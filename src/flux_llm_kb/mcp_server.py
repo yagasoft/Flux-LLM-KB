@@ -82,6 +82,12 @@ def create_server():
 
         return {"jobs": database.list_capture_jobs(limit=limit)}
 
+    @mcp.tool(name="kb.mail_status")
+    def mail_status():
+        from .mail_ingestion import mail_status as collect_mail_status
+
+        return collect_mail_status()
+
     return mcp
 
 

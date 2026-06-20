@@ -44,7 +44,11 @@ def test_dashboard_html_contains_health_mount_points():
 
     assert "Flux-LLM-KB Dashboard" in html
     assert "data-panel=\"watcher\"" in html
+    assert "data-tab=\"settings\"" in html
+    assert "data-tab=\"mail\"" in html
     assert "/api/dashboard/health" in html
+    assert "/api/settings" in html
+    assert "/api/mail/status" in html
 
 
 def test_doctor_summary_treats_gh_as_optional(monkeypatch):

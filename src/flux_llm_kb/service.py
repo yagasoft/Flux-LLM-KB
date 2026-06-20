@@ -10,6 +10,7 @@ from .crawler import CorpusPolicy, scan_path
 from . import database
 from .redaction import redact_text
 from .scoring import ContextCandidate, pack_context
+from .settings import SettingsService
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
 
 
@@ -42,7 +43,9 @@ class KnowledgeService:
         ]
         return sorted(corpus + episodes, key=lambda item: item["score"], reverse=True)[:limit]
 
-    def brief(self, query: str, token_budget: int = 1200) -> str:
+    def brief(self, query: str, token_budget: int | None = None) -> str:
+        if token_budget is None:
+            token_budget = _configured_token_budget()
         candidates = [
             ContextCandidate(
                 id=item["id"],
@@ -254,6 +257,13 @@ def _job_matches_kind(job_type: str, kind: str) -> bool:
     if kind == "embeddings":
         return job_type == "corpus_embed"
     return True
+
+
+def _configured_token_budget() -> int:
+    try:
+        return int(SettingsService().resolve("retrieval.token_budget").raw_value)
+    except Exception:
+        return 1200
 
 
 def _load_watch_roots(root_name: str | None = None) -> list[WatchRoot]:

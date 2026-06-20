@@ -23,6 +23,11 @@ system rather than a large prompt-injected memory file.
   every file into an interaction episode.
 - `crawl_runs` and `watcher_state`: crawler statistics, watcher heartbeat, event, and
   error state for dashboard monitoring.
+- `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
+  `runtime_control_requests`: registry-backed configuration, audit trail, and
+  reload/restart/reindex coordination.
+- `mail_profiles`, `mail_messages`, and `mail_sync_runs`: IMAP and Outlook COM
+  capture profiles, per-message export state, cursors, errors, and sync runs.
 
 ## Retrieval
 
@@ -64,7 +69,40 @@ The watcher runtime reloads enabled roots while running, so `watch enable` and
 event queue, heartbeat recording, and stale-state reporting.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
-backlog, errors, retrieval/index stats, and future graph/review workflows.
+backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,
+and future graph/review workflows.
+
+## Runtime Configuration
+
+Settings are defined in a typed registry with defaults, optional environment
+overrides, sensitivity flags, apply modes, and affected components. Resolution is
+`environment override > database override > registry default`. Bootstrap settings
+such as database URL and API bind address are visible but read-only in the
+dashboard because changing them requires restarting the process that serves the
+dashboard. Sensitive settings are masked in API, CLI, and dashboard responses.
+
+Settings that affect live behavior are picked up on the next service call.
+Settings that require reload, component restart, or embedding reindex create
+runtime control requests and require confirmation before mutation.
+
+## Mail Ingestion
+
+Mail capture uses a private filesystem spool so IMAP and Outlook exports enter
+the same corpus path. Exporters write into `_inflight/<export_id>` and atomically
+move completed exports to `ready/<export_id>`. Flux monitors only `ready`, so
+partial messages and attachments are not indexed. Each export contains a
+manifest, message body files, the original `.eml` or `.msg` where available, and
+attachments.
+
+IMAP profiles are the preferred ongoing capture mechanism. They connect over
+TLS, prefer Gmail-compatible XOAUTH2, track UID/UIDVALIDITY cursors per folder or
+label, and always run reconciliation so restarts and missed events are recovered.
+Post-processing defaults to moving/removing the capture label or moving the
+message to a processed folder; permanent delete is not the default.
+
+Classic Outlook COM catch-up profiles pull selected folder paths from local
+Outlook for historical or missed messages. They are intentionally scoped
+catch-up jobs, not broad live mailbox monitors.
 
 ## Integration Surfaces
 

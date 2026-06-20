@@ -26,6 +26,9 @@ api = [
 mcp = [
   "mcp>=1.7",
 ]
+mail = [
+  "pywin32>=306; platform_system == 'Windows'",
+]
 corpus = [
   "watchdog>=4.0",
   "pypdf>=4.0",

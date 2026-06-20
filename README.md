@@ -22,9 +22,12 @@ interfaces for:
 - Deterministic local `flux-hash-v1` embeddings so the vector pipeline works
   without sending private text to an external service.
 - CLI commands for init, migration, status, search, remember, audit, forget,
-  Codex backfill queueing, wiki export, lint, and doctor checks.
+  Codex backfill queueing, wiki export, runtime settings, mail ingestion, lint,
+  and doctor checks.
 - MCP and REST entrypoints over the same service layer.
 - Codex personal plugin scaffold with hook scripts.
+- Unified dashboard base for health, corpus monitoring, runtime settings, and
+  mail capture status.
 
 ## Quick Start
 

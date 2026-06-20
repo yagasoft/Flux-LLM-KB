@@ -40,6 +40,26 @@ def create_app():
         root_name: str | None = None
         enabled: bool
 
+    class SettingUpdateRequest(BaseModel):
+        value: object
+        confirmed: bool = False
+        reason: str | None = None
+
+    class SettingsApplyRequest(BaseModel):
+        component: str | None = None
+
+    class MailProfileRequest(BaseModel):
+        name: str
+        source_type: str
+        folder_paths: list[str]
+        spool_path: str
+        account: str | None = None
+        server: str | None = None
+        post_process_policy: str = "move_to_processed"
+
+    class MailSyncRequest(BaseModel):
+        profile_name: str | None = None
+
     app = FastAPI(title="Flux-LLM-KB")
     service = KnowledgeService()
 
@@ -104,5 +124,77 @@ def create_app():
         from . import database
 
         return database.set_watch_enabled(root_name=request.root_name, enabled=request.enabled)
+
+    @app.get("/api/settings")
+    def settings_list():
+        from .settings import SettingsService
+
+        return SettingsService().public_list()
+
+    @app.get("/api/settings/{key}")
+    def settings_get(key: str):
+        from .settings import SettingsService
+
+        return SettingsService().resolve(key).to_public_dict()
+
+    @app.put("/api/settings/{key}")
+    def settings_put(key: str, request: SettingUpdateRequest):
+        from .settings import SettingsService
+
+        return SettingsService().set(
+            key,
+            request.value,
+            actor="dashboard",
+            reason=request.reason,
+            confirmed=request.confirmed,
+        )
+
+    @app.post("/api/settings/apply")
+    def settings_apply(request: SettingsApplyRequest):
+        from .settings import SettingsService
+
+        return SettingsService().apply(component=request.component, actor="dashboard")
+
+    @app.post("/api/settings/{key}/reset")
+    def settings_reset(key: str):
+        from .settings import SettingsService
+
+        return SettingsService().reset(key, actor="dashboard")
+
+    @app.get("/api/mail/status")
+    def mail_status():
+        from .mail_ingestion import mail_status
+
+        return mail_status()
+
+    @app.get("/api/mail/profiles")
+    def mail_profiles():
+        from . import database
+
+        return database.list_mail_profiles()
+
+    @app.post("/api/mail/profiles")
+    def mail_profile_add(request: MailProfileRequest):
+        from .mail_ingestion import add_mail_profile
+
+        return add_mail_profile(
+            name=request.name,
+            source_type=request.source_type,
+            account=request.account,
+            server=request.server,
+            folder_paths=request.folder_paths,
+            spool_path=request.spool_path,
+            post_process_policy=request.post_process_policy,
+        )
+
+    @app.post("/api/mail/sync")
+    def mail_sync(request: MailSyncRequest):
+        from .mail_ingestion import sync_mail_profile
+
+        return sync_mail_profile(profile_name=request.profile_name)
+
+    @app.post("/api/mail/watch")
+    def mail_watch(_: MailSyncRequest):
+        return {"status": "watch_loop_runs_from_cli", "command": "flux-kb mail watch run"}
 
     return app

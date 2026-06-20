@@ -950,6 +950,375 @@ def retrieval_stats(*, url: str | None = None) -> dict[str, int]:
             return counts
 
 
+def get_runtime_setting(key: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT value, updated_at
+                FROM runtime_settings
+                WHERE key = %s
+                """,
+                (key,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {"key": key, "value": row[0], "updated_at": row[1].isoformat()}
+
+
+def set_runtime_setting(
+    *,
+    key: str,
+    value: Any,
+    actor: str = "system",
+    reason: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM runtime_settings WHERE key = %s", (key,))
+            old_row = cur.fetchone()
+            old_value = old_row[0] if old_row else None
+            cur.execute(
+                """
+                INSERT INTO runtime_settings (key, value, updated_by, reason)
+                VALUES (%s, %s::jsonb, %s, %s)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_by = EXCLUDED.updated_by,
+                    reason = EXCLUDED.reason,
+                    updated_at = now()
+                RETURNING key, value, updated_by, reason, updated_at
+                """,
+                (key, _json_any(value), actor, reason),
+            )
+            row = cur.fetchone()
+            cur.execute(
+                """
+                INSERT INTO runtime_setting_events (setting_key, old_value, new_value, actor, reason)
+                VALUES (%s, %s::jsonb, %s::jsonb, %s, %s)
+                """,
+                (key, _json_any(old_value), _json_any(value), actor, reason),
+            )
+            return {
+                "key": row[0],
+                "value": row[1],
+                "updated_by": row[2],
+                "reason": row[3],
+                "updated_at": row[4].isoformat(),
+            }
+
+
+def delete_runtime_setting(*, key: str, actor: str = "system", url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM runtime_settings WHERE key = %s RETURNING value", (key,))
+            row = cur.fetchone()
+            deleted = row is not None
+            cur.execute(
+                """
+                INSERT INTO runtime_setting_events (setting_key, old_value, new_value, actor, reason)
+                VALUES (%s, %s::jsonb, NULL, %s, 'reset')
+                """,
+                (key, _json_any(row[0] if row else None), actor),
+            )
+            return {"key": key, "deleted": deleted}
+
+
+def enqueue_runtime_control_request(
+    *,
+    setting_key: str,
+    action: str,
+    affected_components: list[str],
+    actor: str = "system",
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO runtime_control_requests (
+                    setting_key, action, affected_components, actor, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+                RETURNING id::text, setting_key, action, affected_components, status
+                """,
+                (setting_key, action, affected_components, actor, _json(metadata or {})),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "setting_key": row[1],
+                "action": row[2],
+                "affected_components": list(row[3] or []),
+                "status": row[4],
+            }
+
+
+def ack_runtime_control_requests(
+    *,
+    component: str | None = None,
+    actor: str = "system",
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            if component:
+                cur.execute(
+                    """
+                    UPDATE runtime_control_requests
+                    SET status = 'acknowledged',
+                        acknowledged_at = now(),
+                        metadata = metadata || %s::jsonb
+                    WHERE status = 'pending'
+                      AND %s = ANY(affected_components)
+                    RETURNING id::text
+                    """,
+                    (_json({"acknowledged_by": actor}), component),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE runtime_control_requests
+                    SET status = 'acknowledged',
+                        acknowledged_at = now(),
+                        metadata = metadata || %s::jsonb
+                    WHERE status = 'pending'
+                    RETURNING id::text
+                    """,
+                    (_json({"acknowledged_by": actor}),),
+                )
+            return {"acknowledged": len(cur.fetchall()), "component": component}
+
+
+def insert_mail_profile(
+    *,
+    name: str,
+    source_type: str,
+    account: str | None,
+    server: str | None,
+    folder_paths: list[str],
+    spool_path: str,
+    post_process_policy: str,
+    trust_rank: int,
+    metadata: dict[str, Any] | None = None,
+    enabled: bool = True,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO mail_profiles (
+                    name, source_type, account, server, folder_paths, spool_path,
+                    post_process_policy, enabled, trust_rank, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (name) DO UPDATE SET
+                    source_type = EXCLUDED.source_type,
+                    account = EXCLUDED.account,
+                    server = EXCLUDED.server,
+                    folder_paths = EXCLUDED.folder_paths,
+                    spool_path = EXCLUDED.spool_path,
+                    post_process_policy = EXCLUDED.post_process_policy,
+                    enabled = EXCLUDED.enabled,
+                    trust_rank = EXCLUDED.trust_rank,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = now()
+                RETURNING id::text, name, source_type, account, server, folder_paths,
+                          spool_path, post_process_policy, enabled, trust_rank, metadata
+                """,
+                (
+                    name,
+                    source_type,
+                    account,
+                    server,
+                    folder_paths,
+                    spool_path,
+                    post_process_policy,
+                    enabled,
+                    trust_rank,
+                    _json(metadata or {}),
+                ),
+            )
+            return _mail_profile_row(cur.fetchone())
+
+
+def list_mail_profiles(*, name: str | None = None, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            if name:
+                cur.execute(
+                    """
+                    SELECT id::text, name, source_type, account, server, folder_paths,
+                           spool_path, post_process_policy, enabled, trust_rank, metadata
+                    FROM mail_profiles
+                    WHERE name = %s
+                    ORDER BY name
+                    """,
+                    (name,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id::text, name, source_type, account, server, folder_paths,
+                           spool_path, post_process_policy, enabled, trust_rank, metadata
+                    FROM mail_profiles
+                    ORDER BY name
+                    """
+                )
+            return [_mail_profile_row(row) for row in cur.fetchall()]
+
+
+def update_mail_profile_metadata(
+    *,
+    name: str,
+    metadata: dict[str, Any],
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_profiles
+                SET metadata = %s::jsonb,
+                    updated_at = now()
+                WHERE name = %s
+                RETURNING id::text, name, source_type, account, server, folder_paths,
+                          spool_path, post_process_policy, enabled, trust_rank, metadata
+                """,
+                (_json(metadata), name),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"mail profile not found: {name}")
+            return _mail_profile_row(row)
+
+
+def record_mail_sync_run(
+    *,
+    profile_name: str,
+    status: str,
+    messages_seen: int = 0,
+    messages_exported: int = 0,
+    last_cursor: dict[str, Any] | None = None,
+    errors: list[dict[str, Any]] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM mail_profiles WHERE name = %s", (profile_name,))
+            profile = cur.fetchone()
+            if profile is None:
+                raise ValueError(f"mail profile not found: {profile_name}")
+            cur.execute(
+                """
+                INSERT INTO mail_sync_runs (
+                    profile_id, status, finished_at, messages_seen, messages_exported,
+                    last_cursor, errors
+                )
+                VALUES (%s, %s, now(), %s, %s, %s::jsonb, %s::jsonb)
+                RETURNING id::text, status
+                """,
+                (
+                    profile[0],
+                    status,
+                    messages_seen,
+                    messages_exported,
+                    _json(last_cursor or {}),
+                    _json_list(errors or []),
+                ),
+            )
+            row = cur.fetchone()
+            return {"id": row[0], "status": row[1]}
+
+
+def record_mail_message(
+    *,
+    profile_name: str,
+    source_message_id: str,
+    source_folder: str,
+    export_state: str,
+    export_id: str | None = None,
+    content_hash: str | None = None,
+    internet_message_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    error: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM mail_profiles WHERE name = %s", (profile_name,))
+            profile = cur.fetchone()
+            if profile is None:
+                raise ValueError(f"mail profile not found: {profile_name}")
+            cur.execute(
+                """
+                INSERT INTO mail_messages (
+                    profile_id, source_message_id, source_folder, internet_message_id,
+                    content_hash, export_id, export_state, error, metadata, exported_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                        CASE WHEN %s = 'exported' THEN now() ELSE NULL END)
+                ON CONFLICT (profile_id, source_folder, source_message_id) DO UPDATE SET
+                    internet_message_id = EXCLUDED.internet_message_id,
+                    content_hash = EXCLUDED.content_hash,
+                    export_id = EXCLUDED.export_id,
+                    export_state = EXCLUDED.export_state,
+                    error = EXCLUDED.error,
+                    metadata = EXCLUDED.metadata,
+                    exported_at = CASE WHEN EXCLUDED.export_state = 'exported' THEN now() ELSE mail_messages.exported_at END,
+                    updated_at = now()
+                RETURNING id::text, export_state
+                """,
+                (
+                    profile[0],
+                    source_message_id,
+                    source_folder,
+                    internet_message_id,
+                    content_hash,
+                    export_id,
+                    export_state,
+                    error,
+                    _json(metadata or {}),
+                    export_state,
+                ),
+            )
+            row = cur.fetchone()
+            return {"id": row[0], "export_state": row[1]}
+
+
+def mail_status(*, url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM mail_profiles WHERE enabled")
+            enabled_profiles = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM mail_messages WHERE export_state = 'exported'")
+            exported_messages = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM mail_messages WHERE export_state = 'error'")
+            errored_messages = cur.fetchone()[0]
+            profiles = list_mail_profiles(url=url)
+            return {
+                "enabled_profiles": enabled_profiles,
+                "exported_messages": exported_messages,
+                "errored_messages": errored_messages,
+                "profiles": profiles,
+            }
+
+
 def enqueue_capture_job(
     *, job_type: str, payload: dict[str, Any], url: str | None = None
 ) -> str:
@@ -1030,6 +1399,22 @@ def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "max_inline_bytes": row[9],
         "heavy_threshold_bytes": row[10],
         "metadata": row[11],
+    }
+
+
+def _mail_profile_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "name": row[1],
+        "source_type": row[2],
+        "account": row[3],
+        "server": row[4],
+        "folder_paths": list(row[5] or []),
+        "spool_path": row[6],
+        "post_process_policy": row[7],
+        "enabled": row[8],
+        "trust_rank": row[9],
+        "metadata": row[10],
     }
 
 
@@ -1216,6 +1601,12 @@ def _load_psycopg():
 
 
 def _json(value: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(value, sort_keys=True)
+
+
+def _json_any(value: Any) -> str:
     import json
 
     return json.dumps(value, sort_keys=True)

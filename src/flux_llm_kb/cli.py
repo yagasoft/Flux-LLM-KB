@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__, database
 from .health import doctor_payload
 from .migrations import load_migrations
+from .settings import SettingsService
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -73,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     watch_subparsers = watch_parser.add_subparsers(dest="watch_command", required=True)
     watch_run = watch_subparsers.add_parser("run", help="Run the foreground polling watcher")
     watch_run.add_argument("--root")
-    watch_run.add_argument("--interval", type=float, default=2.0)
+    watch_run.add_argument("--interval", type=float)
     watch_enable = watch_subparsers.add_parser("enable", help="Enable watch mode")
     watch_enable.add_argument("--root")
     watch_enable.add_argument("--all", action="store_true")
@@ -88,6 +89,49 @@ def main(argv: list[str] | None = None) -> int:
 
     hook_parser = subparsers.add_parser("hook", help="Run a Codex hook handler")
     hook_parser.add_argument("event")
+
+    settings_parser = subparsers.add_parser("settings", help="Manage runtime settings")
+    settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)
+    settings_subparsers.add_parser("list", help="List runtime settings")
+    settings_get = settings_subparsers.add_parser("get", help="Get one runtime setting")
+    settings_get.add_argument("key")
+    settings_set = settings_subparsers.add_parser("set", help="Set one runtime setting")
+    settings_set.add_argument("key")
+    settings_set.add_argument("value")
+    settings_set.add_argument("--confirm", action="store_true")
+    settings_reset = settings_subparsers.add_parser("reset", help="Reset one runtime setting to default/env")
+    settings_reset.add_argument("key")
+    settings_apply = settings_subparsers.add_parser("apply", help="Acknowledge pending runtime control requests")
+    settings_apply.add_argument("--component")
+
+    mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
+    mail_subparsers = mail_parser.add_subparsers(dest="mail_command", required=True)
+    mail_profile = mail_subparsers.add_parser("profile", help="Manage mail profiles")
+    mail_profile_subparsers = mail_profile.add_subparsers(dest="mail_profile_command", required=True)
+    mail_add_imap = mail_profile_subparsers.add_parser("add-imap", help="Add an IMAP mail profile")
+    mail_add_imap.add_argument("--name", required=True)
+    mail_add_imap.add_argument("--account", required=True)
+    mail_add_imap.add_argument("--server", default="imap.gmail.com")
+    mail_add_imap.add_argument("--folder", action="append", required=True)
+    mail_add_imap.add_argument("--spool", required=True)
+    mail_add_imap.add_argument("--post-process", default="move_to_processed")
+    mail_add_outlook = mail_profile_subparsers.add_parser("add-outlook", help="Add an Outlook COM catch-up profile")
+    mail_add_outlook.add_argument("--name", required=True)
+    mail_add_outlook.add_argument("--folder", action="append", required=True)
+    mail_add_outlook.add_argument("--spool", required=True)
+    mail_add_outlook.add_argument("--post-process", default="move_to_processed")
+    mail_profile_subparsers.add_parser("list", help="List mail profiles")
+    mail_subparsers.add_parser("status", help="Show mail ingestion status")
+    mail_sync = mail_subparsers.add_parser("sync", help="Sync exported mail spool into the corpus")
+    mail_sync.add_argument("--profile")
+    mail_watch = mail_subparsers.add_parser("watch", help="Run a foreground mail watcher")
+    mail_watch_subparsers = mail_watch.add_subparsers(dest="mail_watch_command", required=True)
+    mail_watch_run = mail_watch_subparsers.add_parser("run", help="Run mail reconciliation loop")
+    mail_watch_run.add_argument("--profile")
+    mail_render = mail_subparsers.add_parser("render-outlook-config", help="Render an Outlook COM catch-up config")
+    mail_render.add_argument("--profile", required=True)
+    mail_render.add_argument("--spool", required=True)
+    mail_render.add_argument("--folder", action="append", required=True)
 
     args = parser.parse_args(argv)
     handlers = {
@@ -104,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         "export-wiki": _export_wiki,
         "lint": _lint,
         "hook": _hook,
+        "settings": _settings,
+        "mail": _mail,
     }
     return handlers[args.command](args)
 
@@ -179,11 +225,14 @@ def _backfill_codex(args: argparse.Namespace) -> int:
 
 def _crawl(args: argparse.Namespace) -> int:
     if args.crawl_command == "add":
+        settings = SettingsService()
         payload = database.add_monitored_root(
             name=args.name,
             root_path=str(Path(args.path).expanduser().resolve()),
             recursive=args.recursive,
             watch_enabled=args.watch,
+            max_inline_bytes=int(settings.resolve("crawler.max_inline_bytes").raw_value),
+            heavy_threshold_bytes=int(settings.resolve("crawler.heavy_threshold_bytes").raw_value),
         )
     elif args.crawl_command == "list":
         payload = database.list_monitored_roots()
@@ -223,8 +272,86 @@ def _crawl_watch(args: argparse.Namespace):
     if args.watch_command == "run":
         from .service import KnowledgeService
 
-        return KnowledgeService().run_watch(root_name=args.root, interval_seconds=args.interval)
+        interval = args.interval
+        if interval is None:
+            interval = float(SettingsService().resolve("watcher.interval_seconds").raw_value)
+        return KnowledgeService().run_watch(root_name=args.root, interval_seconds=interval)
     raise ValueError(args.watch_command)  # pragma: no cover - argparse prevents this
+
+
+def _settings(args: argparse.Namespace) -> int:
+    service = SettingsService()
+    if args.settings_command == "list":
+        payload = [setting.to_public_dict() for setting in service.list()]
+    elif args.settings_command == "get":
+        payload = service.resolve(args.key).to_public_dict()
+    elif args.settings_command == "set":
+        payload = service.set(args.key, args.value, actor="cli", confirmed=args.confirm)
+    elif args.settings_command == "reset":
+        payload = service.reset(args.key, actor="cli")
+    elif args.settings_command == "apply":
+        payload = service.apply(component=args.component, actor="cli")
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.settings_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _mail(args: argparse.Namespace) -> int:
+    from . import mail_ingestion
+
+    if args.mail_command == "profile":
+        if args.mail_profile_command == "add-imap":
+            payload = mail_ingestion.add_mail_profile(
+                name=args.name,
+                source_type="imap",
+                account=args.account,
+                server=args.server,
+                folder_paths=args.folder,
+                spool_path=args.spool,
+                post_process_policy=args.post_process,
+            )
+        elif args.mail_profile_command == "add-outlook":
+            payload = mail_ingestion.add_mail_profile(
+                name=args.name,
+                source_type="outlook_com",
+                account=None,
+                server=None,
+                folder_paths=args.folder,
+                spool_path=args.spool,
+                post_process_policy=args.post_process,
+            )
+        elif args.mail_profile_command == "list":
+            payload = database.list_mail_profiles()
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.mail_profile_command)
+    elif args.mail_command == "status":
+        payload = mail_ingestion.mail_status()
+    elif args.mail_command == "sync":
+        payload = mail_ingestion.sync_mail_profile(profile_name=args.profile)
+    elif args.mail_command == "watch":
+        if args.mail_watch_command != "run":  # pragma: no cover - argparse prevents this
+            raise ValueError(args.mail_watch_command)
+        payload = _mail_watch_run(args.profile)
+    elif args.mail_command == "render-outlook-config":
+        print(mail_ingestion.render_outlook_config(args.profile, spool_path=args.spool, folder_paths=args.folder), end="")
+        return 0
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.mail_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _mail_watch_run(profile_name: str | None) -> dict:
+    import time
+
+    from .mail_ingestion import sync_mail_profile
+    from .settings import SettingsService
+
+    interval = int(SettingsService().resolve("mail.imap.poll_interval_seconds").raw_value)
+    while True:
+        sync_mail_profile(profile_name=profile_name)
+        time.sleep(interval)
 
 
 def _export_wiki(args: argparse.Namespace) -> int:

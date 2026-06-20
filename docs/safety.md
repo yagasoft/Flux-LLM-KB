@@ -22,11 +22,17 @@ Forbidden in Git:
 - embeddings created from private content
 - generated private wiki exports
 - private user or customer data
+- mail spool contents, exported `.eml`/`.msg` files, attachments, heartbeat files,
+  OAuth tokens, app passwords, or generated private mail configs
 
 ## Runtime Boundary
 
 Runtime data is local by default. The first implementation stores it in a local
 PostgreSQL database and excludes all runtime paths from Git.
+
+Mail ingestion writes raw messages and attachments to local private spool paths
+before indexing. Keep those paths under ignored private directories and review
+exports before sharing.
 
 ## Capture Rules
 
@@ -35,4 +41,5 @@ PostgreSQL database and excludes all runtime paths from Git.
 - Preserve superseded facts instead of overwriting them silently.
 - Audit every write, delete, export, and bulk operation.
 - Prefer compact task briefs over large memory injection.
-
+- Never default to permanently deleting mailbox messages after capture; prefer
+  move-to-processed or remove-label policies.

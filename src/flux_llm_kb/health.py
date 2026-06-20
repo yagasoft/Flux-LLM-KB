@@ -75,6 +75,8 @@ def collect_dashboard_payload() -> dict[str, Any]:
         "extractors": extractor_availability(),
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
+        "settings": _safe(lambda: __import__("flux_llm_kb.settings", fromlist=["SettingsService"]).SettingsService().public_list(), []),
+        "mail": _safe(lambda: database.mail_status(), {"enabled_profiles": 0, "profiles": []}),
     }
 
 
@@ -101,6 +103,8 @@ def build_dashboard_html() -> str:
   <style>
     body {{ margin: 0; font-family: Arial, sans-serif; background: #f7f8fa; color: #17181c; }}
     header {{ padding: 20px 28px; border-bottom: 1px solid #d9dde5; background: #ffffff; }}
+    nav {{ display: flex; gap: 8px; padding: 12px 24px; border-bottom: 1px solid #d9dde5; background: #ffffff; }}
+    button {{ border: 1px solid #c9ced8; background: #ffffff; border-radius: 6px; padding: 8px 10px; cursor: pointer; }}
     main {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); padding: 24px; }}
     section {{ border: 1px solid #d9dde5; border-radius: 8px; background: #ffffff; padding: 16px; min-height: 132px; }}
     h1 {{ font-size: 24px; margin: 0; }}
@@ -110,11 +114,21 @@ def build_dashboard_html() -> str:
 </head>
 <body>
   <header><h1>{html.escape(title)}</h1></header>
+  <nav>
+    <button data-tab="health">Health</button>
+    <button data-tab="crawl">Crawl</button>
+    <button data-tab="jobs">Jobs</button>
+    <button data-tab="retrieval">Retrieval</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="mail">Outlook/Mail Capture</button>
+  </nav>
   <main>
     <section data-panel="watcher"><h2>Watcher</h2><pre id="watcher">Loading...</pre></section>
     <section data-panel="crawl"><h2>Crawl</h2><pre id="crawl">Loading...</pre></section>
     <section data-panel="jobs"><h2>Jobs</h2><pre id="jobs">Loading...</pre></section>
     <section data-panel="retrieval"><h2>Retrieval</h2><pre id="retrieval">Loading...</pre></section>
+    <section data-panel="settings"><h2>Settings</h2><pre id="settings">Loading...</pre></section>
+    <section data-panel="mail"><h2>Mail Capture</h2><pre id="mail">Loading...</pre></section>
   </main>
   <script>
     async function load(id, url) {{
@@ -125,6 +139,8 @@ def build_dashboard_html() -> str:
     load("crawl", "/api/dashboard/crawl");
     load("jobs", "/api/dashboard/jobs");
     load("retrieval", "/api/dashboard/retrieval-stats");
+    load("settings", "/api/settings");
+    load("mail", "/api/mail/status");
   </script>
 </body>
 </html>"""

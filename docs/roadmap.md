@@ -19,7 +19,8 @@
 ## V2: Review And Visualization
 
 - Unified dashboard for health, monitoring, watcher status, crawler stats, search,
-  graph browsing, stale claims, contradictions, and capture review.
+  graph browsing, stale claims, contradictions, capture review, runtime settings,
+  and mail ingestion status.
 - Retention policy tuning and memory quality reports.
 - Manual approval flows for sensitive or low-confidence captures.
 
@@ -43,6 +44,21 @@
   source metadata.
 - Corpus retrieval combines full-text, fuzzy, pgvector chunk embeddings, trust rank,
   freshness, deletion state, and canonical duplicate filtering.
+
+## V2.6: Mail Capture And Runtime Configuration
+
+- Registry-backed runtime settings with dashboard editing, environment override
+  visibility, masked secrets, audit events, and confirmation-gated reload,
+  restart, or reindex requests.
+- IMAP mailbox/label monitor for Gmail or standards-compliant IMAP servers,
+  using TLS, XOAUTH2-first authentication, UID/UIDVALIDITY cursors, optional
+  IDLE, and periodic reconciliation after restarts.
+- Safe mail post-processing defaults: move/remove from capture label or move to
+  a processed folder; permanent trash/delete is opt-in and confirmation-gated.
+- Classic Outlook COM catch-up for selected mailbox folder paths, intended for
+  historical or missed message pulls rather than all-folder live monitoring.
+- Unified private mail spool for IMAP and Outlook exports; Flux indexes only the
+  `ready` spool and ignores `_inflight` partial exports.
 
 ## V3: Scale And Evaluation
 

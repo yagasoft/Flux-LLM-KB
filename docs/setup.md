@@ -30,6 +30,12 @@ Install optional local corpus extractors when you want richer file processing:
 python -m pip install -e .[dev,corpus]
 ```
 
+Install Outlook COM support on Windows when you want local Outlook catch-up:
+
+```powershell
+python -m pip install -e .[mail]
+```
+
 External tools are detected at runtime and reported by `flux-kb crawl doctor`.
 `ffprobe`/`ffmpeg`, `tesseract`, and local transcription runtimes are never
 called through cloud services by default.
@@ -52,6 +58,12 @@ flux-kb crawl watch enable --root projects
 flux-kb crawl watch run
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl doctor
+flux-kb settings list
+flux-kb settings set retrieval.token_budget 1600
+flux-kb mail profile add-imap --name gmail-capture --account me@gmail.com --folder FluxCapture --spool private\mail-spool\gmail-capture
+flux-kb mail profile add-outlook --name outlook-catchup --folder "Mailbox - Me\Inbox\Flux Capture" --spool private\mail-spool\outlook-catchup
+flux-kb mail status
+flux-kb mail sync --profile gmail-capture
 ```
 
 `private/` is ignored by Git. Review any wiki export before sharing it outside
@@ -66,3 +78,22 @@ postgresql://flux:flux@localhost:5432/flux_llm_kb
 ```
 
 Override it in `.env` or the shell when you want a different local database.
+
+## Runtime Settings
+
+Most operational values are exposed through `flux-kb settings` and the dashboard
+settings tab. Environment variables override database settings and appear as
+read-only effective values. Settings that require reload, component restart, or
+embedding reindex require confirmation and create runtime control requests.
+
+## Mail Capture
+
+Mail capture is local-first. IMAP profiles monitor configured folders or labels
+and export messages into `private\mail-spool\<profile>`. Gmail profiles should
+use OAuth2/XOAUTH2 token references rather than basic passwords. The default
+post-process policy moves messages to a processed folder or removes the capture
+label; permanent trash/delete is not the default.
+
+Outlook COM profiles are for catch-up from selected classic Outlook folder
+paths. They use local Outlook automation and write into the same spool shape as
+IMAP.
