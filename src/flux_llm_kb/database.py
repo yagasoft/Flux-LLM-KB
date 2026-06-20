@@ -1205,6 +1205,246 @@ def update_mail_profile_metadata(
             return _mail_profile_row(row)
 
 
+def create_mail_oauth_state(
+    *,
+    profile_name: str,
+    provider: str,
+    state: str,
+    code_verifier: str,
+    redirect_uri: str,
+    client_config: dict[str, Any],
+    client_config_path: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM mail_profiles WHERE name = %s", (profile_name,))
+            profile = cur.fetchone()
+            if profile is None:
+                raise ValueError(f"mail profile not found: {profile_name}")
+            cur.execute(
+                """
+                INSERT INTO mail_oauth_states (
+                    profile_id, provider, state, code_verifier, redirect_uri,
+                    client_config, client_config_path, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb)
+                RETURNING id::text, provider, state, code_verifier, redirect_uri,
+                          client_config, client_config_path, metadata, created_at,
+                          expires_at, consumed_at
+                """,
+                (
+                    profile[0],
+                    provider,
+                    state,
+                    code_verifier,
+                    redirect_uri,
+                    _json(client_config),
+                    client_config_path,
+                    _json(metadata or {}),
+                ),
+            )
+            return _mail_oauth_state_row(cur.fetchone(), profile_name=profile_name)
+
+
+def get_mail_oauth_state(state: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.id::text, p.name, s.provider, s.state, s.code_verifier,
+                       s.redirect_uri, s.client_config, s.client_config_path,
+                       s.metadata, s.created_at, s.expires_at, s.consumed_at
+                FROM mail_oauth_states s
+                JOIN mail_profiles p ON p.id = s.profile_id
+                WHERE s.state = %s
+                """,
+                (state,),
+            )
+            row = cur.fetchone()
+            return _mail_oauth_state_lookup_row(row) if row else None
+
+
+def consume_mail_oauth_state(*, state: str, url: str | None = None) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_oauth_states
+                SET consumed_at = now()
+                WHERE state = %s
+                """,
+                (state,),
+            )
+
+
+def upsert_mail_oauth_token(
+    *,
+    profile_name: str,
+    provider: str,
+    refresh_token: str,
+    scope: str,
+    token_type: str,
+    status: str,
+    client_config: dict[str, Any],
+    expires_at: str | None = None,
+    last_error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM mail_profiles WHERE name = %s", (profile_name,))
+            profile = cur.fetchone()
+            if profile is None:
+                raise ValueError(f"mail profile not found: {profile_name}")
+            cur.execute(
+                """
+                INSERT INTO mail_oauth_tokens (
+                    profile_id, provider, refresh_token, scope, token_type, status,
+                    last_error, client_config, metadata, refreshed_at, expires_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now(), %s)
+                ON CONFLICT (profile_id, provider) DO UPDATE SET
+                    refresh_token = EXCLUDED.refresh_token,
+                    scope = EXCLUDED.scope,
+                    token_type = EXCLUDED.token_type,
+                    status = EXCLUDED.status,
+                    last_error = EXCLUDED.last_error,
+                    client_config = EXCLUDED.client_config,
+                    metadata = EXCLUDED.metadata,
+                    refreshed_at = now(),
+                    expires_at = EXCLUDED.expires_at,
+                    updated_at = now()
+                RETURNING id::text, provider, refresh_token, scope, token_type,
+                          status, last_error, client_config, metadata,
+                          refreshed_at, expires_at, updated_at
+                """,
+                (
+                    profile[0],
+                    provider,
+                    refresh_token,
+                    scope,
+                    token_type,
+                    status,
+                    last_error,
+                    _json(client_config),
+                    _json(metadata or {}),
+                    expires_at,
+                ),
+            )
+            return _mail_oauth_token_row(cur.fetchone(), profile_name=profile_name)
+
+
+def get_mail_oauth_token(
+    profile_name: str,
+    *,
+    provider: str = "gmail",
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT t.id::text, t.provider, t.refresh_token, t.scope, t.token_type,
+                       t.status, t.last_error, t.client_config, t.metadata,
+                       t.refreshed_at, t.expires_at, t.updated_at
+                FROM mail_oauth_tokens t
+                JOIN mail_profiles p ON p.id = t.profile_id
+                WHERE p.name = %s AND t.provider = %s
+                """,
+                (profile_name, provider),
+            )
+            row = cur.fetchone()
+            return _mail_oauth_token_row(row, profile_name=profile_name) if row else None
+
+
+def update_mail_oauth_token_status(
+    *,
+    profile_name: str,
+    provider: str = "gmail",
+    status: str,
+    last_error: str | None = None,
+    expires_at: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_oauth_tokens t
+                SET status = %s,
+                    last_error = %s,
+                    refreshed_at = CASE WHEN %s = 'configured' THEN now() ELSE refreshed_at END,
+                    expires_at = COALESCE(%s, expires_at),
+                    updated_at = now()
+                FROM mail_profiles p
+                WHERE p.id = t.profile_id
+                  AND p.name = %s
+                  AND t.provider = %s
+                RETURNING t.id::text, t.provider, t.refresh_token, t.scope, t.token_type,
+                          t.status, t.last_error, t.client_config, t.metadata,
+                          t.refreshed_at, t.expires_at, t.updated_at
+                """,
+                (status, last_error, status, expires_at, profile_name, provider),
+            )
+            row = cur.fetchone()
+            return _mail_oauth_token_row(row, profile_name=profile_name) if row else None
+
+
+def mail_oauth_status(
+    *,
+    profile_name: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    where = "WHERE p.name = %s" if profile_name else ""
+    params: tuple[Any, ...] = (profile_name,) if profile_name else ()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT p.name, p.source_type, p.account, p.enabled,
+                       t.provider, t.status, t.scope, t.token_type, t.last_error,
+                       t.refreshed_at, t.expires_at, t.updated_at,
+                       t.refresh_token IS NOT NULL AS has_refresh_token
+                FROM mail_profiles p
+                LEFT JOIN mail_oauth_tokens t ON t.profile_id = p.id
+                {where}
+                ORDER BY p.name
+                """,
+                params,
+            )
+            profiles = []
+            for row in cur.fetchall():
+                status = row[5] or ("blocked_auth_required" if row[1] == "imap" else "not_required")
+                profiles.append(
+                    {
+                        "profile_name": row[0],
+                        "source_type": row[1],
+                        "account": row[2],
+                        "enabled": row[3],
+                        "provider": row[4] or ("gmail" if row[1] == "imap" else None),
+                        "status": status,
+                        "scope": row[6],
+                        "token_type": row[7],
+                        "last_error": row[8],
+                        "refreshed_at": row[9].isoformat() if row[9] else None,
+                        "expires_at": row[10].isoformat() if row[10] else None,
+                        "updated_at": row[11].isoformat() if row[11] else None,
+                        "has_refresh_token": bool(row[12]),
+                    }
+                )
+            return {"profiles": profiles, "count": len(profiles)}
+
+
 def record_mail_sync_run(
     *,
     profile_name: str,
@@ -1415,6 +1655,58 @@ def _mail_profile_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "enabled": row[8],
         "trust_rank": row[9],
         "metadata": row[10],
+    }
+
+
+def _mail_oauth_state_row(row: tuple[Any, ...], *, profile_name: str) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "profile_name": profile_name,
+        "provider": row[1],
+        "state": row[2],
+        "code_verifier": row[3],
+        "redirect_uri": row[4],
+        "client_config": row[5],
+        "client_config_path": row[6],
+        "metadata": row[7],
+        "created_at": row[8].isoformat() if row[8] else None,
+        "expires_at": row[9].isoformat() if row[9] else None,
+        "consumed_at": row[10].isoformat() if row[10] else None,
+    }
+
+
+def _mail_oauth_state_lookup_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "profile_name": row[1],
+        "provider": row[2],
+        "state": row[3],
+        "code_verifier": row[4],
+        "redirect_uri": row[5],
+        "client_config": row[6],
+        "client_config_path": row[7],
+        "metadata": row[8],
+        "created_at": row[9].isoformat() if row[9] else None,
+        "expires_at": row[10].isoformat() if row[10] else None,
+        "consumed_at": row[11].isoformat() if row[11] else None,
+    }
+
+
+def _mail_oauth_token_row(row: tuple[Any, ...], *, profile_name: str) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "profile_name": profile_name,
+        "provider": row[1],
+        "refresh_token": row[2],
+        "scope": row[3],
+        "token_type": row[4],
+        "status": row[5],
+        "last_error": row[6],
+        "client_config": row[7],
+        "metadata": row[8],
+        "refreshed_at": row[9].isoformat() if row[9] else None,
+        "expires_at": row[10].isoformat() if row[10] else None,
+        "updated_at": row[11].isoformat() if row[11] else None,
     }
 
 

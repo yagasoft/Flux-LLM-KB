@@ -20,4 +20,6 @@ def test_load_migrations_returns_ordered_sql_files():
     assert any("CREATE TABLE IF NOT EXISTS runtime_settings" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS mail_profiles" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS mail_messages" in item.sql for item in migrations)
+    assert any("CREATE TABLE IF NOT EXISTS mail_oauth_states" in item.sql for item in migrations)
+    assert any("CREATE TABLE IF NOT EXISTS mail_oauth_tokens" in item.sql for item in migrations)
     assert all(Path(item.path).suffix == ".sql" for item in migrations)

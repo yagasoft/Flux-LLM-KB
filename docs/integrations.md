@@ -45,6 +45,9 @@ Endpoints:
 - `POST /api/mail/profiles`
 - `POST /api/mail/sync`
 - `POST /api/mail/watch`
+- `POST /api/mail/oauth/gmail/start`
+- `GET /api/mail/oauth/gmail/callback`
+- `GET /api/mail/oauth/status`
 - `POST /api/search`
 - `POST /api/brief`
 - `POST /api/remember`
@@ -53,9 +56,11 @@ Endpoints:
 
 ## Runtime Settings
 
-Runtime settings are registry-backed and available through CLI and REST. Use the
-dashboard settings tab for interactive edits; it shows whether a value comes from
-the environment, database, or default registry. Sensitive values are masked.
+Runtime settings are settings catalog-backed and available through CLI and REST.
+Use the dashboard settings tab for interactive edits; it shows whether a value
+comes from the environment, database, or catalog default. Sensitive values are
+masked. This is cross-platform application configuration, not the Windows
+Registry.
 
 ```powershell
 flux-kb settings list
@@ -79,8 +84,18 @@ flux-kb mail profile add-imap `
   --folder FluxCapture `
   --spool private\mail-spool\gmail-capture
 
+flux-kb mail oauth gmail start `
+  --profile gmail-capture `
+  --client-config private\google-oauth-client.json
+
+flux-kb mail oauth status --profile gmail-capture
 flux-kb mail watch run --profile gmail-capture
 ```
+
+Open the returned authorization URL, approve the local desktop app, and let the
+loopback callback complete through the local dashboard/API. Flux stores the
+refresh token locally, masks it in all responses, and refreshes short-lived
+access tokens before XOAUTH2 IMAP login.
 
 Classic Outlook COM catch-up is scoped to selected folder paths:
 

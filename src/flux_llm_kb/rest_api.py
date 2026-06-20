@@ -60,6 +60,11 @@ def create_app():
     class MailSyncRequest(BaseModel):
         profile_name: str | None = None
 
+    class GmailOAuthStartRequest(BaseModel):
+        profile_name: str
+        client_config_path: str
+        redirect_uri: str | None = None
+
     app = FastAPI(title="Flux-LLM-KB")
     service = KnowledgeService()
 
@@ -196,5 +201,31 @@ def create_app():
     @app.post("/api/mail/watch")
     def mail_watch(_: MailSyncRequest):
         return {"status": "watch_loop_runs_from_cli", "command": "flux-kb mail watch run"}
+
+    @app.post("/api/mail/oauth/gmail/start")
+    def mail_oauth_gmail_start(request: GmailOAuthStartRequest):
+        from .mail_oauth import start_gmail_oauth
+
+        return start_gmail_oauth(
+            profile_name=request.profile_name,
+            client_config_path=request.client_config_path,
+            redirect_uri=request.redirect_uri,
+        )
+
+    @app.get("/api/mail/oauth/gmail/callback")
+    def mail_oauth_gmail_callback(state: str, code: str | None = None, error: str | None = None):
+        if error:
+            return {"status": "error", "error": error, "state": state}
+        if not code:
+            return {"status": "error", "error": "missing authorization code", "state": state}
+        from .mail_oauth import complete_gmail_oauth
+
+        return complete_gmail_oauth(state=state, code=code)
+
+    @app.get("/api/mail/oauth/status")
+    def mail_oauth_status(profile_name: str | None = None):
+        from .mail_oauth import oauth_status
+
+        return oauth_status(profile_name=profile_name)
 
     return app

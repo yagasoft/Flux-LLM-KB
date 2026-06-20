@@ -51,6 +51,17 @@ def test_dashboard_html_contains_health_mount_points():
     assert "/api/mail/status" in html
 
 
+def test_dashboard_html_contains_settings_and_mail_forms_without_registry_wording():
+    html = build_dashboard_html()
+
+    assert "id=\"settings-form\"" in html
+    assert "id=\"mail-profile-form\"" in html
+    assert "id=\"oauth-start-form\"" in html
+    assert "confirmSettingChange" in html
+    assert "settings catalog-backed" in html
+    assert "registry-backed" not in html.lower()
+
+
 def test_doctor_summary_treats_gh_as_optional(monkeypatch):
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(health, "_docker_check", lambda **_kwargs: {"ok": True, "message": "ok", "required": True})

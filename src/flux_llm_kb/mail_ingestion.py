@@ -207,7 +207,14 @@ def add_mail_profile(
 
 
 def mail_status() -> dict[str, Any]:
-    return database.mail_status()
+    payload = database.mail_status()
+    try:
+        from .mail_oauth import oauth_status
+
+        payload["oauth"] = oauth_status()
+    except Exception as exc:
+        payload["oauth"] = {"status": "unavailable", "error": str(exc)}
+    return payload
 
 
 def sync_mail_profile(
@@ -388,18 +395,23 @@ def _sync_imap_profile(
     access_token: str | None,
     imap_client_factory: Any | None,
 ) -> dict[str, Any]:
-    token = access_token
+    token = access_token or _oauth_access_token(profile["name"])
     if not token:
-        from .settings import SettingsService
-
-        token = str(SettingsService().resolve("mail.imap.oauth_refresh_token").raw_value or "")
+        token = _legacy_oauth_token()
     if not token:
         database.record_mail_sync_run(
             profile_name=profile["name"],
-            status="blocked_missing_token",
-            errors=[{"error": "mail.imap.oauth_refresh_token is not configured"}],
+            status="blocked_auth_required",
+            errors=[{"error": "Gmail OAuth is not configured for this mail profile"}],
         )
-        return {"profile": profile["name"], "status": "blocked_missing_token", "exported": 0}
+        return {"profile": profile["name"], "status": "blocked_auth_required", "exported": 0}
+    if token == "__auth_expired__":
+        database.record_mail_sync_run(
+            profile_name=profile["name"],
+            status="auth_expired",
+            errors=[{"error": "Gmail OAuth refresh failed; re-run OAuth setup"}],
+        )
+        return {"profile": profile["name"], "status": "auth_expired", "exported": 0}
     factory = imap_client_factory or ImapSyncClient
     cursors = dict((profile.get("metadata") or {}).get("cursors") or {})
     folder_results: list[dict[str, Any]] = []
@@ -439,6 +451,28 @@ def _sync_imap_profile(
         last_cursor=cursors,
     )
     return {"profile": profile["name"], "status": "completed", "folders": folder_results, "exported": total_exported}
+
+
+def _oauth_access_token(profile_name: str) -> str | None:
+    try:
+        from . import mail_oauth
+
+        return mail_oauth.access_token_for_profile(profile_name)
+    except ImportError:
+        return None
+    except Exception as exc:
+        if exc.__class__.__name__ == "OAuthAuthExpired":
+            return "__auth_expired__"
+        return None
+
+
+def _legacy_oauth_token() -> str:
+    try:
+        from .settings import SettingsService
+
+        return str(SettingsService().resolve("mail.imap.oauth_refresh_token").raw_value or "")
+    except Exception:
+        return ""
 
 
 def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:

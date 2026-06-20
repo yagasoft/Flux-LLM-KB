@@ -128,6 +128,19 @@ def main(argv: list[str] | None = None) -> int:
     mail_watch_subparsers = mail_watch.add_subparsers(dest="mail_watch_command", required=True)
     mail_watch_run = mail_watch_subparsers.add_parser("run", help="Run mail reconciliation loop")
     mail_watch_run.add_argument("--profile")
+    mail_oauth = mail_subparsers.add_parser("oauth", help="Manage mail OAuth")
+    mail_oauth_subparsers = mail_oauth.add_subparsers(dest="mail_oauth_command", required=True)
+    gmail_oauth = mail_oauth_subparsers.add_parser("gmail", help="Gmail IMAP OAuth")
+    gmail_oauth_subparsers = gmail_oauth.add_subparsers(dest="gmail_oauth_command", required=True)
+    gmail_oauth_start = gmail_oauth_subparsers.add_parser("start", help="Start Gmail installed-app OAuth")
+    gmail_oauth_start.add_argument("--profile", required=True)
+    gmail_oauth_start.add_argument("--client-config", required=True)
+    gmail_oauth_start.add_argument("--redirect-uri")
+    gmail_oauth_complete = gmail_oauth_subparsers.add_parser("complete", help="Complete Gmail OAuth from callback code")
+    gmail_oauth_complete.add_argument("--state", required=True)
+    gmail_oauth_complete.add_argument("--code", required=True)
+    mail_oauth_status = mail_oauth_subparsers.add_parser("status", help="Show mail OAuth status")
+    mail_oauth_status.add_argument("--profile")
     mail_render = mail_subparsers.add_parser("render-outlook-config", help="Render an Outlook COM catch-up config")
     mail_render.add_argument("--profile", required=True)
     mail_render.add_argument("--spool", required=True)
@@ -333,6 +346,8 @@ def _mail(args: argparse.Namespace) -> int:
         if args.mail_watch_command != "run":  # pragma: no cover - argparse prevents this
             raise ValueError(args.mail_watch_command)
         payload = _mail_watch_run(args.profile)
+    elif args.mail_command == "oauth":
+        payload = _mail_oauth(args)
     elif args.mail_command == "render-outlook-config":
         print(mail_ingestion.render_outlook_config(args.profile, spool_path=args.spool, folder_paths=args.folder), end="")
         return 0
@@ -340,6 +355,24 @@ def _mail(args: argparse.Namespace) -> int:
         raise ValueError(args.mail_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+def _mail_oauth(args: argparse.Namespace) -> dict:
+    from . import mail_oauth
+
+    if args.mail_oauth_command == "gmail":
+        if args.gmail_oauth_command == "start":
+            return mail_oauth.start_gmail_oauth(
+                profile_name=args.profile,
+                client_config_path=args.client_config,
+                redirect_uri=args.redirect_uri,
+            )
+        if args.gmail_oauth_command == "complete":
+            return mail_oauth.complete_gmail_oauth(state=args.state, code=args.code)
+        raise ValueError(args.gmail_oauth_command)
+    if args.mail_oauth_command == "status":
+        return mail_oauth.oauth_status(profile_name=args.profile)
+    raise ValueError(args.mail_oauth_command)
 
 
 def _mail_watch_run(profile_name: str | None) -> dict:

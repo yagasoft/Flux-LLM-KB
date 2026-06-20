@@ -76,7 +76,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
         "settings": _safe(lambda: __import__("flux_llm_kb.settings", fromlist=["SettingsService"]).SettingsService().public_list(), []),
-        "mail": _safe(lambda: database.mail_status(), {"enabled_profiles": 0, "profiles": []}),
+        "mail": _safe(lambda: __import__("flux_llm_kb.mail_ingestion", fromlist=["mail_status"]).mail_status(), {"enabled_profiles": 0, "profiles": []}),
     }
 
 
@@ -105,10 +105,19 @@ def build_dashboard_html() -> str:
     header {{ padding: 20px 28px; border-bottom: 1px solid #d9dde5; background: #ffffff; }}
     nav {{ display: flex; gap: 8px; padding: 12px 24px; border-bottom: 1px solid #d9dde5; background: #ffffff; }}
     button {{ border: 1px solid #c9ced8; background: #ffffff; border-radius: 6px; padding: 8px 10px; cursor: pointer; }}
-    main {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); padding: 24px; }}
+    main {{ display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); padding: 24px; }}
     section {{ border: 1px solid #d9dde5; border-radius: 8px; background: #ffffff; padding: 16px; min-height: 132px; }}
     h1 {{ font-size: 24px; margin: 0; }}
     h2 {{ font-size: 16px; margin: 0 0 12px; }}
+    h3 {{ font-size: 14px; margin: 18px 0 8px; }}
+    label {{ display: grid; gap: 4px; font-size: 12px; color: #4a4f5c; }}
+    input, select {{ border: 1px solid #c9ced8; border-radius: 6px; padding: 8px; font: inherit; min-width: 0; }}
+    form {{ display: grid; gap: 10px; margin-bottom: 12px; }}
+    .row {{ display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }}
+    .hint {{ color: #5b6270; font-size: 12px; line-height: 1.4; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    th, td {{ text-align: left; border-bottom: 1px solid #e2e5ec; padding: 6px; vertical-align: top; }}
+    td input {{ width: 100%; box-sizing: border-box; }}
     pre {{ white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.45; }}
   </style>
 </head>
@@ -127,19 +136,124 @@ def build_dashboard_html() -> str:
     <section data-panel="crawl"><h2>Crawl</h2><pre id="crawl">Loading...</pre></section>
     <section data-panel="jobs"><h2>Jobs</h2><pre id="jobs">Loading...</pre></section>
     <section data-panel="retrieval"><h2>Retrieval</h2><pre id="retrieval">Loading...</pre></section>
-    <section data-panel="settings"><h2>Settings</h2><pre id="settings">Loading...</pre></section>
-    <section data-panel="mail"><h2>Mail Capture</h2><pre id="mail">Loading...</pre></section>
+    <section data-panel="settings">
+      <h2>Settings</h2>
+      <p class="hint">settings catalog-backed runtime configuration. Values are stored by Flux, not the Windows Registry.</p>
+      <form id="settings-form" onsubmit="saveSetting(event)">
+        <div class="row">
+          <label>Key<input id="setting-key" name="key" placeholder="retrieval.token_budget" required></label>
+          <label>Value<input id="setting-value" name="value" required></label>
+        </div>
+        <button type="submit">Save Setting</button>
+      </form>
+      <div id="settings-table">Loading...</div>
+    </section>
+    <section data-panel="mail">
+      <h2>Mail Capture</h2>
+      <form id="mail-profile-form" onsubmit="createMailProfile(event)">
+        <div class="row">
+          <label>Name<input name="name" placeholder="gmail-capture" required></label>
+          <label>Source<select name="source_type"><option value="imap">IMAP</option><option value="outlook_com">Outlook COM</option></select></label>
+          <label>Account<input name="account" placeholder="me@gmail.com"></label>
+          <label>Server<input name="server" value="imap.gmail.com"></label>
+        </div>
+        <label>Folders<input name="folder_paths" placeholder="FluxCapture,Archive/Flux" required></label>
+        <label>Private Spool Path<input name="spool_path" placeholder="private/mail-spool/gmail-capture" required></label>
+        <label>Post Process<select name="post_process_policy"><option value="move_to_processed">move_to_processed</option><option value="remove_label">remove_label</option><option value="none">none</option><option value="trash">trash</option></select></label>
+        <button type="submit">Save Mail Profile</button>
+      </form>
+      <form id="oauth-start-form" onsubmit="startGmailOAuth(event)">
+        <h3>Gmail OAuth</h3>
+        <div class="row">
+          <label>Profile<input name="profile_name" placeholder="gmail-capture" required></label>
+          <label>Private Client JSON<input name="client_config_path" placeholder="private/google-oauth-client.json" required></label>
+        </div>
+        <button type="submit">Start Gmail OAuth</button>
+      </form>
+      <div id="oauth-output"></div>
+      <pre id="mail">Loading...</pre>
+    </section>
   </main>
   <script>
+    const confirmationModes = new Set(["reload", "restart_component", "reindex_required", "manual_process_restart"]);
     async function load(id, url) {{
       const response = await fetch(url);
       document.getElementById(id).textContent = JSON.stringify(await response.json(), null, 2);
+    }}
+    async function json(url, options) {{
+      const response = await fetch(url, options);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(JSON.stringify(payload));
+      return payload;
+    }}
+    function confirmSettingChange(key, applyMode) {{
+      if (!confirmationModes.has(applyMode)) return true;
+      return window.confirm(key + " uses apply mode " + applyMode + ". Continue?");
+    }}
+    async function renderSettings() {{
+      const settings = await json("/api/settings");
+      const rows = settings.map(item => `
+        <tr>
+          <td>${{item.key}}</td>
+          <td>${{item.source}}</td>
+          <td>${{item.sensitive ? "secret" : item.category}}</td>
+          <td>${{item.apply_mode}}</td>
+          <td><input data-key="${{item.key}}" data-apply="${{item.apply_mode}}" value="${{item.value ?? ""}}" ${{item.read_only ? "disabled" : ""}}></td>
+          <td><button type="button" ${{item.read_only ? "disabled" : ""}} onclick="saveInlineSetting('${{item.key}}')">Save</button></td>
+        </tr>`).join("");
+      document.getElementById("settings-table").innerHTML = `<table><thead><tr><th>Key</th><th>Source</th><th>Type</th><th>Apply</th><th>Value</th><th></th></tr></thead><tbody>${{rows}}</tbody></table>`;
+    }}
+    async function saveInlineSetting(key) {{
+      const input = document.querySelector(`input[data-key="${{key}}"]`);
+      if (!confirmSettingChange(key, input.dataset.apply)) return;
+      await json("/api/settings/" + encodeURIComponent(key), {{
+        method: "PUT",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{value: input.value, confirmed: true}})
+      }});
+      await renderSettings();
+    }}
+    async function saveSetting(event) {{
+      event.preventDefault();
+      const key = event.target.key.value;
+      const value = event.target.value.value;
+      const current = (await json("/api/settings/" + encodeURIComponent(key)));
+      if (!confirmSettingChange(key, current.apply_mode)) return;
+      await json("/api/settings/" + encodeURIComponent(key), {{
+        method: "PUT",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{value, confirmed: true}})
+      }});
+      event.target.reset();
+      await renderSettings();
+    }}
+    async function createMailProfile(event) {{
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      data.folder_paths = data.folder_paths.split(",").map(item => item.trim()).filter(Boolean);
+      await json("/api/mail/profiles", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(data)
+      }});
+      event.target.reset();
+      await load("mail", "/api/mail/status");
+    }}
+    async function startGmailOAuth(event) {{
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.target).entries());
+      const payload = await json("/api/mail/oauth/gmail/start", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify(data)
+      }});
+      document.getElementById("oauth-output").innerHTML = `<a href="${{payload.authorization_url}}" target="_blank" rel="noreferrer">Open Google OAuth</a><pre>${{JSON.stringify(payload, null, 2)}}</pre>`;
     }}
     load("watcher", "/api/dashboard/health");
     load("crawl", "/api/dashboard/crawl");
     load("jobs", "/api/dashboard/jobs");
     load("retrieval", "/api/dashboard/retrieval-stats");
-    load("settings", "/api/settings");
+    renderSettings();
     load("mail", "/api/mail/status");
   </script>
 </body>

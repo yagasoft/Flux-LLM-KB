@@ -185,3 +185,109 @@ def test_export_outlook_item_to_spool_writes_msg_backup_and_manifest(tmp_path):
     assert (result.ready_path / "attachments" / "notes.txt").read_text(encoding="utf-8") == "attachment"
     assert result.manifest["source_type"] == "outlook_com"
     assert result.manifest["outlook_entry_id"] == "entry-1"
+
+
+def test_sync_imap_profile_refreshes_oauth_token_before_login(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion, mail_oauth
+
+    auth_calls = []
+
+    class FakeClient:
+        def __init__(self, host):
+            self.host = host
+
+        def authenticate_xoauth2(self, user, token):
+            auth_calls.append((user, token))
+
+        def select(self, folder):
+            return "OK", [b"1"]
+
+        def response(self, key):
+            return "OK", [b"1"]
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                return "OK", [b""]
+            raise AssertionError(command)
+
+        def close(self):
+            return None
+
+        def logout(self):
+            return None
+
+    profile = {
+        "name": "gmail",
+        "source_type": "imap",
+        "enabled": True,
+        "account": "me@gmail.com",
+        "server": "imap.gmail.com",
+        "folder_paths": ["FluxCapture"],
+        "spool_path": str(tmp_path),
+        "post_process_policy": "none",
+        "metadata": {},
+    }
+    runs = []
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: profile | {"metadata": kwargs["metadata"]})
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
+    monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: "fresh-access-token")
+
+    result = mail_ingestion.sync_mail_profile(profile_name="gmail", imap_client_factory=FakeClient)
+
+    assert result["profiles"][0]["status"] == "completed"
+    assert auth_calls == [("me@gmail.com", "fresh-access-token")]
+    assert runs[0]["status"] == "completed"
+
+
+def test_sync_imap_profile_reports_auth_required_without_crashing(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion, mail_oauth
+
+    profile = {
+        "name": "gmail",
+        "source_type": "imap",
+        "enabled": True,
+        "account": "me@gmail.com",
+        "server": "imap.gmail.com",
+        "folder_paths": ["FluxCapture"],
+        "spool_path": str(tmp_path),
+        "post_process_policy": "none",
+        "metadata": {},
+    }
+    runs = []
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
+    monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: None)
+
+    result = mail_ingestion.sync_mail_profile(profile_name="gmail")
+
+    assert result["profiles"][0]["status"] == "blocked_auth_required"
+    assert runs[0]["status"] == "blocked_auth_required"
+
+
+def test_sync_imap_profile_reports_expired_oauth_without_crashing(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion, mail_oauth
+
+    profile = {
+        "name": "gmail",
+        "source_type": "imap",
+        "enabled": True,
+        "account": "me@gmail.com",
+        "server": "imap.gmail.com",
+        "folder_paths": ["FluxCapture"],
+        "spool_path": str(tmp_path),
+        "post_process_policy": "none",
+        "metadata": {},
+    }
+    runs = []
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
+    monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: (_ for _ in ()).throw(mail_oauth.OAuthAuthExpired("invalid_grant")))
+
+    result = mail_ingestion.sync_mail_profile(profile_name="gmail")
+
+    assert result["profiles"][0]["status"] == "auth_expired"
+    assert runs[0]["status"] == "auth_expired"

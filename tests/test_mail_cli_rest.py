@@ -72,3 +72,44 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     assert "/api/settings/{key}" in routes
     assert "/api/mail/status" in routes
     assert "/api/mail/profiles" in routes
+    assert "/api/mail/oauth/gmail/start" in routes
+    assert "/api/mail/oauth/gmail/callback" in routes
+    assert "/api/mail/oauth/status" in routes
+
+
+def test_cli_mail_oauth_start_outputs_authorization_url(monkeypatch, tmp_path, capsys):
+    from flux_llm_kb import mail_oauth
+
+    config_path = tmp_path / "client.json"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mail_oauth,
+        "start_gmail_oauth",
+        lambda **kwargs: {
+            "profile_name": kwargs["profile_name"],
+            "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?state=abc",
+            "state": "abc",
+        },
+    )
+
+    assert cli.main(["mail", "oauth", "gmail", "start", "--profile", "gmail", "--client-config", str(config_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["profile_name"] == "gmail"
+    assert payload["authorization_url"].startswith("https://accounts.google.com/")
+
+
+def test_cli_mail_oauth_status_masks_token_state(monkeypatch, capsys):
+    from flux_llm_kb import mail_oauth
+
+    monkeypatch.setattr(
+        mail_oauth,
+        "oauth_status",
+        lambda profile_name=None: {"profiles": [{"profile_name": profile_name, "status": "configured", "has_refresh_token": True}]},
+    )
+
+    assert cli.main(["mail", "oauth", "status", "--profile", "gmail"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["profiles"][0]["has_refresh_token"] is True
+    assert "secret" not in json.dumps(payload).lower()

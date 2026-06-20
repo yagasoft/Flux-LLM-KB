@@ -47,9 +47,17 @@
 
 ## V2.6: Mail Capture And Runtime Configuration
 
-- Registry-backed runtime settings with dashboard editing, environment override
+- Settings catalog-backed runtime settings with dashboard editing, environment override
   visibility, masked secrets, audit events, and confirmation-gated reload,
   restart, or reindex requests.
+- Terminology cleanup so public docs and dashboard wording do not imply Windows
+  Registry usage; settings are cross-platform catalog definitions plus local
+  PostgreSQL overrides.
+- Dashboard forms for settings edits, mail profile creation, Gmail OAuth setup,
+  confirmation-gated apply actions, validation errors, and mail/token status.
+- Gmail OAuth setup for installed desktop clients, token refresh before IMAP
+  XOAUTH2 login, token health reporting, and clean `blocked_auth_required` or
+  `auth_expired` states when authorization is missing or revoked.
 - IMAP mailbox/label monitor for Gmail or standards-compliant IMAP servers,
   using TLS, XOAUTH2-first authentication, UID/UIDVALIDITY cursors, optional
   IDLE, and periodic reconciliation after restarts.

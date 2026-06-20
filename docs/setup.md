@@ -61,6 +61,8 @@ flux-kb crawl doctor
 flux-kb settings list
 flux-kb settings set retrieval.token_budget 1600
 flux-kb mail profile add-imap --name gmail-capture --account me@gmail.com --folder FluxCapture --spool private\mail-spool\gmail-capture
+flux-kb mail oauth gmail start --profile gmail-capture --client-config private\google-oauth-client.json
+flux-kb mail oauth status --profile gmail-capture
 flux-kb mail profile add-outlook --name outlook-catchup --folder "Mailbox - Me\Inbox\Flux Capture" --spool private\mail-spool\outlook-catchup
 flux-kb mail status
 flux-kb mail sync --profile gmail-capture
@@ -82,17 +84,23 @@ Override it in `.env` or the shell when you want a different local database.
 ## Runtime Settings
 
 Most operational values are exposed through `flux-kb settings` and the dashboard
-settings tab. Environment variables override database settings and appear as
-read-only effective values. Settings that require reload, component restart, or
-embedding reindex require confirmation and create runtime control requests.
+settings tab. Configuration is settings catalog-backed and cross-platform; it
+does not use the Windows Registry. Environment variables override database
+settings and appear as read-only effective values. Settings that require reload,
+component restart, or embedding reindex require confirmation and create runtime
+control requests.
 
 ## Mail Capture
 
 Mail capture is local-first. IMAP profiles monitor configured folders or labels
 and export messages into `private\mail-spool\<profile>`. Gmail profiles should
-use OAuth2/XOAUTH2 token references rather than basic passwords. The default
-post-process policy moves messages to a processed folder or removes the capture
-label; permanent trash/delete is not the default.
+use installed-app OAuth2/XOAUTH2 rather than basic passwords. Create a private
+Google OAuth desktop client JSON outside Git, run `flux-kb mail oauth gmail
+start`, open the returned URL, and let the local callback store a masked refresh
+token. Flux refreshes short-lived access tokens before IMAP login and reports
+token health in the dashboard. The default post-process policy moves messages to
+a processed folder or removes the capture label; permanent trash/delete is not
+the default.
 
 Outlook COM profiles are for catch-up from selected classic Outlook folder
 paths. They use local Outlook automation and write into the same spool shape as
