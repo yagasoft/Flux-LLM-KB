@@ -8,6 +8,8 @@ import sys
 from typing import Any
 
 from . import database
+from .extractors import extractor_availability
+from .watcher import summarize_watcher_staleness
 
 
 def doctor_payload() -> dict[str, Any]:
@@ -15,14 +17,18 @@ def doctor_payload() -> dict[str, Any]:
         "python": {
             "ok": sys.version_info >= (3, 11),
             "message": platform.python_version(),
+            "required": True,
         },
-        "docker": _docker_check(),
-        "git": _command_check("git", "Git source control"),
-        "gh": _command_check("gh", "GitHub CLI"),
+        "docker": _docker_check(required=False),
+        "git": _command_check("git", "Git source control", required=True),
+        "gh": _command_check("gh", "GitHub CLI", required=False),
     }
     db_status = database.check_database()
-    checks["postgresql"] = {"ok": db_status.ok, "message": db_status.message}
-    return {"summary": {"ok": all(check["ok"] for check in checks.values())}, "checks": checks}
+    checks["postgresql"] = {"ok": db_status.ok, "message": db_status.message, "required": True}
+    return {
+        "summary": {"ok": all(check["ok"] for check in checks.values() if check.get("required", True))},
+        "checks": checks,
+    }
 
 
 def collect_dashboard_payload() -> dict[str, Any]:
@@ -44,6 +50,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
         {"episodes": 0, "sources": 0, "source_assets": 0, "asset_chunks": 0, "embeddings": 0},
     )
     checks = doctor_payload()["checks"]
+    watcher_summary = summarize_watcher_staleness(crawl.get("watchers", []))
     return {
         "database": {"ok": db_status.ok, "message": db_status.message},
         "runtime": {
@@ -56,13 +63,17 @@ def collect_dashboard_payload() -> dict[str, Any]:
             "active_roots": crawl["active_watch_roots"],
             "disabled_roots": crawl["disabled_watch_roots"],
             "roots": roots,
-            "states": crawl.get("watchers", []),
+            "states": watcher_summary["states"],
+            "stale_count": watcher_summary["stale_count"],
         },
         "jobs": {
             "pending": crawl["pending_jobs"],
             "failed": crawl["failed_jobs"],
+            "blocked": crawl.get("blocked_jobs", 0),
         },
         "retrieval": retrieval,
+        "extractors": extractor_availability(),
+        "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
     }
 
@@ -126,18 +137,19 @@ def _safe(callable_obj, fallback):
         return fallback
 
 
-def _command_check(command: str, description: str) -> dict[str, Any]:
+def _command_check(command: str, description: str, *, required: bool = True) -> dict[str, Any]:
     path = shutil.which(command)
     return {
         "ok": path is not None,
         "message": path or f"{description} command not found",
+        "required": required,
     }
 
 
-def _docker_check() -> dict[str, Any]:
+def _docker_check(*, required: bool = True) -> dict[str, Any]:
     path = shutil.which("docker")
     if path is None:
-        return {"ok": False, "message": "Docker command not found"}
+        return {"ok": False, "message": "Docker command not found", "required": required}
     try:
         result = subprocess.run(
             ["docker", "compose", "version"],
@@ -147,8 +159,8 @@ def _docker_check() -> dict[str, Any]:
             check=False,
         )
     except Exception as exc:  # pragma: no cover - environment-specific
-        return {"ok": False, "message": str(exc)}
+        return {"ok": False, "message": str(exc), "required": required}
     if result.returncode != 0:
         message = result.stderr.strip() or result.stdout.strip() or "Docker Compose unavailable"
-        return {"ok": False, "message": message}
-    return {"ok": True, "message": result.stdout.strip() or path}
+        return {"ok": False, "message": message, "required": required}
+    return {"ok": True, "message": result.stdout.strip() or path, "required": required}

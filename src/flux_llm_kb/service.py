@@ -10,7 +10,7 @@ from .crawler import CorpusPolicy, scan_path
 from . import database
 from .redaction import redact_text
 from .scoring import ContextCandidate, pack_context
-from .watcher import PollingCorpusWatcher, WatchEvent, WatchRoot
+from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
 
 
 @dataclass(frozen=True)
@@ -120,40 +120,28 @@ class KnowledgeService:
             max_inline_bytes=root["max_inline_bytes"],
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
         )
-        plan = scan_path(root["root_path"], policy)
+        plan = scan_path(root["root_path"], policy, target_path=path)
         return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run)
 
     def run_watch(self, *, root_name: str | None = None, interval_seconds: float = 2.0) -> dict[str, Any]:
-        roots = [
-            root
-            for root in database.list_monitored_roots(watch_enabled=True)
-            if root["enabled"] and (root_name is None or root["name"] == root_name)
-        ]
-        if not roots:
+        if not _load_watch_roots(root_name):
             return {"status": "no_enabled_roots", "root_name": root_name}
 
-        watch_roots = [
-            WatchRoot(
-                name=root["name"],
-                root_path=Path(root["root_path"]),
-                watch_enabled=root["watch_enabled"],
-                recursive=root["recursive"],
-            )
-            for root in roots
-        ]
-        watcher = PollingCorpusWatcher(
-            watch_roots,
+        watcher = create_corpus_watcher(
+            lambda: _load_watch_roots(root_name),
             on_change=self._handle_watch_event,
             interval_seconds=interval_seconds,
         )
         watcher.poll_once(seed=True)
         while True:
-            for root in watch_roots:
+            for root in _load_watch_roots(root_name):
                 database.record_watcher_heartbeat(root_name=root.name)
             watcher.poll_once()
             time.sleep(interval_seconds)
 
     def run_corpus_backfill(self, *, kind: str = "all", limit: int = 10, workers: int = 1) -> dict[str, Any]:
+        from . import worker
+
         claimed = database.claim_corpus_jobs(limit=limit, worker_id=f"flux-kb-backfill-{workers}")
         filtered = [
             job
@@ -168,13 +156,46 @@ class KnowledgeService:
                     error=f"released by {kind} backfill filter",
                     cooldown_seconds=30,
                 )
+        completed = 0
+        blocked = 0
+        retried = 0
         for job in filtered:
-            database.complete_corpus_job(job_id=job["id"])
+            process_result = worker.process_corpus_job(job)
+            if process_result.status in {"indexed", "metadata_only"}:
+                database.complete_corpus_job(job_id=job["id"])
+                completed += 1
+            elif process_result.status == "blocked_missing_dependency":
+                database.block_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or "blocked_missing_dependency",
+                )
+                blocked += 1
+            else:
+                database.retry_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or process_result.status,
+                    cooldown_seconds=300,
+                )
+                retried += 1
         database.record_audit_event(
             event_type="corpus.backfill",
-            details={"kind": kind, "claimed": len(claimed), "completed": len(filtered), "workers": workers},
+            details={
+                "kind": kind,
+                "claimed": len(claimed),
+                "completed": completed,
+                "blocked": blocked,
+                "retried": retried,
+                "workers": workers,
+            },
         )
-        return {"kind": kind, "claimed": len(claimed), "completed": len(filtered), "jobs": filtered}
+        return {
+            "kind": kind,
+            "claimed": len(claimed),
+            "completed": completed,
+            "blocked": blocked,
+            "retried": retried,
+            "jobs": filtered,
+        }
 
     def _handle_watch_event(self, event: WatchEvent) -> None:
         try:
@@ -233,3 +254,20 @@ def _job_matches_kind(job_type: str, kind: str) -> bool:
     if kind == "embeddings":
         return job_type == "corpus_embed"
     return True
+
+
+def _load_watch_roots(root_name: str | None = None) -> list[WatchRoot]:
+    roots = [
+        root
+        for root in database.list_monitored_roots(watch_enabled=True)
+        if root["enabled"] and (root_name is None or root["name"] == root_name)
+    ]
+    return [
+        WatchRoot(
+            name=root["name"],
+            root_path=Path(root["root_path"]),
+            watch_enabled=root["watch_enabled"],
+            recursive=root["recursive"],
+        )
+        for root in roots
+    ]

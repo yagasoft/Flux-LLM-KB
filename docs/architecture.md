@@ -36,19 +36,32 @@ Queries combine four signals:
 The merged result uses reciprocal rank fusion and then packs a compact task brief
 within a strict token budget.
 
+Corpus chunks use the same `embeddings` table as episodes with
+`owner_table = 'asset_chunks'`. Corpus retrieval fuses PostgreSQL full-text,
+trigram fuzzy matching, pgvector similarity, source trust rank, and freshness.
+Deleted assets and non-canonical duplicate assets are suppressed from retrieval.
+
 ## Corpus Monitoring
 
 Configured roots are crawled recursively according to root policy, `.gitignore`,
 `.fluxignore`, `.fluxkbignore`, and `.exclude.codex` markers. Metadata is recorded
-for every supported file type. Small text-like files are extracted and chunked
-locally; heavy documents, images, audio, and video are queued for local deferred
-processing. Archives and unknown binaries remain metadata-only unless explicitly
-enabled later.
+for every supported file type. Sync can target a full root, a subtree, or a
+single file. Small text-like files are extracted and chunked locally; heavy
+documents, images, audio, and video are queued for local deferred processing.
+Images are dimensioned locally, media uses sidecar transcripts and `ffprobe`
+when available, and archives or unknown binaries remain metadata-only unless
+explicitly enabled later.
 
 Deferred workers claim jobs with `FOR UPDATE SKIP LOCKED`, use retry/cooldown
-state in `capture_jobs`, and do not call cloud providers by default. Duplicate
-content is suppressed by content hash while preserving every observed path and
-source asset record.
+state in `capture_jobs`, and do not call cloud providers by default. Jobs move to
+explicit terminal states such as `completed`, `metadata_only`, or
+`blocked_missing_dependency`; they are not completed merely because they were
+claimed. Duplicate content is suppressed by content hash while preserving every
+observed path and source asset record.
+
+The watcher runtime reloads enabled roots while running, so `watch enable` and
+`watch disable` take effect without a restart. It applies debounce, a bounded
+event queue, heartbeat recording, and stale-state reporting.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, and future graph/review workflows.

@@ -63,6 +63,7 @@ class CorpusPolicy:
     exclude_globs: tuple[str, ...] = ()
     max_inline_bytes: int = 256 * 1024
     heavy_threshold_bytes: int = 10 * 1024 * 1024
+    hash_max_bytes: int = 512 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -96,46 +97,77 @@ class DiscoveredAsset:
     content_hash: str | None
     extraction_tier: str
     chunks: tuple[AssetChunk, ...] = ()
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class CrawlPlan:
     root_path: Path
+    scope_relative_path: str | None = None
+    scope_is_file: bool = False
     assets: list[DiscoveredAsset] = field(default_factory=list)
     deferred_jobs: list[dict[str, str]] = field(default_factory=list)
+    errors: list[dict[str, str]] = field(default_factory=list)
 
 
-def scan_path(root_path: str | Path, policy: CorpusPolicy | None = None) -> CrawlPlan:
+def scan_path(
+    root_path: str | Path,
+    policy: CorpusPolicy | None = None,
+    *,
+    target_path: str | Path | None = None,
+) -> CrawlPlan:
     root = Path(root_path).expanduser().resolve()
     active_policy = policy or CorpusPolicy(root_path=root)
     marker_patterns = _load_marker_patterns(root)
     assets: list[DiscoveredAsset] = []
     deferred_jobs: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    target = Path(target_path).expanduser().resolve() if target_path else None
+    scope_relative_path = _scope_relative_path(root, target) if target else None
+    scope_is_file = bool(target and target.is_file())
 
-    for path in _iter_files(root, recursive=active_policy.recursive):
-        relative_path = path.relative_to(root).as_posix()
-        if not _is_included(relative_path, active_policy, marker_patterns):
-            continue
-        asset = discover_asset(path, root, active_policy)
-        assets.append(asset)
-        if asset.extraction_tier == "deferred":
-            deferred_jobs.append(
-                {
-                    "job_type": f"corpus_extract_{asset.file_kind}",
-                    "relative_path": asset.relative_path,
-                    "reason": "heavy_file" if asset.size_bytes > active_policy.heavy_threshold_bytes else "deferred_extractor",
-                }
-            )
+    for path in _iter_files(root, recursive=active_policy.recursive, target=target):
+        try:
+            relative_path = path.relative_to(root).as_posix()
+            if not _is_included(relative_path, active_policy, marker_patterns):
+                continue
+            asset = discover_asset(path, root, active_policy)
+            assets.append(asset)
+            if asset.extraction_tier == "deferred":
+                deferred_jobs.append(
+                    {
+                        "job_type": f"corpus_extract_{asset.file_kind}",
+                        "relative_path": asset.relative_path,
+                        "reason": "heavy_file" if asset.size_bytes > active_policy.heavy_threshold_bytes else "deferred_extractor",
+                    }
+                )
+        except Exception as exc:
+            errors.append({"path": str(path), "error": str(exc)})
 
-    return CrawlPlan(root_path=root, assets=assets, deferred_jobs=deferred_jobs)
+    return CrawlPlan(
+        root_path=root,
+        scope_relative_path=scope_relative_path,
+        scope_is_file=scope_is_file,
+        assets=assets,
+        deferred_jobs=deferred_jobs,
+        errors=errors,
+    )
 
 
 def discover_asset(path: Path, root: Path, policy: CorpusPolicy) -> DiscoveredAsset:
     resolved = path.resolve()
     stat = resolved.stat()
     classification = classify_file(resolved, policy)
-    content_hash = _sha256_file(resolved) if classification.extraction_tier == "inline" else None
-    chunks = tuple(_extract_text_chunks(resolved, root)) if classification.extraction_tier == "inline" else ()
+    content_hash = _sha256_file(resolved) if stat.st_size <= policy.hash_max_bytes else None
+    metadata: dict[str, object] = {}
+    chunks: tuple[AssetChunk, ...] = ()
+    if classification.extraction_tier == "inline" or classification.file_kind == "image":
+        from .extractors import extract_file
+
+        extraction = extract_file(resolved, policy)
+        metadata = extraction.metadata
+        if classification.extraction_tier == "inline":
+            chunks = extraction.chunks
     return DiscoveredAsset(
         path=resolved,
         relative_path=resolved.relative_to(root.resolve()).as_posix(),
@@ -148,6 +180,7 @@ def discover_asset(path: Path, root: Path, policy: CorpusPolicy) -> DiscoveredAs
         content_hash=content_hash,
         extraction_tier=classification.extraction_tier,
         chunks=chunks,
+        metadata=metadata,
     )
 
 
@@ -176,7 +209,16 @@ def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
     return FileClassification(file_kind=file_kind, extraction_tier="metadata_only", mime_type=mime_type)
 
 
-def _iter_files(root: Path, *, recursive: bool) -> Iterable[Path]:
+def _iter_files(root: Path, *, recursive: bool, target: Path | None = None) -> Iterable[Path]:
+    if target is not None:
+        if not _is_relative_to(target, root):
+            raise ValueError(f"target path is outside monitored root: {target}")
+        if target.is_file():
+            return iter([target])
+        if not target.exists():
+            return iter(())
+        iterator = target.rglob("*") if recursive else target.iterdir()
+        return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES)
     iterator = root.rglob("*") if recursive else root.iterdir()
     return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES)
 
@@ -259,6 +301,22 @@ def _extract_text_chunks(path: Path, root: Path) -> list[AssetChunk]:
                 )
             )
     return chunks
+
+
+def _scope_relative_path(root: Path, target: Path | None) -> str | None:
+    if target is None:
+        return None
+    if not _is_relative_to(target, root):
+        raise ValueError(f"target path is outside monitored root: {target}")
+    return target.relative_to(root).as_posix()
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _sha256_file(path: Path) -> str:

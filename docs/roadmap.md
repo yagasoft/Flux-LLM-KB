@@ -26,6 +26,9 @@
 ## V2.5: Autonomous Corpus Expansion
 
 - Configurable recursive path monitoring with persistent watch enable/disable state.
+- Live watcher control with reloadable enabled roots, debounce, bounded queues,
+  heartbeat, and stale-state reporting.
+- Targeted file/subtree sync for efficient watcher-triggered updates.
 - File-type aware extraction:
   - text/code/markdown/json/csv: fast local extraction and chunking
   - office/PDF/spreadsheets/slides: local library extraction where practical; large
@@ -38,6 +41,8 @@
   job claiming, retry/cooldown tracking, and no cloud/provider calls by default.
 - Duplicate suppression by content hash while preserving all observed paths and
   source metadata.
+- Corpus retrieval combines full-text, fuzzy, pgvector chunk embeddings, trust rank,
+  freshness, deletion state, and canonical duplicate filtering.
 
 ## V3: Scale And Evaluation
 

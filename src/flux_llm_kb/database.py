@@ -189,6 +189,7 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
     psycopg = _load_psycopg()
     limit = max(1, min(limit, 50))
     candidate_limit = max(limit * 4, 12)
+    query_vector = to_pgvector_literal(embed_text(query))
 
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -198,12 +199,19 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
             cur.execute(
                 """
                 SELECT c.id::text, c.title, c.body, a.path,
+                       (
+                           SELECT count(*)
+                           FROM source_assets duplicate
+                           WHERE duplicate.canonical_asset_id = a.id
+                       ) AS duplicate_count,
+                       r.trust_rank,
                        ts_rank(c.search_vector, plainto_tsquery('english', %s)) AS score
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
                 JOIN monitored_roots r ON r.id = a.root_id
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
+                  AND a.canonical_asset_id IS NULL
                   AND c.search_vector @@ plainto_tsquery('english', %s)
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
@@ -215,19 +223,75 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
             cur.execute(
                 """
                 SELECT c.id::text, c.title, c.body, a.path,
+                       (
+                           SELECT count(*)
+                           FROM source_assets duplicate
+                           WHERE duplicate.canonical_asset_id = a.id
+                       ) AS duplicate_count,
+                       r.trust_rank,
                        greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
                 JOIN monitored_roots r ON r.id = a.root_id
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
-                  AND (similarity(c.title, %s) > 0.10 OR similarity(c.body, %s) > 0.05)
+                  AND a.canonical_asset_id IS NULL
+                  AND (similarity(c.title, %s) > 0.10 OR similarity(c.body, %s) > 0.15)
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
                 """,
                 (query, query, query, query, candidate_limit),
             )
             _add_ranked_corpus_rows("corpus_fuzzy", cur.fetchall(), streams, details)
+
+            cur.execute(
+                """
+                SELECT c.id::text, c.title, c.body, a.path,
+                       (
+                           SELECT count(*)
+                           FROM source_assets duplicate
+                           WHERE duplicate.canonical_asset_id = a.id
+                       ) AS duplicate_count,
+                       r.trust_rank,
+                       1 - (emb.embedding <=> %s::vector) AS score
+                FROM embeddings emb
+                JOIN asset_chunks c
+                  ON emb.owner_table = 'asset_chunks'
+                 AND emb.owner_id = c.id
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.enabled
+                  AND a.deleted_at IS NULL
+                  AND a.canonical_asset_id IS NULL
+                  AND emb.model = %s
+                  AND 1 - (emb.embedding <=> %s::vector) > 0.25
+                ORDER BY emb.embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_vector, DEFAULT_EMBEDDING_MODEL, query_vector, query_vector, candidate_limit),
+            )
+            _add_ranked_corpus_rows("corpus_vector", cur.fetchall(), streams, details)
+
+            if details:
+                cur.execute(
+                    """
+                    SELECT c.id::text, c.title, c.body, a.path,
+                           (
+                               SELECT count(*)
+                               FROM source_assets duplicate
+                               WHERE duplicate.canonical_asset_id = a.id
+                           ) AS duplicate_count,
+                           r.trust_rank,
+                           1.0 / greatest(r.trust_rank, 1) AS score
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE c.id = ANY(%s::uuid[])
+                    ORDER BY r.trust_rank ASC, c.updated_at DESC
+                    """,
+                    (list(details.keys()),),
+                )
+                _add_ranked_corpus_rows("corpus_trust", cur.fetchall(), streams, details)
 
     fused = reciprocal_rank_fusion(streams)
     results: list[dict[str, Any]] = []
@@ -242,6 +306,8 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                 "streams": list(item.streams),
                 "raw_scores": result["raw_scores"],
                 "source_path": result["source_path"],
+                "duplicate_count": result["duplicate_count"],
+                "trust_rank": result["trust_rank"],
             }
         )
     return results
@@ -400,7 +466,7 @@ def add_monitored_root(
                 ),
             )
             row = cur.fetchone()
-            _upsert_watcher_state(cur, row[0], "enabled" if watch_enabled else "stopped")
+            _upsert_watcher_state(cur, row[0], "enabled" if watch_enabled else "disabled")
             return _root_row(row)
 
 
@@ -422,6 +488,24 @@ def list_monitored_roots(*, watch_enabled: bool | None = None, url: str | None =
                 params,
             )
             return [_root_row(row) for row in cur.fetchall()]
+
+
+def get_monitored_root(name: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, name, root_path, enabled, recursive, watch_enabled,
+                       trust_rank, include_globs, exclude_globs, max_inline_bytes,
+                       heavy_threshold_bytes, metadata
+                FROM monitored_roots
+                WHERE name = %s
+                """,
+                (name,),
+            )
+            row = cur.fetchone()
+            return _root_row(row) if row else None
 
 
 def set_watch_enabled(
@@ -451,7 +535,7 @@ def set_watch_enabled(
                 )
             root_ids = [row[0] for row in cur.fetchall()]
             for root_id in root_ids:
-                _upsert_watcher_state(cur, root_id, "enabled" if enabled else "stopped")
+                _upsert_watcher_state(cur, root_id, "enabled" if enabled else "disabled")
             return {"updated": len(root_ids), "root_name": root_name, "watch_enabled": enabled}
 
 
@@ -513,6 +597,8 @@ def persist_crawl_plan(
                     "metadata_only": "metadata_only",
                 }[asset.extraction_tier]
                 canonical_id = _find_canonical_asset_id(cur, asset.content_hash, previous[0] if previous else None)
+                if canonical_id:
+                    status = "duplicate_suppressed"
                 cur.execute(
                     """
                     INSERT INTO source_assets (
@@ -558,31 +644,12 @@ def persist_crawl_plan(
                         status,
                         asset.extraction_tier,
                         status,
-                        _json({"source": "corpus_crawler"}),
+                        _json({"source": "corpus_crawler", **asset.metadata}),
                     ),
                 )
                 asset_id = cur.fetchone()[0]
                 if changed_asset:
-                    cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s", (asset_id,))
-                    for chunk in asset.chunks:
-                        cur.execute(
-                            """
-                            INSERT INTO asset_chunks (
-                                asset_id, chunk_index, title, body, modality, locator, token_estimate
-                            )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            """,
-                            (
-                                asset_id,
-                                chunk.chunk_index,
-                                chunk.title,
-                                chunk.body,
-                                chunk.modality,
-                                chunk.locator,
-                                chunk.token_estimate,
-                            ),
-                        )
-                        chunks_indexed += 1
+                    chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id else asset.chunks)
                     if asset.extraction_tier == "deferred":
                         cur.execute(
                             """
@@ -596,16 +663,7 @@ def persist_crawl_plan(
                         )
                         jobs_queued += 1
 
-            cur.execute(
-                """
-                UPDATE source_assets
-                SET deleted_at = now(), updated_at = now()
-                WHERE root_id = %s
-                  AND deleted_at IS NULL
-                  AND NOT (path = ANY(%s))
-                """,
-                (root_id, list(seen_paths) or [""]),
-            )
+            _mark_deleted_assets(cur, root_id, seen_paths, plan)
             deleted = cur.rowcount
             cur.execute(
                 """
@@ -616,10 +674,11 @@ def persist_crawl_plan(
                     files_changed = %s,
                     files_deleted = %s,
                     chunks_indexed = %s,
-                    jobs_queued = %s
+                    jobs_queued = %s,
+                    errors = %s::jsonb
                 WHERE id = %s
                 """,
-                (len(plan.assets), changed, deleted, chunks_indexed, jobs_queued, run_id),
+                (len(plan.assets), changed, deleted, chunks_indexed, jobs_queued, _json_list(plan.errors), run_id),
             )
             return {
                 "root_name": root_name,
@@ -645,6 +704,10 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
             pending_jobs = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status = 'failed'")
             failed_jobs = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status = 'blocked_missing_dependency'")
+            blocked_jobs = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM source_assets WHERE canonical_asset_id IS NOT NULL AND deleted_at IS NULL")
+            duplicate_assets = cur.fetchone()[0]
             cur.execute(
                 """
                 SELECT last_error
@@ -667,7 +730,11 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
             job_errors = [row[0] for row in cur.fetchall()]
             cur.execute(
                 """
-                SELECT r.name, s.status, s.heartbeat_at, s.last_event_at, s.last_error
+                SELECT r.name, s.status, s.heartbeat_at, s.last_event_at, s.last_error,
+                       CASE
+                         WHEN s.heartbeat_at IS NULL THEN NULL
+                         ELSE EXTRACT(EPOCH FROM (now() - s.heartbeat_at))::integer
+                       END AS heartbeat_age_seconds
                 FROM monitored_roots r
                 LEFT JOIN watcher_state s ON s.root_id = r.id
                 ORDER BY r.name
@@ -680,6 +747,7 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
                     "heartbeat_at": row[2].isoformat() if row[2] else None,
                     "last_event_at": row[3].isoformat() if row[3] else None,
                     "last_error": row[4],
+                    "heartbeat_age_seconds": row[5],
                 }
                 for row in cur.fetchall()
             ]
@@ -688,6 +756,8 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
                 "disabled_watch_roots": disabled_watch_roots,
                 "pending_jobs": pending_jobs,
                 "failed_jobs": failed_jobs,
+                "blocked_jobs": blocked_jobs,
+                "duplicate_assets": duplicate_assets,
                 "recent_errors": watcher_errors + job_errors,
                 "watchers": watchers,
             }
@@ -803,6 +873,64 @@ def retry_corpus_job(
             )
 
 
+def block_corpus_job(
+    *, job_id: str, error: str, status: str = "blocked_missing_dependency", url: str | None = None
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = %s,
+                    last_error = %s,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                """,
+                (status, error, job_id),
+            )
+
+
+def apply_extraction_result(
+    *, root_name: str, relative_path: str, result: Any, url: str | None = None
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id::text, a.canonical_asset_id::text
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.name = %s
+                  AND a.path = %s
+                """,
+                (root_name, relative_path),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"source asset not found: {root_name}:{relative_path}")
+            asset_id, canonical_asset_id = row
+            status = result.status
+            if canonical_asset_id and status == "indexed":
+                status = "duplicate_suppressed"
+            cur.execute(
+                """
+                UPDATE source_assets
+                SET extraction_status = %s,
+                    metadata = metadata || %s::jsonb,
+                    indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (status, _json(result.metadata or {}), status, asset_id),
+            )
+            _replace_asset_chunks(cur, asset_id, () if canonical_asset_id else result.chunks)
+
+
 def retrieval_stats(*, url: str | None = None) -> dict[str, int]:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -817,6 +945,8 @@ def retrieval_stats(*, url: str | None = None) -> dict[str, int]:
             }.items():
                 cur.execute(f"SELECT count(*) FROM {table}")
                 counts[key] = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM source_assets WHERE canonical_asset_id IS NOT NULL")
+            counts["duplicate_assets"] = cur.fetchone()[0]
             return counts
 
 
@@ -874,9 +1004,16 @@ def _add_ranked_corpus_rows(
         streams[stream].append(item_id)
         detail = details.setdefault(
             item_id,
-            {"title": row[1], "summary": row[2], "source_path": row[3], "raw_scores": {}},
+            {
+                "title": row[1],
+                "summary": row[2],
+                "source_path": row[3],
+                "duplicate_count": int(row[4] or 0),
+                "trust_rank": int(row[5] or 500),
+                "raw_scores": {},
+            },
         )
-        detail["raw_scores"][stream] = float(row[4] or 0.0)
+        detail["raw_scores"][stream] = float(row[6] or 0.0)
 
 
 def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -894,6 +1031,95 @@ def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "heavy_threshold_bytes": row[10],
         "metadata": row[11],
     }
+
+
+def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> int:
+    cur.execute(
+        """
+        DELETE FROM embeddings
+        WHERE owner_table = 'asset_chunks'
+          AND owner_id IN (SELECT id FROM asset_chunks WHERE asset_id = %s)
+        """,
+        (asset_id,),
+    )
+    cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s", (asset_id,))
+    inserted = 0
+    for chunk in chunks:
+        cur.execute(
+            """
+            INSERT INTO asset_chunks (
+                asset_id, chunk_index, title, body, modality, locator, token_estimate
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id::text
+            """,
+            (
+                asset_id,
+                chunk.chunk_index,
+                chunk.title,
+                chunk.body,
+                chunk.modality,
+                chunk.locator,
+                chunk.token_estimate,
+            ),
+        )
+        chunk_id = cur.fetchone()[0]
+        cur.execute(
+            """
+            INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding)
+            VALUES ('asset_chunks', %s, %s, %s, %s::vector)
+            """,
+            (
+                chunk_id,
+                DEFAULT_EMBEDDING_MODEL,
+                DEFAULT_EMBEDDING_DIMENSIONS,
+                to_pgvector_literal(embed_text(f"{chunk.title}\n{chunk.body}")),
+            ),
+        )
+        inserted += 1
+    return inserted
+
+
+def _mark_deleted_assets(cur: Any, root_id: str, seen_paths: set[str], plan: CrawlPlan) -> None:
+    if plan.scope_relative_path is None:
+        cur.execute(
+            """
+            UPDATE source_assets
+            SET deleted_at = now(), updated_at = now()
+            WHERE root_id = %s
+              AND deleted_at IS NULL
+              AND NOT (path = ANY(%s))
+            """,
+            (root_id, list(seen_paths) or [""]),
+        )
+        return
+
+    if plan.scope_is_file:
+        cur.execute(
+            """
+            UPDATE source_assets
+            SET deleted_at = now(), updated_at = now()
+            WHERE root_id = %s
+              AND deleted_at IS NULL
+              AND path = %s
+              AND NOT (path = ANY(%s))
+            """,
+            (root_id, plan.scope_relative_path, list(seen_paths) or [""]),
+        )
+        return
+
+    prefix = f"{plan.scope_relative_path}/"
+    cur.execute(
+        """
+        UPDATE source_assets
+        SET deleted_at = now(), updated_at = now()
+        WHERE root_id = %s
+          AND deleted_at IS NULL
+          AND (path = %s OR path LIKE %s)
+          AND NOT (path = ANY(%s))
+        """,
+        (root_id, plan.scope_relative_path, f"{prefix}%", list(seen_paths) or [""]),
+    )
 
 
 def _upsert_watcher_state(cur: Any, root_id: str, status: str) -> None:
@@ -990,6 +1216,12 @@ def _load_psycopg():
 
 
 def _json(value: dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(value, sort_keys=True)
+
+
+def _json_list(value: list[dict[str, Any]]) -> str:
     import json
 
     return json.dumps(value, sort_keys=True)
