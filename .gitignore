@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+
+# Runtime memory data - never commit
+data/
+runtime/
+exports/private/
+wiki/private/
+transcripts/
+attachments/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.dump
+*.bak
+
+# Worktrees
+.worktrees/
+worktrees/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
