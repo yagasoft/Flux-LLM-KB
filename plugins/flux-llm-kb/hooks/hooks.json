@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command_windows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\scripts\\user_prompt_submit.ps1\"",
+            "statusMessage": "Retrieving Flux-LLM-KB brief"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command_windows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\scripts\\pre_compact.ps1\"",
+            "statusMessage": "Preparing Flux-LLM-KB capture"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command_windows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\scripts\\stop.ps1\"",
+            "statusMessage": "Finalizing Flux-LLM-KB turn"
+          }
+        ]
+      }
+    ]
+  }
+}
+

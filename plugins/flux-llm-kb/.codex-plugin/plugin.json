@@ -1,0 +1,8 @@
+{
+  "name": "flux-llm-kb",
+  "version": "0.1.0",
+  "description": "Global local-first knowledge kernel for Codex and MCP-capable agents.",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}
+

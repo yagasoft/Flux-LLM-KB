@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flux-llm-kb"
+version = "0.1.0"
+description = "Local-first knowledge kernel for LLM agent workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Flux-LLM-KB contributors" }
+]
+dependencies = [
+  "psycopg[binary]>=3.2",
+  "pgvector>=0.3",
+  "pydantic>=2.8",
+]
+
+[project.optional-dependencies]
+api = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+]
+mcp = [
+  "mcp>=1.7",
+]
+dev = [
+  "pytest>=8.3",
+]
+
+[project.scripts]
+flux-kb = "flux_llm_kb.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+flux_llm_kb = ["sql/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+

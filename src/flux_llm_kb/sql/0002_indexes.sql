@@ -1,0 +1,11 @@
+CREATE INDEX IF NOT EXISTS idx_episodes_search_vector ON episodes USING GIN (search_vector);
+CREATE INDEX IF NOT EXISTS idx_episodes_metadata ON episodes USING GIN (metadata);
+CREATE INDEX IF NOT EXISTS idx_episodes_title_trgm ON episodes USING GIN (title gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_episodes_summary_trgm ON episodes USING GIN (summary gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_embeddings_vector_hnsw ON embeddings USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_claims_episode ON claims (episode_id);
+CREATE INDEX IF NOT EXISTS idx_claims_subject ON claims (subject_entity_id);
+CREATE INDEX IF NOT EXISTS idx_relations_from ON relations (from_entity_id, relation_type);
+CREATE INDEX IF NOT EXISTS idx_relations_to ON relations (to_entity_id, relation_type);
+CREATE INDEX IF NOT EXISTS idx_audit_events_target ON audit_events (target_table, target_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_capture_jobs_status ON capture_jobs (status, updated_at);

@@ -20,6 +20,7 @@ build/
 # Runtime memory data - never commit
 data/
 runtime/
+private/
 exports/private/
 wiki/private/
 transcripts/
@@ -40,4 +41,3 @@ worktrees/
 Thumbs.db
 .idea/
 .vscode/
-

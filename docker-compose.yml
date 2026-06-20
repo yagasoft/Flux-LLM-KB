@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: flux-llm-kb-postgres
+    environment:
+      POSTGRES_USER: flux
+      POSTGRES_PASSWORD: flux
+      POSTGRES_DB: flux_llm_kb
+    ports:
+      - "5432:5432"
+    volumes:
+      - flux_llm_kb_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flux -d flux_llm_kb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  flux_llm_kb_postgres:
+
