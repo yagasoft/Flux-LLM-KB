@@ -44,9 +44,43 @@ def create_server():
 
     @mcp.tool(name="kb.status")
     def status():
-        from .cli import doctor_payload
+        from .health import doctor_payload
 
         return doctor_payload()
+
+    @mcp.tool(name="kb.crawl_status")
+    def crawl_status():
+        from .health import collect_crawl_payload
+
+        return collect_crawl_payload()
+
+    @mcp.tool(name="kb.crawl_sync")
+    def crawl_sync(root_name: str | None = None, path: str | None = None, dry_run: bool = False):
+        return service.sync_corpus(root_name=root_name, path=path, dry_run=dry_run)
+
+    @mcp.tool(name="kb.crawl_watch_status")
+    def crawl_watch_status():
+        from . import database
+
+        return database.crawl_status()
+
+    @mcp.tool(name="kb.crawl_watch_enable")
+    def crawl_watch_enable(root_name: str | None = None):
+        from . import database
+
+        return database.set_watch_enabled(root_name=root_name, enabled=True)
+
+    @mcp.tool(name="kb.crawl_watch_disable")
+    def crawl_watch_disable(root_name: str | None = None):
+        from . import database
+
+        return database.set_watch_enabled(root_name=root_name, enabled=False)
+
+    @mcp.tool(name="kb.crawl_jobs")
+    def crawl_jobs(limit: int = 50):
+        from . import database
+
+        return {"jobs": database.list_capture_jobs(limit=limit)}
 
     return mcp
 

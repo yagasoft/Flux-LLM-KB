@@ -18,9 +18,26 @@
 
 ## V2: Review And Visualization
 
-- Dashboard for search, graph browsing, stale claims, contradictions, and capture review.
+- Unified dashboard for health, monitoring, watcher status, crawler stats, search,
+  graph browsing, stale claims, contradictions, and capture review.
 - Retention policy tuning and memory quality reports.
 - Manual approval flows for sensitive or low-confidence captures.
+
+## V2.5: Autonomous Corpus Expansion
+
+- Configurable recursive path monitoring with persistent watch enable/disable state.
+- File-type aware extraction:
+  - text/code/markdown/json/csv: fast local extraction and chunking
+  - office/PDF/spreadsheets/slides: local library extraction where practical; large
+    tabular files can be metadata-first
+  - images: metadata, dimensions, hash, optional local OCR in deferred jobs
+  - audio/video: metadata via local probing, sidecar transcript reuse, optional
+    local transcription/frame sampling in deferred jobs
+  - archives/binaries: metadata-only unless explicitly enabled later
+- Background processing with low-priority bounded workers, `FOR UPDATE SKIP LOCKED`
+  job claiming, retry/cooldown tracking, and no cloud/provider calls by default.
+- Duplicate suppression by content hash while preserving all observed paths and
+  source metadata.
 
 ## V3: Scale And Evaluation
 
@@ -35,4 +52,3 @@
 - Sync and export policies.
 - Optional Apache AGE graph backend.
 - Synthetic-data and fine-tuning pipeline.
-

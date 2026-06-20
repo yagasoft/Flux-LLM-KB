@@ -1,0 +1,274 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import fnmatch
+import hashlib
+import mimetypes
+from pathlib import Path
+from typing import Iterable
+
+from .redaction import redact_text
+
+
+MARKER_FILES = (".gitignore", ".fluxignore", ".fluxkbignore", ".exclude.codex")
+TEXT_EXTENSIONS = {
+    ".adoc",
+    ".cfg",
+    ".conf",
+    ".cs",
+    ".css",
+    ".csv",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsonl",
+    ".md",
+    ".ps1",
+    ".py",
+    ".rs",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+CODE_EXTENSIONS = {
+    ".cs",
+    ".css",
+    ".html",
+    ".java",
+    ".js",
+    ".ps1",
+    ".py",
+    ".rs",
+    ".sql",
+    ".ts",
+}
+DOCUMENT_EXTENSIONS = {".doc", ".docx", ".pdf", ".ppt", ".pptx", ".rtf", ".xls", ".xlsx"}
+IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"}
+AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".wma"}
+VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"}
+ARCHIVE_EXTENSIONS = {".7z", ".gz", ".rar", ".tar", ".tgz", ".zip"}
+
+
+@dataclass(frozen=True)
+class CorpusPolicy:
+    root_path: Path
+    recursive: bool = True
+    include_globs: tuple[str, ...] = ()
+    exclude_globs: tuple[str, ...] = ()
+    max_inline_bytes: int = 256 * 1024
+    heavy_threshold_bytes: int = 10 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class FileClassification:
+    file_kind: str
+    extraction_tier: str
+    mime_type: str | None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class AssetChunk:
+    chunk_index: int
+    title: str
+    body: str
+    modality: str = "text"
+    locator: str | None = None
+    token_estimate: int = 0
+
+
+@dataclass(frozen=True)
+class DiscoveredAsset:
+    path: Path
+    relative_path: str
+    file_kind: str
+    mime_type: str | None
+    extension: str
+    size_bytes: int
+    mtime_ns: int
+    quick_hash: str
+    content_hash: str | None
+    extraction_tier: str
+    chunks: tuple[AssetChunk, ...] = ()
+
+
+@dataclass(frozen=True)
+class CrawlPlan:
+    root_path: Path
+    assets: list[DiscoveredAsset] = field(default_factory=list)
+    deferred_jobs: list[dict[str, str]] = field(default_factory=list)
+
+
+def scan_path(root_path: str | Path, policy: CorpusPolicy | None = None) -> CrawlPlan:
+    root = Path(root_path).expanduser().resolve()
+    active_policy = policy or CorpusPolicy(root_path=root)
+    marker_patterns = _load_marker_patterns(root)
+    assets: list[DiscoveredAsset] = []
+    deferred_jobs: list[dict[str, str]] = []
+
+    for path in _iter_files(root, recursive=active_policy.recursive):
+        relative_path = path.relative_to(root).as_posix()
+        if not _is_included(relative_path, active_policy, marker_patterns):
+            continue
+        asset = discover_asset(path, root, active_policy)
+        assets.append(asset)
+        if asset.extraction_tier == "deferred":
+            deferred_jobs.append(
+                {
+                    "job_type": f"corpus_extract_{asset.file_kind}",
+                    "relative_path": asset.relative_path,
+                    "reason": "heavy_file" if asset.size_bytes > active_policy.heavy_threshold_bytes else "deferred_extractor",
+                }
+            )
+
+    return CrawlPlan(root_path=root, assets=assets, deferred_jobs=deferred_jobs)
+
+
+def discover_asset(path: Path, root: Path, policy: CorpusPolicy) -> DiscoveredAsset:
+    resolved = path.resolve()
+    stat = resolved.stat()
+    classification = classify_file(resolved, policy)
+    content_hash = _sha256_file(resolved) if classification.extraction_tier == "inline" else None
+    chunks = tuple(_extract_text_chunks(resolved, root)) if classification.extraction_tier == "inline" else ()
+    return DiscoveredAsset(
+        path=resolved,
+        relative_path=resolved.relative_to(root.resolve()).as_posix(),
+        file_kind=classification.file_kind,
+        mime_type=classification.mime_type,
+        extension=resolved.suffix.lower(),
+        size_bytes=stat.st_size,
+        mtime_ns=stat.st_mtime_ns,
+        quick_hash=_quick_hash(resolved, stat.st_size, stat.st_mtime_ns),
+        content_hash=content_hash,
+        extraction_tier=classification.extraction_tier,
+        chunks=chunks,
+    )
+
+
+def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
+    file_path = Path(path)
+    ext = file_path.suffix.lower()
+    size = file_path.stat().st_size
+    mime_type, _ = mimetypes.guess_type(file_path.name)
+    file_kind = _file_kind(ext, mime_type)
+
+    if file_kind == "archive":
+        return FileClassification(file_kind=file_kind, extraction_tier="metadata_only", mime_type=mime_type)
+    if file_kind in {"image", "audio", "video"}:
+        return FileClassification(file_kind=file_kind, extraction_tier="deferred", mime_type=mime_type)
+    if size > policy.heavy_threshold_bytes:
+        return FileClassification(
+            file_kind=file_kind,
+            extraction_tier="deferred",
+            mime_type=mime_type,
+            reason="heavy_file",
+        )
+    if ext in TEXT_EXTENSIONS and size <= policy.max_inline_bytes:
+        return FileClassification(file_kind=file_kind, extraction_tier="inline", mime_type=mime_type)
+    if ext in DOCUMENT_EXTENSIONS:
+        return FileClassification(file_kind=file_kind, extraction_tier="deferred", mime_type=mime_type)
+    return FileClassification(file_kind=file_kind, extraction_tier="metadata_only", mime_type=mime_type)
+
+
+def _iter_files(root: Path, *, recursive: bool) -> Iterable[Path]:
+    iterator = root.rglob("*") if recursive else root.iterdir()
+    return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES)
+
+
+def _file_kind(ext: str, mime_type: str | None) -> str:
+    if ext in CODE_EXTENSIONS:
+        return "code"
+    if ext in TEXT_EXTENSIONS:
+        return "text"
+    if ext in DOCUMENT_EXTENSIONS:
+        return "document"
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
+    if ext in AUDIO_EXTENSIONS:
+        return "audio"
+    if ext in VIDEO_EXTENSIONS:
+        return "video"
+    if ext in ARCHIVE_EXTENSIONS:
+        return "archive"
+    if mime_type and mime_type.startswith("text/"):
+        return "text"
+    return "binary"
+
+
+def _load_marker_patterns(root: Path) -> list[str]:
+    patterns: list[str] = []
+    for marker in MARKER_FILES:
+        marker_path = root / marker
+        if not marker_path.exists():
+            continue
+        for raw_line in marker_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw_line.strip()
+            if line and not line.startswith("#"):
+                patterns.append(line)
+    return patterns
+
+
+def _is_included(relative_path: str, policy: CorpusPolicy, marker_patterns: list[str]) -> bool:
+    included = not policy.include_globs
+    for pattern in policy.include_globs:
+        if _matches(relative_path, pattern):
+            included = True
+    for pattern in (*policy.exclude_globs, *marker_patterns):
+        negated = pattern.startswith("!")
+        candidate = pattern[1:] if negated else pattern
+        if _matches(relative_path, candidate):
+            included = bool(negated)
+    return included
+
+
+def _matches(relative_path: str, pattern: str) -> bool:
+    normalized = pattern.replace("\\", "/").strip()
+    if not normalized:
+        return False
+    if normalized.endswith("/"):
+        return relative_path.startswith(normalized)
+    if normalized.endswith("/**"):
+        return relative_path == normalized[:-3] or relative_path.startswith(normalized[:-2])
+    name = Path(relative_path).name
+    return fnmatch.fnmatch(relative_path, normalized) or fnmatch.fnmatch(name, normalized)
+
+
+def _extract_text_chunks(path: Path, root: Path) -> list[AssetChunk]:
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return []
+    redacted, _ = redact_text(text)
+    relative_path = path.relative_to(root.resolve()).as_posix()
+    chunks: list[AssetChunk] = []
+    for index, start in enumerate(range(0, len(redacted), 4000)):
+        body = redacted[start : start + 4000].strip()
+        if body:
+            chunks.append(
+                AssetChunk(
+                    chunk_index=index,
+                    title=relative_path,
+                    body=body,
+                    locator=f"char:{start}-{start + len(body)}",
+                    token_estimate=max(1, len(body.split())),
+                )
+            )
+    return chunks
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _quick_hash(path: Path, size_bytes: int, mtime_ns: int) -> str:
+    value = f"{path.name}:{size_bytes}:{mtime_ns}".encode("utf-8", errors="ignore")
+    return hashlib.sha256(value).hexdigest()
