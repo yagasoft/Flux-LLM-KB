@@ -2,15 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 import time
 from typing import Any
 
 from .crawler import CorpusPolicy, scan_path
 from . import database
+from .glob_policy import effective_glob_policy
 from .redaction import redact_text
 from .scoring import ContextCandidate, pack_context
 from .settings import SettingsService
+from .versioning import collapse_version_families
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
 
 
@@ -33,15 +36,19 @@ class KnowledgeService:
         return RememberResult(id=episode_id, redaction_count=len(all_findings))
 
     def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        corpus_limit = max(limit * 4, 20)
         episodes = [
             {"kind": "episode", **item}
             for item in database.search_episodes(query, limit=limit)
         ]
         corpus = [
             {"kind": "corpus_chunk", **item}
-            for item in database.search_corpus_chunks(query, limit=limit)
+            for item in database.search_corpus_chunks(query, limit=corpus_limit)
         ]
-        return sorted(corpus + episodes, key=lambda item: item["score"], reverse=True)[:limit]
+        return collapse_version_families(
+            sorted(corpus + episodes, key=lambda item: item["score"], reverse=True),
+            limit=limit,
+        )
 
     def brief(self, query: str, token_budget: int | None = None) -> str:
         if token_budget is None:
@@ -115,11 +122,12 @@ class KnowledgeService:
         dry_run: bool = False,
     ) -> dict[str, Any]:
         root = _select_root(root_name=root_name, path=path)
+        glob_policy = _configured_glob_policy(root)
         policy = CorpusPolicy(
             root_path=Path(root["root_path"]),
             recursive=root["recursive"],
-            include_globs=tuple(root["include_globs"]),
-            exclude_globs=tuple(root["exclude_globs"]),
+            include_globs=tuple(glob_policy["include_globs"]),
+            exclude_globs=tuple(glob_policy["exclude_globs"]),
             max_inline_bytes=root["max_inline_bytes"],
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
         )
@@ -236,12 +244,11 @@ def _select_root(*, root_name: str | None, path: str | Path | None) -> dict[str,
                 return root
         raise ValueError(f"monitored root not found: {root_name}")
     if path:
-        target = Path(path).expanduser().resolve()
+        target = str(path)
         for root in roots:
-            root_path = Path(root["root_path"]).expanduser().resolve()
-            if target == root_path or target.is_relative_to(root_path):
+            if _path_is_under_root(target, str(root["root_path"])):
                 return root
-        raise ValueError(f"path is not under a monitored root: {target}")
+        raise ValueError(f"path is not under a monitored root: {path}")
     if len(roots) == 1:
         return roots[0]
     raise ValueError("specify --root or --path")
@@ -264,6 +271,47 @@ def _configured_token_budget() -> int:
         return int(SettingsService().resolve("retrieval.token_budget").raw_value)
     except Exception:
         return 1200
+
+
+def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:
+    settings = SettingsService()
+    try:
+        global_include = settings.resolve("crawler.global_include_globs").raw_value
+    except Exception:
+        global_include = []
+    try:
+        global_exclude = settings.resolve("crawler.global_exclude_globs").raw_value
+    except Exception:
+        global_exclude = []
+    return effective_glob_policy(root, global_include=global_include, global_exclude=global_exclude)
+
+
+def _path_is_under_root(path: str, root_path: str) -> bool:
+    if _looks_windows(path) or _looks_windows(root_path):
+        target = PureWindowsPath(path)
+        root = PureWindowsPath(root_path)
+        try:
+            target.relative_to(root)
+            return True
+        except ValueError:
+            return False
+    target_posix = PurePosixPath(path)
+    root_posix = PurePosixPath(root_path)
+    try:
+        target_posix.relative_to(root_posix)
+        return True
+    except ValueError:
+        pass
+    try:
+        target_local = Path(path).expanduser().resolve()
+        root_local = Path(root_path).expanduser().resolve()
+        return target_local == root_local or target_local.is_relative_to(root_local)
+    except Exception:
+        return False
+
+
+def _looks_windows(path: str) -> bool:
+    return bool(PureWindowsPath(path).drive) or str(path).startswith("\\\\")
 
 
 def _load_watch_roots(root_name: str | None = None) -> list[WatchRoot]:

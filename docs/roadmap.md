@@ -27,6 +27,11 @@
 ## V2.5: Autonomous Corpus Expansion
 
 - Configurable recursive path monitoring with persistent watch enable/disable state.
+- Local host-agent bridge for arbitrary host filesystem paths when the normal
+  API/dashboard run in Docker, including native folder browse, host-path
+  validation, and host-side sync/watch execution.
+- Global include/exclude glob defaults with per-root inherit, extend, or
+  override behavior visible in the dashboard.
 - Live watcher control with reloadable enabled roots, debounce, bounded queues,
   heartbeat, and stale-state reporting.
 - Targeted file/subtree sync for efficient watcher-triggered updates.
@@ -47,6 +52,9 @@
   job claiming, retry/cooldown tracking, and no cloud/provider calls by default.
 - Duplicate suppression by content hash while preserving all observed paths and
   source metadata.
+- Conservative same-document/version-family suppression in retrieval, so common
+  `v1`/`v2`/`final`/dated/copy variants preserve provenance but surface as one
+  canonical result by default.
 - Corpus retrieval combines full-text, fuzzy, pgvector chunk embeddings, trust rank,
   freshness, deletion state, and canonical duplicate filtering.
 

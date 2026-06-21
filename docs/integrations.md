@@ -52,6 +52,9 @@ Endpoints:
 - `POST /api/outlook-host/request-sync`
 - `POST /api/outlook-host/profiles/{name}/enable`
 - `POST /api/outlook-host/profiles/{name}/disable`
+- `GET /api/host/status`
+- `POST /api/host/browse-folder`
+- `POST /api/host/validate-path`
 - `POST /api/search`
 - `POST /api/brief`
 - `POST /api/remember`
@@ -74,6 +77,22 @@ flux-kb settings set embedding.model flux-hash-v2 --confirm
 flux-kb settings reset retrieval.token_budget
 flux-kb settings apply --component watcher
 ```
+
+Crawler glob settings are global defaults. Monitored roots can inherit, extend,
+or override them; effective globs are returned in dashboard crawl payloads.
+
+## Host Filesystem Agent
+
+Use the host agent when the dashboard/API is Docker-hosted but watched paths live
+on the host filesystem:
+
+```powershell
+flux-kb host-agent status
+flux-kb host-agent run
+```
+
+The agent exposes local-only status, path validation, native folder browse, and
+host-side crawl sync endpoints. It stores no private content in Git.
 
 ## Mail Capture
 
@@ -139,7 +158,10 @@ Set `FLUX_KB_PYTHON` if Codex should use a specific Python executable:
 $env:FLUX_KB_PYTHON = "C:\Path\To\python.exe"
 ```
 
-The current hooks emit compact context instructions. The service layer already
-supports durable capture and retrieval, so the next step is wiring the hook
-payloads to call `kb.brief` and `kb.finalize_turn` automatically once the Codex
-hook runtime contract is finalized.
+The current hooks emit compact context instructions. Dashboard health reports
+whether the local Codex config references the Flux plugin, whether the plugin is
+installed or linked under the Codex plugin directory, and whether hook files are
+available. The service layer already supports durable capture and retrieval, so
+the next step is wiring the hook payloads to call `kb.brief` and
+`kb.finalize_turn` automatically once the Codex hook runtime contract is
+finalized.

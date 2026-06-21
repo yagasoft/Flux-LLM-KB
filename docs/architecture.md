@@ -59,6 +59,17 @@ Images are dimensioned locally, media uses sidecar transcripts and `ffprobe`
 when available, and archives or unknown binaries remain metadata-only unless
 explicitly enabled later.
 
+When the API/dashboard is Docker-hosted, arbitrary Windows/macOS/Linux host
+paths are accessed through a separate local host agent (`flux-kb host-agent run`).
+The dashboard can ask that host process to open a native folder picker, validate
+the selected path on the host OS, and execute host-side sync/watch work against
+the same PostgreSQL database. Docker never interprets Windows drive paths such
+as `E:\Projects` with Linux path rules.
+
+Global crawler include/exclude globs live in the settings catalog. Each
+monitored root chooses `inherit`, `extend`, or `override`; the dashboard shows
+both root-local globs and the effective policy used by crawl/watch.
+
 The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
 structure, sidecar transcripts, and decorative-image skips. Optional richer
@@ -72,7 +83,11 @@ state in `capture_jobs`, and do not call cloud providers by default. Jobs move t
 explicit terminal states such as `completed`, `metadata_only`, or
 `blocked_missing_dependency`; they are not completed merely because they were
 claimed. Duplicate content is suppressed by content hash while preserving every
-observed path and source asset record.
+observed path and source asset record. Retrieval also applies a conservative
+same-document/version-family collapse for common filename variants such as
+`v1`, `v2`, `final`, dated copies, and copy suffixes. It suppresses sibling
+versions only in result presentation and exposes the canonical path plus
+suppressed sibling count.
 
 The watcher runtime reloads enabled roots while running, so `watch enable` and
 `watch disable` take effect without a restart. It applies debounce, a bounded
@@ -140,3 +155,5 @@ configured interval. Missing host/Outlook states are explicit:
 - Docker hosts the normal Flux API/dashboard/worker processes. The Outlook COM
   bridge is deliberately outside Docker because COM requires the logged-in
   Windows user session and classic Outlook.
+- The generic host-agent bridge is also outside Docker when direct access to
+  arbitrary host filesystem paths or native folder browsing is required.

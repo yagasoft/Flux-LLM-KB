@@ -419,22 +419,23 @@ def add_monitored_root(
     trust_rank: int = 500,
     include_globs: list[str] | None = None,
     exclude_globs: list[str] | None = None,
+    glob_mode: str = "extend",
     max_inline_bytes: int = 256 * 1024,
     heavy_threshold_bytes: int = 10 * 1024 * 1024,
     metadata: dict[str, Any] | None = None,
     url: str | None = None,
 ) -> dict[str, Any]:
     psycopg = _load_psycopg()
-    resolved_path = str(Path(root_path).expanduser().resolve())
+    resolved_path = _normalize_root_path(root_path)
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO monitored_roots (
                     name, root_path, enabled, recursive, watch_enabled, trust_rank,
-                    include_globs, exclude_globs, max_inline_bytes, heavy_threshold_bytes, metadata
+                    include_globs, exclude_globs, glob_mode, max_inline_bytes, heavy_threshold_bytes, metadata
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
                 ON CONFLICT (name) DO UPDATE SET
                     root_path = EXCLUDED.root_path,
                     enabled = EXCLUDED.enabled,
@@ -443,12 +444,13 @@ def add_monitored_root(
                     trust_rank = EXCLUDED.trust_rank,
                     include_globs = EXCLUDED.include_globs,
                     exclude_globs = EXCLUDED.exclude_globs,
+                    glob_mode = EXCLUDED.glob_mode,
                     max_inline_bytes = EXCLUDED.max_inline_bytes,
                     heavy_threshold_bytes = EXCLUDED.heavy_threshold_bytes,
                     metadata = EXCLUDED.metadata,
                     updated_at = now()
                 RETURNING id::text, name, root_path, enabled, recursive, watch_enabled,
-                          trust_rank, include_globs, exclude_globs, max_inline_bytes,
+                          trust_rank, include_globs, exclude_globs, glob_mode, max_inline_bytes,
                           heavy_threshold_bytes, metadata
                 """,
                 (
@@ -460,6 +462,7 @@ def add_monitored_root(
                     trust_rank,
                     include_globs or [],
                     exclude_globs or [],
+                    glob_mode,
                     max_inline_bytes,
                     heavy_threshold_bytes,
                     _json(metadata or {}),
@@ -479,7 +482,7 @@ def list_monitored_roots(*, watch_enabled: bool | None = None, url: str | None =
             cur.execute(
                 f"""
                 SELECT id::text, name, root_path, enabled, recursive, watch_enabled,
-                       trust_rank, include_globs, exclude_globs, max_inline_bytes,
+                       trust_rank, include_globs, exclude_globs, glob_mode, max_inline_bytes,
                        heavy_threshold_bytes, metadata
                 FROM monitored_roots
                 {where}
@@ -497,7 +500,7 @@ def get_monitored_root(name: str, *, url: str | None = None) -> dict[str, Any] |
             cur.execute(
                 """
                 SELECT id::text, name, root_path, enabled, recursive, watch_enabled,
-                       trust_rank, include_globs, exclude_globs, max_inline_bytes,
+                       trust_rank, include_globs, exclude_globs, glob_mode, max_inline_bytes,
                        heavy_threshold_bytes, metadata
                 FROM monitored_roots
                 WHERE name = %s
@@ -772,7 +775,7 @@ def crawl_root_summaries(
             cur.execute(
                 """
                 SELECT r.id::text, r.name, r.root_path, r.enabled, r.recursive, r.watch_enabled,
-                       r.trust_rank, r.include_globs, r.exclude_globs, r.max_inline_bytes,
+                       r.trust_rank, r.include_globs, r.exclude_globs, r.glob_mode, r.max_inline_bytes,
                        r.heavy_threshold_bytes, r.metadata,
                        s.status, s.heartbeat_at, s.last_event_at, s.last_error,
                        CASE
@@ -787,14 +790,14 @@ def crawl_root_summaries(
             roots = cur.fetchall()
             summaries: list[dict[str, Any]] = []
             for row in roots:
-                root = _root_row(row[:12])
+                root = _root_row(row[:13])
                 root_id = root["id"]
                 watcher = {
-                    "status": row[12] or ("enabled" if root["watch_enabled"] else "disabled"),
-                    "heartbeat_at": row[13].isoformat() if row[13] else None,
-                    "last_event_at": row[14].isoformat() if row[14] else None,
-                    "last_error": row[15],
-                    "heartbeat_age_seconds": row[16],
+                    "status": row[13] or ("enabled" if root["watch_enabled"] else "disabled"),
+                    "heartbeat_at": row[14].isoformat() if row[14] else None,
+                    "last_event_at": row[15].isoformat() if row[15] else None,
+                    "last_error": row[16],
+                    "heartbeat_age_seconds": row[17],
                 }
                 latest_crawl = _latest_crawl_run(cur, root_id)
                 asset_counts = _root_asset_counts(cur, root_id)
@@ -1981,6 +1984,16 @@ def _add_ranked_corpus_rows(
 
 
 def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    if len(row) >= 13:
+        glob_mode = row[9]
+        max_inline_bytes = row[10]
+        heavy_threshold_bytes = row[11]
+        metadata = row[12]
+    else:
+        metadata = row[11]
+        glob_mode = (metadata or {}).get("glob_mode", "extend")
+        max_inline_bytes = row[9]
+        heavy_threshold_bytes = row[10]
     return {
         "id": row[0],
         "name": row[1],
@@ -1991,9 +2004,10 @@ def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "trust_rank": row[6],
         "include_globs": list(row[7] or []),
         "exclude_globs": list(row[8] or []),
-        "max_inline_bytes": row[9],
-        "heavy_threshold_bytes": row[10],
-        "metadata": row[11],
+        "glob_mode": glob_mode or "extend",
+        "max_inline_bytes": max_inline_bytes,
+        "heavy_threshold_bytes": heavy_threshold_bytes,
+        "metadata": metadata,
     }
 
 
@@ -2260,6 +2274,18 @@ def _mail_oauth_token_row(row: tuple[Any, ...], *, profile_name: str) -> dict[st
         "expires_at": row[10].isoformat() if row[10] else None,
         "updated_at": row[11].isoformat() if row[11] else None,
     }
+
+
+def _normalize_root_path(root_path: str | Path) -> str:
+    value = str(root_path)
+    try:
+        from .host_agent import path_requires_host_agent
+
+        if path_requires_host_agent(value):
+            return value
+    except Exception:
+        pass
+    return str(Path(value).expanduser().resolve())
 
 
 def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> int:

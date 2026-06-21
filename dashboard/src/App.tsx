@@ -38,6 +38,8 @@ type HealthPayload = {
   retrieval?: { episodes?: number; sources?: number; source_assets?: number; asset_chunks?: number; embeddings?: number };
   recent_errors?: string[];
   extractors?: Record<string, { ok?: boolean; message?: string }>;
+  host_agent?: { status?: string; browse_supported?: boolean; message?: string };
+  codex?: { status?: string; configured?: boolean; installed?: boolean; hooks_available?: boolean };
 };
 
 type MailProfile = {
@@ -156,6 +158,8 @@ type MonitoredRoot = {
   trust_rank?: number;
   include_globs?: string[];
   exclude_globs?: string[];
+  glob_mode?: "inherit" | "extend" | "override" | string;
+  effective_globs?: { include_globs?: string[]; exclude_globs?: string[]; mode?: string };
   max_inline_bytes?: number;
   heavy_threshold_bytes?: number;
   metadata?: Record<string, unknown>;
@@ -181,6 +185,7 @@ type CrawlRootForm = {
   trust_rank: number;
   include_globs: string;
   exclude_globs: string;
+  glob_mode: "inherit" | "extend" | "override";
   max_inline_bytes: number;
   heavy_threshold_bytes: number;
 };
@@ -334,6 +339,7 @@ export default function App() {
         recursive: form.recursive,
         watch_enabled: form.watch_enabled,
         initial_crawl: form.initial_crawl,
+        glob_mode: form.glob_mode,
         trust_rank: Number(form.trust_rank),
         include_globs: splitLines(form.include_globs),
         exclude_globs: splitLines(form.exclude_globs),
@@ -499,12 +505,12 @@ export default function App() {
               />
               <kbd>Ctrl K</kbd>
             </form>
-            <button className="primary-action" type="button" onClick={() => void requestProfileSync()}>
+            <button className="primary-action" type="button" title="Run the selected mail profile sync now" onClick={() => void requestProfileSync()}>
               <RefreshCcw size={17} />
               Sync Now
             </button>
             <div className="menu-wrap">
-              <button className="ghost-action" aria-label="More actions" type="button" onClick={() => setMoreOpen((open) => !open)}>
+              <button className="ghost-action" aria-label="More actions" title="Open dashboard actions and diagnostics" type="button" onClick={() => setMoreOpen((open) => !open)}>
                 More <ChevronDown size={16} />
               </button>
               {moreOpen && (
@@ -736,6 +742,8 @@ function MailTab({
 
 function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySettings }: { state: LoadState; hostStatus: string; restartRows: SettingRow[]; onErrorDetail: (error: string) => void; onApplySettings: () => void }) {
   const runtimeRows = Object.entries(state.health.runtime ?? {});
+  const hostAgent = state.health.host_agent;
+  const codex = state.health.codex;
   return (
     <section className="tab-grid">
       <Panel title="System Health">
@@ -743,6 +751,8 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
           <StatusTile label="Database" ok={state.health.database?.ok} message={state.health.database?.message} />
           {runtimeRows.map(([key, value]) => <StatusTile key={key} label={key} ok={value.ok} message={value.message} />)}
           <StatusTile label="Outlook Host" ok={hostStatus === "running"} message={hostStatusLabel(hostStatus)} />
+          <StatusTile label="Host Agent" ok={hostAgent?.status === "running"} message={hostAgent?.status ?? "host_agent_offline"} />
+          <StatusTile label="Codex Integration" ok={codex?.status === "ready"} message={codex?.status ?? "unknown"} />
         </div>
       </Panel>
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
@@ -778,12 +788,12 @@ function CorpusTab({
   const status = state.crawl.status ?? {};
   return (
     <section className="tab-grid corpus-tab">
-      <Panel title="Corpus Monitor" action={<button className="small-primary" type="button" onClick={onAddRoot}><Plus size={15} /> Add Watched Path</button>}>
+      <Panel title="Corpus Monitor" action={<button className="small-primary" type="button" title="Add a monitored root path for recursive crawl and watch" onClick={onAddRoot}><Plus size={15} /> Add Watched Path</button>}>
         <div className="corpus-actions">
-          <button className="small-primary" type="button" onClick={onSync}><RefreshCcw size={15} /> Sync all</button>
-          <button className="ghost-action compact" type="button" onClick={onRefresh}>Refresh</button>
-          <button className="ghost-action compact" type="button" onClick={() => onWatch(true)}>Enable all watch</button>
-          <button className="ghost-action compact" type="button" onClick={() => onWatch(false)}>Disable all watch</button>
+          <button className="small-primary" type="button" title="Run a crawl sync for all configured roots" onClick={onSync}><RefreshCcw size={15} /> Sync all</button>
+          <button className="ghost-action compact" type="button" title="Reload dashboard crawl state" onClick={onRefresh}>Refresh</button>
+          <button className="ghost-action compact" type="button" title="Enable watch mode for every monitored root" onClick={() => onWatch(true)}>Enable all watch</button>
+          <button className="ghost-action compact" type="button" title="Disable watch mode without deleting roots" onClick={() => onWatch(false)}>Disable all watch</button>
         </div>
         <MiniTable rows={[
           ["Roots", "configured", String(roots.length)],
@@ -875,9 +885,9 @@ function RootTable({
             </td>
             <td>
               <div className="row-actions root-actions">
-                <button type="button" aria-label={`Sync ${root.name}`} onClick={(event) => { event.stopPropagation(); onSync(root, false); }}><RefreshCcw size={15} /></button>
-                <button type="button" aria-label={`Dry run ${root.name}`} onClick={(event) => { event.stopPropagation(); onSync(root, true); }}><ListFilter size={15} /></button>
-                <button type="button" aria-label={`${root.watch_enabled ? "Disable" : "Enable"} watch ${root.name}`} onClick={(event) => { event.stopPropagation(); onWatch(root, !root.watch_enabled); }}>
+                <button type="button" aria-label={`Sync ${root.name}`} title={`Sync ${root.name} now`} onClick={(event) => { event.stopPropagation(); onSync(root, false); }}><RefreshCcw size={15} /></button>
+                <button type="button" aria-label={`Dry run ${root.name}`} title={`Preview crawl changes for ${root.name}`} onClick={(event) => { event.stopPropagation(); onSync(root, true); }}><ListFilter size={15} /></button>
+                <button type="button" aria-label={`${root.watch_enabled ? "Disable" : "Enable"} watch ${root.name}`} title={`${root.watch_enabled ? "Disable" : "Enable"} recursive watch for ${root.name}`} onClick={(event) => { event.stopPropagation(); onWatch(root, !root.watch_enabled); }}>
                   {root.watch_enabled ? <Square size={15} /> : <Play size={15} />}
                 </button>
               </div>
@@ -922,6 +932,10 @@ function RootInspector({ root }: { root?: RootSummary }) {
       <div className="folder-box">{(root.include_globs ?? []).join("\n") || "All files allowed by ignore policy."}</div>
       <label>Exclude globs</label>
       <div className="folder-box">{(root.exclude_globs ?? []).join("\n") || "No custom excludes."}</div>
+      <label>Effective include globs</label>
+      <div className="folder-box">{(root.effective_globs?.include_globs ?? root.include_globs ?? []).join("\n") || "All files allowed by effective policy."}</div>
+      <label>Effective exclude globs</label>
+      <div className="folder-box">{(root.effective_globs?.exclude_globs ?? root.exclude_globs ?? []).join("\n") || "No effective excludes."}</div>
       <div className="recent-grid">
         <div>
           <strong>Recent assets</strong>
@@ -991,6 +1005,7 @@ function CrawlRootDialog({ onClose, onSave }: { onClose: () => void; onSave: (fo
     trust_rank: 500,
     include_globs: "",
     exclude_globs: "",
+    glob_mode: "extend",
     max_inline_bytes: 256 * 1024,
     heavy_threshold_bytes: 10 * 1024 * 1024
   }));
@@ -1027,6 +1042,20 @@ function CrawlRootDialog({ onClose, onSave }: { onClose: () => void; onSave: (fo
     onSave(form);
   }
 
+  async function browse() {
+    try {
+      const result = await sendJson<{ status?: string; path?: string | null; message?: string }>("/api/host/browse-folder", "POST", {});
+      if (result.path) {
+        updatePath(result.path);
+        setError("");
+        return;
+      }
+      setError(result.message ?? "No folder was selected.");
+    } catch (error) {
+      setError(`Browse unavailable: ${errorMessage(error)}`);
+    }
+  }
+
   return (
     <div className="modal-backdrop">
       <form className="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="crawl-root-dialog-title" onSubmit={submit}>
@@ -1035,9 +1064,19 @@ function CrawlRootDialog({ onClose, onSave }: { onClose: () => void; onSave: (fo
           <button type="button" aria-label="Close watched path form" onClick={onClose}><X size={18} /></button>
         </header>
         <div className="form-grid">
-          <label className="span-2">Root path<input value={form.root_path} onChange={(event) => updatePath(event.target.value)} placeholder="E:/Projects/Client RFPs" required /></label>
+          <label className="span-2">Root path
+            <div className="path-input-row">
+              <input value={form.root_path} onChange={(event) => updatePath(event.target.value)} placeholder="E:/Projects/Client RFPs" required />
+              <button className="ghost-action compact" type="button" title="Choose a local folder through the Flux host agent" onClick={() => void browse()}>Browse</button>
+            </div>
+          </label>
           <label>Root name<input value={form.name} onChange={(event) => { setNameTouched(true); update("name", event.target.value); }} required /></label>
           <label>Trust rank<input type="number" min="0" max="1000" value={form.trust_rank} onChange={(event) => update("trust_rank", Number(event.target.value))} /></label>
+          <label>Glob inheritance<select value={form.glob_mode} onChange={(event) => update("glob_mode", event.target.value as CrawlRootForm["glob_mode"])}>
+            <option value="extend">Extend global defaults</option>
+            <option value="inherit">Inherit global defaults only</option>
+            <option value="override">Override global defaults</option>
+          </select></label>
           <label className="span-2">Include globs<textarea value={form.include_globs} onChange={(event) => update("include_globs", event.target.value)} placeholder="**/*.pdf&#10;**/*.docx" /></label>
           <label className="span-2">Exclude globs<textarea value={form.exclude_globs} onChange={(event) => update("exclude_globs", event.target.value)} placeholder="private/**&#10;node_modules/**" /></label>
           <label>Inline size bytes<input type="number" min="1" value={form.max_inline_bytes} onChange={(event) => update("max_inline_bytes", Number(event.target.value))} /></label>

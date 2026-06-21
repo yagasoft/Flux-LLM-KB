@@ -1,5 +1,13 @@
 from pathlib import Path
 
+from .host_agent import (
+    path_requires_host_agent,
+    remote_browse_folder,
+    remote_status,
+    remote_sync,
+    remote_validate_path,
+    validate_host_path,
+)
 from .health import (
     build_dashboard_html,
     collect_crawl_payload,
@@ -48,6 +56,7 @@ def create_app():
         trust_rank: int = 500
         include_globs: list[str] = Field(default_factory=list)
         exclude_globs: list[str] = Field(default_factory=list)
+        glob_mode: str = "extend"
         max_inline_bytes: int | None = None
         heavy_threshold_bytes: int | None = None
 
@@ -143,6 +152,8 @@ def create_app():
 
     @app.post("/api/crawl/sync")
     def crawl_sync(request: CrawlSyncRequest = Body(...)):
+        if _should_proxy_crawl_sync(request.root_name, request.path):
+            return host_agent_sync(root_name=request.root_name, path=request.path, dry_run=request.dry_run)
         return service.sync_corpus(root_name=request.root_name, path=request.path, dry_run=request.dry_run)
 
     @app.post("/api/crawl/roots")
@@ -153,13 +164,10 @@ def create_app():
         name = request.name.strip()
         if not name:
             raise HTTPException(status_code=400, detail="root name is required")
-        root_path = Path(request.root_path).expanduser()
-        if not root_path.is_absolute():
-            raise HTTPException(status_code=400, detail="root path must be absolute")
-        if not root_path.exists():
-            raise HTTPException(status_code=400, detail="directory does not exist")
-        if not root_path.is_dir():
-            raise HTTPException(status_code=400, detail="root path must be a directory")
+        root_path_text = request.root_path.strip()
+        validation = _validate_root_path(root_path_text)
+        if validation["status"] != "ok":
+            raise HTTPException(status_code=400, detail=validation["message"])
 
         settings = SettingsService()
         max_inline_bytes = request.max_inline_bytes
@@ -174,20 +182,28 @@ def create_app():
 
         root = database.add_monitored_root(
             name=name,
-            root_path=root_path,
+            root_path=root_path_text,
             enabled=request.enabled,
             recursive=request.recursive,
             watch_enabled=request.watch_enabled,
             trust_rank=request.trust_rank,
             include_globs=[item.strip() for item in request.include_globs if item.strip()],
             exclude_globs=[item.strip() for item in request.exclude_globs if item.strip()],
+            glob_mode=request.glob_mode,
             max_inline_bytes=max_inline_bytes,
             heavy_threshold_bytes=heavy_threshold_bytes,
-            metadata={"source": "dashboard"},
+            metadata={
+                "source": "dashboard",
+                "host_access": "host_agent" if validation.get("host_agent") else "direct",
+                "host_validation": validation,
+            },
         )
         payload: dict[str, object] = {"root": root}
         if request.initial_crawl:
-            payload["sync"] = service.sync_corpus(root_name=root["name"], dry_run=request.dry_run)
+            if validation.get("host_agent"):
+                payload["sync"] = host_agent_sync(root_name=root["name"], dry_run=request.dry_run)
+            else:
+                payload["sync"] = service.sync_corpus(root_name=root["name"], dry_run=request.dry_run)
         return payload
 
     @app.get("/api/crawl/jobs")
@@ -199,6 +215,19 @@ def create_app():
         from . import database
 
         return database.set_watch_enabled(root_name=request.root_name, enabled=request.enabled)
+
+    @app.get("/api/host/status")
+    def host_status():
+        return host_agent_status()
+
+    @app.post("/api/host/browse-folder")
+    def host_browse_folder():
+        return host_agent_browse_folder()
+
+    @app.post("/api/host/validate-path")
+    def host_validate_path(request: dict[str, object] = Body(...)):
+        path = str(request.get("path") or "")
+        return host_agent_validate_path(path)
 
     @app.get("/api/settings")
     def settings_list():
@@ -327,3 +356,44 @@ def create_app():
         return set_profile_enabled(name, enabled=False)
 
     return app
+
+
+def host_agent_status() -> dict:
+    return remote_status()
+
+
+def host_agent_browse_folder() -> dict:
+    return remote_browse_folder()
+
+
+def host_agent_validate_path(path: str) -> dict:
+    if path_requires_host_agent(path):
+        return remote_validate_path(path)
+    return validate_host_path(path)
+
+
+def host_agent_sync(*, root_name: str | None = None, path: str | None = None, dry_run: bool = False) -> dict:
+    return remote_sync(root_name=root_name, path=path, dry_run=dry_run)
+
+
+def _validate_root_path(root_path_text: str) -> dict:
+    validation = host_agent_validate_path(root_path_text)
+    if validation.get("status") == "ok":
+        validation["host_agent"] = path_requires_host_agent(root_path_text)
+        return validation
+    if validation.get("status") == "host_agent_offline":
+        validation["message"] = (
+            "host agent offline; start `flux-kb host-agent run` to add local host paths from Docker"
+        )
+    return validation
+
+
+def _should_proxy_crawl_sync(root_name: str | None, path: str | None) -> bool:
+    from . import database
+
+    if path and path_requires_host_agent(path):
+        return True
+    if not root_name:
+        return False
+    root = database.get_monitored_root(root_name)
+    return bool(root and root.get("metadata", {}).get("host_access") == "host_agent")

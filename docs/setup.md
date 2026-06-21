@@ -60,6 +60,8 @@ flux-kb crawl sync --root projects
 flux-kb crawl sync --path E:\Projects\README.md
 flux-kb crawl watch enable --root projects
 flux-kb crawl watch run
+flux-kb host-agent status
+flux-kb host-agent run
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl doctor
 flux-kb settings list
@@ -96,6 +98,24 @@ does not use the Windows Registry. Environment variables override database
 settings and appear as read-only effective values. Settings that require reload,
 component restart, or embedding reindex require confirmation and create runtime
 control requests.
+
+Global crawler include/exclude globs are also settings. Per-root glob policy can
+inherit those defaults, extend them with root-specific lines, or override them
+entirely. The Corpus dashboard shows the effective policy for each root.
+
+## Host Filesystem Agent
+
+When Flux services run in Docker, Windows paths such as `E:\Projects` are not
+valid Linux container paths. Start the host agent in the logged-in desktop
+session to enable dashboard folder browsing and host-side crawl/watch work:
+
+```powershell
+flux-kb host-agent run
+```
+
+The dashboard uses this bridge for `Browse`, path validation, and host-path sync
+requests. If it is not running, the UI keeps manual entry available and shows a
+clear `host_agent_offline` state.
 
 ## Mail Capture
 

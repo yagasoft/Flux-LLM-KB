@@ -9,7 +9,10 @@ import sys
 from typing import Any
 
 from . import database
+from .codex_integration import codex_status
 from .extractors import extractor_availability
+from .glob_policy import effective_glob_policy
+from .host_agent import remote_status
 from .watcher import summarize_watcher_staleness
 
 DASHBOARD_INDEX = Path(__file__).resolve().parent / "dashboard_static" / "index.html"
@@ -76,6 +79,8 @@ def collect_dashboard_payload() -> dict[str, Any]:
         },
         "retrieval": retrieval,
         "extractors": extractor_availability(),
+        "host_agent": remote_status(),
+        "codex": _safe(codex_status, {"status": "unknown"}),
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
         "settings": _safe(lambda: __import__("flux_llm_kb.settings", fromlist=["SettingsService"]).SettingsService().public_list(), []),
@@ -85,9 +90,11 @@ def collect_dashboard_payload() -> dict[str, Any]:
 
 def collect_crawl_payload() -> dict[str, Any]:
     status = _safe(database.crawl_status, {})
+    roots = _safe(database.list_monitored_roots, [])
+    summaries = _safe(database.crawl_root_summaries, [])
     return {
-        "roots": _safe(database.list_monitored_roots, []),
-        "root_summaries": _safe(database.crawl_root_summaries, []),
+        "roots": [_with_effective_globs(root) for root in roots],
+        "root_summaries": [_with_effective_globs(root) for root in summaries],
         "status": status,
         "watchers": status.get("watchers", []),
         "recent_errors": status.get("recent_errors", []),
@@ -136,6 +143,23 @@ def _safe(callable_obj, fallback):
         return callable_obj()
     except Exception:
         return fallback
+
+
+def _with_effective_globs(root: dict[str, Any]) -> dict[str, Any]:
+    return {**root, "effective_globs": effective_glob_policy(root, **_global_glob_defaults())}
+
+
+def _global_glob_defaults() -> dict[str, list[str]]:
+    try:
+        from .settings import SettingsService
+
+        settings = SettingsService()
+        return {
+            "global_include": list(settings.resolve("crawler.global_include_globs").raw_value or []),
+            "global_exclude": list(settings.resolve("crawler.global_exclude_globs").raw_value or []),
+        }
+    except Exception:
+        return {"global_include": [], "global_exclude": []}
 
 
 def _command_check(command: str, description: str, *, required: bool = True) -> dict[str, Any]:

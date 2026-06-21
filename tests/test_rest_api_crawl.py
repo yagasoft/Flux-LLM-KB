@@ -60,6 +60,75 @@ def test_crawl_root_create_endpoint_validates_and_adds_root(tmp_path, monkeypatc
     assert captured["exclude_globs"] == ["private/**"]
 
 
+def test_crawl_root_create_accepts_windows_host_path_via_host_agent(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    captured = {}
+
+    def fake_add_monitored_root(**kwargs):
+        captured.update(kwargs)
+        return {
+            "name": kwargs["name"],
+            "root_path": kwargs["root_path"],
+            "glob_mode": kwargs["glob_mode"],
+            "metadata": kwargs["metadata"],
+        }
+
+    class FakeService:
+        def sync_corpus(self, **_kwargs):
+            raise AssertionError("Docker API must not directly crawl host-agent paths")
+
+    monkeypatch.setattr(database, "add_monitored_root", fake_add_monitored_root)
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(
+        "flux_llm_kb.rest_api.host_agent_validate_path",
+        lambda path: {
+            "status": "ok",
+            "absolute": True,
+            "is_dir": True,
+            "exists": True,
+            "path": path,
+            "path_style": "windows_drive",
+        },
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.rest_api.host_agent_sync",
+        lambda **kwargs: {"status": "queued", **kwargs},
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.path_requires_host_agent", lambda _path: True)
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post(
+        "/api/crawl/roots",
+        json={
+            "name": "watch-test",
+            "root_path": "E:\\Temp\\watch-test",
+            "initial_crawl": True,
+            "glob_mode": "extend",
+            "include_globs": ["**/*.md"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["root"]["root_path"] == "E:\\Temp\\watch-test"
+    assert payload["sync"]["status"] == "queued"
+    assert captured["glob_mode"] == "extend"
+    assert captured["metadata"]["host_access"] == "host_agent"
+
+
+def test_host_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.get("/api/host/status")
+
+    assert response.status_code == 200
+    assert "status" in response.json()
+
+
 def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_path):
     from flux_llm_kb.rest_api import create_app
 

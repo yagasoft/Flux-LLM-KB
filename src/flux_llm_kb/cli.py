@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
     crawl_add.add_argument("--name", required=True)
     crawl_add.add_argument("--watch", action="store_true", help="Enable watch mode for this root")
     crawl_add.add_argument("--no-recursive", action="store_false", dest="recursive")
+    crawl_add.add_argument("--glob-mode", choices=["inherit", "extend", "override"], default="extend")
     crawl_add.set_defaults(recursive=True)
 
     crawl_subparsers.add_parser("list", help="List monitored roots")
@@ -157,6 +158,14 @@ def main(argv: list[str] | None = None) -> int:
     outlook_host_sync = outlook_host_subparsers.add_parser("sync", help="Request an Outlook COM profile sync")
     outlook_host_sync.add_argument("--profile", required=True)
 
+    host_agent_parser = subparsers.add_parser("host-agent", help="Run the local filesystem host agent")
+    host_agent_subparsers = host_agent_parser.add_subparsers(dest="host_agent_command", required=True)
+    host_agent_run = host_agent_subparsers.add_parser("run", help="Run the local host-agent REST bridge")
+    host_agent_run.add_argument("--host", default="127.0.0.1")
+    host_agent_run.add_argument("--port", type=int, default=8799)
+    host_agent_subparsers.add_parser("status", help="Show local host-agent status")
+    host_agent_subparsers.add_parser("browse", help="Open a native folder picker")
+
     args = parser.parse_args(argv)
     handlers = {
         "doctor": _doctor,
@@ -175,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         "settings": _settings,
         "mail": _mail,
         "outlook-host": _outlook_host,
+        "host-agent": _host_agent,
     }
     return handlers[args.command](args)
 
@@ -260,9 +270,10 @@ def _crawl(args: argparse.Namespace) -> int:
         settings = SettingsService()
         payload = database.add_monitored_root(
             name=args.name,
-            root_path=str(Path(args.path).expanduser().resolve()),
+            root_path=args.path,
             recursive=args.recursive,
             watch_enabled=args.watch,
+            glob_mode=args.glob_mode,
             max_inline_bytes=int(settings.resolve("crawler.max_inline_bytes").raw_value),
             heavy_threshold_bytes=int(settings.resolve("crawler.heavy_threshold_bytes").raw_value),
         )
@@ -395,6 +406,21 @@ def _outlook_host(args: argparse.Namespace) -> int:
         payload = outlook_host.run_forever(host_id=args.host_id, interval_seconds=args.interval_seconds)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.outlook_host_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _host_agent(args: argparse.Namespace) -> int:
+    from . import host_agent
+
+    if args.host_agent_command == "run":
+        payload = host_agent.run_server(host=args.host, port=args.port)
+    elif args.host_agent_command == "status":
+        payload = host_agent.status_payload()
+    elif args.host_agent_command == "browse":
+        payload = host_agent.browse_folder()
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.host_agent_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

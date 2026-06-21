@@ -14,7 +14,9 @@ const health = {
   watcher: { active_roots: 1, disabled_roots: 2, stale_count: 0 },
   jobs: { pending: 4, failed: 1, blocked: 2 },
   retrieval: { episodes: 9, asset_chunks: 12, embeddings: 40 },
-  recent_errors: ["ffprobe command not found"]
+  recent_errors: ["ffprobe command not found"],
+  host_agent: { status: "running", browse_supported: true },
+  codex: { status: "configured_not_installed", configured: true, installed: false, hooks_available: true }
 };
 
 const crawl = {
@@ -137,6 +139,8 @@ describe("Flux dashboard", () => {
       if (url === "/api/dashboard/retrieval-stats") return json({ retrieval: health.retrieval, duplicate_assets: 0 });
       if (url === "/api/mail/status") return json(mail);
       if (url === "/api/outlook-host/status") return json(outlook);
+      if (url === "/api/host/status") return json({ status: "running", browse_supported: true, platform: "Windows" });
+      if (url === "/api/host/browse-folder") return json({ status: "selected", path: "E:\\Temp\\watch-test" });
       if (url === "/api/settings") return json(settings);
       if (url.startsWith("/api/settings/") && init?.method === "PUT") {
         const key = decodeURIComponent(url.replace("/api/settings/", ""));
@@ -170,6 +174,8 @@ describe("Flux dashboard", () => {
     expect(screen.getByRole("heading", { name: "System Health" })).toBeInTheDocument();
     expect(screen.getByText("PostgreSQL")).toBeInTheDocument();
     expect(screen.getByText("Outlook Host")).toBeInTheDocument();
+    expect(screen.getByText("Host Agent")).toBeInTheDocument();
+    expect(screen.getByText("Codex Integration")).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Mail profiles" })).not.toBeInTheDocument();
     expect(screen.queryByText(/"database"/)).not.toBeInTheDocument();
   });
@@ -261,9 +267,13 @@ describe("Flux dashboard", () => {
 
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Corpus" }));
-    await user.click(screen.getByRole("button", { name: "Add Watched Path" }));
+    const addButton = screen.getByRole("button", { name: "Add Watched Path" });
+    expect(addButton).toHaveAttribute("title", expect.stringContaining("monitored root"));
+    await user.click(addButton);
 
     expect(screen.getByRole("dialog", { name: "Add Watched Path" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Browse" }));
+    expect(screen.getByLabelText("Root path")).toHaveValue("E:\\Temp\\watch-test");
     await user.clear(screen.getByLabelText("Root path"));
     await user.type(screen.getByLabelText("Root path"), "E:/Client RFPs");
     await user.clear(screen.getByLabelText("Root name"));
@@ -289,6 +299,7 @@ describe("Flux dashboard", () => {
             recursive: true,
             watch_enabled: true,
             initial_crawl: true,
+            glob_mode: "extend",
             trust_rank: 500,
             include_globs: ["**/*.pdf", "**/*.docx"],
             exclude_globs: ["private/**"],
@@ -309,6 +320,7 @@ describe("Flux dashboard", () => {
     expect((await screen.findAllByText("E:/Flux Docs")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("watching").length).toBeGreaterThan(0);
     expect(screen.getAllByText("clip.mp4").length).toBeGreaterThan(0);
+    expect(screen.getByText("Effective include globs")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Sync docs" }));
     await user.click(screen.getByRole("button", { name: "Dry run docs" }));
