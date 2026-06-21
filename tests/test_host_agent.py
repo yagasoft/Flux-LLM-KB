@@ -189,7 +189,7 @@ def test_host_agent_watcher_loop_records_heartbeat_and_syncs_changed_file(monkey
     assert result == {"status": "running", "roots": 1, "events": 1}
     assert heartbeats == ["watch-test"]
     assert watch_events == ["watch-test"]
-    assert synced == [{"root_name": "watch-test", "path": str(tmp_path / "changed.md")}]
+    assert synced == [{"root_name": "watch-test", "path": str(tmp_path / "changed.md"), "reason": "watch_event"}]
 
 
 def test_host_path_validator_accepts_windows_absolute_path(monkeypatch):

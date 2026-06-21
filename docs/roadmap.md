@@ -34,6 +34,9 @@
   override behavior visible in the dashboard.
 - Live watcher control with reloadable enabled roots, debounce, bounded queues,
   heartbeat, and stale-state reporting.
+- Startup and periodic reconciliation for enabled watched roots so files added,
+  modified, or deleted while Flux was offline are detected without manual
+  backfill.
 - Targeted file/subtree sync for efficient watcher-triggered updates.
 - File-type aware extraction:
   - text/code/markdown/json/csv: fast local extraction and chunking
@@ -74,6 +77,9 @@
 - React/Vite operations console served by FastAPI at `/dashboard`, with raw JSON
   available only through a developer/debug drawer instead of primary monitoring
   panels.
+- Production PC deployment under `D:\FluxLLMKB` with repo-independent app,
+  private, data, logs, runtime, and backup directories plus install/update/start/
+  stop/status scripts.
 - Docker-hosted Flux control plane for PostgreSQL/pgvector, FastAPI, REST APIs,
   dashboard assets, IMAP worker, corpus crawler, and normal extraction workers.
 - Gmail OAuth setup for installed desktop clients, token refresh before IMAP

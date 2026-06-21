@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import platform
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -94,6 +95,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
             "active": sum(1 for item in workers if item.get("status") == "running"),
             "components": workers,
         },
+        "deployment": _deployment_status(),
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
         "settings": _safe(lambda: __import__("flux_llm_kb.settings", fromlist=["SettingsService"]).SettingsService().public_list(), []),
@@ -202,3 +204,30 @@ def _docker_check(*, required: bool = True) -> dict[str, Any]:
         message = result.stderr.strip() or result.stdout.strip() or "Docker Compose unavailable"
         return {"ok": False, "message": message, "required": required}
     return {"ok": True, "message": result.stdout.strip() or path, "required": required}
+
+
+def _deployment_status() -> dict[str, Any]:
+    source_root = Path(__file__).resolve().parents[2]
+    install_root = os.environ.get("FLUX_KB_INSTALL_ROOT")
+    app_root = os.environ.get("FLUX_KB_APP_ROOT")
+    private_dir = os.environ.get("FLUX_KB_PRIVATE_DIR")
+    data_dir = os.environ.get("FLUX_KB_DATA_DIR")
+    logs_dir = os.environ.get("FLUX_KB_LOG_DIR")
+    image_tag = os.environ.get("FLUX_KB_IMAGE_TAG")
+    cwd = Path.cwd()
+    try:
+        running_from_repo = (cwd == source_root or source_root in cwd.parents) and (source_root / ".git").exists()
+    except Exception:
+        running_from_repo = False
+    return {
+        "install_root": install_root,
+        "app_root": app_root,
+        "private_dir": private_dir,
+        "data_dir": data_dir,
+        "logs_dir": logs_dir,
+        "image_tag": image_tag,
+        "source_root": str(source_root),
+        "running_from_repo": running_from_repo,
+        "repo_coupled": running_from_repo or not install_root,
+        "mode": "production" if install_root and not running_from_repo else "development",
+    }

@@ -19,6 +19,51 @@ outside Docker.
 
 ## Install
 
+### Production Runtime
+
+For day-to-day use, deploy Flux into a permanent PC runtime root instead of
+running services from this repository. The default root is `D:\FluxLLMKB` and can
+be changed with `-InstallRoot`.
+
+```powershell
+.\scripts\deploy\install-flux.ps1
+.\scripts\deploy\status-flux.ps1
+```
+
+The production layout is:
+
+- `D:\FluxLLMKB\app`: deployed compose files, app venv, host launchers, version metadata
+- `D:\FluxLLMKB\private`: local env, OAuth tokens, mail spool, and private config
+- `D:\FluxLLMKB\data`: PostgreSQL bind-mounted data on the D drive
+- `D:\FluxLLMKB\logs`: API, worker, host-agent, and Outlook-host logs
+- `D:\FluxLLMKB\runtime`: process heartbeat/status files
+- `D:\FluxLLMKB\backups`: future local backup/export target
+
+The repository remains source code only. Production Docker Compose uses prebuilt
+local image tags, not `build.context: .`, and it bind-mounts only the deployed
+private/data/log paths. API access remains local at
+`http://127.0.0.1:8765/dashboard`.
+
+Update an existing deployment from the current checkout with:
+
+```powershell
+.\scripts\deploy\update-flux.ps1 -RestartHostTasks
+```
+
+Start and stop the deployed runtime with:
+
+```powershell
+.\scripts\deploy\start-flux.ps1
+.\scripts\deploy\stop-flux.ps1 -StopHostTasks
+```
+
+`install-flux.ps1` also registers `FluxKB Host Agent` and `FluxKB Outlook Host`
+as Windows Scheduled Tasks at user logon. They run outside Docker because host
+filesystem access, native folder browsing, and Outlook COM need the logged-in
+desktop session.
+
+### Developer Install
+
 ```powershell
 python -m pip install -e .[dev]
 Copy-Item .env.example .env
@@ -116,6 +161,12 @@ flux-kb host-agent run
 The dashboard uses this bridge for `Browse`, path validation, and host-path sync
 requests. If it is not running, the UI keeps manual entry available and shows a
 clear `host_agent_offline` state.
+
+The host agent also performs startup reconciliation and periodic reconciliation
+for host-owned watched roots. If the PC, Docker, or the host agent was offline,
+the next startup scan compares files against persisted `source_assets` state and
+indexes new files, re-indexes changed files, and marks deleted files as removed
+from retrieval without requiring a manual backfill. Empty folders are a no-op.
 
 ## Mail Capture
 

@@ -729,13 +729,19 @@ def record_watch_error(*, root_name: str, error: str, url: str | None = None) ->
 
 
 def persist_crawl_plan(
-    *, root_name: str, plan: CrawlPlan, dry_run: bool = False, url: str | None = None
+    *,
+    root_name: str,
+    plan: CrawlPlan,
+    dry_run: bool = False,
+    reason: str = "manual_sync",
+    url: str | None = None,
 ) -> dict[str, Any]:
     if dry_run:
         return {
             "root_name": root_name,
             "root_path": str(plan.root_path),
             "dry_run": True,
+            "reason": reason,
             "files_seen": len(plan.assets),
             "jobs_queued": len(plan.deferred_jobs),
             "chunks_indexed": sum(len(asset.chunks) for asset in plan.assets),
@@ -750,8 +756,12 @@ def persist_crawl_plan(
                 raise ValueError(f"monitored root not found: {root_name}")
             root_id = root_row[0]
             cur.execute(
-                "INSERT INTO crawl_runs (root_id, status) VALUES (%s, 'running') RETURNING id::text",
-                (root_id,),
+                """
+                INSERT INTO crawl_runs (root_id, status, reason)
+                VALUES (%s, 'running', %s)
+                RETURNING id::text
+                """,
+                (root_id, reason),
             )
             run_id = cur.fetchone()[0]
             seen_paths: set[str] = set()
@@ -875,6 +885,7 @@ def persist_crawl_plan(
                 "root_name": root_name,
                 "root_path": str(plan.root_path),
                 "dry_run": False,
+                "reason": reason,
                 "files_seen": len(plan.assets),
                 "files_changed": changed,
                 "files_deleted": deleted,
@@ -2544,7 +2555,7 @@ def _latest_crawl_run(cur: Any, root_id: str) -> dict[str, Any] | None:
     cur.execute(
         """
         SELECT id::text, status, started_at, finished_at, files_seen, files_changed,
-               files_deleted, chunks_indexed, jobs_queued, errors
+               files_deleted, chunks_indexed, jobs_queued, errors, reason
         FROM crawl_runs
         WHERE root_id = %s
         ORDER BY started_at DESC
@@ -2566,6 +2577,7 @@ def _latest_crawl_run(cur: Any, root_id: str) -> dict[str, Any] | None:
         "chunks_indexed": row[7],
         "jobs_queued": row[8],
         "errors": row[9] or [],
+        "reason": row[10],
     }
 
 

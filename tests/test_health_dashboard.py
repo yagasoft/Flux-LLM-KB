@@ -11,6 +11,8 @@ from flux_llm_kb.health import (
 
 
 def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "D:\\FluxLLMKB")
+    monkeypatch.setenv("FLUX_KB_IMAGE_TAG", "abc123")
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(
         database,
@@ -69,6 +71,9 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["runtime"]["git"]["message"] == "host git"
     assert payload["workers"]["active"] == 1
     assert payload["workers"]["components"][0]["name"] == "corpus-worker:docker"
+    assert payload["deployment"]["install_root"] == "D:\\FluxLLMKB"
+    assert payload["deployment"]["image_tag"] == "abc123"
+    assert "repo_coupled" in payload["deployment"]
 
 
 def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):

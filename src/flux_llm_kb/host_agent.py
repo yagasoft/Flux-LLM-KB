@@ -143,6 +143,7 @@ class HostAgentWatcherLoop:
         self.interval_seconds = interval_seconds
         self.service_factory = service_factory
         self.watcher_factory = watcher_factory or create_corpus_watcher
+        self._last_reconcile_at = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._watcher = self.watcher_factory(
@@ -176,10 +177,17 @@ class HostAgentWatcherLoop:
         return {"status": "running", "roots": len(roots), "events": len(events)}
 
     def _run(self) -> None:
+        if _configured_reconcile_on_start():
+            self.reconcile_once(reason="startup_reconcile")
+            self._last_reconcile_at = time.monotonic()
         self.run_once(seed=True)
         while not self._stop.wait(self.interval_seconds):
             try:
                 self.run_once(seed=False)
+                reconcile_interval = _configured_reconcile_interval_seconds()
+                if reconcile_interval > 0 and time.monotonic() - self._last_reconcile_at >= reconcile_interval:
+                    self.reconcile_once(reason="periodic_reconcile")
+                    self._last_reconcile_at = time.monotonic()
             except Exception as exc:  # pragma: no cover - defensive long-running loop
                 for root in _load_host_watch_roots(self.root_name):
                     database.record_watch_error(root_name=root.name, error=str(exc))
@@ -188,9 +196,18 @@ class HostAgentWatcherLoop:
         try:
             database.record_watch_event(root_name=event.root_name)
             service = self.service_factory() if self.service_factory else _service()
-            service.sync_corpus(root_name=event.root_name, path=str(event.path))
+            service.sync_corpus(root_name=event.root_name, path=str(event.path), reason="watch_event")
         except Exception as exc:  # pragma: no cover - environment-specific watcher loop
             database.record_watch_error(root_name=event.root_name, error=str(exc))
+
+    def reconcile_once(self, *, reason: str) -> dict[str, Any]:
+        service = self.service_factory() if self.service_factory else _service()
+        return service.reconcile_watch_roots(
+            root_name=self.root_name,
+            reason=reason,
+            host_agent_roots=True,
+            component_name="watch-reconciler:host-agent",
+        )
 
 
 class HostAgentWorkerLoop:
@@ -466,6 +483,24 @@ def _configured_worker_batch_size() -> int:
         return int(SettingsService().resolve("worker.batch_size").raw_value)
     except Exception:
         return 10
+
+
+def _configured_reconcile_on_start() -> bool:
+    try:
+        from .settings import SettingsService
+
+        return bool(SettingsService().resolve("watcher.reconcile_on_start").raw_value)
+    except Exception:
+        return True
+
+
+def _configured_reconcile_interval_seconds() -> int:
+    try:
+        from .settings import SettingsService
+
+        return int(SettingsService().resolve("watcher.reconcile_interval_seconds").raw_value)
+    except Exception:
+        return 3600
 
 
 def _is_host_agent_root(root: dict[str, Any]) -> bool:

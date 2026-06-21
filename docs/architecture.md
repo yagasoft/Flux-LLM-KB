@@ -91,7 +91,21 @@ suppressed sibling count.
 
 The watcher runtime reloads enabled roots while running, so `watch enable` and
 `watch disable` take effect without a restart. It applies debounce, a bounded
-event queue, heartbeat recording, and stale-state reporting.
+event queue, heartbeat recording, and stale-state reporting. Live filesystem
+events are not the only correctness mechanism: watcher services run startup reconciliation
+and periodic reconciliation for enabled watched roots. A
+reconciliation is a full-root sync recorded in `crawl_runs.reason` as
+`startup_reconcile` or `periodic_reconcile`; it compares the current filesystem
+snapshot with persisted `source_assets` hashes, marks deleted files as deleted,
+queues changed deferred files, and treats empty folders as a clean no-op. Watch
+events continue to use targeted sync with reason `watch_event`.
+
+Production deployments are intentionally not repo-coupled. The default Windows
+PC install root is `D:\FluxLLMKB`, with deployed app files under `app`, private
+runtime/config/spool data under `private`, PostgreSQL bind-mounted data under
+`data`, and logs under `logs`. Docker runs PostgreSQL/API/dashboard/worker from
+prebuilt local images and bind-mounts only deployed runtime paths. Host-agent and
+Outlook-host run as Windows Scheduled Tasks in the logged-in user session.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,

@@ -44,6 +44,17 @@ type HealthPayload = {
   recent_errors?: string[];
   extractors?: Record<string, { ok?: boolean; message?: string }>;
   host_agent?: { status?: string; browse_supported?: boolean; message?: string };
+  deployment?: {
+    install_root?: string | null;
+    app_root?: string | null;
+    private_dir?: string | null;
+    data_dir?: string | null;
+    logs_dir?: string | null;
+    image_tag?: string | null;
+    mode?: string;
+    repo_coupled?: boolean;
+    running_from_repo?: boolean;
+  };
   codex?: {
     status?: string;
     configured?: boolean;
@@ -869,6 +880,7 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
   const hostAgent = state.health.host_agent;
   const codex = state.health.codex;
   const workers = state.health.workers;
+  const deployment = state.health.deployment;
   return (
     <section className="tab-grid">
       <Panel title="System Health">
@@ -883,6 +895,24 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
             ok={codex?.status === "ready"}
             message={codex?.restart_required ? "Codex restart required" : (codex?.status ?? "unknown")}
           />
+        </div>
+      </Panel>
+      <Panel title="Deployment">
+        <div className="status-grid">
+          <StatusTile
+            label="Runtime Mode"
+            ok={deployment?.mode === "production" && !deployment?.repo_coupled}
+            message={deployment?.mode ?? "development"}
+          />
+          <StatusTile
+            label="Repo Coupled"
+            ok={!deployment?.repo_coupled}
+            message={deployment?.repo_coupled ? "runtime is repo-coupled" : "runtime is separated"}
+          />
+          <StatusTile label="Install Root" ok={Boolean(deployment?.install_root)} message={deployment?.install_root ?? "not deployed"} />
+          <StatusTile label="Image Tag" ok={Boolean(deployment?.image_tag)} message={deployment?.image_tag ?? "local/dev"} />
+          <StatusTile label="Private Dir" ok={Boolean(deployment?.private_dir)} message={deployment?.private_dir ?? "not configured"} />
+          <StatusTile label="Data Dir" ok={Boolean(deployment?.data_dir)} message={deployment?.data_dir ?? "not configured"} />
         </div>
       </Panel>
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />

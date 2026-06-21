@@ -13,6 +13,8 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.token_budget" in keys
     assert "crawler.max_inline_bytes" in keys
     assert "watcher.interval_seconds" in keys
+    assert "watcher.reconcile_on_start" in keys
+    assert "watcher.reconcile_interval_seconds" in keys
     assert "mail.imap.poll_interval_seconds" in keys
     assert "mail.post_process.default_policy" in keys
 

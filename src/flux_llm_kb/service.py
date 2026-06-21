@@ -120,6 +120,7 @@ class KnowledgeService:
         root_name: str | None = None,
         path: str | Path | None = None,
         dry_run: bool = False,
+        reason: str = "manual_sync",
     ) -> dict[str, Any]:
         root = _select_root(root_name=root_name, path=path)
         glob_policy = _configured_glob_policy(root)
@@ -132,7 +133,53 @@ class KnowledgeService:
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
         )
         plan = scan_path(root["root_path"], policy, target_path=path)
-        return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run)
+        return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run, reason=reason)
+
+    def reconcile_watch_roots(
+        self,
+        *,
+        root_name: str | None = None,
+        reason: str = "periodic_reconcile",
+        host_agent_roots: bool | None = None,
+        component_name: str = "watch-reconciler:service",
+    ) -> dict[str, Any]:
+        roots = [
+            root
+            for root in database.list_monitored_roots(watch_enabled=True)
+            if root.get("enabled")
+            and root.get("watch_enabled")
+            and (root_name is None or root.get("name") == root_name)
+            and _root_matches_host_agent_filter(root, host_agent_roots)
+        ]
+        if not roots:
+            payload = {"status": "no_enabled_watch_roots", "reason": reason, "roots": 0, "results": []}
+            database.record_runtime_component_heartbeat(
+                name=component_name,
+                status="idle",
+                metadata=payload,
+            )
+            return payload
+
+        results: list[dict[str, Any]] = []
+        totals = {"files_seen": 0, "files_changed": 0, "files_deleted": 0, "jobs_queued": 0}
+        for root in roots:
+            try:
+                result = self.sync_corpus(root_name=root["name"], reason=reason)
+                results.append(result)
+                for key in totals:
+                    totals[key] += int(result.get(key) or 0)
+            except Exception as exc:
+                error = {"root_name": root.get("name"), "status": "error", "error": str(exc)}
+                results.append(error)
+                database.record_watch_error(root_name=root["name"], error=str(exc))
+        status = "completed" if all(item.get("status") != "error" for item in results) else "partial"
+        payload = {"status": status, "reason": reason, "roots": len(roots), **totals, "results": results}
+        database.record_runtime_component_heartbeat(
+            name=component_name,
+            status="running" if status == "completed" else "error",
+            metadata=payload,
+        )
+        return payload
 
     def run_watch(self, *, root_name: str | None = None, interval_seconds: float = 2.0) -> dict[str, Any]:
         if not _load_watch_roots(root_name):
@@ -143,11 +190,19 @@ class KnowledgeService:
             on_change=self._handle_watch_event,
             interval_seconds=interval_seconds,
         )
+        last_reconcile_at = 0.0
+        if _configured_reconcile_on_start():
+            self.reconcile_watch_roots(root_name=root_name, reason="startup_reconcile")
+            last_reconcile_at = time.monotonic()
         watcher.poll_once(seed=True)
         while True:
             for root in _load_watch_roots(root_name):
                 database.record_watcher_heartbeat(root_name=root.name)
             watcher.poll_once()
+            reconcile_interval = _configured_reconcile_interval_seconds()
+            if reconcile_interval > 0 and time.monotonic() - last_reconcile_at >= reconcile_interval:
+                self.reconcile_watch_roots(root_name=root_name, reason="periodic_reconcile")
+                last_reconcile_at = time.monotonic()
             time.sleep(interval_seconds)
 
     def run_corpus_backfill(
@@ -294,7 +349,7 @@ class KnowledgeService:
     def _handle_watch_event(self, event: WatchEvent) -> None:
         try:
             database.record_watch_event(root_name=event.root_name)
-            self.sync_corpus(root_name=event.root_name)
+            self.sync_corpus(root_name=event.root_name, path=event.path, reason="watch_event")
         except Exception as exc:  # pragma: no cover - environment-specific watcher loop
             database.record_watch_error(root_name=event.root_name, error=str(exc))
 
@@ -356,6 +411,20 @@ def _configured_token_budget() -> int:
         return 1200
 
 
+def _configured_reconcile_on_start() -> bool:
+    try:
+        return bool(SettingsService().resolve("watcher.reconcile_on_start").raw_value)
+    except Exception:
+        return True
+
+
+def _configured_reconcile_interval_seconds() -> int:
+    try:
+        return int(SettingsService().resolve("watcher.reconcile_interval_seconds").raw_value)
+    except Exception:
+        return 3600
+
+
 def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:
     settings = SettingsService()
     try:
@@ -395,6 +464,14 @@ def _path_is_under_root(path: str, root_path: str) -> bool:
 
 def _looks_windows(path: str) -> bool:
     return bool(PureWindowsPath(path).drive) or str(path).startswith("\\\\")
+
+
+def _root_matches_host_agent_filter(root: dict[str, Any], host_agent_roots: bool | None) -> bool:
+    if host_agent_roots is None:
+        return True
+    metadata = root.get("metadata") or {}
+    is_host_root = metadata.get("host_access") == "host_agent" or _looks_windows(str(root.get("root_path") or ""))
+    return is_host_root is host_agent_roots
 
 
 def _load_watch_roots(root_name: str | None = None) -> list[WatchRoot]:
