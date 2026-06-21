@@ -34,7 +34,7 @@ function Write-FluxCompose {
     $compose = @"
 services:
   api:
-    image: flux-llm-kb-api:${ImageTag}
+    image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-api
     restart: unless-stopped
     depends_on:
@@ -56,7 +56,7 @@ services:
              python -m uvicorn flux_llm_kb.rest_api:create_app --factory --host 0.0.0.0 --port 8765"
 
   worker:
-    image: flux-llm-kb-worker:${ImageTag}
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-worker
     restart: unless-stopped
     depends_on:
