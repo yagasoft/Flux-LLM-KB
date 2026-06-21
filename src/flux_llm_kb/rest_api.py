@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from pathlib import Path
 
 from .health import (
@@ -15,10 +13,10 @@ from .service import KnowledgeService
 
 def create_app():
     try:
-        from fastapi import FastAPI
+        from fastapi import Body, FastAPI, HTTPException
         from fastapi.responses import HTMLResponse
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel
+        from pydantic import BaseModel, Field
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install REST support with `pip install -e .[api]`") from exc
 
@@ -38,6 +36,20 @@ def create_app():
         root_name: str | None = None
         path: str | None = None
         dry_run: bool = False
+
+    class CrawlRootRequest(BaseModel):
+        name: str
+        root_path: str
+        enabled: bool = True
+        recursive: bool = True
+        watch_enabled: bool = True
+        initial_crawl: bool = True
+        dry_run: bool = False
+        trust_rank: int = 500
+        include_globs: list[str] = Field(default_factory=list)
+        exclude_globs: list[str] = Field(default_factory=list)
+        max_inline_bytes: int | None = None
+        heavy_threshold_bytes: int | None = None
 
     class WatchRequest(BaseModel):
         root_name: str | None = None
@@ -106,15 +118,15 @@ def create_app():
         return collect_retrieval_payload()
 
     @app.post("/api/search")
-    def search(request: SearchRequest):
+    def search(request: SearchRequest = Body(...)):
         return service.search(request.query, limit=request.limit)
 
     @app.post("/api/brief")
-    def brief(request: SearchRequest):
+    def brief(request: SearchRequest = Body(...)):
         return {"brief": service.brief(request.query)}
 
     @app.post("/api/remember")
-    def remember(request: RememberRequest):
+    def remember(request: RememberRequest = Body(...)):
         return service.remember(request.title, request.body).__dict__
 
     @app.get("/api/audit")
@@ -122,7 +134,7 @@ def create_app():
         return service.audit(limit=limit)
 
     @app.post("/api/forget")
-    def forget(request: ForgetRequest):
+    def forget(request: ForgetRequest = Body(...)):
         return service.forget(request.memory_id, reason=request.reason)
 
     @app.get("/api/crawl/status")
@@ -130,15 +142,60 @@ def create_app():
         return collect_crawl_payload()
 
     @app.post("/api/crawl/sync")
-    def crawl_sync(request: CrawlSyncRequest):
+    def crawl_sync(request: CrawlSyncRequest = Body(...)):
         return service.sync_corpus(root_name=request.root_name, path=request.path, dry_run=request.dry_run)
+
+    @app.post("/api/crawl/roots")
+    def crawl_root_add(request: CrawlRootRequest = Body(...)):
+        from . import database
+        from .settings import SettingsService
+
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="root name is required")
+        root_path = Path(request.root_path).expanduser()
+        if not root_path.is_absolute():
+            raise HTTPException(status_code=400, detail="root path must be absolute")
+        if not root_path.exists():
+            raise HTTPException(status_code=400, detail="directory does not exist")
+        if not root_path.is_dir():
+            raise HTTPException(status_code=400, detail="root path must be a directory")
+
+        settings = SettingsService()
+        max_inline_bytes = request.max_inline_bytes
+        if max_inline_bytes is None:
+            max_inline_bytes = int(settings.resolve("crawler.max_inline_bytes").raw_value)
+        heavy_threshold_bytes = request.heavy_threshold_bytes
+        if heavy_threshold_bytes is None:
+            heavy_threshold_bytes = int(settings.resolve("crawler.heavy_threshold_bytes").raw_value)
+
+        if max_inline_bytes <= 0 or heavy_threshold_bytes <= 0:
+            raise HTTPException(status_code=400, detail="size thresholds must be positive")
+
+        root = database.add_monitored_root(
+            name=name,
+            root_path=root_path,
+            enabled=request.enabled,
+            recursive=request.recursive,
+            watch_enabled=request.watch_enabled,
+            trust_rank=request.trust_rank,
+            include_globs=[item.strip() for item in request.include_globs if item.strip()],
+            exclude_globs=[item.strip() for item in request.exclude_globs if item.strip()],
+            max_inline_bytes=max_inline_bytes,
+            heavy_threshold_bytes=heavy_threshold_bytes,
+            metadata={"source": "dashboard"},
+        )
+        payload: dict[str, object] = {"root": root}
+        if request.initial_crawl:
+            payload["sync"] = service.sync_corpus(root_name=root["name"], dry_run=request.dry_run)
+        return payload
 
     @app.get("/api/crawl/jobs")
     def crawl_jobs(limit: int = 50):
         return collect_jobs_payload(limit=limit)
 
     @app.post("/api/crawl/watch")
-    def crawl_watch(request: WatchRequest):
+    def crawl_watch(request: WatchRequest = Body(...)):
         from . import database
 
         return database.set_watch_enabled(root_name=request.root_name, enabled=request.enabled)
@@ -156,7 +213,7 @@ def create_app():
         return SettingsService().resolve(key).to_public_dict()
 
     @app.put("/api/settings/{key}")
-    def settings_put(key: str, request: SettingUpdateRequest):
+    def settings_put(key: str, request: SettingUpdateRequest = Body(...)):
         from .settings import SettingsService
 
         return SettingsService().set(
@@ -168,7 +225,7 @@ def create_app():
         )
 
     @app.post("/api/settings/apply")
-    def settings_apply(request: SettingsApplyRequest):
+    def settings_apply(request: SettingsApplyRequest = Body(...)):
         from .settings import SettingsService
 
         return SettingsService().apply(component=request.component, actor="dashboard")
@@ -192,7 +249,7 @@ def create_app():
         return database.list_mail_profiles()
 
     @app.post("/api/mail/profiles")
-    def mail_profile_add(request: MailProfileRequest):
+    def mail_profile_add(request: MailProfileRequest = Body(...)):
         from .mail_ingestion import add_mail_profile
 
         return add_mail_profile(
@@ -210,17 +267,17 @@ def create_app():
         )
 
     @app.post("/api/mail/sync")
-    def mail_sync(request: MailSyncRequest):
+    def mail_sync(request: MailSyncRequest = Body(...)):
         from .mail_ingestion import sync_mail_profile
 
         return sync_mail_profile(profile_name=request.profile_name)
 
     @app.post("/api/mail/watch")
-    def mail_watch(_: MailSyncRequest):
+    def mail_watch(_: MailSyncRequest = Body(...)):
         return {"status": "watch_loop_runs_from_cli", "command": "flux-kb mail watch run"}
 
     @app.post("/api/mail/oauth/gmail/start")
-    def mail_oauth_gmail_start(request: GmailOAuthStartRequest):
+    def mail_oauth_gmail_start(request: GmailOAuthStartRequest = Body(...)):
         from .mail_oauth import start_gmail_oauth
 
         return start_gmail_oauth(
@@ -252,7 +309,7 @@ def create_app():
         return status()
 
     @app.post("/api/outlook-host/request-sync")
-    def outlook_host_request_sync(request: OutlookHostSyncRequest):
+    def outlook_host_request_sync(request: OutlookHostSyncRequest = Body(...)):
         from .outlook_host import request_sync
 
         return request_sync(request.profile_name, actor="dashboard")

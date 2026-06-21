@@ -2,7 +2,12 @@ import tomllib
 from pathlib import Path
 
 from flux_llm_kb import database, health
-from flux_llm_kb.health import build_dashboard_html, collect_dashboard_payload, doctor_payload
+from flux_llm_kb.health import (
+    build_dashboard_html,
+    collect_crawl_payload,
+    collect_dashboard_payload,
+    doctor_payload,
+)
 
 
 def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
@@ -37,6 +42,42 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["retrieval"]["asset_chunks"] == 5
     assert payload["recent_errors"] == ["bad file"]
     assert "extractors" in payload
+
+
+def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [{"name": "docs", "root_path": "E:/Docs", "watch_enabled": True}],
+    )
+    monkeypatch.setattr(
+        database,
+        "crawl_status",
+        lambda: {"active_watch_roots": 1, "disabled_watch_roots": 0, "recent_errors": ["bad file"]},
+    )
+    monkeypatch.setattr(
+        database,
+        "crawl_root_summaries",
+        lambda: [
+            {
+                "name": "docs",
+                "root_path": "E:/Docs",
+                "state": "watching",
+                "asset_counts": {"indexed": 3, "queued": 1},
+                "job_counts": {"pending": 1, "blocked": 0},
+                "latest_crawl": {"status": "completed", "files_seen": 4},
+                "recent_assets": [{"path": "README.md", "status": "indexed"}],
+                "recent_jobs": [],
+            }
+        ],
+    )
+
+    payload = collect_crawl_payload()
+
+    assert payload["roots"][0]["name"] == "docs"
+    assert payload["root_summaries"][0]["state"] == "watching"
+    assert payload["root_summaries"][0]["asset_counts"]["indexed"] == 3
+    assert payload["recent_errors"] == ["bad file"]
 
 
 def test_dashboard_html_contains_health_mount_points():

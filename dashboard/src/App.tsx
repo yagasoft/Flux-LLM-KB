@@ -93,7 +93,8 @@ type SettingRow = {
 };
 
 type CrawlPayload = {
-  roots?: Array<Record<string, unknown>>;
+  roots?: MonitoredRoot[];
+  root_summaries?: RootSummary[];
   status?: Record<string, unknown>;
   watchers?: Array<Record<string, unknown>>;
   recent_errors?: string[];
@@ -145,6 +146,45 @@ type ProfileForm = {
   max_messages_per_run: number;
 };
 
+type MonitoredRoot = {
+  id?: string;
+  name: string;
+  root_path: string;
+  enabled?: boolean;
+  recursive?: boolean;
+  watch_enabled?: boolean;
+  trust_rank?: number;
+  include_globs?: string[];
+  exclude_globs?: string[];
+  max_inline_bytes?: number;
+  heavy_threshold_bytes?: number;
+  metadata?: Record<string, unknown>;
+};
+
+type RootSummary = MonitoredRoot & {
+  state?: string;
+  watcher?: { status?: string; heartbeat_at?: string | null; last_event_at?: string | null; last_error?: string | null; heartbeat_age_seconds?: number | null };
+  asset_counts?: Record<string, number>;
+  job_counts?: Record<string, number>;
+  latest_crawl?: Record<string, unknown> | null;
+  recent_assets?: Array<Record<string, unknown>>;
+  recent_jobs?: Array<Record<string, unknown>>;
+  recent_errors?: string[];
+};
+
+type CrawlRootForm = {
+  name: string;
+  root_path: string;
+  recursive: boolean;
+  watch_enabled: boolean;
+  initial_crawl: boolean;
+  trust_rank: number;
+  include_globs: string;
+  exclude_globs: string;
+  max_inline_bytes: number;
+  heavy_threshold_bytes: number;
+};
+
 const emptyState: LoadState = {
   health: {},
   crawl: { roots: [] },
@@ -166,13 +206,15 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
 
 export default function App() {
   const [state, setState] = useState<LoadState>(emptyState);
-  const [activeTab, setActiveTab] = useState<TabId>("mail");
+  const [activeTab, setActiveTab] = useState<TabId>("health");
   const [selectedName, setSelectedName] = useState<string>("");
+  const [selectedRootName, setSelectedRootName] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string>("");
   const [debugOpen, setDebugOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [profileDialog, setProfileDialog] = useState<MailProfile | "new" | null>(null);
+  const [rootDialog, setRootDialog] = useState(false);
   const [settingEditor, setSettingEditor] = useState<SettingRow | null>(null);
   const [settingValue, setSettingValue] = useState("");
   const [confirmSetting, setConfirmSetting] = useState<SettingRow | null>(null);
@@ -207,15 +249,25 @@ export default function App() {
   }, [theme]);
 
   const profiles = state.mail.profiles ?? [];
+  const rootSummaries = state.crawl.root_summaries ?? (state.crawl.roots ?? []);
   const selectedProfile = useMemo(() => {
     return profiles.find((profile) => profile.name === selectedName) ?? profiles.find((profile) => profile.source_type === "outlook_com") ?? profiles[0];
   }, [profiles, selectedName]);
+  const selectedRoot = useMemo(() => {
+    return rootSummaries.find((root) => root.name === selectedRootName) ?? rootSummaries[0];
+  }, [rootSummaries, selectedRootName]);
 
   useEffect(() => {
     if (!selectedName && selectedProfile?.name) {
       setSelectedName(selectedProfile.name);
     }
   }, [selectedName, selectedProfile?.name]);
+
+  useEffect(() => {
+    if (!selectedRootName && selectedRoot?.name) {
+      setSelectedRootName(selectedRoot.name);
+    }
+  }, [selectedRootName, selectedRoot?.name]);
 
   useEffect(() => {
     if (settingEditor) {
@@ -272,6 +324,70 @@ export default function App() {
       setToast(payload.status ?? "Gmail OAuth setup started.");
     }
     await load();
+  }
+
+  async function saveCrawlRoot(form: CrawlRootForm) {
+    try {
+      const payload = {
+        name: form.name.trim(),
+        root_path: form.root_path.trim(),
+        recursive: form.recursive,
+        watch_enabled: form.watch_enabled,
+        initial_crawl: form.initial_crawl,
+        trust_rank: Number(form.trust_rank),
+        include_globs: splitLines(form.include_globs),
+        exclude_globs: splitLines(form.exclude_globs),
+        max_inline_bytes: Number(form.max_inline_bytes),
+        heavy_threshold_bytes: Number(form.heavy_threshold_bytes)
+      };
+      const result = await sendJson<{ root?: MonitoredRoot; sync?: Record<string, unknown> }>("/api/crawl/roots", "POST", payload);
+      setRootDialog(false);
+      setSelectedRootName(result.root?.name ?? payload.name);
+      setToast(result.sync ? `Watched path ${payload.name} added and initial crawl started.` : `Watched path ${payload.name} added.`);
+      await load();
+    } catch (error) {
+      setToast(`Could not add watched path: ${errorMessage(error)}`);
+    }
+  }
+
+  async function runCorpusSync() {
+    try {
+      await sendJson("/api/crawl/sync", "POST", { dry_run: false });
+      setToast("Corpus sync completed.");
+      await load();
+    } catch (error) {
+      setToast(`Corpus sync failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async function setCorpusWatch(enabled: boolean) {
+    try {
+      await sendJson("/api/crawl/watch", "POST", { enabled });
+      setToast(enabled ? "Watch enabled." : "Watch disabled.");
+      await load();
+    } catch (error) {
+      setToast(`Watch update failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async function runRootSync(rootName: string, dryRun = false) {
+    try {
+      await sendJson("/api/crawl/sync", "POST", { root_name: rootName, dry_run: dryRun });
+      setToast(dryRun ? `Dry run completed for ${rootName}.` : `Sync completed for ${rootName}.`);
+      await load();
+    } catch (error) {
+      setToast(`Root sync failed for ${rootName}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function setRootWatch(rootName: string, enabled: boolean) {
+    try {
+      await sendJson("/api/crawl/watch", "POST", { root_name: rootName, enabled });
+      setToast(enabled ? `Watch enabled for ${rootName}.` : `Watch disabled for ${rootName}.`);
+      await load();
+    } catch (error) {
+      setToast(`Watch update failed for ${rootName}: ${errorMessage(error)}`);
+    }
   }
 
   async function saveSetting(confirmed = false) {
@@ -448,9 +564,14 @@ export default function App() {
         {activeTab === "corpus" && (
           <CorpusTab
             state={state}
+            selectedRoot={selectedRoot}
+            onAddRoot={() => setRootDialog(true)}
+            onSelectRoot={(root) => setSelectedRootName(root.name)}
             onRefresh={() => void load()}
-            onSync={() => void sendJson("/api/crawl/sync", "POST", { dry_run: false }).then(() => load()).then(() => setToast("Corpus sync completed."))}
-            onWatch={(enabled) => void sendJson("/api/crawl/watch", "POST", { enabled }).then(() => load()).then(() => setToast(enabled ? "Watch enabled." : "Watch disabled."))}
+            onSync={() => void runCorpusSync()}
+            onWatch={(enabled) => void setCorpusWatch(enabled)}
+            onRootSync={(root, dryRun) => void runRootSync(root.name, dryRun)}
+            onRootWatch={(root, enabled) => void setRootWatch(root.name, enabled)}
           />
         )}
 
@@ -476,6 +597,13 @@ export default function App() {
           profile={profileDialog === "new" ? undefined : profileDialog}
           onClose={() => setProfileDialog(null)}
           onSave={(form) => void saveProfile(form)}
+        />
+      )}
+
+      {rootDialog && (
+        <CrawlRootDialog
+          onClose={() => setRootDialog(false)}
+          onSave={(form) => void saveCrawlRoot(form)}
         />
       )}
 
@@ -625,16 +753,37 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
   );
 }
 
-function CorpusTab({ state, onRefresh, onSync, onWatch }: { state: LoadState; onRefresh: () => void; onSync: () => void; onWatch: (enabled: boolean) => void }) {
-  const roots = state.crawl.roots ?? [];
+function CorpusTab({
+  state,
+  selectedRoot,
+  onAddRoot,
+  onSelectRoot,
+  onRefresh,
+  onSync,
+  onWatch,
+  onRootSync,
+  onRootWatch
+}: {
+  state: LoadState;
+  selectedRoot?: RootSummary;
+  onAddRoot: () => void;
+  onSelectRoot: (root: RootSummary) => void;
+  onRefresh: () => void;
+  onSync: () => void;
+  onWatch: (enabled: boolean) => void;
+  onRootSync: (root: RootSummary, dryRun: boolean) => void;
+  onRootWatch: (root: RootSummary, enabled: boolean) => void;
+}) {
+  const roots = state.crawl.root_summaries ?? (state.crawl.roots ?? []);
   const status = state.crawl.status ?? {};
   return (
-    <section className="tab-grid">
-      <Panel title="Corpus Monitor" action={<button className="small-primary" type="button" onClick={onSync}><RefreshCcw size={15} /> Sync corpus</button>}>
+    <section className="tab-grid corpus-tab">
+      <Panel title="Corpus Monitor" action={<button className="small-primary" type="button" onClick={onAddRoot}><Plus size={15} /> Add Watched Path</button>}>
         <div className="corpus-actions">
+          <button className="small-primary" type="button" onClick={onSync}><RefreshCcw size={15} /> Sync all</button>
           <button className="ghost-action compact" type="button" onClick={onRefresh}>Refresh</button>
-          <button className="ghost-action compact" type="button" onClick={() => onWatch(true)}>Enable watch</button>
-          <button className="ghost-action compact" type="button" onClick={() => onWatch(false)}>Disable watch</button>
+          <button className="ghost-action compact" type="button" onClick={() => onWatch(true)}>Enable all watch</button>
+          <button className="ghost-action compact" type="button" onClick={() => onWatch(false)}>Disable all watch</button>
         </div>
         <MiniTable rows={[
           ["Roots", "configured", String(roots.length)],
@@ -643,16 +792,267 @@ function CorpusTab({ state, onRefresh, onSync, onWatch }: { state: LoadState; on
           ["Stale", "watcher", String(state.health.watcher?.stale_count ?? 0)]
         ]} />
       </Panel>
-      <Panel title="Monitored Roots">
-        <DataRows rows={roots} empty="No monitored roots configured yet." />
-      </Panel>
+      <section className="main-grid">
+        <Panel className="profiles-panel" title="Monitored Roots">
+          <RootTable
+            roots={roots}
+            selectedRoot={selectedRoot}
+            onSelect={onSelectRoot}
+            onSync={onRootSync}
+            onWatch={onRootWatch}
+          />
+        </Panel>
+        <Panel title="Root Details" action={selectedRoot ? <RootStateBadge state={selectedRoot.state} /> : undefined}>
+          <RootInspector root={selectedRoot} />
+        </Panel>
+      </section>
       <Panel title="Extractor Availability">
+        <p className="panel-note">Optional local tools expand media extraction. Missing ffmpeg, ffprobe, or faster_whisper blocks only the related deferred media jobs; core health can stay green.</p>
         <div className="status-grid">
           {Object.entries(state.health.extractors ?? {}).map(([key, value]) => <StatusTile key={key} label={key} ok={value.ok} message={value.message} />)}
           {Object.keys(state.health.extractors ?? {}).length === 0 && <p className="muted">Extractor status is not available yet.</p>}
         </div>
       </Panel>
     </section>
+  );
+}
+
+function RootTable({
+  roots,
+  selectedRoot,
+  onSelect,
+  onSync,
+  onWatch
+}: {
+  roots: RootSummary[];
+  selectedRoot?: RootSummary;
+  onSelect: (root: RootSummary) => void;
+  onSync: (root: RootSummary, dryRun: boolean) => void;
+  onWatch: (root: RootSummary, enabled: boolean) => void;
+}) {
+  return (
+    <table className="profile-table root-table" aria-label="Monitored roots">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Path</th>
+          <th>Status</th>
+          <th>Assets</th>
+          <th>Jobs</th>
+          <th>Watch</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {roots.map((root) => (
+          <tr
+            key={root.name}
+            className={selectedRoot?.name === root.name ? "selected" : ""}
+            onClick={() => onSelect(root)}
+          >
+            <td>
+              <button className="row-select" type="button" aria-label={`Select ${root.name}`}>
+                {selectedRoot?.name === root.name ? <CheckCircle2 size={15} /> : <Square size={12} />}
+              </button>
+              <div>
+                <strong>{root.name}</strong>
+                <span>{root.recursive ? "Recursive" : "Single level"} - trust {root.trust_rank ?? 500}</span>
+              </div>
+            </td>
+            <td className="path-cell">{root.root_path}</td>
+            <td><RootStateBadge state={root.state} /></td>
+            <td>
+              <strong>{root.asset_counts?.indexed ?? 0} indexed</strong>
+              <span>{root.asset_counts?.queued ?? 0} queued - {root.asset_counts?.duplicate_suppressed ?? 0} duplicate</span>
+            </td>
+            <td>
+              <strong>{root.job_counts?.pending ?? 0} pending</strong>
+              <span>{root.job_counts?.blocked ?? 0} blocked - {root.job_counts?.failed ?? 0} failed</span>
+            </td>
+            <td>
+              <strong>{root.watch_enabled ? "On" : "Off"}</strong>
+              <span>{root.watcher?.status ?? "stopped"}</span>
+            </td>
+            <td>
+              <div className="row-actions root-actions">
+                <button type="button" aria-label={`Sync ${root.name}`} onClick={(event) => { event.stopPropagation(); onSync(root, false); }}><RefreshCcw size={15} /></button>
+                <button type="button" aria-label={`Dry run ${root.name}`} onClick={(event) => { event.stopPropagation(); onSync(root, true); }}><ListFilter size={15} /></button>
+                <button type="button" aria-label={`${root.watch_enabled ? "Disable" : "Enable"} watch ${root.name}`} onClick={(event) => { event.stopPropagation(); onWatch(root, !root.watch_enabled); }}>
+                  {root.watch_enabled ? <Square size={15} /> : <Play size={15} />}
+                </button>
+              </div>
+            </td>
+          </tr>
+        ))}
+        {roots.length === 0 && (
+          <tr>
+            <td colSpan={7} className="empty-row">No monitored roots configured yet.</td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+}
+
+function RootInspector({ root }: { root?: RootSummary }) {
+  if (!root) {
+    return <div className="empty-inspector"><p className="muted">Add or select a watched path to see crawl, watch, and job status.</p></div>;
+  }
+  const latest = root.latest_crawl ?? {};
+  return (
+    <div className="inspector root-inspector">
+      <div className="profile-head">
+        <div className="outlook-logo root-logo"><Folder size={24} /></div>
+        <div>
+          <h3>{root.name}</h3>
+          <span>{root.root_path}</span>
+        </div>
+      </div>
+      <div className="schedule-row">
+        <Stat label="Last crawl" value={String(latest.status ?? "-")} />
+        <Stat label="Files seen" value={String(latest.files_seen ?? 0)} />
+        <Stat label="Changed" value={String(latest.files_changed ?? 0)} />
+      </div>
+      <div className="schedule-row">
+        <Stat label="Watch heartbeat" value={root.watcher?.heartbeat_age_seconds == null ? "-" : `${root.watcher.heartbeat_age_seconds}s ago`} />
+        <Stat label="Last event" value={formatDate(root.watcher?.last_event_at)} />
+        <Stat label="Deleted" value={String(root.asset_counts?.deleted ?? 0)} />
+      </div>
+      <label>Include globs</label>
+      <div className="folder-box">{(root.include_globs ?? []).join("\n") || "All files allowed by ignore policy."}</div>
+      <label>Exclude globs</label>
+      <div className="folder-box">{(root.exclude_globs ?? []).join("\n") || "No custom excludes."}</div>
+      <div className="recent-grid">
+        <div>
+          <strong>Recent assets</strong>
+          <AssetRows assets={root.recent_assets ?? []} />
+        </div>
+        <div>
+          <strong>Recent jobs</strong>
+          <JobRows jobs={root.recent_jobs ?? []} />
+        </div>
+      </div>
+      {(root.recent_errors ?? []).length > 0 && (
+        <div className="warning-note">
+          {(root.recent_errors ?? []).slice(0, 3).join(" | ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AssetRows({ assets }: { assets: Array<Record<string, unknown>> }) {
+  if (assets.length === 0) return <p className="muted">No assets indexed yet.</p>;
+  return (
+    <div className="compact-rows">
+      {assets.slice(0, 6).map((asset) => (
+        <div key={String(asset.path)}>
+          <span>{String(asset.path ?? "-")}</span>
+          <RootStateBadge state={String(asset.status ?? "indexed")} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function JobRows({ jobs }: { jobs: Array<Record<string, unknown>> }) {
+  if (jobs.length === 0) return <p className="muted">No root jobs queued.</p>;
+  return (
+    <div className="compact-rows">
+      {jobs.slice(0, 6).map((job) => (
+        <div key={String(job.id)}>
+          <span>{String(job.path ?? job.job_type ?? "-")}</span>
+          <RootStateBadge state={String(job.status ?? "pending")} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RootStateBadge({ state }: { state?: string }) {
+  const normalized = state ?? "unknown";
+  const tone = ["watching", "indexed", "completed"].includes(normalized)
+    ? "enabled"
+    : ["queued", "processing", "crawling", "changed", "watch_enabled"].includes(normalized)
+      ? "info"
+      : ["blocked", "failed", "stale", "deleted", "blocked_missing_dependency"].includes(normalized)
+        ? "warning"
+        : "";
+  return <span className={`state-pill ${tone}`}>{normalized}</span>;
+}
+
+function CrawlRootDialog({ onClose, onSave }: { onClose: () => void; onSave: (form: CrawlRootForm) => void }) {
+  const [form, setForm] = useState<CrawlRootForm>(() => ({
+    name: "",
+    root_path: "",
+    recursive: true,
+    watch_enabled: true,
+    initial_crawl: true,
+    trust_rank: 500,
+    include_globs: "",
+    exclude_globs: "",
+    max_inline_bytes: 256 * 1024,
+    heavy_threshold_bytes: 10 * 1024 * 1024
+  }));
+  const [nameTouched, setNameTouched] = useState(false);
+  const [error, setError] = useState("");
+
+  function update<K extends keyof CrawlRootForm>(key: K, value: CrawlRootForm[K]) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function updatePath(value: string) {
+    setForm((current) => ({
+      ...current,
+      root_path: value,
+      name: nameTouched ? current.name : slugFromPath(value)
+    }));
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!form.root_path.trim()) {
+      setError("Root path is required.");
+      return;
+    }
+    if (!form.name.trim()) {
+      setError("Root name is required.");
+      return;
+    }
+    if (form.max_inline_bytes <= 0 || form.heavy_threshold_bytes <= 0) {
+      setError("Size thresholds must be positive.");
+      return;
+    }
+    setError("");
+    onSave(form);
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <form className="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="crawl-root-dialog-title" onSubmit={submit}>
+        <header>
+          <h2 id="crawl-root-dialog-title">Add Watched Path</h2>
+          <button type="button" aria-label="Close watched path form" onClick={onClose}><X size={18} /></button>
+        </header>
+        <div className="form-grid">
+          <label className="span-2">Root path<input value={form.root_path} onChange={(event) => updatePath(event.target.value)} placeholder="E:/Projects/Client RFPs" required /></label>
+          <label>Root name<input value={form.name} onChange={(event) => { setNameTouched(true); update("name", event.target.value); }} required /></label>
+          <label>Trust rank<input type="number" min="0" max="1000" value={form.trust_rank} onChange={(event) => update("trust_rank", Number(event.target.value))} /></label>
+          <label className="span-2">Include globs<textarea value={form.include_globs} onChange={(event) => update("include_globs", event.target.value)} placeholder="**/*.pdf&#10;**/*.docx" /></label>
+          <label className="span-2">Exclude globs<textarea value={form.exclude_globs} onChange={(event) => update("exclude_globs", event.target.value)} placeholder="private/**&#10;node_modules/**" /></label>
+          <label>Inline size bytes<input type="number" min="1" value={form.max_inline_bytes} onChange={(event) => update("max_inline_bytes", Number(event.target.value))} /></label>
+          <label>Heavy file threshold bytes<input type="number" min="1" value={form.heavy_threshold_bytes} onChange={(event) => update("heavy_threshold_bytes", Number(event.target.value))} /></label>
+          <label className="checkbox-label"><input type="checkbox" checked={form.recursive} onChange={(event) => update("recursive", event.target.checked)} /> Recursive</label>
+          <label className="checkbox-label"><input type="checkbox" checked={form.watch_enabled} onChange={(event) => update("watch_enabled", event.target.checked)} /> Watch enabled</label>
+          <label className="checkbox-label"><input type="checkbox" checked={form.initial_crawl} onChange={(event) => update("initial_crawl", event.target.checked)} /> Initial crawl now</label>
+          {error && <p className="warning-note span-2">{error}</p>}
+        </div>
+        <footer>
+          <button className="ghost-action compact" type="button" onClick={onClose}>Cancel</button>
+          <button className="small-primary" type="submit">Save watched path</button>
+        </footer>
+      </form>
+    </div>
   );
 }
 
@@ -1124,9 +1524,14 @@ async function sendJson<T>(url: string, method: "POST" | "PUT", body: unknown): 
     body: JSON.stringify(body)
   });
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    const details = await response.text().catch(() => "");
+    throw new Error(details ? `Request failed: ${response.status} ${details}` : `Request failed: ${response.status}`);
   }
   return await response.json();
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function StatusChip({ label, ok }: { label: string; ok?: boolean }) {
@@ -1232,6 +1637,14 @@ function parseSettingValue(value: string, current: unknown) {
 
 function splitLines(value: string) {
   return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
+}
+
+function slugFromPath(value: string) {
+  const leaf = value.trim().split(/[\\/]+/).filter(Boolean).pop() ?? "";
+  return leaf
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }
 
 function intervalLabel(seconds?: number) {

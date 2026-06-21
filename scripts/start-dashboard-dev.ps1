@@ -17,11 +17,14 @@ try {
   $docker = Get-Command docker -ErrorAction SilentlyContinue
   if ($null -ne $docker) {
     docker compose up -d --build postgres api
-    Write-Host "Dashboard deployment refreshed at $url"
-    return
+    if ($LASTEXITCODE -eq 0) {
+      Write-Host "Dashboard deployment refreshed at $url"
+      return
+    }
+    Write-Warning "Docker dashboard refresh failed; falling back to a local FastAPI dashboard process."
+  } else {
+    Write-Host "Docker was not found on PATH; starting a local FastAPI dashboard process instead."
   }
-
-  Write-Host "Docker was not found on PATH; starting a local FastAPI dashboard process instead."
 
   if (Test-Path $pidFile) {
     $existingPid = [int](Get-Content -Raw $pidFile)

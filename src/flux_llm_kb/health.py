@@ -84,7 +84,14 @@ def collect_dashboard_payload() -> dict[str, Any]:
 
 
 def collect_crawl_payload() -> dict[str, Any]:
-    return {"roots": _safe(database.list_monitored_roots, []), "status": _safe(database.crawl_status, {})}
+    status = _safe(database.crawl_status, {})
+    return {
+        "roots": _safe(database.list_monitored_roots, []),
+        "root_summaries": _safe(database.crawl_root_summaries, []),
+        "status": status,
+        "watchers": status.get("watchers", []),
+        "recent_errors": status.get("recent_errors", []),
+    }
 
 
 def collect_jobs_payload(limit: int = 50) -> dict[str, Any]:

@@ -59,6 +59,14 @@ Images are dimensioned locally, media uses sidecar transcripts and `ffprobe`
 when available, and archives or unknown binaries remain metadata-only unless
 explicitly enabled later.
 
+The media backfill path is deliberately local and staged. Flux should prefer
+cheap structural signals first: file hash caches, dimensions, SVG/draw.io
+structure, sidecar transcripts, and decorative-image skips. Optional richer
+stages can then run as bounded jobs: Tesseract or PaddleOCR OCR, local
+Ollama/ONNX image descriptions, frame sampling, and faster-whisper audio/video
+transcription. Semantic media embeddings are a separate backfill phase so large
+media files do not slow normal crawl/watch loops.
+
 Deferred workers claim jobs with `FOR UPDATE SKIP LOCKED`, use retry/cooldown
 state in `capture_jobs`, and do not call cloud providers by default. Jobs move to
 explicit terminal states such as `completed`, `metadata_only`, or

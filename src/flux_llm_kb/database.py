@@ -763,6 +763,65 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
             }
 
 
+def crawl_root_summaries(
+    *, limit_assets: int = 12, limit_jobs: int = 12, url: str | None = None
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id::text, r.name, r.root_path, r.enabled, r.recursive, r.watch_enabled,
+                       r.trust_rank, r.include_globs, r.exclude_globs, r.max_inline_bytes,
+                       r.heavy_threshold_bytes, r.metadata,
+                       s.status, s.heartbeat_at, s.last_event_at, s.last_error,
+                       CASE
+                         WHEN s.heartbeat_at IS NULL THEN NULL
+                         ELSE EXTRACT(EPOCH FROM (now() - s.heartbeat_at))::integer
+                       END AS heartbeat_age_seconds
+                FROM monitored_roots r
+                LEFT JOIN watcher_state s ON s.root_id = r.id
+                ORDER BY r.name
+                """
+            )
+            roots = cur.fetchall()
+            summaries: list[dict[str, Any]] = []
+            for row in roots:
+                root = _root_row(row[:12])
+                root_id = root["id"]
+                watcher = {
+                    "status": row[12] or ("enabled" if root["watch_enabled"] else "disabled"),
+                    "heartbeat_at": row[13].isoformat() if row[13] else None,
+                    "last_event_at": row[14].isoformat() if row[14] else None,
+                    "last_error": row[15],
+                    "heartbeat_age_seconds": row[16],
+                }
+                latest_crawl = _latest_crawl_run(cur, root_id)
+                asset_counts = _root_asset_counts(cur, root_id)
+                job_counts = _root_job_counts(cur, root["name"])
+                recent_assets = _recent_root_assets(cur, root_id, limit=limit_assets)
+                recent_jobs = _recent_root_jobs(cur, root["name"], limit=limit_jobs)
+                recent_errors = [
+                    error
+                    for error in [watcher["last_error"], *(job.get("last_error") for job in recent_jobs)]
+                    if error
+                ][:5]
+                summaries.append(
+                    {
+                        **root,
+                        "state": _root_state(root, watcher, latest_crawl, job_counts),
+                        "watcher": watcher,
+                        "latest_crawl": latest_crawl,
+                        "asset_counts": asset_counts,
+                        "job_counts": job_counts,
+                        "recent_assets": recent_assets,
+                        "recent_jobs": recent_jobs,
+                        "recent_errors": recent_errors,
+                    }
+                )
+            return summaries
+
+
 def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -1936,6 +1995,180 @@ def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "heavy_threshold_bytes": row[10],
         "metadata": row[11],
     }
+
+
+def _latest_crawl_run(cur: Any, root_id: str) -> dict[str, Any] | None:
+    cur.execute(
+        """
+        SELECT id::text, status, started_at, finished_at, files_seen, files_changed,
+               files_deleted, chunks_indexed, jobs_queued, errors
+        FROM crawl_runs
+        WHERE root_id = %s
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+        (root_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "status": row[1],
+        "started_at": row[2].isoformat() if row[2] else None,
+        "finished_at": row[3].isoformat() if row[3] else None,
+        "files_seen": row[4],
+        "files_changed": row[5],
+        "files_deleted": row[6],
+        "chunks_indexed": row[7],
+        "jobs_queued": row[8],
+        "errors": row[9] or [],
+    }
+
+
+def _root_asset_counts(cur: Any, root_id: str) -> dict[str, int]:
+    cur.execute(
+        """
+        SELECT
+            count(*) FILTER (WHERE deleted_at IS NULL) AS total,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'indexed') AS indexed,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'queued') AS queued,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'metadata_only') AS metadata_only,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'duplicate_suppressed') AS duplicate_suppressed,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status LIKE 'blocked%%') AS blocked,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'failed') AS failed,
+            count(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted
+        FROM source_assets
+        WHERE root_id = %s
+        """,
+        (root_id,),
+    )
+    row = cur.fetchone()
+    keys = [
+        "total",
+        "indexed",
+        "queued",
+        "metadata_only",
+        "duplicate_suppressed",
+        "blocked",
+        "failed",
+        "deleted",
+    ]
+    return {key: int(row[index] or 0) for index, key in enumerate(keys)}
+
+
+def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
+    cur.execute(
+        """
+        SELECT
+            count(*) FILTER (WHERE status = 'pending') AS pending,
+            count(*) FILTER (WHERE status = 'running') AS running,
+            count(*) FILTER (WHERE status = 'blocked_missing_dependency') AS blocked,
+            count(*) FILTER (WHERE status = 'failed') AS failed,
+            count(*) FILTER (WHERE status = 'completed') AS completed
+        FROM capture_jobs
+        WHERE job_type LIKE 'corpus_%%'
+          AND payload->>'root_name' = %s
+        """,
+        (root_name,),
+    )
+    row = cur.fetchone()
+    keys = ["pending", "running", "blocked", "failed", "completed"]
+    return {key: int(row[index] or 0) for index, key in enumerate(keys)}
+
+
+def _recent_root_assets(cur: Any, root_id: str, *, limit: int) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT path, file_kind, extraction_status, extraction_tier, size_bytes,
+               canonical_asset_id IS NOT NULL AS is_duplicate, deleted_at,
+               last_seen_at, indexed_at, updated_at
+        FROM source_assets
+        WHERE root_id = %s
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """,
+        (root_id, max(1, min(limit, 100))),
+    )
+    rows = []
+    for row in cur.fetchall():
+        status = row[2]
+        if row[6]:
+            status = "deleted"
+        elif row[5]:
+            status = "duplicate_suppressed"
+        rows.append(
+            {
+                "path": row[0],
+                "file_kind": row[1],
+                "status": status,
+                "extraction_tier": row[3],
+                "size_bytes": row[4],
+                "duplicate": row[5],
+                "deleted_at": row[6].isoformat() if row[6] else None,
+                "last_seen_at": row[7].isoformat() if row[7] else None,
+                "indexed_at": row[8].isoformat() if row[8] else None,
+                "updated_at": row[9].isoformat() if row[9] else None,
+            }
+        )
+    return rows
+
+
+def _recent_root_jobs(cur: Any, root_name: str, *, limit: int) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id::text, job_type, status, payload, attempts, last_error, updated_at
+        FROM capture_jobs
+        WHERE job_type LIKE 'corpus_%%'
+          AND payload->>'root_name' = %s
+        ORDER BY updated_at DESC
+        LIMIT %s
+        """,
+        (root_name, max(1, min(limit, 100))),
+    )
+    rows = []
+    for row in cur.fetchall():
+        payload = row[3] or {}
+        rows.append(
+            {
+                "id": row[0],
+                "job_type": row[1],
+                "status": row[2],
+                "path": payload.get("path"),
+                "attempts": row[4],
+                "last_error": row[5],
+                "updated_at": row[6].isoformat() if row[6] else None,
+            }
+        )
+    return rows
+
+
+def _root_state(
+    root: dict[str, Any],
+    watcher: dict[str, Any],
+    latest_crawl: dict[str, Any] | None,
+    job_counts: dict[str, int],
+) -> str:
+    if not root["enabled"]:
+        return "disabled"
+    if latest_crawl and latest_crawl.get("status") == "running":
+        return "crawling"
+    if job_counts.get("running", 0) > 0:
+        return "processing"
+    if job_counts.get("pending", 0) > 0:
+        return "queued"
+    if job_counts.get("blocked", 0) > 0:
+        return "blocked"
+    if watcher.get("status") == "error":
+        return "failed"
+    if root["watch_enabled"]:
+        age = watcher.get("heartbeat_age_seconds")
+        if age is not None and age > 120:
+            return "stale"
+        if watcher.get("status") == "running":
+            return "watching"
+        return "watch_enabled"
+    return "watch_off"
 
 
 def _mail_profile_row(row: tuple[Any, ...]) -> dict[str, Any]:

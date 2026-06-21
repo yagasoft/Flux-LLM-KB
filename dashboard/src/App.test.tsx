@@ -17,6 +17,49 @@ const health = {
   recent_errors: ["ffprobe command not found"]
 };
 
+const crawl = {
+  roots: [
+    {
+      name: "docs",
+      root_path: "E:/Flux Docs",
+      enabled: true,
+      recursive: true,
+      watch_enabled: true,
+      trust_rank: 720,
+      include_globs: ["**/*.md"],
+      exclude_globs: ["private/**"],
+      max_inline_bytes: 131072,
+      heavy_threshold_bytes: 5242880
+    }
+  ],
+  root_summaries: [
+    {
+      name: "docs",
+      root_path: "E:/Flux Docs",
+      enabled: true,
+      recursive: true,
+      watch_enabled: true,
+      trust_rank: 720,
+      include_globs: ["**/*.md"],
+      exclude_globs: ["private/**"],
+      max_inline_bytes: 131072,
+      heavy_threshold_bytes: 5242880,
+      state: "watching",
+      watcher: { status: "running", heartbeat_age_seconds: 3 },
+      asset_counts: { total: 4, indexed: 3, queued: 1, duplicate_suppressed: 1, deleted: 0 },
+      job_counts: { pending: 1, blocked: 0, failed: 0, running: 0 },
+      latest_crawl: { status: "completed", files_seen: 4, files_changed: 1, jobs_queued: 1 },
+      recent_assets: [
+        { path: "README.md", file_kind: "text", status: "indexed", size_bytes: 1200 },
+        { path: "clip.mp4", file_kind: "video", status: "queued", size_bytes: 8200000 }
+      ],
+      recent_jobs: [{ id: "job-1", job_type: "corpus_extract_video", status: "blocked_missing_dependency", path: "clip.mp4" }],
+      recent_errors: ["ffprobe command not found"]
+    }
+  ],
+  status: { active_watch_roots: 1, disabled_watch_roots: 0, recent_errors: ["ffprobe command not found"] }
+};
+
 const mail = {
   enabled_profiles: 2,
   exported_messages: 10,
@@ -89,7 +132,7 @@ describe("Flux dashboard", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(health);
-      if (url === "/api/dashboard/crawl") return json({ roots: [], status: { active_watch_roots: 1, disabled_watch_roots: 2 } });
+      if (url === "/api/dashboard/crawl") return json(crawl);
       if (url === "/api/dashboard/jobs") return json({ jobs: [{ id: "job-1", job_type: "corpus_extract_pdf", status: "pending" }] });
       if (url === "/api/dashboard/retrieval-stats") return json({ retrieval: health.retrieval, duplicate_assets: 0 });
       if (url === "/api/mail/status") return json(mail);
@@ -108,6 +151,9 @@ describe("Flux dashboard", () => {
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
       }
+      if (url === "/api/crawl/roots") return json({ root: JSON.parse(String(init?.body)), sync: { files_seen: 0 } });
+      if (url === "/api/crawl/sync") return json({ root_name: JSON.parse(String(init?.body)).root_name ?? null, dry_run: JSON.parse(String(init?.body)).dry_run });
+      if (url === "/api/crawl/watch") return json({ updated: 1, watch_enabled: JSON.parse(String(init?.body)).enabled });
       if (url.endsWith("/enable") || url.endsWith("/disable")) return json({ status: "updated" });
       return json({});
     }));
@@ -117,15 +163,14 @@ describe("Flux dashboard", () => {
     vi.unstubAllGlobals();
   });
 
-  test("renders the operations console without primary raw JSON panels", async () => {
+  test("defaults to health and renders the operations console without primary raw JSON panels", async () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "System Health" })).toBeInTheDocument();
     expect(screen.getByText("PostgreSQL")).toBeInTheDocument();
-    expect(screen.getByText("Outlook COM host")).toBeInTheDocument();
-    expect(screen.getByRole("table", { name: "Mail profiles" })).toBeInTheDocument();
-    expect(screen.getByText("outlook-catchup")).toBeInTheDocument();
-    expect(screen.getByText("host_offline")).toBeInTheDocument();
+    expect(screen.getByText("Outlook Host")).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Mail profiles" })).not.toBeInTheDocument();
     expect(screen.queryByText(/"database"/)).not.toBeInTheDocument();
   });
 
@@ -133,6 +178,8 @@ describe("Flux dashboard", () => {
     const user = userEvent.setup();
     render(<App />);
 
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
     await screen.findByText("outlook-catchup");
     await user.click(screen.getByRole("button", { name: "Sync selected profile" }));
 
@@ -168,6 +215,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
     await user.click(screen.getByRole("button", { name: "Add Profile" }));
 
     expect(screen.getByRole("dialog", { name: "Add Mail Profile" })).toBeInTheDocument();
@@ -205,6 +253,81 @@ describe("Flux dashboard", () => {
       );
     });
     expect(await screen.findByText("Mail profile saved.")).toBeInTheDocument();
+  });
+
+  test("corpus tab can add a watched path with policy fields", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Corpus" }));
+    await user.click(screen.getByRole("button", { name: "Add Watched Path" }));
+
+    expect(screen.getByRole("dialog", { name: "Add Watched Path" })).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Root path"));
+    await user.type(screen.getByLabelText("Root path"), "E:/Client RFPs");
+    await user.clear(screen.getByLabelText("Root name"));
+    await user.type(screen.getByLabelText("Root name"), "client-rfps");
+    await user.clear(screen.getByLabelText("Include globs"));
+    await user.type(screen.getByLabelText("Include globs"), "**/*.pdf\n**/*.docx");
+    await user.clear(screen.getByLabelText("Exclude globs"));
+    await user.type(screen.getByLabelText("Exclude globs"), "private/**");
+    await user.clear(screen.getByLabelText("Inline size bytes"));
+    await user.type(screen.getByLabelText("Inline size bytes"), "131072");
+    await user.clear(screen.getByLabelText("Heavy file threshold bytes"));
+    await user.type(screen.getByLabelText("Heavy file threshold bytes"), "5242880");
+    await user.click(screen.getByRole("button", { name: "Save watched path" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/crawl/roots",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            name: "client-rfps",
+            root_path: "E:/Client RFPs",
+            recursive: true,
+            watch_enabled: true,
+            initial_crawl: true,
+            trust_rank: 500,
+            include_globs: ["**/*.pdf", "**/*.docx"],
+            exclude_globs: ["private/**"],
+            max_inline_bytes: 131072,
+            heavy_threshold_bytes: 5242880
+          })
+        })
+      );
+    });
+  });
+
+  test("corpus root actions call scoped sync, dry-run, and watch APIs", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Corpus" }));
+    expect((await screen.findAllByText("E:/Flux Docs")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("watching").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("clip.mp4").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Sync docs" }));
+    await user.click(screen.getByRole("button", { name: "Dry run docs" }));
+    await user.click(screen.getByRole("button", { name: "Disable watch docs" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/crawl/sync",
+        expect.objectContaining({ method: "POST", body: JSON.stringify({ root_name: "docs", dry_run: false }) })
+      );
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/crawl/sync",
+        expect.objectContaining({ method: "POST", body: JSON.stringify({ root_name: "docs", dry_run: true }) })
+      );
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/crawl/watch",
+        expect.objectContaining({ method: "POST", body: JSON.stringify({ root_name: "docs", enabled: false }) })
+      );
+    });
   });
 
   test("settings editor saves live settings and confirms reindex-class changes", async () => {

@@ -38,6 +38,11 @@
   - audio/video: metadata via local probing, sidecar transcript reuse, optional
     local transcription/frame sampling in deferred jobs
   - archives/binaries: metadata-only unless explicitly enabled later
+- MoHESR-inspired local media stages, generalized for Flux: draw.io/SVG
+  structural extraction, image hash cache reuse, decorative-image skips,
+  PaddleOCR/Tesseract local OCR, optional local Ollama/ONNX vision
+  descriptions, faster-whisper audio/video transcription, stale lock recovery,
+  sidecar transcript indexing, and a separate semantic media backfill phase.
 - Background processing with low-priority bounded workers, `FOR UPDATE SKIP LOCKED`
   job claiming, retry/cooldown tracking, and no cloud/provider calls by default.
 - Duplicate suppression by content hash while preserving all observed paths and
