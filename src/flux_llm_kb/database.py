@@ -18,6 +18,7 @@ from .scoring import reciprocal_rank_fusion
 
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@localhost:5432/flux_llm_kb"
+_MIGRATION_ADVISORY_LOCK_ID = 570_221_876_500_815
 
 
 @dataclass(frozen=True)
@@ -35,28 +36,38 @@ def run_migrations(url: str | None = None) -> list[str]:
     applied: list[str] = []
     with psycopg.connect(url or database_url(), autocommit=True) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version integer PRIMARY KEY,
-                    name text NOT NULL,
-                    applied_at timestamptz NOT NULL DEFAULT now()
-                )
-                """
-            )
-            for migration in load_migrations():
+            cur.execute("SELECT pg_advisory_lock(%s)", (_MIGRATION_ADVISORY_LOCK_ID,))
+            try:
                 cur.execute(
-                    "SELECT 1 FROM schema_migrations WHERE version = %s",
-                    (migration.version,),
+                    """
+                    CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version integer PRIMARY KEY,
+                        name text NOT NULL,
+                        applied_at timestamptz NOT NULL DEFAULT now()
+                    )
+                    """
                 )
-                if cur.fetchone():
-                    continue
-                cur.execute(migration.sql)
-                cur.execute(
-                    "INSERT INTO schema_migrations (version, name) VALUES (%s, %s)",
-                    (migration.version, migration.name),
-                )
-                applied.append(migration.name)
+                for migration in load_migrations():
+                    cur.execute(
+                        "SELECT 1 FROM schema_migrations WHERE version = %s",
+                        (migration.version,),
+                    )
+                    if cur.fetchone():
+                        continue
+                    cur.execute(migration.sql)
+                    cur.execute(
+                        """
+                        INSERT INTO schema_migrations (version, name)
+                        VALUES (%s, %s)
+                        ON CONFLICT (version) DO NOTHING
+                        RETURNING version
+                        """,
+                        (migration.version, migration.name),
+                    )
+                    if cur.fetchone():
+                        applied.append(migration.name)
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (_MIGRATION_ADVISORY_LOCK_ID,))
     return applied
 
 

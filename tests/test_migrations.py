@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from flux_llm_kb import database
+from flux_llm_kb.migrations import Migration
 from flux_llm_kb.migrations import load_migrations
 
 
@@ -27,3 +29,53 @@ def test_load_migrations_returns_ordered_sql_files():
     assert any("CREATE TABLE IF NOT EXISTS outlook_host_state" in item.sql for item in migrations)
     assert any("sync_interval_seconds" in item.sql for item in migrations)
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
+
+
+def test_run_migrations_uses_advisory_lock_and_idempotent_insert(monkeypatch):
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=None):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT 1 FROM schema_migrations" in sql:
+                return None
+            if "RETURNING version" in sql:
+                return (1,)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(
+        database,
+        "load_migrations",
+        lambda: [Migration(version=1, name="0001_initial", path="0001_initial.sql", sql="SELECT 1")],
+    )
+
+    assert database.run_migrations("postgresql://test") == ["0001_initial"]
+
+    statements = [item[0] for item in executed]
+    assert "SELECT pg_advisory_lock(%s)" in statements[0]
+    assert any("ON CONFLICT (version) DO NOTHING" in statement for statement in statements)
+    assert statements[-1] == "SELECT pg_advisory_unlock(%s)"
