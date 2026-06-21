@@ -36,7 +36,11 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     monkeypatch.setattr(
         health,
         "remote_status",
-        lambda: {"status": "running", "codex": {"status": "ready", "installed": True}},
+        lambda: {
+            "status": "running",
+            "codex": {"status": "ready", "installed": True},
+            "runtime": {"git": {"ok": True, "message": "host git", "required": True}},
+        },
     )
     monkeypatch.setattr(health, "codex_status", lambda: {"status": "missing"})
 
@@ -49,6 +53,7 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["recent_errors"] == ["bad file"]
     assert "extractors" in payload
     assert payload["codex"]["status"] == "ready"
+    assert payload["runtime"]["git"]["message"] == "host git"
 
 
 def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):

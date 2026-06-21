@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import platform
+import shutil
+import subprocess
+import sys
 import time
 from typing import Any
 from urllib import error, request
@@ -41,6 +44,7 @@ def status_payload() -> dict[str, Any]:
         "process_id": os.getpid(),
         "browse_supported": _native_browse_supported(),
         "codex": _host_codex_status(),
+        "runtime": _host_runtime_checks(),
         "time": time.time(),
     }
 
@@ -246,6 +250,48 @@ def _host_codex_status() -> dict[str, Any]:
         return codex_status()
     except Exception as exc:  # pragma: no cover - defensive status payload
         return {"status": "unknown", "message": str(exc)}
+
+
+def _host_runtime_checks() -> dict[str, Any]:
+    return {
+        "python": {
+            "ok": sys.version_info >= (3, 11),
+            "message": platform.python_version(),
+            "required": True,
+        },
+        "docker": _host_docker_check(required=False),
+        "git": _host_command_check("git", "Git source control", required=True),
+        "gh": _host_command_check("gh", "GitHub CLI", required=False),
+    }
+
+
+def _host_command_check(command: str, description: str, *, required: bool = True) -> dict[str, Any]:
+    path = shutil.which(command)
+    return {
+        "ok": path is not None,
+        "message": path or f"{description} command not found",
+        "required": required,
+    }
+
+
+def _host_docker_check(*, required: bool = True) -> dict[str, Any]:
+    path = shutil.which("docker")
+    if path is None:
+        return {"ok": False, "message": "Docker command not found", "required": required}
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - environment-specific
+        return {"ok": False, "message": str(exc), "required": required}
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "Docker Compose unavailable"
+        return {"ok": False, "message": message, "required": required}
+    return {"ok": True, "message": result.stdout.strip() or path, "required": required}
 
 
 def _path_style(path: str) -> str:

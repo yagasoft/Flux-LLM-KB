@@ -56,6 +56,11 @@ def test_host_path_validator_rejects_relative_path():
 def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
     monkeypatch.setattr(host_agent, "_native_browse_supported", lambda: True)
     monkeypatch.setattr(
+        host_agent,
+        "_host_runtime_checks",
+        lambda: {"git": {"ok": True, "message": "git", "required": True}},
+    )
+    monkeypatch.setattr(
         "flux_llm_kb.codex_integration.codex_status",
         lambda: {"status": "ready", "installed": True},
     )
@@ -66,3 +71,4 @@ def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
     assert result["browse_supported"] is True
     assert "platform" in result
     assert result["codex"]["status"] == "ready"
+    assert result["runtime"]["git"]["ok"] is True

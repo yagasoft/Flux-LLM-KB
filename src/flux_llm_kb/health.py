@@ -58,14 +58,20 @@ def collect_dashboard_payload() -> dict[str, Any]:
     checks = doctor_payload()["checks"]
     watcher_summary = summarize_watcher_staleness(crawl.get("watchers", []))
     host_agent_status = remote_status()
+    host_runtime = host_agent_status.get("runtime") if isinstance(host_agent_status, dict) else {}
+    runtime_checks = {
+        "python": checks["python"],
+        "docker": checks["docker"],
+        "git": checks["git"],
+        "postgresql": checks["postgresql"],
+    }
+    if isinstance(host_runtime, dict):
+        for key in ("python", "docker", "git"):
+            if key in host_runtime:
+                runtime_checks[key] = host_runtime[key]
     return {
         "database": {"ok": db_status.ok, "message": db_status.message},
-        "runtime": {
-            "python": checks["python"],
-            "docker": checks["docker"],
-            "git": checks["git"],
-            "postgresql": checks["postgresql"],
-        },
+        "runtime": runtime_checks,
         "watcher": {
             "active_roots": crawl["active_watch_roots"],
             "disabled_roots": crawl["disabled_watch_roots"],
