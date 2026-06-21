@@ -60,9 +60,28 @@ def create_app():
         max_inline_bytes: int | None = None
         heavy_threshold_bytes: int | None = None
 
+    class CrawlRootUpdateRequest(BaseModel):
+        name: str
+        root_path: str
+        enabled: bool = True
+        recursive: bool = True
+        watch_enabled: bool = True
+        trust_rank: int = 500
+        include_globs: list[str] = Field(default_factory=list)
+        exclude_globs: list[str] = Field(default_factory=list)
+        glob_mode: str = "extend"
+        max_inline_bytes: int | None = None
+        heavy_threshold_bytes: int | None = None
+
     class WatchRequest(BaseModel):
         root_name: str | None = None
         enabled: bool
+
+    class CrawlBackfillRequest(BaseModel):
+        kind: str = "all"
+        limit: int = 10
+        workers: int = 1
+        root_name: str | None = None
 
     class SettingUpdateRequest(BaseModel):
         value: object
@@ -206,9 +225,72 @@ def create_app():
                 payload["sync"] = service.sync_corpus(root_name=root["name"], dry_run=request.dry_run)
         return payload
 
+    @app.patch("/api/crawl/roots/{root_id}")
+    def crawl_root_update(root_id: str, request: CrawlRootUpdateRequest = Body(...)):
+        from . import database
+        from .settings import SettingsService
+
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="root name is required")
+        root_path_text = request.root_path.strip()
+        validation = _validate_root_path(root_path_text)
+        if validation["status"] != "ok":
+            raise HTTPException(status_code=400, detail=validation["message"])
+
+        settings = SettingsService()
+        max_inline_bytes = request.max_inline_bytes
+        if max_inline_bytes is None:
+            max_inline_bytes = int(settings.resolve("crawler.max_inline_bytes").raw_value)
+        heavy_threshold_bytes = request.heavy_threshold_bytes
+        if heavy_threshold_bytes is None:
+            heavy_threshold_bytes = int(settings.resolve("crawler.heavy_threshold_bytes").raw_value)
+
+        if max_inline_bytes <= 0 or heavy_threshold_bytes <= 0:
+            raise HTTPException(status_code=400, detail="size thresholds must be positive")
+
+        try:
+            return database.update_monitored_root(
+                root_id=root_id,
+                name=name,
+                root_path=root_path_text,
+                enabled=request.enabled,
+                recursive=request.recursive,
+                watch_enabled=request.watch_enabled,
+                trust_rank=request.trust_rank,
+                include_globs=[item.strip() for item in request.include_globs if item.strip()],
+                exclude_globs=[item.strip() for item in request.exclude_globs if item.strip()],
+                glob_mode=request.glob_mode,
+                max_inline_bytes=max_inline_bytes,
+                heavy_threshold_bytes=heavy_threshold_bytes,
+                metadata={
+                    "source": "dashboard",
+                    "host_access": "host_agent" if validation.get("host_agent") else "direct",
+                    "host_validation": validation,
+                },
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.delete("/api/crawl/roots/{root_id}")
+    def crawl_root_delete(root_id: str, purge_index: bool = True):
+        from . import database
+
+        try:
+            return database.delete_monitored_root(root_id=root_id, purge_index=purge_index, actor="dashboard")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/crawl/jobs")
     def crawl_jobs(limit: int = 50):
         return collect_jobs_payload(limit=limit)
+
+    @app.post("/api/crawl/backfill")
+    def crawl_backfill(request: CrawlBackfillRequest = Body(...)):
+        kwargs: dict[str, object] = {"kind": request.kind, "limit": request.limit, "workers": request.workers}
+        if request.root_name is not None:
+            kwargs["root_name"] = request.root_name
+        return service.run_corpus_backfill(**kwargs)
 
     @app.post("/api/crawl/watch")
     def crawl_watch(request: WatchRequest = Body(...)):

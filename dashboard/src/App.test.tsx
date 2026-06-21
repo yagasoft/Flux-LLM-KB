@@ -16,7 +16,14 @@ const health = {
   retrieval: { episodes: 9, asset_chunks: 12, embeddings: 40 },
   recent_errors: ["ffprobe command not found"],
   host_agent: { status: "running", browse_supported: true },
-  codex: { status: "configured_not_installed", configured: true, installed: false, hooks_available: true }
+  codex: {
+    status: "configured_not_installed",
+    configured: true,
+    installed: false,
+    hooks_available: true,
+    discoverable: false,
+    restart_required: true
+  }
 };
 
 const crawl = {
@@ -126,6 +133,17 @@ const settings = [
     read_only: false,
     affected_components: ["retrieval", "worker"],
     description: "Embedding vector dimensions."
+  },
+  {
+    key: "dashboard.poll_interval_seconds",
+    value: 1,
+    source: "default",
+    sensitive: false,
+    category: "dashboard",
+    apply_mode: "live",
+    read_only: false,
+    affected_components: ["dashboard"],
+    description: "Dashboard polling interval."
   }
 ];
 
@@ -156,6 +174,13 @@ describe("Flux dashboard", () => {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
       }
       if (url === "/api/crawl/roots") return json({ root: JSON.parse(String(init?.body)), sync: { files_seen: 0 } });
+      if (url.startsWith("/api/crawl/roots/") && init?.method === "PATCH") {
+        return json({ id: url.split("/").pop(), ...JSON.parse(String(init.body)) });
+      }
+      if (url.startsWith("/api/crawl/roots/") && init?.method === "DELETE") {
+        return json({ id: url.split("/").pop()?.split("?")[0], deleted: true, purged_index: true });
+      }
+      if (url === "/api/crawl/backfill") return json({ completed: 1, blocked: 0, retried: 0 });
       if (url === "/api/crawl/sync") return json({ root_name: JSON.parse(String(init?.body)).root_name ?? null, dry_run: JSON.parse(String(init?.body)).dry_run });
       if (url === "/api/crawl/watch") return json({ updated: 1, watch_enabled: JSON.parse(String(init?.body)).enabled });
       if (url.endsWith("/enable") || url.endsWith("/disable")) return json({ status: "updated" });
@@ -165,6 +190,9 @@ describe("Flux dashboard", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    localStorage.clear();
+    window.history.replaceState(null, "", "/dashboard");
+    vi.useRealTimers();
   });
 
   test("defaults to health and renders the operations console without primary raw JSON panels", async () => {
@@ -176,8 +204,31 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Outlook Host")).toBeInTheDocument();
     expect(screen.getByText("Host Agent")).toBeInTheDocument();
     expect(screen.getByText("Codex Integration")).toBeInTheDocument();
+    expect(screen.getByText("Codex restart required")).toBeInTheDocument();
+    expect(screen.getByText(/Auto-refresh every 1s/i)).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Mail profiles" })).not.toBeInTheDocument();
     expect(screen.queryByText(/"database"/)).not.toBeInTheDocument();
+  });
+
+  test("restores the last tab and selected root after refresh", async () => {
+    localStorage.setItem("flux-dashboard-state", JSON.stringify({ activeTab: "corpus", selectedRootName: "docs" }));
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Corpus Monitor" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Root Details" })).toBeInTheDocument();
+    expect(screen.getAllByText("docs").length).toBeGreaterThan(0);
+  });
+
+  test("auto-refreshes from backend polling without a manual page refresh", async () => {
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    expect(fetch).toHaveBeenCalledWith("/api/dashboard/health");
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(14);
+    }, { timeout: 2500 });
+    expect(screen.getByText(/Last updated/i)).toBeInTheDocument();
   });
 
   test("manual Outlook sync creates a host request", async () => {
@@ -339,6 +390,47 @@ describe("Flux dashboard", () => {
         "/api/crawl/watch",
         expect.objectContaining({ method: "POST", body: JSON.stringify({ root_name: "docs", enabled: false }) })
       );
+    });
+  });
+
+  test("corpus root can be edited, backfilled, and deleted with purge confirmation", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Corpus" }));
+    expect((await screen.findAllByText("docs")).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Edit docs" }));
+    expect(screen.getByRole("dialog", { name: "Edit Watched Path" })).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Root name"));
+    await user.type(screen.getByLabelText("Root name"), "docs-edited");
+    await user.click(screen.getByRole("button", { name: "Save watched path" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/crawl/roots/docs",
+        expect.objectContaining({
+          method: "PATCH",
+          body: expect.stringContaining("docs-edited")
+        })
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Run backfill for docs" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/crawl/backfill",
+        expect.objectContaining({ method: "POST", body: JSON.stringify({ kind: "all", limit: 10, workers: 1, root_name: "docs" }) })
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "Delete docs" }));
+    expect(screen.getByRole("dialog", { name: "Delete watched path" })).toHaveTextContent("does not delete files from disk");
+    await user.click(screen.getByRole("button", { name: "Delete watched path and purge index" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/api/crawl/roots/docs?purge_index=true", expect.objectContaining({ method: "DELETE" }));
     });
   });
 

@@ -144,6 +144,86 @@ def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_p
     assert "directory does not exist" in response.json()["detail"]
 
 
+def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path):
+    from flux_llm_kb.rest_api import create_app
+
+    captured = {}
+
+    def fake_update_monitored_root(**kwargs):
+        captured.update(kwargs)
+        return {
+            "id": kwargs["root_id"],
+            "name": kwargs["name"],
+            "root_path": kwargs["root_path"],
+            "watch_enabled": kwargs["watch_enabled"],
+            "include_globs": kwargs["include_globs"],
+            "exclude_globs": kwargs["exclude_globs"],
+            "metadata": kwargs["metadata"],
+        }
+
+    monkeypatch.setattr(database, "update_monitored_root", fake_update_monitored_root)
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.patch(
+        "/api/crawl/roots/root-1",
+        json={
+            "name": "docs-edited",
+            "root_path": str(tmp_path),
+            "watch_enabled": False,
+            "recursive": True,
+            "trust_rank": 640,
+            "include_globs": ["**/*.md"],
+            "exclude_globs": ["tmp/**"],
+            "glob_mode": "override",
+            "max_inline_bytes": 262144,
+            "heavy_threshold_bytes": 10485760,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "docs-edited"
+    assert captured["root_id"] == "root-1"
+    assert captured["watch_enabled"] is False
+    assert captured["metadata"]["source"] == "dashboard"
+
+
+def test_crawl_root_delete_endpoint_purges_index(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "delete_monitored_root",
+        lambda **kwargs: calls.append(kwargs)
+        or {"id": kwargs["root_id"], "deleted": True, "purged_index": kwargs["purge_index"]},
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.delete("/api/crawl/roots/root-1?purge_index=true")
+
+    assert response.status_code == 200
+    assert response.json() == {"id": "root-1", "deleted": True, "purged_index": True}
+    assert calls == [{"root_id": "root-1", "purge_index": True, "actor": "dashboard"}]
+
+
+def test_crawl_backfill_endpoint_runs_worker_once(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    class FakeService:
+        def run_corpus_backfill(self, **kwargs):
+            return {"backfill": kwargs, "completed": 2}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post("/api/crawl/backfill", json={"kind": "text", "limit": 3, "workers": 1})
+
+    assert response.status_code == 200
+    assert response.json()["backfill"] == {"kind": "text", "limit": 3, "workers": 1}
+
+
 def test_post_body_models_are_bound_from_json(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

@@ -150,10 +150,22 @@ class KnowledgeService:
             watcher.poll_once()
             time.sleep(interval_seconds)
 
-    def run_corpus_backfill(self, *, kind: str = "all", limit: int = 10, workers: int = 1) -> dict[str, Any]:
+    def run_corpus_backfill(
+        self,
+        *,
+        kind: str = "all",
+        limit: int = 10,
+        workers: int = 1,
+        root_name: str | None = None,
+    ) -> dict[str, Any]:
         from . import worker
 
-        claimed = database.claim_corpus_jobs(limit=limit, worker_id=f"flux-kb-backfill-{workers}")
+        cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
+        claimed = database.claim_corpus_jobs(
+            limit=limit,
+            worker_id=f"flux-kb-backfill-{workers}",
+            root_name=root_name,
+        )
         filtered = [
             job
             for job in claimed
@@ -192,21 +204,59 @@ class KnowledgeService:
             event_type="corpus.backfill",
             details={
                 "kind": kind,
+                "root_name": root_name,
                 "claimed": len(claimed),
                 "completed": completed,
                 "blocked": blocked,
                 "retried": retried,
+                "cancelled_duplicate": cancelled["cancelled"],
                 "workers": workers,
             },
         )
         return {
             "kind": kind,
+            "root_name": root_name,
             "claimed": len(claimed),
             "completed": completed,
             "blocked": blocked,
             "retried": retried,
+            "cancelled_duplicate": cancelled["cancelled"],
             "jobs": filtered,
         }
+
+    def run_corpus_worker(
+        self,
+        *,
+        kind: str = "all",
+        limit: int = 10,
+        workers: int = 1,
+        interval_seconds: float = 5.0,
+        once: bool = False,
+        root_name: str | None = None,
+    ) -> dict[str, Any]:
+        runs = 0
+        last_result: dict[str, Any] | None = None
+        while True:
+            runs += 1
+            last_result = self.run_corpus_backfill(
+                kind=kind,
+                limit=limit,
+                workers=workers,
+                root_name=root_name,
+            )
+            if once:
+                return {
+                    "status": "completed_once",
+                    "once": True,
+                    "kind": kind,
+                    "limit": limit,
+                    "workers": workers,
+                    "interval_seconds": interval_seconds,
+                    "root_name": root_name,
+                    "runs": runs,
+                    "last_result": last_result,
+                }
+            time.sleep(interval_seconds)
 
     def _handle_watch_event(self, event: WatchEvent) -> None:
         try:

@@ -51,3 +51,95 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
 
     assert jobs[0]["id"] == "job-1"
     assert any("FOR UPDATE SKIP LOCKED" in sql for sql in executed_sql)
+
+
+def test_delete_monitored_root_purges_index_rows_and_jobs(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("root-1", "docs")
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.delete_monitored_root(root_id="root-1", purge_index=True, actor="tester")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"id": "root-1", "name": "docs", "deleted": True, "purged_index": True}
+    assert "UPDATE monitored_roots" in sql
+    assert "DELETE FROM embeddings" in sql
+    assert "DELETE FROM asset_chunks" in sql
+    assert "DELETE FROM source_assets" in sql
+    assert "DELETE FROM capture_jobs" in sql
+    assert "DELETE FROM crawl_runs" in sql
+    assert "DELETE FROM watcher_state" in sql
+    assert "DELETE FROM monitored_roots" in sql
+    assert "monitored_root.deleted" in sql
+
+
+def test_cancel_duplicate_corpus_jobs_marks_pending_duplicate_jobs_terminal(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (2,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.cancel_duplicate_corpus_jobs(root_name="docs")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"root_name": "docs", "cancelled": 2}
+    assert "cancelled_duplicate" in sql
+    assert "duplicate_suppressed" in sql
+    assert "payload->>'root_name' = %s" in sql

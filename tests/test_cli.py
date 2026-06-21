@@ -83,3 +83,87 @@ def test_cli_crawl_add_persists_disabled_watch_by_default(monkeypatch, tmp_path,
     assert payload["name"] == "docs"
     assert payload["root_path"] == str(root.resolve())
     assert payload["watch_enabled"] is False
+
+
+def test_cli_crawl_edit_updates_root(monkeypatch, tmp_path, capsys):
+    calls = {}
+    monkeypatch.setattr(
+        cli.database,
+        "update_monitored_root",
+        lambda **kwargs: calls.update(kwargs)
+        or {"id": kwargs["root_id"], "name": kwargs["name"], "root_path": kwargs["root_path"]},
+    )
+    monkeypatch.setattr(
+        cli.database,
+        "get_monitored_root_by_identifier",
+        lambda _root: {
+            "id": "root-1",
+            "name": "docs",
+            "root_path": str(tmp_path),
+            "enabled": True,
+            "recursive": True,
+            "watch_enabled": True,
+            "trust_rank": 500,
+            "include_globs": [],
+            "exclude_globs": [],
+            "glob_mode": "extend",
+            "max_inline_bytes": 262144,
+            "heavy_threshold_bytes": 10485760,
+        },
+    )
+
+    assert (
+        cli.main(
+            [
+                "crawl",
+                "edit",
+                "root-1",
+                "--name",
+                "docs-edited",
+                "--path",
+                str(tmp_path),
+                "--disable-watch",
+                "--glob-mode",
+                "override",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["name"] == "docs-edited"
+    assert calls["root_id"] == "root-1"
+    assert calls["watch_enabled"] is False
+    assert calls["glob_mode"] == "override"
+
+
+def test_cli_crawl_delete_requires_and_passes_purge_index(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(
+        cli.database,
+        "delete_monitored_root",
+        lambda **kwargs: calls.append(kwargs)
+        or {"id": kwargs["root_id"], "deleted": True, "purged_index": kwargs["purge_index"]},
+    )
+
+    assert cli.main(["crawl", "delete", "root-1", "--purge-index"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["deleted"] is True
+    assert calls == [{"root_id": "root-1", "purge_index": True, "actor": "cli"}]
+
+
+def test_cli_crawl_worker_run_once_invokes_backfill_loop(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    class FakeService:
+        def run_corpus_worker(self, **kwargs):
+            return {"worker": kwargs}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["crawl", "worker", "run", "--once", "--limit", "2", "--interval", "0.1"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["worker"]["once"] is True
+    assert payload["worker"]["limit"] == 2

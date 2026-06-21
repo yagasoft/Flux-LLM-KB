@@ -511,6 +511,180 @@ def get_monitored_root(name: str, *, url: str | None = None) -> dict[str, Any] |
             return _root_row(row) if row else None
 
 
+def get_monitored_root_by_identifier(identifier: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, name, root_path, enabled, recursive, watch_enabled,
+                       trust_rank, include_globs, exclude_globs, glob_mode, max_inline_bytes,
+                       heavy_threshold_bytes, metadata
+                FROM monitored_roots
+                WHERE id::text = %s OR name = %s
+                """,
+                (identifier, identifier),
+            )
+            row = cur.fetchone()
+            return _root_row(row) if row else None
+
+
+def update_monitored_root(
+    *,
+    root_id: str,
+    name: str,
+    root_path: str | Path,
+    enabled: bool = True,
+    recursive: bool = True,
+    watch_enabled: bool = False,
+    trust_rank: int = 500,
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    glob_mode: str = "extend",
+    max_inline_bytes: int = 256 * 1024,
+    heavy_threshold_bytes: int = 10 * 1024 * 1024,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    resolved_path = _normalize_root_path(root_path)
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text, name FROM monitored_roots WHERE id::text = %s OR name = %s", (root_id, root_id))
+            current = cur.fetchone()
+            if not current:
+                raise ValueError(f"monitored root not found: {root_id}")
+            actual_root_id, previous_name = current
+            cur.execute(
+                """
+                UPDATE monitored_roots
+                SET name = %s,
+                    root_path = %s,
+                    enabled = %s,
+                    recursive = %s,
+                    watch_enabled = %s,
+                    trust_rank = %s,
+                    include_globs = %s,
+                    exclude_globs = %s,
+                    glob_mode = %s,
+                    max_inline_bytes = %s,
+                    heavy_threshold_bytes = %s,
+                    metadata = metadata || %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text, name, root_path, enabled, recursive, watch_enabled,
+                          trust_rank, include_globs, exclude_globs, glob_mode, max_inline_bytes,
+                          heavy_threshold_bytes, metadata
+                """,
+                (
+                    name,
+                    resolved_path,
+                    enabled,
+                    recursive,
+                    watch_enabled,
+                    trust_rank,
+                    include_globs or [],
+                    exclude_globs or [],
+                    glob_mode,
+                    max_inline_bytes,
+                    heavy_threshold_bytes,
+                    _json(metadata or {}),
+                    actual_root_id,
+                ),
+            )
+            row = cur.fetchone()
+            if previous_name != name:
+                cur.execute(
+                    """
+                    UPDATE capture_jobs
+                    SET payload = jsonb_set(payload, '{root_name}', to_jsonb(%s::text), true),
+                        updated_at = now()
+                    WHERE job_type LIKE 'corpus_%%'
+                      AND payload->>'root_name' = %s
+                    """,
+                    (name, previous_name),
+                )
+            _upsert_watcher_state(cur, actual_root_id, "enabled" if watch_enabled else "disabled")
+            return _root_row(row)
+
+
+def delete_monitored_root(
+    *,
+    root_id: str,
+    purge_index: bool = True,
+    actor: str = "system",
+    url: str | None = None,
+) -> dict[str, Any]:
+    if not purge_index:
+        raise ValueError("deleting a monitored root requires purge_index=true")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text, name FROM monitored_roots WHERE id::text = %s OR name = %s", (root_id, root_id))
+            row = cur.fetchone()
+            if not row:
+                return {"id": root_id, "name": None, "deleted": False, "purged_index": purge_index}
+            actual_root_id, name = row
+            cur.execute(
+                """
+                UPDATE monitored_roots
+                SET enabled = false, watch_enabled = false, updated_at = now()
+                WHERE id = %s
+                """,
+                (actual_root_id,),
+            )
+            cur.execute(
+                """
+                UPDATE source_assets
+                SET canonical_asset_id = NULL, updated_at = now()
+                WHERE canonical_asset_id IN (
+                    SELECT id FROM source_assets WHERE root_id = %s
+                )
+                """,
+                (actual_root_id,),
+            )
+            cur.execute(
+                """
+                DELETE FROM embeddings
+                WHERE owner_table = 'asset_chunks'
+                  AND owner_id IN (
+                    SELECT c.id
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    WHERE a.root_id = %s
+                  )
+                """,
+                (actual_root_id,),
+            )
+            cur.execute(
+                """
+                DELETE FROM asset_chunks
+                WHERE asset_id IN (SELECT id FROM source_assets WHERE root_id = %s)
+                """,
+                (actual_root_id,),
+            )
+            cur.execute("DELETE FROM source_assets WHERE root_id = %s", (actual_root_id,))
+            cur.execute(
+                """
+                DELETE FROM capture_jobs
+                WHERE job_type LIKE 'corpus_%%'
+                  AND payload->>'root_name' = %s
+                """,
+                (name,),
+            )
+            cur.execute("DELETE FROM crawl_runs WHERE root_id = %s", (actual_root_id,))
+            cur.execute("DELETE FROM watcher_state WHERE root_id = %s", (actual_root_id,))
+            cur.execute("DELETE FROM monitored_roots WHERE id = %s", (actual_root_id,))
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, actor, target_table, target_id, details)
+                VALUES ('monitored_root.deleted', %s, 'monitored_roots', %s, %s::jsonb)
+                """,
+                (actor, actual_root_id, _json({"name": name, "purged_index": purge_index})),
+            )
+            return {"id": actual_root_id, "name": name, "deleted": True, "purged_index": purge_index}
+
+
 def set_watch_enabled(
     *, root_name: str | None = None, enabled: bool, url: str | None = None
 ) -> dict[str, Any]:
@@ -653,7 +827,7 @@ def persist_crawl_plan(
                 asset_id = cur.fetchone()[0]
                 if changed_asset:
                     chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id else asset.chunks)
-                    if asset.extraction_tier == "deferred":
+                    if asset.extraction_tier == "deferred" and not canonical_id:
                         cur.execute(
                             """
                             INSERT INTO capture_jobs (job_type, payload)
@@ -665,6 +839,8 @@ def persist_crawl_plan(
                             ),
                         )
                         jobs_queued += 1
+                    elif asset.extraction_tier == "deferred" and canonical_id:
+                        _cancel_duplicate_corpus_job_for_asset(cur, root_name=root_name, relative_path=asset.relative_path)
 
             _mark_deleted_assets(cur, root_id, seen_paths, plan)
             deleted = cur.rowcount
@@ -709,6 +885,8 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
             failed_jobs = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status = 'blocked_missing_dependency'")
             blocked_jobs = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status = 'cancelled_duplicate'")
+            duplicate_jobs = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM source_assets WHERE canonical_asset_id IS NOT NULL AND deleted_at IS NULL")
             duplicate_assets = cur.fetchone()[0]
             cur.execute(
@@ -760,6 +938,7 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
                 "pending_jobs": pending_jobs,
                 "failed_jobs": failed_jobs,
                 "blocked_jobs": blocked_jobs,
+                "duplicate_jobs": duplicate_jobs,
                 "duplicate_assets": duplicate_assets,
                 "recent_errors": watcher_errors + job_errors,
                 "watchers": watchers,
@@ -854,14 +1033,61 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
             ]
 
 
-def claim_corpus_jobs(
-    *, limit: int = 1, worker_id: str = "flux-kb-worker", url: str | None = None
-) -> list[dict[str, Any]]:
+def cancel_duplicate_corpus_jobs(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
     psycopg = _load_psycopg()
+    root_filter = "AND payload->>'root_name' = %s" if root_name else ""
+    params: tuple[Any, ...] = (root_name,) if root_name else ()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
+                WITH cancelled AS (
+                    UPDATE capture_jobs job
+                    SET status = 'cancelled_duplicate',
+                        last_error = 'duplicate_suppressed',
+                        locked_at = NULL,
+                        locked_by = NULL,
+                        updated_at = now()
+                    WHERE job.job_type LIKE 'corpus_%%'
+                      AND job.status IN ('pending', 'running')
+                      {root_filter}
+                      AND EXISTS (
+                          SELECT 1
+                          FROM source_assets asset
+                          JOIN monitored_roots root ON root.id = asset.root_id
+                          WHERE root.name = job.payload->>'root_name'
+                            AND asset.path = job.payload->>'path'
+                            AND asset.canonical_asset_id IS NOT NULL
+                            AND asset.deleted_at IS NULL
+                            AND asset.extraction_status = 'duplicate_suppressed'
+                      )
+                    RETURNING 1
+                )
+                SELECT count(*) FROM cancelled
+                """,
+                params,
+            )
+            return {"root_name": root_name, "cancelled": int(cur.fetchone()[0] or 0)}
+
+
+def claim_corpus_jobs(
+    *,
+    limit: int = 1,
+    worker_id: str = "flux-kb-worker",
+    root_name: str | None = None,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    root_filter = "AND payload->>'root_name' = %s" if root_name else ""
+    params: tuple[Any, ...]
+    if root_name:
+        params = (worker_id, root_name, max(1, min(limit, 100)))
+    else:
+        params = (worker_id, max(1, min(limit, 100)))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
                 UPDATE capture_jobs
                 SET status = 'running',
                     attempts = attempts + 1,
@@ -874,13 +1100,14 @@ def claim_corpus_jobs(
                     WHERE job_type LIKE 'corpus_%%'
                       AND status = 'pending'
                       AND next_attempt_at <= now()
+                      {root_filter}
                     ORDER BY created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
                 RETURNING id::text, job_type, status, payload, attempts, last_error
                 """,
-                (worker_id, max(1, min(limit, 100))),
+                params,
             )
             return [
                 {
@@ -2079,7 +2306,8 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
             count(*) FILTER (WHERE status = 'running') AS running,
             count(*) FILTER (WHERE status = 'blocked_missing_dependency') AS blocked,
             count(*) FILTER (WHERE status = 'failed') AS failed,
-            count(*) FILTER (WHERE status = 'completed') AS completed
+            count(*) FILTER (WHERE status = 'completed') AS completed,
+            count(*) FILTER (WHERE status = 'cancelled_duplicate') AS duplicate_suppressed
         FROM capture_jobs
         WHERE job_type LIKE 'corpus_%%'
           AND payload->>'root_name' = %s
@@ -2087,7 +2315,7 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
         (root_name,),
     )
     row = cur.fetchone()
-    keys = ["pending", "running", "blocked", "failed", "completed"]
+    keys = ["pending", "running", "blocked", "failed", "completed", "duplicate_suppressed"]
     return {key: int(row[index] or 0) for index, key in enumerate(keys)}
 
 
@@ -2333,6 +2561,24 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
         )
         inserted += 1
     return inserted
+
+
+def _cancel_duplicate_corpus_job_for_asset(cur: Any, *, root_name: str, relative_path: str) -> None:
+    cur.execute(
+        """
+        UPDATE capture_jobs
+        SET status = 'cancelled_duplicate',
+            last_error = 'duplicate_suppressed',
+            locked_at = NULL,
+            locked_by = NULL,
+            updated_at = now()
+        WHERE job_type LIKE 'corpus_%%'
+          AND status IN ('pending', 'running')
+          AND payload->>'root_name' = %s
+          AND payload->>'path' = %s
+        """,
+        (root_name, relative_path),
+    )
 
 
 def _mark_deleted_assets(cur: Any, root_id: str, seen_paths: set[str], plan: CrawlPlan) -> None:

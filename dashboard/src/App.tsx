@@ -24,6 +24,7 @@ import {
   SlidersHorizontal,
   Square,
   Terminal,
+  Trash2,
   Wrench,
   X
 } from "lucide-react";
@@ -39,7 +40,15 @@ type HealthPayload = {
   recent_errors?: string[];
   extractors?: Record<string, { ok?: boolean; message?: string }>;
   host_agent?: { status?: string; browse_supported?: boolean; message?: string };
-  codex?: { status?: string; configured?: boolean; installed?: boolean; hooks_available?: boolean };
+  codex?: {
+    status?: string;
+    configured?: boolean;
+    installed?: boolean;
+    hooks_available?: boolean;
+    discoverable?: boolean;
+    restart_required?: boolean;
+    message?: string;
+  };
 };
 
 type MailProfile = {
@@ -209,17 +218,28 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
   { id: "jobs", label: "Jobs", icon: <ListFilter size={20} /> }
 ];
 
+const DASHBOARD_STATE_KEY = "flux-dashboard-state";
+const DEFAULT_POLL_SECONDS = 10;
+type SavedDashboardState = {
+  activeTab?: TabId;
+  selectedName?: string;
+  selectedRootName?: string;
+};
+
 export default function App() {
+  const initialDashboardState = readDashboardState();
   const [state, setState] = useState<LoadState>(emptyState);
-  const [activeTab, setActiveTab] = useState<TabId>("health");
-  const [selectedName, setSelectedName] = useState<string>("");
-  const [selectedRootName, setSelectedRootName] = useState<string>("");
+  const [activeTab, setActiveTab] = useState<TabId>(initialDashboardState.activeTab ?? "health");
+  const [selectedName, setSelectedName] = useState<string>(initialDashboardState.selectedName ?? "");
+  const [selectedRootName, setSelectedRootName] = useState<string>(initialDashboardState.selectedRootName ?? "");
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [toast, setToast] = useState<string>("");
   const [debugOpen, setDebugOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [profileDialog, setProfileDialog] = useState<MailProfile | "new" | null>(null);
-  const [rootDialog, setRootDialog] = useState(false);
+  const [rootDialog, setRootDialog] = useState<RootSummary | "new" | null>(null);
+  const [deleteRoot, setDeleteRoot] = useState<RootSummary | null>(null);
   const [settingEditor, setSettingEditor] = useState<SettingRow | null>(null);
   const [settingValue, setSettingValue] = useState("");
   const [confirmSetting, setConfirmSetting] = useState<SettingRow | null>(null);
@@ -229,8 +249,10 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
 
-  async function load() {
-    setLoading(true);
+  async function load(options: { showLoading?: boolean } = {}) {
+    if (options.showLoading ?? false) {
+      setLoading(true);
+    }
     const [health, crawl, jobs, retrieval, mail, outlook, settings] = await Promise.all([
       getJson<HealthPayload>("/api/dashboard/health", {}),
       getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }),
@@ -241,11 +263,12 @@ export default function App() {
       getJson<SettingRow[]>("/api/settings", [])
     ]);
     setState({ health, crawl, jobs, retrieval, mail, outlook, settings });
+    setLastUpdated(new Date());
     setLoading(false);
   }
 
   useEffect(() => {
-    void load();
+    void load({ showLoading: true });
   }, []);
 
   useEffect(() => {
@@ -279,6 +302,19 @@ export default function App() {
       setSettingValue(String(settingEditor.value ?? ""));
     }
   }, [settingEditor]);
+
+  const pollSeconds = dashboardPollSeconds(state.settings);
+
+  useEffect(() => {
+    writeDashboardState({ activeTab, selectedName, selectedRootName });
+  }, [activeTab, selectedName, selectedRootName]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void load({ showLoading: false });
+    }, pollSeconds * 1000);
+    return () => window.clearInterval(timer);
+  }, [pollSeconds]);
 
   async function requestProfileSync(profile = selectedProfile) {
     if (!profile) {
@@ -333,6 +369,7 @@ export default function App() {
 
   async function saveCrawlRoot(form: CrawlRootForm) {
     try {
+      const editingRoot = rootDialog && rootDialog !== "new" ? rootDialog : null;
       const payload = {
         name: form.name.trim(),
         root_path: form.root_path.trim(),
@@ -346,13 +383,21 @@ export default function App() {
         max_inline_bytes: Number(form.max_inline_bytes),
         heavy_threshold_bytes: Number(form.heavy_threshold_bytes)
       };
-      const result = await sendJson<{ root?: MonitoredRoot; sync?: Record<string, unknown> }>("/api/crawl/roots", "POST", payload);
-      setRootDialog(false);
-      setSelectedRootName(result.root?.name ?? payload.name);
-      setToast(result.sync ? `Watched path ${payload.name} added and initial crawl started.` : `Watched path ${payload.name} added.`);
+      const result = editingRoot
+        ? await sendJson<MonitoredRoot>(`/api/crawl/roots/${encodeURIComponent(editingRoot.id ?? editingRoot.name)}`, "PATCH", payload)
+        : await sendJson<{ root?: MonitoredRoot; sync?: Record<string, unknown> }>("/api/crawl/roots", "POST", payload);
+      setRootDialog(null);
+      const savedName = editingRoot ? (result as MonitoredRoot).name : ((result as { root?: MonitoredRoot }).root?.name ?? payload.name);
+      setSelectedRootName(savedName);
+      if (editingRoot) {
+        setToast(`Watched path ${payload.name} updated.`);
+      } else {
+        const addResult = result as { sync?: Record<string, unknown> };
+        setToast(addResult.sync ? `Watched path ${payload.name} added and initial crawl started.` : `Watched path ${payload.name} added.`);
+      }
       await load();
     } catch (error) {
-      setToast(`Could not add watched path: ${errorMessage(error)}`);
+      setToast(`Could not save watched path: ${errorMessage(error)}`);
     }
   }
 
@@ -393,6 +438,28 @@ export default function App() {
       await load();
     } catch (error) {
       setToast(`Watch update failed for ${rootName}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function runRootBackfill(rootName: string) {
+    try {
+      await sendJson("/api/crawl/backfill", "POST", { kind: "all", limit: 10, workers: 1, root_name: rootName });
+      setToast(`Backfill run completed for ${rootName}.`);
+      await load();
+    } catch (error) {
+      setToast(`Backfill failed for ${rootName}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function deleteSelectedRoot(root: RootSummary) {
+    try {
+      await sendJson(`/api/crawl/roots/${encodeURIComponent(root.id ?? root.name)}?purge_index=true`, "DELETE", {});
+      setDeleteRoot(null);
+      setSelectedRootName("");
+      setToast(`Watched path ${root.name} deleted and index rows purged. Files on disk were not deleted.`);
+      await load();
+    } catch (error) {
+      setToast(`Could not delete watched path ${root.name}: ${errorMessage(error)}`);
     }
   }
 
@@ -488,6 +555,10 @@ export default function App() {
           <div>
             <h1>Operations</h1>
             <p>Dashboard control plane for capture, indexing, retrieval, and Windows Outlook host coordination.</p>
+            <div className="refresh-meta">
+              <span>Last updated {lastUpdated ? formatDate(lastUpdated.toISOString()) : "-"}</span>
+              <span>Auto-refresh every {pollSeconds}s</span>
+            </div>
           </div>
           <div className="top-actions">
             <StatusChip label="Database" ok={health.database?.ok} />
@@ -571,13 +642,16 @@ export default function App() {
           <CorpusTab
             state={state}
             selectedRoot={selectedRoot}
-            onAddRoot={() => setRootDialog(true)}
+            onAddRoot={() => setRootDialog("new")}
+            onEditRoot={(root) => setRootDialog(root)}
+            onDeleteRoot={(root) => setDeleteRoot(root)}
             onSelectRoot={(root) => setSelectedRootName(root.name)}
             onRefresh={() => void load()}
             onSync={() => void runCorpusSync()}
             onWatch={(enabled) => void setCorpusWatch(enabled)}
             onRootSync={(root, dryRun) => void runRootSync(root.name, dryRun)}
             onRootWatch={(root, enabled) => void setRootWatch(root.name, enabled)}
+            onRootBackfill={(root) => void runRootBackfill(root.name)}
           />
         )}
 
@@ -608,8 +682,19 @@ export default function App() {
 
       {rootDialog && (
         <CrawlRootDialog
-          onClose={() => setRootDialog(false)}
+          root={rootDialog === "new" ? undefined : rootDialog}
+          onClose={() => setRootDialog(null)}
           onSave={(form) => void saveCrawlRoot(form)}
+        />
+      )}
+
+      {deleteRoot && (
+        <ConfirmDialog
+          title="Delete watched path"
+          body={`Delete watched path ${deleteRoot.name} and purge its indexed files, chunks, embeddings, jobs, crawl runs, and watcher state. This does not delete files from disk.`}
+          confirmLabel="Delete watched path and purge index"
+          onCancel={() => setDeleteRoot(null)}
+          onConfirm={() => void deleteSelectedRoot(deleteRoot)}
         />
       )}
 
@@ -752,7 +837,11 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
           {runtimeRows.map(([key, value]) => <StatusTile key={key} label={key} ok={value.ok} message={value.message} />)}
           <StatusTile label="Outlook Host" ok={hostStatus === "running"} message={hostStatusLabel(hostStatus)} />
           <StatusTile label="Host Agent" ok={hostAgent?.status === "running"} message={hostAgent?.status ?? "host_agent_offline"} />
-          <StatusTile label="Codex Integration" ok={codex?.status === "ready"} message={codex?.status ?? "unknown"} />
+          <StatusTile
+            label="Codex Integration"
+            ok={codex?.status === "ready"}
+            message={codex?.restart_required ? "Codex restart required" : (codex?.status ?? "unknown")}
+          />
         </div>
       </Panel>
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
@@ -767,22 +856,28 @@ function CorpusTab({
   state,
   selectedRoot,
   onAddRoot,
+  onEditRoot,
+  onDeleteRoot,
   onSelectRoot,
   onRefresh,
   onSync,
   onWatch,
   onRootSync,
-  onRootWatch
+  onRootWatch,
+  onRootBackfill
 }: {
   state: LoadState;
   selectedRoot?: RootSummary;
   onAddRoot: () => void;
+  onEditRoot: (root: RootSummary) => void;
+  onDeleteRoot: (root: RootSummary) => void;
   onSelectRoot: (root: RootSummary) => void;
   onRefresh: () => void;
   onSync: () => void;
   onWatch: (enabled: boolean) => void;
   onRootSync: (root: RootSummary, dryRun: boolean) => void;
   onRootWatch: (root: RootSummary, enabled: boolean) => void;
+  onRootBackfill: (root: RootSummary) => void;
 }) {
   const roots = state.crawl.root_summaries ?? (state.crawl.roots ?? []);
   const status = state.crawl.status ?? {};
@@ -810,10 +905,13 @@ function CorpusTab({
             onSelect={onSelectRoot}
             onSync={onRootSync}
             onWatch={onRootWatch}
+            onEdit={onEditRoot}
+            onDelete={onDeleteRoot}
+            onBackfill={onRootBackfill}
           />
         </Panel>
         <Panel title="Root Details" action={selectedRoot ? <RootStateBadge state={selectedRoot.state} /> : undefined}>
-          <RootInspector root={selectedRoot} />
+          <RootInspector root={selectedRoot} onEdit={onEditRoot} onDelete={onDeleteRoot} onBackfill={onRootBackfill} />
         </Panel>
       </section>
       <Panel title="Extractor Availability">
@@ -832,13 +930,19 @@ function RootTable({
   selectedRoot,
   onSelect,
   onSync,
-  onWatch
+  onWatch,
+  onEdit,
+  onDelete,
+  onBackfill
 }: {
   roots: RootSummary[];
   selectedRoot?: RootSummary;
   onSelect: (root: RootSummary) => void;
   onSync: (root: RootSummary, dryRun: boolean) => void;
   onWatch: (root: RootSummary, enabled: boolean) => void;
+  onEdit: (root: RootSummary) => void;
+  onDelete: (root: RootSummary) => void;
+  onBackfill: (root: RootSummary) => void;
 }) {
   return (
     <table className="profile-table root-table" aria-label="Monitored roots">
@@ -887,9 +991,12 @@ function RootTable({
               <div className="row-actions root-actions">
                 <button type="button" aria-label={`Sync ${root.name}`} title={`Sync ${root.name} now`} onClick={(event) => { event.stopPropagation(); onSync(root, false); }}><RefreshCcw size={15} /></button>
                 <button type="button" aria-label={`Dry run ${root.name}`} title={`Preview crawl changes for ${root.name}`} onClick={(event) => { event.stopPropagation(); onSync(root, true); }}><ListFilter size={15} /></button>
+                <button type="button" aria-label={`Run backfill for ${root.name}`} title={`Process deferred jobs for ${root.name}`} onClick={(event) => { event.stopPropagation(); onBackfill(root); }}><Play size={15} /></button>
                 <button type="button" aria-label={`${root.watch_enabled ? "Disable" : "Enable"} watch ${root.name}`} title={`${root.watch_enabled ? "Disable" : "Enable"} recursive watch for ${root.name}`} onClick={(event) => { event.stopPropagation(); onWatch(root, !root.watch_enabled); }}>
                   {root.watch_enabled ? <Square size={15} /> : <Play size={15} />}
                 </button>
+                <button type="button" aria-label={`Edit ${root.name}`} title={`Edit watched path ${root.name}`} onClick={(event) => { event.stopPropagation(); onEdit(root); }}><Wrench size={15} /></button>
+                <button type="button" aria-label={`Delete ${root.name}`} title={`Delete watched path ${root.name} from the Flux index`} onClick={(event) => { event.stopPropagation(); onDelete(root); }}><Trash2 size={15} /></button>
               </div>
             </td>
           </tr>
@@ -904,7 +1011,17 @@ function RootTable({
   );
 }
 
-function RootInspector({ root }: { root?: RootSummary }) {
+function RootInspector({
+  root,
+  onEdit,
+  onDelete,
+  onBackfill
+}: {
+  root?: RootSummary;
+  onEdit: (root: RootSummary) => void;
+  onDelete: (root: RootSummary) => void;
+  onBackfill: (root: RootSummary) => void;
+}) {
   if (!root) {
     return <div className="empty-inspector"><p className="muted">Add or select a watched path to see crawl, watch, and job status.</p></div>;
   }
@@ -918,6 +1035,23 @@ function RootInspector({ root }: { root?: RootSummary }) {
           <span>{root.root_path}</span>
         </div>
       </div>
+      <div className="button-row">
+        <button className="ghost-action compact" type="button" aria-label={`Edit selected watched path ${root.name}`} title="Edit this watched path" onClick={() => onEdit(root)}>
+          <Wrench size={15} /> Edit
+        </button>
+        <button className="ghost-action compact" type="button" aria-label={`Run selected root backfill for ${root.name}`} title="Process deferred jobs for this watched path" onClick={() => onBackfill(root)}>
+          <Play size={15} /> Run backfill
+        </button>
+        <button className="ghost-action compact danger-action" type="button" aria-label={`Delete selected watched path ${root.name}`} title="Delete this watched path from the Flux index" onClick={() => onDelete(root)}>
+          <Trash2 size={15} /> Delete
+        </button>
+      </div>
+      {root.job_counts?.pending ? (
+        <p className="warning-note">
+          {root.job_counts.pending} pending deferred job{root.job_counts.pending === 1 ? "" : "s"}.
+          Start <code>flux-kb crawl worker run</code> or run backfill now.
+        </p>
+      ) : null}
       <div className="schedule-row">
         <Stat label="Last crawl" value={String(latest.status ?? "-")} />
         <Stat label="Files seen" value={String(latest.files_seen ?? 0)} />
@@ -995,21 +1129,21 @@ function RootStateBadge({ state }: { state?: string }) {
   return <span className={`state-pill ${tone}`}>{normalized}</span>;
 }
 
-function CrawlRootDialog({ onClose, onSave }: { onClose: () => void; onSave: (form: CrawlRootForm) => void }) {
+function CrawlRootDialog({ root, onClose, onSave }: { root?: RootSummary; onClose: () => void; onSave: (form: CrawlRootForm) => void }) {
   const [form, setForm] = useState<CrawlRootForm>(() => ({
-    name: "",
-    root_path: "",
-    recursive: true,
-    watch_enabled: true,
-    initial_crawl: true,
-    trust_rank: 500,
-    include_globs: "",
-    exclude_globs: "",
-    glob_mode: "extend",
-    max_inline_bytes: 256 * 1024,
-    heavy_threshold_bytes: 10 * 1024 * 1024
+    name: root?.name ?? "",
+    root_path: root?.root_path ?? "",
+    recursive: root?.recursive ?? true,
+    watch_enabled: root?.watch_enabled ?? true,
+    initial_crawl: root ? false : true,
+    trust_rank: root?.trust_rank ?? 500,
+    include_globs: (root?.include_globs ?? []).join("\n"),
+    exclude_globs: (root?.exclude_globs ?? []).join("\n"),
+    glob_mode: (root?.glob_mode as CrawlRootForm["glob_mode"]) ?? "extend",
+    max_inline_bytes: root?.max_inline_bytes ?? 256 * 1024,
+    heavy_threshold_bytes: root?.heavy_threshold_bytes ?? 10 * 1024 * 1024
   }));
-  const [nameTouched, setNameTouched] = useState(false);
+  const [nameTouched, setNameTouched] = useState(Boolean(root));
   const [error, setError] = useState("");
 
   function update<K extends keyof CrawlRootForm>(key: K, value: CrawlRootForm[K]) {
@@ -1060,7 +1194,7 @@ function CrawlRootDialog({ onClose, onSave }: { onClose: () => void; onSave: (fo
     <div className="modal-backdrop">
       <form className="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="crawl-root-dialog-title" onSubmit={submit}>
         <header>
-          <h2 id="crawl-root-dialog-title">Add Watched Path</h2>
+          <h2 id="crawl-root-dialog-title">{root ? "Edit Watched Path" : "Add Watched Path"}</h2>
           <button type="button" aria-label="Close watched path form" onClick={onClose}><X size={18} /></button>
         </header>
         <div className="form-grid">
@@ -1083,7 +1217,7 @@ function CrawlRootDialog({ onClose, onSave }: { onClose: () => void; onSave: (fo
           <label>Heavy file threshold bytes<input type="number" min="1" value={form.heavy_threshold_bytes} onChange={(event) => update("heavy_threshold_bytes", Number(event.target.value))} /></label>
           <label className="checkbox-label"><input type="checkbox" checked={form.recursive} onChange={(event) => update("recursive", event.target.checked)} /> Recursive</label>
           <label className="checkbox-label"><input type="checkbox" checked={form.watch_enabled} onChange={(event) => update("watch_enabled", event.target.checked)} /> Watch enabled</label>
-          <label className="checkbox-label"><input type="checkbox" checked={form.initial_crawl} onChange={(event) => update("initial_crawl", event.target.checked)} /> Initial crawl now</label>
+          {!root && <label className="checkbox-label"><input type="checkbox" checked={form.initial_crawl} onChange={(event) => update("initial_crawl", event.target.checked)} /> Initial crawl now</label>}
           {error && <p className="warning-note span-2">{error}</p>}
         </div>
         <footer>
@@ -1546,6 +1680,45 @@ function DataRows({ rows, empty }: { rows: Array<Record<string, unknown>>; empty
   );
 }
 
+function readDashboardState(): SavedDashboardState {
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get("tab") as TabId | null;
+  const root = params.get("root");
+  const profile = params.get("profile");
+  if (tab && navItems.some((item) => item.id === tab)) {
+    return { activeTab: tab, selectedRootName: root ?? "", selectedName: profile ?? "" };
+  }
+  try {
+    const saved = JSON.parse(localStorage.getItem(DASHBOARD_STATE_KEY) ?? "{}") as SavedDashboardState;
+    if (saved.activeTab && !navItems.some((item) => item.id === saved.activeTab)) {
+      saved.activeTab = "health";
+    }
+    return saved;
+  } catch {
+    return {};
+  }
+}
+
+function writeDashboardState(value: SavedDashboardState) {
+  localStorage.setItem(DASHBOARD_STATE_KEY, JSON.stringify(value));
+  const params = new URLSearchParams();
+  if (value.activeTab && value.activeTab !== "health") params.set("tab", value.activeTab);
+  if (value.selectedRootName) params.set("root", value.selectedRootName);
+  if (value.selectedName) params.set("profile", value.selectedName);
+  const query = params.toString();
+  const nextUrl = query ? `/dashboard?${query}` : "/dashboard";
+  if (`${window.location.pathname}${window.location.search}` !== nextUrl) {
+    window.history.replaceState(null, "", nextUrl);
+  }
+}
+
+function dashboardPollSeconds(settings: SettingRow[]) {
+  const row = settings.find((setting) => setting.key === "dashboard.poll_interval_seconds");
+  const value = Number(row?.value ?? DEFAULT_POLL_SECONDS);
+  if (!Number.isFinite(value) || value <= 0) return DEFAULT_POLL_SECONDS;
+  return Math.max(1, Math.round(value));
+}
+
 async function getJson<T>(url: string, fallback: T): Promise<T> {
   try {
     const response = await fetch(url);
@@ -1556,7 +1729,7 @@ async function getJson<T>(url: string, fallback: T): Promise<T> {
   }
 }
 
-async function sendJson<T>(url: string, method: "POST" | "PUT", body: unknown): Promise<T> {
+async function sendJson<T>(url: string, method: "POST" | "PUT" | "PATCH" | "DELETE", body: unknown): Promise<T> {
   const response = await fetch(url, {
     method,
     headers: { "Content-Type": "application/json" },

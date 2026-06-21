@@ -2,7 +2,39 @@
   "name": "flux-llm-kb",
   "version": "0.1.0",
   "description": "Global local-first knowledge kernel for Codex and MCP-capable agents.",
+  "author": {
+    "name": "Yagasoft"
+  },
+  "homepage": "https://github.com/yagasoft/Flux-LLM-KB",
+  "repository": "https://github.com/yagasoft/Flux-LLM-KB",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "knowledge-base",
+    "codex",
+    "mcp",
+    "postgres",
+    "pgvector"
+  ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Flux LLM-KB",
+    "shortDescription": "Local-first knowledge memory for Codex",
+    "longDescription": "Flux LLM-KB captures, searches, and briefs local interaction and corpus memory through a PostgreSQL/pgvector knowledge kernel, with privacy-aware hooks and operational dashboard status.",
+    "developerName": "Yagasoft",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/yagasoft/Flux-LLM-KB",
+    "privacyPolicyURL": "https://github.com/yagasoft/Flux-LLM-KB/blob/main/docs/safety.md",
+    "termsOfServiceURL": "https://github.com/yagasoft/Flux-LLM-KB/blob/main/LICENSE",
+    "defaultPrompt": [
+      "Use Flux LLM-KB to retrieve relevant project memory before starting non-trivial work"
+    ],
+    "brandColor": "#0891B2",
+    "screenshots": []
+  }
 }
-

@@ -53,6 +53,28 @@ def main(argv: list[str] | None = None) -> int:
     crawl_add.add_argument("--glob-mode", choices=["inherit", "extend", "override"], default="extend")
     crawl_add.set_defaults(recursive=True)
 
+    crawl_edit = crawl_subparsers.add_parser("edit", help="Edit a monitored root")
+    crawl_edit.add_argument("root")
+    crawl_edit.add_argument("--name")
+    crawl_edit.add_argument("--path")
+    crawl_edit.add_argument("--enable", action="store_true")
+    crawl_edit.add_argument("--disable", action="store_true")
+    crawl_edit_watch = crawl_edit.add_mutually_exclusive_group()
+    crawl_edit_watch.add_argument("--enable-watch", action="store_true")
+    crawl_edit_watch.add_argument("--disable-watch", action="store_true")
+    crawl_edit.add_argument("--recursive", action="store_true")
+    crawl_edit.add_argument("--no-recursive", action="store_true")
+    crawl_edit.add_argument("--trust-rank", type=int)
+    crawl_edit.add_argument("--include-glob", action="append")
+    crawl_edit.add_argument("--exclude-glob", action="append")
+    crawl_edit.add_argument("--glob-mode", choices=["inherit", "extend", "override"])
+    crawl_edit.add_argument("--max-inline-bytes", type=int)
+    crawl_edit.add_argument("--heavy-threshold-bytes", type=int)
+
+    crawl_delete = crawl_subparsers.add_parser("delete", help="Delete a monitored root and purge indexed files")
+    crawl_delete.add_argument("root")
+    crawl_delete.add_argument("--purge-index", action="store_true", required=True)
+
     crawl_subparsers.add_parser("list", help="List monitored roots")
 
     crawl_sync = crawl_subparsers.add_parser("sync", help="Run a one-shot crawl")
@@ -68,6 +90,15 @@ def main(argv: list[str] | None = None) -> int:
     crawl_backfill.add_argument("--kind", choices=["text", "images", "media", "embeddings", "all"], default="all")
     crawl_backfill.add_argument("--limit", type=int, default=10)
     crawl_backfill.add_argument("--workers", type=int, default=1)
+
+    crawl_worker = crawl_subparsers.add_parser("worker", help="Run the corpus extraction worker")
+    crawl_worker_subparsers = crawl_worker.add_subparsers(dest="worker_command", required=True)
+    crawl_worker_run = crawl_worker_subparsers.add_parser("run", help="Run the corpus worker loop")
+    crawl_worker_run.add_argument("--kind", choices=["text", "images", "media", "embeddings", "all"], default="all")
+    crawl_worker_run.add_argument("--limit", type=int, default=10)
+    crawl_worker_run.add_argument("--workers", type=int, default=1)
+    crawl_worker_run.add_argument("--interval", type=float, default=5.0)
+    crawl_worker_run.add_argument("--once", action="store_true")
 
     crawl_subparsers.add_parser("doctor", help="Show crawler and watcher health")
 
@@ -90,6 +121,12 @@ def main(argv: list[str] | None = None) -> int:
 
     hook_parser = subparsers.add_parser("hook", help="Run a Codex hook handler")
     hook_parser.add_argument("event")
+
+    codex_parser = subparsers.add_parser("codex", help="Install and inspect Codex integration")
+    codex_subparsers = codex_parser.add_subparsers(dest="codex_command", required=True)
+    codex_subparsers.add_parser("install-plugin", help="Install/link the local Flux Codex plugin")
+    codex_status_parser = codex_subparsers.add_parser("status", help="Show Codex plugin status")
+    codex_status_parser.add_argument("--json", action="store_true", dest="json_output")
 
     settings_parser = subparsers.add_parser("settings", help="Manage runtime settings")
     settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)
@@ -181,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         "export-wiki": _export_wiki,
         "lint": _lint,
         "hook": _hook,
+        "codex": _codex,
         "settings": _settings,
         "mail": _mail,
         "outlook-host": _outlook_host,
@@ -279,6 +317,10 @@ def _crawl(args: argparse.Namespace) -> int:
         )
     elif args.crawl_command == "list":
         payload = database.list_monitored_roots()
+    elif args.crawl_command == "edit":
+        payload = _crawl_edit(args)
+    elif args.crawl_command == "delete":
+        payload = database.delete_monitored_root(root_id=args.root, purge_index=args.purge_index, actor="cli")
     elif args.crawl_command == "sync":
         from .service import KnowledgeService
 
@@ -289,6 +331,18 @@ def _crawl(args: argparse.Namespace) -> int:
         from .service import KnowledgeService
 
         payload = KnowledgeService().run_corpus_backfill(kind=args.kind, limit=args.limit, workers=args.workers)
+    elif args.crawl_command == "worker":
+        from .service import KnowledgeService
+
+        if args.worker_command != "run":  # pragma: no cover - argparse prevents this
+            raise ValueError(args.worker_command)
+        payload = KnowledgeService().run_corpus_worker(
+            kind=args.kind,
+            limit=args.limit,
+            workers=args.workers,
+            interval_seconds=args.interval,
+            once=args.once,
+        )
     elif args.crawl_command == "doctor":
         from .health import collect_dashboard_payload
 
@@ -299,6 +353,48 @@ def _crawl(args: argparse.Namespace) -> int:
         raise ValueError(args.crawl_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
+
+
+def _crawl_edit(args: argparse.Namespace) -> dict:
+    existing = database.get_monitored_root_by_identifier(args.root)
+    if existing is None:
+        raise SystemExit(f"monitored root not found: {args.root}")
+    if args.enable and args.disable:
+        raise SystemExit("choose either --enable or --disable")
+    if args.recursive and args.no_recursive:
+        raise SystemExit("choose either --recursive or --no-recursive")
+    watch_enabled = existing["watch_enabled"]
+    if args.enable_watch:
+        watch_enabled = True
+    if args.disable_watch:
+        watch_enabled = False
+    enabled = existing["enabled"]
+    if args.enable:
+        enabled = True
+    if args.disable:
+        enabled = False
+    recursive = existing["recursive"]
+    if args.recursive:
+        recursive = True
+    if args.no_recursive:
+        recursive = False
+    return database.update_monitored_root(
+        root_id=existing["id"],
+        name=args.name or existing["name"],
+        root_path=args.path or existing["root_path"],
+        enabled=enabled,
+        recursive=recursive,
+        watch_enabled=watch_enabled,
+        trust_rank=args.trust_rank if args.trust_rank is not None else existing["trust_rank"],
+        include_globs=args.include_glob if args.include_glob is not None else existing["include_globs"],
+        exclude_globs=args.exclude_glob if args.exclude_glob is not None else existing["exclude_globs"],
+        glob_mode=args.glob_mode or existing["glob_mode"],
+        max_inline_bytes=args.max_inline_bytes if args.max_inline_bytes is not None else existing["max_inline_bytes"],
+        heavy_threshold_bytes=(
+            args.heavy_threshold_bytes if args.heavy_threshold_bytes is not None else existing["heavy_threshold_bytes"]
+        ),
+        metadata={"source": "cli"},
+    )
 
 
 def _crawl_watch(args: argparse.Namespace):
@@ -336,6 +432,19 @@ def _settings(args: argparse.Namespace) -> int:
         payload = service.apply(component=args.component, actor="cli")
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.settings_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _codex(args: argparse.Namespace) -> int:
+    from .codex_integration import codex_status, install_plugin
+
+    if args.codex_command == "install-plugin":
+        payload = install_plugin()
+    elif args.codex_command == "status":
+        payload = codex_status()
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.codex_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
