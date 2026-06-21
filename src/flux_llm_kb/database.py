@@ -1142,6 +1142,7 @@ def complete_corpus_job(*, job_id: str, url: str | None = None) -> None:
                 """
                 UPDATE capture_jobs
                 SET status = 'completed',
+                    last_error = NULL,
                     locked_at = NULL,
                     locked_by = NULL,
                     updated_at = now()
@@ -1150,6 +1151,33 @@ def complete_corpus_job(*, job_id: str, url: str | None = None) -> None:
                 """,
                 (job_id,),
             )
+
+
+def clear_completed_corpus_job_errors(
+    *, root_name: str | None = None, url: str | None = None
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    root_filter = "AND payload->>'root_name' = %s" if root_name else ""
+    params: tuple[Any, ...] = (root_name,) if root_name else ()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH cleared AS (
+                    UPDATE capture_jobs
+                    SET last_error = NULL,
+                        updated_at = now()
+                    WHERE job_type LIKE 'corpus_%%'
+                      AND status = 'completed'
+                      AND last_error IS NOT NULL
+                      {root_filter}
+                    RETURNING 1
+                )
+                SELECT count(*) FROM cleared
+                """,
+                params,
+            )
+            return {"root_name": root_name, "cleared": int(cur.fetchone()[0] or 0)}
 
 
 def retry_corpus_job(

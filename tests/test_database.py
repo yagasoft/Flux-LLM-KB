@@ -189,6 +189,82 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
     assert "r.name = %s" in sql
 
 
+def test_complete_corpus_job_clears_previous_error(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.complete_corpus_job(job_id="job-1")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert "last_error = NULL" in sql
+
+
+def test_clear_completed_corpus_job_errors_clears_legacy_errors(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (5,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.clear_completed_corpus_job_errors(root_name="watch-test")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"root_name": "watch-test", "cleared": 5}
+    assert "status = 'completed'" in sql
+    assert "last_error IS NOT NULL" in sql
+    assert "payload->>'root_name' = %s" in sql
+
+
 def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
     source = Path(database.__file__).read_text(encoding="utf-8")
 

@@ -201,6 +201,7 @@ class KnowledgeService:
                 )
                 retried += 1
         repaired = database.repair_extracted_corpus_asset_statuses(root_name=root_name)
+        cleared_errors = database.clear_completed_corpus_job_errors(root_name=root_name)
         database.record_audit_event(
             event_type="corpus.backfill",
             details={
@@ -212,6 +213,7 @@ class KnowledgeService:
                 "retried": retried,
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
+                "cleared_completed_errors": cleared_errors["cleared"],
                 "workers": workers,
             },
         )
@@ -224,6 +226,7 @@ class KnowledgeService:
             "retried": retried,
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],
+            "cleared_completed_errors": cleared_errors["cleared"],
             "jobs": filtered,
         }
 
