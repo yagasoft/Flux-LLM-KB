@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import json
 import os
@@ -52,6 +53,7 @@ class HostAgentClientError(RuntimeError):
 
 
 def status_payload() -> dict[str, Any]:
+    components = _runtime_components()
     return {
         "status": "running",
         "platform": platform.system() or "unknown",
@@ -59,6 +61,7 @@ def status_payload() -> dict[str, Any]:
         "browse_supported": _native_browse_supported(),
         "codex": _host_codex_status(),
         "runtime": _host_runtime_checks(),
+        "workers": [item for item in components if str(item.get("name", "")).startswith("corpus-worker:")],
         "time": time.time(),
     }
 
@@ -190,23 +193,111 @@ class HostAgentWatcherLoop:
             database.record_watch_error(root_name=event.root_name, error=str(exc))
 
 
+class HostAgentWorkerLoop:
+    def __init__(
+        self,
+        *,
+        root_name: str | None = None,
+        interval_seconds: float = 5.0,
+        limit: int | None = None,
+        workers: int = 1,
+        service_factory=None,
+    ) -> None:
+        self.root_name = root_name
+        self.interval_seconds = interval_seconds
+        self.limit = limit
+        self.workers = workers
+        self.service_factory = service_factory
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="flux-host-agent-worker", daemon=True)
+        self._thread.start()
+
+    def stop(self, *, timeout: float = 5.0) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def run_once(self) -> dict[str, Any]:
+        roots = _load_host_roots(self.root_name)
+        batch_size = self.limit if self.limit is not None else _configured_worker_batch_size()
+        metadata = {"root_count": len(roots), "roots": [root["name"] for root in roots]}
+        database.record_runtime_component_heartbeat(
+            name="corpus-worker:host-agent",
+            status="running" if roots else "idle",
+            metadata=metadata,
+        )
+        if not roots:
+            return {"status": "no_enabled_host_roots", "roots": 0, "completed": 0, "blocked": 0, "retried": 0}
+
+        service = self.service_factory() if self.service_factory else _service()
+        totals = {"completed": 0, "blocked": 0, "retried": 0, "claimed": 0}
+        results: list[dict[str, Any]] = []
+        for root in roots:
+            result = service.run_corpus_backfill(
+                kind="all",
+                limit=batch_size,
+                workers=self.workers,
+                root_name=root["name"],
+                host_agent_roots=True,
+            )
+            results.append(result)
+            for key in totals:
+                totals[key] += int(result.get(key) or 0)
+        payload = {"status": "running", "roots": len(roots), **totals, "results": results}
+        database.record_runtime_component_heartbeat(
+            name="corpus-worker:host-agent",
+            status="running",
+            metadata={"last_result": payload},
+        )
+        return payload
+
+    def _run(self) -> None:
+        while not self._stop.wait(0):
+            try:
+                self.run_once()
+            except Exception as exc:  # pragma: no cover - defensive long-running loop
+                database.record_runtime_component_heartbeat(
+                    name="corpus-worker:host-agent",
+                    status="error",
+                    metadata={"last_error": str(exc)},
+                )
+            if self._stop.wait(self.interval_seconds):
+                return
+
+
 def create_app(*, start_watcher: bool = False):
     try:
         from fastapi import Body, FastAPI
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install host agent REST support with `pip install -e .[api]`") from exc
 
-    app = FastAPI(title="Flux Host Agent")
     watcher_loop = HostAgentWatcherLoop() if start_watcher else None
+    worker_loop = HostAgentWorkerLoop() if start_watcher else None
 
-    if watcher_loop is not None:
-        @app.on_event("startup")
-        def _start_watcher():
-            watcher_loop.start()
+    if watcher_loop is not None or worker_loop is not None:
+        @asynccontextmanager
+        async def lifespan(_app):
+            if watcher_loop is not None:
+                watcher_loop.start()
+            if worker_loop is not None:
+                worker_loop.start()
+            try:
+                yield
+            finally:
+                if worker_loop is not None:
+                    worker_loop.stop()
+                if watcher_loop is not None:
+                    watcher_loop.stop()
+    else:
+        lifespan = None
 
-        @app.on_event("shutdown")
-        def _stop_watcher():
-            watcher_loop.stop()
+    app = FastAPI(title="Flux Host Agent", lifespan=lifespan)
 
     @app.get("/status")
     def status():
@@ -345,11 +436,7 @@ def _service():
 
 
 def _load_host_watch_roots(root_name: str | None = None) -> list[WatchRoot]:
-    roots = [
-        root
-        for root in database.list_monitored_roots(watch_enabled=True)
-        if root.get("enabled") and (root_name is None or root.get("name") == root_name) and _is_host_agent_root(root)
-    ]
+    roots = _load_host_roots(root_name=root_name, watch_enabled=True)
     return [
         WatchRoot(
             name=root["name"],
@@ -359,6 +446,26 @@ def _load_host_watch_roots(root_name: str | None = None) -> list[WatchRoot]:
         )
         for root in roots
     ]
+
+
+def _load_host_roots(root_name: str | None = None, *, watch_enabled: bool | None = None) -> list[dict[str, Any]]:
+    roots = database.list_monitored_roots(watch_enabled=watch_enabled) if watch_enabled is not None else database.list_monitored_roots()
+    return [
+        root
+        for root in roots
+        if root.get("enabled")
+        and (root_name is None or root.get("name") == root_name)
+        and _is_host_agent_root(root)
+    ]
+
+
+def _configured_worker_batch_size() -> int:
+    try:
+        from .settings import SettingsService
+
+        return int(SettingsService().resolve("worker.batch_size").raw_value)
+    except Exception:
+        return 10
 
 
 def _is_host_agent_root(root: dict[str, Any]) -> bool:
@@ -417,6 +524,13 @@ def _host_runtime_checks() -> dict[str, Any]:
         "git": _host_command_check("git", "Git source control", required=True),
         "gh": _host_command_check("gh", "GitHub CLI", required=False),
     }
+
+
+def _runtime_components() -> list[dict[str, Any]]:
+    try:
+        return database.list_runtime_components()
+    except Exception:
+        return []
 
 
 def _host_command_check(command: str, description: str, *, required: bool = True) -> dict[str, Any]:

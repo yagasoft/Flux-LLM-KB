@@ -25,3 +25,21 @@ def test_dockerfile_uses_pip_buildkit_cache() -> None:
     assert "# syntax=docker/dockerfile:" in dockerfile
     assert "--mount=type=cache,target=/root/.cache/pip" in dockerfile
     assert "--no-cache-dir" not in dockerfile
+
+
+def test_docker_compose_defines_corpus_worker_service() -> None:
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "  worker:" in compose
+    assert "python -m flux_llm_kb.cli crawl worker run" in compose
+    assert "FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb" in compose
+
+
+def test_dashboard_dev_scripts_manage_worker_service() -> None:
+    start_script = Path("scripts/start-dashboard-dev.ps1").read_text(encoding="utf-8")
+    status_script = Path("scripts/status-dashboard-dev.ps1").read_text(encoding="utf-8")
+    stop_script = Path("scripts/stop-dashboard-dev.ps1").read_text(encoding="utf-8")
+
+    assert "docker compose up -d --build postgres api worker" in start_script
+    assert "docker compose ps api worker postgres" in status_script
+    assert "docker compose stop api worker" in stop_script

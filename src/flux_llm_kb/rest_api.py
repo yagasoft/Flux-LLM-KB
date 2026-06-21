@@ -1,3 +1,4 @@
+from json import JSONDecodeError
 from pathlib import Path
 
 from .host_agent import (
@@ -150,9 +151,41 @@ def create_app():
     def search(request: SearchRequest = Body(...)):
         return service.search(request.query, limit=request.limit)
 
+    @app.get("/api/search")
+    def search_get(query: str, limit: int = 5):
+        return service.search(query, limit=limit)
+
     @app.post("/api/brief")
     def brief(request: SearchRequest = Body(...)):
         return {"brief": service.brief(request.query)}
+
+    @app.get("/api/brief")
+    def brief_get(query: str, token_budget: int | None = None):
+        return {"brief": service.brief(query, token_budget=token_budget)}
+
+    @app.get("/api/corpus/assets")
+    def corpus_assets(root_name: str | None = None, path: str | None = None, limit: int = 50):
+        from . import database
+
+        return {"assets": database.list_source_assets(root_name=root_name, path=path, limit=limit)}
+
+    @app.get("/api/corpus/assets/{asset_id}")
+    def corpus_asset(asset_id: str):
+        from . import database
+
+        asset = database.get_source_asset(asset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="source asset not found")
+        return asset
+
+    @app.get("/api/corpus/chunks/{chunk_id}")
+    def corpus_chunk(chunk_id: str):
+        from . import database
+
+        chunk = database.get_asset_chunk(chunk_id)
+        if chunk is None:
+            raise HTTPException(status_code=404, detail="asset chunk not found")
+        return chunk
 
     @app.post("/api/remember")
     def remember(request: RememberRequest = Body(...)):
@@ -394,11 +427,26 @@ def create_app():
     def mail_oauth_gmail_start(request: GmailOAuthStartRequest = Body(...)):
         from .mail_oauth import start_gmail_oauth
 
-        return start_gmail_oauth(
-            profile_name=request.profile_name,
-            client_config_path=request.client_config_path,
-            redirect_uri=request.redirect_uri,
-        )
+        try:
+            return start_gmail_oauth(
+                profile_name=request.profile_name,
+                client_config_path=request.client_config_path,
+                redirect_uri=request.redirect_uri,
+            )
+        except FileNotFoundError as exc:
+            return {
+                "profile_name": request.profile_name,
+                "provider": "gmail",
+                "status": "blocked_config_missing",
+                "message": str(exc),
+            }
+        except (JSONDecodeError, ValueError) as exc:
+            return {
+                "profile_name": request.profile_name,
+                "provider": "gmail",
+                "status": "blocked_config_invalid",
+                "message": str(exc),
+            }
 
     @app.get("/api/mail/oauth/gmail/callback")
     def mail_oauth_gmail_callback(state: str, code: str | None = None, error: str | None = None):

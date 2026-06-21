@@ -34,6 +34,19 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
         lambda: {"episodes": 3, "asset_chunks": 5, "embeddings": 8},
     )
     monkeypatch.setattr(
+        database,
+        "list_runtime_components",
+        lambda: [
+            {
+                "name": "corpus-worker:docker",
+                "status": "running",
+                "heartbeat_age_seconds": 2,
+                "metadata": {"last_result": {"completed": 1}},
+            }
+        ],
+        raising=False,
+    )
+    monkeypatch.setattr(
         health,
         "remote_status",
         lambda: {
@@ -54,6 +67,8 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert "extractors" in payload
     assert payload["codex"]["status"] == "ready"
     assert payload["runtime"]["git"]["message"] == "host git"
+    assert payload["workers"]["active"] == 1
+    assert payload["workers"]["components"][0]["name"] == "corpus-worker:docker"
 
 
 def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):

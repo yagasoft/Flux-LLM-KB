@@ -56,10 +56,29 @@ Endpoints:
 - `POST /api/host/browse-folder`
 - `POST /api/host/validate-path`
 - `POST /api/search`
+- `GET /api/search?query=<q>&limit=<n>`
 - `POST /api/brief`
+- `GET /api/brief?query=<q>&token_budget=<n>`
+- `GET /api/corpus/assets`
+- `GET /api/corpus/assets/{asset_id}`
+- `GET /api/corpus/chunks/{chunk_id}`
 - `POST /api/remember`
 - `GET /api/audit`
 - `POST /api/forget`
+
+## Consumer Access
+
+External consumers should use one of three read paths:
+
+- REST for simple tools and scripts:
+  `GET /api/search?query=customer%20RFP&limit=5` or
+  `GET /api/brief?query=customer%20RFP&token_budget=1200`.
+- MCP for agent runtimes: `kb.search` and `kb.brief`.
+- CLI for local shell automation: `flux-kb search "customer RFP" --limit 5`.
+
+Lookup endpoints are read-only and return stable JSON payloads for asset and
+chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a
+network interface without an explicit local access-control policy.
 
 ## Runtime Settings
 

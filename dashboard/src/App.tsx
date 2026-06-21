@@ -37,6 +37,10 @@ type HealthPayload = {
   watcher?: { active_roots?: number; disabled_roots?: number; stale_count?: number; roots?: unknown[] };
   jobs?: { pending?: number; failed?: number; blocked?: number };
   retrieval?: { episodes?: number; sources?: number; source_assets?: number; asset_chunks?: number; embeddings?: number };
+  workers?: {
+    active?: number;
+    components?: Array<{ name?: string; status?: string; heartbeat_age_seconds?: number | null; metadata?: Record<string, unknown> }>;
+  };
   recent_errors?: string[];
   extractors?: Record<string, { ok?: boolean; message?: string }>;
   host_agent?: { status?: string; browse_supported?: boolean; message?: string };
@@ -75,7 +79,7 @@ type MailStatus = {
   errored_messages?: number;
   profiles?: MailProfile[];
   oauth?: {
-    profiles?: Array<{ profile_name?: string; status?: string; expires_at?: string | null }>;
+    profiles?: Array<{ profile_name?: string; status?: string; expires_at?: string | null; has_refresh_token?: boolean }>;
   };
 };
 
@@ -321,15 +325,22 @@ export default function App() {
       setToast("Select a mail profile first.");
       return;
     }
-    setToast(`Sync request queued for ${profile.name}...`);
-    if (profile.source_type === "outlook_com") {
-      const payload = await sendJson<{ status?: string }>("/api/outlook-host/request-sync", "POST", { profile_name: profile.name });
-      setToast(payload?.status ? `Outlook sync request ${payload.status}.` : "Outlook sync request queued.");
-    } else {
-      const payload = await sendJson<{ count?: number }>("/api/mail/sync", "POST", { profile_name: profile.name });
-      setToast(`IMAP sync completed for ${payload?.count ?? 0} profile(s).`);
+    try {
+      setToast(`Sync request queued for ${profile.name}...`);
+      if (profile.source_type === "outlook_com") {
+        const payload = await sendJson<{ status?: string }>("/api/outlook-host/request-sync", "POST", { profile_name: profile.name });
+        setToast(payload?.status ? `Outlook sync request ${payload.status}.` : "Outlook sync request queued.");
+      } else {
+        const payload = await sendJson<{ count?: number; profiles?: Array<{ profile?: string; status?: string; exported?: number; spool_sync?: { count?: number } }> }>("/api/mail/sync", "POST", { profile_name: profile.name });
+        const result = payload.profiles?.[0];
+        const status = result?.status ?? "completed";
+        const exported = result?.exported ?? 0;
+        setToast(`IMAP sync ${status} for ${profile.name}; exported ${exported} message${exported === 1 ? "" : "s"}.`);
+      }
+      await load();
+    } catch (error) {
+      setToast(`Sync failed for ${profile.name}: ${errorMessage(error)}`);
     }
-    await load();
   }
 
   async function saveProfile(form: ProfileForm) {
@@ -354,17 +365,23 @@ export default function App() {
   }
 
   async function startGmailOAuth(profile: MailProfile, clientConfigPath: string) {
-    const payload = await sendJson<{ auth_url?: string; status?: string }>("/api/mail/oauth/gmail/start", "POST", {
-      profile_name: profile.name,
-      client_config_path: clientConfigPath
-    });
-    if (payload.auth_url) {
-      window.open(payload.auth_url, "_blank", "noopener,noreferrer");
-      setToast("Gmail OAuth opened in a new browser tab.");
-    } else {
-      setToast(payload.status ?? "Gmail OAuth setup started.");
+    try {
+      const payload = await sendJson<{ auth_url?: string; status?: string; message?: string }>("/api/mail/oauth/gmail/start", "POST", {
+        profile_name: profile.name,
+        client_config_path: clientConfigPath
+      });
+      if (payload.auth_url) {
+        window.open(payload.auth_url, "_blank", "noopener,noreferrer");
+        setToast(`Gmail OAuth opened for ${profile.name}.`);
+      } else if (payload.message) {
+        setToast(`Gmail OAuth ${payload.status ?? "blocked"} for ${profile.name}: ${payload.message}`);
+      } else {
+        setToast(payload.status ?? `Gmail OAuth setup started for ${profile.name}.`);
+      }
+      await load();
+    } catch (error) {
+      setToast(`Gmail OAuth failed for ${profile.name}: ${errorMessage(error)}`);
     }
-    await load();
   }
 
   async function saveCrawlRoot(form: CrawlRootForm) {
@@ -615,16 +632,12 @@ export default function App() {
             host={host}
             oauthProfiles={oauthProfiles}
             mailErrors={mailErrors}
-            blockedJobs={blockedJobs}
-            restartRows={restartRows}
-            debugOpen={debugOpen}
-            onDebugToggle={() => setDebugOpen((open) => !open)}
             onAddProfile={() => setProfileDialog("new")}
             onEditProfile={setProfileDialog}
             onSelectProfile={(profile) => setSelectedName(profile.name)}
             onSyncProfile={(profile) => void requestProfileSync(profile)}
+            onOAuthStart={(profile, clientPath) => void startGmailOAuth(profile, clientPath)}
             onErrorDetail={setErrorDetail}
-            onSettingsTab={() => setActiveTab("settings")}
           />
         )}
 
@@ -726,9 +739,13 @@ export default function App() {
         </InfoDialog>
       )}
 
-      {selectedProfile?.source_type === "imap" && activeTab === "mail" && (
-        <OAuthAction profile={selectedProfile} onStart={(clientPath) => void startGmailOAuth(selectedProfile, clientPath)} />
+      {debugOpen && (
+        <InfoDialog title="Developer Debug Drawer" onClose={() => setDebugOpen(false)}>
+          <p className="muted">Raw payloads are shown only for diagnostics.</p>
+          <pre className="debug-drawer">{JSON.stringify(state, null, 2)}</pre>
+        </InfoDialog>
       )}
+
     </div>
   );
 }
@@ -742,16 +759,12 @@ function MailTab({
   host,
   oauthProfiles,
   mailErrors,
-  blockedJobs,
-  restartRows,
-  debugOpen,
-  onDebugToggle,
   onAddProfile,
   onEditProfile,
   onSelectProfile,
   onSyncProfile,
-  onErrorDetail,
-  onSettingsTab
+  onOAuthStart,
+  onErrorDetail
 }: {
   state: LoadState;
   loading: boolean;
@@ -761,17 +774,14 @@ function MailTab({
   host: OutlookStatus["host"];
   oauthProfiles: Array<{ profile_name?: string; status?: string }>;
   mailErrors: number;
-  blockedJobs: number;
-  restartRows: SettingRow[];
-  debugOpen: boolean;
-  onDebugToggle: () => void;
   onAddProfile: () => void;
   onEditProfile: (profile: MailProfile) => void;
   onSelectProfile: (profile: MailProfile) => void;
   onSyncProfile: (profile: MailProfile) => void;
+  onOAuthStart: (profile: MailProfile, clientPath: string) => void;
   onErrorDetail: (error: string) => void;
-  onSettingsTab: () => void;
 }) {
+  const hasOutlookProfiles = profiles.some((profile) => profile.source_type === "outlook_com") || (state.outlook.pending_requests?.length ?? 0) > 0;
   return (
     <>
       <section className="main-grid">
@@ -779,8 +789,8 @@ function MailTab({
           <div className="table-toolbar">
             <span>{loading ? "Refreshing..." : `Showing ${profiles.length} profile${profiles.length === 1 ? "" : "s"}`}</span>
             <div>
-              <button className="icon-button" type="button" aria-label="Filter profiles"><SlidersHorizontal size={18} /></button>
-              <button className="icon-button" type="button" aria-label="Profile table options"><MoreVertical size={18} /></button>
+              <button className="icon-button" type="button" aria-label="Filter profiles" title="Profile filters are not needed for the current profile count" disabled><SlidersHorizontal size={18} /></button>
+              <button className="icon-button" type="button" aria-label="Profile table options" title="Profile table options will appear here when bulk actions are added" disabled><MoreVertical size={18} /></button>
             </div>
           </div>
           <ProfileTable
@@ -800,28 +810,57 @@ function MailTab({
             profile={selectedProfile}
             hostStatus={hostStatus}
             hostCommand={host?.command}
+            oauthProfile={oauthProfiles.find((row) => row.profile_name === selectedProfile?.name)}
             onSync={() => selectedProfile && onSyncProfile(selectedProfile)}
             onEdit={() => selectedProfile && onEditProfile(selectedProfile)}
+            onOAuthStart={(clientPath) => selectedProfile && onOAuthStart(selectedProfile, clientPath)}
           />
         </Panel>
       </section>
 
       <section className="lower-grid">
-        <BacklogPanel health={state.health} blockedJobs={blockedJobs} />
-        <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
-        <Panel title={`Settings Changes Requiring Restart (${restartRows.length})`} action={<button className="ghost-action compact" type="button" onClick={onSettingsTab}>Review</button>}>
-          <SettingsPreview rows={restartRows} />
-        </Panel>
-      </section>
-
-      <section className="host-grid">
-        <OutlookHostPanel host={host} hostStatus={hostStatus} pending={state.outlook.pending_requests?.length ?? 0} />
-        <Panel title="Developer Debug Drawer" action={<button className="ghost-action compact" type="button" onClick={onDebugToggle}><Terminal size={15} /> {debugOpen ? "Hide" : "Open"}</button>}>
-          <p className="muted">Raw payloads are kept out of the primary dashboard. Open this drawer only for diagnostics.</p>
-          {debugOpen && <pre className="debug-drawer">{JSON.stringify(state, null, 2)}</pre>}
-        </Panel>
+        <MailStatusPanel mail={state.mail} hostStatus={hostStatus} showOutlook={hasOutlookProfiles} />
+        <MailErrorsPanel mail={state.mail} errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
+        {hasOutlookProfiles && <OutlookHostPanel host={host} hostStatus={hostStatus} pending={state.outlook.pending_requests?.length ?? 0} />}
       </section>
     </>
+  );
+}
+
+function MailStatusPanel({ mail, hostStatus, showOutlook }: { mail: MailStatus; hostStatus: string; showOutlook: boolean }) {
+  const rows = [
+    ["Profiles", "enabled", String(mail.enabled_profiles ?? 0)],
+    ["Exports", "messages", String(mail.exported_messages ?? 0)],
+    ["Errors", "messages", String(mail.errored_messages ?? 0)]
+  ];
+  if (showOutlook) {
+    rows.push(["Outlook host", "state", hostStatusLabel(hostStatus)]);
+  }
+  return (
+    <Panel title="Mail Runtime">
+      <MiniTable rows={rows} />
+    </Panel>
+  );
+}
+
+function MailErrorsPanel({ mail, errors, onErrorDetail }: { mail: MailStatus; errors: string[]; onErrorDetail: (error: string) => void }) {
+  const mailErrors = errors.filter((error) => /mail|imap|oauth|gmail|outlook/i.test(error));
+  return (
+    <Panel title="Mail Errors">
+      <div className="error-list">
+        {mailErrors.slice(0, 4).map((error, index) => (
+          <div className="error-item" key={`${error}-${index}`}>
+            <span className="error-dot" />
+            <div>
+              <strong>{error}</strong>
+              <span>Captured from mail ingestion or profile auth state</span>
+            </div>
+            <button type="button" title="Show mail error detail" aria-label={`View mail error ${error}`} onClick={() => onErrorDetail(error)}>View</button>
+          </div>
+        ))}
+        {mailErrors.length === 0 && <p className="muted">{mail.errored_messages ? `${mail.errored_messages} errored message records. Select a profile or open Jobs for details.` : "No mail errors."}</p>}
+      </div>
+    </Panel>
   );
 }
 
@@ -829,6 +868,7 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
   const runtimeRows = Object.entries(state.health.runtime ?? {});
   const hostAgent = state.health.host_agent;
   const codex = state.health.codex;
+  const workers = state.health.workers;
   return (
     <section className="tab-grid">
       <Panel title="System Health">
@@ -837,6 +877,7 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
           {runtimeRows.map(([key, value]) => <StatusTile key={key} label={key} ok={value.ok} message={value.message} />)}
           <StatusTile label="Outlook Host" ok={hostStatus === "running"} message={hostStatusLabel(hostStatus)} />
           <StatusTile label="Host Agent" ok={hostAgent?.status === "running"} message={hostAgent?.status ?? "host_agent_offline"} />
+          <StatusTile label="Corpus Worker" ok={(workers?.active ?? 0) > 0} message={`${workers?.active ?? 0} active worker${workers?.active === 1 ? "" : "s"}`} />
           <StatusTile
             label="Codex Integration"
             ok={codex?.status === "ready"}
@@ -890,12 +931,13 @@ function CorpusTab({
           <button className="ghost-action compact" type="button" title="Enable watch mode for every monitored root" onClick={() => onWatch(true)}>Enable all watch</button>
           <button className="ghost-action compact" type="button" title="Disable watch mode without deleting roots" onClick={() => onWatch(false)}>Disable all watch</button>
         </div>
-        <MiniTable rows={[
-          ["Roots", "configured", String(roots.length)],
-          ["Active watch", "status", String(status.active_watch_roots ?? state.health.watcher?.active_roots ?? 0)],
-          ["Disabled watch", "status", String(status.disabled_watch_roots ?? state.health.watcher?.disabled_roots ?? 0)],
-          ["Stale", "watcher", String(state.health.watcher?.stale_count ?? 0)]
-        ]} />
+        <div className="summary-cards">
+          <Stat label="Roots" value={String(roots.length)} />
+          <Stat label="Active watch" value={String(status.active_watch_roots ?? state.health.watcher?.active_roots ?? 0)} />
+          <Stat label="Disabled watch" value={String(status.disabled_watch_roots ?? state.health.watcher?.disabled_roots ?? 0)} />
+          <Stat label="Stale" value={String(state.health.watcher?.stale_count ?? 0)} />
+          <Stat label="Workers" value={String(state.health.workers?.active ?? 0)} />
+        </div>
       </Panel>
       <section className="main-grid">
         <Panel className="profiles-panel" title="Monitored Roots">
@@ -973,7 +1015,7 @@ function RootTable({
                 <span>{root.recursive ? "Recursive" : "Single level"} - trust {root.trust_rank ?? 500}</span>
               </div>
             </td>
-            <td className="path-cell">{root.root_path}</td>
+            <td className="path-cell" title={root.root_path}>{root.root_path}</td>
             <td><RootStateBadge state={root.state} /></td>
             <td>
               <strong>{root.asset_counts?.indexed ?? 0} indexed</strong>
@@ -1032,7 +1074,7 @@ function RootInspector({
         <div className="outlook-logo root-logo"><Folder size={24} /></div>
         <div>
           <h3>{root.name}</h3>
-          <span>{root.root_path}</span>
+          <span title={root.root_path}>{root.root_path}</span>
         </div>
       </div>
       <div className="button-row">
@@ -1049,7 +1091,7 @@ function RootInspector({
       {root.job_counts?.pending ? (
         <p className="warning-note">
           {root.job_counts.pending} pending deferred job{root.job_counts.pending === 1 ? "" : "s"}.
-          Start <code>flux-kb crawl worker run</code> or run backfill now.
+          The background worker will process these automatically; use Run backfill only for an immediate one-shot retry.
         </p>
       ) : null}
       <div className="schedule-row">
@@ -1095,7 +1137,7 @@ function AssetRows({ assets }: { assets: Array<Record<string, unknown>> }) {
     <div className="compact-rows">
       {assets.slice(0, 6).map((asset) => (
         <div key={String(asset.path)}>
-          <span>{String(asset.path ?? "-")}</span>
+          <span title={String(asset.path ?? "-")}>{String(asset.path ?? "-")}</span>
           <RootStateBadge state={String(asset.status ?? "indexed")} />
         </div>
       ))}
@@ -1109,7 +1151,7 @@ function JobRows({ jobs }: { jobs: Array<Record<string, unknown>> }) {
     <div className="compact-rows">
       {jobs.slice(0, 6).map((job) => (
         <div key={String(job.id)}>
-          <span>{String(job.path ?? job.job_type ?? "-")}</span>
+          <span title={String(job.path ?? job.job_type ?? "-")}>{String(job.path ?? job.job_type ?? "-")}</span>
           <RootStateBadge state={String(job.status ?? "pending")} />
         </div>
       ))}
@@ -1312,6 +1354,16 @@ function RetrievalTab({ state, searchOpen, searchResults, query, onClear, onErro
           <p className="muted">Use the top search box to query episodes, corpus chunks, mail bodies, and attachments.</p>
         )}
       </Panel>
+      <Panel title="Consumer Access">
+        <p className="panel-note">External tools can query Flux through local REST, MCP tools, or the CLI. Keep the API bound to localhost unless you explicitly configure access controls.</p>
+        <div className="consumer-grid">
+          <code>GET /api/search?query=customer%20RFP&amp;limit=5</code>
+          <code>GET /api/brief?query=customer%20RFP&amp;token_budget=1200</code>
+          <code>{'kb.search({"query":"customer RFP","limit":5})'}</code>
+          <code>{'kb.brief({"query":"customer RFP","token_budget":1200})'}</code>
+          <code>flux-kb search "customer RFP" --limit 5</code>
+        </div>
+      </Panel>
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
     </section>
   );
@@ -1388,7 +1440,7 @@ function ProfileTable({
               </div>
             </td>
             <td><SourceBadge source={profile.source_type} /></td>
-            <td>{(profile.folder_paths ?? []).slice(0, 2).join(" / ") || "-"}</td>
+            <td className="path-cell" title={(profile.folder_paths ?? []).join(" / ")}>{(profile.folder_paths ?? []).slice(0, 2).join(" / ") || "-"}</td>
             <td><AuthBadge profile={profile} oauthProfiles={oauthProfiles} hostStatus={hostStatus} /></td>
             <td>
               <strong>{profile.sync_enabled ? intervalLabel(profile.sync_interval_seconds) : "Manual"}</strong>
@@ -1399,9 +1451,9 @@ function ProfileTable({
             <td className={mailErrors ? "error-text" : ""}>{mailErrors ? `${mailErrors} total` : "0"}</td>
             <td>
               <div className="row-actions">
-                <button type="button" aria-label={`Sync ${profile.name}`} onClick={(event) => { event.stopPropagation(); onSync(profile); }}><RefreshCcw size={15} /></button>
-                <button type="button" aria-label={`Edit ${profile.name}`} onClick={(event) => { event.stopPropagation(); onEdit(profile); }}><Wrench size={15} /></button>
-                <button type="button" aria-label={`More ${profile.name}`} onClick={(event) => { event.stopPropagation(); onSelect(profile); }}><MoreVertical size={15} /></button>
+                <button type="button" aria-label={`Sync ${profile.name}`} title={`Sync ${profile.name} now`} onClick={(event) => { event.stopPropagation(); onSync(profile); }}><RefreshCcw size={15} /></button>
+                <button type="button" aria-label={`Edit ${profile.name}`} title={`Edit ${profile.name}`} onClick={(event) => { event.stopPropagation(); onEdit(profile); }}><Wrench size={15} /></button>
+                <button type="button" aria-label={`More ${profile.name}`} title={`Select ${profile.name} for details`} onClick={(event) => { event.stopPropagation(); onSelect(profile); }}><MoreVertical size={15} /></button>
               </div>
             </td>
           </tr>
@@ -1416,8 +1468,26 @@ function ProfileTable({
   );
 }
 
-function Inspector({ profile, hostStatus, hostCommand, onSync, onEdit }: { profile?: MailProfile; hostStatus: string; hostCommand?: string; onSync: () => void; onEdit: () => void }) {
+function Inspector({
+  profile,
+  hostStatus,
+  hostCommand,
+  oauthProfile,
+  onSync,
+  onEdit,
+  onOAuthStart
+}: {
+  profile?: MailProfile;
+  hostStatus: string;
+  hostCommand?: string;
+  oauthProfile?: { profile_name?: string; status?: string; expires_at?: string | null; has_refresh_token?: boolean };
+  onSync: () => void;
+  onEdit: () => void;
+  onOAuthStart: (clientPath: string) => void;
+}) {
+  const [clientPath, setClientPath] = useState("private/google-oauth-client.json");
   if (!profile) return <div className="empty-inspector"><p className="muted">Select or create a mail profile.</p></div>;
+  const oauthStatus = oauthProfile?.status ?? (profile.source_type === "imap" ? "blocked_auth_required" : "");
   return (
     <div className="inspector">
       <div className="profile-head">
@@ -1434,6 +1504,25 @@ function Inspector({ profile, hostStatus, hostCommand, onSync, onEdit }: { profi
         <strong className={hostStatus === "running" || profile.source_type !== "outlook_com" ? "good-text" : "warn-text"}>{profile.source_type === "outlook_com" ? hostStatusLabel(hostStatus) : "Docker mail worker"}</strong>
       </div>
       {profile.source_type === "outlook_com" && hostStatus !== "running" && <code>{hostCommand ?? "flux-kb outlook-host run"}</code>}
+      {profile.source_type === "imap" && (
+        <div className="oauth-inline">
+          <div className="availability">
+            <span>Gmail OAuth</span>
+            <strong className={oauthStatus === "configured" ? "good-text" : "warn-text"}>{oauthStatus}</strong>
+          </div>
+          <label>Private client JSON
+            <input value={clientPath} onChange={(event) => setClientPath(event.target.value)} />
+          </label>
+          <button
+            className="ghost-action compact"
+            type="button"
+            title={`Start Gmail OAuth for ${profile.name}`}
+            onClick={() => onOAuthStart(clientPath)}
+          >
+            <KeyRound size={15} /> Gmail OAuth for {profile.name}
+          </button>
+        </div>
+      )}
       <div className="schedule-row">
         <Stat label="Schedule" value={profile.sync_enabled ? intervalLabel(profile.sync_interval_seconds) : "Manual"} />
         <Stat label="Window" value={`${profile.sync_window_days ?? 30} days`} />
@@ -1444,11 +1533,11 @@ function Inspector({ profile, hostStatus, hostCommand, onSync, onEdit }: { profi
         <Stat label="Next Sync" value={formatDate(profile.next_sync_at)} />
       </div>
       <div className="button-row">
-        <button className="sync-selected" type="button" onClick={onSync}>
+        <button className="sync-selected" type="button" title={`Sync ${profile.name} now`} onClick={onSync}>
           <RefreshCcw size={17} />
           Sync selected profile
         </button>
-        <button className="ghost-action compact" type="button" onClick={onEdit}>
+        <button className="ghost-action compact" type="button" title={`Edit ${profile.name}`} onClick={onEdit}>
           <Wrench size={15} />
           Edit profile
         </button>
@@ -1577,28 +1666,6 @@ function InfoDialog({ title, children, onClose }: { title: string; children: Rea
           <button className="small-primary" type="button" onClick={onClose}>Close</button>
         </footer>
       </div>
-    </div>
-  );
-}
-
-function OAuthAction({ profile, onStart }: { profile: MailProfile; onStart: (clientPath: string) => void }) {
-  const [open, setOpen] = useState(false);
-  const [clientPath, setClientPath] = useState("private/google-oauth-client.json");
-  if (!open) {
-    return (
-      <button className="floating-oauth" type="button" onClick={() => setOpen(true)}>
-        <KeyRound size={16} /> Gmail OAuth
-      </button>
-    );
-  }
-  return (
-    <div className="floating-card">
-      <header>
-        <strong>Gmail OAuth for {profile.name}</strong>
-        <button type="button" aria-label="Close Gmail OAuth" onClick={() => setOpen(false)}><X size={16} /></button>
-      </header>
-      <label>Private client JSON<input value={clientPath} onChange={(event) => setClientPath(event.target.value)} /></label>
-      <button className="small-primary" type="button" onClick={() => onStart(clientPath)}>Start Gmail OAuth</button>
     </div>
   );
 }
@@ -1796,8 +1863,11 @@ function AuthBadge({ profile, oauthProfiles, hostStatus }: { profile: MailProfil
   if (profile.source_type === "outlook_com") {
     return <span className={hostStatus === "running" ? "auth good" : "auth warn"}><ShieldCheck size={16} /> {hostStatus === "running" ? "COM Ready" : "Host needed"}</span>;
   }
-  const oauth = oauthProfiles.find((row) => row.profile_name === profile.name)?.status ?? "OAuth2";
-  return <span className={String(oauth).includes("expired") ? "auth warn" : "auth good"}><CheckCircle2 size={16} /> {oauth}</span>;
+  const oauth = oauthProfiles.find((row) => row.profile_name === profile.name)?.status ?? "blocked_auth_required";
+  const good = oauth === "configured";
+  const pending = oauth === "pending_user_authorization";
+  const Icon = good ? CheckCircle2 : pending ? Clock3 : AlertCircle;
+  return <span className={good ? "auth good" : "auth warn"}><Icon size={16} /> {oauth}</span>;
 }
 
 function StatusTile({ label, ok, message }: { label: string; ok?: boolean; message?: string }) {

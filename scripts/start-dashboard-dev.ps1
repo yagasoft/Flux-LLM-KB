@@ -16,7 +16,7 @@ try {
 
   $docker = Get-Command docker -ErrorAction SilentlyContinue
   if ($null -ne $docker) {
-    docker compose up -d --build postgres api
+    docker compose up -d --build postgres api worker
     if ($LASTEXITCODE -eq 0) {
       Write-Host "Dashboard deployment refreshed at $url"
       return

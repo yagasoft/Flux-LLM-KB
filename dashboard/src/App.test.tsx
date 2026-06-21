@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "./App";
@@ -14,6 +14,12 @@ const health = {
   watcher: { active_roots: 1, disabled_roots: 2, stale_count: 0 },
   jobs: { pending: 4, failed: 1, blocked: 2 },
   retrieval: { episodes: 9, asset_chunks: 12, embeddings: 40 },
+  workers: {
+    active: 1,
+    components: [
+      { name: "corpus-worker:docker", status: "running", heartbeat_age_seconds: 2 }
+    ]
+  },
   recent_errors: ["ffprobe command not found"],
   host_agent: { status: "running", browse_supported: true },
   codex: {
@@ -73,6 +79,11 @@ const mail = {
   enabled_profiles: 2,
   exported_messages: 10,
   errored_messages: 1,
+  oauth: {
+    profiles: [
+      { profile_name: "gmail-capture", status: "blocked_auth_required", has_refresh_token: false }
+    ]
+  },
   profiles: [
     {
       name: "gmail-capture",
@@ -267,6 +278,39 @@ describe("Flux dashboard", () => {
     expect(await screen.findByRole("heading", { name: "Corpus Monitor" })).toBeInTheDocument();
   });
 
+  test("mail tab shows only mail-focused panels and profile-scoped OAuth actions", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Select gmail-capture" }));
+
+    expect(screen.getByRole("heading", { name: "Mail Profiles" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Extraction Backlog/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Settings Changes Requiring Restart/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Developer Debug Drawer" })).not.toBeInTheDocument();
+    expect(document.querySelector(".floating-oauth")).toBeNull();
+
+    const profileDetails = screen.getByRole("heading", { name: "Profile Details" }).closest(".panel");
+    expect(profileDetails).not.toBeNull();
+    expect(within(profileDetails as HTMLElement).getByRole("button", { name: /Gmail OAuth/i })).toBeInTheDocument();
+    expect(within(profileDetails as HTMLElement).getByText("blocked_auth_required")).toBeInTheDocument();
+  });
+
+  test("retrieval tab documents REST MCP and CLI consumer access", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Retrieval" }));
+
+    expect(await screen.findByRole("heading", { name: "Consumer Access" })).toBeInTheDocument();
+    expect(screen.getByText(/GET \/api\/search\?query=/)).toBeInTheDocument();
+    expect(screen.getByText(/^kb\.search/)).toBeInTheDocument();
+    expect(screen.getByText(/flux-kb search/)).toBeInTheDocument();
+  });
+
   test("add profile opens a real form and persists an IMAP profile", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -372,6 +416,7 @@ describe("Flux dashboard", () => {
     expect(screen.getAllByText("watching").length).toBeGreaterThan(0);
     expect(screen.getAllByText("clip.mp4").length).toBeGreaterThan(0);
     expect(screen.getByText("Effective include globs")).toBeInTheDocument();
+    expect(screen.queryByText(/Start .*flux-kb crawl worker run/)).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Sync docs" }));
     await user.click(screen.getByRole("button", { name: "Dry run docs" }));

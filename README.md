@@ -42,6 +42,7 @@ flux-kb migrate
 flux-kb doctor
 flux-kb remember "Project decision" "Use PostgreSQL and pgvector from day one."
 flux-kb search "pgvector decision"
+.\scripts\start-dashboard-dev.ps1
 ```
 
 Docker Compose is the default runtime profile. If Docker is missing, the setup

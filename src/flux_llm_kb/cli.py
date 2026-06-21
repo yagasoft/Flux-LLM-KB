@@ -99,6 +99,12 @@ def main(argv: list[str] | None = None) -> int:
     crawl_worker_run.add_argument("--workers", type=int, default=1)
     crawl_worker_run.add_argument("--interval", type=float, default=5.0)
     crawl_worker_run.add_argument("--once", action="store_true")
+    crawl_worker_run.add_argument("--host-agent-roots", action="store_true", help="Process only host-agent owned roots")
+    crawl_worker_run.add_argument(
+        "--exclude-host-agent-roots",
+        action="store_true",
+        help="Skip host-agent owned roots so Docker workers do not open host paths",
+    )
 
     crawl_subparsers.add_parser("doctor", help="Show crawler and watcher health")
 
@@ -336,12 +342,22 @@ def _crawl(args: argparse.Namespace) -> int:
 
         if args.worker_command != "run":  # pragma: no cover - argparse prevents this
             raise ValueError(args.worker_command)
+        host_agent_roots = None
+        component_name = "corpus-worker:manual"
+        if args.host_agent_roots:
+            host_agent_roots = True
+            component_name = "corpus-worker:host-agent"
+        elif args.exclude_host_agent_roots:
+            host_agent_roots = False
+            component_name = "corpus-worker:docker"
         payload = KnowledgeService().run_corpus_worker(
             kind=args.kind,
             limit=args.limit,
             workers=args.workers,
             interval_seconds=args.interval,
             once=args.once,
+            host_agent_roots=host_agent_roots,
+            component_name=component_name,
         )
     elif args.crawl_command == "doctor":
         from .health import collect_dashboard_payload

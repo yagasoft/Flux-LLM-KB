@@ -1087,10 +1087,30 @@ def claim_corpus_jobs(
     limit: int = 1,
     worker_id: str = "flux-kb-worker",
     root_name: str | None = None,
+    host_agent_roots: bool | None = None,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     root_filter = "AND payload->>'root_name' = %s" if root_name else ""
+    host_root_filter = ""
+    if host_agent_roots is True:
+        host_root_filter = """
+                      AND EXISTS (
+                          SELECT 1
+                          FROM monitored_roots r
+                          WHERE r.name = capture_jobs.payload->>'root_name'
+                            AND r.metadata->>'host_access' = 'host_agent'
+                      )
+        """
+    elif host_agent_roots is False:
+        host_root_filter = """
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM monitored_roots r
+                          WHERE r.name = capture_jobs.payload->>'root_name'
+                            AND r.metadata->>'host_access' = 'host_agent'
+                      )
+        """
     params: tuple[Any, ...]
     if root_name:
         params = (worker_id, root_name, max(1, min(limit, 100)))
@@ -1113,6 +1133,7 @@ def claim_corpus_jobs(
                       AND status = 'pending'
                       AND next_attempt_at <= now()
                       {root_filter}
+                      {host_root_filter}
                     ORDER BY created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -1129,6 +1150,68 @@ def claim_corpus_jobs(
                     "payload": row[3],
                     "attempts": row[4],
                     "last_error": row[5],
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def record_runtime_component_heartbeat(
+    *,
+    name: str,
+    status: str = "running",
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO runtime_components (name, status, heartbeat_at, metadata)
+                VALUES (%s, %s, now(), %s::jsonb)
+                ON CONFLICT (name) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    heartbeat_at = now(),
+                    metadata = runtime_components.metadata || EXCLUDED.metadata,
+                    updated_at = now()
+                RETURNING name, status, heartbeat_at, metadata, updated_at
+                """,
+                (name, status, _json(metadata or {})),
+            )
+            row = cur.fetchone()
+            return {
+                "name": row[0],
+                "status": row[1],
+                "heartbeat_at": row[2].isoformat() if row[2] else None,
+                "metadata": row[3] or {},
+                "updated_at": row[4].isoformat() if row[4] else None,
+            }
+
+
+def list_runtime_components(*, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT name, status, heartbeat_at,
+                       CASE
+                         WHEN heartbeat_at IS NULL THEN NULL
+                         ELSE EXTRACT(EPOCH FROM (now() - heartbeat_at))::integer
+                       END AS heartbeat_age_seconds,
+                       metadata, updated_at
+                FROM runtime_components
+                ORDER BY name
+                """
+            )
+            return [
+                {
+                    "name": row[0],
+                    "status": row[1],
+                    "heartbeat_at": row[2].isoformat() if row[2] else None,
+                    "heartbeat_age_seconds": row[3],
+                    "metadata": row[4] or {},
+                    "updated_at": row[5].isoformat() if row[5] else None,
                 }
                 for row in cur.fetchall()
             ]
@@ -1311,6 +1394,131 @@ def retrieval_stats(*, url: str | None = None) -> dict[str, int]:
             cur.execute("SELECT count(*) FROM source_assets WHERE canonical_asset_id IS NOT NULL")
             counts["duplicate_assets"] = cur.fetchone()[0]
             return counts
+
+
+def list_source_assets(
+    *,
+    root_name: str | None = None,
+    path: str | None = None,
+    limit: int = 50,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    filters = ["a.deleted_at IS NULL"]
+    params: list[Any] = []
+    if root_name:
+        filters.append("r.name = %s")
+        params.append(root_name)
+    if path:
+        filters.append("a.path ILIKE %s")
+        params.append(f"%{path}%")
+    params.append(max(1, min(limit, 200)))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT a.id::text, r.name, a.path, a.uri, a.file_kind, a.mime_type,
+                       a.extension, a.size_bytes, a.extraction_status,
+                       a.canonical_asset_id::text,
+                       (
+                           SELECT count(*)
+                           FROM source_assets duplicate
+                           WHERE duplicate.canonical_asset_id = a.id
+                             AND duplicate.deleted_at IS NULL
+                       ) AS duplicate_count,
+                       a.last_seen_at, a.indexed_at, a.metadata
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE {" AND ".join(filters)}
+                ORDER BY a.updated_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            return [_source_asset_lookup_row(row) for row in cur.fetchall()]
+
+
+def get_source_asset(asset_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id::text, r.name, a.path, a.uri, a.file_kind, a.mime_type,
+                       a.extension, a.size_bytes, a.extraction_status,
+                       a.canonical_asset_id::text,
+                       (
+                           SELECT count(*)
+                           FROM source_assets duplicate
+                           WHERE duplicate.canonical_asset_id = a.id
+                             AND duplicate.deleted_at IS NULL
+                       ) AS duplicate_count,
+                       a.last_seen_at, a.indexed_at, a.metadata
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE a.id = %s
+                """,
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            asset = _source_asset_lookup_row(row)
+            cur.execute(
+                """
+                SELECT id::text, chunk_index, title, modality, locator, token_estimate
+                FROM asset_chunks
+                WHERE asset_id = %s
+                ORDER BY chunk_index
+                LIMIT 100
+                """,
+                (asset_id,),
+            )
+            asset["chunks"] = [
+                {
+                    "id": chunk[0],
+                    "chunk_index": chunk[1],
+                    "title": chunk[2],
+                    "modality": chunk[3],
+                    "locator": chunk[4],
+                    "token_estimate": chunk[5],
+                }
+                for chunk in cur.fetchall()
+            ]
+            return asset
+
+
+def get_asset_chunk(chunk_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id::text, c.asset_id::text, c.chunk_index, c.title, c.body,
+                       c.modality, c.locator, c.token_estimate,
+                       a.path, r.name
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE c.id = %s
+                """,
+                (chunk_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "asset_id": row[1],
+                "chunk_index": row[2],
+                "title": row[3],
+                "body": row[4],
+                "modality": row[5],
+                "locator": row[6],
+                "token_estimate": row[7],
+                "asset_path": row[8],
+                "root_name": row[9],
+            }
 
 
 def get_runtime_setting(key: str, *, url: str | None = None) -> dict[str, Any] | None:
@@ -2309,6 +2517,26 @@ def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "max_inline_bytes": max_inline_bytes,
         "heavy_threshold_bytes": heavy_threshold_bytes,
         "metadata": metadata,
+    }
+
+
+def _source_asset_lookup_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "root_name": row[1],
+        "path": row[2],
+        "uri": row[3],
+        "file_kind": row[4],
+        "mime_type": row[5],
+        "extension": row[6],
+        "size_bytes": row[7],
+        "status": row[8],
+        "canonical_asset_id": row[9],
+        "is_duplicate": row[9] is not None,
+        "duplicate_count": int(row[10] or 0),
+        "last_seen_at": row[11].isoformat() if row[11] else None,
+        "indexed_at": row[12].isoformat() if row[12] else None,
+        "metadata": row[13] or {},
     }
 
 

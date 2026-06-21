@@ -993,6 +993,21 @@ kbd {
   padding: 16px;
 }
 
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 10px;
+  padding: 0 16px 16px;
+}
+
+.summary-cards .stat {
+  min-height: 64px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
 .corpus-tab .main-grid {
   grid-template-columns: minmax(720px, 1fr) 420px;
 }
@@ -1008,7 +1023,9 @@ kbd {
 .path-cell {
   max-width: 260px;
   color: var(--muted);
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: break-word;
 }
 
 .root-actions button {
@@ -1055,7 +1072,9 @@ kbd {
 
 .compact-rows span:first-child {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: break-word;
   color: var(--ink);
   font-size: 12px;
 }
@@ -1148,8 +1167,7 @@ kbd {
   width: min(560px, 100%);
 }
 
-.modal > header,
-.floating-card > header {
+.modal > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1163,8 +1181,7 @@ kbd {
   font-size: 18px;
 }
 
-.modal > header button,
-.floating-card > header button {
+.modal > header button {
   display: inline-grid;
   place-items: center;
   width: 32px;
@@ -1192,7 +1209,7 @@ kbd {
 
 .form-grid label,
 .setting-editor label,
-.floating-card label {
+.oauth-inline label {
   display: grid;
   gap: 7px;
   color: #596679;
@@ -1204,7 +1221,7 @@ kbd {
 .form-grid select,
 .form-grid textarea,
 .setting-editor input,
-.floating-card input {
+.oauth-inline input {
   width: 100%;
   min-height: 38px;
   padding: 8px 10px;
@@ -1289,43 +1306,37 @@ kbd {
   border-color: #684214;
 }
 
-.floating-oauth,
-.floating-card {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 30;
-}
-
-.floating-oauth {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 0 14px;
+.oauth-inline {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  color: #ffffff;
-  background: linear-gradient(180deg, #0799b8, #057994);
-  box-shadow: var(--shadow);
-  font-weight: 700;
+  background: var(--surface-soft);
 }
 
-.floating-card {
-  width: min(360px, calc(100vw - 32px));
+.oauth-inline .ghost-action {
+  width: max-content;
+  min-height: 36px;
+}
+
+.consumer-grid {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.consumer-grid code {
+  display: block;
+  min-width: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.floating-card label {
-  padding: 14px 16px;
-}
-
-.floating-card > .small-primary {
-  width: calc(100% - 32px);
-  margin: 0 16px 16px;
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--surface-soft);
+  white-space: nowrap;
 }
 
 .sr-only {

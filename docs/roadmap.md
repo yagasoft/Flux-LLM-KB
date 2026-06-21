@@ -50,6 +50,9 @@
   sidecar transcript indexing, and a separate semantic media backfill phase.
 - Background processing with low-priority bounded workers, `FOR UPDATE SKIP LOCKED`
   job claiming, retry/cooldown tracking, and no cloud/provider calls by default.
+- Always-on worker runtime: Docker workers process Docker-visible corpus and mail
+  spool jobs, while the local host agent owns Windows/host filesystem roots and
+  drains host-only extraction jobs automatically after watch-triggered sync.
 - Duplicate suppression by content hash while preserving all observed paths and
   source metadata.
 - Conservative same-document/version-family suppression in retrieval, so common
@@ -88,8 +91,13 @@
   control plane.
 - Dashboard controls for IMAP worker state, Outlook COM host state, per-profile
   schedule fields, manual sync requests, last sync, next sync, backlog, and errors.
+- Profile-scoped Gmail OAuth actions and status, so multiple IMAP/Gmail accounts
+  can be configured independently without floating global OAuth controls.
 - Unified private mail spool for IMAP and Outlook exports; Flux indexes only the
   `ready` spool and ignores `_inflight` partial exports.
+- Consumer access panel and read-only lookup endpoints for REST, MCP, and CLI
+  consumers, including `GET /api/search`, `GET /api/brief`, corpus asset lookup,
+  and chunk lookup.
 
 ## V3: Scale And Evaluation
 

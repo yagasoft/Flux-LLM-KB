@@ -275,3 +275,62 @@ def test_post_body_models_are_bound_from_json(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == [{"query": "corpus roots", "limit": 7}]
+
+
+def test_get_search_and_brief_support_external_consumers(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    class FakeService:
+        def search(self, query, limit=5):
+            return [{"kind": "corpus_chunk", "query": query, "limit": limit}]
+
+        def brief(self, query, token_budget=None):
+            return f"{query}:{token_budget}"
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    search = client.get("/api/search", params={"query": "RFP", "limit": 3})
+    brief = client.get("/api/brief", params={"query": "RFP", "token_budget": 900})
+
+    assert search.status_code == 200
+    assert search.json() == [{"kind": "corpus_chunk", "query": "RFP", "limit": 3}]
+    assert brief.status_code == 200
+    assert brief.json() == {"brief": "RFP:900"}
+
+
+def test_corpus_lookup_routes_return_assets_and_chunks(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr(
+        database,
+        "list_source_assets",
+        lambda **kwargs: [{"id": "asset-1", "path": "docs/readme.md", "root_name": kwargs.get("root_name")}],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
+        "get_source_asset",
+        lambda asset_id: {"id": asset_id, "path": "docs/readme.md"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
+        "get_asset_chunk",
+        lambda chunk_id: {"id": chunk_id, "title": "Readme"},
+        raising=False,
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+
+    assets = client.get("/api/corpus/assets", params={"root_name": "docs", "limit": 2})
+    asset = client.get("/api/corpus/assets/asset-1")
+    chunk = client.get("/api/corpus/chunks/chunk-1")
+
+    assert assets.status_code == 200
+    assert assets.json()["assets"][0]["root_name"] == "docs"
+    assert asset.status_code == 200
+    assert asset.json()["id"] == "asset-1"
+    assert chunk.status_code == 200
+    assert chunk.json()["title"] == "Readme"

@@ -10,7 +10,7 @@ Push-Location $repoRoot
 try {
   $docker = Get-Command docker -ErrorAction SilentlyContinue
   if ($null -ne $docker) {
-    docker compose ps api postgres | Out-Host
+    docker compose ps api worker postgres | Out-Host
   } else {
     Write-Host "Docker command not found on PATH."
   }

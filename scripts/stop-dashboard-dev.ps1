@@ -9,7 +9,7 @@ Push-Location $repoRoot
 try {
   $docker = Get-Command docker -ErrorAction SilentlyContinue
   if ($null -ne $docker) {
-    docker compose stop api | Out-Host
+    docker compose stop api worker | Out-Host
   }
 
   if (Test-Path $pidFile) {

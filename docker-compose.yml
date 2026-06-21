@@ -18,6 +18,21 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m uvicorn flux_llm_kb.rest_api:create_app --factory --host 0.0.0.0 --port 8765"
 
+  worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+    volumes:
+      - ./private:/app/private
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5 --limit 10"
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: flux-llm-kb-postgres

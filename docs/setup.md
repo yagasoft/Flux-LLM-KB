@@ -155,5 +155,7 @@ changes; it rebuilds assets and refreshes the running deployment:
 ```
 
 When Docker is on PATH, the script runs `docker compose up -d --build postgres
-api`. If Docker is unavailable on the current PATH, it falls back to a local
-FastAPI process on the same URL so browser refresh still shows the current build.
+api worker`. If Docker is unavailable on the current PATH, it falls back to a
+local FastAPI process on the same URL so browser refresh still shows the current
+build; in that fallback mode, start `flux-kb crawl worker run` separately when
+you need continuous local job processing.

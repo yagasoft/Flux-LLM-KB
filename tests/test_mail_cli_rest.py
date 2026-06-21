@@ -103,6 +103,27 @@ def test_cli_mail_oauth_start_outputs_authorization_url(monkeypatch, tmp_path, c
     assert payload["authorization_url"].startswith("https://accounts.google.com/")
 
 
+def test_rest_mail_oauth_start_reports_missing_client_config_without_internal_error(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_oauth
+
+    monkeypatch.setattr(
+        mail_oauth,
+        "start_gmail_oauth",
+        lambda **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing client json")),
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/mail/oauth/gmail/start",
+        json={"profile_name": "gmail", "client_config_path": "private/missing-client.json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "blocked_config_missing"
+    assert "missing client json" in response.json()["message"]
+
+
 def test_cli_mail_oauth_status_masks_token_state(monkeypatch, capsys):
     from flux_llm_kb import mail_oauth
 

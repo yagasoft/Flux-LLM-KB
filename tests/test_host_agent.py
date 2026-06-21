@@ -64,6 +64,39 @@ def test_host_agent_backfill_endpoint_routes_to_service(monkeypatch):
     }
 
 
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
+def test_host_agent_startup_runs_watcher_and_worker_loops(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    events: list[str] = []
+
+    class FakeWatcherLoop:
+        def start(self):
+            events.append("watcher-start")
+
+        def stop(self):
+            events.append("watcher-stop")
+
+    class FakeWorkerLoop:
+        def start(self):
+            events.append("worker-start")
+
+        def stop(self):
+            events.append("worker-stop")
+
+    monkeypatch.setattr(host_agent, "HostAgentWatcherLoop", lambda: FakeWatcherLoop())
+    monkeypatch.setattr(host_agent, "HostAgentWorkerLoop", lambda: FakeWorkerLoop(), raising=False)
+
+    with TestClient(host_agent.create_app(start_watcher=True)):
+        assert "watcher-start" in events
+        assert "worker-start" in events
+
+    assert "watcher-stop" in events
+    assert "worker-stop" in events
+
+
 def test_remote_backfill_allows_host_root_processing(monkeypatch):
     requests: list[tuple[str, str, dict]] = []
 

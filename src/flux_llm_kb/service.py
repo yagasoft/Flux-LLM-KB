@@ -157,15 +157,19 @@ class KnowledgeService:
         limit: int = 10,
         workers: int = 1,
         root_name: str | None = None,
+        host_agent_roots: bool | None = None,
     ) -> dict[str, Any]:
         from . import worker
 
         cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
-        claimed = database.claim_corpus_jobs(
-            limit=limit,
-            worker_id=f"flux-kb-backfill-{workers}",
-            root_name=root_name,
-        )
+        claim_kwargs: dict[str, Any] = {
+            "limit": limit,
+            "worker_id": f"flux-kb-backfill-{workers}",
+            "root_name": root_name,
+        }
+        if host_agent_roots is not None:
+            claim_kwargs["host_agent_roots"] = host_agent_roots
+        claimed = database.claim_corpus_jobs(**claim_kwargs)
         filtered = [
             job
             for job in claimed
@@ -207,6 +211,7 @@ class KnowledgeService:
             details={
                 "kind": kind,
                 "root_name": root_name,
+                "host_agent_roots": host_agent_roots,
                 "claimed": len(claimed),
                 "completed": completed,
                 "blocked": blocked,
@@ -220,6 +225,7 @@ class KnowledgeService:
         return {
             "kind": kind,
             "root_name": root_name,
+            "host_agent_roots": host_agent_roots,
             "claimed": len(claimed),
             "completed": completed,
             "blocked": blocked,
@@ -239,16 +245,36 @@ class KnowledgeService:
         interval_seconds: float = 5.0,
         once: bool = False,
         root_name: str | None = None,
+        host_agent_roots: bool | None = None,
+        component_name: str = "corpus-worker:docker",
     ) -> dict[str, Any]:
         runs = 0
         last_result: dict[str, Any] | None = None
         while True:
             runs += 1
+            database.record_runtime_component_heartbeat(
+                name=component_name,
+                status="running",
+                metadata={
+                    "kind": kind,
+                    "limit": limit,
+                    "workers": workers,
+                    "root_name": root_name,
+                    "host_agent_roots": host_agent_roots,
+                    "runs": runs,
+                },
+            )
             last_result = self.run_corpus_backfill(
                 kind=kind,
                 limit=limit,
                 workers=workers,
                 root_name=root_name,
+                host_agent_roots=host_agent_roots,
+            )
+            database.record_runtime_component_heartbeat(
+                name=component_name,
+                status="running",
+                metadata={"last_result": last_result, "runs": runs},
             )
             if once:
                 return {
@@ -259,6 +285,7 @@ class KnowledgeService:
                     "workers": workers,
                     "interval_seconds": interval_seconds,
                     "root_name": root_name,
+                    "host_agent_roots": host_agent_roots,
                     "runs": runs,
                     "last_result": last_result,
                 }

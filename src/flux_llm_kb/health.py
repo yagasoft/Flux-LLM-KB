@@ -55,6 +55,8 @@ def collect_dashboard_payload() -> dict[str, Any]:
         database.retrieval_stats,
         {"episodes": 0, "sources": 0, "source_assets": 0, "asset_chunks": 0, "embeddings": 0},
     )
+    components = _safe(database.list_runtime_components, [])
+    workers = [item for item in components if str(item.get("name", "")).startswith("corpus-worker:")]
     checks = doctor_payload()["checks"]
     watcher_summary = summarize_watcher_staleness(crawl.get("watchers", []))
     host_agent_status = remote_status()
@@ -88,6 +90,10 @@ def collect_dashboard_payload() -> dict[str, Any]:
         "extractors": extractor_availability(),
         "host_agent": host_agent_status,
         "codex": host_agent_status.get("codex") or _safe(codex_status, {"status": "unknown"}),
+        "workers": {
+            "active": sum(1 for item in workers if item.get("status") == "running"),
+            "components": workers,
+        },
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
         "settings": _safe(lambda: __import__("flux_llm_kb.settings", fromlist=["SettingsService"]).SettingsService().public_list(), []),
