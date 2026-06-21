@@ -33,6 +33,12 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
         "retrieval_stats",
         lambda: {"episodes": 3, "asset_chunks": 5, "embeddings": 8},
     )
+    monkeypatch.setattr(
+        health,
+        "remote_status",
+        lambda: {"status": "running", "codex": {"status": "ready", "installed": True}},
+    )
+    monkeypatch.setattr(health, "codex_status", lambda: {"status": "missing"})
 
     payload = collect_dashboard_payload()
 
@@ -42,6 +48,7 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["retrieval"]["asset_chunks"] == 5
     assert payload["recent_errors"] == ["bad file"]
     assert "extractors" in payload
+    assert payload["codex"]["status"] == "ready"
 
 
 def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):

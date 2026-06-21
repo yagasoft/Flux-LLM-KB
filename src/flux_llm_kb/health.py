@@ -57,6 +57,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
     )
     checks = doctor_payload()["checks"]
     watcher_summary = summarize_watcher_staleness(crawl.get("watchers", []))
+    host_agent_status = remote_status()
     return {
         "database": {"ok": db_status.ok, "message": db_status.message},
         "runtime": {
@@ -79,8 +80,8 @@ def collect_dashboard_payload() -> dict[str, Any]:
         },
         "retrieval": retrieval,
         "extractors": extractor_availability(),
-        "host_agent": remote_status(),
-        "codex": _safe(codex_status, {"status": "unknown"}),
+        "host_agent": host_agent_status,
+        "codex": host_agent_status.get("codex") or _safe(codex_status, {"status": "unknown"}),
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
         "settings": _safe(lambda: __import__("flux_llm_kb.settings", fromlist=["SettingsService"]).SettingsService().public_list(), []),

@@ -40,6 +40,7 @@ def status_payload() -> dict[str, Any]:
         "platform": platform.system() or "unknown",
         "process_id": os.getpid(),
         "browse_supported": _native_browse_supported(),
+        "codex": _host_codex_status(),
         "time": time.time(),
     }
 
@@ -236,6 +237,15 @@ def _native_browse_supported() -> bool:
     except Exception:
         return False
     return platform.system() in {"Windows", "Darwin", "Linux"}
+
+
+def _host_codex_status() -> dict[str, Any]:
+    try:
+        from .codex_integration import codex_status
+
+        return codex_status()
+    except Exception as exc:  # pragma: no cover - defensive status payload
+        return {"status": "unknown", "message": str(exc)}
 
 
 def _path_style(path: str) -> str:
