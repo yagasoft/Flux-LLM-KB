@@ -24,6 +24,7 @@ Forbidden in Git:
 - private user or customer data
 - mail spool contents, exported `.eml`/`.msg` files, attachments, heartbeat files,
   OAuth tokens, app passwords, or generated private mail configs
+- local dashboard runtime PID/log files and Outlook host heartbeat/error payloads
 
 ## Runtime Boundary
 
@@ -33,6 +34,10 @@ PostgreSQL database and excludes all runtime paths from Git.
 Mail ingestion writes raw messages and attachments to local private spool paths
 before indexing. Keep those paths under ignored private directories and review
 exports before sharing.
+
+The Outlook COM bridge runs outside Docker under the logged-in Windows user. It
+must write only to ignored private spool/runtime paths and report status through
+the local Flux API or database; no raw mail or credentials belong in Git.
 
 ## Capture Rules
 

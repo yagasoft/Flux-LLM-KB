@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from .health import (
     build_dashboard_html,
     collect_crawl_payload,
@@ -15,6 +17,7 @@ def create_app():
     try:
         from fastapi import FastAPI
         from fastapi.responses import HTMLResponse
+        from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install REST support with `pip install -e .[api]`") from exc
@@ -56,6 +59,10 @@ def create_app():
         account: str | None = None
         server: str | None = None
         post_process_policy: str = "move_to_processed"
+        sync_enabled: bool = False
+        sync_interval_seconds: int = 900
+        sync_window_days: int = 30
+        max_messages_per_run: int = 200
 
     class MailSyncRequest(BaseModel):
         profile_name: str | None = None
@@ -65,8 +72,14 @@ def create_app():
         client_config_path: str
         redirect_uri: str | None = None
 
+    class OutlookHostSyncRequest(BaseModel):
+        profile_name: str
+
     app = FastAPI(title="Flux-LLM-KB")
     service = KnowledgeService()
+    dashboard_assets = Path(__file__).resolve().parent / "dashboard_static" / "assets"
+    if dashboard_assets.exists():
+        app.mount("/dashboard/assets", StaticFiles(directory=str(dashboard_assets)), name="dashboard-assets")
 
     @app.get("/api/health")
     def health():
@@ -190,6 +203,10 @@ def create_app():
             folder_paths=request.folder_paths,
             spool_path=request.spool_path,
             post_process_policy=request.post_process_policy,
+            sync_enabled=request.sync_enabled,
+            sync_interval_seconds=request.sync_interval_seconds,
+            sync_window_days=request.sync_window_days,
+            max_messages_per_run=request.max_messages_per_run,
         )
 
     @app.post("/api/mail/sync")
@@ -227,5 +244,29 @@ def create_app():
         from .mail_oauth import oauth_status
 
         return oauth_status(profile_name=profile_name)
+
+    @app.get("/api/outlook-host/status")
+    def outlook_host_status():
+        from .outlook_host import status
+
+        return status()
+
+    @app.post("/api/outlook-host/request-sync")
+    def outlook_host_request_sync(request: OutlookHostSyncRequest):
+        from .outlook_host import request_sync
+
+        return request_sync(request.profile_name, actor="dashboard")
+
+    @app.post("/api/outlook-host/profiles/{name}/enable")
+    def outlook_host_profile_enable(name: str):
+        from .outlook_host import set_profile_enabled
+
+        return set_profile_enabled(name, enabled=True)
+
+    @app.post("/api/outlook-host/profiles/{name}/disable")
+    def outlook_host_profile_disable(name: str):
+        from .outlook_host import set_profile_enabled
+
+        return set_profile_enabled(name, enabled=False)
 
     return app

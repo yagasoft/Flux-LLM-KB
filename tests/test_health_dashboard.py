@@ -43,23 +43,28 @@ def test_dashboard_html_contains_health_mount_points():
     html = build_dashboard_html()
 
     assert "Flux-LLM-KB Dashboard" in html
-    assert "data-panel=\"watcher\"" in html
-    assert "data-tab=\"settings\"" in html
-    assert "data-tab=\"mail\"" in html
-    assert "/api/dashboard/health" in html
-    assert "/api/settings" in html
-    assert "/api/mail/status" in html
+    assert "id=\"root\"" in html
+    assert "/dashboard/assets/" in html
 
 
 def test_dashboard_html_contains_settings_and_mail_forms_without_registry_wording():
     html = build_dashboard_html()
 
-    assert "id=\"settings-form\"" in html
-    assert "id=\"mail-profile-form\"" in html
-    assert "id=\"oauth-start-form\"" in html
-    assert "confirmSettingChange" in html
-    assert "settings catalog-backed" in html
     assert "registry-backed" not in html.lower()
+    assert "<pre id=\"watcher\"" not in html
+
+
+def test_dashboard_html_can_load_built_spa(tmp_path, monkeypatch):
+    from flux_llm_kb import health
+
+    index = tmp_path / "index.html"
+    index.write_text("<!doctype html><div id=\"root\">Built SPA</div>", encoding="utf-8")
+    monkeypatch.setattr(health, "DASHBOARD_INDEX", index)
+
+    html = build_dashboard_html()
+
+    assert "Built SPA" in html
+    assert "This dashboard build is missing" not in html
 
 
 def test_doctor_summary_treats_gh_as_optional(monkeypatch):

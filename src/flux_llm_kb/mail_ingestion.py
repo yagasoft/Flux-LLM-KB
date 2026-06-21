@@ -180,6 +180,10 @@ def add_mail_profile(
     server: str | None = None,
     post_process_policy: str = "move_to_processed",
     trust_rank: int = 450,
+    sync_enabled: bool = False,
+    sync_interval_seconds: int = 900,
+    sync_window_days: int = 30,
+    max_messages_per_run: int = 200,
 ) -> dict[str, Any]:
     spool = Path(spool_path).expanduser().resolve()
     profile = database.insert_mail_profile(
@@ -191,6 +195,10 @@ def add_mail_profile(
         spool_path=str(spool),
         post_process_policy=post_process_policy,
         trust_rank=trust_rank,
+        sync_enabled=sync_enabled,
+        sync_interval_seconds=sync_interval_seconds,
+        sync_window_days=sync_window_days,
+        max_messages_per_run=max_messages_per_run,
         metadata={},
     )
     ready_root = spool / "ready"
@@ -222,6 +230,7 @@ def sync_mail_profile(
     *,
     access_token: str | None = None,
     imap_client_factory: Any | None = None,
+    allow_outlook_com: bool = False,
 ) -> dict[str, Any]:
     profiles = database.list_mail_profiles(name=profile_name)
     results: list[dict[str, Any]] = []
@@ -231,13 +240,33 @@ def sync_mail_profile(
         if profile["source_type"] == "imap":
             result = _sync_imap_profile(profile, access_token=access_token, imap_client_factory=imap_client_factory)
         elif profile["source_type"] == "outlook_com":
-            result = _sync_outlook_profile(profile)
+            if allow_outlook_com:
+                result = _sync_outlook_profile(profile)
+            else:
+                result = {
+                    "profile": profile["name"],
+                    "status": "outlook_host_required",
+                    "command": "flux-kb outlook-host run",
+                    "exported": 0,
+                }
         else:
             result = {"profile": profile["name"], "status": "unsupported_source_type"}
         spool_result = sync_mail_spool(profile_name=profile["name"])
         result["spool_sync"] = spool_result
         results.append(result)
     return {"profiles": results, "count": len(results)}
+
+
+def sync_outlook_profile(profile_name: str) -> dict[str, Any]:
+    profiles = database.list_mail_profiles(name=profile_name)
+    if not profiles:
+        raise ValueError(f"mail profile not found: {profile_name}")
+    profile = profiles[0]
+    if profile["source_type"] != "outlook_com":
+        raise ValueError(f"mail profile is not Outlook COM: {profile_name}")
+    result = _sync_outlook_profile(profile)
+    result["spool_sync"] = sync_mail_spool(profile_name=profile_name)
+    return result
 
 
 def sync_mail_spool(profile_name: str | None = None) -> dict[str, Any]:

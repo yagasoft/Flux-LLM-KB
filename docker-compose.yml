@@ -1,4 +1,23 @@
 services:
+  api:
+    build:
+      context: .
+    container_name: flux-llm-kb-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_API_HOST: 0.0.0.0
+      FLUX_KB_API_PORT: "8765"
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./private:/app/private
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m uvicorn flux_llm_kb.rest_api:create_app --factory --host 0.0.0.0 --port 8765"
+
   postgres:
     image: pgvector/pgvector:pg16
     container_name: flux-llm-kb-postgres
@@ -18,4 +37,3 @@ services:
 
 volumes:
   flux_llm_kb_postgres:
-

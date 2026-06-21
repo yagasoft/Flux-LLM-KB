@@ -48,6 +48,10 @@ Endpoints:
 - `POST /api/mail/oauth/gmail/start`
 - `GET /api/mail/oauth/gmail/callback`
 - `GET /api/mail/oauth/status`
+- `GET /api/outlook-host/status`
+- `POST /api/outlook-host/request-sync`
+- `POST /api/outlook-host/profiles/{name}/enable`
+- `POST /api/outlook-host/profiles/{name}/disable`
 - `POST /api/search`
 - `POST /api/brief`
 - `POST /api/remember`
@@ -105,8 +109,14 @@ flux-kb mail profile add-outlook `
   --folder "Mailbox - Me\Inbox\Flux Capture" `
   --spool private\mail-spool\outlook-catchup
 
-flux-kb mail sync --profile outlook-catchup
+flux-kb outlook-host sync --profile outlook-catchup
+flux-kb outlook-host run
 ```
+
+`flux-kb mail sync --profile <outlook-profile>` does not attempt COM from the
+Docker-hosted worker. It reports that the Windows Outlook host is required. Run
+`flux-kb outlook-host run` in the logged-in Windows session for scheduled pulls,
+or queue a one-off request with `flux-kb outlook-host sync --profile <name>`.
 
 Mailbox credentials, OAuth tokens, raw messages, and attachments stay local and
 must remain outside Git.

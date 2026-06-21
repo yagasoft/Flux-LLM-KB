@@ -1110,6 +1110,10 @@ def insert_mail_profile(
     trust_rank: int,
     metadata: dict[str, Any] | None = None,
     enabled: bool = True,
+    sync_enabled: bool = False,
+    sync_interval_seconds: int = 900,
+    sync_window_days: int = 30,
+    max_messages_per_run: int = 200,
     url: str | None = None,
 ) -> dict[str, Any]:
     psycopg = _load_psycopg()
@@ -1119,9 +1123,13 @@ def insert_mail_profile(
                 """
                 INSERT INTO mail_profiles (
                     name, source_type, account, server, folder_paths, spool_path,
-                    post_process_policy, enabled, trust_rank, metadata
+                    post_process_policy, enabled, trust_rank, metadata,
+                    sync_enabled, sync_interval_seconds, sync_window_days,
+                    max_messages_per_run, next_sync_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                        %s, %s, %s, %s,
+                        CASE WHEN %s THEN now() ELSE NULL END)
                 ON CONFLICT (name) DO UPDATE SET
                     source_type = EXCLUDED.source_type,
                     account = EXCLUDED.account,
@@ -1132,9 +1140,16 @@ def insert_mail_profile(
                     enabled = EXCLUDED.enabled,
                     trust_rank = EXCLUDED.trust_rank,
                     metadata = EXCLUDED.metadata,
+                    sync_enabled = EXCLUDED.sync_enabled,
+                    sync_interval_seconds = EXCLUDED.sync_interval_seconds,
+                    sync_window_days = EXCLUDED.sync_window_days,
+                    max_messages_per_run = EXCLUDED.max_messages_per_run,
+                    next_sync_at = CASE WHEN EXCLUDED.sync_enabled THEN COALESCE(mail_profiles.next_sync_at, now()) ELSE NULL END,
                     updated_at = now()
                 RETURNING id::text, name, source_type, account, server, folder_paths,
-                          spool_path, post_process_policy, enabled, trust_rank, metadata
+                          spool_path, post_process_policy, enabled, trust_rank, metadata,
+                          sync_enabled, sync_interval_seconds, sync_window_days,
+                          max_messages_per_run, last_sync_at, next_sync_at
                 """,
                 (
                     name,
@@ -1147,6 +1162,11 @@ def insert_mail_profile(
                     enabled,
                     trust_rank,
                     _json(metadata or {}),
+                    sync_enabled,
+                    sync_interval_seconds,
+                    sync_window_days,
+                    max_messages_per_run,
+                    sync_enabled,
                 ),
             )
             return _mail_profile_row(cur.fetchone())
@@ -1160,7 +1180,9 @@ def list_mail_profiles(*, name: str | None = None, url: str | None = None) -> li
                 cur.execute(
                     """
                     SELECT id::text, name, source_type, account, server, folder_paths,
-                           spool_path, post_process_policy, enabled, trust_rank, metadata
+                           spool_path, post_process_policy, enabled, trust_rank, metadata,
+                           sync_enabled, sync_interval_seconds, sync_window_days,
+                           max_messages_per_run, last_sync_at, next_sync_at
                     FROM mail_profiles
                     WHERE name = %s
                     ORDER BY name
@@ -1171,7 +1193,9 @@ def list_mail_profiles(*, name: str | None = None, url: str | None = None) -> li
                 cur.execute(
                     """
                     SELECT id::text, name, source_type, account, server, folder_paths,
-                           spool_path, post_process_policy, enabled, trust_rank, metadata
+                           spool_path, post_process_policy, enabled, trust_rank, metadata,
+                           sync_enabled, sync_interval_seconds, sync_window_days,
+                           max_messages_per_run, last_sync_at, next_sync_at
                     FROM mail_profiles
                     ORDER BY name
                     """
@@ -1195,7 +1219,9 @@ def update_mail_profile_metadata(
                     updated_at = now()
                 WHERE name = %s
                 RETURNING id::text, name, source_type, account, server, folder_paths,
-                          spool_path, post_process_policy, enabled, trust_rank, metadata
+                          spool_path, post_process_policy, enabled, trust_rank, metadata,
+                          sync_enabled, sync_interval_seconds, sync_window_days,
+                          max_messages_per_run, last_sync_at, next_sync_at
                 """,
                 (_json(metadata), name),
             )
@@ -1559,6 +1585,276 @@ def mail_status(*, url: str | None = None) -> dict[str, Any]:
             }
 
 
+def update_mail_profile_sync(
+    *,
+    name: str,
+    sync_enabled: bool,
+    sync_interval_seconds: int | None = None,
+    sync_window_days: int | None = None,
+    max_messages_per_run: int | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_profiles
+                SET sync_enabled = %s,
+                    sync_interval_seconds = COALESCE(%s, sync_interval_seconds),
+                    sync_window_days = COALESCE(%s, sync_window_days),
+                    max_messages_per_run = COALESCE(%s, max_messages_per_run),
+                    next_sync_at = CASE WHEN %s THEN COALESCE(next_sync_at, now()) ELSE NULL END,
+                    updated_at = now()
+                WHERE name = %s
+                RETURNING id::text, name, source_type, account, server, folder_paths,
+                          spool_path, post_process_policy, enabled, trust_rank, metadata,
+                          sync_enabled, sync_interval_seconds, sync_window_days,
+                          max_messages_per_run, last_sync_at, next_sync_at
+                """,
+                (
+                    sync_enabled,
+                    sync_interval_seconds,
+                    sync_window_days,
+                    max_messages_per_run,
+                    sync_enabled,
+                    name,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"mail profile not found: {name}")
+            return _mail_profile_row(row)
+
+
+def create_outlook_sync_request(
+    *,
+    profile_name: str,
+    actor: str = "system",
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM mail_profiles WHERE name = %s AND source_type = 'outlook_com'", (profile_name,))
+            profile = cur.fetchone()
+            if profile is None:
+                raise ValueError(f"Outlook COM profile not found: {profile_name}")
+            cur.execute(
+                """
+                INSERT INTO outlook_sync_requests (profile_id, requested_by)
+                VALUES (%s, %s)
+                RETURNING id::text, status, created_at
+                """,
+                (profile[0], actor),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "profile_name": profile_name,
+                "status": row[1],
+                "created_at": row[2].isoformat(),
+            }
+
+
+def list_outlook_sync_requests(*, limit: int = 20, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id::text, p.name, r.status, r.requested_by, r.claimed_by,
+                       r.error, r.result, r.created_at, r.updated_at
+                FROM outlook_sync_requests r
+                JOIN mail_profiles p ON p.id = r.profile_id
+                ORDER BY r.created_at DESC
+                LIMIT %s
+                """,
+                (max(1, min(limit, 100)),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "profile_name": row[1],
+                    "status": row[2],
+                    "requested_by": row[3],
+                    "claimed_by": row[4],
+                    "error": row[5],
+                    "result": row[6],
+                    "created_at": row[7].isoformat(),
+                    "updated_at": row[8].isoformat(),
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH request AS (
+                    SELECT r.id
+                    FROM outlook_sync_requests r
+                    JOIN mail_profiles p ON p.id = r.profile_id
+                    WHERE r.status = 'pending'
+                      AND p.enabled
+                      AND p.source_type = 'outlook_com'
+                    ORDER BY r.created_at
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE outlook_sync_requests r
+                SET status = 'claimed',
+                    claimed_by = %s,
+                    claimed_at = now(),
+                    updated_at = now()
+                FROM request
+                JOIN mail_profiles p ON p.id = r.profile_id
+                WHERE r.id = request.id
+                RETURNING r.id::text, p.name, r.status
+                """,
+                (host_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                return {"id": row[0], "profile_name": row[1], "status": row[2]}
+
+            cur.execute(
+                """
+                SELECT id, name
+                FROM mail_profiles
+                WHERE source_type = 'outlook_com'
+                  AND enabled
+                  AND sync_enabled
+                  AND (next_sync_at IS NULL OR next_sync_at <= now())
+                ORDER BY COALESCE(next_sync_at, now())
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """
+            )
+            due = cur.fetchone()
+            if due is None:
+                return None
+            cur.execute(
+                """
+                INSERT INTO outlook_sync_requests (profile_id, requested_by, status, claimed_by, claimed_at)
+                VALUES (%s, 'schedule', 'claimed', %s, now())
+                RETURNING id::text, status
+                """,
+                (due[0], host_id),
+            )
+            row = cur.fetchone()
+            return {"id": row[0], "profile_name": due[1], "status": row[1]}
+
+
+def complete_outlook_sync_request(
+    *,
+    request_id: str,
+    profile_name: str,
+    status: str,
+    result: dict[str, Any] | None = None,
+    error: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE outlook_sync_requests
+                SET status = %s,
+                    completed_at = now(),
+                    error = %s,
+                    result = %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text, status
+                """,
+                (status, error, _json(result or {}), request_id),
+            )
+            row = cur.fetchone()
+            cur.execute(
+                """
+                UPDATE mail_profiles
+                SET last_sync_at = now(),
+                    next_sync_at = CASE
+                        WHEN sync_enabled THEN now() + make_interval(secs => sync_interval_seconds)
+                        ELSE NULL
+                    END,
+                    updated_at = now()
+                WHERE name = %s
+                """,
+                (profile_name,),
+            )
+            return {"id": row[0], "profile_name": profile_name, "status": row[1]}
+
+
+def record_outlook_host_heartbeat(
+    *,
+    host_id: str = "default",
+    status: str,
+    metadata: dict[str, Any] | None = None,
+    process_id: int | None = None,
+    last_error: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO outlook_host_state (host_id, status, process_id, last_error, metadata)
+                VALUES (%s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (host_id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    process_id = EXCLUDED.process_id,
+                    last_error = EXCLUDED.last_error,
+                    metadata = EXCLUDED.metadata,
+                    heartbeat_at = now(),
+                    updated_at = now()
+                RETURNING host_id, status, process_id, heartbeat_at, last_error, metadata
+                """,
+                (host_id, status, process_id, last_error, _json(metadata or {})),
+            )
+            row = cur.fetchone()
+            return {
+                "host_id": row[0],
+                "status": row[1],
+                "process_id": row[2],
+                "heartbeat_at": row[3].isoformat(),
+                "last_error": row[4],
+                "metadata": row[5],
+            }
+
+
+def get_outlook_host_state(*, host_id: str = "default", url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT host_id, status, process_id, heartbeat_at, last_error, metadata, updated_at
+                FROM outlook_host_state
+                WHERE host_id = %s
+                """,
+                (host_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "host_id": row[0],
+                "status": row[1],
+                "process_id": row[2],
+                "heartbeat_at": row[3].isoformat(),
+                "last_error": row[4],
+                "metadata": row[5],
+                "updated_at": row[6].isoformat(),
+            }
+
+
 def enqueue_capture_job(
     *, job_type: str, payload: dict[str, Any], url: str | None = None
 ) -> str:
@@ -1643,7 +1939,7 @@ def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 
 def _mail_profile_row(row: tuple[Any, ...]) -> dict[str, Any]:
-    return {
+    payload = {
         "id": row[0],
         "name": row[1],
         "source_type": row[2],
@@ -1656,6 +1952,29 @@ def _mail_profile_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "trust_rank": row[9],
         "metadata": row[10],
     }
+    if len(row) > 11:
+        payload.update(
+            {
+                "sync_enabled": row[11],
+                "sync_interval_seconds": row[12],
+                "sync_window_days": row[13],
+                "max_messages_per_run": row[14],
+                "last_sync_at": row[15].isoformat() if row[15] else None,
+                "next_sync_at": row[16].isoformat() if row[16] else None,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "sync_enabled": False,
+                "sync_interval_seconds": 900,
+                "sync_window_days": 30,
+                "max_messages_per_run": 200,
+                "last_sync_at": None,
+                "next_sync_at": None,
+            }
+        )
+    return payload
 
 
 def _mail_oauth_state_row(row: tuple[Any, ...], *, profile_name: str) -> dict[str, Any]:

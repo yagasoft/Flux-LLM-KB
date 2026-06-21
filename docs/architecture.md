@@ -28,6 +28,8 @@ system rather than a large prompt-injected memory file.
   reload/restart/reindex coordination.
 - `mail_profiles`, `mail_messages`, and `mail_sync_runs`: IMAP and Outlook COM
   capture profiles, per-message export state, cursors, errors, and sync runs.
+- `outlook_host_state` and `outlook_sync_requests`: Windows host heartbeat and
+  pull-request coordination for Outlook COM catch-up profiles.
 
 ## Retrieval
 
@@ -70,7 +72,9 @@ event queue, heartbeat recording, and stale-state reporting.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,
-and future graph/review workflows.
+and future graph/review workflows. The UI is a React/Vite operations console
+bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
+payloads are diagnostic-only, not the primary monitoring surface.
 
 ## Runtime Configuration
 
@@ -105,7 +109,19 @@ message to a processed folder; permanent delete is not the default.
 
 Classic Outlook COM catch-up profiles pull selected folder paths from local
 Outlook for historical or missed messages. They are intentionally scoped
-catch-up jobs, not broad live mailbox monitors.
+catch-up jobs, not broad live mailbox monitors. COM access runs only in a
+separate Windows host process (`flux-kb outlook-host run`) under the logged-in
+user session. Docker-hosted Flux services never attempt COM directly; they
+record sync requests and read host heartbeat/status through PostgreSQL and REST.
+
+After the split, Outlook COM crawls when a sync request is queued or when a
+scheduled Outlook profile becomes due while the Windows host is running. If
+`sync_enabled=false`, it crawls only on manual requests such as dashboard
+“Sync Now” or `flux-kb outlook-host sync --profile <name>`. If
+`sync_enabled=true`, the host reconciles due profiles on startup and then at the
+configured interval. Missing host/Outlook states are explicit:
+`host_offline`, `blocked_not_windows`, `blocked_missing_dependency`, or
+`blocked_outlook_unavailable`.
 
 ## Integration Surfaces
 
@@ -113,3 +129,6 @@ catch-up jobs, not broad live mailbox monitors.
 - CLI supports local automation, diagnostics, migration, and export.
 - REST mirrors the MCP operations for clients that do not support MCP.
 - Codex hooks enforce preflight retrieval and post-turn capture across workspaces.
+- Docker hosts the normal Flux API/dashboard/worker processes. The Outlook COM
+  bridge is deliberately outside Docker because COM requires the logged-in
+  Windows user session and classic Outlook.

@@ -115,11 +115,13 @@ def main(argv: list[str] | None = None) -> int:
     mail_add_imap.add_argument("--folder", action="append", required=True)
     mail_add_imap.add_argument("--spool", required=True)
     mail_add_imap.add_argument("--post-process", default="move_to_processed")
+    _add_mail_schedule_args(mail_add_imap)
     mail_add_outlook = mail_profile_subparsers.add_parser("add-outlook", help="Add an Outlook COM catch-up profile")
     mail_add_outlook.add_argument("--name", required=True)
     mail_add_outlook.add_argument("--folder", action="append", required=True)
     mail_add_outlook.add_argument("--spool", required=True)
     mail_add_outlook.add_argument("--post-process", default="move_to_processed")
+    _add_mail_schedule_args(mail_add_outlook)
     mail_profile_subparsers.add_parser("list", help="List mail profiles")
     mail_subparsers.add_parser("status", help="Show mail ingestion status")
     mail_sync = mail_subparsers.add_parser("sync", help="Sync exported mail spool into the corpus")
@@ -146,6 +148,15 @@ def main(argv: list[str] | None = None) -> int:
     mail_render.add_argument("--spool", required=True)
     mail_render.add_argument("--folder", action="append", required=True)
 
+    outlook_host_parser = subparsers.add_parser("outlook-host", help="Run the Windows Outlook COM bridge")
+    outlook_host_subparsers = outlook_host_parser.add_subparsers(dest="outlook_host_command", required=True)
+    outlook_host_run = outlook_host_subparsers.add_parser("run", help="Run the Outlook COM host loop")
+    outlook_host_run.add_argument("--host-id", default="default")
+    outlook_host_run.add_argument("--interval-seconds", type=int, default=15)
+    outlook_host_subparsers.add_parser("status", help="Show Outlook COM host status")
+    outlook_host_sync = outlook_host_subparsers.add_parser("sync", help="Request an Outlook COM profile sync")
+    outlook_host_sync.add_argument("--profile", required=True)
+
     args = parser.parse_args(argv)
     handlers = {
         "doctor": _doctor,
@@ -163,8 +174,16 @@ def main(argv: list[str] | None = None) -> int:
         "hook": _hook,
         "settings": _settings,
         "mail": _mail,
+        "outlook-host": _outlook_host,
     }
     return handlers[args.command](args)
+
+
+def _add_mail_schedule_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--sync-enabled", action="store_true", help="Enable scheduled sync for this profile")
+    parser.add_argument("--sync-interval-seconds", type=int, default=900)
+    parser.add_argument("--sync-window-days", type=int, default=30)
+    parser.add_argument("--max-messages-per-run", type=int, default=200)
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -323,6 +342,10 @@ def _mail(args: argparse.Namespace) -> int:
                 folder_paths=args.folder,
                 spool_path=args.spool,
                 post_process_policy=args.post_process,
+                sync_enabled=args.sync_enabled,
+                sync_interval_seconds=args.sync_interval_seconds,
+                sync_window_days=args.sync_window_days,
+                max_messages_per_run=args.max_messages_per_run,
             )
         elif args.mail_profile_command == "add-outlook":
             payload = mail_ingestion.add_mail_profile(
@@ -333,6 +356,10 @@ def _mail(args: argparse.Namespace) -> int:
                 folder_paths=args.folder,
                 spool_path=args.spool,
                 post_process_policy=args.post_process,
+                sync_enabled=args.sync_enabled,
+                sync_interval_seconds=args.sync_interval_seconds,
+                sync_window_days=args.sync_window_days,
+                max_messages_per_run=args.max_messages_per_run,
             )
         elif args.mail_profile_command == "list":
             payload = database.list_mail_profiles()
@@ -353,6 +380,21 @@ def _mail(args: argparse.Namespace) -> int:
         return 0
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.mail_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _outlook_host(args: argparse.Namespace) -> int:
+    from . import outlook_host
+
+    if args.outlook_host_command == "status":
+        payload = outlook_host.status()
+    elif args.outlook_host_command == "sync":
+        payload = outlook_host.request_sync(args.profile, actor="cli")
+    elif args.outlook_host_command == "run":
+        payload = outlook_host.run_forever(host_id=args.host_id, interval_seconds=args.interval_seconds)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.outlook_host_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

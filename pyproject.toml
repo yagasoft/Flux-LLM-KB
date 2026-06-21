@@ -48,7 +48,7 @@ flux-kb = "flux_llm_kb.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-flux_llm_kb = ["sql/*.sql"]
+flux_llm_kb = ["sql/*.sql", "dashboard_static/*.html", "dashboard_static/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

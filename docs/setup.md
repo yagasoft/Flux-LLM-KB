@@ -12,6 +12,10 @@ database, not in this repository.
 
 The default PostgreSQL runtime uses `pgvector/pgvector:pg16`. If Docker or
 Compose is not available, `scripts/check-docker.ps1` exits with a clear error.
+The normal application runtime is Docker-backed: PostgreSQL, FastAPI, the
+dashboard, IMAP workers, corpus crawlers, and extraction workers live in
+containers. Outlook COM is the exception; it runs as a Windows host process
+outside Docker.
 
 ## Install
 
@@ -64,6 +68,9 @@ flux-kb mail profile add-imap --name gmail-capture --account me@gmail.com --fold
 flux-kb mail oauth gmail start --profile gmail-capture --client-config private\google-oauth-client.json
 flux-kb mail oauth status --profile gmail-capture
 flux-kb mail profile add-outlook --name outlook-catchup --folder "Mailbox - Me\Inbox\Flux Capture" --spool private\mail-spool\outlook-catchup
+flux-kb outlook-host status
+flux-kb outlook-host sync --profile outlook-catchup
+flux-kb outlook-host run
 flux-kb mail status
 flux-kb mail sync --profile gmail-capture
 ```
@@ -104,4 +111,29 @@ the default.
 
 Outlook COM profiles are for catch-up from selected classic Outlook folder
 paths. They use local Outlook automation and write into the same spool shape as
-IMAP.
+IMAP, but the automation runs in a separate Windows host process:
+
+```powershell
+flux-kb outlook-host run
+```
+
+The dashboard and Docker-hosted API create sync requests. The Windows host polls
+and claims those requests, exports messages through classic Outlook COM, reports
+heartbeat/status, and indexes the ready spool. If the host is not running, the
+dashboard shows `host_offline` and the command above.
+
+## Dashboard Development
+
+The dashboard is a React/Vite app under `dashboard/` and is served by FastAPI at
+`http://127.0.0.1:8765/dashboard`. Use the helper script whenever dashboard code
+changes; it rebuilds assets and refreshes the running deployment:
+
+```powershell
+.\scripts\start-dashboard-dev.ps1
+.\scripts\status-dashboard-dev.ps1
+.\scripts\stop-dashboard-dev.ps1
+```
+
+When Docker is on PATH, the script runs `docker compose up -d --build postgres
+api`. If Docker is unavailable on the current PATH, it falls back to a local
+FastAPI process on the same URL so browser refresh still shows the current build.

@@ -55,6 +55,11 @@
   PostgreSQL overrides.
 - Dashboard forms for settings edits, mail profile creation, Gmail OAuth setup,
   confirmation-gated apply actions, validation errors, and mail/token status.
+- React/Vite operations console served by FastAPI at `/dashboard`, with raw JSON
+  available only through a developer/debug drawer instead of primary monitoring
+  panels.
+- Docker-hosted Flux control plane for PostgreSQL/pgvector, FastAPI, REST APIs,
+  dashboard assets, IMAP worker, corpus crawler, and normal extraction workers.
 - Gmail OAuth setup for installed desktop clients, token refresh before IMAP
   XOAUTH2 login, token health reporting, and clean `blocked_auth_required` or
   `auth_expired` states when authorization is missing or revoked.
@@ -65,6 +70,11 @@
   a processed folder; permanent trash/delete is opt-in and confirmation-gated.
 - Classic Outlook COM catch-up for selected mailbox folder paths, intended for
   historical or missed message pulls rather than all-folder live monitoring.
+- Separate Windows Outlook COM host process for classic Outlook catch-up, with
+  heartbeat, blocked-state reporting, and sync-request claiming from the Docker
+  control plane.
+- Dashboard controls for IMAP worker state, Outlook COM host state, per-profile
+  schedule fields, manual sync requests, last sync, next sync, backlog, and errors.
 - Unified private mail spool for IMAP and Outlook exports; Flux indexes only the
   `ready` spool and ignores `_inflight` partial exports.
 

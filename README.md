@@ -10,9 +10,10 @@ interfaces for:
 - MCP tools for Codex and other MCP-capable agents
 - A command-line interface for local automation
 - A REST API for non-MCP integrations
+- A React/Vite operations dashboard served by FastAPI
 - Codex hooks and a personal plugin for global, cross-workspace use
 
-## Current V1 Kernel
+## Current Kernel
 
 - PostgreSQL schema for episodes, sources, entities, claims, relations,
   embeddings, audit events, capture jobs, workspace scopes, and retention
@@ -26,8 +27,10 @@ interfaces for:
   and doctor checks.
 - MCP and REST entrypoints over the same service layer.
 - Codex personal plugin scaffold with hook scripts.
-- Unified dashboard base for health, corpus monitoring, runtime settings, and
-  mail capture status.
+- Unified React dashboard for health, corpus monitoring, runtime settings, mail
+  capture, worker state, and Outlook COM host status.
+- IMAP mail capture with Gmail OAuth support and a separate Windows Outlook COM
+  host process for selected-folder catch-up.
 
 ## Quick Start
 
@@ -43,6 +46,10 @@ flux-kb search "pgvector decision"
 
 Docker Compose is the default runtime profile. If Docker is missing, the setup
 scripts fail clearly instead of silently switching storage engines.
+
+The normal Flux API/dashboard/worker runtime is Docker-hosted. Classic Outlook
+COM catch-up is intentionally split into `flux-kb outlook-host run` on Windows
+because COM must run in the logged-in user session.
 
 See [docs/setup.md](docs/setup.md) and [docs/integrations.md](docs/integrations.md).
 
