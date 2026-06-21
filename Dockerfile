@@ -8,7 +8,7 @@ ENV PIP_ROOT_USER_ACTION=ignore
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml ./
 
 RUN python - <<'PY' > /tmp/requirements-docker.txt
 import tomllib
@@ -31,6 +31,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY src ./src
 COPY plugins ./plugins
+COPY README.md ./
 
 RUN python -m pip install --no-deps .
 
