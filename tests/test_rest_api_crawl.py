@@ -224,6 +224,43 @@ def test_crawl_backfill_endpoint_runs_worker_once(monkeypatch):
     assert response.json()["backfill"] == {"kind": "text", "limit": 3, "workers": 1}
 
 
+def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    class FakeService:
+        def run_corpus_backfill(self, **_kwargs):
+            raise AssertionError("Docker API must not process host-agent backfill jobs directly")
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda name: {
+            "name": name,
+            "root_path": "E:\\Temp\\watch-test",
+            "metadata": {"host_access": "host_agent"},
+        },
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.rest_api.host_agent_backfill",
+        lambda **kwargs: {"host_backfill": kwargs, "completed": 4},
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post(
+        "/api/crawl/backfill",
+        json={"kind": "all", "limit": 10, "workers": 1, "root_name": "watch-test"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["host_backfill"] == {
+        "kind": "all",
+        "limit": 10,
+        "workers": 1,
+        "root_name": "watch-test",
+    }
+
+
 def test_post_body_models_are_bound_from_json(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

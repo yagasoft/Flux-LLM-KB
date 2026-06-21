@@ -2,6 +2,7 @@ from pathlib import Path
 
 from .host_agent import (
     path_requires_host_agent,
+    remote_backfill,
     remote_browse_folder,
     remote_status,
     remote_sync,
@@ -290,6 +291,8 @@ def create_app():
         kwargs: dict[str, object] = {"kind": request.kind, "limit": request.limit, "workers": request.workers}
         if request.root_name is not None:
             kwargs["root_name"] = request.root_name
+            if _should_proxy_host_root(request.root_name):
+                return host_agent_backfill(**kwargs)
         return service.run_corpus_backfill(**kwargs)
 
     @app.post("/api/crawl/watch")
@@ -458,6 +461,16 @@ def host_agent_sync(*, root_name: str | None = None, path: str | None = None, dr
     return remote_sync(root_name=root_name, path=path, dry_run=dry_run)
 
 
+def host_agent_backfill(
+    *,
+    kind: str = "all",
+    limit: int = 10,
+    workers: int = 1,
+    root_name: str | None = None,
+) -> dict:
+    return remote_backfill(kind=kind, limit=limit, workers=workers, root_name=root_name)
+
+
 def _validate_root_path(root_path_text: str) -> dict:
     validation = host_agent_validate_path(root_path_text)
     if validation.get("status") == "ok":
@@ -478,4 +491,16 @@ def _should_proxy_crawl_sync(root_name: str | None, path: str | None) -> bool:
     if not root_name:
         return False
     root = database.get_monitored_root(root_name)
-    return bool(root and root.get("metadata", {}).get("host_access") == "host_agent")
+    return bool(root and _root_requires_host_agent(root))
+
+
+def _should_proxy_host_root(root_name: str) -> bool:
+    from . import database
+
+    root = database.get_monitored_root(root_name)
+    return bool(root and _root_requires_host_agent(root))
+
+
+def _root_requires_host_agent(root: dict) -> bool:
+    metadata = root.get("metadata") or {}
+    return metadata.get("host_access") == "host_agent" or path_requires_host_agent(str(root.get("root_path") or ""))

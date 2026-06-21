@@ -8,16 +8,21 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 from urllib import error, request
 
 from pydantic import BaseModel
 
+from . import database
+from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
+
 
 DEFAULT_HOST_AGENT_PORT = 8799
 HOST_AGENT_REQUEST_TIMEOUT_SECONDS = 3
 HOST_AGENT_BROWSE_TIMEOUT_SECONDS = 300
+HOST_AGENT_BACKFILL_TIMEOUT_SECONDS = 600
 
 
 class ValidateRequest(BaseModel):
@@ -29,6 +34,13 @@ class SyncRequest(BaseModel):
     root_name: str | None = None
     path: str | None = None
     dry_run: bool = False
+
+
+class BackfillRequest(BaseModel):
+    kind: str = "all"
+    limit: int = 10
+    workers: int = 1
+    root_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -115,13 +127,86 @@ def browse_folder() -> dict[str, Any]:
     return {"status": "selected", "path": selected}
 
 
-def create_app():
+class HostAgentWatcherLoop:
+    def __init__(
+        self,
+        *,
+        root_name: str | None = None,
+        interval_seconds: float = 2.0,
+        service_factory=None,
+        watcher_factory=None,
+    ) -> None:
+        self.root_name = root_name
+        self.interval_seconds = interval_seconds
+        self.service_factory = service_factory
+        self.watcher_factory = watcher_factory or create_corpus_watcher
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._watcher = self.watcher_factory(
+            lambda: _load_host_watch_roots(self.root_name),
+            on_change=None,
+            interval_seconds=interval_seconds,
+        )
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="flux-host-agent-watcher", daemon=True)
+        self._thread.start()
+
+    def stop(self, *, timeout: float = 5.0) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def run_once(self, *, seed: bool = False) -> dict[str, Any]:
+        roots = _load_host_watch_roots(self.root_name)
+        if not roots:
+            return {"status": "no_enabled_host_roots", "roots": 0, "events": 0}
+        for root in roots:
+            database.record_watcher_heartbeat(root_name=root.name)
+        self._watcher.poll_once(seed=seed)
+        events = self._watcher.drain_events() if hasattr(self._watcher, "drain_events") else []
+        for event in events:
+            self._handle_event(event)
+        return {"status": "running", "roots": len(roots), "events": len(events)}
+
+    def _run(self) -> None:
+        self.run_once(seed=True)
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                self.run_once(seed=False)
+            except Exception as exc:  # pragma: no cover - defensive long-running loop
+                for root in _load_host_watch_roots(self.root_name):
+                    database.record_watch_error(root_name=root.name, error=str(exc))
+
+    def _handle_event(self, event: WatchEvent) -> None:
+        try:
+            database.record_watch_event(root_name=event.root_name)
+            service = self.service_factory() if self.service_factory else _service()
+            service.sync_corpus(root_name=event.root_name, path=str(event.path))
+        except Exception as exc:  # pragma: no cover - environment-specific watcher loop
+            database.record_watch_error(root_name=event.root_name, error=str(exc))
+
+
+def create_app(*, start_watcher: bool = False):
     try:
         from fastapi import Body, FastAPI
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install host agent REST support with `pip install -e .[api]`") from exc
 
     app = FastAPI(title="Flux Host Agent")
+    watcher_loop = HostAgentWatcherLoop() if start_watcher else None
+
+    if watcher_loop is not None:
+        @app.on_event("startup")
+        def _start_watcher():
+            watcher_loop.start()
+
+        @app.on_event("shutdown")
+        def _stop_watcher():
+            watcher_loop.stop()
 
     @app.get("/status")
     def status():
@@ -137,9 +222,16 @@ def create_app():
 
     @app.post("/crawl/sync")
     def crawl_sync(req: SyncRequest = Body(...)):
-        from .service import KnowledgeService
+        return _service().sync_corpus(root_name=req.root_name, path=req.path, dry_run=req.dry_run)
 
-        return KnowledgeService().sync_corpus(root_name=req.root_name, path=req.path, dry_run=req.dry_run)
+    @app.post("/crawl/backfill")
+    def crawl_backfill(req: BackfillRequest = Body(...)):
+        return _service().run_corpus_backfill(
+            kind=req.kind,
+            limit=req.limit,
+            workers=req.workers,
+            root_name=req.root_name,
+        )
 
     return app
 
@@ -150,7 +242,7 @@ def run_server(*, host: str = "127.0.0.1", port: int = DEFAULT_HOST_AGENT_PORT) 
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install host agent REST support with `pip install -e .[api]`") from exc
 
-    app = create_app()
+    app = create_app(start_watcher=True)
     uvicorn.run(app, host=host, port=port, log_level="info")
     return {"status": "stopped", "host": host, "port": port}
 
@@ -210,6 +302,25 @@ def remote_sync(
         return {"status": "host_agent_offline", "message": str(exc), "root_name": root_name, "path": path}
 
 
+def remote_backfill(
+    *,
+    kind: str = "all",
+    limit: int = 10,
+    workers: int = 1,
+    root_name: str | None = None,
+    agent_url: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return _request_json(
+            "POST",
+            f"{_agent_url(agent_url)}/crawl/backfill",
+            {"kind": kind, "limit": limit, "workers": workers, "root_name": root_name},
+            timeout=HOST_AGENT_BACKFILL_TIMEOUT_SECONDS,
+        )
+    except HostAgentClientError as exc:
+        return {"status": "host_agent_offline", "message": str(exc), "root_name": root_name}
+
+
 def path_requires_host_agent(path: str) -> bool:
     style = _path_style(path)
     if style in {"windows_drive", "windows_unc"} and platform.system() != "Windows":
@@ -225,6 +336,36 @@ def _agent_url(agent_url: str | None = None) -> str:
         return configured.rstrip("/")
     host = "host.docker.internal" if Path("/.dockerenv").exists() else "127.0.0.1"
     return f"http://{host}:{DEFAULT_HOST_AGENT_PORT}"
+
+
+def _service():
+    from .service import KnowledgeService
+
+    return KnowledgeService()
+
+
+def _load_host_watch_roots(root_name: str | None = None) -> list[WatchRoot]:
+    roots = [
+        root
+        for root in database.list_monitored_roots(watch_enabled=True)
+        if root.get("enabled") and (root_name is None or root.get("name") == root_name) and _is_host_agent_root(root)
+    ]
+    return [
+        WatchRoot(
+            name=root["name"],
+            root_path=Path(root["root_path"]),
+            watch_enabled=root["watch_enabled"],
+            recursive=root["recursive"],
+        )
+        for root in roots
+    ]
+
+
+def _is_host_agent_root(root: dict[str, Any]) -> bool:
+    metadata = root.get("metadata") or {}
+    if metadata.get("host_access") == "host_agent":
+        return True
+    return _path_style(str(root.get("root_path") or "")) in {"windows_drive", "windows_unc"}
 
 
 def _request_json(
