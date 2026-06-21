@@ -3,7 +3,7 @@ from flux_llm_kb.service import KnowledgeService
 
 
 def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch):
-    calls = {"completed": [], "blocked": [], "retried": []}
+    calls = {"completed": [], "blocked": [], "retried": [], "repaired": []}
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
@@ -20,6 +20,11 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
     monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
     monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(
+        database,
+        "repair_extracted_corpus_asset_statuses",
+        lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0},
+    )
     monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
 
     from flux_llm_kb import worker
@@ -39,3 +44,4 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     assert calls["completed"] == []
     assert calls["retried"] == []
     assert calls["blocked"][0]["job_id"] == "job-1"
+    assert calls["repaired"] == [{"root_name": None}]

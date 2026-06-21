@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from flux_llm_kb import database
 from flux_llm_kb.database import forget_episode
 
@@ -143,3 +145,52 @@ def test_cancel_duplicate_corpus_jobs_marks_pending_duplicate_jobs_terminal(monk
     assert "cancelled_duplicate" in sql
     assert "duplicate_suppressed" in sql
     assert "payload->>'root_name' = %s" in sql
+
+
+def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_indexed(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (7,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.repair_extracted_corpus_asset_statuses(root_name="watch-test")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"root_name": "watch-test", "repaired": 7}
+    assert "EXISTS" in sql
+    assert "asset_chunks" in sql
+    assert "extraction_status = 'queued'" in sql
+    assert "r.name = %s" in sql
+
+
+def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash" in source
+    assert "source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')" in source

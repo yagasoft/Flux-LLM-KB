@@ -797,12 +797,24 @@ def persist_crawl_plan(
                         quick_hash = EXCLUDED.quick_hash,
                         content_hash = EXCLUDED.content_hash,
                         canonical_asset_id = EXCLUDED.canonical_asset_id,
-                        extraction_status = EXCLUDED.extraction_status,
+                        extraction_status = CASE
+                            WHEN EXCLUDED.extraction_status = 'duplicate_suppressed'
+                                THEN EXCLUDED.extraction_status
+                            WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
+                                THEN EXCLUDED.extraction_status
+                            WHEN source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')
+                                THEN source_assets.extraction_status
+                            ELSE EXCLUDED.extraction_status
+                        END,
                         extraction_tier = EXCLUDED.extraction_tier,
                         last_seen_at = now(),
-                        indexed_at = EXCLUDED.indexed_at,
+                        indexed_at = CASE
+                            WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
+                                THEN EXCLUDED.indexed_at
+                            ELSE source_assets.indexed_at
+                        END,
                         deleted_at = NULL,
-                        metadata = EXCLUDED.metadata,
+                        metadata = source_assets.metadata || EXCLUDED.metadata,
                         updated_at = now()
                     RETURNING id::text
                     """,
@@ -1181,6 +1193,40 @@ def block_corpus_job(
                 """,
                 (status, error, job_id),
             )
+
+
+def repair_extracted_corpus_asset_statuses(
+    *, root_name: str | None = None, url: str | None = None
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    root_filter = "AND r.name = %s" if root_name else ""
+    params: tuple[Any, ...] = (root_name,) if root_name else ()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH repaired AS (
+                    UPDATE source_assets a
+                    SET extraction_status = 'indexed',
+                        indexed_at = COALESCE(a.indexed_at, now()),
+                        updated_at = now()
+                    FROM monitored_roots r
+                    WHERE r.id = a.root_id
+                      {root_filter}
+                      AND a.deleted_at IS NULL
+                      AND a.extraction_status = 'queued'
+                      AND EXISTS (
+                          SELECT 1
+                          FROM asset_chunks c
+                          WHERE c.asset_id = a.id
+                      )
+                    RETURNING 1
+                )
+                SELECT count(*) FROM repaired
+                """,
+                params,
+            )
+            return {"root_name": root_name, "repaired": int(cur.fetchone()[0] or 0)}
 
 
 def apply_extraction_result(

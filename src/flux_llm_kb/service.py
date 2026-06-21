@@ -200,6 +200,7 @@ class KnowledgeService:
                     cooldown_seconds=300,
                 )
                 retried += 1
+        repaired = database.repair_extracted_corpus_asset_statuses(root_name=root_name)
         database.record_audit_event(
             event_type="corpus.backfill",
             details={
@@ -210,6 +211,7 @@ class KnowledgeService:
                 "blocked": blocked,
                 "retried": retried,
                 "cancelled_duplicate": cancelled["cancelled"],
+                "repaired_assets": repaired["repaired"],
                 "workers": workers,
             },
         )
@@ -221,6 +223,7 @@ class KnowledgeService:
             "blocked": blocked,
             "retried": retried,
             "cancelled_duplicate": cancelled["cancelled"],
+            "repaired_assets": repaired["repaired"],
             "jobs": filtered,
         }
 
