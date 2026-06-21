@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 
 DEFAULT_HOST_AGENT_PORT = 8799
+HOST_AGENT_REQUEST_TIMEOUT_SECONDS = 3
+HOST_AGENT_BROWSE_TIMEOUT_SECONDS = 300
 
 
 class ValidateRequest(BaseModel):
@@ -181,7 +183,12 @@ def remote_validate_path(path: str, *, agent_url: str | None = None) -> dict[str
 
 def remote_browse_folder(agent_url: str | None = None) -> dict[str, Any]:
     try:
-        return _request_json("POST", f"{_agent_url(agent_url)}/browse-folder", {})
+        return _request_json(
+            "POST",
+            f"{_agent_url(agent_url)}/browse-folder",
+            {},
+            timeout=HOST_AGENT_BROWSE_TIMEOUT_SECONDS,
+        )
     except HostAgentClientError as exc:
         return {"status": "host_agent_offline", "path": None, "message": str(exc)}
 
@@ -220,7 +227,13 @@ def _agent_url(agent_url: str | None = None) -> str:
     return f"http://{host}:{DEFAULT_HOST_AGENT_PORT}"
 
 
-def _request_json(method: str, url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def _request_json(
+    method: str,
+    url: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float = HOST_AGENT_REQUEST_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = request.Request(
         url,
@@ -229,7 +242,7 @@ def _request_json(method: str, url: str, payload: dict[str, Any] | None = None) 
         headers={"Content-Type": "application/json"},
     )
     try:
-        with request.urlopen(req, timeout=3) as response:
+        with request.urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise HostAgentClientError(str(exc)) from exc

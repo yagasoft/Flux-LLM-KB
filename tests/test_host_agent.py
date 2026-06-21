@@ -72,3 +72,55 @@ def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
     assert "platform" in result
     assert result["codex"]["status"] == "ready"
     assert result["runtime"]["git"]["ok"] is True
+
+
+def test_remote_browse_folder_allows_user_interaction_time(monkeypatch):
+    timeouts: list[float | None] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"status": "selected", "path": "E:\\\\Temp\\\\watch-test"}'
+
+    def fake_urlopen(_request, timeout=None):
+        timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(host_agent.request, "urlopen", fake_urlopen)
+
+    result = host_agent.remote_browse_folder(agent_url="http://127.0.0.1:8799")
+
+    assert result["status"] == "selected"
+    assert result["path"] == "E:\\Temp\\watch-test"
+    assert timeouts == [host_agent.HOST_AGENT_BROWSE_TIMEOUT_SECONDS]
+    assert host_agent.HOST_AGENT_BROWSE_TIMEOUT_SECONDS >= 120
+
+
+def test_remote_status_keeps_short_timeout(monkeypatch):
+    timeouts: list[float | None] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"status": "running"}'
+
+    def fake_urlopen(_request, timeout=None):
+        timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(host_agent.request, "urlopen", fake_urlopen)
+
+    result = host_agent.remote_status(agent_url="http://127.0.0.1:8799")
+
+    assert result["status"] == "running"
+    assert timeouts == [host_agent.HOST_AGENT_REQUEST_TIMEOUT_SECONDS]
