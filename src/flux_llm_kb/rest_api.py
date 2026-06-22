@@ -114,6 +114,9 @@ def create_app():
         client_config_path: str
         redirect_uri: str | None = None
 
+    class GmailOAuthClientConfigRequest(BaseModel):
+        client_config_path: str
+
     class OutlookHostSyncRequest(BaseModel):
         profile_name: str
 
@@ -413,6 +416,18 @@ def create_app():
             max_messages_per_run=request.max_messages_per_run,
         )
 
+    @app.put("/api/mail/profiles/{profile_name}/oauth-client-config")
+    def mail_profile_oauth_client_config(profile_name: str, request: GmailOAuthClientConfigRequest = Body(...)):
+        from .mail_ingestion import update_mail_profile_oauth_client_config_path
+
+        try:
+            return update_mail_profile_oauth_client_config_path(
+                profile_name=profile_name,
+                client_config_path=request.client_config_path,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.post("/api/mail/sync")
     def mail_sync(request: MailSyncRequest = Body(...)):
         from .mail_ingestion import sync_mail_profile
@@ -428,11 +443,14 @@ def create_app():
         from .mail_oauth import start_gmail_oauth
 
         try:
-            return start_gmail_oauth(
+            payload = start_gmail_oauth(
                 profile_name=request.profile_name,
                 client_config_path=request.client_config_path,
                 redirect_uri=request.redirect_uri,
             )
+            if payload.get("authorization_url") and not payload.get("auth_url"):
+                payload["auth_url"] = payload["authorization_url"]
+            return payload
         except FileNotFoundError as exc:
             return {
                 "profile_name": request.profile_name,

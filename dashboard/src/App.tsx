@@ -376,22 +376,45 @@ export default function App() {
   }
 
   async function startGmailOAuth(profile: MailProfile, clientConfigPath: string) {
+    const popup = openOAuthPopup();
     try {
-      const payload = await sendJson<{ auth_url?: string; status?: string; message?: string }>("/api/mail/oauth/gmail/start", "POST", {
+      const payload = await sendJson<{ auth_url?: string; authorization_url?: string; status?: string; message?: string }>("/api/mail/oauth/gmail/start", "POST", {
         profile_name: profile.name,
         client_config_path: clientConfigPath
       });
-      if (payload.auth_url) {
-        window.open(payload.auth_url, "_blank", "noopener,noreferrer");
+      const authUrl = payload.auth_url ?? payload.authorization_url;
+      if (authUrl) {
+        if (popup && !popup.closed) {
+          popup.location.assign(authUrl);
+        } else {
+          setToast(`Gmail OAuth URL ready for ${profile.name}, but the browser blocked the popup: ${authUrl}`);
+          await load();
+          return;
+        }
         setToast(`Gmail OAuth opened for ${profile.name}.`);
       } else if (payload.message) {
+        popup?.close();
         setToast(`Gmail OAuth ${payload.status ?? "blocked"} for ${profile.name}: ${payload.message}`);
       } else {
+        popup?.close();
         setToast(payload.status ?? `Gmail OAuth setup started for ${profile.name}.`);
       }
       await load();
     } catch (error) {
+      popup?.close();
       setToast(`Gmail OAuth failed for ${profile.name}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function saveGmailOAuthClientPath(profile: MailProfile, clientConfigPath: string) {
+    try {
+      await sendJson(`/api/mail/profiles/${encodeURIComponent(profile.name)}/oauth-client-config`, "PUT", {
+        client_config_path: clientConfigPath.trim()
+      });
+      setToast(`OAuth client JSON path saved for ${profile.name}.`);
+      await load();
+    } catch (error) {
+      setToast(`Could not save OAuth client JSON path for ${profile.name}: ${errorMessage(error)}`);
     }
   }
 
@@ -648,6 +671,7 @@ export default function App() {
             onSelectProfile={(profile) => setSelectedName(profile.name)}
             onSyncProfile={(profile) => void requestProfileSync(profile)}
             onOAuthStart={(profile, clientPath) => void startGmailOAuth(profile, clientPath)}
+            onOAuthPathSave={(profile, clientPath) => void saveGmailOAuthClientPath(profile, clientPath)}
             onErrorDetail={setErrorDetail}
           />
         )}
@@ -775,6 +799,7 @@ function MailTab({
   onSelectProfile,
   onSyncProfile,
   onOAuthStart,
+  onOAuthPathSave,
   onErrorDetail
 }: {
   state: LoadState;
@@ -790,6 +815,7 @@ function MailTab({
   onSelectProfile: (profile: MailProfile) => void;
   onSyncProfile: (profile: MailProfile) => void;
   onOAuthStart: (profile: MailProfile, clientPath: string) => void;
+  onOAuthPathSave: (profile: MailProfile, clientPath: string) => void;
   onErrorDetail: (error: string) => void;
 }) {
   const hasOutlookProfiles = profiles.some((profile) => profile.source_type === "outlook_com") || (state.outlook.pending_requests?.length ?? 0) > 0;
@@ -825,6 +851,7 @@ function MailTab({
             onSync={() => selectedProfile && onSyncProfile(selectedProfile)}
             onEdit={() => selectedProfile && onEditProfile(selectedProfile)}
             onOAuthStart={(clientPath) => selectedProfile && onOAuthStart(selectedProfile, clientPath)}
+            onOAuthPathSave={(clientPath) => selectedProfile && onOAuthPathSave(selectedProfile, clientPath)}
           />
         </Panel>
       </section>
@@ -1505,7 +1532,8 @@ function Inspector({
   oauthProfile,
   onSync,
   onEdit,
-  onOAuthStart
+  onOAuthStart,
+  onOAuthPathSave
 }: {
   profile?: MailProfile;
   hostStatus: string;
@@ -1514,8 +1542,13 @@ function Inspector({
   onSync: () => void;
   onEdit: () => void;
   onOAuthStart: (clientPath: string) => void;
+  onOAuthPathSave: (clientPath: string) => void;
 }) {
-  const [clientPath, setClientPath] = useState("private/google-oauth-client.json");
+  const profileClientPath = oauthClientConfigPath(profile);
+  const [clientPath, setClientPath] = useState(profileClientPath);
+  useEffect(() => {
+    setClientPath(profileClientPath);
+  }, [profile?.name, profileClientPath]);
   if (!profile) return <div className="empty-inspector"><p className="muted">Select or create a mail profile.</p></div>;
   const oauthStatus = oauthProfile?.status ?? (profile.source_type === "imap" ? "blocked_auth_required" : "");
   return (
@@ -1543,6 +1576,14 @@ function Inspector({
           <label>Private client JSON
             <input value={clientPath} onChange={(event) => setClientPath(event.target.value)} />
           </label>
+          <button
+            className="ghost-action compact"
+            type="button"
+            title={`Save the private Google OAuth client JSON path for ${profile.name}`}
+            onClick={() => onOAuthPathSave(clientPath)}
+          >
+            <CheckCircle2 size={15} /> Save OAuth client JSON path
+          </button>
           <button
             className="ghost-action compact"
             type="button"
@@ -1949,6 +1990,24 @@ function parseSettingValue(value: string, current: unknown) {
 
 function splitLines(value: string) {
   return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
+}
+
+function oauthClientConfigPath(profile?: MailProfile): string {
+  const metadata = profile?.metadata ?? {};
+  const profilePath = metadata.gmail_oauth_client_config_path ?? metadata.oauth_client_config_path;
+  return typeof profilePath === "string" && profilePath.trim() ? profilePath : "private/google-oauth-client.json";
+}
+
+function openOAuthPopup(): Window | null {
+  const popup = window.open("about:blank", "_blank");
+  if (!popup) return null;
+  try {
+    popup.document.title = "Flux Gmail OAuth";
+    popup.document.body.innerHTML = "<p>Preparing Gmail OAuth consent...</p>";
+  } catch {
+    // Some browsers restrict about:blank writes; the later navigation still works.
+  }
+  return popup;
 }
 
 function slugFromPath(value: string) {

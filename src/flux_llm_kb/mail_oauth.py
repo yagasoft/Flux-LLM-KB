@@ -149,12 +149,16 @@ def start_gmail_oauth(
         client_config_path=str(Path(client_config_path).expanduser().resolve()),
         url=url,
     )
+    metadata = dict(profiles[0].get("metadata") or {})
+    metadata["gmail_oauth_client_config_path"] = str(client_config_path)
+    database.update_mail_profile_metadata(name=profile_name, metadata=metadata, url=url)
     return {
         "profile_name": profile_name,
         "provider": "gmail",
         "state": state,
         "redirect_uri": redirect_uri,
         "authorization_url": authorization_url,
+        "auth_url": authorization_url,
         "status": "pending_user_authorization",
     }
 

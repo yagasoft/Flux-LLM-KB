@@ -96,9 +96,11 @@ def test_oauth_start_creates_state_and_masks_status(monkeypatch, tmp_path):
     config_path = tmp_path / "client.json"
     config_path.write_text(json.dumps(CLIENT_CONFIG), encoding="utf-8")
     states = []
+    metadata_updates = []
 
-    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None, url=None: [{"id": "profile-id", "name": name}])
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None, url=None: [{"id": "profile-id", "name": name, "metadata": {}}])
     monkeypatch.setattr(database, "create_mail_oauth_state", lambda **kwargs: states.append(kwargs) or {"state": kwargs["state"]})
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: metadata_updates.append(kwargs) or {"name": kwargs["name"], "metadata": kwargs["metadata"]})
     monkeypatch.setattr(
         database,
         "mail_oauth_status",
@@ -124,8 +126,10 @@ def test_oauth_start_creates_state_and_masks_status(monkeypatch, tmp_path):
 
     assert started["profile_name"] == "gmail"
     assert "authorization_url" in started
+    assert started["auth_url"] == started["authorization_url"]
     assert states[0]["provider"] == "gmail"
     assert states[0]["profile_name"] == "gmail"
+    assert metadata_updates[0]["metadata"]["gmail_oauth_client_config_path"] == str(config_path)
     assert status["profiles"][0]["has_refresh_token"] is True
     assert "secret" not in json.dumps(status)
 

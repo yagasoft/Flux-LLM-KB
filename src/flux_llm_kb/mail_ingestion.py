@@ -214,6 +214,15 @@ def add_mail_profile(
     return profile
 
 
+def update_mail_profile_oauth_client_config_path(*, profile_name: str, client_config_path: str) -> dict[str, Any]:
+    profiles = database.list_mail_profiles(name=profile_name)
+    if not profiles:
+        raise ValueError(f"mail profile not found: {profile_name}")
+    metadata = dict(profiles[0].get("metadata") or {})
+    metadata["gmail_oauth_client_config_path"] = client_config_path.strip()
+    return database.update_mail_profile_metadata(name=profile_name, metadata=metadata)
+
+
 def mail_status() -> dict[str, Any]:
     payload = database.mail_status()
     try:

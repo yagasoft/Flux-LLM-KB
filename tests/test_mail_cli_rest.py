@@ -72,6 +72,7 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     assert "/api/settings/{key}" in routes
     assert "/api/mail/status" in routes
     assert "/api/mail/profiles" in routes
+    assert "/api/mail/profiles/{profile_name}/oauth-client-config" in routes
     assert "/api/mail/oauth/gmail/start" in routes
     assert "/api/mail/oauth/gmail/callback" in routes
     assert "/api/mail/oauth/status" in routes
@@ -122,6 +123,55 @@ def test_rest_mail_oauth_start_reports_missing_client_config_without_internal_er
     assert response.status_code == 200
     assert response.json()["status"] == "blocked_config_missing"
     assert "missing client json" in response.json()["message"]
+
+
+def test_rest_mail_oauth_start_aliases_authorization_url_for_dashboard(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_oauth
+
+    monkeypatch.setattr(
+        mail_oauth,
+        "start_gmail_oauth",
+        lambda **kwargs: {
+            "profile_name": kwargs["profile_name"],
+            "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?state=abc",
+            "status": "pending_user_authorization",
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/mail/oauth/gmail/start",
+        json={"profile_name": "gmail", "client_config_path": "private/client.json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["auth_url"] == "https://accounts.google.com/o/oauth2/v2/auth?state=abc"
+
+
+def test_rest_mail_profile_oauth_client_config_path_persists_metadata(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_ingestion
+
+    captured = {}
+    monkeypatch.setattr(
+        mail_ingestion,
+        "update_mail_profile_oauth_client_config_path",
+        lambda **kwargs: captured.update(kwargs) or {
+            "name": kwargs["profile_name"],
+            "metadata": {"gmail_oauth_client_config_path": kwargs["client_config_path"]},
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.put(
+        "/api/mail/profiles/gmail/oauth-client-config",
+        json={"client_config_path": "private/client_secret_custom.json"},
+    )
+
+    assert response.status_code == 200
+    assert captured == {"profile_name": "gmail", "client_config_path": "private/client_secret_custom.json"}
+    assert response.json()["metadata"]["gmail_oauth_client_config_path"] == "private/client_secret_custom.json"
 
 
 def test_cli_mail_oauth_status_masks_token_state(monkeypatch, capsys):

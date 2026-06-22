@@ -178,8 +178,14 @@ describe("Flux dashboard", () => {
       if (url.startsWith("/api/settings/") && url.endsWith("/reset")) return json({ status: "reset" });
       if (url === "/api/settings/apply") return json({ acknowledged: 1 });
       if (url === "/api/mail/profiles" && init?.method === "POST") return json({ ...JSON.parse(String(init.body)), enabled: true });
+      if (url.startsWith("/api/mail/profiles/") && url.endsWith("/oauth-client-config") && init?.method === "PUT") {
+        return json({
+          name: decodeURIComponent(url.split("/").at(-2) ?? ""),
+          metadata: { gmail_oauth_client_config_path: JSON.parse(String(init.body)).client_config_path }
+        });
+      }
       if (url === "/api/mail/sync") return json({ profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 });
-      if (url === "/api/mail/oauth/gmail/start") return json({ status: "pending_user_auth", auth_url: "https://accounts.google.com/o/oauth2/v2/auth?state=test" });
+      if (url === "/api/mail/oauth/gmail/start") return json({ status: "pending_user_authorization", authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?state=test" });
       if (url === "/api/search") return json([{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }]);
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
@@ -296,6 +302,55 @@ describe("Flux dashboard", () => {
     expect(profileDetails).not.toBeNull();
     expect(within(profileDetails as HTMLElement).getByRole("button", { name: /Gmail OAuth/i })).toBeInTheDocument();
     expect(within(profileDetails as HTMLElement).getByText("blocked_auth_required")).toBeInTheDocument();
+  });
+
+  test("mail profile inspector saves the Gmail OAuth client JSON path", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Select gmail-capture" }));
+
+    await user.clear(screen.getByLabelText("Private client JSON"));
+    await user.type(screen.getByLabelText("Private client JSON"), "private/client_secret_custom.json");
+    await user.click(screen.getByRole("button", { name: "Save OAuth client JSON path" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/mail/profiles/gmail-capture/oauth-client-config",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ client_config_path: "private/client_secret_custom.json" })
+        })
+      );
+    });
+    expect(await screen.findByText("OAuth client JSON path saved for gmail-capture.")).toBeInTheDocument();
+  });
+
+  test("gmail oauth opens a user-initiated consent window from authorization_url", async () => {
+    const popup = {
+      closed: false,
+      location: { assign: vi.fn() },
+      close: vi.fn(),
+      document: { title: "", body: { innerHTML: "" } }
+    };
+    const open = vi.fn(() => popup);
+    vi.stubGlobal("open", open);
+
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Select gmail-capture" }));
+    await user.click(screen.getByRole("button", { name: "Gmail OAuth for gmail-capture" }));
+
+    expect(open).toHaveBeenCalledWith("about:blank", "_blank");
+    await waitFor(() => {
+      expect(popup.location.assign).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2/v2/auth?state=test");
+    });
+    expect(await screen.findByText("Gmail OAuth opened for gmail-capture.")).toBeInTheDocument();
   });
 
   test("retrieval tab documents REST MCP and CLI consumer access", async () => {
