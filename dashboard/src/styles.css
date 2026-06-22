@@ -462,21 +462,53 @@ kbd {
 
 .toast {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   gap: 12px;
   min-height: 42px;
   padding: 10px 14px;
-  border: 1px solid #a9e7c4;
+  border: 1px solid transparent;
   border-radius: 8px;
+}
+
+.toast span {
+  flex: 1;
+  line-height: 1.4;
+}
+
+.toast.success {
   color: #0d6d3c;
+  border-color: #a9e7c4;
   background: #effcf5;
 }
 
-[data-theme="dark"] .toast {
+.toast.warning {
+  color: #8a4b00;
+  border-color: #ffd28a;
+  background: #fff7e8;
+}
+
+.toast.error {
+  color: #b42318;
+  border-color: #f5b5ae;
+  background: #fff1f0;
+}
+
+[data-theme="dark"] .toast.success {
   color: #b7f7d2;
   background: #123321;
   border-color: #236540;
+}
+
+[data-theme="dark"] .toast.warning {
+  color: #ffd89a;
+  background: #3a2608;
+  border-color: #765117;
+}
+
+[data-theme="dark"] .toast.error {
+  color: #ffc8c3;
+  background: #3a1212;
+  border-color: #7a2720;
 }
 
 .toast button,

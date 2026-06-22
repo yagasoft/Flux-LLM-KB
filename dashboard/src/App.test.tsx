@@ -158,8 +158,11 @@ const settings = [
   }
 ];
 
+let mailSyncPayload: unknown;
+
 describe("Flux dashboard", () => {
   beforeEach(() => {
+    mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(health);
@@ -184,7 +187,7 @@ describe("Flux dashboard", () => {
           metadata: { gmail_oauth_client_config_path: JSON.parse(String(init.body)).client_config_path }
         });
       }
-      if (url === "/api/mail/sync") return json({ profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 });
+      if (url === "/api/mail/sync") return json(mailSyncPayload);
       if (url === "/api/mail/oauth/gmail/start") return json({ status: "pending_user_authorization", authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?state=test" });
       if (url === "/api/search") return json([{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }]);
       if (url === "/api/outlook-host/request-sync") {
@@ -351,6 +354,40 @@ describe("Flux dashboard", () => {
       expect(popup.location.assign).toHaveBeenCalledWith("https://accounts.google.com/o/oauth2/v2/auth?state=test");
     });
     expect(await screen.findByText("Gmail OAuth opened for gmail-capture.")).toBeInTheDocument();
+  });
+
+  test("mail sync failures show detailed red errors instead of success banners", async () => {
+    mailSyncPayload = {
+      profiles: [
+        {
+          profile: "gmail-capture",
+          status: "auth_failed",
+          exported: 0,
+          errors: [
+            {
+              folder: "FluxCapture",
+              stage: "authenticate_xoauth2",
+              error: "AUTHENTICATE command error: BAD Invalid SASL argument"
+            }
+          ]
+        }
+      ],
+      count: 1
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Select gmail-capture" }));
+    await user.click(screen.getByRole("button", { name: "Sync selected profile" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("error");
+    expect(alert).toHaveTextContent("Sync failed for gmail-capture: auth_failed");
+    expect(alert).toHaveTextContent("FluxCapture");
+    expect(alert).toHaveTextContent("authenticate_xoauth2");
+    expect(alert).toHaveTextContent("Invalid SASL argument");
   });
 
   test("retrieval tab documents REST MCP and CLI consumer access", async () => {

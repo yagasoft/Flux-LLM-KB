@@ -146,6 +146,21 @@ type SearchResult = {
   id?: string;
 };
 
+type MailSyncError = {
+  folder?: string;
+  stage?: string;
+  error?: string;
+  [key: string]: unknown;
+};
+
+type MailSyncProfileResult = {
+  profile?: string;
+  status?: string;
+  exported?: number;
+  errors?: MailSyncError[];
+  spool_sync?: { count?: number };
+};
+
 type LoadState = {
   health: HealthPayload;
   crawl: CrawlPayload;
@@ -342,11 +357,16 @@ export default function App() {
         const payload = await sendJson<{ status?: string }>("/api/outlook-host/request-sync", "POST", { profile_name: profile.name });
         setToast(payload?.status ? `Outlook sync request ${payload.status}.` : "Outlook sync request queued.");
       } else {
-        const payload = await sendJson<{ count?: number; profiles?: Array<{ profile?: string; status?: string; exported?: number; spool_sync?: { count?: number } }> }>("/api/mail/sync", "POST", { profile_name: profile.name });
+        const payload = await sendJson<{ count?: number; profiles?: MailSyncProfileResult[] }>("/api/mail/sync", "POST", { profile_name: profile.name });
         const result = payload.profiles?.[0];
         const status = result?.status ?? "completed";
         const exported = result?.exported ?? 0;
-        setToast(`IMAP sync ${status} for ${profile.name}; exported ${exported} message${exported === 1 ? "" : "s"}.`);
+        const details = mailSyncErrorDetail(result);
+        if (mailSyncStatusFailed(status)) {
+          setToast(`Sync failed for ${profile.name}: ${status}${details ? ` - ${details}` : ""}`);
+        } else {
+          setToast(`IMAP sync ${status} for ${profile.name}; exported ${exported} message${exported === 1 ? "" : "s"}.`);
+        }
       }
       await load();
     } catch (error) {
@@ -565,6 +585,7 @@ export default function App() {
   const blockedJobs = health.jobs?.blocked ?? 0;
   const oauthProfiles = state.mail.oauth?.profiles ?? [];
   const restartRows = restartSettings(state.settings);
+  const currentToastTone = toast ? toastTone(toast) : "success";
 
   return (
     <div className="app-shell">
@@ -648,7 +669,8 @@ export default function App() {
         </header>
 
         {toast && (
-          <div className="toast" role="status">
+          <div className={`toast ${currentToastTone}`} role={currentToastTone === "error" ? "alert" : "status"}>
+            {currentToastTone === "error" ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
             <span>{toast}</span>
             <button type="button" aria-label="Dismiss notification" onClick={() => setToast("")}><X size={15} /></button>
           </div>
@@ -1875,13 +1897,69 @@ async function sendJson<T>(url: string, method: "POST" | "PUT" | "PATCH" | "DELE
   });
   if (!response.ok) {
     const details = await response.text().catch(() => "");
-    throw new Error(details ? `Request failed: ${response.status} ${details}` : `Request failed: ${response.status}`);
+    throw new Error(formatApiError(method, url, response.status, response.statusText, details));
   }
   return await response.json();
 }
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatApiError(method: string, url: string, status: number, statusText: string, body: string) {
+  const detail = parseApiErrorDetail(body);
+  const statusLabel = statusText ? `${status} ${statusText}` : String(status);
+  return `${method} ${url} failed (${statusLabel})${detail ? `: ${detail}` : ""}`;
+}
+
+function parseApiErrorDetail(body: string) {
+  if (!body.trim()) return "";
+  try {
+    const payload = JSON.parse(body) as Record<string, unknown>;
+    const detail = payload.detail ?? payload.message ?? payload.error;
+    if (Array.isArray(detail)) {
+      return detail.map((item) => objectSummary(item)).filter(Boolean).join("; ");
+    }
+    if (detail && typeof detail === "object") {
+      return objectSummary(detail);
+    }
+    return detail ? String(detail) : body;
+  } catch {
+    return body;
+  }
+}
+
+function mailSyncStatusFailed(status: string) {
+  return ["auth_failed", "auth_expired", "blocked_auth_required", "blocked_missing_dependency", "failed"].includes(status) || status.endsWith("_failed");
+}
+
+function mailSyncErrorDetail(result?: MailSyncProfileResult) {
+  const errors = result?.errors ?? [];
+  return errors
+    .map((error) => {
+      const parts = [error.folder, error.stage, error.error].filter(Boolean);
+      return parts.join(" / ");
+    })
+    .filter(Boolean)
+    .join("; ");
+}
+
+function objectSummary(value: unknown) {
+  if (!value || typeof value !== "object") return String(value ?? "");
+  return Object.entries(value as Record<string, unknown>)
+    .map(([key, item]) => `${key}=${typeof item === "object" ? JSON.stringify(item) : String(item)}`)
+    .join(", ");
+}
+
+function toastTone(message: string): "success" | "warning" | "error" {
+  const text = message.toLowerCase();
+  if (/(failed|failure|could not|error|invalid|denied|timed out|unavailable|auth_failed|auth_expired|blocked)/.test(text)) {
+    return "error";
+  }
+  if (/(queued|pending|started|opened)/.test(text)) {
+    return "warning";
+  }
+  return "success";
 }
 
 function StatusChip({ label, ok }: { label: string; ok?: boolean }) {

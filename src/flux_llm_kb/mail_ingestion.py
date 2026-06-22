@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import base64
 from email import policy
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
@@ -49,8 +48,7 @@ class OutlookFolderPath:
 
 
 def build_xoauth2_string(user: str, access_token: str) -> str:
-    payload = f"user={user}\x01auth=Bearer {access_token}\x01\x01"
-    return base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    return f"user={user}\x01auth=Bearer {access_token}\x01\x01"
 
 
 def parse_email_bytes(raw_message: bytes) -> ParsedEmail:
@@ -459,19 +457,55 @@ def _sync_imap_profile(
         client = factory(profile.get("server") or "imap.gmail.com")
         try:
             if hasattr(client, "authenticate_xoauth2"):
-                client.authenticate_xoauth2(profile.get("account") or "", token)
+                try:
+                    client.authenticate_xoauth2(profile.get("account") or "", token)
+                except Exception as exc:
+                    errors = [_mail_sync_error(folder=folder, stage="authenticate_xoauth2", error=exc)]
+                    database.record_mail_sync_run(
+                        profile_name=profile["name"],
+                        status="auth_failed",
+                        messages_seen=total_seen,
+                        messages_exported=total_exported,
+                        last_cursor=cursors,
+                        errors=errors,
+                    )
+                    return {
+                        "profile": profile["name"],
+                        "status": "auth_failed",
+                        "folders": folder_results,
+                        "exported": total_exported,
+                        "errors": errors,
+                    }
             previous = cursors.get(folder, {})
-            result = sync_imap_folder(
-                client=client,
-                profile_name=profile["name"],
-                account=profile.get("account") or "",
-                folder=folder,
-                spool_path=profile["spool_path"],
-                previous_uid=int(previous.get("last_uid", 0) or 0),
-                previous_uidvalidity=previous.get("uidvalidity"),
-                post_process_policy=profile["post_process_policy"],
-                processed_folder=(profile.get("metadata") or {}).get("processed_folder"),
-            )
+            try:
+                result = sync_imap_folder(
+                    client=client,
+                    profile_name=profile["name"],
+                    account=profile.get("account") or "",
+                    folder=folder,
+                    spool_path=profile["spool_path"],
+                    previous_uid=int(previous.get("last_uid", 0) or 0),
+                    previous_uidvalidity=previous.get("uidvalidity"),
+                    post_process_policy=profile["post_process_policy"],
+                    processed_folder=(profile.get("metadata") or {}).get("processed_folder"),
+                )
+            except Exception as exc:
+                errors = [_mail_sync_error(folder=folder, stage="sync_folder", error=exc)]
+                database.record_mail_sync_run(
+                    profile_name=profile["name"],
+                    status="failed",
+                    messages_seen=total_seen,
+                    messages_exported=total_exported,
+                    last_cursor=cursors,
+                    errors=errors,
+                )
+                return {
+                    "profile": profile["name"],
+                    "status": "failed",
+                    "folders": folder_results,
+                    "exported": total_exported,
+                    "errors": errors,
+                }
             cursors[folder] = {"last_uid": result["last_uid"], "uidvalidity": result["uidvalidity"]}
             folder_results.append(result)
             total_seen += result["seen"]
@@ -489,6 +523,14 @@ def _sync_imap_profile(
         last_cursor=cursors,
     )
     return {"profile": profile["name"], "status": "completed", "folders": folder_results, "exported": total_exported}
+
+
+def _mail_sync_error(*, folder: str, stage: str, error: Exception) -> dict[str, str]:
+    return {
+        "folder": folder,
+        "stage": stage,
+        "error": str(error),
+    }
 
 
 def _oauth_access_token(profile_name: str) -> str | None:

@@ -34,8 +34,8 @@ def _sample_message() -> bytes:
 def test_build_xoauth2_string_uses_gmail_imap_shape():
     value = build_xoauth2_string("user@gmail.com", "access-token")
 
-    assert value.endswith("=")
-    assert " " not in value
+    assert value == "user=user@gmail.com\x01auth=Bearer access-token\x01\x01"
+    assert "\x01" in value
 
 
 def test_parse_email_bytes_extracts_body_metadata_and_attachments():
@@ -291,3 +291,44 @@ def test_sync_imap_profile_reports_expired_oauth_without_crashing(monkeypatch, t
 
     assert result["profiles"][0]["status"] == "auth_expired"
     assert runs[0]["status"] == "auth_expired"
+
+
+def test_sync_imap_profile_reports_auth_failure_without_500(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion, mail_oauth
+
+    class FakeClient:
+        def __init__(self, host):
+            self.host = host
+            self.closed = False
+
+        def authenticate_xoauth2(self, user, token):
+            raise RuntimeError("AUTHENTICATE command error: BAD Invalid SASL argument")
+
+        def close(self):
+            self.closed = True
+
+        def logout(self):
+            self.closed = True
+
+    profile = {
+        "name": "gmail",
+        "source_type": "imap",
+        "enabled": True,
+        "account": "me@gmail.com",
+        "server": "imap.gmail.com",
+        "folder_paths": ["FluxCapture"],
+        "spool_path": str(tmp_path),
+        "post_process_policy": "none",
+        "metadata": {},
+    }
+    runs = []
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
+    monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: "fresh-access-token")
+
+    result = mail_ingestion.sync_mail_profile(profile_name="gmail", imap_client_factory=FakeClient)
+
+    assert result["profiles"][0]["status"] == "auth_failed"
+    assert "Invalid SASL argument" in result["profiles"][0]["errors"][0]["error"]
+    assert runs[0]["status"] == "auth_failed"
