@@ -94,7 +94,7 @@ def _default_root() -> Path:
     app_root = os.environ.get("FLUX_KB_APP_ROOT")
     if app_root:
         candidates.append(Path(app_root))
-    candidates.append(Path(__file__).resolve().parents[2])
+    candidates.extend(Path(__file__).resolve().parents)
     for root in candidates:
         if (root / "plugins" / PLUGIN_NAME).exists():
             return root
@@ -103,11 +103,25 @@ def _default_root() -> Path:
 
 def _install_plugin_path(source: Path, target: Path) -> None:
     if target.exists():
-        return
+        try:
+            if target.resolve() == source.resolve():
+                return
+        except OSError:
+            pass
+        _remove_existing_plugin_path(target)
     try:
         target.symlink_to(source, target_is_directory=True)
     except OSError:
         shutil.copytree(source, target)
+
+
+def _remove_existing_plugin_path(target: Path) -> None:
+    if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
+        target.rmdir()
+    elif target.is_dir():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
 
 
 def _write_local_marketplace_config(config_path: Path, source_dir: Path) -> None:
