@@ -116,6 +116,53 @@ function Register-FluxTask {
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Flux-LLM-KB local host process" -Force | Out-Null
 }
 
+function Wait-FluxTaskStopped {
+    param([string]$TaskName, [int]$TimeoutSeconds = 30)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $task -or $task.State -ne "Running") { return }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for scheduled task $TaskName to stop"
+}
+
+function Test-FluxTcpOpen {
+    param([int]$Port)
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $async = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne(500, $false)) { return $false }
+        $client.EndConnect($async)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($client) { $client.Close() }
+    }
+}
+
+function Wait-FluxTcpClosed {
+    param([int]$Port, [int]$TimeoutSeconds = 30)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (-not (Test-FluxTcpOpen -Port $Port)) { return }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for 127.0.0.1:$Port to close"
+}
+
+function Wait-FluxTcpOpen {
+    param([int]$Port, [int]$TimeoutSeconds = 30)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-FluxTcpOpen -Port $Port) { return }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for 127.0.0.1:$Port to open"
+}
+
 function Invoke-FluxMigration {
     param([string]$VenvPython, [string]$InstallRoot, [int]$PostgresPort)
     $previousDatabaseUrl = $env:FLUX_KB_DATABASE_URL
@@ -202,8 +249,8 @@ try {
 Invoke-FluxMigration -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort
 
 foreach ($taskSpec in @(
-    @{ Name = "FluxKB Host Agent"; Launcher = (Join-Path $appRoot "run-host-agent.pyw") },
-    @{ Name = "FluxKB Outlook Host"; Launcher = (Join-Path $appRoot "run-outlook-host.pyw") }
+    @{ Name = "FluxKB Host Agent"; Launcher = (Join-Path $appRoot "run-host-agent.pyw"); Port = $HostAgentPort },
+    @{ Name = "FluxKB Outlook Host"; Launcher = (Join-Path $appRoot "run-outlook-host.pyw"); Port = $null }
 )) {
     $existing = Get-ScheduledTask -TaskName $taskSpec.Name -ErrorAction SilentlyContinue
     $wasRunning = $false
@@ -211,11 +258,14 @@ foreach ($taskSpec in @(
         $wasRunning = $existing.State -eq "Running"
         if ($wasRunning -or $RestartHostTasks) {
             Stop-ScheduledTask -TaskName $taskSpec.Name -ErrorAction SilentlyContinue
+            Wait-FluxTaskStopped -TaskName $taskSpec.Name
+            if ($taskSpec.Port) { Wait-FluxTcpClosed -Port $taskSpec.Port }
         }
     }
     Register-FluxTask -TaskName $taskSpec.Name -LauncherPath $taskSpec.Launcher -AppRoot $appRoot
     if ($wasRunning -or $RestartHostTasks) {
         Start-ScheduledTask -TaskName $taskSpec.Name
+        if ($taskSpec.Port) { Wait-FluxTcpOpen -Port $taskSpec.Port }
     }
 }
 

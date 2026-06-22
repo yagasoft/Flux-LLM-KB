@@ -69,6 +69,9 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "Invoke-FluxMigration" in update
     assert "-m flux_llm_kb.cli migrate" in update
     assert "Register-FluxTask" in update
+    assert "Wait-FluxTaskStopped" in update
+    assert "Wait-FluxTcpClosed" in update
+    assert "Port = $HostAgentPort" in update
     assert "pythonw.exe" in update
     assert "run-host-agent.pyw" in update
     assert "run-outlook-host.pyw" in update
