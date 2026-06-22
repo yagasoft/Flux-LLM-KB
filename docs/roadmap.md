@@ -36,6 +36,14 @@ Progress against this roadmap is tracked in [progress.md](progress.md).
   override behavior visible in the dashboard.
 - Live watcher control with reloadable enabled roots, debounce, bounded queues,
   heartbeat, and stale-state reporting.
+- Non-invasive watch semantics: filesystem monitors should subscribe to OS
+  notifications or polling snapshots without holding exclusive handles on files
+  or directories, so watched roots can coexist with OneDrive, Dropbox,
+  SharePoint sync, editors, build tools, and backup software.
+- Debounce and file-stability policy for watcher events: coalesce write/rename/
+  create bursts per path, wait for size and mtime to remain stable, use adaptive
+  longer quiet windows for cloud-synced or large files, and record suppressed
+  duplicate events for diagnostics.
 - Startup and periodic reconciliation for enabled watched roots so files added,
   modified, or deleted while Flux was offline are detected without manual
   backfill.
@@ -146,6 +154,42 @@ Progress against this roadmap is tracked in [progress.md](progress.md).
 
 ## V2.7: Mail And Retrieval Production Hardening
 
+- Search result content actions and previews:
+  - Clicking a search result should open the most useful representation for that
+    result instead of leaving it as a passive row.
+  - Mail results open inside the dashboard as a logical email view with subject,
+    sender, recipients, dates, sanitized HTML/text body, attachment list,
+    source profile, mailbox folder, post-process state, and provenance links.
+  - File results expose `Preview extracted text`, `Open with default app`,
+    `Reveal in folder`, and `Copy path` actions where appropriate. Opening or
+    revealing host files is routed through the local host agent so Docker never
+    tries to launch Windows desktop apps directly.
+  - Dashboard file-open actions are local-only, explicit user actions. The host
+    agent must validate that the target is a known indexed asset, normalize the
+    path, reject arbitrary browser-supplied paths, audit the action, and return
+    clear states such as `opened`, `missing`, `deleted`, `locked`, or
+    `host_agent_offline`.
+  - Archive members, mail attachments, embedded document objects, and generated
+    sidecars should display as related evidence under their parent logical
+    result rather than as unexplained standalone implementation files.
+- Lock-tolerant indexing and cloud-sync coexistence:
+  - Indexers should open files read-only with shared-read semantics where the
+    platform supports it, copy stable inputs to a temporary extraction workspace
+    before heavy parsers run, and release file handles quickly.
+  - Indexing must not require Flux to own or exclusively lock a user file. A
+    locked file should produce `pending_stable`, `blocked_locked`, or
+    `retrying_locked` state with cooldown, not a failed root crawl.
+  - Detect common cloud-sync edge cases such as OneDrive Files On-Demand
+    placeholders, partially hydrated files, transient `.tmp`/sync artifacts, and
+    rename bursts. Default behavior is to wait or skip with an actionable state
+    rather than forcing hydration or conflicting with the sync client.
+  - Add optional Windows Volume Shadow Copy support in the host agent for local
+    NTFS roots when normal shared reads cannot access a locked but important
+    file. VSS use is opt-in, settings-controlled, permission-aware, capped by
+    size/time/depth, audited, and falls back to retry/cooldown when unavailable.
+  - Add explicit compatibility tests for OneDrive/SharePoint-synced folders,
+    Office files open during indexing, large files still being written, and
+    repeated save/rename patterns from common editors.
 - Mail post-process semantics hardening:
   - Make mailbox-side actions explicit per provider/profile: remove label, move
     to processed folder, IMAP delete plus expunge, Gmail trash, or no action.

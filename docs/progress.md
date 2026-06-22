@@ -33,7 +33,7 @@ scripts:
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
-| V2.7 Mail And Retrieval Production Hardening | planned | Explicit hardening lane for mail post-processing, retrieval explainability, scheduler reliability, and error diagnostics. |
+| V2.7 Mail And Retrieval Production Hardening | planned | Explicit hardening lane for result content actions, lock-tolerant indexing, mail post-processing, retrieval explainability, scheduler reliability, and error diagnostics. |
 | V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, optional ParadeDB/BM25, and local librarian workers. |
 | V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
 
@@ -98,7 +98,21 @@ scripts:
 
 ### V2.7
 
-- Entire lane is planned. See [roadmap.md](roadmap.md#v27-mail-and-retrieval-production-hardening).
+- Search results need actionable open/preview flows: in-app mail viewing,
+  extracted-text preview, host-agent file open, reveal-in-folder, copy path, and
+  related-evidence grouping for attachments/archive members.
+- Watcher debounce exists as a roadmap/runtime concern, but needs stronger
+  documented guarantees and tests for burst coalescing, stable-size/mtime
+  windows, cloud-sync rename bursts, and large file writes.
+- Lock-tolerant indexing is planned: shared read handles, temporary extraction
+  copies, locked-file retry/cooldown states, and optional Windows VSS fallback
+  for local NTFS roots when normal reads cannot access an important file.
+- OneDrive/SharePoint/Dropbox coexistence needs explicit verification so
+  monitoring remains non-invasive and indexing reports actionable states instead
+  of fighting sync clients.
+- Mail post-processing, retrieval explainability, scheduler reliability, and
+  detailed red error diagnostics remain planned hardening items. See
+  [roadmap.md](roadmap.md#v27-mail-and-retrieval-production-hardening).
 
 ### V3
 
@@ -113,12 +127,16 @@ scripts:
 
 ## Immediate Next Queue
 
-1. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
-2. Promote IMAP scheduled sync into a claimable scheduler state machine.
-3. Improve retrieval snippets and collapse mail spool implementation files into
+1. Add search result content actions: in-app mail viewer, extracted-text preview,
+   host-agent file open, reveal-in-folder, and copy path.
+2. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
+3. Add lock-tolerant indexing states, debounce/stability tests, and optional
+   Windows VSS design/controls for locked files.
+4. Promote IMAP scheduled sync into a claimable scheduler state machine.
+5. Improve retrieval snippets and collapse mail spool implementation files into
    one logical mail result with linked attachments.
-4. Add provider-specific mail post-process policies with dry-run and audit views.
-5. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
+6. Add provider-specific mail post-process policies with dry-run and audit views.
+7. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
    prioritizing common Office legacy files, diagrams, archives, and embedded
    media.
 
