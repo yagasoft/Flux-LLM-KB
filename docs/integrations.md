@@ -188,14 +188,44 @@ Set `FLUX_KB_PYTHON` if Codex should use a specific Python executable:
 $env:FLUX_KB_PYTHON = "C:\Path\To\python.exe"
 ```
 
+Codex has three Flux integration surfaces:
+
+- Plugin hooks and skills provide automatic context/capture behavior and user
+  guidance inside Codex turns.
+- MCP tools provide direct callable tools such as `kb.brief`, `kb.search`, and
+  `kb.finalize_turn` when `[mcp_servers.flux_llm_kb]` is present in
+  `~/.codex/config.toml`.
+- REST remains the fallback surface for tools that can call the local API
+  directly, for example `GET /api/brief?query=...`.
+
+`flux-kb codex install-plugin` installs the plugin and writes the Flux MCP
+server config block:
+
+```toml
+[mcp_servers.flux_llm_kb]
+command = "<Flux Python>"
+args = ["-m", "flux_llm_kb.mcp_server"]
+cwd = "<Flux app root>"
+enabled = true
+startup_timeout_sec = 15
+tool_timeout_sec = 60
+```
+
+The command prefers `FLUX_KB_PYTHON`, then the production app virtual
+environment when available, then the active Python. `flux-kb codex status` and
+dashboard health report whether this MCP block is configured, enabled, and able
+to import the optional MCP dependency.
+
 Codex hooks run a configurable local policy by default:
 
 - `UserPromptSubmit` skips empty, short, slash-command, and trivial prompts; for
-  non-trivial prompts it retrieves a compact Flux brief only when search results
-  include lexical or fuzzy evidence.
+  non-trivial prompts it injects guidance for indexable final responses and
+  retrieves a compact Flux brief when search results include lexical or fuzzy
+  evidence.
 - `Stop` captures the final assistant message once per `session_id` and
   `turn_id`, subject to the global `capture.enabled` setting and Codex hook
-  capture limits.
+  capture limits. It can also index bounded public web references and file
+  references that already belong to enabled monitored roots.
 - `PreCompact` remains non-blocking and does not parse transcript files because
   Codex transcript paths are not a stable hook contract.
 
@@ -209,6 +239,12 @@ Runtime settings:
 flux-kb settings get codex.hooks.enabled
 flux-kb settings set codex.hooks.preflight_enabled false
 flux-kb settings set codex.hooks.capture_enabled false
+flux-kb settings set codex.hooks.capture_guidance_enabled true
+flux-kb settings set codex.hooks.reference_indexing_enabled true
+flux-kb settings set codex.hooks.reference_max_count 5
+flux-kb settings set codex.hooks.reference_max_bytes 1048576
+flux-kb settings set codex.hooks.reference_fetch_timeout_seconds 3
+flux-kb settings set codex.hooks.reference_allow_private_urls false
 flux-kb settings set codex.hooks.token_budget 900
 flux-kb settings set codex.hooks.min_prompt_chars 32
 flux-kb settings set codex.hooks.capture_min_chars 160

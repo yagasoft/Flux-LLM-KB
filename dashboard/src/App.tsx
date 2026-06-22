@@ -68,6 +68,14 @@ type HealthPayload = {
     discoverable?: boolean;
     restart_required?: boolean;
     message?: string;
+    mcp?: {
+      configured?: boolean;
+      command?: string | null;
+      cwd?: string | null;
+      enabled?: boolean;
+      dependency_available?: boolean;
+      message?: string;
+    };
     hook_policy?: {
       status?: string;
       enabled?: boolean;
@@ -1121,6 +1129,7 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
 
 function CodexHooksPanel({ codex }: { codex?: HealthPayload["codex"] }) {
   const policy = codex?.hook_policy ?? {};
+  const mcp = codex?.mcp ?? {};
   const recent = policy.recent_events ?? [];
   const lastEvent = recent[0];
   return (
@@ -1129,6 +1138,7 @@ function CodexHooksPanel({ codex }: { codex?: HealthPayload["codex"] }) {
         <StatusTile label="Hook policy" ok={policy.status === "active"} message={policy.status ?? "unknown"} />
         <StatusTile label="Preflight brief" ok={policy.preflight_enabled} message={policy.preflight_enabled ? `enabled - ${policy.token_budget ?? "-"} tokens` : "disabled"} />
         <StatusTile label="Turn capture" ok={policy.capture_enabled} message={policy.capture_enabled ? "enabled" : "disabled"} />
+        <StatusTile label="MCP tools" ok={mcp.configured && mcp.enabled && mcp.dependency_available} message={mcp.configured && mcp.enabled && mcp.dependency_available ? "kb.brief ready" : mcp.message ?? "not configured"} />
       </div>
       {lastEvent ? (
         <div className="settings-list">

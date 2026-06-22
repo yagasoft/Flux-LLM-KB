@@ -20,6 +20,12 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "codex.hooks.enabled" in keys
     assert "codex.hooks.preflight_enabled" in keys
     assert "codex.hooks.capture_enabled" in keys
+    assert "codex.hooks.capture_guidance_enabled" in keys
+    assert "codex.hooks.reference_indexing_enabled" in keys
+    assert "codex.hooks.reference_max_count" in keys
+    assert "codex.hooks.reference_max_bytes" in keys
+    assert "codex.hooks.reference_fetch_timeout_seconds" in keys
+    assert "codex.hooks.reference_allow_private_urls" in keys
     assert "codex.hooks.token_budget" in keys
     assert "codex.hooks.min_prompt_chars" in keys
     assert "codex.hooks.capture_min_chars" in keys
@@ -34,6 +40,12 @@ def test_codex_hook_settings_are_enabled_by_default(monkeypatch):
     assert service.resolve("codex.hooks.enabled").raw_value is True
     assert service.resolve("codex.hooks.preflight_enabled").raw_value is True
     assert service.resolve("codex.hooks.capture_enabled").raw_value is True
+    assert service.resolve("codex.hooks.capture_guidance_enabled").raw_value is True
+    assert service.resolve("codex.hooks.reference_indexing_enabled").raw_value is True
+    assert service.resolve("codex.hooks.reference_max_count").raw_value == 5
+    assert service.resolve("codex.hooks.reference_max_bytes").raw_value == 1024 * 1024
+    assert service.resolve("codex.hooks.reference_fetch_timeout_seconds").raw_value == 3
+    assert service.resolve("codex.hooks.reference_allow_private_urls").raw_value is False
     assert service.resolve("codex.hooks.token_budget").raw_value == 900
     assert service.resolve("codex.hooks.min_prompt_chars").raw_value == 32
     assert service.resolve("codex.hooks.capture_min_chars").raw_value == 160

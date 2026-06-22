@@ -9,6 +9,12 @@ DEFAULT_SETTINGS = {
     "codex.hooks.enabled": True,
     "codex.hooks.preflight_enabled": True,
     "codex.hooks.capture_enabled": True,
+    "codex.hooks.capture_guidance_enabled": True,
+    "codex.hooks.reference_indexing_enabled": True,
+    "codex.hooks.reference_max_count": 5,
+    "codex.hooks.reference_max_bytes": 1048576,
+    "codex.hooks.reference_fetch_timeout_seconds": 3,
+    "codex.hooks.reference_allow_private_urls": False,
     "codex.hooks.token_budget": 900,
     "codex.hooks.min_prompt_chars": 32,
     "codex.hooks.capture_min_chars": 160,
@@ -90,6 +96,41 @@ def test_user_prompt_hook_injects_real_brief_for_relevant_non_trivial_prompt(mon
     assert audits[-1]["event_type"] == "codex_hook.preflight_injected"
     assert audits[-1]["details"]["session_id"] == "session-1"
     assert audits[-1]["details"]["turn_id"] == "turn-1"
+
+
+def test_user_prompt_hook_injects_indexable_capture_guidance_without_memory_evidence(monkeypatch):
+    install_settings(monkeypatch)
+    audits = []
+
+    class FakeService:
+        def search(self, query, limit=5):
+            return []
+
+        def brief(self, *_args, **_kwargs):
+            raise AssertionError("brief should not run without relevant evidence")
+
+    monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    output = run_hook(
+        "user-prompt-submit",
+        json.dumps(
+            {
+                "session_id": "session-1",
+                "turn_id": "turn-guidance",
+                "prompt": "Please implement the next Flux roadmap item with tests and deployment.",
+            }
+        ),
+    )
+
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert output["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "Make the final assistant message indexable for Flux-LLM-KB" in context
+    assert "files changed or referenced" in context
+    assert "commands or tests run" in context
+    assert "Do not include secrets" in context
+    assert audits[-1]["event_type"] == "codex_hook.preflight_guidance"
+    assert audits[-1]["details"]["reason"] == "no_relevant_evidence"
 
 
 def test_user_prompt_hook_skips_trivial_and_slash_prompts_without_search(monkeypatch):
@@ -178,6 +219,167 @@ def test_stop_hook_captures_final_assistant_message_once(monkeypatch):
     }
     assert audits[-1]["event_type"] == "codex_hook.capture_saved"
     assert audits[-1]["target_id"] == "episode-1"
+
+
+def test_stop_hook_indexes_public_web_references_from_final_message(monkeypatch):
+    install_settings(monkeypatch, {"codex.hooks.capture_min_chars": 20})
+    audits = []
+    remembered = []
+
+    class FakeService:
+        def remember(self, title, body, metadata=None):
+            remembered.append({"title": title, "body": body, "metadata": metadata})
+            return type("Result", (), {"id": f"episode-{len(remembered)}", "redaction_count": 0})()
+
+    monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(hook_policy.database, "codex_hook_capture_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(hook_policy.database, "codex_hook_reference_exists", lambda **_kwargs: False, raising=False)
+    monkeypatch.setattr(
+        hook_policy,
+        "_fetch_web_reference",
+        lambda url, settings: {"title": "Codex MCP docs", "text": "Codex MCP tools are configured in config.toml."},
+        raising=False,
+    )
+    monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    output = run_hook(
+        "stop",
+        json.dumps(
+            {
+                "session_id": "session-1",
+                "turn_id": "turn-web",
+                "last_assistant_message": (
+                    "Implemented MCP configuration. Reference: "
+                    "https://developers.openai.com/codex/mcp for the Codex MCP config contract."
+                ),
+            }
+        ),
+    )
+
+    assert output == {"continue": True}
+    assert len(remembered) == 2
+    assert remembered[1]["title"] == "Referenced web page: Codex MCP docs"
+    assert remembered[1]["body"] == "Codex MCP tools are configured in config.toml."
+    assert remembered[1]["metadata"]["source"] == "codex_hook_reference"
+    assert remembered[1]["metadata"]["reference_type"] == "web"
+    assert remembered[1]["metadata"]["url"] == "https://developers.openai.com/codex/mcp"
+    assert remembered[1]["metadata"]["parent_episode_id"] == "episode-1"
+    assert any(item["event_type"] == "codex_hook.reference_indexed" for item in audits)
+    assert audits[-1]["event_type"] == "codex_hook.capture_saved"
+    assert audits[-1]["details"]["references_indexed"] == 1
+
+
+def test_stop_hook_rejects_private_web_references_by_default(monkeypatch):
+    install_settings(monkeypatch, {"codex.hooks.capture_min_chars": 20})
+    audits = []
+
+    class FakeService:
+        def remember(self, title, body, metadata=None):
+            return type("Result", (), {"id": "episode-1", "redaction_count": 0})()
+
+    monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(hook_policy.database, "codex_hook_capture_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(hook_policy.database, "codex_hook_reference_exists", lambda **_kwargs: False, raising=False)
+    monkeypatch.setattr(
+        hook_policy,
+        "_fetch_web_reference",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("private URL should not be fetched")),
+        raising=False,
+    )
+    monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    run_hook(
+        "stop",
+        '{"session_id":"session-1","turn_id":"turn-private","last_assistant_message":"Checked local status at http://127.0.0.1:8765/api/dashboard/health after deployment."}',
+    )
+
+    skipped = [item for item in audits if item["event_type"] == "codex_hook.reference_skipped"]
+    assert skipped
+    assert skipped[-1]["details"]["reason"] == "private_url"
+    assert skipped[-1]["details"]["reference"] == "http://127.0.0.1:8765/api/dashboard/health"
+
+
+def test_stop_hook_syncs_file_references_under_monitored_roots(monkeypatch, tmp_path):
+    install_settings(monkeypatch, {"codex.hooks.capture_min_chars": 20})
+    docs_root = tmp_path / "docs"
+    docs_root.mkdir()
+    referenced = docs_root / "implementation.md"
+    referenced.write_text("implementation notes", encoding="utf-8")
+    audits = []
+    synced = []
+
+    class FakeService:
+        def remember(self, title, body, metadata=None):
+            return type("Result", (), {"id": "episode-1", "redaction_count": 0})()
+
+        def sync_corpus(self, **kwargs):
+            synced.append(kwargs)
+            return {"files_seen": 1, "chunks_indexed": 1, "jobs_queued": 0}
+
+    monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(hook_policy.database, "codex_hook_capture_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(hook_policy.database, "codex_hook_reference_exists", lambda **_kwargs: False, raising=False)
+    monkeypatch.setattr(
+        hook_policy.database,
+        "list_monitored_roots",
+        lambda: [{"name": "docs", "root_path": str(docs_root), "enabled": True}],
+    )
+    monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    run_hook(
+        "stop",
+        json.dumps(
+            {
+                "session_id": "session-1",
+                "turn_id": "turn-file",
+                "cwd": str(tmp_path),
+                "last_assistant_message": "Updated docs/implementation.md and verified it indexed correctly.",
+            }
+        ),
+    )
+
+    assert synced == [{"path": str(referenced), "reason": "codex_hook_reference"}]
+    indexed = [item for item in audits if item["event_type"] == "codex_hook.reference_indexed"]
+    assert indexed[-1]["details"]["reference_type"] == "file"
+    assert indexed[-1]["details"]["root_name"] == "docs"
+
+
+def test_stop_hook_rejects_file_references_outside_monitored_roots(monkeypatch, tmp_path):
+    install_settings(monkeypatch, {"codex.hooks.capture_min_chars": 20})
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    audits = []
+    synced = []
+
+    class FakeService:
+        def remember(self, title, body, metadata=None):
+            return type("Result", (), {"id": "episode-1", "redaction_count": 0})()
+
+        def sync_corpus(self, **kwargs):
+            synced.append(kwargs)
+            return {}
+
+    monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(hook_policy.database, "codex_hook_capture_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(hook_policy.database, "codex_hook_reference_exists", lambda **_kwargs: False, raising=False)
+    monkeypatch.setattr(hook_policy.database, "list_monitored_roots", lambda: [])
+    monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    run_hook(
+        "stop",
+        json.dumps(
+            {
+                "session_id": "session-1",
+                "turn_id": "turn-outside",
+                "cwd": str(tmp_path),
+                "last_assistant_message": f"Reviewed {outside} after implementation.",
+            }
+        ),
+    )
+
+    assert synced == []
+    skipped = [item for item in audits if item["event_type"] == "codex_hook.reference_skipped"]
+    assert skipped[-1]["details"]["reason"] == "file_not_under_monitored_root"
 
 
 def test_stop_hook_skips_duplicate_capture(monkeypatch):

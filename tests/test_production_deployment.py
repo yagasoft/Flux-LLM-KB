@@ -36,6 +36,7 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "-m flux_llm_kb.cli migrate" in install
     assert "Invoke-FluxCodexPluginInstall" in install
     assert "-m flux_llm_kb.cli codex install-plugin" in install
+    assert '"$SourceRoot[api,corpus,mail,mcp]"' in install
     assert 'Join-Path $appRoot "plugins"' in install
     assert "E:\\LLM KB" not in install
     assert "private\\runtime" not in install
@@ -72,6 +73,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "-m flux_llm_kb.cli migrate" in update
     assert "Invoke-FluxCodexPluginInstall" in update
     assert "-m flux_llm_kb.cli codex install-plugin" in update
+    assert '"$SourceRoot[api,corpus,mail,mcp]"' in update
     assert "Register-FluxTask" in update
     assert "Wait-FluxTaskStopped" in update
     assert "Wait-FluxTcpClosed" in update

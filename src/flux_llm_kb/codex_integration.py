@@ -4,13 +4,18 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+
+from .processes import run_no_window
 
 
 PLUGIN_NAME = "flux-llm-kb"
 MARKETPLACE_NAME = "flux-llm-kb-local"
 PLUGIN_CONFIG_NAME = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
+MCP_SERVER_NAME = "flux_llm_kb"
 
 
 def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
@@ -34,6 +39,7 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
         if marketplace_source:
             marketplace_path = _marketplace_file(marketplace_source)
             marketplace_valid = _marketplace_contains_plugin(marketplace_path)
+    mcp = _flux_mcp_status(config)
     installed = installed_path.exists()
     hooks_available = hooks_json.exists()
     manifest = _read_manifest(manifest_path)
@@ -70,6 +76,7 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
         "installed_path": str(installed_path),
         "repo_plugin_path": str(repo_plugin),
         "manifest_path": str(manifest_path),
+        "mcp": mcp,
         "message": _status_message(status, restart_required=restart_required),
     }
 
@@ -92,6 +99,7 @@ def install_plugin(*, repo_root: str | Path | None = None) -> dict[str, Any]:
     _install_plugin_path(plugin_source, installed_path)
     _write_local_marketplace(root)
     _write_local_marketplace_config(codex_home / "config.toml", root)
+    _write_flux_mcp_server_config(codex_home / "config.toml", root)
 
     status = codex_status(repo_root=root)
     return {
@@ -180,9 +188,41 @@ def _write_local_marketplace_config(config_path: Path, source_dir: Path) -> None
     config_path.write_text(existing.rstrip() + "\n\n" + addition, encoding="utf-8")
 
 
+def _write_flux_mcp_server_config(config_path: Path, app_root: Path) -> None:
+    existing = config_path.read_text(encoding="utf-8", errors="ignore") if config_path.exists() else ""
+    existing = _remove_toml_table(existing, f"mcp_servers.{MCP_SERVER_NAME}")
+    python_command = _resolve_mcp_python(app_root)
+    addition = "\n".join(
+        [
+            f"[mcp_servers.{MCP_SERVER_NAME}]",
+            f"command = {_toml_string(python_command)}",
+            'args = ["-m", "flux_llm_kb.mcp_server"]',
+            f"cwd = {_toml_string(str(app_root))}",
+            "enabled = true",
+            "startup_timeout_sec = 15",
+            "tool_timeout_sec = 60",
+            "",
+        ]
+    )
+    config_path.write_text(existing.rstrip() + "\n\n" + addition, encoding="utf-8")
+
+
+def _resolve_mcp_python(app_root: Path) -> str:
+    requested = os.environ.get("FLUX_KB_PYTHON")
+    if requested:
+        return requested
+    for candidate in (
+        app_root / ".venv" / "Scripts" / "python.exe",
+        app_root / ".venv" / "bin" / "python",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
 def _remove_toml_table(text: str, table_name: str) -> str:
     escaped = re.escape(table_name)
-    pattern = re.compile(rf"^\[{escaped}\]\n(?:^[^\[].*\n?)*", re.MULTILINE)
+    pattern = re.compile(rf"^\[{escaped}\]\n(?:^(?!\[).*\n?)*", re.MULTILINE)
     return pattern.sub("", text)
 
 
@@ -204,6 +244,99 @@ def _read_local_marketplace_source(config: str) -> Path | None:
     except json.JSONDecodeError:
         value = raw.strip("'\"")
     return Path(value) if value else None
+
+
+def _flux_mcp_status(config: str) -> dict[str, Any]:
+    block = _read_toml_table_block(config, f"mcp_servers.{MCP_SERVER_NAME}")
+    if block is None:
+        return {
+            "configured": False,
+            "command": None,
+            "cwd": None,
+            "enabled": False,
+            "dependency_available": False,
+            "message": "Flux MCP server is not configured; run flux-kb codex install-plugin.",
+        }
+    values = _parse_simple_toml_table(block)
+    command = _optional_str(values.get("command"))
+    cwd = _optional_str(values.get("cwd"))
+    enabled = bool(values.get("enabled", True))
+    dependency_available = bool(command and cwd and enabled and _mcp_dependency_available(command, cwd))
+    if not enabled:
+        message = "Flux MCP server is configured but disabled."
+    elif not command or not cwd:
+        message = "Flux MCP server config is incomplete."
+    elif not dependency_available:
+        message = "MCP optional dependency is not available for the configured Flux Python."
+    else:
+        message = "ready"
+    return {
+        "configured": True,
+        "command": command,
+        "cwd": cwd,
+        "enabled": enabled,
+        "dependency_available": dependency_available,
+        "message": message,
+    }
+
+
+def _read_toml_table_block(config: str, table_name: str) -> str | None:
+    escaped = re.escape(table_name)
+    match = re.search(rf"^\[{escaped}\]\n(?P<body>(?:^(?!\[).*\n?)*)", config, re.MULTILINE)
+    return match.group("body") if match else None
+
+
+def _parse_simple_toml_table(block: str) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for raw_line in block.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        values[key.strip()] = _parse_simple_toml_value(raw_value.strip())
+    return values
+
+
+def _parse_simple_toml_value(raw_value: str) -> Any:
+    if raw_value in {"true", "false"}:
+        return raw_value == "true"
+    if raw_value.startswith('"') and raw_value.endswith('"'):
+        try:
+            return json.loads(raw_value)
+        except json.JSONDecodeError:
+            return raw_value.strip('"')
+    if raw_value.startswith("["):
+        try:
+            return json.loads(raw_value)
+        except json.JSONDecodeError:
+            return raw_value
+    try:
+        return int(raw_value)
+    except ValueError:
+        return raw_value
+
+
+def _mcp_dependency_available(command: str, cwd: str) -> bool:
+    try:
+        result = run_no_window(
+            [command, "-c", "import mcp.server.fastmcp"],
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
+
+
+def _optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
 
 
 def _read_manifest(path: Path) -> dict[str, Any]:

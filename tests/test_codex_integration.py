@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import flux_llm_kb.codex_integration as codex_integration
 from flux_llm_kb.codex_integration import codex_status, install_plugin
 
 
@@ -65,6 +66,139 @@ def test_codex_install_plugin_links_plugin_and_writes_local_marketplace(tmp_path
     assert f"source = {json.dumps(str(repo_root))}" in config
     assert f"source = {json.dumps(str(repo_root / 'plugins'))}" not in config
     assert '[plugins."flux-llm-kb@flux-llm-kb-local"]' in config
+    assert "[mcp_servers.flux_llm_kb]" in config
+    assert 'args = ["-m", "flux_llm_kb.mcp_server"]' in config
+    assert "enabled = true" in config
+    assert "startup_timeout_sec = 15" in config
+    assert "tool_timeout_sec = 60" in config
+
+
+def test_codex_install_plugin_preserves_unrelated_config_and_replaces_stale_mcp_block(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    repo_root = tmp_path / "repo"
+    plugin = repo_root / "plugins" / "flux-llm-kb"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"flux-llm-kb","version":"0.1.0","interface":{"displayName":"Flux LLM-KB"}}',
+        encoding="utf-8",
+    )
+    (plugin / "hooks").mkdir()
+    (plugin / "hooks" / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            [
+                '[mcp_servers.other]',
+                'command = "other"',
+                "",
+                "[mcp_servers.flux_llm_kb]",
+                'command = "stale-python"',
+                'args = ["old"]',
+                "enabled = false",
+                "",
+                '[profiles.personal]',
+                'model = "gpt-5"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("FLUX_KB_PYTHON", "C:\\Python\\python.exe")
+
+    install_plugin(repo_root=repo_root)
+
+    config = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert config.count("[mcp_servers.flux_llm_kb]") == 1
+    assert '[mcp_servers.other]' in config
+    assert '[profiles.personal]' in config
+    assert 'command = "stale-python"' not in config
+    assert 'command = "C:\\\\Python\\\\python.exe"' in config
+    assert f"cwd = {json.dumps(str(repo_root))}" in config
+
+
+def test_codex_status_reports_mcp_configuration_health(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    app_root = tmp_path / "FluxLLMKB" / "app"
+    _write_test_marketplace(app_root)
+    plugin = app_root / "plugins" / "flux-llm-kb"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"flux-llm-kb","version":"0.1.0","interface":{"displayName":"Flux LLM-KB"}}',
+        encoding="utf-8",
+    )
+    (plugin / "hooks").mkdir()
+    (plugin / "hooks" / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            [
+                f'[marketplaces.flux-llm-kb-local]',
+                'source_type = "local"',
+                f"source = {json.dumps(str(app_root))}",
+                '[plugins."flux-llm-kb@flux-llm-kb-local"]',
+                "enabled = true",
+                "[mcp_servers.flux_llm_kb]",
+                'command = "python"',
+                'args = ["-m", "flux_llm_kb.mcp_server"]',
+                f"cwd = {json.dumps(str(app_root))}",
+                "enabled = true",
+                "startup_timeout_sec = 15",
+                "tool_timeout_sec = 60",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_integration, "_mcp_dependency_available", lambda command, cwd: True, raising=False)
+
+    result = codex_status(repo_root=app_root)
+
+    assert result["mcp"] == {
+        "configured": True,
+        "command": "python",
+        "cwd": str(app_root),
+        "enabled": True,
+        "dependency_available": True,
+        "message": "ready",
+    }
+
+
+def test_codex_status_reports_missing_and_dependency_missing_mcp_states(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    repo_root = tmp_path / "repo"
+    _write_test_marketplace(repo_root)
+    (codex_home / "config.toml").write_text(
+        f'[marketplaces.flux-llm-kb-local]\nsource_type = "local"\nsource = {json.dumps(str(repo_root))}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    missing = codex_status(repo_root=repo_root)
+    assert missing["mcp"]["configured"] is False
+    assert missing["mcp"]["dependency_available"] is False
+    assert "not configured" in missing["mcp"]["message"]
+
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            [
+                "[mcp_servers.flux_llm_kb]",
+                'command = "python"',
+                'args = ["-m", "flux_llm_kb.mcp_server"]',
+                f"cwd = {json.dumps(str(repo_root))}",
+                "enabled = true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_integration, "_mcp_dependency_available", lambda command, cwd: False, raising=False)
+
+    dependency_missing = codex_status(repo_root=repo_root)
+    assert dependency_missing["mcp"]["configured"] is True
+    assert dependency_missing["mcp"]["dependency_available"] is False
+    assert "MCP optional dependency is not available" in dependency_missing["mcp"]["message"]
 
 
 def test_codex_install_plugin_replaces_stale_existing_install(tmp_path, monkeypatch):
@@ -89,6 +223,18 @@ def test_codex_install_plugin_replaces_stale_existing_install(tmp_path, monkeypa
     installed = codex_home / "plugins" / "flux-llm-kb"
     assert not (installed / "old.txt").exists()
     assert (installed / ".codex-plugin" / "plugin.json").exists()
+
+
+def test_codex_plugin_prompts_ask_for_indexable_final_responses():
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads((root / "plugins" / "flux-llm-kb" / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    skill = (root / "plugins" / "flux-llm-kb" / "skills" / "flux-memory" / "SKILL.md").read_text(encoding="utf-8")
+
+    prompts = "\n".join(manifest["interface"]["defaultPrompt"])
+    assert "Make final responses indexable" in prompts
+    assert "files changed or referenced" in prompts
+    assert "Make final responses indexable" in skill
+    assert "commands/tests run" in skill
 
 
 def test_codex_status_reports_discovery_cache_and_restart_need(tmp_path, monkeypatch):

@@ -250,7 +250,7 @@ if (-not (Test-Path $venvPython)) {
     & $resolvedPython -m venv $venvRoot
 }
 & $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install "$SourceRoot[api,corpus,mail]"
+& $venvPython -m pip install "$SourceRoot[api,corpus,mail,mcp]"
 Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot

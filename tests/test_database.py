@@ -96,6 +96,52 @@ def test_codex_hook_capture_exists_checks_session_and_turn_metadata(monkeypatch)
     assert params == ("session-1", "turn-1")
 
 
+def test_codex_hook_reference_exists_checks_indexed_reference_audit(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (1,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    assert database.codex_hook_reference_exists(
+        session_id="session-1",
+        turn_id="turn-1",
+        reference="https://developers.openai.com/codex/mcp",
+    ) is True
+
+    sql, params = executed[0]
+    assert "event_type = 'codex_hook.reference_indexed'" in sql
+    assert "details->>'session_id' = %s" in sql
+    assert "details->>'turn_id' = %s" in sql
+    assert "details->>'reference' = %s" in sql
+    assert params == ("session-1", "turn-1", "https://developers.openai.com/codex/mcp")
+
+
 def test_recent_codex_hook_audit_events_filters_hook_events(monkeypatch):
     executed = []
 

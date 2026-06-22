@@ -80,7 +80,9 @@ def collect_dashboard_payload() -> dict[str, Any]:
         for key in ("python", "docker", "git"):
             if key in host_runtime:
                 runtime_checks[key] = host_runtime[key]
-    codex = host_agent_status.get("codex") or _safe(codex_status, {"status": "unknown"})
+    local_codex = _safe(codex_status, {"status": "unknown"})
+    host_codex = host_agent_status.get("codex") or {}
+    codex = {**local_codex, **host_codex}
     codex = {
         **codex,
         "hook_policy": _safe(

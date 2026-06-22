@@ -421,6 +421,29 @@ def codex_hook_capture_exists(*, session_id: str, turn_id: str, url: str | None 
             return cur.fetchone() is not None
 
 
+def codex_hook_reference_exists(
+    *, session_id: str, turn_id: str, reference: str, url: str | None = None
+) -> bool:
+    if not session_id or not turn_id or not reference:
+        return False
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM audit_events
+                WHERE event_type = 'codex_hook.reference_indexed'
+                  AND details->>'session_id' = %s
+                  AND details->>'turn_id' = %s
+                  AND details->>'reference' = %s
+                LIMIT 1
+                """,
+                (session_id, turn_id, reference),
+            )
+            return cur.fetchone() is not None
+
+
 def recent_codex_hook_audit_events(*, limit: int = 5, url: str | None = None) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:

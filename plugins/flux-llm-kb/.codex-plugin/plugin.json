@@ -31,7 +31,8 @@
     "privacyPolicyURL": "https://github.com/yagasoft/Flux-LLM-KB/blob/main/docs/safety.md",
     "termsOfServiceURL": "https://github.com/yagasoft/Flux-LLM-KB/blob/main/LICENSE",
     "defaultPrompt": [
-      "Use Flux LLM-KB to retrieve relevant project memory before starting non-trivial work"
+      "Use Flux LLM-KB to retrieve relevant project memory before starting non-trivial work",
+      "Make final responses indexable for Flux LLM-KB by summarizing decisions, files changed or referenced, commands/tests run, and unresolved gaps without including secrets"
     ],
     "brandColor": "#0891B2",
     "screenshots": []

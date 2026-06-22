@@ -29,7 +29,7 @@ scripts:
 | Version | Status | Summary |
 | --- | --- | --- |
 | V0 Foundation | shipped | Public repo, safety model, ADRs, PostgreSQL/pgvector migrations, Docker Compose, fixtures, and initial interfaces exist. |
-| V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, and automatic Codex hook preflight/capture policy exist; graph/lifecycle depth still needs hardening. |
+| V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, automatic Codex hook preflight/capture, direct Codex MCP tool configuration, and safe reference capture exist; graph/lifecycle depth still needs hardening. |
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
@@ -60,15 +60,24 @@ scripts:
   and related-evidence grouping for mail spool siblings and known child assets.
 - Codex hook policy for automatic non-trivial prompt briefs, final-turn capture,
   opt-out runtime settings, dashboard-visible status, and audit records.
+- Codex MCP server configuration through `flux-kb codex install-plugin`, making
+  Flux tools such as `kb.brief` directly callable in Codex sessions when the
+  optional MCP dependency is installed.
+- Codex Stop hook reference indexing for bounded public web references and
+  existing monitored-root file references, with duplicate checks and audit
+  records.
+- One-shot feature closeout script with fail-fast validation, structured local
+  logs, squash merge, push, deploy, probes, and safe cleanup sequencing.
 - Public file-type coverage matrix and roadmap targets.
 
 ## Known Gaps
 
 ### V1
 
-- Codex plugin discovery and automatic hook policy exist locally. Broader
-  real-session proof should continue across Codex surfaces, especially around
-  long-running turns, user opt-out habits, and duplicate capture review.
+- Codex plugin discovery, MCP tool availability, automatic hook policy, and
+  reference capture exist locally. Broader real-session proof should continue
+  across Codex surfaces, especially around long-running turns, user opt-out
+  habits, and duplicate capture review.
 - Graph traversal, claim lifecycle, confidence decay, contradiction handling, and
   lifecycle scoring need more complete implementation and tests.
 

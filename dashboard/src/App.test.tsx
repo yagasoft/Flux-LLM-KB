@@ -42,6 +42,14 @@ const health = {
           details: { reason: "matched" }
         }
       ]
+    },
+    mcp: {
+      configured: true,
+      command: "python",
+      cwd: "D:/FluxLLMKB/app",
+      enabled: true,
+      dependency_available: true,
+      message: "ready"
     }
   }
 };
@@ -285,6 +293,8 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Preflight brief")).toBeInTheDocument();
     expect(screen.getByText("Turn capture")).toBeInTheDocument();
     expect(screen.getByText("codex_hook.preflight_injected")).toBeInTheDocument();
+    expect(screen.getByText("MCP tools")).toBeInTheDocument();
+    expect(screen.getByText("kb.brief ready")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Settings" }));
     await waitFor(() => {
