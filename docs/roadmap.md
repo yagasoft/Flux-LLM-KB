@@ -229,6 +229,80 @@ Progress against this roadmap is tracked in [progress.md](progress.md).
   - Add operator-facing debug views for mail sync runs, retrieval explanations,
     watcher events, worker heartbeats, and post-process command outcomes.
 
+## V2.8: Indexer Acceleration And Local Inference Optimization
+
+- Add a dedicated acceleration lane for high-volume file indexing before V3
+  benchmarks. The goal is to make Flux fast and predictable on a single PC
+  without making GPU or heavyweight media tooling mandatory.
+- Hardware capability detection and routing:
+  - Detect CPU cores, memory pressure, disk throughput hints, NVIDIA/CUDA via
+    `nvidia-smi` and local runtimes, ONNX Runtime providers, DirectML/OpenVINO
+    where available, and local model servers such as Ollama.
+  - Expose capabilities in dashboard Health and Settings, including current
+    provider, fallback provider, model cache paths, and blocked-missing-runtime
+    reasons.
+  - Add settings for `auto`, `cpu_only`, `gpu_preferred`, and `gpu_only` per
+    extractor family so operators can avoid saturating the workstation.
+- Permanent cache and model layout:
+  - Keep dependency, model, OCR, ASR, vision, thumbnail, and parser caches under
+    the production install root rather than source worktrees.
+  - Reuse pip/package caches, Hugging Face/model caches, Paddle/ONNX/Ollama
+    model caches, and generated sidecars across deploy updates.
+  - Add cold-start avoidance: model warmup, lazy load with reuse, explicit unload
+    for large local models, and dashboard visibility into cache hit/miss rates.
+- Resource-aware worker scheduling:
+  - Split queues by job family and locality: text/parser, Office/PDF, OCR,
+    vision, audio/video transcription, embeddings, archive expansion, and
+    preview generation.
+  - Add concurrency caps, priority bands, rate limits, backpressure, cooldowns,
+    and time budgets per queue so normal watch/index work stays responsive while
+    large media backfills run in the background.
+  - Prevent repeated expensive work by checking content hash, extracted-sidecar
+    hash, model version, provider, source mtime/size, and extraction settings
+    before queuing a new job.
+- OCR, image, diagram, and vision acceleration:
+  - Prefer structural extraction before OCR for formats such as `drawio`, SVG,
+    Mermaid/PlantUML/Graphviz exports, `vsdx`, Office embedded drawings, and
+    embedded document images.
+  - Add image hash caches, decorative-image skips, thumbnail/preview caches,
+    page/image batching, confidence thresholds, language routing, and retry-safe
+    OCR job metadata.
+  - Support a local provider chain such as PaddleOCR/PaddleX with GPU when
+    available, Tesseract fallback, and optional local ONNX/Ollama vision
+    descriptions. Cloud OCR or cloud vision remains off by default.
+- Audio/video transcription acceleration:
+  - Reuse sidecar transcripts first, then run local deferred transcription with
+    `ffmpeg`/`ffprobe` or bundled equivalents, faster-whisper/CTranslate2, and
+    GPU-first CPU-fallback model candidates.
+  - Store transcript metadata with source hash, model, device, compute type,
+    language, duration, and transcript version so unchanged media is not
+    reprocessed.
+  - Add stale lock recovery, progress reporting, segment-level diagnostics, and
+    bounded temp audio extraction.
+- Embedding and vectorization acceleration:
+  - Batch embedding generation by model/provider and hardware target instead of
+    embedding chunks one by one.
+  - Support optional local accelerated embedding providers while preserving the
+    deterministic lightweight embedding path for tests and offline bootstrap.
+  - Bulk upsert vectors into PostgreSQL/pgvector and record embedding model,
+    dimensions, source version, and chunk hash to avoid stale vectors.
+- Native and incremental filesystem performance:
+  - Evaluate optional `watchfiles`/native watcher backends for high-volume roots,
+    keeping polling and watchdog fallbacks.
+  - Use incremental scan manifests, mtime/size prefilters, content-hash caches,
+    and bounded parallel hashing so reconciliation does not rescan unchanged
+    trees expensively.
+  - Stage heavy parser input through temporary snapshots where useful, then
+    release source file handles quickly.
+- Observability and benchmarks:
+  - Add dashboard panels for per-stage throughput, queue latency, cache hit rate,
+    model warm/cold state, CPU/GPU mode, blocked dependencies, and top slow files.
+  - Add benchmark fixtures for small text-heavy roots, Office/PDF-heavy roots,
+    image-heavy roots, and audio/video-heavy roots, with before/after p50/p95
+    indexing times and resource usage.
+  - Keep the implementation generic and local-first, using MoHESR-inspired
+    operational lessons without copying private workspace code or data.
+
 ## V3: Scale And Evaluation
 
 - Historical Codex backfill with redaction.

@@ -1,6 +1,6 @@
 # Roadmap Progress
 
-Last reviewed: 2026-06-22
+Last reviewed: 2026-06-23
 
 This tracker records public project progress against [roadmap.md](roadmap.md).
 It is intentionally separate from live runtime state. Do not add private paths,
@@ -34,6 +34,7 @@ scripts:
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
 | V2.7 Mail And Retrieval Production Hardening | planned | Explicit hardening lane for result content actions, lock-tolerant indexing, mail post-processing, retrieval explainability, scheduler reliability, and error diagnostics. |
+| V2.8 Indexer Acceleration And Local Inference Optimization | planned | Dedicated acceleration lane for GPU/local inference routing, caches, bounded workers, OCR/ASR/vision batching, native watchers, vectorization throughput, and indexing benchmarks. |
 | V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, optional ParadeDB/BM25, and local librarian workers. |
 | V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
 
@@ -114,6 +115,21 @@ scripts:
   detailed red error diagnostics remain planned hardening items. See
   [roadmap.md](roadmap.md#v27-mail-and-retrieval-production-hardening).
 
+### V2.8
+
+- GPU/local inference acceleration is planned but not implemented as a cohesive
+  Flux runtime yet.
+- Current extractors detect some optional tools, but Flux still needs provider
+  routing by hardware capability, CPU/GPU policy settings, model warmup/unload,
+  and persistent model/cache layout visibility.
+- OCR, vision, ASR, thumbnails/previews, archive expansion, and embedding
+  vectorization need bounded worker queues, cache-hit tracking, and per-stage
+  throughput telemetry.
+- High-volume watcher/indexer performance needs native watcher evaluation,
+  incremental scan manifests, content-hash caches, and benchmarks across text,
+  Office/PDF, image, and audio/video-heavy roots. See
+  [roadmap.md](roadmap.md#v28-indexer-acceleration-and-local-inference-optimization).
+
 ### V3
 
 - Historical Codex backfill is not yet production-ready.
@@ -136,7 +152,10 @@ scripts:
 5. Improve retrieval snippets and collapse mail spool implementation files into
    one logical mail result with linked attachments.
 6. Add provider-specific mail post-process policies with dry-run and audit views.
-7. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
+7. Design V2.8 indexer acceleration: hardware detection, local inference
+   provider routing, permanent caches, bounded media/OCR/ASR workers, vector
+   batching, and throughput telemetry.
+8. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
    prioritizing common Office legacy files, diagrams, archives, and embedded
    media.
 
