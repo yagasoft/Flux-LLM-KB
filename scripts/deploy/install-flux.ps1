@@ -262,6 +262,20 @@ function Invoke-FluxMigration {
     }
 }
 
+function Invoke-FluxCodexPluginInstall {
+    param([string]$VenvPython, [string]$InstallRoot)
+    $previousAppRoot = $env:FLUX_KB_APP_ROOT
+    $previousInstallRoot = $env:FLUX_KB_INSTALL_ROOT
+    try {
+        $env:FLUX_KB_INSTALL_ROOT = $InstallRoot
+        $env:FLUX_KB_APP_ROOT = Join-Path $InstallRoot "app"
+        & $VenvPython -m flux_llm_kb.cli codex install-plugin
+    } finally {
+        $env:FLUX_KB_APP_ROOT = $previousAppRoot
+        $env:FLUX_KB_INSTALL_ROOT = $previousInstallRoot
+    }
+}
+
 $appRoot = Join-Path $InstallRoot "app"
 $privateRoot = Join-Path $InstallRoot "private"
 $dataRoot = Join-Path $InstallRoot "data"
@@ -307,6 +321,7 @@ if (-not (Test-Path $venvPython)) {
 }
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install "$SourceRoot[api,corpus,mail]"
+Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 

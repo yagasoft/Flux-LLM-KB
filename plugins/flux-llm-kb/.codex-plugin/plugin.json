@@ -17,7 +17,6 @@
     "pgvector"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Flux LLM-KB",
     "shortDescription": "Local-first knowledge memory for Codex",

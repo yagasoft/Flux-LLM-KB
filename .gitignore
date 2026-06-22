@@ -39,6 +39,7 @@ attachments/
 # Worktrees
 .worktrees/
 worktrees/
+.agents/
 
 # OS/editor
 .DS_Store

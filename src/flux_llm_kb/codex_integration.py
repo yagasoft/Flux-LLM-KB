@@ -22,17 +22,27 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
     hooks_json = repo_plugin / "hooks" / "hooks.json"
     manifest_path = repo_plugin / ".codex-plugin" / "plugin.json"
 
+    config = ""
     configured = False
+    marketplace_source: Path | None = None
+    marketplace_path: Path | None = None
+    marketplace_valid = False
     if config_path.exists():
         config = config_path.read_text(encoding="utf-8", errors="ignore")
         configured = PLUGIN_NAME in config
+        marketplace_source = _read_local_marketplace_source(config)
+        if marketplace_source:
+            marketplace_path = _marketplace_file(marketplace_source)
+            marketplace_valid = _marketplace_contains_plugin(marketplace_path)
     installed = installed_path.exists()
     hooks_available = hooks_json.exists()
     manifest = _read_manifest(manifest_path)
     manifest_valid = manifest.get("name") == PLUGIN_NAME and bool(manifest.get("interface", {}).get("displayName"))
     discoverable = _discovery_cache_contains(codex_home)
-    restart_required = installed and configured and hooks_available and not discoverable
-    if installed and configured and hooks_available and discoverable:
+    restart_required = installed and configured and marketplace_valid and hooks_available and not discoverable
+    if installed and configured and not marketplace_valid:
+        status = "marketplace_misconfigured"
+    elif installed and configured and hooks_available and discoverable:
         status = "ready"
     elif installed and configured and hooks_available:
         status = "ready_restart_required"
@@ -50,6 +60,9 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
         "installed": installed,
         "hooks_available": hooks_available,
         "manifest_valid": manifest_valid,
+        "marketplace_source": str(marketplace_source) if marketplace_source else None,
+        "marketplace_path": str(marketplace_path) if marketplace_path else None,
+        "marketplace_valid": marketplace_valid,
         "discoverable": discoverable,
         "restart_required": restart_required,
         "codex_home": str(codex_home),
@@ -77,7 +90,8 @@ def install_plugin(*, repo_root: str | Path | None = None) -> dict[str, Any]:
     plugins_dir.mkdir(parents=True, exist_ok=True)
     installed_path = plugins_dir / PLUGIN_NAME
     _install_plugin_path(plugin_source, installed_path)
-    _write_local_marketplace_config(codex_home / "config.toml", root / "plugins")
+    _write_local_marketplace(root)
+    _write_local_marketplace_config(codex_home / "config.toml", root)
 
     status = codex_status(repo_root=root)
     return {
@@ -124,6 +138,29 @@ def _remove_existing_plugin_path(target: Path) -> None:
         target.unlink()
 
 
+def _marketplace_file(root: Path) -> Path:
+    return root / ".agents" / "plugins" / "marketplace.json"
+
+
+def _write_local_marketplace(root: Path) -> Path:
+    marketplace_path = _marketplace_file(root)
+    marketplace_path.parent.mkdir(parents=True, exist_ok=True)
+    marketplace = {
+        "name": MARKETPLACE_NAME,
+        "interface": {"displayName": "Flux LLM-KB Local"},
+        "plugins": [
+            {
+                "name": PLUGIN_NAME,
+                "source": {"source": "local", "path": f"./plugins/{PLUGIN_NAME}"},
+                "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+                "category": "Developer Tools",
+            }
+        ],
+    }
+    marketplace_path.write_text(json.dumps(marketplace, indent=2) + "\n", encoding="utf-8")
+    return marketplace_path
+
+
 def _write_local_marketplace_config(config_path: Path, source_dir: Path) -> None:
     existing = config_path.read_text(encoding="utf-8", errors="ignore") if config_path.exists() else ""
     existing = _remove_toml_table(existing, f"marketplaces.{MARKETPLACE_NAME}")
@@ -153,6 +190,22 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
+def _read_local_marketplace_source(config: str) -> Path | None:
+    match = re.search(
+        rf"^\[marketplaces\.{re.escape(MARKETPLACE_NAME)}\]\n(?:^[^\[].*\n?)*?^source\s*=\s*(.+)$",
+        config,
+        re.MULTILINE,
+    )
+    if not match:
+        return None
+    raw = match.group(1).strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = raw.strip("'\"")
+    return Path(value) if value else None
+
+
 def _read_manifest(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -172,7 +225,19 @@ def _discovery_cache_contains(codex_home: Path) -> bool:
     return False
 
 
+def _marketplace_contains_plugin(path: Path | None) -> bool:
+    if not path or not path.exists():
+        return False
+    try:
+        marketplace = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return any(plugin.get("name") == PLUGIN_NAME for plugin in marketplace.get("plugins", []))
+
+
 def _status_message(status: str, *, restart_required: bool) -> str:
+    if status == "marketplace_misconfigured":
+        return "Codex marketplace config is missing or points to the wrong root; run flux-kb codex install-plugin."
     if restart_required:
         return "Codex plugin is installed/configured; restart Codex Desktop if the Plugins UI has not indexed it yet."
     return status.replace("_", " ")
