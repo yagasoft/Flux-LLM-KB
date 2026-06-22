@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -13,7 +14,7 @@ PLUGIN_CONFIG_NAME = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
 
 
 def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
-    root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[2]
+    root = Path(repo_root) if repo_root else _default_root()
     codex_home = Path.home() / ".codex"
     config_path = codex_home / "config.toml"
     installed_path = codex_home / "plugins" / PLUGIN_NAME
@@ -61,7 +62,7 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
 
 
 def install_plugin(*, repo_root: str | Path | None = None) -> dict[str, Any]:
-    root = Path(repo_root) if repo_root else Path(__file__).resolve().parents[2]
+    root = Path(repo_root) if repo_root else _default_root()
     codex_home = Path.home() / ".codex"
     plugin_source = root / "plugins" / PLUGIN_NAME
     if not plugin_source.exists():
@@ -86,6 +87,18 @@ def install_plugin(*, repo_root: str | Path | None = None) -> dict[str, Any]:
         "restart_required": True if not status.get("discoverable") else False,
         "action": "installed",
     }
+
+
+def _default_root() -> Path:
+    candidates: list[Path] = []
+    app_root = os.environ.get("FLUX_KB_APP_ROOT")
+    if app_root:
+        candidates.append(Path(app_root))
+    candidates.append(Path(__file__).resolve().parents[2])
+    for root in candidates:
+        if (root / "plugins" / PLUGIN_NAME).exists():
+            return root
+    return candidates[0]
 
 
 def _install_plugin_path(source: Path, target: Path) -> None:

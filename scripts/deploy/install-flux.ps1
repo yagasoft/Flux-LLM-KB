@@ -15,6 +15,22 @@ function New-FluxDirectory {
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
 
+function Set-FluxEnvValue {
+    param([string]$TargetPath, [string]$Key, [string]$Value)
+    $line = "$Key=$Value"
+    if (-not (Test-Path $TargetPath)) {
+        Set-Content -Path $TargetPath -Value "$line`n" -Encoding UTF8
+        return
+    }
+    $existing = Get-Content -Raw -Path $TargetPath
+    if ($existing -match "(?m)^$([regex]::Escape($Key))=") {
+        $updated = [regex]::Replace($existing, "(?m)^$([regex]::Escape($Key))=.*$", $line)
+        Set-Content -Path $TargetPath -Value $updated -Encoding UTF8
+    } else {
+        Add-Content -Path $TargetPath -Value $line -Encoding UTF8
+    }
+}
+
 function Get-FluxGitSha {
     param([string]$Root)
     try {
@@ -114,13 +130,10 @@ FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_
         Set-Content -Path $TargetPath -Value $envText -Encoding UTF8
         return
     }
-    $existing = Get-Content -Raw -Path $TargetPath
     foreach ($line in $envText -split "`r?`n") {
         if (-not $line.Trim()) { continue }
-        $key = ($line -split "=", 2)[0]
-        if ($existing -notmatch "(?m)^$([regex]::Escape($key))=") {
-            Add-Content -Path $TargetPath -Value $line -Encoding UTF8
-        }
+        $parts = $line -split "=", 2
+        Set-FluxEnvValue -TargetPath $TargetPath -Key $parts[0] -Value $parts[1]
     }
 }
 
@@ -177,6 +190,13 @@ if (-not $SkipDashboardBuild) {
 docker build -t "flux-llm-kb-api:$imageTag" -t "flux-llm-kb-api:local" $SourceRoot
 docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:$imageTag"
 docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:local"
+
+$pluginSource = Join-Path $SourceRoot "plugins"
+$pluginTarget = Join-Path $appRoot "plugins"
+if (Test-Path $pluginSource) {
+    if (Test-Path $pluginTarget) { Remove-Item -LiteralPath $pluginTarget -Recurse -Force }
+    Copy-Item -Path $pluginSource -Destination $pluginTarget -Recurse -Force
+}
 
 $composePath = Join-Path $appRoot "docker-compose.yml"
 $envPath = Join-Path $privateRoot "flux.env"

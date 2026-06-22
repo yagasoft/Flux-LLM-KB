@@ -22,6 +22,7 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "FluxKB Host Agent" in install
     assert "FluxKB Outlook Host" in install
     assert "Register-ScheduledTask" in install
+    assert 'Join-Path $appRoot "plugins"' in install
     assert "E:\\LLM KB" not in install
     assert "private\\runtime" not in install
     assert "127.0.0.1:${ApiPort}:8765" in install
@@ -36,6 +37,8 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "flux-llm-kb-api:" in update
     assert "up -d --no-build postgres api worker" in update
     assert "FLUX_KB_IMAGE_TAG" in update
+    assert "private\\flux.env" in update
+    assert 'Join-Path $appRoot "plugins"' in update
     assert "build:" not in _embedded_compose_template(update)
 
 

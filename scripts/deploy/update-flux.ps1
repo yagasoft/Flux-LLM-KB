@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $appRoot = Join-Path $InstallRoot "app"
 $composePath = Join-Path $appRoot "docker-compose.yml"
 $appEnvPath = Join-Path $appRoot ".env"
+$privateEnvPath = Join-Path $InstallRoot "private\flux.env"
 $venvPython = Join-Path $appRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path $composePath)) {
@@ -31,8 +32,24 @@ docker build -t "flux-llm-kb-api:$imageTag" -t "flux-llm-kb-api:local" $SourceRo
 docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:$imageTag"
 docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:local"
 
+$pluginSource = Join-Path $SourceRoot "plugins"
+$pluginTarget = Join-Path $appRoot "plugins"
+if (Test-Path $pluginSource) {
+    if (Test-Path $pluginTarget) { Remove-Item -LiteralPath $pluginTarget -Recurse -Force }
+    Copy-Item -Path $pluginSource -Destination $pluginTarget -Recurse -Force
+}
+
 Set-Content -Path $appEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag`n" -Encoding UTF8
 Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
+if (Test-Path $privateEnvPath) {
+    $envText = Get-Content -Raw -Path $privateEnvPath
+    if ($envText -match "(?m)^FLUX_KB_IMAGE_TAG=") {
+        $envText = [regex]::Replace($envText, "(?m)^FLUX_KB_IMAGE_TAG=.*$", "FLUX_KB_IMAGE_TAG=$imageTag")
+        Set-Content -Path $privateEnvPath -Value $envText -Encoding UTF8
+    } else {
+        Add-Content -Path $privateEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag" -Encoding UTF8
+    }
+}
 
 if (-not (Test-Path $venvPython)) {
     python -m venv (Join-Path $appRoot ".venv")
