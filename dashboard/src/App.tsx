@@ -68,6 +68,14 @@ type HealthPayload = {
     discoverable?: boolean;
     restart_required?: boolean;
     message?: string;
+    hook_policy?: {
+      status?: string;
+      enabled?: boolean;
+      preflight_enabled?: boolean;
+      capture_enabled?: boolean;
+      token_budget?: number;
+      recent_events?: Array<{ event_type?: string; created_at?: string; details?: Record<string, unknown> }>;
+    };
   };
 };
 
@@ -1084,6 +1092,7 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
           />
         </div>
       </Panel>
+      <CodexHooksPanel codex={codex} />
       <Panel title="Deployment">
         <div className="status-grid">
           <StatusTile
@@ -1107,6 +1116,32 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
         <SettingsPreview rows={restartRows} />
       </Panel>
     </section>
+  );
+}
+
+function CodexHooksPanel({ codex }: { codex?: HealthPayload["codex"] }) {
+  const policy = codex?.hook_policy ?? {};
+  const recent = policy.recent_events ?? [];
+  const lastEvent = recent[0];
+  return (
+    <Panel title="Codex Hooks">
+      <div className="status-grid">
+        <StatusTile label="Hook policy" ok={policy.status === "active"} message={policy.status ?? "unknown"} />
+        <StatusTile label="Preflight brief" ok={policy.preflight_enabled} message={policy.preflight_enabled ? `enabled - ${policy.token_budget ?? "-"} tokens` : "disabled"} />
+        <StatusTile label="Turn capture" ok={policy.capture_enabled} message={policy.capture_enabled ? "enabled" : "disabled"} />
+      </div>
+      {lastEvent ? (
+        <div className="settings-list">
+          <div className="settings-row">
+            <strong>Last hook event</strong>
+            <span>{lastEvent.event_type ?? "unknown"}</span>
+            <em>{formatDate(lastEvent.created_at)}</em>
+          </div>
+        </div>
+      ) : (
+        <p className="muted">No Codex hook audit events recorded yet.</p>
+      )}
+    </Panel>
   );
 }
 

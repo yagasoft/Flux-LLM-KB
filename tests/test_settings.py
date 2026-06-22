@@ -17,6 +17,27 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "watcher.reconcile_interval_seconds" in keys
     assert "mail.imap.poll_interval_seconds" in keys
     assert "mail.post_process.default_policy" in keys
+    assert "codex.hooks.enabled" in keys
+    assert "codex.hooks.preflight_enabled" in keys
+    assert "codex.hooks.capture_enabled" in keys
+    assert "codex.hooks.token_budget" in keys
+    assert "codex.hooks.min_prompt_chars" in keys
+    assert "codex.hooks.capture_min_chars" in keys
+    assert "codex.hooks.capture_max_chars" in keys
+
+
+def test_codex_hook_settings_are_enabled_by_default(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+
+    service = SettingsService()
+
+    assert service.resolve("codex.hooks.enabled").raw_value is True
+    assert service.resolve("codex.hooks.preflight_enabled").raw_value is True
+    assert service.resolve("codex.hooks.capture_enabled").raw_value is True
+    assert service.resolve("codex.hooks.token_budget").raw_value == 900
+    assert service.resolve("codex.hooks.min_prompt_chars").raw_value == 32
+    assert service.resolve("codex.hooks.capture_min_chars").raw_value == 160
+    assert service.resolve("codex.hooks.capture_max_chars").raw_value == 8000
 
 
 def test_settings_service_uses_env_over_database_and_masks_secret(monkeypatch):

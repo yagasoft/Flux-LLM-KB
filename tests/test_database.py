@@ -55,6 +55,98 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
     assert any("FOR UPDATE SKIP LOCKED" in sql for sql in executed_sql)
 
 
+def test_codex_hook_capture_exists_checks_session_and_turn_metadata(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (1,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    assert database.codex_hook_capture_exists(session_id="session-1", turn_id="turn-1") is True
+
+    sql, params = executed[0]
+    assert "metadata->>'source' = 'codex_hook_stop'" in sql
+    assert "metadata->>'session_id' = %s" in sql
+    assert "metadata->>'turn_id' = %s" in sql
+    assert params == ("session-1", "turn-1")
+
+
+def test_recent_codex_hook_audit_events_filters_hook_events(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "audit-1",
+                    "codex_hook.preflight_injected",
+                    "system",
+                    "episodes",
+                    "episode-1",
+                    {"reason": "matched"},
+                    type("Created", (), {"isoformat": lambda self: "2026-06-23T10:00:00+00:00"})(),
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    events = database.recent_codex_hook_audit_events(limit=3)
+
+    sql, params = executed[0]
+    assert "event_type LIKE 'codex_hook.%'" in sql
+    assert params == (3,)
+    assert events[0]["event_type"] == "codex_hook.preflight_injected"
+    assert events[0]["details"] == {"reason": "matched"}
+
+
 def test_delete_monitored_root_purges_index_rows_and_jobs(monkeypatch):
     executed = []
 

@@ -58,6 +58,19 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
         },
     )
     monkeypatch.setattr(health, "codex_status", lambda: {"status": "missing"})
+    monkeypatch.setattr(
+        health,
+        "codex_hook_policy_status",
+        lambda: {
+            "status": "active",
+            "enabled": True,
+            "preflight_enabled": True,
+            "capture_enabled": True,
+            "token_budget": 900,
+            "recent_events": [{"event_type": "codex_hook.preflight_injected"}],
+        },
+        raising=False,
+    )
 
     payload = collect_dashboard_payload()
 
@@ -68,6 +81,8 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["recent_errors"] == ["bad file"]
     assert "extractors" in payload
     assert payload["codex"]["status"] == "ready"
+    assert payload["codex"]["hook_policy"]["status"] == "active"
+    assert payload["codex"]["hook_policy"]["recent_events"][0]["event_type"] == "codex_hook.preflight_injected"
     assert payload["runtime"]["git"]["message"] == "host git"
     assert payload["workers"]["active"] == 1
     assert payload["workers"]["components"][0]["name"] == "corpus-worker:docker"

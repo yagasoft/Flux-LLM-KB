@@ -29,7 +29,7 @@ scripts:
 | Version | Status | Summary |
 | --- | --- | --- |
 | V0 Foundation | shipped | Public repo, safety model, ADRs, PostgreSQL/pgvector migrations, Docker Compose, fixtures, and initial interfaces exist. |
-| V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, and hybrid retrieval exist; Codex capture and graph/lifecycle depth still need hardening. |
+| V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, and automatic Codex hook preflight/capture policy exist; graph/lifecycle depth still needs hardening. |
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
@@ -58,18 +58,17 @@ scripts:
 - Dashboard search result content actions with sanitized in-app mail viewing,
   file text previews, host-agent open/reveal actions, copy path, action states,
   and related-evidence grouping for mail spool siblings and known child assets.
+- Codex hook policy for automatic non-trivial prompt briefs, final-turn capture,
+  opt-out runtime settings, dashboard-visible status, and audit records.
 - Public file-type coverage matrix and roadmap targets.
 
 ## Known Gaps
 
 ### V1
 
-- Codex plugin discovery is working locally, but automatic usefulness still needs
-  a configurable hook policy that calls `kb.brief` before non-trivial prompts or
-  tasks while suppressing trivial prompts where memory lookup would add noise.
-- Preflight retrieval and automatic turn capture need stricter end-to-end proof
-  across real Codex sessions, including dashboard-visible hook status, audit
-  records, opt-out controls, and context-budget enforcement.
+- Codex plugin discovery and automatic hook policy exist locally. Broader
+  real-session proof should continue across Codex surfaces, especially around
+  long-running turns, user opt-out habits, and duplicate capture review.
 - Graph traversal, claim lifecycle, confidence decay, contradiction handling, and
   lifecycle scoring need more complete implementation and tests.
 
@@ -145,18 +144,16 @@ scripts:
 
 ## Immediate Next Queue
 
-1. Add the V1 Codex hook policy that automatically invokes `kb.brief` before
-   non-trivial tasks with relevance gating, opt-out, audit, and budget controls.
-2. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
-3. Add lock-tolerant indexing states, debounce/stability tests, and optional
+1. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
+2. Add lock-tolerant indexing states, debounce/stability tests, and optional
    Windows VSS design/controls for locked files.
-4. Promote IMAP scheduled sync into a claimable scheduler state machine.
-5. Improve retrieval snippets with query-aware highlights and explainability.
-6. Add provider-specific mail post-process policies with dry-run and audit views.
-7. Design V2.8 indexer acceleration: hardware detection, local inference
+3. Promote IMAP scheduled sync into a claimable scheduler state machine.
+4. Improve retrieval snippets with query-aware highlights and explainability.
+5. Add provider-specific mail post-process policies with dry-run and audit views.
+6. Design V2.8 indexer acceleration: hardware detection, local inference
    provider routing, permanent caches, bounded media/OCR/ASR workers, vector
    batching, and throughput telemetry.
-8. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
+7. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
    prioritizing common Office legacy files, diagrams, archives, and embedded
    media.
 

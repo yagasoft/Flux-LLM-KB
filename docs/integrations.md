@@ -188,10 +188,29 @@ Set `FLUX_KB_PYTHON` if Codex should use a specific Python executable:
 $env:FLUX_KB_PYTHON = "C:\Path\To\python.exe"
 ```
 
-The current hooks emit compact context instructions. Dashboard health reports
-whether the local Codex config references the Flux plugin, whether the plugin is
-installed or linked under the Codex plugin directory, and whether hook files are
-available. The service layer already supports durable capture and retrieval, so
-the next step is wiring the hook payloads to call `kb.brief` and
-`kb.finalize_turn` automatically once the Codex hook runtime contract is
-finalized.
+Codex hooks run a configurable local policy by default:
+
+- `UserPromptSubmit` skips empty, short, slash-command, and trivial prompts; for
+  non-trivial prompts it retrieves a compact Flux brief only when search results
+  include lexical or fuzzy evidence.
+- `Stop` captures the final assistant message once per `session_id` and
+  `turn_id`, subject to the global `capture.enabled` setting and Codex hook
+  capture limits.
+- `PreCompact` remains non-blocking and does not parse transcript files because
+  Codex transcript paths are not a stable hook contract.
+
+Hook failures never block Codex. They return a warning and continue. Audit
+events use the `codex_hook.*` prefix, and dashboard health shows hook policy
+state plus recent hook events.
+
+Runtime settings:
+
+```powershell
+flux-kb settings get codex.hooks.enabled
+flux-kb settings set codex.hooks.preflight_enabled false
+flux-kb settings set codex.hooks.capture_enabled false
+flux-kb settings set codex.hooks.token_budget 900
+flux-kb settings set codex.hooks.min_prompt_chars 32
+flux-kb settings set codex.hooks.capture_min_chars 160
+flux-kb settings set codex.hooks.capture_max_chars 8000
+```

@@ -12,6 +12,7 @@ from . import database
 from .codex_integration import codex_status
 from .extractors import extractor_availability
 from .glob_policy import effective_glob_policy
+from .hook_policy import codex_hook_policy_status
 from .host_agent import remote_status
 from .processes import run_no_window
 from .watcher import summarize_watcher_staleness
@@ -79,6 +80,20 @@ def collect_dashboard_payload() -> dict[str, Any]:
         for key in ("python", "docker", "git"):
             if key in host_runtime:
                 runtime_checks[key] = host_runtime[key]
+    codex = host_agent_status.get("codex") or _safe(codex_status, {"status": "unknown"})
+    codex = {
+        **codex,
+        "hook_policy": _safe(
+            codex_hook_policy_status,
+            {
+                "status": "unknown",
+                "enabled": False,
+                "preflight_enabled": False,
+                "capture_enabled": False,
+                "recent_events": [],
+            },
+        ),
+    }
     return {
         "database": {"ok": db_status.ok, "message": db_status.message},
         "runtime": runtime_checks,
@@ -97,7 +112,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
         "retrieval": retrieval,
         "extractors": extractor_availability(),
         "host_agent": host_agent_status,
-        "codex": host_agent_status.get("codex") or _safe(codex_status, {"status": "unknown"}),
+        "codex": codex,
         "workers": {
             "active": sum(1 for item in workers if item.get("status") == "running"),
             "components": workers,

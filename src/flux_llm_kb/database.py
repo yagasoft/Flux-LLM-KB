@@ -401,6 +401,54 @@ def list_episodes(*, limit: int = 500, url: str | None = None) -> list[dict[str,
             ]
 
 
+def codex_hook_capture_exists(*, session_id: str, turn_id: str, url: str | None = None) -> bool:
+    if not session_id or not turn_id:
+        return False
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM episodes
+                WHERE metadata->>'source' = 'codex_hook_stop'
+                  AND metadata->>'session_id' = %s
+                  AND metadata->>'turn_id' = %s
+                LIMIT 1
+                """,
+                (session_id, turn_id),
+            )
+            return cur.fetchone() is not None
+
+
+def recent_codex_hook_audit_events(*, limit: int = 5, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, event_type, actor, target_table, target_id::text, details, created_at
+                FROM audit_events
+                WHERE event_type LIKE 'codex_hook.%'
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (max(1, min(limit, 20)),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "event_type": row[1],
+                    "actor": row[2],
+                    "target_table": row[3],
+                    "target_id": row[4],
+                    "details": row[5],
+                    "created_at": row[6].isoformat(),
+                }
+                for row in cur.fetchall()
+            ]
+
+
 def record_audit_event(
     *,
     event_type: str,

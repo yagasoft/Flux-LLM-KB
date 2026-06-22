@@ -28,7 +28,21 @@ const health = {
     installed: false,
     hooks_available: true,
     discoverable: false,
-    restart_required: true
+    restart_required: true,
+    hook_policy: {
+      status: "active",
+      enabled: true,
+      preflight_enabled: true,
+      capture_enabled: true,
+      token_budget: 900,
+      recent_events: [
+        {
+          event_type: "codex_hook.preflight_injected",
+          created_at: "2026-06-23T10:00:00+00:00",
+          details: { reason: "matched" }
+        }
+      ]
+    }
   }
 };
 
@@ -155,6 +169,17 @@ const settings = [
     read_only: false,
     affected_components: ["dashboard"],
     description: "Dashboard polling interval."
+  },
+  {
+    key: "codex.hooks.enabled",
+    value: true,
+    source: "default",
+    sensitive: false,
+    category: "codex",
+    apply_mode: "reload",
+    read_only: false,
+    affected_components: ["hooks", "dashboard"],
+    description: "Enable Flux Codex hook policy evaluation."
   }
 ];
 
@@ -249,6 +274,23 @@ describe("Flux dashboard", () => {
     expect(screen.getByText(/Auto-refresh every 1s/i)).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Mail profiles" })).not.toBeInTheDocument();
     expect(screen.queryByText(/"database"/)).not.toBeInTheDocument();
+  });
+
+  test("health shows Codex hook policy status and settings expose hook controls", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Codex Hooks" })).toBeInTheDocument();
+    expect(screen.getByText("Preflight brief")).toBeInTheDocument();
+    expect(screen.getByText("Turn capture")).toBeInTheDocument();
+    expect(screen.getByText("codex_hook.preflight_injected")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await waitFor(() => {
+      expect(screen.getAllByText("codex.hooks.enabled").length).toBeGreaterThan(0);
+    });
+    expect(screen.getByText("Enable Flux Codex hook policy evaluation.")).toBeInTheDocument();
   });
 
   test("restores the last tab and selected root after refresh", async () => {
