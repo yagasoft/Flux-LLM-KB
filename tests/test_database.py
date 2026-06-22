@@ -270,3 +270,11 @@ def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
 
     assert "source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash" in source
     assert "source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')" in source
+
+
+def test_persist_crawl_plan_requeues_legacy_metadata_only_documents():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "source_assets.extraction_status = 'metadata_only'" in source
+    assert "source_assets.extension IN ('.doc', '.rtf')" in source
+    assert "EXCLUDED.extraction_status = 'queued'" in source

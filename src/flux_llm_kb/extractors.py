@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import struct
+import tempfile
 from typing import Any
 
 from .crawler import AssetChunk, CorpusPolicy, classify_file
@@ -46,6 +48,11 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "openpyxl": _module_check("openpyxl"),
         "pillow": _module_check("PIL"),
         "watchdog": _module_check("watchdog"),
+        "libreoffice": _first_tool_check("LibreOffice", ("soffice", "libreoffice")),
+        "antiword": _tool_check("antiword"),
+        "catdoc": _tool_check("catdoc"),
+        "wvText": _tool_check("wvText"),
+        "word_com": _word_com_check(),
         "ffprobe": _tool_check("ffprobe"),
         "ffmpeg": _tool_check("ffmpeg"),
         "tesseract": _tool_check("tesseract"),
@@ -83,6 +90,8 @@ def _extract_document(path: Path, policy: CorpusPolicy) -> ExtractionResult:
         return _extract_pptx(path)
     if ext == ".xlsx":
         return _extract_xlsx(path)
+    if ext in {".doc", ".rtf"}:
+        return _extract_legacy_word_document(path)
     return ExtractionResult(status="metadata_only", metadata={"extractor": "document", "extension": ext})
 
 
@@ -150,6 +159,165 @@ def _extract_xlsx(path: Path) -> ExtractionResult:
         chunks=chunks,
         metadata={"extractor": "xlsx", "sheet_count": len(workbook.worksheets)},
     )
+
+
+def _extract_legacy_word_document(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    metadata = {"extractor": "legacy_document", "extension": ext}
+    attempts: list[str] = []
+
+    for extractor_name, extract in (
+        ("libreoffice", _extract_with_libreoffice),
+        ("antiword", _extract_with_antiword),
+        ("catdoc", _extract_with_catdoc),
+        ("wvText", _extract_with_wvtext),
+        ("word_com", _extract_with_word_com),
+    ):
+        attempts.append(extractor_name)
+        text = extract(path)
+        if not text:
+            continue
+        chunks = _chunks_from_text(text, path.name)
+        return ExtractionResult(
+            status="indexed" if chunks else "metadata_only",
+            chunks=chunks,
+            metadata={"extractor": extractor_name, "extension": ext},
+        )
+
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata={**metadata, "attempted": attempts},
+        message="Legacy Word extraction requires LibreOffice, antiword, catdoc, wvText, or Windows Word COM.",
+    )
+
+
+def _extract_with_libreoffice(path: Path) -> str | None:
+    command = shutil.which("soffice") or shutil.which("libreoffice")
+    if command is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="flux-kb-lo-") as temp_dir:
+            result = run_no_window(
+                [
+                    command,
+                    "--headless",
+                    "--convert-to",
+                    "txt:Text",
+                    "--outdir",
+                    temp_dir,
+                    str(path),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=90,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            output_path = Path(temp_dir) / f"{path.stem}.txt"
+            candidates = [output_path] if output_path.exists() else sorted(Path(temp_dir).glob("*.txt"))
+            for candidate in candidates:
+                text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+                if text:
+                    return text
+    except Exception:
+        return None
+    return None
+
+
+def _extract_with_antiword(path: Path) -> str | None:
+    return _extract_with_stdout_tool(path, "antiword")
+
+
+def _extract_with_catdoc(path: Path) -> str | None:
+    return _extract_with_stdout_tool(path, "catdoc")
+
+
+def _extract_with_stdout_tool(path: Path, command_name: str) -> str | None:
+    command = shutil.which(command_name)
+    if command is None:
+        return None
+    try:
+        result = run_no_window(
+            [command, str(path)],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _extract_with_wvtext(path: Path) -> str | None:
+    command = shutil.which("wvText")
+    if command is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="flux-kb-wv-") as temp_dir:
+            output_path = Path(temp_dir) / f"{path.stem}.txt"
+            result = run_no_window(
+                [command, str(path), str(output_path)],
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            if result.returncode != 0 or not output_path.exists():
+                return None
+            return output_path.read_text(encoding="utf-8", errors="replace").strip() or None
+    except Exception:
+        return None
+
+
+def _extract_with_word_com(path: Path) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        import pythoncom
+        import win32com.client
+    except Exception:
+        return None
+
+    word = None
+    document = None
+    initialized = False
+    try:
+        pythoncom.CoInitialize()
+        initialized = True
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        document = word.Documents.Open(
+            FileName=str(path),
+            ConfirmConversions=False,
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            Visible=False,
+            OpenAndRepair=True,
+        )
+        return str(document.Content.Text or "").strip() or None
+    except Exception:
+        return None
+    finally:
+        if document is not None:
+            try:
+                document.Close(False)
+            except Exception:
+                pass
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                pass
+        if initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
 
 
 def _extract_image(path: Path) -> ExtractionResult:
@@ -275,3 +443,18 @@ def _module_check(module_name: str) -> dict[str, Any]:
 def _tool_check(command: str) -> dict[str, Any]:
     path = shutil.which(command)
     return {"ok": path is not None, "message": path or f"{command} command not found"}
+
+
+def _first_tool_check(label: str, commands: tuple[str, ...]) -> dict[str, Any]:
+    for command in commands:
+        path = shutil.which(command)
+        if path is not None:
+            return {"ok": True, "message": path}
+    return {"ok": False, "message": f"{label} command not found"}
+
+
+def _word_com_check() -> dict[str, Any]:
+    if os.name != "nt":
+        return {"ok": False, "message": "Windows Word COM is only available on Windows"}
+    ok = importlib.util.find_spec("win32com") is not None
+    return {"ok": ok, "message": "pywin32 available" if ok else "pywin32 not installed"}

@@ -782,7 +782,11 @@ def persist_crawl_plan(
             for asset in plan.assets:
                 seen_paths.add(asset.relative_path)
                 cur.execute(
-                    "SELECT id::text, quick_hash FROM source_assets WHERE root_id = %s AND path = %s",
+                    """
+                    SELECT id::text, quick_hash, extraction_status, extension
+                    FROM source_assets
+                    WHERE root_id = %s AND path = %s
+                    """,
                     (root_id, asset.relative_path),
                 )
                 previous = cur.fetchone()
@@ -797,6 +801,14 @@ def persist_crawl_plan(
                 canonical_id = _find_canonical_asset_id(cur, asset.content_hash, previous[0] if previous else None)
                 if canonical_id:
                     status = "duplicate_suppressed"
+                legacy_metadata_requeue = (
+                    previous is not None
+                    and not changed_asset
+                    and previous[2] == "metadata_only"
+                    and asset.extension in {".doc", ".rtf"}
+                    and asset.extraction_tier == "deferred"
+                    and canonical_id is None
+                )
                 cur.execute(
                     """
                     INSERT INTO source_assets (
@@ -822,6 +834,10 @@ def persist_crawl_plan(
                             WHEN EXCLUDED.extraction_status = 'duplicate_suppressed'
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
+                                THEN EXCLUDED.extraction_status
+                            WHEN source_assets.extraction_status = 'metadata_only'
+                                 AND source_assets.extension IN ('.doc', '.rtf')
+                                 AND EXCLUDED.extraction_status = 'queued'
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')
                                 THEN source_assets.extraction_status
@@ -858,7 +874,7 @@ def persist_crawl_plan(
                     ),
                 )
                 asset_id = cur.fetchone()[0]
-                if changed_asset:
+                if changed_asset or legacy_metadata_requeue:
                     chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id else asset.chunks)
                     if asset.extraction_tier == "deferred" and not canonical_id:
                         cur.execute(
