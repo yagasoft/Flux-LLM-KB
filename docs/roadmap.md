@@ -142,6 +142,47 @@
   consumers, including `GET /api/search`, `GET /api/brief`, corpus asset lookup,
   and chunk lookup.
 
+## V2.7: Mail And Retrieval Production Hardening
+
+- Mail post-process semantics hardening:
+  - Make mailbox-side actions explicit per provider/profile: remove label, move
+    to processed folder, IMAP delete plus expunge, Gmail trash, or no action.
+  - Add dashboard copy that explains where messages go for the selected policy,
+    including Gmail-specific behavior and warnings for destructive policies.
+  - Add dry-run and audit records for post-process actions, with per-message
+    source UID, folder, policy, command sequence, result, and provider response.
+  - Add retry-safe post-process handling so an exported message is not processed
+    twice and a failed delete/move does not hide successful local export.
+- Retrieval result quality and explainability:
+  - Generate query-aware snippets with highlighted terms instead of showing only
+    raw chunk prefixes or generic summaries.
+  - Treat mail spool implementation files (`manifest.json`, `body.txt`,
+    `body.html`, `.eml`, `.msg`) as a single logical mail result by default,
+    with attachments linked as related evidence rather than noisy siblings.
+  - Separate score display from confidence: expose retrieval streams, raw ranks,
+    source trust, freshness, duplicate/version-family suppression, and why each
+    result matched.
+  - Add configurable filters for source type, root, mail profile, date range,
+    document family, and minimum lexical/vector evidence.
+- Scheduled sync and worker reliability:
+  - Promote due-profile IMAP sync from implicit worker behavior to a first-class
+    scheduler state machine with claimed/running/completed/failed runs.
+  - Show schedule drift, next-due time, last attempt, last success, retry
+    cooldown, auth-blocked state, and worker ownership in the dashboard.
+  - Add missed-run reconciliation after API/worker restarts, with bounded catch-up
+    and explicit backoff for repeated provider/auth failures.
+  - Add tests and health checks proving tight intervals trigger automatically
+    without manual `Sync now` or `backfill`.
+- Detailed error diagnostics and operator UX:
+  - Standardize API error envelopes with code, severity, component, profile/root,
+    stage, retryability, user action, and sanitized technical detail.
+  - Render errors in the dashboard as red actionable alerts with expandable
+    details, copyable diagnostics, and links to the relevant profile/root/job.
+  - Preserve recent error history per component while distinguishing optional
+    dependency warnings from core health failures.
+  - Add operator-facing debug views for mail sync runs, retrieval explanations,
+    watcher events, worker heartbeats, and post-process command outcomes.
+
 ## V3: Scale And Evaluation
 
 - Historical Codex backfill with redaction.
