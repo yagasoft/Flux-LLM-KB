@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -229,6 +230,19 @@ def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
     assert "platform" in result
     assert result["codex"]["status"] == "ready"
     assert result["runtime"]["git"]["ok"] is True
+
+
+def test_run_server_exits_cleanly_when_host_agent_already_owns_port(monkeypatch):
+    def fail_run(*_args, **_kwargs):
+        raise AssertionError("uvicorn.run should not be called for an already-running host agent")
+
+    monkeypatch.setattr(host_agent, "remote_status", lambda agent_url=None: {"status": "running", "process_id": 1234})
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", SimpleNamespace(run=fail_run))
+
+    result = host_agent.run_server(host="127.0.0.1", port=8799)
+
+    assert result["status"] == "already_running"
+    assert result["process_id"] == 1234
 
 
 def test_remote_browse_folder_allows_user_interaction_time(monkeypatch):

@@ -345,6 +345,15 @@ def create_app(*, start_watcher: bool = False):
 
 
 def run_server(*, host: str = "127.0.0.1", port: int = DEFAULT_HOST_AGENT_PORT) -> dict[str, Any]:
+    agent_url = f"http://{host}:{port}"
+    existing = remote_status(agent_url=agent_url)
+    if existing.get("status") == "running":
+        return {
+            "status": "already_running",
+            "host": host,
+            "port": port,
+            "process_id": existing.get("process_id"),
+        }
     try:
         import uvicorn
     except ImportError as exc:  # pragma: no cover - optional dependency

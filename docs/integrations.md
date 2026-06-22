@@ -80,6 +80,17 @@ Lookup endpoints are read-only and return stable JSON payloads for asset and
 chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a
 network interface without an explicit local access-control policy.
 
+## Gmail OAuth
+
+The default Gmail OAuth redirect URI is `http://127.0.0.1:8765`. Google returns
+the authorization code to the Flux root route, which completes setup and shows a
+small local result page. Keep the dashboard/API running before starting consent.
+
+The explicit `GET /api/mail/oauth/gmail/callback` endpoint remains available for
+custom clients or manually configured redirect URIs, but Flux will not silently
+reuse a generic `http://localhost` redirect from a downloaded Google client JSON
+because another local service, such as IIS, may already own that URL.
+
 ## Runtime Settings
 
 Runtime settings are settings catalog-backed and available through CLI and REST.

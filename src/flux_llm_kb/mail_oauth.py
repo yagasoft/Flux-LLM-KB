@@ -16,7 +16,7 @@ from . import database
 GMAIL_IMAP_SCOPE = "https://mail.google.com/"
 DEFAULT_GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
 DEFAULT_GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
-DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765/api/mail/oauth/gmail/callback"
+DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765"
 
 TokenTransport = Callable[[str, dict[str, str]], dict[str, Any]]
 
@@ -283,11 +283,13 @@ def _token_response(payload: dict[str, Any]) -> OAuthTokenResponse:
 
 def _default_redirect_uri(client_config: dict[str, Any]) -> str:
     client_config = _client_config(client_config)
-    redirect_uris = client_config.get("redirect_uris") or []
+    redirect_uris = [str(redirect_uri).rstrip("/") for redirect_uri in client_config.get("redirect_uris") or []]
+    if DEFAULT_REDIRECT_URI in redirect_uris:
+        return DEFAULT_REDIRECT_URI
     for redirect_uri in redirect_uris:
-        if str(redirect_uri).startswith("http://127.0.0.1"):
-            return str(redirect_uri)
-    return str(redirect_uris[0]) if redirect_uris else DEFAULT_REDIRECT_URI
+        if redirect_uri.startswith(f"{DEFAULT_REDIRECT_URI}/"):
+            return redirect_uri
+    return DEFAULT_REDIRECT_URI
 
 
 def _expires_at(expires_in: int) -> str:

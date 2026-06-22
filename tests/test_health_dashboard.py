@@ -112,6 +112,58 @@ def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):
     assert payload["recent_errors"] == ["bad file"]
 
 
+def test_collect_crawl_payload_marks_host_agent_roots_offline_when_bridge_is_down(monkeypatch):
+    host_root = {
+        "name": "watch-test",
+        "root_path": "E:/Temp/watch-test",
+        "watch_enabled": True,
+        "metadata": {"host_access": "host_agent"},
+    }
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [host_root])
+    monkeypatch.setattr(
+        database,
+        "crawl_status",
+        lambda: {
+            "active_watch_roots": 1,
+            "disabled_watch_roots": 0,
+            "recent_errors": [],
+            "watchers": [
+                {
+                    "root_name": "watch-test",
+                    "status": "running",
+                    "heartbeat_age_seconds": 999,
+                    "last_error": None,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        database,
+        "crawl_root_summaries",
+        lambda: [
+            {
+                **host_root,
+                "state": "stale",
+                "watcher": {"status": "running", "heartbeat_age_seconds": 999, "last_error": None},
+                "asset_counts": {"indexed": 10},
+                "job_counts": {"pending": 0},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        health,
+        "remote_status",
+        lambda: {"status": "host_agent_offline", "message": "connection refused"},
+    )
+
+    payload = collect_crawl_payload()
+
+    assert payload["watchers"][0]["status"] == "host_offline"
+    assert payload["watchers"][0]["last_error"] == "connection refused"
+    assert payload["root_summaries"][0]["state"] == "host_offline"
+    assert payload["root_summaries"][0]["watcher"]["status"] == "host_offline"
+
+
 def test_dashboard_html_contains_health_mount_points():
     html = build_dashboard_html()
 

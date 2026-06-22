@@ -65,8 +65,9 @@ def collect_dashboard_payload() -> dict[str, Any]:
     components = _safe(database.list_runtime_components, [])
     workers = [item for item in components if str(item.get("name", "")).startswith("corpus-worker:")]
     checks = doctor_payload()["checks"]
-    watcher_summary = summarize_watcher_staleness(crawl.get("watchers", []))
     host_agent_status = remote_status()
+    crawl = _overlay_host_agent_crawl_status(crawl, roots, host_agent_status)
+    watcher_summary = summarize_watcher_staleness(crawl.get("watchers", []))
     host_runtime = host_agent_status.get("runtime") if isinstance(host_agent_status, dict) else {}
     runtime_checks = {
         "python": checks["python"],
@@ -113,6 +114,9 @@ def collect_crawl_payload() -> dict[str, Any]:
     status = _safe(database.crawl_status, {})
     roots = _safe(database.list_monitored_roots, [])
     summaries = _safe(database.crawl_root_summaries, [])
+    host_agent_status = remote_status()
+    status = _overlay_host_agent_crawl_status(status, roots, host_agent_status)
+    summaries = [_overlay_host_agent_root_summary(root, host_agent_status) for root in summaries]
     return {
         "roots": [_with_effective_globs(root) for root in roots],
         "root_summaries": [_with_effective_globs(root) for root in summaries],
@@ -168,6 +172,50 @@ def _safe(callable_obj, fallback):
 
 def _with_effective_globs(root: dict[str, Any]) -> dict[str, Any]:
     return {**root, "effective_globs": effective_glob_policy(root, **_global_glob_defaults())}
+
+
+def _overlay_host_agent_crawl_status(
+    status: dict[str, Any],
+    roots: list[dict[str, Any]],
+    host_agent_status: dict[str, Any],
+) -> dict[str, Any]:
+    if _host_agent_is_running(host_agent_status):
+        return status
+    host_root_names = {
+        str(root.get("name"))
+        for root in roots
+        if root.get("watch_enabled") and _root_uses_host_agent(root)
+    }
+    if not host_root_names:
+        return status
+    message = str(host_agent_status.get("message") or host_agent_status.get("status") or "host agent offline")
+    watchers = []
+    for watcher in status.get("watchers", []):
+        item = dict(watcher)
+        if item.get("root_name") in host_root_names:
+            item["status"] = "host_offline"
+            item["last_error"] = item.get("last_error") or message
+        watchers.append(item)
+    return {**status, "watchers": watchers}
+
+
+def _overlay_host_agent_root_summary(root: dict[str, Any], host_agent_status: dict[str, Any]) -> dict[str, Any]:
+    if _host_agent_is_running(host_agent_status) or not root.get("watch_enabled") or not _root_uses_host_agent(root):
+        return root
+    message = str(host_agent_status.get("message") or host_agent_status.get("status") or "host agent offline")
+    watcher = dict(root.get("watcher") or {})
+    watcher["status"] = "host_offline"
+    watcher["last_error"] = watcher.get("last_error") or message
+    return {**root, "state": "host_offline", "watcher": watcher}
+
+
+def _host_agent_is_running(host_agent_status: dict[str, Any]) -> bool:
+    return isinstance(host_agent_status, dict) and host_agent_status.get("status") == "running"
+
+
+def _root_uses_host_agent(root: dict[str, Any]) -> bool:
+    metadata = root.get("metadata") or {}
+    return metadata.get("host_access") == "host_agent"
 
 
 def _global_glob_defaults() -> dict[str, list[str]]:

@@ -375,7 +375,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="mail.oauth.google.redirect_uri",
         category="mail",
-        default="http://127.0.0.1:8765/api/mail/oauth/gmail/callback",
+        default="http://127.0.0.1:8765",
         value_type="str",
         description="Loopback redirect URI for Gmail installed-app OAuth.",
         env_var="FLUX_KB_MAIL_GOOGLE_REDIRECT_URI",

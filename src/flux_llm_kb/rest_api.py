@@ -1,3 +1,4 @@
+from html import escape
 from json import JSONDecodeError
 from pathlib import Path
 
@@ -125,6 +126,15 @@ def create_app():
     dashboard_assets = Path(__file__).resolve().parent / "dashboard_static" / "assets"
     if dashboard_assets.exists():
         app.mount("/dashboard/assets", StaticFiles(directory=str(dashboard_assets)), name="dashboard-assets")
+
+    @app.get("/", response_class=HTMLResponse)
+    def root(state: str | None = None, code: str | None = None, error: str | None = None):
+        if not state and not code and not error:
+            return HTMLResponse(
+                "<!doctype html><meta http-equiv=\"refresh\" content=\"0; url=/dashboard\">"
+                "<a href=\"/dashboard\">Open Flux dashboard</a>"
+            )
+        return HTMLResponse(_mail_oauth_callback_html(_mail_oauth_callback_payload(state=state, code=code, error=error)))
 
     @app.get("/api/health")
     def health():
@@ -468,13 +478,7 @@ def create_app():
 
     @app.get("/api/mail/oauth/gmail/callback")
     def mail_oauth_gmail_callback(state: str, code: str | None = None, error: str | None = None):
-        if error:
-            return {"status": "error", "error": error, "state": state}
-        if not code:
-            return {"status": "error", "error": "missing authorization code", "state": state}
-        from .mail_oauth import complete_gmail_oauth
-
-        return complete_gmail_oauth(state=state, code=code)
+        return _mail_oauth_callback_payload(state=state, code=code, error=error)
 
     @app.get("/api/mail/oauth/status")
     def mail_oauth_status(profile_name: str | None = None):
@@ -547,6 +551,50 @@ def _validate_root_path(root_path_text: str) -> dict:
             "host agent offline; start `flux-kb host-agent run` to add local host paths from Docker"
         )
     return validation
+
+
+def _mail_oauth_callback_payload(*, state: str | None, code: str | None, error: str | None) -> dict:
+    if error:
+        return {"status": "error", "error": error, "state": state}
+    if not state:
+        return {"status": "error", "error": "missing OAuth state", "state": state}
+    if not code:
+        return {"status": "error", "error": "missing authorization code", "state": state}
+    from .mail_oauth import complete_gmail_oauth
+
+    try:
+        return complete_gmail_oauth(state=state, code=code)
+    except Exception as exc:  # pragma: no cover - provider/database errors vary by environment.
+        return {"status": "error", "error": str(exc), "state": state}
+
+
+def _mail_oauth_callback_html(payload: dict) -> str:
+    configured = payload.get("status") == "configured"
+    title = "Gmail OAuth configured" if configured else "Gmail OAuth did not complete"
+    profile = payload.get("profile_name") or "selected profile"
+    detail = f"{profile} is ready for Gmail IMAP sync." if configured else str(payload.get("error") or payload.get("status") or "unknown error")
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(title)}</title>
+  <style>
+    body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, sans-serif; background: #f3f7fb; color: #172033; }}
+    main {{ width: min(560px, calc(100vw - 32px)); padding: 32px; border: 1px solid #d9e4ee; border-radius: 14px; background: white; box-shadow: 0 20px 60px rgba(15, 34, 52, .12); }}
+    h1 {{ margin: 0 0 12px; font-size: 28px; }}
+    p {{ line-height: 1.5; color: #526174; }}
+    a {{ display: inline-block; margin-top: 16px; padding: 12px 16px; border-radius: 8px; background: #078aa2; color: white; text-decoration: none; font-weight: 700; }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{escape(title)}</h1>
+    <p>{escape(detail)}</p>
+    <a href="/dashboard?tab=mail">Return to Flux Mail</a>
+  </main>
+</body>
+</html>"""
 
 
 def _should_proxy_crawl_sync(root_name: str | None, path: str | None) -> bool:

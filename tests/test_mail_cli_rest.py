@@ -68,6 +68,7 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     app = create_app()
     routes = {route.path for route in app.routes}
 
+    assert "/" in routes
     assert "/api/settings" in routes
     assert "/api/settings/{key}" in routes
     assert "/api/mail/status" in routes
@@ -172,6 +173,47 @@ def test_rest_mail_profile_oauth_client_config_path_persists_metadata(monkeypatc
     assert response.status_code == 200
     assert captured == {"profile_name": "gmail", "client_config_path": "private/client_secret_custom.json"}
     assert response.json()["metadata"]["gmail_oauth_client_config_path"] == "private/client_secret_custom.json"
+
+
+def test_root_oauth_callback_completes_gmail_consent(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_oauth
+
+    captured = {}
+    monkeypatch.setattr(
+        mail_oauth,
+        "complete_gmail_oauth",
+        lambda **kwargs: captured.update(kwargs) or {"profile_name": "gmail", "provider": "gmail", "status": "configured"},
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/?state=state-1&code=code-1&scope=https%3A%2F%2Fmail.google.com%2F")
+
+    assert response.status_code == 200
+    assert captured == {"state": "state-1", "code": "code-1"}
+    assert "Gmail OAuth configured" in response.text
+    assert "/dashboard?tab=mail" in response.text
+
+
+def test_root_oauth_callback_reports_provider_error_without_iis(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_oauth
+
+    called = False
+
+    def fake_complete(**_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(mail_oauth, "complete_gmail_oauth", fake_complete)
+    client = TestClient(create_app())
+
+    response = client.get("/?state=state-1&error=access_denied")
+
+    assert response.status_code == 200
+    assert called is False
+    assert "Gmail OAuth did not complete" in response.text
+    assert "access_denied" in response.text
 
 
 def test_cli_mail_oauth_status_masks_token_state(monkeypatch, capsys):

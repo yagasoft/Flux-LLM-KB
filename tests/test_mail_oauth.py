@@ -17,6 +17,16 @@ CLIENT_CONFIG = {
     }
 }
 
+LOCALHOST_ONLY_CLIENT_CONFIG = {
+    "installed": {
+        "client_id": "client-id.apps.googleusercontent.com",
+        "client_secret": "client-secret",
+        "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": ["http://localhost"],
+    }
+}
+
 
 def test_gmail_authorization_url_uses_pkce_loopback_and_mail_scope():
     from flux_llm_kb.mail_oauth import (
@@ -132,6 +142,25 @@ def test_oauth_start_creates_state_and_masks_status(monkeypatch, tmp_path):
     assert metadata_updates[0]["metadata"]["gmail_oauth_client_config_path"] == str(config_path)
     assert status["profiles"][0]["has_refresh_token"] is True
     assert "secret" not in json.dumps(status)
+
+
+def test_oauth_start_does_not_use_generic_localhost_redirect_from_client_json(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_oauth
+
+    config_path = tmp_path / "client.json"
+    config_path.write_text(json.dumps(LOCALHOST_ONLY_CLIENT_CONFIG), encoding="utf-8")
+    states = []
+
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None, url=None: [{"id": "profile-id", "name": name, "metadata": {}}])
+    monkeypatch.setattr(database, "create_mail_oauth_state", lambda **kwargs: states.append(kwargs) or {"state": kwargs["state"]})
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: {"name": kwargs["name"], "metadata": kwargs["metadata"]})
+
+    started = mail_oauth.start_gmail_oauth(profile_name="gmail", client_config_path=config_path)
+
+    assert started["redirect_uri"] == "http://127.0.0.1:8765"
+    assert states[0]["redirect_uri"] == "http://127.0.0.1:8765"
+    assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A8765" in started["authorization_url"]
+    assert "redirect_uri=http%3A%2F%2Flocalhost" not in started["authorization_url"]
 
 
 def test_complete_oauth_stores_refresh_token_without_persisting_access_token(monkeypatch):
