@@ -264,6 +264,21 @@ def sync_mail_profile(
     return {"profiles": results, "count": len(results)}
 
 
+def sync_due_mail_profiles(
+    *,
+    limit: int = 10,
+    access_token: str | None = None,
+    imap_client_factory: Any | None = None,
+) -> dict[str, Any]:
+    profiles = database.list_due_imap_mail_profiles(limit=limit)
+    results: list[dict[str, Any]] = []
+    for profile in profiles:
+        result = _sync_imap_profile(profile, access_token=access_token, imap_client_factory=imap_client_factory)
+        result["spool_sync"] = sync_mail_spool(profile_name=profile["name"])
+        results.append(result)
+    return {"profiles": results, "count": len(results)}
+
+
 def sync_outlook_profile(profile_name: str) -> dict[str, Any]:
     profiles = database.list_mail_profiles(name=profile_name)
     if not profiles:
@@ -651,9 +666,17 @@ def _post_process_imap_message(
     if post_process_policy == "move_to_processed" and processed_folder:
         client.uid("COPY", str(uid), processed_folder)
         client.uid("STORE", str(uid), "+FLAGS", r"(\Deleted)")
+        _expunge_imap_deleted(client)
         return
     if post_process_policy == "trash":
         client.uid("STORE", str(uid), "+FLAGS", r"(\Deleted)")
+        _expunge_imap_deleted(client)
+
+
+def _expunge_imap_deleted(client: Any) -> None:
+    expunge = getattr(client, "expunge", None)
+    if expunge:
+        expunge()
 
 
 def _close_imap_client(client: Any) -> None:

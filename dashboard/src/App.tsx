@@ -142,8 +142,12 @@ type SearchResult = {
   kind?: string;
   title?: string;
   excerpt?: string;
+  summary?: string;
   score?: number;
   id?: string;
+  source_path?: string;
+  streams?: string[];
+  raw_scores?: Record<string, number>;
 };
 
 type MailSyncError = {
@@ -1423,9 +1427,10 @@ function RetrievalTab({ state, searchOpen, searchResults, query, onClear, onErro
           <div className="search-results">
             {searchResults.map((result, index) => (
               <article key={`${result.title}-${index}`}>
-                <span>{result.kind ?? "result"} {typeof result.score === "number" ? `- ${Math.round(result.score * 100)}%` : ""}</span>
+                <span>{searchResultMeta(result)}</span>
                 <strong>{result.title ?? result.id ?? "Untitled result"}</strong>
-                <p>{result.excerpt ?? "No excerpt available."}</p>
+                <p>{result.excerpt ?? result.summary ?? "No excerpt available."}</p>
+                {result.source_path && <code className="result-path" title={result.source_path}>{result.source_path}</code>}
               </article>
             ))}
           </div>
@@ -1446,6 +1451,21 @@ function RetrievalTab({ state, searchOpen, searchResults, query, onClear, onErro
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
     </section>
   );
+}
+
+function searchResultMeta(result: SearchResult): string {
+  const kind = result.kind ?? "result";
+  if (result.streams?.length) {
+    return `${kind} - ${result.streams.map(prettyStreamName).join(", ")}`;
+  }
+  if (typeof result.score === "number") {
+    return `${kind} - score ${result.score.toFixed(3)}`;
+  }
+  return kind;
+}
+
+function prettyStreamName(value: string): string {
+  return value.replace(/^corpus_/, "").replace(/_/g, " ");
 }
 
 function JobsTab({ state, onRefresh }: { state: LoadState; onRefresh: () => void }) {

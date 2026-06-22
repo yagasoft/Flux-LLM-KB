@@ -1812,6 +1812,29 @@ def list_mail_profiles(*, name: str | None = None, url: str | None = None) -> li
             return [_mail_profile_row(row) for row in cur.fetchall()]
 
 
+def list_due_imap_mail_profiles(*, limit: int = 10, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, name, source_type, account, server, folder_paths,
+                       spool_path, post_process_policy, enabled, trust_rank, metadata,
+                       sync_enabled, sync_interval_seconds, sync_window_days,
+                       max_messages_per_run, last_sync_at, next_sync_at
+                FROM mail_profiles
+                WHERE source_type = 'imap'
+                  AND enabled
+                  AND sync_enabled
+                  AND (next_sync_at IS NULL OR next_sync_at <= now())
+                ORDER BY COALESCE(next_sync_at, now()), name
+                LIMIT %s
+                """,
+                (max(1, min(limit, 100)),),
+            )
+            return [_mail_profile_row(row) for row in cur.fetchall()]
+
+
 def update_mail_profile_metadata(
     *,
     name: str,
@@ -2116,6 +2139,19 @@ def record_mail_sync_run(
                 ),
             )
             row = cur.fetchone()
+            cur.execute(
+                """
+                UPDATE mail_profiles
+                SET last_sync_at = now(),
+                    next_sync_at = CASE
+                        WHEN sync_enabled THEN now() + make_interval(secs => sync_interval_seconds)
+                        ELSE NULL
+                    END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (profile[0],),
+            )
             return {"id": row[0], "status": row[1]}
 
 

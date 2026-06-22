@@ -278,3 +278,17 @@ def test_persist_crawl_plan_requeues_legacy_metadata_only_documents():
     assert "source_assets.extraction_status = 'metadata_only'" in source
     assert "source_assets.extension IN ('.doc', '.rtf')" in source
     assert "EXCLUDED.extraction_status = 'queued'" in source
+
+
+def test_imap_mail_schedule_has_due_query_and_advances_after_sync_run():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "def list_due_imap_mail_profiles" in source
+    due_function = source.split("def list_due_imap_mail_profiles", 1)[1].split("def create_outlook_sync_request", 1)[0]
+    assert "source_type = 'imap'" in due_function
+    assert "next_sync_at <= now()" in due_function
+
+    record_function = source.split("def record_mail_sync_run", 1)[1].split("def record_mail_message", 1)[0]
+    assert "UPDATE mail_profiles" in record_function
+    assert "last_sync_at = now()" in record_function
+    assert "make_interval(secs => sync_interval_seconds)" in record_function

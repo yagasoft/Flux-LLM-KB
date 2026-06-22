@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
 import re
@@ -38,11 +39,11 @@ class KnowledgeService:
     def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         corpus_limit = max(limit * 4, 20)
         episodes = [
-            {"kind": "episode", **item}
+            {"kind": "episode", **item, "excerpt": item.get("summary", "")}
             for item in database.search_episodes(query, limit=limit)
         ]
         corpus = [
-            {"kind": "corpus_chunk", **item}
+            {"kind": "corpus_chunk", **_format_corpus_search_item(item)}
             for item in database.search_corpus_chunks(query, limit=corpus_limit)
         ]
         return collapse_version_families(
@@ -326,6 +327,13 @@ class KnowledgeService:
                 root_name=root_name,
                 host_agent_roots=host_agent_roots,
             )
+            if host_agent_roots is not True:
+                try:
+                    from . import mail_ingestion
+
+                    last_result["mail_sync"] = mail_ingestion.sync_due_mail_profiles(limit=limit)
+                except Exception as exc:
+                    last_result["mail_sync"] = {"status": "failed", "error": str(exc)}
             database.record_runtime_component_heartbeat(
                 name=component_name,
                 status="running",
@@ -372,6 +380,64 @@ def _episode_markdown(episode: dict[str, Any]) -> str:
 def _slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug[:72] or "memory"
+
+
+def _format_corpus_search_item(item: dict[str, Any]) -> dict[str, Any]:
+    result = dict(item)
+    result.setdefault("excerpt", str(result.get("summary") or ""))
+    source_path = str(result.get("source_path") or "").replace("\\", "/")
+    if source_path.endswith("/manifest.json") or source_path == "manifest.json":
+        manifest = _parse_json_object(result.get("summary"))
+        if manifest:
+            subject = str(manifest.get("subject") or "").strip()
+            if subject:
+                result["title"] = f"Mail: {subject}"
+            summary = _mail_manifest_summary(manifest)
+            if summary:
+                result["summary"] = summary
+                result["excerpt"] = summary
+    return result
+
+
+def _parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _mail_manifest_summary(manifest: dict[str, Any]) -> str:
+    parts: list[str] = []
+    sender = _display_address(manifest.get("sender"))
+    if sender:
+        parts.append(f"From {sender}")
+    recipients = manifest.get("recipients")
+    if isinstance(recipients, list) and recipients:
+        display_recipients = ", ".join(_display_address(item) for item in recipients[:3] if _display_address(item))
+        if display_recipients:
+            parts.append(f"to {display_recipients}")
+    received_at = str(manifest.get("received_at") or "").strip()
+    if received_at:
+        parts.append(f"received {received_at}")
+    source_folder = str(manifest.get("source_folder") or "").strip()
+    if source_folder:
+        parts.append(f"folder {source_folder}")
+    if manifest.get("attachment_count") is not None:
+        count = int(manifest.get("attachment_count") or 0)
+        parts.append(f"{count} attachment{'s' if count != 1 else ''}")
+    return "; ".join(parts) + "." if parts else ""
+
+
+def _display_address(value: Any) -> str:
+    text = str(value or "").strip()
+    if "<" in text:
+        text = text.split("<", 1)[0].strip()
+    return text
 
 
 def _select_root(*, root_name: str | None, path: str | Path | None) -> dict[str, Any]:

@@ -1152,6 +1152,18 @@ kbd {
   font-size: 13px;
 }
 
+.search-results article .result-path {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin-top: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  background: var(--surface);
+}
+
 .data-rows {
   display: grid;
   gap: 10px;

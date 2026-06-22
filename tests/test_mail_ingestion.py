@@ -145,6 +145,46 @@ def test_sync_imap_folder_resets_cursor_when_uidvalidity_changes(monkeypatch, tm
     assert records[0]["source_message_id"] == "imap:FluxCapture:3"
 
 
+def test_sync_imap_folder_trash_policy_executes_delete_and_expunge(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeClient:
+        def select(self, folder):
+            return "OK", [b"1"]
+
+        def response(self, key):
+            return "OK", [b"1"]
+
+        def uid(self, command, *args):
+            calls.append((command, args))
+            if command == "SEARCH":
+                return "OK", [b"7"]
+            if command == "FETCH":
+                return "OK", [(b"7 (RFC822)", _sample_message())]
+            if command == "STORE":
+                return "OK", []
+            raise AssertionError(command)
+
+        def expunge(self):
+            calls.append(("EXPUNGE", ()))
+            return "OK", []
+
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: {"id": "mail-1"})
+
+    result = sync_imap_folder(
+        client=FakeClient(),
+        profile_name="gmail-capture",
+        account="me@gmail.com",
+        folder="FluxCapture",
+        spool_path=tmp_path,
+        post_process_policy="trash",
+    )
+
+    assert result["exported"] == 1
+    assert ("STORE", ("7", "+FLAGS", r"(\Deleted)")) in calls
+    assert ("EXPUNGE", ()) in calls
+
+
 def test_export_outlook_item_to_spool_writes_msg_backup_and_manifest(tmp_path):
     class FakeAttachment:
         FileName = "notes.txt"
@@ -332,3 +372,65 @@ def test_sync_imap_profile_reports_auth_failure_without_500(monkeypatch, tmp_pat
     assert result["profiles"][0]["status"] == "auth_failed"
     assert "Invalid SASL argument" in result["profiles"][0]["errors"][0]["error"]
     assert runs[0]["status"] == "auth_failed"
+
+
+def test_sync_due_mail_profiles_runs_due_imap_profiles(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion, mail_oauth
+
+    auth_calls = []
+    listed_limits = []
+
+    class FakeClient:
+        def __init__(self, host):
+            self.host = host
+
+        def authenticate_xoauth2(self, user, token):
+            auth_calls.append((user, token))
+
+        def select(self, folder):
+            return "OK", [b"1"]
+
+        def response(self, key):
+            return "OK", [b"1"]
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                return "OK", [b""]
+            raise AssertionError(command)
+
+        def close(self):
+            return None
+
+        def logout(self):
+            return None
+
+    profile = {
+        "name": "gmail",
+        "source_type": "imap",
+        "enabled": True,
+        "account": "me@gmail.com",
+        "server": "imap.gmail.com",
+        "folder_paths": ["FluxCapture"],
+        "spool_path": str(tmp_path),
+        "post_process_policy": "none",
+        "metadata": {},
+    }
+    runs = []
+    monkeypatch.setattr(
+        database,
+        "list_due_imap_mail_profiles",
+        lambda limit=10: listed_limits.append(limit) or [profile],
+    )
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: profile | {"metadata": kwargs["metadata"]})
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
+    monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: "fresh-access-token")
+
+    result = mail_ingestion.sync_due_mail_profiles(limit=3, imap_client_factory=FakeClient)
+
+    assert listed_limits == [3]
+    assert result["count"] == 1
+    assert result["profiles"][0]["profile"] == "gmail"
+    assert result["profiles"][0]["status"] == "completed"
+    assert auth_calls == [("me@gmail.com", "fresh-access-token")]
+    assert runs[0]["status"] == "completed"

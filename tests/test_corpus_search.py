@@ -1,3 +1,5 @@
+import json
+
 from flux_llm_kb import database
 from flux_llm_kb import service
 from flux_llm_kb.service import KnowledgeService
@@ -38,6 +40,43 @@ def test_service_search_includes_corpus_chunks(monkeypatch):
 
     assert [result["kind"] for result in results] == ["corpus_chunk", "episode"]
     assert results[0]["source_path"] == "docs/architecture.md"
+
+
+def test_service_search_formats_mail_manifest_results(monkeypatch):
+    manifest = {
+        "subject": "YsTrader alert: shared market data unavailable",
+        "sender": "YsTrader <alerts@example.com>",
+        "recipients": ["me@example.com"],
+        "received_at": "Mon, 22 Jun 2026 19:19:26 +0000",
+        "source_folder": "FluxCapture",
+        "attachment_count": 1,
+    }
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5: [])
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks",
+        lambda query, limit=20: [
+            {
+                "id": "chunk-1",
+                "title": "manifest.json",
+                "summary": json.dumps(manifest),
+                "score": 0.032,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.24},
+                "source_path": "export-1/manifest.json",
+                "duplicate_count": 0,
+                "trust_rank": 450,
+            }
+        ],
+    )
+
+    results = KnowledgeService().search("ystrader", limit=5)
+
+    assert results[0]["title"] == "Mail: YsTrader alert: shared market data unavailable"
+    assert "From YsTrader" in results[0]["summary"]
+    assert "FluxCapture" in results[0]["summary"]
+    assert "1 attachment" in results[0]["summary"]
+    assert results[0]["excerpt"] == results[0]["summary"]
 
 
 def test_service_brief_uses_configured_token_budget(monkeypatch):

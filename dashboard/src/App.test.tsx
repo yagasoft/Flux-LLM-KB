@@ -159,10 +159,12 @@ const settings = [
 ];
 
 let mailSyncPayload: unknown;
+let searchPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
+    searchPayload = [{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(health);
@@ -189,7 +191,7 @@ describe("Flux dashboard", () => {
       }
       if (url === "/api/mail/sync") return json(mailSyncPayload);
       if (url === "/api/mail/oauth/gmail/start") return json({ status: "pending_user_authorization", authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?state=test" });
-      if (url === "/api/search") return json([{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }]);
+      if (url === "/api/search") return json(searchPayload);
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
       }
@@ -401,6 +403,29 @@ describe("Flux dashboard", () => {
     expect(screen.getByText(/GET \/api\/search\?query=/)).toBeInTheDocument();
     expect(screen.getByText(/^kb\.search/)).toBeInTheDocument();
     expect(screen.getByText(/flux-kb search/)).toBeInTheDocument();
+  });
+
+  test("retrieval results render backend summaries and do not present RRF as a confidence percent", async () => {
+    searchPayload = [
+      {
+        kind: "corpus_chunk",
+        title: "Mail: YsTrader alert",
+        summary: "From YsTrader; folder FluxCapture; 0 attachments.",
+        score: 0.032,
+        streams: ["corpus_lexical", "corpus_trust"],
+        source_path: "export-1/manifest.json"
+      }
+    ];
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.type(screen.getByLabelText("Dashboard search"), "ystrader{enter}");
+
+    expect(await screen.findByText("Mail: YsTrader alert")).toBeInTheDocument();
+    expect(screen.getByText("From YsTrader; folder FluxCapture; 0 attachments.")).toBeInTheDocument();
+    expect(screen.queryByText(/3%/)).not.toBeInTheDocument();
+    expect(screen.getByText("export-1/manifest.json")).toBeInTheDocument();
   });
 
   test("add profile opens a real form and persists an IMAP profile", async () => {

@@ -51,3 +51,51 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     assert calls["blocked"][0]["job_id"] == "job-1"
     assert calls["repaired"] == [{"root_name": None}]
     assert calls["cleared_errors"] == [{"root_name": None}]
+
+
+def test_docker_corpus_worker_processes_due_imap_mail_profiles(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    heartbeats = []
+    mail_sync_limits = []
+
+    monkeypatch.setattr(database, "record_runtime_component_heartbeat", lambda **kwargs: heartbeats.append(kwargs))
+    monkeypatch.setattr(
+        KnowledgeService,
+        "run_corpus_backfill",
+        lambda self, **kwargs: {"claimed": 0, "completed": 0, "jobs": []},
+    )
+    monkeypatch.setattr(
+        mail_ingestion,
+        "sync_due_mail_profiles",
+        lambda limit=10: mail_sync_limits.append(limit) or {"count": 1, "profiles": [{"profile": "gmail", "status": "completed"}]},
+    )
+
+    result = KnowledgeService().run_corpus_worker(once=True, limit=7, host_agent_roots=False)
+
+    assert mail_sync_limits == [7]
+    assert result["last_result"]["mail_sync"]["count"] == 1
+    assert heartbeats[-1]["metadata"]["last_result"]["mail_sync"]["profiles"][0]["profile"] == "gmail"
+
+
+def test_host_agent_corpus_worker_does_not_process_imap_mail_profiles(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    mail_sync_limits = []
+
+    monkeypatch.setattr(database, "record_runtime_component_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(
+        KnowledgeService,
+        "run_corpus_backfill",
+        lambda self, **kwargs: {"claimed": 0, "completed": 0, "jobs": []},
+    )
+    monkeypatch.setattr(
+        mail_ingestion,
+        "sync_due_mail_profiles",
+        lambda limit=10: mail_sync_limits.append(limit) or {"count": 1},
+    )
+
+    result = KnowledgeService().run_corpus_worker(once=True, limit=7, host_agent_roots=True)
+
+    assert mail_sync_limits == []
+    assert "mail_sync" not in result["last_result"]
