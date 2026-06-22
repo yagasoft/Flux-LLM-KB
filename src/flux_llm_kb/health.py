@@ -5,7 +5,6 @@ import platform
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 from typing import Any
 
@@ -14,6 +13,7 @@ from .codex_integration import codex_status
 from .extractors import extractor_availability
 from .glob_policy import effective_glob_policy
 from .host_agent import remote_status
+from .processes import run_no_window
 from .watcher import summarize_watcher_staleness
 
 DASHBOARD_INDEX = Path(__file__).resolve().parent / "dashboard_static" / "index.html"
@@ -215,7 +215,7 @@ def _docker_check(*, required: bool = True, production_mode: bool = False) -> di
             }
         return {"ok": False, "message": "Docker command not found", "required": required}
     try:
-        result = subprocess.run(
+        result = run_no_window(
             ["docker", "compose", "version"],
             text=True,
             capture_output=True,

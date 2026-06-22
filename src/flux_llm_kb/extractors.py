@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 import shutil
 import struct
-import subprocess
 from typing import Any
 
 from .crawler import AssetChunk, CorpusPolicy, classify_file
+from .processes import run_no_window
 from .redaction import redact_text
 
 
@@ -51,6 +51,14 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "tesseract": _tool_check("tesseract"),
         "faster_whisper": _module_check("faster_whisper"),
     }
+
+
+def image_metadata(path: str | Path) -> dict[str, Any]:
+    metadata: dict[str, Any] = {"extractor": "image"}
+    dimensions = _image_dimensions(Path(path))
+    if dimensions:
+        metadata.update({"width": dimensions[0], "height": dimensions[1]})
+    return metadata
 
 
 def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str) -> ExtractionResult:
@@ -145,10 +153,7 @@ def _extract_xlsx(path: Path) -> ExtractionResult:
 
 
 def _extract_image(path: Path) -> ExtractionResult:
-    metadata: dict[str, Any] = {"extractor": "image"}
-    dimensions = _image_dimensions(path)
-    if dimensions:
-        metadata.update({"width": dimensions[0], "height": dimensions[1]})
+    metadata = image_metadata(path)
     text = _ocr_image(path)
     chunks = _chunks_from_text(text or "", path.name, modality="ocr")
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
@@ -164,7 +169,7 @@ def _extract_media(path: Path, file_kind: str) -> ExtractionResult:
     if ffprobe is None:
         return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message="ffprobe command not found")
     try:
-        result = subprocess.run(
+        result = run_no_window(
             [
                 ffprobe,
                 "-v",
@@ -240,7 +245,7 @@ def _ocr_image(path: Path) -> str | None:
     if tesseract is None:
         return None
     try:
-        result = subprocess.run(
+        result = run_no_window(
             [tesseract, str(path), "stdout"],
             text=True,
             capture_output=True,

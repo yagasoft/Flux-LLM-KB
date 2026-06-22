@@ -1,3 +1,4 @@
+import base64
 from pathlib import Path
 
 from flux_llm_kb.crawler import CorpusPolicy, classify_file, scan_path
@@ -36,6 +37,37 @@ def test_scan_path_classifies_heavy_media_as_deferred(tmp_path):
             "job_type": "corpus_extract_video",
             "relative_path": "clip.mp4",
             "reason": "heavy_file",
+        }
+    ]
+
+
+def test_scan_path_records_image_metadata_without_ocr(monkeypatch, tmp_path):
+    root = tmp_path / "images"
+    root.mkdir()
+    image = root / "diagram.png"
+    image.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAADZrBkAAAAAD0lEQVR4nGP8z8AARLJAgAEACPwD"
+            "Aaz3RyoAAAAASUVORK5CYII="
+        )
+    )
+
+    def fail_ocr(_path):
+        raise AssertionError("OCR must run only in deferred extraction jobs")
+
+    monkeypatch.setattr("flux_llm_kb.extractors._ocr_image", fail_ocr)
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert plan.assets[0].file_kind == "image"
+    assert plan.assets[0].extraction_tier == "deferred"
+    assert plan.assets[0].metadata["width"] == 2
+    assert plan.assets[0].metadata["height"] == 3
+    assert plan.deferred_jobs == [
+        {
+            "job_type": "corpus_extract_image",
+            "relative_path": "diagram.png",
+            "reason": "deferred_extractor",
         }
     ]
 

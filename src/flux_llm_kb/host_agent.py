@@ -7,7 +7,6 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import platform
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -17,6 +16,7 @@ from urllib import error, request
 from pydantic import BaseModel
 
 from . import database
+from .processes import run_no_window
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
 
 
@@ -582,7 +582,7 @@ def _host_docker_check(*, required: bool = True) -> dict[str, Any]:
     if path is None:
         return {"ok": False, "message": "Docker command not found", "required": required}
     try:
-        result = subprocess.run(
+        result = run_no_window(
             ["docker", "compose", "version"],
             text=True,
             capture_output=True,

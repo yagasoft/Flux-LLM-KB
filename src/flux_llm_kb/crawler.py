@@ -161,13 +161,16 @@ def discover_asset(path: Path, root: Path, policy: CorpusPolicy) -> DiscoveredAs
     content_hash = _sha256_file(resolved) if stat.st_size <= policy.hash_max_bytes else None
     metadata: dict[str, object] = {}
     chunks: tuple[AssetChunk, ...] = ()
-    if classification.extraction_tier == "inline" or classification.file_kind == "image":
+    if classification.file_kind == "image":
+        from .extractors import image_metadata
+
+        metadata = image_metadata(resolved)
+    elif classification.extraction_tier == "inline":
         from .extractors import extract_file
 
         extraction = extract_file(resolved, policy)
         metadata = extraction.metadata
-        if classification.extraction_tier == "inline":
-            chunks = extraction.chunks
+        chunks = extraction.chunks
     return DiscoveredAsset(
         path=resolved,
         relative_path=resolved.relative_to(root.resolve()).as_posix(),

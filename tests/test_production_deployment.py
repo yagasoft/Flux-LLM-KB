@@ -22,16 +22,37 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "FluxKB Host Agent" in install
     assert "FluxKB Outlook Host" in install
     assert "Register-ScheduledTask" in install
-    assert "-WindowStyle Hidden" in install
     assert "-Hidden" in install
+    assert "pythonw.exe" in install
+    assert "run-host-agent.pyw" in install
+    assert "run-outlook-host.pyw" in install
+    assert "Remove-FluxLegacyConsoleLaunchers" in install
+    assert "run-host-agent.ps1" in install
+    assert "run-outlook-host.ps1" in install
+    assert '-Execute "pwsh.exe"' not in install
     assert "Resolve-FluxPythonExe" in install
     assert "python\\python.exe" in install
+    assert "Invoke-FluxMigration" in install
+    assert "-m flux_llm_kb.cli migrate" in install
     assert 'Join-Path $appRoot "plugins"' in install
     assert "E:\\LLM KB" not in install
     assert "private\\runtime" not in install
     assert "127.0.0.1:${ApiPort}:8765" in install
     assert "restart: unless-stopped" in install
     assert "Flux production status" in status
+    assert "docker compose down" not in install
+    assert "--volumes" not in install
+    assert "docker volume rm" not in install
+    for protected_path in (
+        "$InstallRoot",
+        "$privateRoot",
+        "$dataRoot",
+        "$logsRoot",
+        "$runtimeRoot",
+        "$backupRoot",
+        'Join-Path $dataRoot "postgres"',
+    ):
+        assert f"Remove-Item -LiteralPath {protected_path}" not in install
 
 
 def test_production_update_uses_prebuilt_images_not_repo_context_compose_build():
@@ -45,6 +66,19 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert 'Join-Path $appRoot "plugins"' in update
     assert "Resolve-FluxPythonExe" in update
     assert "RecreateVenv" in update
+    assert "Invoke-FluxMigration" in update
+    assert "-m flux_llm_kb.cli migrate" in update
+    assert "Register-FluxTask" in update
+    assert "pythonw.exe" in update
+    assert "run-host-agent.pyw" in update
+    assert "run-outlook-host.pyw" in update
+    assert "Remove-FluxLegacyConsoleLaunchers" in update
+    assert "run-host-agent.ps1" in update
+    assert "run-outlook-host.ps1" in update
+    assert '-Execute "pwsh.exe"' not in update
+    assert "[int]$HostAgentPort = 8799" in update
+    assert "[int]$PostgresPort = 5432" in update
+    assert "Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort" in update
     assert "build:" not in _embedded_compose_template(update)
 
 

@@ -149,35 +149,117 @@ FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_
 function Write-FluxHostScripts {
     param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort)
     $hostAgent = @"
-`$ErrorActionPreference = "Stop"
-`$env:FLUX_KB_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
-`$env:FLUX_KB_INSTALL_ROOT = "$InstallRoot"
-`$env:FLUX_KB_APP_ROOT = "$AppRoot"
-`$env:FLUX_KB_PRIVATE_DIR = "$InstallRoot\private"
-`$env:FLUX_KB_DATA_DIR = "$InstallRoot\data"
-`$env:FLUX_KB_LOG_DIR = "$InstallRoot\logs"
-& "$AppRoot\.venv\Scripts\python.exe" -m flux_llm_kb.cli host-agent run --host 127.0.0.1 --port $HostAgentPort
+import os
+import runpy
+import sys
+import traceback
+from pathlib import Path
+
+os.environ["FLUX_KB_DATABASE_URL"] = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
+os.environ["FLUX_KB_INSTALL_ROOT"] = r"$InstallRoot"
+os.environ["FLUX_KB_APP_ROOT"] = r"$AppRoot"
+os.environ["FLUX_KB_PRIVATE_DIR"] = r"$InstallRoot\private"
+os.environ["FLUX_KB_DATA_DIR"] = r"$InstallRoot\data"
+os.environ["FLUX_KB_LOG_DIR"] = r"$InstallRoot\logs"
+
+log_dir = Path(os.environ["FLUX_KB_LOG_DIR"])
+log_dir.mkdir(parents=True, exist_ok=True)
+sys.stdout = open(log_dir / "host-agent.log", "a", encoding="utf-8", buffering=1)
+sys.stderr = open(log_dir / "host-agent.err.log", "a", encoding="utf-8", buffering=1)
+os.chdir(os.environ["FLUX_KB_APP_ROOT"])
+sys.argv = ["flux-kb", "host-agent", "run", "--host", "127.0.0.1", "--port", "$HostAgentPort"]
+
+try:
+    runpy.run_module("flux_llm_kb.cli", run_name="__main__")
+except SystemExit:
+    raise
+except Exception:
+    traceback.print_exc()
+    raise
 "@
-    Set-Content -Path (Join-Path $AppRoot "run-host-agent.ps1") -Value $hostAgent -Encoding UTF8
+    Set-Content -Path (Join-Path $AppRoot "run-host-agent.pyw") -Value $hostAgent -Encoding UTF8
 
     $outlookHost = @"
-`$ErrorActionPreference = "Stop"
-`$env:FLUX_KB_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
-`$env:FLUX_KB_INSTALL_ROOT = "$InstallRoot"
-`$env:FLUX_KB_APP_ROOT = "$AppRoot"
-`$env:FLUX_KB_PRIVATE_DIR = "$InstallRoot\private"
-`$env:FLUX_KB_LOG_DIR = "$InstallRoot\logs"
-& "$AppRoot\.venv\Scripts\python.exe" -m flux_llm_kb.cli outlook-host run
+import os
+import runpy
+import sys
+import traceback
+from pathlib import Path
+
+os.environ["FLUX_KB_DATABASE_URL"] = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
+os.environ["FLUX_KB_INSTALL_ROOT"] = r"$InstallRoot"
+os.environ["FLUX_KB_APP_ROOT"] = r"$AppRoot"
+os.environ["FLUX_KB_PRIVATE_DIR"] = r"$InstallRoot\private"
+os.environ["FLUX_KB_LOG_DIR"] = r"$InstallRoot\logs"
+
+log_dir = Path(os.environ["FLUX_KB_LOG_DIR"])
+log_dir.mkdir(parents=True, exist_ok=True)
+sys.stdout = open(log_dir / "outlook-host.log", "a", encoding="utf-8", buffering=1)
+sys.stderr = open(log_dir / "outlook-host.err.log", "a", encoding="utf-8", buffering=1)
+os.chdir(os.environ["FLUX_KB_APP_ROOT"])
+sys.argv = ["flux-kb", "outlook-host", "run"]
+
+try:
+    runpy.run_module("flux_llm_kb.cli", run_name="__main__")
+except SystemExit:
+    raise
+except Exception:
+    traceback.print_exc()
+    raise
 "@
-    Set-Content -Path (Join-Path $AppRoot "run-outlook-host.ps1") -Value $outlookHost -Encoding UTF8
+    Set-Content -Path (Join-Path $AppRoot "run-outlook-host.pyw") -Value $outlookHost -Encoding UTF8
+}
+
+function Remove-FluxLegacyConsoleLaunchers {
+    param([string]$AppRoot)
+    foreach ($legacyLauncher in @("run-host-agent.ps1", "run-outlook-host.ps1")) {
+        $legacyPath = Join-Path $AppRoot $legacyLauncher
+        if (Test-Path $legacyPath) {
+            Remove-Item -LiteralPath $legacyPath -Force
+        }
+    }
+}
+
+function Resolve-FluxPythonwExe {
+    param([string]$AppRoot)
+    $pythonw = Join-Path $AppRoot ".venv\Scripts\pythonw.exe"
+    if (Test-Path $pythonw) { return $pythonw }
+    throw "Missing windowless Python launcher: $pythonw"
 }
 
 function Register-FluxTask {
-    param([string]$TaskName, [string]$ScriptPath)
-    $action = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
+    param([string]$TaskName, [string]$LauncherPath, [string]$AppRoot)
+    $pythonw = Resolve-FluxPythonwExe -AppRoot $AppRoot
+    $action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$LauncherPath`""
     $trigger = New-ScheduledTaskTrigger -AtLogOn
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Flux-LLM-KB local host process" -Force | Out-Null
+}
+
+function Invoke-FluxMigration {
+    param([string]$VenvPython, [string]$InstallRoot, [int]$PostgresPort)
+    $previousDatabaseUrl = $env:FLUX_KB_DATABASE_URL
+    $previousInstallRoot = $env:FLUX_KB_INSTALL_ROOT
+    $previousAppRoot = $env:FLUX_KB_APP_ROOT
+    $previousPrivateDir = $env:FLUX_KB_PRIVATE_DIR
+    $previousDataDir = $env:FLUX_KB_DATA_DIR
+    $previousLogDir = $env:FLUX_KB_LOG_DIR
+    try {
+        $env:FLUX_KB_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
+        $env:FLUX_KB_INSTALL_ROOT = $InstallRoot
+        $env:FLUX_KB_APP_ROOT = Join-Path $InstallRoot "app"
+        $env:FLUX_KB_PRIVATE_DIR = Join-Path $InstallRoot "private"
+        $env:FLUX_KB_DATA_DIR = Join-Path $InstallRoot "data"
+        $env:FLUX_KB_LOG_DIR = Join-Path $InstallRoot "logs"
+        & $VenvPython -m flux_llm_kb.cli migrate
+    } finally {
+        $env:FLUX_KB_DATABASE_URL = $previousDatabaseUrl
+        $env:FLUX_KB_INSTALL_ROOT = $previousInstallRoot
+        $env:FLUX_KB_APP_ROOT = $previousAppRoot
+        $env:FLUX_KB_PRIVATE_DIR = $previousPrivateDir
+        $env:FLUX_KB_DATA_DIR = $previousDataDir
+        $env:FLUX_KB_LOG_DIR = $previousLogDir
+    }
 }
 
 $appRoot = Join-Path $InstallRoot "app"
@@ -187,6 +269,9 @@ $logsRoot = Join-Path $InstallRoot "logs"
 $runtimeRoot = Join-Path $InstallRoot "runtime"
 $backupRoot = Join-Path $InstallRoot "backups"
 
+# Installation is intentionally non-destructive for live runtime state. These
+# calls create missing directories but never remove private data, database
+# files, mail spools, logs, runtime status, or backups.
 foreach ($dir in @($InstallRoot, $appRoot, $privateRoot, $dataRoot, (Join-Path $dataRoot "postgres"), $logsRoot, $runtimeRoot, $backupRoot)) {
     New-FluxDirectory $dir
 }
@@ -223,6 +308,7 @@ if (-not (Test-Path $venvPython)) {
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install "$SourceRoot[api,corpus,mail]"
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
+Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 
 Push-Location $appRoot
 try {
@@ -230,10 +316,11 @@ try {
 } finally {
     Pop-Location
 }
+Invoke-FluxMigration -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort
 
 if (-not $SkipScheduledTasks) {
-    Register-FluxTask -TaskName "FluxKB Host Agent" -ScriptPath (Join-Path $appRoot "run-host-agent.ps1")
-    Register-FluxTask -TaskName "FluxKB Outlook Host" -ScriptPath (Join-Path $appRoot "run-outlook-host.ps1")
+    Register-FluxTask -TaskName "FluxKB Host Agent" -LauncherPath (Join-Path $appRoot "run-host-agent.pyw") -AppRoot $appRoot
+    Register-FluxTask -TaskName "FluxKB Outlook Host" -LauncherPath (Join-Path $appRoot "run-outlook-host.pyw") -AppRoot $appRoot
 }
 
 Write-Host "Flux production runtime installed at $InstallRoot"
