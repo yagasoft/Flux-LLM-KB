@@ -59,6 +59,19 @@ Images are dimensioned locally, media uses sidecar transcripts and `ffprobe`
 when available, and archives or unknown binaries remain metadata-only unless
 explicitly enabled later.
 
+File coverage is intentionally broad but tiered. Flux should first record stable
+metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
+source root, trust rank, and provenance. Extraction then escalates only when a
+safe local path exists: inline UTF/code parsing; local document/data libraries;
+optional local tools such as LibreOffice, Tesseract, ffprobe/ffmpeg, or
+faster-whisper; bounded archive/container expansion; and finally metadata-only
+terminal states for unsafe, encrypted, proprietary, or unsupported binaries.
+This lets Flux cover common text, code, office, PDF, spreadsheet, presentation,
+mail, calendar/contact, image, diagram, audio, video, subtitle, archive,
+database/export, notebook, CAD/BIM/GIS/design, security scan, operations log,
+and unknown-binary families without requiring cloud services or blocking normal
+watch/crawl loops.
+
 When the API/dashboard is Docker-hosted, arbitrary Windows/macOS/Linux host
 paths are accessed through a separate local host agent (`flux-kb host-agent run`).
 The dashboard can ask that host process to open a native folder picker, validate

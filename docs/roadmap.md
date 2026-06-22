@@ -38,14 +38,48 @@
   modified, or deleted while Flux was offline are detected without manual
   backfill.
 - Targeted file/subtree sync for efficient watcher-triggered updates.
-- File-type aware extraction:
-  - text/code/markdown/json/csv: fast local extraction and chunking
-  - office/PDF/spreadsheets/slides: local library extraction where practical; large
-    tabular files can be metadata-first
-  - images: metadata, dimensions, hash, optional local OCR in deferred jobs
-  - audio/video: metadata via local probing, sidecar transcript reuse, optional
-    local transcription/frame sampling in deferred jobs
-  - archives/binaries: metadata-only unless explicitly enabled later
+- Broad file-type coverage through explicit support tiers: inline text extraction,
+  local parser extraction, optional local external-tool extraction, local media
+  enrichment, archive/container expansion when enabled, and metadata-only fallback.
+- File-type aware extraction roadmap:
+  - plain text and notes: txt, md, markdown, rst, org, asciidoc, tex, log,
+    changelog, license, readme, todo, ini, env examples, and other UTF text
+  - code and developer artifacts: py, js, ts, tsx, jsx, java, cs, fs, cpp, c,
+    h, hpp, go, rs, rb, php, swift, kt, scala, sql, sh, ps1, bat, cmd, yaml,
+    yml, toml, xml, html, css, scss, dockerfile, makefile, gradle, lockfiles,
+    package manifests, OpenAPI/Swagger specs, GraphQL schemas, protobuf, thrift,
+    notebooks, diffs, and patches
+  - structured data: json, jsonl, ndjson, csv, tsv, psv, parquet, avro, orc,
+    feather, arrow, sqlite/db snapshots, xml, yaml, xlsx tables, ods, and common
+    BI/report exports; large tabular files use schema/profile/sample-first
+    indexing before optional chunk backfill
+  - documents and publications: pdf, docx, doc, rtf, odt, ott, epub, mobi/azw
+    where locally parseable, html/mhtml, xps, and scanned PDFs; text layers are
+    preferred before local OCR
+  - spreadsheets and presentations: xlsx, xls, xlsm, ods, csv bundles, pptx,
+    ppt, odp, speaker notes, slide text, tables, and embedded media metadata
+  - mail and collaboration exports: eml, msg, mbox, maildir, ics, vcf, teams/
+    slack/discord exports, meeting transcripts, chat logs, and attachment
+    relationships; PST/OST remain optional Windows-host extraction targets
+  - images, diagrams, and vector assets: png, jpg/jpeg, webp, gif, tiff, bmp,
+    heic/heif where local codecs exist, svg, drawio, mermaid, plantuml, graphviz,
+    excalidraw, visio/vsdx where local tooling exists, and design exports such
+    as fig/sketch metadata where available
+  - audio, video, and subtitles: mp3, wav, m4a, flac, ogg, aac, mp4, mov, mkv,
+    avi, webm, wmv, mpeg, ts, vtt, srt, ass, and sidecar transcripts; metadata
+    and sidecars are first-class, transcription/frame sampling is deferred
+  - archives and containers: zip, 7z, tar, gz, bz2, xz, rar where locally
+    supported, wheel/jar/war/ear, npm/tgz, container image metadata, ISO/VHD
+    metadata, and nested archive expansion with depth, size, and file-count caps
+  - binary/proprietary engineering assets: cad/bim/gis/media project files such
+    as dwg/dxf/ifc/rvt/skp/qgz/shp/kml/kmz/psd/ai/indd/blend/fbx/obj/usd/usdz
+    are metadata-first, with optional local adapters for text layers, manifests,
+    thumbnails, and sidecar exports
+  - security and operations artifacts: pcap summaries, sarif, junit, coverage,
+    sbom/cyclonedx/spdx, vulnerability scans, terraform plans/state metadata,
+    kube manifests, logs, traces, and metrics exports
+  - unknown or unsafe binaries: hash, size, timestamps, mime, signature, and
+    provenance only unless a trusted local extractor is explicitly enabled
 - MoHESR-inspired local media stages, generalized for Flux: draw.io/SVG
   structural extraction, image hash cache reuse, decorative-image skips,
   PaddleOCR/Tesseract local OCR, optional local Ollama/ONNX vision
