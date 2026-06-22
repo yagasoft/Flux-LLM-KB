@@ -25,12 +25,11 @@ _RULES = [
         re.compile(r"(?i)\b(password|passwd|pwd)\s*[:=]\s*([^\s;,'\"]+)"),
         group=2,
     ),
-    _Rule("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
 ]
 
 
 def redact_text(text: str) -> tuple[str, list[RedactionFinding]]:
-    """Redact common secrets and PII before persistence."""
+    """Redact common secrets before persistence."""
     findings: list[RedactionFinding] = []
     redacted = text
 
@@ -56,4 +55,3 @@ def _apply_rule(text: str, rule: _Rule, findings: list[RedactionFinding]) -> str
         return f"{whole[:rel_start]}{marker}{whole[rel_end:]}"
 
     return rule.pattern.sub(replace, text)
-
