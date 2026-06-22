@@ -64,10 +64,12 @@ scripts:
 
 ### V1
 
-- Codex plugin installation/configuration exists, but visible Codex UI discovery
-  may still require Codex Desktop restart or plugin-discovery improvements.
+- Codex plugin discovery is working locally, but automatic usefulness still needs
+  a configurable hook policy that calls `kb.brief` before non-trivial prompts or
+  tasks while suppressing trivial prompts where memory lookup would add noise.
 - Preflight retrieval and automatic turn capture need stricter end-to-end proof
-  across real Codex sessions.
+  across real Codex sessions, including dashboard-visible hook status, audit
+  records, opt-out controls, and context-budget enforcement.
 - Graph traversal, claim lifecycle, confidence decay, contradiction handling, and
   lifecycle scoring need more complete implementation and tests.
 
@@ -143,16 +145,18 @@ scripts:
 
 ## Immediate Next Queue
 
-1. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
-2. Add lock-tolerant indexing states, debounce/stability tests, and optional
+1. Add the V1 Codex hook policy that automatically invokes `kb.brief` before
+   non-trivial tasks with relevance gating, opt-out, audit, and budget controls.
+2. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
+3. Add lock-tolerant indexing states, debounce/stability tests, and optional
    Windows VSS design/controls for locked files.
-3. Promote IMAP scheduled sync into a claimable scheduler state machine.
-4. Improve retrieval snippets with query-aware highlights and explainability.
-5. Add provider-specific mail post-process policies with dry-run and audit views.
-6. Design V2.8 indexer acceleration: hardware detection, local inference
+4. Promote IMAP scheduled sync into a claimable scheduler state machine.
+5. Improve retrieval snippets with query-aware highlights and explainability.
+6. Add provider-specific mail post-process policies with dry-run and audit views.
+7. Design V2.8 indexer acceleration: hardware detection, local inference
    provider routing, permanent caches, bounded media/OCR/ASR workers, vector
    batching, and throughput telemetry.
-7. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
+8. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
    prioritizing common Office legacy files, diagrams, archives, and embedded
    media.
 

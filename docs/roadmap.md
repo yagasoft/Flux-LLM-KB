@@ -14,6 +14,10 @@ Progress against this roadmap is tracked in [progress.md](progress.md).
 
 - Hybrid retrieval with lexical, vector, graph, and lifecycle scoring.
 - Codex hooks for automatic preflight retrieval and session capture.
+- Configurable Codex hook policy that invokes `kb.brief` automatically before
+  non-trivial prompts or tasks, with relevance gating, context-budget limits,
+  opt-out controls, audit records, dashboard health/status, and suppression for
+  trivial prompts where memory lookup would add noise.
 - Redaction and audit trail before any persistence.
 - Markdown wiki export for human auditability.
 - Disposable PostgreSQL integration tests.
