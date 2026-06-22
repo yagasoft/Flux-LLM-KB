@@ -66,11 +66,13 @@ safe local path exists: inline UTF/code parsing; local document/data libraries;
 optional local tools such as LibreOffice, Tesseract, ffprobe/ffmpeg, or
 faster-whisper; bounded archive/container expansion; and finally metadata-only
 terminal states for unsafe, encrypted, proprietary, or unsupported binaries.
-This lets Flux cover common text, code, office, PDF, spreadsheet, presentation,
-mail, calendar/contact, image, diagram, audio, video, subtitle, archive,
-database/export, notebook, CAD/BIM/GIS/design, security scan, operations log,
-and unknown-binary families without requiring cloud services or blocking normal
-watch/crawl loops.
+The detailed target matrix lives in [file-type-coverage.md](file-type-coverage.md)
+and explicitly includes common legacy and diagram formats such as `doc`, `xls`,
+`ppt`, Draw.io, and Visio `vsdx`. This lets Flux cover common text, code,
+office, PDF, spreadsheet, presentation, mail, calendar/contact, image, diagram,
+audio, video, subtitle, archive, database/export, notebook, CAD/BIM/GIS/design,
+security scan, operations log, and unknown-binary families without requiring
+cloud services or blocking normal watch/crawl loops.
 
 When the API/dashboard is Docker-hosted, arbitrary Windows/macOS/Linux host
 paths are accessed through a separate local host agent (`flux-kb host-agent run`).

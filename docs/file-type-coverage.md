@@ -1,0 +1,93 @@
+# File Type Coverage Roadmap
+
+Flux should assume that every watched file is useful at least as provenance.
+The default floor is stable metadata: path, source root, size, timestamps, MIME
+or signature, hashes, trust rank, deletion state, duplicate/version-family state,
+and extraction status. Content extraction then escalates only when a safe local
+parser or local tool exists.
+
+## Support Tiers
+
+- `metadata`: record file identity, provenance, hashes, MIME/signature, size,
+  timestamps, and lifecycle state.
+- `inline`: read small UTF/text-like files directly and chunk them immediately.
+- `local_parser`: use bundled or optional Python libraries without cloud calls.
+- `local_tool`: use installed local tools such as LibreOffice, Tesseract,
+  ffprobe/ffmpeg, ExifTool, Pandoc, or domain-specific converters.
+- `container`: safely enumerate or expand nested files with depth, size,
+  file-count, and bomb-protection limits.
+- `enriched`: deferred local OCR, transcription, frame sampling, image/diagram
+  structural extraction, or semantic backfill.
+- `sensitive_metadata`: record only safe metadata by default because the file is
+  likely to contain credentials, private keys, or executable/binary payloads.
+
+## Priority Rules
+
+- Common business formats are first-class: `doc`, `docx`, `xls`, `xlsx`, `ppt`,
+  `pptx`, `pdf`, `msg`, `eml`, `drawio`, and `vsdx`.
+- Legacy Microsoft formats are not generic binaries. `doc`, `xls`, `ppt`, `vsd`,
+  `mdb`, and related formats should use LibreOffice, Windows COM, or other local
+  adapters when available, and otherwise report `blocked_missing_dependency`.
+- Diagram formats should preserve structure where possible, not just OCR a
+  screenshot. Draw.io XML and VSDX zipped XML are high-priority structured
+  extractors.
+- Proprietary or unsafe formats still get metadata, hashes, duplicate/version
+  grouping, and optional sidecar extraction.
+- Cloud OCR, cloud transcription, and provider LLM calls are off by default.
+
+## Coverage Matrix
+
+| Family | Extensions and names | Target tier |
+| --- | --- | --- |
+| Plain text and notes | `txt`, `text`, `md`, `markdown`, `mdown`, `mkd`, `rst`, `adoc`, `asciidoc`, `org`, `tex`, `ltx`, `log`, `out`, `err`, `trace`, `readme`, `license`, `copying`, `changelog`, `todo`, `notes` | inline |
+| Code | `py`, `pyw`, `ipynb`, `js`, `mjs`, `cjs`, `ts`, `tsx`, `jsx`, `java`, `kt`, `kts`, `scala`, `cs`, `fs`, `fsx`, `vb`, `c`, `h`, `cpp`, `cc`, `cxx`, `hpp`, `go`, `rs`, `rb`, `php`, `swift`, `m`, `mm`, `r`, `R`, `jl`, `lua`, `pl`, `pm`, `dart`, `ex`, `exs`, `erl`, `hrl`, `clj`, `cljs`, `hs`, `ml`, `mli`, `nim`, `zig`, `sol` | inline |
+| Shell and automation | `sh`, `bash`, `zsh`, `fish`, `ps1`, `psm1`, `psd1`, `bat`, `cmd`, `vbs`, `vba`, `ahk`, `applescript`, `makefile`, `mk`, `justfile`, `taskfile`, `psql`, `sql` | inline |
+| Config and manifests | `json`, `jsonc`, `json5`, `yaml`, `yml`, `toml`, `ini`, `cfg`, `conf`, `properties`, `env.example`, `xml`, `plist`, `editorconfig`, `gitignore`, `dockerignore`, `npmrc`, `prettierrc`, `eslintrc`, `babelrc`, `browserslistrc` | inline |
+| Developer specs | `openapi.json`, `openapi.yaml`, `swagger.json`, `graphql`, `gql`, `proto`, `thrift`, `avsc`, `raml`, `wsdl`, `xsd`, `dtd`, `patch`, `diff`, `rej` | inline/local_parser |
+| Documents | `pdf`, `doc`, `dot`, `docx`, `docm`, `dotx`, `dotm`, `rtf`, `odt`, `ott`, `fodt`, `sxw`, `abw`, `wpd`, `wps`, `pages`, `xps`, `oxps`, `djvu`, `ps`, `eps`, `chm` | local_parser/local_tool |
+| Publications and ebooks | `epub`, `mobi`, `azw`, `azw3`, `fb2`, `lit`, `cbz`, `cbr`, `cb7`, `cbt` | local_parser/local_tool |
+| Scanned documents | image-only `pdf`, scanned `tiff`, scanned `png/jpg`, mixed text/OCR PDFs | local_parser plus enriched OCR |
+| Spreadsheets | `csv`, `tsv`, `psv`, `ssv`, `xlsx`, `xlsm`, `xltx`, `xltm`, `xls`, `xlt`, `xlsb`, `ods`, `ots`, `fods`, `numbers`, `dif`, `slk`, `gnumeric` | inline/local_parser/local_tool |
+| Presentations | `pptx`, `pptm`, `potx`, `potm`, `ppsx`, `ppsm`, `ppt`, `pot`, `pps`, `odp`, `otp`, `fodp`, `key` | local_parser/local_tool |
+| Draw.io and diagrams | `drawio`, `dio`, `drawio.svg`, `drawio.png`, embedded draw.io XML, `mmd`, `mermaid`, `puml`, `plantuml`, `iuml`, `dot`, `gv`, `graphml`, `gml`, `cyjs`, `bpmn`, `dmn`, `excalidraw`, `xmind`, `mm`, `mmap` | local_parser/enriched |
+| Visio | `vsdx`, `vsdm`, `vssx`, `vssm`, `vstx`, `vstm`, `vdx`, `vsd`, `vss`, `vst` | local_parser/local_tool |
+| Images and raster assets | `png`, `jpg`, `jpeg`, `jpe`, `webp`, `gif`, `tif`, `tiff`, `bmp`, `dib`, `heic`, `heif`, `avif`, `ico`, `icns`, `jp2`, `j2k`, `raw`, `cr2`, `nef`, `arw`, `dng` | metadata/local_parser/enriched |
+| Vector and design assets | `svg`, `ai`, `eps`, `pdf` vector pages, `psd`, `psb`, `xcf`, `afdesign`, `sketch`, `fig`, `xd`, `indd`, `idml`, `cdr` | metadata/local_tool/enriched |
+| Audio | `mp3`, `wav`, `m4a`, `aac`, `flac`, `ogg`, `oga`, `opus`, `wma`, `aiff`, `aif`, `amr`, `mid`, `midi` | metadata/local_tool/enriched |
+| Video | `mp4`, `m4v`, `mov`, `mkv`, `webm`, `avi`, `wmv`, `mpeg`, `mpg`, `ts`, `m2ts`, `mts`, `3gp`, `flv`, `ogv` | metadata/local_tool/enriched |
+| Subtitles and transcripts | `srt`, `vtt`, `ass`, `ssa`, `ttml`, `dfxp`, `sbv`, transcript `txt/md/json` sidecars | inline/local_parser |
+| Mail | `eml`, `msg`, `mbox`, `maildir`, `pst`, `ost`, RFC822 exports, MIME attachment trees | local_parser/local_tool |
+| Calendar and contacts | `ics`, `ical`, `ifb`, `vcf`, `vcard` | local_parser |
+| Chat and collaboration exports | Slack JSON/ZIP exports, Teams exports, Discord exports, Mattermost exports, Zoom/Webex/Meet transcripts, meeting chat logs, `har` browser captures | local_parser/container |
+| Structured data | `jsonl`, `ndjson`, `parquet`, `avro`, `orc`, `feather`, `arrow`, `xml`, `rdf`, `ttl`, `nt`, `nq`, `jsonld`, `hcl`, `tfvars` | local_parser |
+| Databases and data stores | `sqlite`, `sqlite3`, `db`, `duckdb`, `mdb`, `accdb`, `dbf`, `fdb`, `bak`, `dump`, `sql`, `sql.gz` | metadata/local_parser/local_tool |
+| BI and analytics | `pbix`, `pbit`, `twb`, `twbx`, `hyper`, `tdsx`, `qvw`, `qvf`, exported CSV/XLSX/PDF reports | metadata/local_tool |
+| Geospatial | `geojson`, `topojson`, `kml`, `kmz`, `gpx`, `shp`, `shx`, `dbf`, `prj`, `cpg`, `gpkg`, `mbtiles`, `qgs`, `qgz`, `tif`, `geotiff`, `las`, `laz`, `e57` | metadata/local_parser/local_tool |
+| CAD, BIM, and 3D | `dwg`, `dxf`, `dgn`, `ifc`, `ifczip`, `rvt`, `rfa`, `skp`, `step`, `stp`, `iges`, `igs`, `stl`, `obj`, `fbx`, `dae`, `3ds`, `blend`, `gltf`, `glb`, `usd`, `usda`, `usdc`, `usdz`, `ply` | metadata/local_tool |
+| Archives | `zip`, `7z`, `rar`, `tar`, `tgz`, `tar.gz`, `gz`, `bz2`, `xz`, `zst`, `lz4`, `cab`, `ar`, `cpio`, `iso`, `dmg` | container |
+| Package containers | `jar`, `war`, `ear`, `apk`, `ipa`, `nupkg`, `whl`, `egg`, `gem`, `crate`, `deb`, `rpm`, npm `tgz`, VSIX, browser extension packages | container/metadata |
+| Virtual disks and images | `vhd`, `vhdx`, `vmdk`, `qcow2`, `img`, `wim`, `esd` | metadata/local_tool |
+| Security and compliance | `sarif`, `spdx`, `cyclonedx`, `cdx.json`, `nessus`, `nmap`, `burp`, `zap`, `pcap`, `pcapng`, `evtx`, audit logs, vulnerability scan exports | local_parser/metadata |
+| Test and coverage | `junit.xml`, `trx`, `coverage.xml`, `cobertura.xml`, `lcov`, `gcov`, `profraw`, `profdata`, `tap`, `allure` exports | local_parser |
+| Observability and ops | application logs, syslog, journald exports, `har`, OpenTelemetry JSON, trace exports, metrics CSV/JSON, Kubernetes manifests, Helm charts, Terraform plans/state metadata | inline/local_parser/sensitive_metadata |
+| Scientific and ML | `rmd`, `qmd`, `mat`, `h5`, `hdf5`, `nc`, `netcdf`, `fits`, `npy`, `npz`, `pkl`, `pickle`, `joblib`, `onnx`, `pb`, `tflite`, `pt`, `pth`, `ckpt`, `safetensors`, `gguf` | metadata/local_parser |
+| Fonts | `ttf`, `otf`, `woff`, `woff2`, `eot` | metadata |
+| Executables and compiled artifacts | `exe`, `dll`, `msi`, `msp`, `sys`, `scr`, `com`, `elf`, `so`, `dylib`, `class`, `o`, `obj`, `pdb`, `wasm`, firmware images | sensitive_metadata |
+| Secrets and keys | `pem`, `key`, `crt`, `cer`, `pfx`, `p12`, `jks`, `keystore`, `kdbx`, `age`, `gpg`, `pgp`, `.env`, private config files | sensitive_metadata |
+| Unknown binaries | any unrecognized extension or signature | metadata |
+
+## Extraction Notes
+
+- `doc`, `xls`, and `ppt` should use local legacy Office adapters. On Windows,
+  host-agent extraction may use Office COM when installed; cross-platform
+  extraction should prefer LibreOffice or equivalent local tools.
+- `drawio`, `drawio.svg`, and `drawio.png` should parse embedded XML when present
+  and index page names, shapes, labels, connectors, and links.
+- `vsdx` and related modern Visio files are ZIP/XML containers and should be
+  parsed before falling back to rendered-image OCR. Legacy `vsd` can use a local
+  converter where available.
+- Archives and package containers must not expand recursively without limits.
+  Expansion must enforce maximum depth, total uncompressed bytes, file count,
+  path traversal protection, and per-root policy.
+- Secret-bearing formats should never have raw content indexed by default.
+  They may produce redacted metadata and audit entries only.

@@ -41,6 +41,9 @@
 - Broad file-type coverage through explicit support tiers: inline text extraction,
   local parser extraction, optional local external-tool extraction, local media
   enrichment, archive/container expansion when enabled, and metadata-only fallback.
+- Dedicated file-type coverage matrix in [file-type-coverage.md](file-type-coverage.md),
+  with common formats such as `doc`, `xls`, `ppt`, `drawio`, and `vsdx` treated
+  as explicit roadmap targets rather than incidental binaries.
 - File-type aware extraction roadmap:
   - plain text and notes: txt, md, markdown, rst, org, asciidoc, tex, log,
     changelog, license, readme, todo, ini, env examples, and other UTF text
