@@ -1,7 +1,9 @@
 param(
     [string]$InstallRoot = "D:\FluxLLMKB",
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
+    [string]$PythonExe = "",
     [switch]$SkipDashboardBuild,
+    [switch]$RecreateVenv,
     [switch]$RestartHostTasks
 )
 
@@ -12,6 +14,15 @@ $composePath = Join-Path $appRoot "docker-compose.yml"
 $appEnvPath = Join-Path $appRoot ".env"
 $privateEnvPath = Join-Path $InstallRoot "private\flux.env"
 $venvPython = Join-Path $appRoot ".venv\Scripts\python.exe"
+$venvRoot = Join-Path $appRoot ".venv"
+
+function Resolve-FluxPythonExe {
+    param([string]$InstallRoot, [string]$RequestedPython)
+    if ($RequestedPython) { return $RequestedPython }
+    $installedPython = Join-Path $InstallRoot "python\python.exe"
+    if (Test-Path $installedPython) { return $installedPython }
+    return "python"
+}
 
 if (-not (Test-Path $composePath)) {
     throw "Flux production runtime is not installed at $InstallRoot. Run install-flux.ps1 first."
@@ -27,6 +38,8 @@ try {
 if (-not $SkipDashboardBuild) {
     npm --prefix (Join-Path $SourceRoot "dashboard") run build
 }
+
+$resolvedPython = Resolve-FluxPythonExe -InstallRoot $InstallRoot -RequestedPython $PythonExe
 
 docker build -t "flux-llm-kb-api:$imageTag" -t "flux-llm-kb-api:local" $SourceRoot
 docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:$imageTag"
@@ -51,8 +64,11 @@ if (Test-Path $privateEnvPath) {
     }
 }
 
+if ($RecreateVenv -and (Test-Path $venvRoot)) {
+    Remove-Item -LiteralPath $venvRoot -Recurse -Force
+}
 if (-not (Test-Path $venvPython)) {
-    python -m venv (Join-Path $appRoot ".venv")
+    & $resolvedPython -m venv $venvRoot
 }
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install "$SourceRoot[api,corpus,mail]"

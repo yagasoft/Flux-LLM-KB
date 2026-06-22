@@ -4,6 +4,7 @@ param(
     [int]$ApiPort = 8765,
     [int]$PostgresPort = 5432,
     [int]$HostAgentPort = 8799,
+    [string]$PythonExe = "",
     [switch]$SkipDashboardBuild,
     [switch]$SkipScheduledTasks
 )
@@ -38,6 +39,14 @@ function Get-FluxGitSha {
         if ($sha) { return $sha }
     } catch {}
     return "local"
+}
+
+function Resolve-FluxPythonExe {
+    param([string]$InstallRoot, [string]$RequestedPython)
+    if ($RequestedPython) { return $RequestedPython }
+    $installedPython = Join-Path $InstallRoot "python\python.exe"
+    if (Test-Path $installedPython) { return $installedPython }
+    return "python"
 }
 
 function Write-FluxCompose {
@@ -183,6 +192,7 @@ foreach ($dir in @($InstallRoot, $appRoot, $privateRoot, $dataRoot, (Join-Path $
 }
 
 $imageTag = Get-FluxGitSha -Root $SourceRoot
+$resolvedPython = Resolve-FluxPythonExe -InstallRoot $InstallRoot -RequestedPython $PythonExe
 if (-not $SkipDashboardBuild) {
     npm --prefix (Join-Path $SourceRoot "dashboard") run build
 }
@@ -208,7 +218,7 @@ Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
 
 $venvPython = Join-Path $appRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $venvPython)) {
-    python -m venv (Join-Path $appRoot ".venv")
+    & $resolvedPython -m venv (Join-Path $appRoot ".venv")
 }
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install "$SourceRoot[api,corpus,mail]"
