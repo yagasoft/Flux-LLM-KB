@@ -17,7 +17,7 @@ from .migrations import load_migrations
 from .scoring import reciprocal_rank_fusion
 
 
-DEFAULT_DATABASE_URL = "postgresql://flux:flux@localhost:5432/flux_llm_kb"
+DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
 _MIGRATION_ADVISORY_LOCK_ID = 570_221_876_500_815
 
 

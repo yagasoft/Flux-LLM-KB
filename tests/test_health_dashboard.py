@@ -141,15 +141,16 @@ def test_dashboard_html_can_load_built_spa(tmp_path, monkeypatch):
 
 
 def test_doctor_summary_treats_gh_as_optional(monkeypatch):
+    monkeypatch.delenv("FLUX_KB_INSTALL_ROOT", raising=False)
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(health, "_docker_check", lambda **_kwargs: {"ok": True, "message": "ok", "required": True})
     monkeypatch.setattr(
         health,
         "_command_check",
-        lambda command, description, required=True: {
+        lambda command, description, **kwargs: {
             "ok": command != "gh",
             "message": f"{command} check",
-            "required": required,
+            "required": kwargs.get("required", True),
         },
     )
 
@@ -157,6 +158,20 @@ def test_doctor_summary_treats_gh_as_optional(monkeypatch):
 
     assert payload["checks"]["gh"]["ok"] is False
     assert payload["checks"]["gh"]["required"] is False
+    assert payload["summary"]["ok"] is True
+
+
+def test_doctor_summary_treats_host_owned_tools_as_ok_in_production(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "D:\\FluxLLMKB")
+    monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
+    monkeypatch.setattr(health.shutil, "which", lambda _command: None)
+
+    payload = doctor_payload()
+
+    assert payload["checks"]["docker"]["ok"] is True
+    assert payload["checks"]["docker"]["required"] is False
+    assert payload["checks"]["git"]["ok"] is True
+    assert payload["checks"]["git"]["required"] is False
     assert payload["summary"]["ok"] is True
 
 

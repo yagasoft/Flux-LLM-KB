@@ -20,14 +20,20 @@ DASHBOARD_INDEX = Path(__file__).resolve().parent / "dashboard_static" / "index.
 
 
 def doctor_payload() -> dict[str, Any]:
+    production_mode = bool(os.environ.get("FLUX_KB_INSTALL_ROOT"))
     checks = {
         "python": {
             "ok": sys.version_info >= (3, 11),
             "message": platform.python_version(),
             "required": True,
         },
-        "docker": _docker_check(required=False),
-        "git": _command_check("git", "Git source control", required=True),
+        "docker": _docker_check(required=False, production_mode=production_mode),
+        "git": _command_check(
+            "git",
+            "Git source control",
+            required=not production_mode,
+            production_mode=production_mode,
+        ),
         "gh": _command_check("gh", "GitHub CLI", required=False),
     }
     db_status = database.check_database()
@@ -177,8 +183,20 @@ def _global_glob_defaults() -> dict[str, list[str]]:
         return {"global_include": [], "global_exclude": []}
 
 
-def _command_check(command: str, description: str, *, required: bool = True) -> dict[str, Any]:
+def _command_check(
+    command: str,
+    description: str,
+    *,
+    required: bool = True,
+    production_mode: bool = False,
+) -> dict[str, Any]:
     path = shutil.which(command)
+    if production_mode and path is None and command in {"docker", "git"}:
+        return {
+            "ok": True,
+            "message": f"{description} is host-owned in production; not required inside the API container",
+            "required": False,
+        }
     return {
         "ok": path is not None,
         "message": path or f"{description} command not found",
@@ -186,9 +204,15 @@ def _command_check(command: str, description: str, *, required: bool = True) -> 
     }
 
 
-def _docker_check(*, required: bool = True) -> dict[str, Any]:
+def _docker_check(*, required: bool = True, production_mode: bool = False) -> dict[str, Any]:
     path = shutil.which("docker")
     if path is None:
+        if production_mode:
+            return {
+                "ok": True,
+                "message": "Docker is host-owned in production; not required inside the API container",
+                "required": False,
+            }
         return {"ok": False, "message": "Docker command not found", "required": required}
     try:
         result = subprocess.run(
