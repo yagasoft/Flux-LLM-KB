@@ -9,6 +9,7 @@ from .host_agent import (
     remote_status,
     remote_sync,
     remote_validate_path,
+    remote_file_action,
     validate_host_path,
 )
 from .health import (
@@ -27,7 +28,7 @@ def create_app():
         from fastapi import Body, FastAPI, HTTPException
         from fastapi.responses import HTMLResponse
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel, Field
+        from pydantic import BaseModel, ConfigDict, Field
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install REST support with `pip install -e .[api]`") from exc
 
@@ -121,6 +122,11 @@ def create_app():
     class OutlookHostSyncRequest(BaseModel):
         profile_name: str
 
+    class FileActionRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        action: str
+
     app = FastAPI(title="Flux-LLM-KB")
     service = KnowledgeService()
     dashboard_assets = Path(__file__).resolve().parent / "dashboard_static" / "assets"
@@ -199,6 +205,23 @@ def create_app():
         if chunk is None:
             raise HTTPException(status_code=404, detail="asset chunk not found")
         return chunk
+
+    @app.get("/api/results/{kind}/{result_id}")
+    def result_detail(kind: str, result_id: str):
+        from .result_details import result_detail as build_result_detail
+
+        try:
+            return build_result_detail(kind, result_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/corpus/assets/{asset_id}/actions")
+    def corpus_asset_action(asset_id: str, request: FileActionRequest = Body(...)):
+        if request.action not in {"open", "reveal"}:
+            return {"state": "not_allowed", "asset_id": asset_id, "action": request.action}
+        return host_agent_file_action(asset_id=asset_id, action=request.action)
 
     @app.post("/api/remember")
     def remember(request: RememberRequest = Body(...)):
@@ -539,6 +562,10 @@ def host_agent_backfill(
     root_name: str | None = None,
 ) -> dict:
     return remote_backfill(kind=kind, limit=limit, workers=workers, root_name=root_name)
+
+
+def host_agent_file_action(*, asset_id: str, action: str) -> dict:
+    return remote_file_action(asset_id=asset_id, action=action)
 
 
 def _validate_root_path(root_path_text: str) -> dict:

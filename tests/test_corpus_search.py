@@ -79,6 +79,70 @@ def test_service_search_formats_mail_manifest_results(monkeypatch):
     assert results[0]["excerpt"] == results[0]["summary"]
 
 
+def test_service_search_collapses_mail_spool_siblings(monkeypatch):
+    manifest = {
+        "export_id": "export-1",
+        "profile_name": "gmail-capture",
+        "subject": "Customer RFP",
+        "sender": "Sender <sender@example.com>",
+        "recipients": ["me@example.com"],
+        "source_folder": "FluxCapture",
+        "attachment_count": 1,
+    }
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5: [])
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks",
+        lambda query, limit=20: [
+            {
+                "id": "chunk-body",
+                "asset_id": "asset-body",
+                "title": "body.txt",
+                "summary": "Please review the Customer RFP",
+                "score": 0.060,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.4},
+                "source_path": "export-1/body.txt",
+                "duplicate_count": 0,
+                "trust_rank": 450,
+            },
+            {
+                "id": "chunk-manifest",
+                "asset_id": "asset-manifest",
+                "title": "manifest.json",
+                "summary": json.dumps(manifest),
+                "score": 0.050,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.3},
+                "source_path": "export-1/manifest.json",
+                "duplicate_count": 0,
+                "trust_rank": 450,
+            },
+            {
+                "id": "chunk-attachment",
+                "asset_id": "asset-attachment",
+                "title": "rfp.pdf",
+                "summary": "Customer RFP attachment",
+                "score": 0.040,
+                "streams": ["corpus_fuzzy"],
+                "raw_scores": {"corpus_fuzzy": 0.2},
+                "source_path": "export-1/attachments/rfp.pdf",
+                "duplicate_count": 0,
+                "trust_rank": 450,
+            },
+        ],
+    )
+
+    results = KnowledgeService().search("customer rfp", limit=5)
+
+    assert len(results) == 1
+    assert results[0]["logical_kind"] == "mail"
+    assert results[0]["title"] == "Mail: Customer RFP"
+    assert results[0]["source_path"] == "export-1/manifest.json"
+    assert results[0]["related_evidence_count"] == 2
+    assert results[0]["detail_ref"] == {"kind": "corpus_chunk", "id": "chunk-manifest"}
+
+
 def test_service_brief_uses_configured_token_budget(monkeypatch):
     observed = {}
 

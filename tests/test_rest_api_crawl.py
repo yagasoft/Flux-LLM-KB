@@ -334,3 +334,59 @@ def test_corpus_lookup_routes_return_assets_and_chunks(monkeypatch):
     assert asset.json()["id"] == "asset-1"
     assert chunk.status_code == 200
     assert chunk.json()["title"] == "Readme"
+
+
+def test_result_detail_route_returns_logical_payload(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr(
+        "flux_llm_kb.result_details.result_detail",
+        lambda kind, result_id: {
+            "logical_kind": "file",
+            "detail_ref": {"kind": kind, "id": result_id},
+            "asset_id": "asset-1",
+            "preview": {"text": "preview"},
+        },
+        raising=False,
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.get("/api/results/corpus_chunk/chunk-1")
+
+    assert response.status_code == 200
+    assert response.json()["detail_ref"] == {"kind": "corpus_chunk", "id": "chunk-1"}
+    assert response.json()["logical_kind"] == "file"
+
+
+def test_file_action_route_proxies_to_host_agent_without_path(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    captured = {}
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr(
+        "flux_llm_kb.rest_api.host_agent_file_action",
+        lambda **kwargs: captured.update(kwargs) or {"state": "opened", "asset_id": kwargs["asset_id"]},
+        raising=False,
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/corpus/assets/asset-1/actions", json={"action": "reveal"})
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "opened"
+    assert captured == {"asset_id": "asset-1", "action": "reveal"}
+
+
+def test_file_action_route_rejects_browser_supplied_path(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post(
+        "/api/corpus/assets/asset-1/actions",
+        json={"action": "open", "path": "E:\\Unsafe\\from-browser.txt"},
+    )
+
+    assert response.status_code == 422

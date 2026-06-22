@@ -160,11 +160,28 @@ const settings = [
 
 let mailSyncPayload: unknown;
 let searchPayload: unknown;
+let resultDetailPayload: unknown;
+let fileActionPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
     searchPayload = [{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }];
+    resultDetailPayload = {
+      logical_kind: "file",
+      title: "Dashboard Operations",
+      asset_id: "asset-1",
+      metadata: { path: "docs/dashboard.md", canonical_path: "E:/Flux Docs/docs/dashboard.md", status: "indexed" },
+      preview: { available: true, text: "dashboard search result", chunks: [] },
+      actions: {
+        copy_path: { available: true, path: "E:/Flux Docs/docs/dashboard.md" },
+        open: { available: true },
+        reveal: { available: true }
+      },
+      related_evidence: [],
+      provenance: []
+    };
+    fileActionPayload = { state: "opened", asset_id: "asset-1", action: "open" };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(health);
@@ -192,6 +209,8 @@ describe("Flux dashboard", () => {
       if (url === "/api/mail/sync") return json(mailSyncPayload);
       if (url === "/api/mail/oauth/gmail/start") return json({ status: "pending_user_authorization", authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?state=test" });
       if (url === "/api/search") return json(searchPayload);
+      if (url.startsWith("/api/results/")) return json(resultDetailPayload);
+      if (url.startsWith("/api/corpus/assets/") && url.endsWith("/actions")) return json(fileActionPayload);
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
       }
@@ -651,6 +670,161 @@ describe("Flux dashboard", () => {
 
     await user.click(screen.getByRole("button", { name: "View error ffprobe command not found" }));
     expect(screen.getByRole("dialog", { name: "Error detail" })).toHaveTextContent("ffprobe command not found");
+  });
+
+  test("clicking a mail search result opens a sanitized in-app mail detail viewer", async () => {
+    searchPayload = [
+      {
+        kind: "corpus_chunk",
+        logical_kind: "mail",
+        id: "chunk-mail",
+        title: "Mail: Customer RFP",
+        summary: "From Sender; folder FluxCapture; 1 attachment.",
+        source_path: "export-1/manifest.json",
+        detail_ref: { kind: "corpus_chunk", id: "chunk-mail" },
+        related_evidence_count: 2
+      }
+    ];
+    resultDetailPayload = {
+      logical_kind: "mail",
+      title: "Mail: Customer RFP",
+      mail: {
+        subject: "Customer RFP",
+        sender: "Sender <sender@example.com>",
+        recipients: ["me@example.com"],
+        received_at: "Tue, 23 Jun 2026 10:00:00 +0000",
+        profile_name: "gmail-capture",
+        source_folder: "FluxCapture",
+        post_process_state: "exported"
+      },
+      body: {
+        format: "html",
+        html_sanitized: '<p>Please <strong>review</strong> the RFP.</p>',
+        text: ""
+      },
+      attachments: [{ title: "rfp.pdf", path: "export-1/attachments/rfp.pdf", status: "metadata_only" }],
+      related_evidence: [{ title: "body.html", path: "export-1/body.html", relationship: "body" }],
+      provenance: [{ path: "export-1/manifest.json" }]
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.type(screen.getByLabelText("Dashboard search"), "customer rfp{enter}");
+    await user.click(await screen.findByRole("button", { name: /Mail: Customer RFP/ }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Mail: Customer RFP" });
+    expect(dialog).toHaveTextContent("Sender <sender@example.com>");
+    expect(dialog).toHaveTextContent("me@example.com");
+    expect(dialog).toHaveTextContent("gmail-capture");
+    expect(dialog).toHaveTextContent("FluxCapture");
+    expect(dialog).toHaveTextContent("Please review the RFP.");
+    expect(dialog).toHaveTextContent("rfp.pdf");
+    expect(dialog.innerHTML).not.toContain("onclick");
+    expect(dialog.innerHTML).not.toContain("<script");
+    expect(screen.queryByText("export-1/body.txt")).not.toBeInTheDocument();
+  });
+
+  test("file result detail previews text, copies path, and routes open and reveal actions", async () => {
+    const writeText = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText }
+    });
+    expect(window.navigator.clipboard?.writeText).toBe(writeText);
+    searchPayload = [
+      {
+        kind: "corpus_chunk",
+        logical_kind: "file",
+        id: "chunk-file",
+        asset_id: "asset-file",
+        title: "Project Plan",
+        excerpt: "Milestone details",
+        source_path: "plans/project-plan.md",
+        detail_ref: { kind: "corpus_chunk", id: "chunk-file" }
+      }
+    ];
+    resultDetailPayload = {
+      logical_kind: "file",
+      title: "Project Plan",
+      asset_id: "asset-file",
+      metadata: { path: "plans/project-plan.md", canonical_path: "E:/Flux Docs/plans/project-plan.md", status: "indexed" },
+      preview: { available: true, text: "Milestone details and owners.", chunks: [] },
+      actions: {
+        copy_path: { available: true, path: "E:/Flux Docs/plans/project-plan.md" },
+        open: { available: true },
+        reveal: { available: true }
+      },
+      related_evidence: [],
+      provenance: []
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.type(screen.getByLabelText("Dashboard search"), "project plan{enter}");
+    await user.click(await screen.findByRole("button", { name: /Project Plan/ }));
+
+    expect(await screen.findByRole("dialog", { name: "Project Plan" })).toHaveTextContent("Milestone details and owners.");
+    const copyButton = screen.getByRole("button", { name: "Copy path" });
+    expect(screen.getByText("E:/Flux Docs/plans/project-plan.md")).toBeInTheDocument();
+    expect(copyButton).toBeEnabled();
+    await user.click(copyButton);
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("E:/Flux Docs/plans/project-plan.md");
+    });
+    await user.click(screen.getByRole("button", { name: "Open with default app" }));
+    await user.click(screen.getByRole("button", { name: "Reveal in folder" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/corpus/assets/asset-file/actions",
+        expect.objectContaining({ method: "POST", body: JSON.stringify({ action: "open" }) })
+      );
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/corpus/assets/asset-file/actions",
+        expect.objectContaining({ method: "POST", body: JSON.stringify({ action: "reveal" }) })
+      );
+    });
+  });
+
+  test("file detail disables unavailable actions with readable reasons", async () => {
+    searchPayload = [
+      {
+        kind: "corpus_chunk",
+        logical_kind: "file",
+        id: "chunk-deleted",
+        asset_id: "asset-deleted",
+        title: "Deleted Proposal",
+        excerpt: "deleted",
+        source_path: "archive/deleted.docx",
+        detail_ref: { kind: "corpus_chunk", id: "chunk-deleted" }
+      }
+    ];
+    resultDetailPayload = {
+      logical_kind: "file",
+      title: "Deleted Proposal",
+      asset_id: "asset-deleted",
+      metadata: { path: "archive/deleted.docx", canonical_path: "E:/Flux Docs/archive/deleted.docx", status: "deleted" },
+      preview: { available: false, text: "", chunks: [] },
+      actions: {
+        copy_path: { available: true, path: "E:/Flux Docs/archive/deleted.docx" },
+        open: { available: false, disabled_reason: "Asset is deleted from the index." },
+        reveal: { available: false, disabled_reason: "Asset is deleted from the index." }
+      },
+      related_evidence: [],
+      provenance: []
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.type(screen.getByLabelText("Dashboard search"), "deleted proposal{enter}");
+    await user.click(await screen.findByRole("button", { name: /Deleted Proposal/ }));
+
+    expect(await screen.findByRole("dialog", { name: "Deleted Proposal" })).toHaveTextContent("No extracted text is available.");
+    expect(screen.getByRole("button", { name: "Open with default app" })).toBeDisabled();
+    expect(screen.getByText("Asset is deleted from the index.")).toBeInTheDocument();
   });
 });
 

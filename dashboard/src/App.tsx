@@ -4,9 +4,13 @@ import {
   BriefcaseBusiness,
   CheckCircle2,
   ChevronDown,
+  Copy,
   Clock3,
   Database,
+  ExternalLink,
+  FileText,
   Folder,
+  FolderOpen,
   Gauge,
   HeartPulse,
   Inbox,
@@ -14,6 +18,7 @@ import {
   ListFilter,
   Mail,
   MoreVertical,
+  Paperclip,
   Play,
   Plus,
   RefreshCcw,
@@ -140,14 +145,72 @@ type RetrievalPayload = {
 
 type SearchResult = {
   kind?: string;
+  logical_kind?: "file" | "mail" | "episode" | string;
   title?: string;
   excerpt?: string;
   summary?: string;
   score?: number;
   id?: string;
+  asset_id?: string;
+  chunk_id?: string;
+  mail_message_id?: string;
+  detail_ref?: { kind?: string; id?: string };
+  related_evidence_count?: number;
   source_path?: string;
   streams?: string[];
   raw_scores?: Record<string, number>;
+};
+
+type ResultAction = {
+  available?: boolean;
+  disabled_reason?: string;
+  path?: string;
+};
+
+type EvidenceItem = {
+  title?: string;
+  path?: string;
+  relationship?: string;
+  kind?: string;
+  status?: string;
+  asset_id?: string;
+  metadata?: Record<string, unknown>;
+};
+
+type ResultDetail = {
+  kind?: string;
+  id?: string;
+  logical_kind?: "file" | "mail" | "episode" | string;
+  title?: string;
+  asset_id?: string;
+  chunk_id?: string;
+  mail_message_id?: string;
+  metadata?: Record<string, unknown>;
+  preview?: { available?: boolean; text?: string; chunks?: Array<Record<string, unknown>> };
+  body?: { format?: string; html_sanitized?: string; text?: string };
+  mail?: {
+    subject?: string;
+    sender?: string;
+    recipients?: string[];
+    cc?: string[];
+    bcc?: string[];
+    received_at?: string;
+    sent_at?: string;
+    profile_name?: string;
+    source_folder?: string;
+    export_id?: string;
+    post_process_state?: string;
+  };
+  attachments?: EvidenceItem[];
+  related_evidence?: EvidenceItem[];
+  provenance?: EvidenceItem[];
+  actions?: Record<string, ResultAction>;
+};
+
+type FileActionResponse = {
+  state?: "opened" | "missing" | "deleted" | "locked" | "host_agent_offline" | "not_allowed";
+  action?: string;
+  asset_id?: string;
 };
 
 type MailSyncError = {
@@ -281,6 +344,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [resultDetail, setResultDetail] = useState<ResultDetail | null>(null);
+  const [resultDetailLoading, setResultDetailLoading] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
 
   async function load(options: { showLoading?: boolean } = {}) {
@@ -581,6 +646,57 @@ export default function App() {
     setActiveTab("retrieval");
   }
 
+  async function openSearchResult(result: SearchResult) {
+    const refKind = result.detail_ref?.kind ?? result.kind;
+    const refId = result.detail_ref?.id ?? result.id ?? result.chunk_id ?? result.asset_id ?? result.mail_message_id;
+    if (!refKind || !refId) {
+      setToast("This result does not expose a detail reference.");
+      return;
+    }
+    setResultDetail(null);
+    setResultDetailLoading(true);
+    try {
+      const detail = await fetchRequiredJson<ResultDetail>(`/api/results/${encodeURIComponent(refKind)}/${encodeURIComponent(refId)}`);
+      setResultDetail(detail);
+    } catch (error) {
+      setToast(`Could not load result detail: ${errorMessage(error)}`);
+    } finally {
+      setResultDetailLoading(false);
+    }
+  }
+
+  async function copyResultPath(detail: ResultDetail) {
+    const path = resultActionPath(detail, "copy_path") ?? stringFromUnknown(detail.metadata?.canonical_path) ?? stringFromUnknown(detail.metadata?.path);
+    if (!path) {
+      setToast("No canonical path is available for this result.");
+      return;
+    }
+    const clipboard = window.navigator.clipboard;
+    if (!clipboard?.writeText) {
+      setToast("Clipboard access is unavailable in this browser context.");
+      return;
+    }
+    try {
+      await clipboard.writeText(path);
+      setToast("Path copied.");
+    } catch (error) {
+      setToast(`Could not copy path: ${errorMessage(error)}`);
+    }
+  }
+
+  async function runResultFileAction(detail: ResultDetail, action: "open" | "reveal") {
+    if (!detail.asset_id) {
+      setToast("No indexed asset id is available for this result.");
+      return;
+    }
+    try {
+      const payload = await sendJson<FileActionResponse>(`/api/corpus/assets/${encodeURIComponent(detail.asset_id)}/actions`, "POST", { action });
+      setToast(fileActionToast(action, payload.state));
+    } catch (error) {
+      setToast(`File action failed: ${errorMessage(error)}`);
+    }
+  }
+
   const health = state.health;
   const runtime = health.runtime ?? {};
   const host = state.outlook.host ?? {};
@@ -740,7 +856,15 @@ export default function App() {
         )}
 
         {activeTab === "retrieval" && (
-          <RetrievalTab state={state} searchOpen={searchOpen} searchResults={searchResults} query={searchQuery} onClear={() => { setSearchOpen(false); setSearchResults([]); }} onErrorDetail={setErrorDetail} />
+          <RetrievalTab
+            state={state}
+            searchOpen={searchOpen}
+            searchResults={searchResults}
+            query={searchQuery}
+            onClear={() => { setSearchOpen(false); setSearchResults([]); }}
+            onErrorDetail={setErrorDetail}
+            onOpenResult={(result) => void openSearchResult(result)}
+          />
         )}
 
         {activeTab === "jobs" && <JobsTab state={state} onRefresh={() => void load()} />}
@@ -798,6 +922,16 @@ export default function App() {
           <p>{errorDetail}</p>
           <p className="muted">This error is reported by the shared health service and may represent an optional local extractor/tool dependency.</p>
         </InfoDialog>
+      )}
+
+      {(resultDetailLoading || resultDetail) && (
+        <ResultDetailDialog
+          detail={resultDetail}
+          loading={resultDetailLoading}
+          onClose={() => { setResultDetail(null); setResultDetailLoading(false); }}
+          onCopyPath={(detail) => void copyResultPath(detail)}
+          onFileAction={(detail, action) => void runResultFileAction(detail, action)}
+        />
       )}
 
       {debugOpen && (
@@ -1409,7 +1543,23 @@ function SettingsTab({ settings, restartRows, onEdit, onReset, onApply }: { sett
   );
 }
 
-function RetrievalTab({ state, searchOpen, searchResults, query, onClear, onErrorDetail }: { state: LoadState; searchOpen: boolean; searchResults: SearchResult[]; query: string; onClear: () => void; onErrorDetail: (error: string) => void }) {
+function RetrievalTab({
+  state,
+  searchOpen,
+  searchResults,
+  query,
+  onClear,
+  onErrorDetail,
+  onOpenResult
+}: {
+  state: LoadState;
+  searchOpen: boolean;
+  searchResults: SearchResult[];
+  query: string;
+  onClear: () => void;
+  onErrorDetail: (error: string) => void;
+  onOpenResult: (result: SearchResult) => void;
+}) {
   const retrieval = state.retrieval.retrieval ?? state.health.retrieval ?? {};
   return (
     <section className="tab-grid">
@@ -1426,12 +1576,15 @@ function RetrievalTab({ state, searchOpen, searchResults, query, onClear, onErro
         {searchResults.length > 0 ? (
           <div className="search-results">
             {searchResults.map((result, index) => (
-              <article key={`${result.title}-${index}`}>
+              <button className="search-result-card" key={searchResultKey(result, index)} type="button" onClick={() => onOpenResult(result)}>
                 <span>{searchResultMeta(result)}</span>
                 <strong>{result.title ?? result.id ?? "Untitled result"}</strong>
                 <p>{result.excerpt ?? result.summary ?? "No excerpt available."}</p>
                 {result.source_path && <code className="result-path" title={result.source_path}>{result.source_path}</code>}
-              </article>
+                {Boolean(result.related_evidence_count) && (
+                  <em>{result.related_evidence_count} related evidence item{result.related_evidence_count === 1 ? "" : "s"}</em>
+                )}
+              </button>
             ))}
           </div>
         ) : (
@@ -1453,8 +1606,162 @@ function RetrievalTab({ state, searchOpen, searchResults, query, onClear, onErro
   );
 }
 
+function ResultDetailDialog({
+  detail,
+  loading,
+  onClose,
+  onCopyPath,
+  onFileAction
+}: {
+  detail: ResultDetail | null;
+  loading: boolean;
+  onClose: () => void;
+  onCopyPath: (detail: ResultDetail) => void;
+  onFileAction: (detail: ResultDetail, action: "open" | "reveal") => void;
+}) {
+  const title = detail?.title ?? "Result detail";
+  const logicalKind = detail?.logical_kind ?? detail?.kind ?? "result";
+  return (
+    <div className="modal-backdrop top-layer">
+      <div className="modal result-detail-modal" role="dialog" aria-modal="true" aria-labelledby="result-detail-title">
+        <header>
+          <div className="result-detail-heading">
+            <span>{logicalKind}</span>
+            <h2 id="result-detail-title">{title}</h2>
+          </div>
+          <button type="button" aria-label="Close result detail" onClick={onClose}><X size={18} /></button>
+        </header>
+        {loading && !detail ? (
+          <div className="result-detail-body">
+            <p className="muted">Loading result detail...</p>
+          </div>
+        ) : detail?.logical_kind === "mail" ? (
+          <MailResultDetail detail={detail} />
+        ) : (
+          <FileResultDetail detail={detail ?? {}} onCopyPath={onCopyPath} onFileAction={onFileAction} />
+        )}
+        <footer>
+          <button className="small-primary" type="button" onClick={onClose}>Close</button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function MailResultDetail({ detail }: { detail: ResultDetail }) {
+  const mail = detail.mail ?? {};
+  return (
+    <div className="result-detail-body">
+      <div className="detail-grid">
+        <DetailField label="From" value={mail.sender} />
+        <DetailField label="To" value={mail.recipients?.join(", ")} />
+        <DetailField label="Received" value={mail.received_at ?? mail.sent_at} />
+        <DetailField label="Profile" value={mail.profile_name} />
+        <DetailField label="Folder" value={mail.source_folder} />
+        <DetailField label="Export state" value={mail.post_process_state} />
+      </div>
+      <section className="result-section">
+        <h3>Body</h3>
+        {detail.body?.html_sanitized ? (
+          <div className="mail-body" dangerouslySetInnerHTML={{ __html: detail.body.html_sanitized }} />
+        ) : detail.body?.text ? (
+          <pre className="result-preview">{detail.body.text}</pre>
+        ) : (
+          <p className="muted">No readable body is available.</p>
+        )}
+      </section>
+      <EvidenceList title="Attachments" empty="No attachments." items={detail.attachments ?? []} icon={<Paperclip size={15} />} />
+      <EvidenceList title="Related Evidence" empty="No related implementation files." items={detail.related_evidence ?? []} icon={<Archive size={15} />} />
+      <EvidenceList title="Provenance" empty="No provenance rows." items={detail.provenance ?? []} icon={<FileText size={15} />} />
+    </div>
+  );
+}
+
+function FileResultDetail({
+  detail,
+  onCopyPath,
+  onFileAction
+}: {
+  detail: ResultDetail;
+  onCopyPath: (detail: ResultDetail) => void;
+  onFileAction: (detail: ResultDetail, action: "open" | "reveal") => void;
+}) {
+  const copyAvailable = actionAvailable(detail, "copy_path");
+  const openAvailable = actionAvailable(detail, "open") && Boolean(detail.asset_id);
+  const revealAvailable = actionAvailable(detail, "reveal") && Boolean(detail.asset_id);
+  const disabledReasons = uniqueActionReasons(detail);
+  const canonicalPath = resultActionPath(detail, "copy_path") ?? stringFromUnknown(detail.metadata?.canonical_path) ?? stringFromUnknown(detail.metadata?.path);
+  return (
+    <div className="result-detail-body">
+      <div className="detail-grid">
+        <DetailField label="Path" value={canonicalPath} />
+        <DetailField label="Status" value={stringFromUnknown(detail.metadata?.status)} />
+        <DetailField label="Asset id" value={detail.asset_id} />
+        <DetailField label="Chunk id" value={detail.chunk_id} />
+      </div>
+      <div className="file-action-row">
+        <button className="ghost-action compact" type="button" disabled={!copyAvailable} title={actionDisabledReason(detail, "copy_path")} onClick={() => onCopyPath(detail)}>
+          <Copy size={15} /> Copy path
+        </button>
+        <button className="ghost-action compact" type="button" disabled={!openAvailable} title={actionDisabledReason(detail, "open")} onClick={() => onFileAction(detail, "open")}>
+          <ExternalLink size={15} /> Open with default app
+        </button>
+        <button className="ghost-action compact" type="button" disabled={!revealAvailable} title={actionDisabledReason(detail, "reveal")} onClick={() => onFileAction(detail, "reveal")}>
+          <FolderOpen size={15} /> Reveal in folder
+        </button>
+      </div>
+      {disabledReasons.map((reason) => <p className="action-disabled-reason" key={reason}>{reason}</p>)}
+      <section className="result-section">
+        <h3>Preview</h3>
+        {detail.preview?.available && detail.preview.text ? (
+          <pre className="result-preview">{detail.preview.text}</pre>
+        ) : (
+          <p className="muted">No extracted text is available.</p>
+        )}
+      </section>
+      <EvidenceList title="Related Evidence" empty="No related evidence." items={detail.related_evidence ?? []} icon={<Archive size={15} />} />
+      <EvidenceList title="Provenance" empty="No provenance rows." items={detail.provenance ?? []} icon={<FileText size={15} />} />
+    </div>
+  );
+}
+
+function DetailField({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value || "-"}</strong>
+    </div>
+  );
+}
+
+function EvidenceList({ title, empty, items, icon }: { title: string; empty: string; items: EvidenceItem[]; icon: ReactNode }) {
+  return (
+    <section className="result-section">
+      <h3>{title}</h3>
+      {items.length > 0 ? (
+        <div className="evidence-list">
+          {items.map((item, index) => (
+            <div key={`${item.path ?? item.title ?? "evidence"}-${index}`}>
+              {icon}
+              <div>
+                <strong>{item.title ?? item.path ?? "Evidence"}</strong>
+                {item.path && <code>{item.path}</code>}
+                {(item.relationship || item.status || item.kind) && (
+                  <span>{[item.relationship, item.status, item.kind].filter(Boolean).join(" - ")}</span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="muted">{empty}</p>
+      )}
+    </section>
+  );
+}
+
 function searchResultMeta(result: SearchResult): string {
-  const kind = result.kind ?? "result";
+  const kind = result.logical_kind ?? result.kind ?? "result";
   if (result.streams?.length) {
     return `${kind} - ${result.streams.map(prettyStreamName).join(", ")}`;
   }
@@ -1462,6 +1769,10 @@ function searchResultMeta(result: SearchResult): string {
     return `${kind} - score ${result.score.toFixed(3)}`;
   }
   return kind;
+}
+
+function searchResultKey(result: SearchResult, index: number): string {
+  return result.detail_ref?.id ?? result.id ?? result.asset_id ?? result.mail_message_id ?? `${result.title ?? "result"}-${index}`;
 }
 
 function prettyStreamName(value: string): string {
@@ -1922,6 +2233,15 @@ async function sendJson<T>(url: string, method: "POST" | "PUT" | "PATCH" | "DELE
   return await response.json();
 }
 
+async function fetchRequiredJson<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw new Error(formatApiError("GET", url, response.status, response.statusText, details));
+  }
+  return await response.json();
+}
+
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1980,6 +2300,42 @@ function toastTone(message: string): "success" | "warning" | "error" {
     return "warning";
   }
   return "success";
+}
+
+function fileActionToast(action: "open" | "reveal", state?: FileActionResponse["state"]) {
+  const label = action === "open" ? "Open" : "Reveal";
+  if (state === "opened") return `${label} request opened.`;
+  if (state === "missing") return `${label} request could not find the file.`;
+  if (state === "deleted") return `${label} request is unavailable because the asset is deleted from the index.`;
+  if (state === "locked") return `${label} request could not access the file because it is locked.`;
+  if (state === "host_agent_offline") return `${label} request cannot run because the host agent is offline.`;
+  if (state === "not_allowed") return `${label} request was rejected for this indexed asset.`;
+  return `${label} request finished with state ${state ?? "unknown"}.`;
+}
+
+function actionAvailable(detail: ResultDetail, action: string) {
+  const availability = detail.actions?.[action];
+  if (!availability) return false;
+  return availability.available !== false;
+}
+
+function actionDisabledReason(detail: ResultDetail, action: string) {
+  const availability = detail.actions?.[action];
+  if (!availability) return "Action is not available for this result.";
+  if (availability.available !== false) return "";
+  return availability.disabled_reason ?? "Action is not available for this result.";
+}
+
+function resultActionPath(detail: ResultDetail, action: string) {
+  return stringFromUnknown(detail.actions?.[action]?.path);
+}
+
+function uniqueActionReasons(detail: ResultDetail) {
+  return Array.from(new Set(["copy_path", "open", "reveal"].map((action) => actionDisabledReason(detail, action)).filter(Boolean)));
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function StatusChip({ label, ok }: { label: string; ok?: boolean }) {

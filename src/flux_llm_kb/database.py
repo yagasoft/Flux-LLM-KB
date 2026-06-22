@@ -209,7 +209,7 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
 
             cur.execute(
                 """
-                SELECT c.id::text, c.title, c.body, a.path,
+                SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                        (
                            SELECT count(*)
                            FROM source_assets duplicate
@@ -233,7 +233,7 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
 
             cur.execute(
                 """
-                SELECT c.id::text, c.title, c.body, a.path,
+                SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                        (
                            SELECT count(*)
                            FROM source_assets duplicate
@@ -257,7 +257,7 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
 
             cur.execute(
                 """
-                SELECT c.id::text, c.title, c.body, a.path,
+                SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                        (
                            SELECT count(*)
                            FROM source_assets duplicate
@@ -286,7 +286,7 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
             if details:
                 cur.execute(
                     """
-                    SELECT c.id::text, c.title, c.body, a.path,
+                    SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                            (
                                SELECT count(*)
                                FROM source_assets duplicate
@@ -316,6 +316,7 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                 "score": item.score,
                 "streams": list(item.streams),
                 "raw_scores": result["raw_scores"],
+                "asset_id": result["asset_id"],
                 "source_path": result["source_path"],
                 "duplicate_count": result["duplicate_count"],
                 "trust_rank": result["trust_rank"],
@@ -1559,6 +1560,218 @@ def get_asset_chunk(chunk_id: str, *, url: str | None = None) -> dict[str, Any] 
             }
 
 
+def get_asset_chunk_detail(chunk_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id::text, c.asset_id::text, c.chunk_index, c.title, c.body,
+                       c.modality, c.locator, c.token_estimate,
+                       a.path, a.extraction_status, a.deleted_at, r.name, r.root_path
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE c.id = %s
+                """,
+                (chunk_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "asset_id": row[1],
+                "chunk_index": row[2],
+                "title": row[3],
+                "body": row[4],
+                "modality": row[5],
+                "locator": row[6],
+                "token_estimate": row[7],
+                "asset_path": row[8],
+                "asset_status": "deleted" if row[10] else row[9],
+                "deleted_at": row[10].isoformat() if row[10] else None,
+                "root_name": row[11],
+                "root_path": row[12],
+            }
+
+
+def get_source_asset_detail(asset_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id::text, r.name, r.root_path, a.path, a.uri, a.file_kind,
+                       a.mime_type, a.extension, a.size_bytes, a.extraction_status,
+                       a.canonical_asset_id::text,
+                       (
+                           SELECT count(*)
+                           FROM source_assets duplicate
+                           WHERE duplicate.canonical_asset_id = a.id
+                             AND duplicate.deleted_at IS NULL
+                       ) AS duplicate_count,
+                       a.last_seen_at, a.indexed_at, a.deleted_at, a.metadata, r.metadata
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE a.id = %s
+                """,
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            asset = _source_asset_detail_row(row)
+            asset["chunks"] = _asset_chunk_details(cur, asset_id)
+            return asset
+
+
+def get_source_asset_for_file_action(asset_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id::text, r.root_path, a.path, a.extraction_status,
+                       a.deleted_at, a.metadata, r.metadata
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE a.id = %s
+                """,
+                (asset_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "root_path": row[1],
+                "path": row[2],
+                "status": "deleted" if row[4] else row[3],
+                "deleted_at": row[4].isoformat() if row[4] else None,
+                "metadata": row[5] or {},
+                "root_metadata": row[6] or {},
+            }
+
+
+def list_related_source_assets(asset_id: str, *, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.id::text, r.name, r.root_path, a.path, a.uri, a.file_kind,
+                       a.mime_type, a.extension, a.size_bytes, a.extraction_status,
+                       a.canonical_asset_id::text, 0 AS duplicate_count,
+                       a.last_seen_at, a.indexed_at, a.deleted_at, a.metadata, r.metadata
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE a.id <> %s
+                  AND (
+                      a.metadata->>'parent_asset_id' = %s
+                      OR a.metadata->>'container_asset_id' = %s
+                      OR a.metadata->>'logical_parent_asset_id' = %s
+                  )
+                ORDER BY a.path
+                LIMIT 100
+                """,
+                (asset_id, asset_id, asset_id, asset_id),
+            )
+            return [_source_asset_detail_row(row) for row in cur.fetchall()]
+
+
+def list_mail_export_assets(export_id: str, *, root_name: str | None = None, url: str | None = None) -> list[dict[str, Any]]:
+    assets = list_source_assets(root_name=root_name, path=f"{export_id}/", limit=200, url=url)
+    related = [
+        asset
+        for asset in assets
+        if str(asset.get("path") or "").replace("\\", "/").startswith(f"{export_id}/")
+    ]
+    return [
+        detail
+        for asset in related
+        if (detail := get_source_asset_detail(asset["id"], url=url)) is not None
+    ]
+
+
+def get_mail_message(mail_message_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT m.id::text, p.name, p.source_type, m.source_message_id,
+                       m.source_folder, m.internet_message_id, m.content_hash,
+                       m.export_id, m.export_state, m.error, m.received_at,
+                       m.exported_at, m.metadata
+                FROM mail_messages m
+                JOIN mail_profiles p ON p.id = m.profile_id
+                WHERE m.id = %s
+                """,
+                (mail_message_id,),
+            )
+            row = cur.fetchone()
+            return _mail_message_detail_row(row) if row else None
+
+
+def get_mail_message_by_export_id(
+    export_id: str,
+    *,
+    profile_name: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    filters = ["m.export_id = %s"]
+    params: list[Any] = [export_id]
+    if profile_name:
+        filters.append("p.name = %s")
+        params.append(profile_name)
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT m.id::text, p.name, p.source_type, m.source_message_id,
+                       m.source_folder, m.internet_message_id, m.content_hash,
+                       m.export_id, m.export_state, m.error, m.received_at,
+                       m.exported_at, m.metadata
+                FROM mail_messages m
+                JOIN mail_profiles p ON p.id = m.profile_id
+                WHERE {" AND ".join(filters)}
+                ORDER BY m.updated_at DESC
+                LIMIT 1
+                """,
+                tuple(params),
+            )
+            row = cur.fetchone()
+            return _mail_message_detail_row(row) if row else None
+
+
+def get_episode_detail(episode_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, title, summary, source_kind, metadata, created_at, updated_at
+                FROM episodes
+                WHERE id = %s
+                """,
+                (episode_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "title": row[1],
+                "summary": row[2],
+                "source_kind": row[3],
+                "metadata": row[4] or {},
+                "created_at": row[5].isoformat() if row[5] else None,
+                "updated_at": row[6].isoformat() if row[6] else None,
+            }
+
+
 def get_runtime_setting(key: str, *, url: str | None = None) -> dict[str, Any] | None:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -2555,15 +2768,16 @@ def _add_ranked_corpus_rows(
         detail = details.setdefault(
             item_id,
             {
-                "title": row[1],
-                "summary": row[2],
-                "source_path": row[3],
-                "duplicate_count": int(row[4] or 0),
-                "trust_rank": int(row[5] or 500),
+                "asset_id": row[1],
+                "title": row[2],
+                "summary": row[3],
+                "source_path": row[4],
+                "duplicate_count": int(row[5] or 0),
+                "trust_rank": int(row[6] or 500),
                 "raw_scores": {},
             },
         )
-        detail["raw_scores"][stream] = float(row[6] or 0.0)
+        detail["raw_scores"][stream] = float(row[7] or 0.0)
 
 
 def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -2611,6 +2825,73 @@ def _source_asset_lookup_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "last_seen_at": row[11].isoformat() if row[11] else None,
         "indexed_at": row[12].isoformat() if row[12] else None,
         "metadata": row[13] or {},
+    }
+
+
+def _source_asset_detail_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "root_name": row[1],
+        "root_path": row[2],
+        "path": row[3],
+        "uri": row[4],
+        "file_kind": row[5],
+        "mime_type": row[6],
+        "extension": row[7],
+        "size_bytes": row[8],
+        "status": "deleted" if row[14] else row[9],
+        "canonical_asset_id": row[10],
+        "is_duplicate": row[10] is not None,
+        "duplicate_count": int(row[11] or 0),
+        "last_seen_at": row[12].isoformat() if row[12] else None,
+        "indexed_at": row[13].isoformat() if row[13] else None,
+        "deleted_at": row[14].isoformat() if row[14] else None,
+        "metadata": row[15] or {},
+        "root_metadata": row[16] or {},
+    }
+
+
+def _asset_chunk_details(cur: Any, asset_id: str) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id::text, chunk_index, title, body, modality, locator, token_estimate, metadata
+        FROM asset_chunks
+        WHERE asset_id = %s
+        ORDER BY chunk_index
+        LIMIT 200
+        """,
+        (asset_id,),
+    )
+    return [
+        {
+            "id": row[0],
+            "chunk_index": row[1],
+            "title": row[2],
+            "body": row[3],
+            "modality": row[4],
+            "locator": row[5],
+            "token_estimate": row[6],
+            "metadata": row[7] or {},
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def _mail_message_detail_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "profile_name": row[1],
+        "source_type": row[2],
+        "source_message_id": row[3],
+        "source_folder": row[4],
+        "internet_message_id": row[5],
+        "content_hash": row[6],
+        "export_id": row[7],
+        "export_state": row[8],
+        "error": row[9],
+        "received_at": row[10].isoformat() if row[10] else None,
+        "exported_at": row[11].isoformat() if row[11] else None,
+        "metadata": row[12] or {},
     }
 
 

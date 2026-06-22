@@ -33,7 +33,7 @@ def collapse_version_families(items: list[dict[str, Any]], *, limit: int) -> lis
     families: dict[str, list[dict[str, Any]]] = {}
     passthrough: list[dict[str, Any]] = []
     for item in items:
-        if item.get("kind") != "corpus_chunk" or not item.get("source_path"):
+        if item.get("logical_kind") == "mail" or item.get("kind") != "corpus_chunk" or not item.get("source_path"):
             passthrough.append(item)
             continue
         key = document_family_key(str(item["source_path"]), title=str(item.get("title") or ""))

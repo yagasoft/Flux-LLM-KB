@@ -125,6 +125,156 @@ def test_remote_backfill_allows_host_root_processing(monkeypatch):
     ]
 
 
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
+def test_host_file_action_endpoint_rejects_browser_supplied_path(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(host_agent, "perform_file_action", lambda **_kwargs: {"state": "opened"})
+    client = TestClient(host_agent.create_app())
+
+    response = client.post(
+        "/file-actions",
+        json={"asset_id": "asset-1", "action": "open", "path": "E:\\Unsafe\\from-browser.txt"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_host_file_action_rejects_unknown_asset(monkeypatch):
+    audits: list[dict] = []
+    monkeypatch.setattr(host_agent.database, "get_source_asset_for_file_action", lambda asset_id: None, raising=False)
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    result = host_agent.perform_file_action(asset_id="missing-asset", action="open")
+
+    assert result["state"] == "not_allowed"
+    assert audits[0]["event_type"] == "host.file_action"
+    assert audits[0]["details"]["state"] == "not_allowed"
+
+
+def test_host_file_action_reports_deleted_asset(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        host_agent.database,
+        "get_source_asset_for_file_action",
+        lambda asset_id: {
+            "id": asset_id,
+            "root_path": str(tmp_path),
+            "path": "deleted.txt",
+            "deleted_at": "2026-06-23T00:00:00+00:00",
+            "status": "deleted",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **_kwargs: None)
+
+    result = host_agent.perform_file_action(asset_id="asset-1", action="reveal")
+
+    assert result["state"] == "deleted"
+
+
+def test_host_file_action_reports_missing_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        host_agent.database,
+        "get_source_asset_for_file_action",
+        lambda asset_id: {
+            "id": asset_id,
+            "root_path": str(tmp_path),
+            "path": "missing.txt",
+            "deleted_at": None,
+            "status": "indexed",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **_kwargs: None)
+
+    result = host_agent.perform_file_action(asset_id="asset-1", action="open")
+
+    assert result["state"] == "missing"
+
+
+def test_host_file_action_rejects_asset_path_outside_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        host_agent.database,
+        "get_source_asset_for_file_action",
+        lambda asset_id: {
+            "id": asset_id,
+            "root_path": str(tmp_path),
+            "path": "../outside.txt",
+            "deleted_at": None,
+            "status": "indexed",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **_kwargs: None)
+
+    result = host_agent.perform_file_action(asset_id="asset-1", action="open")
+
+    assert result["state"] == "not_allowed"
+
+
+def test_host_file_action_opens_known_asset_and_audits(monkeypatch, tmp_path):
+    target = tmp_path / "known.txt"
+    target.write_text("known", encoding="utf-8")
+    launched: list[str] = []
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        host_agent.database,
+        "get_source_asset_for_file_action",
+        lambda asset_id: {
+            "id": asset_id,
+            "root_path": str(tmp_path),
+            "path": "known.txt",
+            "deleted_at": None,
+            "status": "indexed",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent, "_launch_default_app", lambda path: launched.append(str(path)), raising=False)
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    result = host_agent.perform_file_action(asset_id="asset-1", action="open")
+
+    assert result["state"] == "opened"
+    assert launched == [str(target.resolve())]
+    assert audits[0]["details"]["state"] == "opened"
+
+
+def test_host_file_action_reports_locked_when_os_denies_open(monkeypatch, tmp_path):
+    target = tmp_path / "locked.txt"
+    target.write_text("locked", encoding="utf-8")
+    monkeypatch.setattr(
+        host_agent.database,
+        "get_source_asset_for_file_action",
+        lambda asset_id: {
+            "id": asset_id,
+            "root_path": str(tmp_path),
+            "path": "locked.txt",
+            "deleted_at": None,
+            "status": "indexed",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent, "_launch_default_app", lambda path: (_ for _ in ()).throw(PermissionError("locked")), raising=False)
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **_kwargs: None)
+
+    result = host_agent.perform_file_action(asset_id="asset-1", action="open")
+
+    assert result["state"] == "locked"
+
+
+def test_remote_file_action_reports_host_agent_offline(monkeypatch):
+    def fake_request_json(*_args, **_kwargs):
+        raise host_agent.HostAgentClientError("connection refused")
+
+    monkeypatch.setattr(host_agent, "_request_json", fake_request_json)
+
+    result = host_agent.remote_file_action(asset_id="asset-1", action="open", agent_url="http://127.0.0.1:8799")
+
+    assert result["state"] == "host_agent_offline"
+
+
 def test_host_agent_watcher_loop_records_heartbeat_and_syncs_changed_file(monkeypatch, tmp_path):
     heartbeats: list[str] = []
     watch_events: list[str] = []

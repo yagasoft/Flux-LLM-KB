@@ -13,7 +13,7 @@ import time
 from typing import Any
 from urllib import error, request
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from . import database
 from .processes import run_no_window
@@ -42,6 +42,13 @@ class BackfillRequest(BaseModel):
     limit: int = 10
     workers: int = 1
     root_name: str | None = None
+
+
+class FileActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    action: str
 
 
 @dataclass(frozen=True)
@@ -128,6 +135,35 @@ def browse_folder() -> dict[str, Any]:
     if not selected:
         return {"status": "cancelled", "path": None}
     return {"status": "selected", "path": selected}
+
+
+def perform_file_action(*, asset_id: str, action: str) -> dict[str, Any]:
+    if action not in {"open", "reveal"}:
+        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed")
+
+    asset = database.get_source_asset_for_file_action(asset_id)
+    if asset is None:
+        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed")
+    if asset.get("deleted_at") or asset.get("status") == "deleted":
+        return _file_action_result(asset_id=asset_id, action=action, state="deleted", asset=asset)
+
+    target = _resolve_known_asset_path(asset)
+    if target is None:
+        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed", asset=asset)
+    if not target.exists():
+        return _file_action_result(asset_id=asset_id, action=action, state="missing", asset=asset, target=target)
+
+    try:
+        if action == "open":
+            _launch_default_app(target)
+        else:
+            _reveal_in_folder(target)
+    except FileNotFoundError:
+        return _file_action_result(asset_id=asset_id, action=action, state="missing", asset=asset, target=target)
+    except (PermissionError, OSError) as exc:
+        state = "locked" if _is_locked_error(exc) else "not_allowed"
+        return _file_action_result(asset_id=asset_id, action=action, state=state, asset=asset, target=target, error=str(exc))
+    return _file_action_result(asset_id=asset_id, action=action, state="opened", asset=asset, target=target)
 
 
 class HostAgentWatcherLoop:
@@ -328,6 +364,10 @@ def create_app(*, start_watcher: bool = False):
     def browse():
         return browse_folder()
 
+    @app.post("/file-actions")
+    def file_action(req: FileActionRequest = Body(...)):
+        return perform_file_action(asset_id=req.asset_id, action=req.action)
+
     @app.post("/crawl/sync")
     def crawl_sync(req: SyncRequest = Body(...)):
         return _service().sync_corpus(root_name=req.root_name, path=req.path, dry_run=req.dry_run)
@@ -438,6 +478,22 @@ def remote_backfill(
         return {"status": "host_agent_offline", "message": str(exc), "root_name": root_name}
 
 
+def remote_file_action(
+    *,
+    asset_id: str,
+    action: str,
+    agent_url: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return _request_json(
+            "POST",
+            f"{_agent_url(agent_url)}/file-actions",
+            {"asset_id": asset_id, "action": action},
+        )
+    except HostAgentClientError as exc:
+        return {"state": "host_agent_offline", "message": str(exc), "asset_id": asset_id, "action": action}
+
+
 def path_requires_host_agent(path: str) -> bool:
     style = _path_style(path)
     if style in {"windows_drive", "windows_unc"} and platform.system() != "Windows":
@@ -517,6 +573,91 @@ def _is_host_agent_root(root: dict[str, Any]) -> bool:
     if metadata.get("host_access") == "host_agent":
         return True
     return _path_style(str(root.get("root_path") or "")) in {"windows_drive", "windows_unc"}
+
+
+def _resolve_known_asset_path(asset: dict[str, Any]) -> Path | None:
+    root_text = str(asset.get("root_path") or "").strip()
+    relative_text = str(asset.get("path") or "").strip()
+    if not root_text or not relative_text or _path_style(relative_text) != "relative":
+        return None
+    try:
+        root = Path(root_text).expanduser().resolve()
+        target = (root / PurePosixPath(relative_text).as_posix()).resolve()
+    except Exception:
+        return None
+    try:
+        if target != root and not target.is_relative_to(root):
+            return None
+    except ValueError:
+        return None
+    return target
+
+
+def _file_action_result(
+    *,
+    asset_id: str,
+    action: str,
+    state: str,
+    asset: dict[str, Any] | None = None,
+    target: Path | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    details = {
+        "asset_id": asset_id,
+        "action": action,
+        "state": state,
+        "path": str(asset.get("path")) if asset else None,
+        "target_path": str(target) if target else None,
+        "error": error,
+    }
+    database.record_audit_event(
+        event_type="host.file_action",
+        target_table="source_assets",
+        target_id=asset_id,
+        details={key: value for key, value in details.items() if value is not None},
+    )
+    return {
+        "state": state,
+        "asset_id": asset_id,
+        "action": action,
+        "path": str(target) if target else None,
+        "message": error,
+    }
+
+
+def _launch_default_app(path: Path) -> None:
+    system = platform.system()
+    if system == "Windows":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    if system == "Darwin":
+        result = run_no_window(["open", str(path)], capture_output=True, text=True, check=False)
+    else:
+        result = run_no_window(["xdg-open", str(path)], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise OSError(result.stderr.strip() or result.stdout.strip() or "open failed")
+
+
+def _reveal_in_folder(path: Path) -> None:
+    system = platform.system()
+    if system == "Windows":
+        result = run_no_window(["explorer", f"/select,{path}"], capture_output=True, text=True, check=False)
+    elif system == "Darwin":
+        result = run_no_window(["open", "-R", str(path)], capture_output=True, text=True, check=False)
+    else:
+        result = run_no_window(["xdg-open", str(path.parent)], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise OSError(result.stderr.strip() or result.stdout.strip() or "reveal failed")
+
+
+def _is_locked_error(exc: OSError) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {32, 33}:
+        return True
+    text = str(exc).lower()
+    return "locked" in text or "being used by another process" in text or "permission" in text
 
 
 def _request_json(

@@ -12,6 +12,7 @@ from .crawler import CorpusPolicy, scan_path
 from . import database
 from .glob_policy import effective_glob_policy
 from .redaction import redact_text
+from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
 from .scoring import ContextCandidate, pack_context
 from .settings import SettingsService
 from .versioning import collapse_version_families
@@ -39,13 +40,22 @@ class KnowledgeService:
     def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         corpus_limit = max(limit * 4, 20)
         episodes = [
-            {"kind": "episode", **item, "excerpt": item.get("summary", "")}
+            {
+                "kind": "episode",
+                "logical_kind": "episode",
+                **item,
+                "excerpt": item.get("summary", ""),
+                "detail_ref": {"kind": "episode", "id": item.get("id")},
+                "related_evidence_count": 0,
+            }
             for item in database.search_episodes(query, limit=limit)
         ]
-        corpus = [
-            {"kind": "corpus_chunk", **_format_corpus_search_item(item)}
-            for item in database.search_corpus_chunks(query, limit=corpus_limit)
-        ]
+        corpus = collapse_mail_spool_search_results(
+            [
+                decorate_corpus_search_item({"kind": "corpus_chunk", **_format_corpus_search_item(item)})
+                for item in database.search_corpus_chunks(query, limit=corpus_limit)
+            ]
+        )
         return collapse_version_families(
             sorted(corpus + episodes, key=lambda item: item["score"], reverse=True),
             limit=limit,
