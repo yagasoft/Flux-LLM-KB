@@ -22,6 +22,8 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "FluxKB Host Agent" in install
     assert "FluxKB Outlook Host" in install
     assert "Register-ScheduledTask" in install
+    assert "-WindowStyle Hidden" in install
+    assert "-Hidden" in install
     assert "Resolve-FluxPythonExe" in install
     assert "python\\python.exe" in install
     assert 'Join-Path $appRoot "plugins"' in install
