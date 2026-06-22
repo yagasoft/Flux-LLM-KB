@@ -1,0 +1,133 @@
+# Roadmap Progress
+
+Last reviewed: 2026-06-22
+
+This tracker records public project progress against [roadmap.md](roadmap.md).
+It is intentionally separate from live runtime state. Do not add private paths,
+mail contents, OAuth tokens, live database values, raw indexed content, or local
+deployment-only details here.
+
+Live operational state belongs in the local dashboard and production status
+scripts:
+
+- Dashboard: `http://127.0.0.1:8765/dashboard`
+- Production status: `scripts/deploy/status-flux.ps1`
+- CLI health: `flux-kb doctor --json`
+
+## Status Labels
+
+| Label | Meaning |
+| --- | --- |
+| `shipped` | Implemented, documented enough to use, and covered by verification. |
+| `in progress` | Usable slice exists, but planned scope remains. |
+| `planned` | Roadmap intent exists; implementation has not started. |
+| `blocked` | Cannot proceed without external input, dependency, or design decision. |
+| `deferred` | Intentionally postponed. |
+
+## Version Summary
+
+| Version | Status | Summary |
+| --- | --- | --- |
+| V0 Foundation | shipped | Public repo, safety model, ADRs, PostgreSQL/pgvector migrations, Docker Compose, fixtures, and initial interfaces exist. |
+| V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, and hybrid retrieval exist; Codex capture and graph/lifecycle depth still need hardening. |
+| V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
+| V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
+| V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
+| V2.7 Mail And Retrieval Production Hardening | planned | Explicit hardening lane for mail post-processing, retrieval explainability, scheduler reliability, and error diagnostics. |
+| V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, optional ParadeDB/BM25, and local librarian workers. |
+| V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
+
+## Current Shipped Capabilities
+
+- PostgreSQL/pgvector primary store with migrations.
+- Local deterministic `flux-hash-v1` embeddings.
+- CLI, REST, and MCP-facing service layer.
+- React/Vite dashboard served by FastAPI.
+- Production deployment scripts and separated runtime layout under a configurable
+  install root.
+- Host agent for Windows/host filesystem paths, folder browse, watch, sync,
+  reconciliation, and host-side worker processing.
+- Corpus root add/edit/delete/sync/watch controls in the dashboard.
+- IMAP Gmail OAuth setup and profile-scoped mail capture through a private spool.
+- Separate Windows Outlook COM host process model for selected-folder catch-up.
+- Automatic Docker worker processing for Docker-visible corpus and mail jobs.
+- Automatic host-agent worker processing for host-only roots.
+- Exact duplicate suppression and conservative version-family suppression.
+- REST/CLI/MCP consumer search and brief access.
+- Public file-type coverage matrix and roadmap targets.
+
+## Known Gaps
+
+### V1
+
+- Codex plugin installation/configuration exists, but visible Codex UI discovery
+  may still require Codex Desktop restart or plugin-discovery improvements.
+- Preflight retrieval and automatic turn capture need stricter end-to-end proof
+  across real Codex sessions.
+- Graph traversal, claim lifecycle, confidence decay, contradiction handling, and
+  lifecycle scoring need more complete implementation and tests.
+
+### V2
+
+- Dashboard is operational, but graph browsing, stale claim review,
+  contradiction review, capture approval, and retention tuning are not complete.
+- Dashboard needs deeper drill-down views for retrieval explanations, mail sync
+  runs, watcher events, and worker history.
+
+### V2.5
+
+- File-type coverage is broad in roadmap form, but many advanced extractors are
+  still metadata-first or optional-tool dependent.
+- Archive/container expansion with depth, size, and file-count caps is planned
+  but not production-ready.
+- Local OCR, visual descriptions, media frame sampling, and transcription need
+  bounded worker stages and dashboard controls before default use.
+- Same-document/version-family suppression is conservative and path/title based;
+  semantic near-duplicate grouping remains a future enhancement.
+
+### V2.6
+
+- IMAP scheduled sync works through the worker loop, but needs first-class run
+  records, claiming, drift reporting, backoff, and dashboard history.
+- Mail post-processing needs provider-specific semantics, dry-run/audit views,
+  and clearer UI around destructive actions.
+- Outlook COM host model exists, but broader real-world Outlook catch-up
+  verification remains a Windows-host validation task.
+- Error reporting is improving but still needs a standard API error envelope and
+  consistently red, actionable dashboard rendering.
+
+### V2.7
+
+- Entire lane is planned. See [roadmap.md](roadmap.md#v27-mail-and-retrieval-production-hardening).
+
+### V3
+
+- Historical Codex backfill is not yet production-ready.
+- Benchmark suite and retrieval strategy comparisons are planned.
+- Optional ParadeDB/BM25 and local-LLM librarian workers are not started.
+
+### V4
+
+- Team/shared vault mode, sync/export governance, Apache AGE backend option, and
+  synthetic-data/fine-tuning pipeline are planned only.
+
+## Immediate Next Queue
+
+1. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
+2. Promote IMAP scheduled sync into a claimable scheduler state machine.
+3. Improve retrieval snippets and collapse mail spool implementation files into
+   one logical mail result with linked attachments.
+4. Add provider-specific mail post-process policies with dry-run and audit views.
+5. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
+   prioritizing common Office legacy files, diagrams, archives, and embedded
+   media.
+
+## Update Rules
+
+- Update this file in the same commit as any roadmap-significant feature.
+- Keep `roadmap.md` strategic and `progress.md` factual.
+- Prefer `in progress` over `shipped` unless the feature has working code,
+  documentation or UI, and verification.
+- Link to docs, tests, or commits when a status changes materially.
+- Never record private runtime state, private file paths, mail contents, tokens,
+  raw memories, embeddings from private content, or database dumps.

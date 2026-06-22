@@ -65,4 +65,5 @@ See [docs/safety.md](docs/safety.md) for the data boundary.
 
 ## Roadmap
 
-See [docs/roadmap.md](docs/roadmap.md).
+See [docs/roadmap.md](docs/roadmap.md). Current implementation progress is
+tracked in [docs/progress.md](docs/progress.md).

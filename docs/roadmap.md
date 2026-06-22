@@ -1,5 +1,7 @@
 # Roadmap
 
+Progress against this roadmap is tracked in [progress.md](progress.md).
+
 ## V0: Foundation
 
 - Public GitHub repo with safety docs and architecture records.
