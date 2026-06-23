@@ -1,5 +1,8 @@
 import base64
+import gzip
 import sys
+import tarfile
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -49,6 +52,128 @@ def test_extractor_availability_reports_optional_tools():
     assert "word_com" in availability
     assert "ffprobe" in availability
     assert all("ok" in item and "message" in item for item in availability.values())
+
+
+def test_extractor_availability_reports_container_tools():
+    availability = extractor_availability()
+
+    assert "seven_zip" in availability
+    assert "bsdtar" in availability
+    assert "unrar" in availability
+    assert "zstd" in availability
+    assert "lz4" in availability
+    assert "rpm2cpio" in availability
+    assert all("ok" in availability[name] and "message" in availability[name] for name in ("seven_zip", "bsdtar", "unrar"))
+
+
+def test_extract_zip_archive_indexes_inline_child_assets(tmp_path):
+    path = tmp_path / "bundle.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr("docs/readme.md", "# Readme\nArchive body")
+        archive.writestr("nested/inner.zip", b"PK")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["extractor"] == "container"
+    assert result.metadata["format"] == "zip"
+    assert result.metadata["member_count"] == 2
+    assert [child.member_path for child in result.child_assets] == ["docs/readme.md", "nested/inner.zip"]
+    readme = result.child_assets[0]
+    nested = result.child_assets[1]
+    assert readme.file_kind == "text"
+    assert readme.extraction_status == "indexed"
+    assert readme.chunks[0].body == "# Readme\nArchive body"
+    assert readme.metadata["container_member_path"] == "docs/readme.md"
+    assert nested.file_kind == "archive"
+    assert nested.extraction_status == "metadata_only"
+    assert nested.chunks == ()
+
+
+def test_extract_tgz_archive_indexes_text_member(tmp_path):
+    path = tmp_path / "bundle.tgz"
+    payload = b"Meeting notes from archive"
+    with tarfile.open(path, "w:gz") as archive:
+        info = tarfile.TarInfo("notes/meeting.txt")
+        info.size = len(payload)
+        archive.addfile(info, BytesIO(payload))
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["format"] == "tar"
+    assert result.child_assets[0].member_path == "notes/meeting.txt"
+    assert result.child_assets[0].extraction_status == "indexed"
+    assert "Meeting notes" in result.child_assets[0].chunks[0].body
+
+
+def test_extract_gzip_stream_indexes_single_child(tmp_path):
+    path = tmp_path / "server.log.gz"
+    with gzip.open(path, "wb") as handle:
+        handle.write(b"error line from compressed log")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["format"] == "gzip"
+    assert len(result.child_assets) == 1
+    assert result.child_assets[0].member_path == "server.log"
+    assert result.child_assets[0].file_kind == "text"
+    assert "compressed log" in result.child_assets[0].chunks[0].body
+
+
+def test_extract_package_container_uses_zip_adapter(tmp_path):
+    path = tmp_path / "library.whl"
+    with ZipFile(path, "w") as archive:
+        archive.writestr("package/METADATA", "Name: library\nVersion: 1.0")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["format"] == "zip"
+    assert result.metadata["container_kind"] == "container"
+    assert result.child_assets[0].member_path == "package/METADATA"
+    assert result.child_assets[0].extraction_status == "indexed"
+    assert "Version: 1.0" in result.child_assets[0].chunks[0].body
+
+
+def test_extract_archive_rejects_unsafe_member_path(tmp_path):
+    path = tmp_path / "unsafe.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr("../evil.txt", "escape")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "failed"
+    assert result.metadata["extractor"] == "container"
+    assert "unsafe" in (result.message or "").lower()
+    assert result.child_assets == ()
+
+
+def test_extract_archive_respects_member_size_cap(tmp_path):
+    path = tmp_path / "large.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr("large.txt", "too large")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_member_bytes=4))
+
+    assert result.status == "metadata_only"
+    assert result.child_assets == ()
+    assert "member exceeds size limit" in (result.message or "")
+
+
+def test_extract_unsupported_archive_blocks_when_tool_missing(monkeypatch, tmp_path):
+    path = tmp_path / "bundle.7z"
+    path.write_bytes(b"7z placeholder")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.metadata["extractor"] == "container"
+    assert result.metadata["format"] == "7z"
+    assert "attempted" in result.metadata
+    assert "7z" in (result.message or "")
 
 
 def test_extract_legacy_doc_uses_local_converter(monkeypatch, tmp_path):

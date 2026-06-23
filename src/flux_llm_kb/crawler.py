@@ -86,7 +86,41 @@ DIAGRAM_COMPOUND_SUFFIXES = (".drawio.png", ".drawio.svg")
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"}
 AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".wma"}
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"}
-ARCHIVE_EXTENSIONS = {".7z", ".gz", ".rar", ".tar", ".tgz", ".zip"}
+ARCHIVE_EXTENSIONS = {
+    ".7z",
+    ".ar",
+    ".bz2",
+    ".cab",
+    ".cpio",
+    ".dmg",
+    ".gz",
+    ".iso",
+    ".lz4",
+    ".rar",
+    ".tar",
+    ".tgz",
+    ".xz",
+    ".zip",
+    ".zst",
+}
+CONTAINER_EXTENSIONS = {
+    ".apk",
+    ".crate",
+    ".crx",
+    ".deb",
+    ".ear",
+    ".egg",
+    ".gem",
+    ".ipa",
+    ".jar",
+    ".nupkg",
+    ".rpm",
+    ".vsix",
+    ".war",
+    ".whl",
+    ".xpi",
+}
+ARCHIVE_COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4")
 TRANSIENT_SUFFIXES = {".tmp", ".partial", ".crdownload", ".download", ".part"}
 
 
@@ -99,6 +133,10 @@ class CorpusPolicy:
     max_inline_bytes: int = 256 * 1024
     heavy_threshold_bytes: int = 10 * 1024 * 1024
     hash_max_bytes: int = 512 * 1024 * 1024
+    container_max_depth: int = 1
+    container_max_members: int = 200
+    container_max_total_bytes: int = 50 * 1024 * 1024
+    container_max_member_bytes: int = 10 * 1024 * 1024
     stability_quiet_seconds: float = 0.0
     large_file_stability_quiet_seconds: float = 0.0
     clock: Callable[[], float] | None = None
@@ -239,9 +277,7 @@ def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
     mime_type, _ = mimetypes.guess_type(file_path.name)
     file_kind = _file_kind(file_path, mime_type)
 
-    if file_kind == "archive":
-        return FileClassification(file_kind=file_kind, extraction_tier="metadata_only", mime_type=mime_type)
-    if file_kind in {"diagram", "image", "audio", "video"}:
+    if file_kind in {"archive", "container", "diagram", "image", "audio", "video"}:
         return FileClassification(file_kind=file_kind, extraction_tier="deferred", mime_type=mime_type)
     if size > policy.heavy_threshold_bytes:
         return FileClassification(
@@ -289,7 +325,9 @@ def _file_kind(path: str | Path, mime_type: str | None) -> str:
         return "audio"
     if ext in VIDEO_EXTENSIONS:
         return "video"
-    if ext in ARCHIVE_EXTENSIONS:
+    if ext in CONTAINER_EXTENSIONS:
+        return "container"
+    if ext in ARCHIVE_EXTENSIONS or any(name.endswith(suffix) for suffix in ARCHIVE_COMPOUND_SUFFIXES):
         return "archive"
     if mime_type and mime_type.startswith("text/"):
         return "text"

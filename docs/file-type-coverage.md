@@ -91,8 +91,16 @@ parser or local tool exists.
 - `vsdx` and related modern Visio files are ZIP/XML containers and are parsed
   with bounded in-memory reads before any future rendered-image OCR fallback.
   Legacy `vsd` can use a local converter where available.
-- Archives and package containers must not expand recursively without limits.
-  Expansion must enforce maximum depth, total uncompressed bytes, file count,
-  path traversal protection, and per-root policy.
+- Archives and package containers enumerate members through bounded local
+  adapters. ZIP-family packages, TAR-family archives, and gzip/bzip2/xz streams
+  use Python stdlib readers; formats such as 7z, RAR, CAB, ISO, DMG, ZST, LZ4,
+  AR, CPIO, DEB, RPM, and CRX depend on local tools when available and otherwise
+  report `blocked_missing_dependency`. Expansion enforces maximum depth, total
+  uncompressed bytes, member count, member size, path traversal protection,
+  encrypted-entry rejection, and unsafe link/device rejection.
+- Container members are stored as related child assets linked to the parent
+  archive. Inline-safe text/code members are chunked; nested containers and
+  embedded documents/media are recorded as child metadata until later worker
+  stages perform recursive or rich embedded extraction.
 - Secret-bearing formats should never have raw content indexed by default.
   They may produce redacted metadata and audit entries only.

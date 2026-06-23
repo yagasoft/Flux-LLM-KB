@@ -1,25 +1,46 @@
 from __future__ import annotations
 
 import base64
+import bz2
 import binascii
 from dataclasses import dataclass, field
+import gzip
+import hashlib
 from html import unescape
 import importlib.util
 import json
+import lzma
+import mimetypes
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
 import shutil
 import struct
+import tarfile
 import tempfile
 from typing import Any, Callable
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 import zlib
 
-from .crawler import AssetChunk, CorpusPolicy, classify_file
+from .crawler import (
+    ARCHIVE_COMPOUND_SUFFIXES,
+    ARCHIVE_EXTENSIONS,
+    AUDIO_EXTENSIONS,
+    AssetChunk,
+    CODE_EXTENSIONS,
+    CONTAINER_EXTENSIONS,
+    DIAGRAM_COMPOUND_SUFFIXES,
+    DIAGRAM_EXTENSIONS,
+    DOCUMENT_EXTENSIONS,
+    IMAGE_EXTENSIONS,
+    TEXT_EXTENSIONS,
+    VIDEO_EXTENSIONS,
+    CorpusPolicy,
+    classify_file,
+)
 from .processes import run_no_window
 from .redaction import redact_text
 
@@ -39,9 +60,25 @@ OPENDOCUMENT_PRESENTATION_EXTENSIONS = {".odp", ".otp"}
 
 
 @dataclass(frozen=True)
+class ContainerChildAsset:
+    member_path: str
+    file_kind: str
+    mime_type: str | None
+    extension: str
+    size_bytes: int
+    quick_hash: str
+    content_hash: str | None
+    extraction_tier: str
+    extraction_status: str
+    chunks: tuple[AssetChunk, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ExtractionResult:
     status: str
     chunks: tuple[AssetChunk, ...] = ()
+    child_assets: tuple[ContainerChildAsset, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     message: str | None = None
 
@@ -53,6 +90,8 @@ def extract_file(path: str | Path, policy: CorpusPolicy) -> ExtractionResult:
         return _extract_text(file_path, policy, extractor=classification.file_kind)
     if classification.file_kind == "document":
         return _extract_document(file_path, policy)
+    if classification.file_kind in {"archive", "container"}:
+        return _extract_container(file_path, policy, container_kind=classification.file_kind)
     if classification.file_kind == "diagram":
         return _extract_diagram(file_path)
     if classification.file_kind == "image":
@@ -80,6 +119,14 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "word_com": _word_com_check(),
         "excel_com": _excel_com_check(),
         "powerpoint_com": _powerpoint_com_check(),
+        "seven_zip": _first_tool_check("7-Zip", ("7z", "7zz")),
+        "bsdtar": _tool_check("bsdtar"),
+        "unar": _tool_check("unar"),
+        "unrar": _tool_check("unrar"),
+        "zstd": _tool_check("zstd"),
+        "lz4": _tool_check("lz4"),
+        "ar": _tool_check("ar"),
+        "rpm2cpio": _tool_check("rpm2cpio"),
         "ffprobe": _tool_check("ffprobe"),
         "ffmpeg": _tool_check("ffmpeg"),
         "tesseract": _tool_check("tesseract"),
@@ -655,6 +702,481 @@ def _com_table_rows(value: Any, *, max_rows: int, max_cols: int) -> list[list[st
         if values:
             normalized.append(values)
     return normalized
+
+
+ZIP_CONTAINER_EXTENSIONS = {
+    ".apk",
+    ".ear",
+    ".egg",
+    ".ipa",
+    ".jar",
+    ".nupkg",
+    ".vsix",
+    ".war",
+    ".whl",
+    ".xpi",
+    ".zip",
+}
+TAR_CONTAINER_EXTENSIONS = {".crate", ".gem", ".tar", ".tgz"}
+STREAM_CONTAINER_FORMATS = {".bz2": "bzip2", ".gz": "gzip", ".xz": "xz"}
+OPTIONAL_CONTAINER_TOOLS = {
+    "7z": ("7z", "7zz", "bsdtar", "unar"),
+    "rar": ("unrar", "7z", "7zz", "bsdtar", "unar"),
+    "cab": ("7z", "7zz", "bsdtar", "unar"),
+    "iso": ("7z", "7zz", "bsdtar", "unar"),
+    "dmg": ("7z", "7zz", "bsdtar", "unar"),
+    "zst": ("zstd", "bsdtar"),
+    "lz4": ("lz4", "bsdtar"),
+    "ar": ("ar", "bsdtar"),
+    "cpio": ("bsdtar",),
+    "deb": ("ar", "bsdtar"),
+    "rpm": ("rpm2cpio", "bsdtar"),
+    "crx": ("7z", "7zz", "bsdtar", "unar"),
+}
+TEXT_MEMBER_NAMES = {"changelog", "copying", "license", "metadata", "notice", "readme"}
+TEXT_MEMBER_EXTENSIONS = TEXT_EXTENSIONS | {".err", ".log", ".out", ".trace"}
+
+
+def _extract_container(path: Path, policy: CorpusPolicy, *, container_kind: str) -> ExtractionResult:
+    format_name = _container_format(path)
+    if format_name == "zip":
+        return _extract_zip_container(path, policy, container_kind=container_kind)
+    if format_name == "tar":
+        return _extract_tar_container(path, policy, container_kind=container_kind)
+    if format_name in STREAM_CONTAINER_FORMATS.values():
+        return _extract_stream_container(path, policy, container_kind=container_kind, format_name=format_name)
+    if format_name in {"zst", "lz4"}:
+        stream_result = _extract_tool_stream_container(path, policy, container_kind=container_kind, format_name=format_name)
+        if stream_result is not None:
+            return stream_result
+    optional_result = _extract_optional_tool_container(path, policy, container_kind=container_kind, format_name=format_name)
+    if optional_result is not None:
+        return optional_result
+    attempted = list(OPTIONAL_CONTAINER_TOOLS.get(format_name, ()))
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata=_container_metadata(format_name, container_kind, attempted=attempted),
+        message=f"{format_name} extraction requires a local tool: {', '.join(attempted) or format_name}.",
+    )
+
+
+def _container_format(path: Path) -> str:
+    name = path.name.lower()
+    ext = path.suffix.lower()
+    if ext in ZIP_CONTAINER_EXTENSIONS:
+        return "zip"
+    if name.endswith((".tar.zst", ".tar.lz4")):
+        return ext.lstrip(".")
+    if ext in TAR_CONTAINER_EXTENSIONS or name.endswith((".tar.gz", ".tar.bz2", ".tar.xz")):
+        return "tar"
+    if ext in STREAM_CONTAINER_FORMATS:
+        return STREAM_CONTAINER_FORMATS[ext]
+    return ext.lstrip(".") or "unknown"
+
+
+def _extract_zip_container(path: Path, policy: CorpusPolicy, *, container_kind: str) -> ExtractionResult:
+    format_name = "zip"
+    metadata = _container_metadata(format_name, container_kind)
+    try:
+        with ZipFile(path) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+            children: list[ContainerChildAsset] = []
+            total_bytes = 0
+            for index, info in enumerate(infos):
+                member_path = _safe_container_member_name(info.filename)
+                if member_path is None:
+                    return _failed_container_result(metadata, f"unsafe container member: {info.filename}")
+                if info.flag_bits & 0x1:
+                    return _failed_container_result(metadata, f"encrypted container member is not supported: {member_path}")
+                size = int(info.file_size or 0)
+                cap_message = _container_cap_message(policy, member_count=index + 1, member_size=size, total_bytes=total_bytes + size)
+                if cap_message:
+                    metadata["member_count"] = len(infos)
+                    return _metadata_only_container_result(metadata, cap_message)
+                total_bytes += size
+                data = archive.read(info)
+                children.append(
+                    _container_child_from_bytes(
+                        member_path,
+                        data,
+                        policy,
+                        container_format=format_name,
+                        container_kind=container_kind,
+                        member_index=index,
+                        compressed_size=int(info.compress_size or 0),
+                    )
+                )
+    except BadZipFile as exc:
+        return _failed_container_result(metadata, f"ZIP container parse failed: {exc}")
+    except ValueError as exc:
+        return _failed_container_result(metadata, str(exc))
+
+    metadata["member_count"] = len(children)
+    metadata["total_uncompressed_bytes"] = sum(child.size_bytes for child in children)
+    return ExtractionResult(status="metadata_only", child_assets=tuple(children), metadata=metadata)
+
+
+def _extract_tar_container(path: Path, policy: CorpusPolicy, *, container_kind: str) -> ExtractionResult:
+    format_name = "tar"
+    metadata = _container_metadata(format_name, container_kind)
+    try:
+        with tarfile.open(path) as archive:
+            members = [member for member in archive.getmembers() if not member.isdir()]
+            children: list[ContainerChildAsset] = []
+            total_bytes = 0
+            for index, member in enumerate(members):
+                member_path = _safe_container_member_name(member.name)
+                if member_path is None:
+                    return _failed_container_result(metadata, f"unsafe container member: {member.name}")
+                if not member.isfile():
+                    return _failed_container_result(metadata, f"unsafe non-file container member: {member_path}")
+                size = int(member.size or 0)
+                cap_message = _container_cap_message(policy, member_count=index + 1, member_size=size, total_bytes=total_bytes + size)
+                if cap_message:
+                    metadata["member_count"] = len(members)
+                    return _metadata_only_container_result(metadata, cap_message)
+                extracted = archive.extractfile(member)
+                data = extracted.read() if extracted is not None else b""
+                total_bytes += len(data)
+                children.append(
+                    _container_child_from_bytes(
+                        member_path,
+                        data,
+                        policy,
+                        container_format=format_name,
+                        container_kind=container_kind,
+                        member_index=index,
+                        compressed_size=None,
+                    )
+                )
+    except tarfile.TarError as exc:
+        return _failed_container_result(metadata, f"TAR container parse failed: {exc}")
+    except ValueError as exc:
+        return _failed_container_result(metadata, str(exc))
+
+    metadata["member_count"] = len(children)
+    metadata["total_uncompressed_bytes"] = sum(child.size_bytes for child in children)
+    return ExtractionResult(status="metadata_only", child_assets=tuple(children), metadata=metadata)
+
+
+def _extract_stream_container(
+    path: Path,
+    policy: CorpusPolicy,
+    *,
+    container_kind: str,
+    format_name: str,
+) -> ExtractionResult:
+    metadata = _container_metadata(format_name, container_kind)
+    opener: Callable[..., Any]
+    if format_name == "gzip":
+        opener = gzip.open
+    elif format_name == "bzip2":
+        opener = bz2.open
+    else:
+        opener = lzma.open
+    try:
+        with opener(path, "rb") as handle:
+            data = handle.read(policy.container_max_member_bytes + 1)
+    except OSError as exc:
+        return _failed_container_result(metadata, f"{format_name} stream parse failed: {exc}")
+    if len(data) > policy.container_max_member_bytes:
+        return _metadata_only_container_result(metadata, "member exceeds size limit")
+    member_path = _stream_member_name(path, format_name)
+    child = _container_child_from_bytes(
+        member_path,
+        data,
+        policy,
+        container_format=format_name,
+        container_kind=container_kind,
+        member_index=0,
+        compressed_size=path.stat().st_size,
+    )
+    metadata["member_count"] = 1
+    metadata["total_uncompressed_bytes"] = child.size_bytes
+    return ExtractionResult(status="metadata_only", child_assets=(child,), metadata=metadata)
+
+
+def _extract_tool_stream_container(
+    path: Path,
+    policy: CorpusPolicy,
+    *,
+    container_kind: str,
+    format_name: str,
+) -> ExtractionResult | None:
+    tool_name = "zstd" if format_name == "zst" else "lz4"
+    command = shutil.which(tool_name)
+    if command is None:
+        return None
+    metadata = _container_metadata(format_name, container_kind, attempted=[tool_name])
+    try:
+        result = run_no_window(
+            [command, "-dc", str(path)],
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+    except Exception as exc:
+        return _failed_container_result(metadata, str(exc))
+    if result.returncode != 0:
+        return _failed_container_result(metadata, result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, bytes) else str(result.stderr or "stream decompression failed"))
+    data = bytes(result.stdout or b"")
+    if len(data) > policy.container_max_member_bytes:
+        return _metadata_only_container_result(metadata, "member exceeds size limit")
+    child = _container_child_from_bytes(
+        _stream_member_name(path, format_name),
+        data,
+        policy,
+        container_format=format_name,
+        container_kind=container_kind,
+        member_index=0,
+        compressed_size=path.stat().st_size,
+    )
+    metadata["member_count"] = 1
+    metadata["total_uncompressed_bytes"] = child.size_bytes
+    return ExtractionResult(status="metadata_only", child_assets=(child,), metadata=metadata)
+
+
+def _extract_optional_tool_container(
+    path: Path,
+    policy: CorpusPolicy,
+    *,
+    container_kind: str,
+    format_name: str,
+) -> ExtractionResult | None:
+    tools = OPTIONAL_CONTAINER_TOOLS.get(format_name, ())
+    for tool in tools:
+        command = shutil.which(tool)
+        if command is None:
+            continue
+        result = _extract_with_directory_tool(
+            path,
+            policy,
+            container_kind=container_kind,
+            format_name=format_name,
+            command=command,
+            command_name=tool,
+            attempted=list(tools),
+        )
+        if result is not None:
+            return result
+    return None
+
+
+def _extract_with_directory_tool(
+    path: Path,
+    policy: CorpusPolicy,
+    *,
+    container_kind: str,
+    format_name: str,
+    command: str,
+    command_name: str,
+    attempted: list[str],
+) -> ExtractionResult | None:
+    metadata = _container_metadata(format_name, container_kind, attempted=attempted)
+    with tempfile.TemporaryDirectory(prefix="flux-kb-container-") as temp_dir:
+        temp_path = Path(temp_dir)
+        command_line: list[str]
+        kwargs: dict[str, Any] = {"text": True, "capture_output": True, "timeout": 180, "check": False}
+        if command_name in {"7z", "7zz"}:
+            command_line = [command, "x", "-y", f"-o{temp_dir}", str(path)]
+        elif command_name == "bsdtar":
+            command_line = [command, "-xf", str(path), "-C", temp_dir]
+        elif command_name == "unar":
+            command_line = [command, "-quiet", "-force-overwrite", "-output-directory", temp_dir, str(path)]
+        elif command_name == "unrar":
+            command_line = [command, "x", "-o+", "-inul", str(path), temp_dir]
+        elif command_name == "ar":
+            command_line = [command, "x", str(path)]
+            kwargs["cwd"] = temp_dir
+        else:
+            return None
+        try:
+            result = run_no_window(command_line, **kwargs)
+        except Exception as exc:
+            return _failed_container_result(metadata, str(exc))
+        if result.returncode != 0:
+            return None
+        return _children_from_extracted_directory(temp_path, policy, container_kind=container_kind, format_name=format_name, metadata=metadata)
+    return None
+
+
+def _children_from_extracted_directory(
+    temp_path: Path,
+    policy: CorpusPolicy,
+    *,
+    container_kind: str,
+    format_name: str,
+    metadata: dict[str, Any],
+) -> ExtractionResult:
+    children: list[ContainerChildAsset] = []
+    total_bytes = 0
+    files = [path for path in temp_path.rglob("*") if path.is_file() and not path.is_symlink()]
+    for index, member in enumerate(files):
+        member_path = _safe_container_member_name(member.relative_to(temp_path).as_posix())
+        if member_path is None:
+            return _failed_container_result(metadata, f"unsafe container member: {member}")
+        data = member.read_bytes()
+        cap_message = _container_cap_message(policy, member_count=index + 1, member_size=len(data), total_bytes=total_bytes + len(data))
+        if cap_message:
+            metadata["member_count"] = len(files)
+            return _metadata_only_container_result(metadata, cap_message)
+        total_bytes += len(data)
+        children.append(
+            _container_child_from_bytes(
+                member_path,
+                data,
+                policy,
+                container_format=format_name,
+                container_kind=container_kind,
+                member_index=index,
+                compressed_size=None,
+            )
+        )
+    metadata["member_count"] = len(children)
+    metadata["total_uncompressed_bytes"] = total_bytes
+    return ExtractionResult(status="metadata_only", child_assets=tuple(children), metadata=metadata)
+
+
+def _container_child_from_bytes(
+    member_path: str,
+    data: bytes,
+    policy: CorpusPolicy,
+    *,
+    container_format: str,
+    container_kind: str,
+    member_index: int,
+    compressed_size: int | None,
+) -> ContainerChildAsset:
+    size = len(data)
+    content_hash = hashlib.sha256(data).hexdigest()
+    file_kind = _member_file_kind(member_path)
+    extension = PurePosixPath(member_path).suffix.lower()
+    mime_type, _ = mimetypes.guess_type(member_path)
+    metadata: dict[str, Any] = {
+        "extractor": "container_member",
+        "container_format": container_format,
+        "container_kind": container_kind,
+        "container_member_path": member_path,
+        "container_member_index": member_index,
+    }
+    if compressed_size is not None:
+        metadata["compressed_size_bytes"] = compressed_size
+    chunks: tuple[AssetChunk, ...] = ()
+    extraction_tier = "metadata_only"
+    extraction_status = "metadata_only"
+    if file_kind in {"text", "code"} and size <= policy.max_inline_bytes:
+        text = data.decode("utf-8", errors="replace").strip()
+        chunks = _chunks_from_text(text, member_path)
+        extraction_tier = "inline"
+        extraction_status = "indexed" if chunks else "metadata_only"
+    elif file_kind in {"archive", "container"}:
+        metadata["nested_container"] = True
+    return ContainerChildAsset(
+        member_path=member_path,
+        file_kind=file_kind,
+        mime_type=mime_type,
+        extension=extension,
+        size_bytes=size,
+        quick_hash=_container_child_quick_hash(member_path, size, content_hash),
+        content_hash=content_hash,
+        extraction_tier=extraction_tier,
+        extraction_status=extraction_status,
+        chunks=chunks,
+        metadata=metadata,
+    )
+
+
+def _member_file_kind(member_path: str) -> str:
+    path = PurePosixPath(member_path)
+    name = path.name.lower()
+    ext = path.suffix.lower()
+    if name in TEXT_MEMBER_NAMES:
+        return "text"
+    if ext in DIAGRAM_EXTENSIONS or any(name.endswith(suffix) for suffix in DIAGRAM_COMPOUND_SUFFIXES):
+        return "diagram"
+    if ext in CODE_EXTENSIONS:
+        return "code"
+    if ext in TEXT_MEMBER_EXTENSIONS:
+        return "text"
+    if ext in DOCUMENT_EXTENSIONS:
+        return "document"
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
+    if ext in AUDIO_EXTENSIONS:
+        return "audio"
+    if ext in VIDEO_EXTENSIONS:
+        return "video"
+    if ext in CONTAINER_EXTENSIONS:
+        return "container"
+    if ext in ARCHIVE_EXTENSIONS or any(name.endswith(suffix) for suffix in ARCHIVE_COMPOUND_SUFFIXES):
+        return "archive"
+    mime_type, _ = mimetypes.guess_type(member_path)
+    if mime_type and mime_type.startswith("text/"):
+        return "text"
+    return "binary"
+
+
+def _container_metadata(format_name: str, container_kind: str, *, attempted: list[str] | None = None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "extractor": "container",
+        "format": format_name,
+        "container_kind": container_kind,
+        "member_count": 0,
+        "max_depth": 1,
+    }
+    if attempted is not None:
+        metadata["attempted"] = attempted
+    return metadata
+
+
+def _container_cap_message(policy: CorpusPolicy, *, member_count: int, member_size: int, total_bytes: int) -> str | None:
+    if policy.container_max_depth < 1:
+        return "container expansion depth must be at least 1"
+    if member_count > policy.container_max_members:
+        return "container exceeds member count limit"
+    if member_size > policy.container_max_member_bytes:
+        return "member exceeds size limit"
+    if total_bytes > policy.container_max_total_bytes:
+        return "container exceeds total size limit"
+    return None
+
+
+def _metadata_only_container_result(metadata: dict[str, Any], message: str) -> ExtractionResult:
+    metadata = {**metadata, "warnings": [message]}
+    return ExtractionResult(status="metadata_only", metadata=metadata, message=message)
+
+
+def _failed_container_result(metadata: dict[str, Any], message: str) -> ExtractionResult:
+    metadata = {**metadata, "warnings": [message]}
+    return ExtractionResult(status="failed", metadata=metadata, message=message)
+
+
+def _safe_container_member_name(name: str) -> str | None:
+    normalized = str(name or "").replace("\\", "/")
+    if not normalized or normalized.startswith("/"):
+        return None
+    path = PurePosixPath(normalized)
+    if path.is_absolute():
+        return None
+    if any(part in {"", ".", ".."} or ":" in part for part in path.parts):
+        return None
+    return path.as_posix()
+
+
+def _stream_member_name(path: Path, format_name: str) -> str:
+    name = path.name
+    suffix_by_format = {"gzip": ".gz", "bzip2": ".bz2", "xz": ".xz", "zst": ".zst", "lz4": ".lz4"}
+    suffix = suffix_by_format.get(format_name, path.suffix)
+    if name.lower().endswith(suffix):
+        candidate = name[: -len(suffix)]
+        if candidate:
+            return candidate
+    return path.stem or f"{path.name}.contents"
+
+
+def _container_child_quick_hash(member_path: str, size_bytes: int, content_hash: str) -> str:
+    value = f"{member_path}:{size_bytes}:{content_hash}".encode("utf-8", errors="ignore")
+    return hashlib.sha256(value).hexdigest()
 
 
 def _extract_diagram(path: Path) -> ExtractionResult:

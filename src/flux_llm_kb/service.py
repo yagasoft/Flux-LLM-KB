@@ -1051,6 +1051,8 @@ def _job_matches_kind(job_type: str, kind: str) -> bool:
         return job_type == "corpus_extract_image"
     if kind == "diagrams":
         return job_type == "corpus_extract_diagram"
+    if kind in {"archives", "containers"}:
+        return job_type in {"corpus_extract_archive", "corpus_extract_container"}
     if kind == "media":
         return job_type in {"corpus_extract_audio", "corpus_extract_video"}
     if kind == "text":

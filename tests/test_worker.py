@@ -168,6 +168,57 @@ def test_backfill_diagrams_kind_processes_only_diagram_jobs(monkeypatch):
     assert "diagrams backfill filter" in calls["retried"][0]["error"]
 
 
+def test_backfill_archive_kinds_process_archive_and_container_jobs(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "processed": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, host_agent_roots=None: [
+            {
+                "id": "job-archive",
+                "job_type": "corpus_extract_archive",
+                "payload": {"path": "bundle.zip", "root_name": "docs"},
+                "attempts": 1,
+            },
+            {
+                "id": "job-container",
+                "job_type": "corpus_extract_container",
+                "payload": {"path": "package.whl", "root_name": "docs"},
+                "attempts": 1,
+            },
+            {
+                "id": "job-document",
+                "job_type": "corpus_extract_document",
+                "payload": {"path": "report.docx", "root_name": "docs"},
+                "attempts": 1,
+            },
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    def fake_process(job):
+        calls["processed"].append(job["id"])
+        return worker.JobProcessResult(status="metadata_only")
+
+    monkeypatch.setattr(worker, "process_corpus_job", fake_process)
+
+    result = KnowledgeService().run_corpus_backfill(kind="archives", limit=3, workers=1)
+
+    assert result["completed"] == 2
+    assert calls["processed"] == ["job-archive", "job-container"]
+    assert calls["completed"] == [{"job_id": "job-archive"}, {"job_id": "job-container"}]
+    assert calls["retried"][0]["job_id"] == "job-document"
+    assert "archives backfill filter" in calls["retried"][0]["error"]
+
+
 def test_process_corpus_job_reports_locked_file(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 

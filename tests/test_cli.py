@@ -228,7 +228,7 @@ def test_cli_crawl_worker_run_once_invokes_backfill_loop(monkeypatch, capsys):
     assert payload["worker"]["limit"] == 2
 
 
-def test_cli_crawl_backfill_and_worker_accept_diagrams_kind(monkeypatch, capsys):
+def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, capsys):
     from flux_llm_kb import service
 
     calls = {}
@@ -249,9 +249,13 @@ def test_cli_crawl_backfill_and_worker_accept_diagrams_kind(monkeypatch, capsys)
     assert backfill_payload["backfill"] == {"kind": "diagrams", "limit": 3, "workers": 1}
     assert calls["backfill"]["kind"] == "diagrams"
 
-    assert cli.main(["crawl", "worker", "run", "--once", "--kind", "diagrams", "--limit", "4"]) == 0
+    assert cli.main(["crawl", "backfill", "--kind", "archives", "--limit", "5"]) == 0
+    archive_payload = json.loads(capsys.readouterr().out)
+    assert archive_payload["backfill"] == {"kind": "archives", "limit": 5, "workers": 1}
+
+    assert cli.main(["crawl", "worker", "run", "--once", "--kind", "containers", "--limit", "4"]) == 0
     worker_payload = json.loads(capsys.readouterr().out)
-    assert worker_payload["worker"]["kind"] == "diagrams"
+    assert worker_payload["worker"]["kind"] == "containers"
     assert worker_payload["worker"]["limit"] == 4
 
 

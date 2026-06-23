@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID
 
 from .crawler import CrawlPlan
@@ -2525,7 +2526,7 @@ def apply_extraction_result(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT a.id::text, a.canonical_asset_id::text
+                SELECT a.id::text, a.canonical_asset_id::text, a.root_id::text, a.uri, a.mtime_ns
                 FROM source_assets a
                 JOIN monitored_roots r ON r.id = a.root_id
                 WHERE r.name = %s
@@ -2536,7 +2537,7 @@ def apply_extraction_result(
             row = cur.fetchone()
             if not row:
                 raise ValueError(f"source asset not found: {root_name}:{relative_path}")
-            asset_id, canonical_asset_id = row
+            asset_id, canonical_asset_id, root_id, parent_uri, parent_mtime_ns = row
             status = result.status
             if canonical_asset_id and status == "indexed":
                 status = "duplicate_suppressed"
@@ -2552,6 +2553,17 @@ def apply_extraction_result(
                 (status, _json(result.metadata or {}), status, asset_id),
             )
             _replace_asset_chunks(cur, asset_id, () if canonical_asset_id else result.chunks)
+            child_assets = tuple(getattr(result, "child_assets", ()) or ())
+            if not canonical_asset_id and (child_assets or (result.metadata or {}).get("extractor") == "container"):
+                _replace_container_child_assets(
+                    cur,
+                    root_id=root_id,
+                    parent_asset_id=asset_id,
+                    parent_relative_path=relative_path,
+                    parent_uri=parent_uri,
+                    parent_mtime_ns=int(parent_mtime_ns or 0),
+                    child_assets=child_assets,
+                )
 
 
 def retrieval_stats(*, url: str | None = None) -> dict[str, int]:
@@ -5447,6 +5459,105 @@ def _normalize_root_path(root_path: str | Path) -> str:
     except Exception:
         pass
     return str(Path(value).expanduser().resolve())
+
+
+def _replace_container_child_assets(
+    cur: Any,
+    *,
+    root_id: str,
+    parent_asset_id: str,
+    parent_relative_path: str,
+    parent_uri: str,
+    parent_mtime_ns: int,
+    child_assets: tuple[Any, ...],
+) -> None:
+    cur.execute(
+        """
+        UPDATE source_assets
+        SET deleted_at = now(),
+            extraction_status = 'deleted',
+            updated_at = now()
+        WHERE root_id = %s
+          AND metadata->>'container_asset_id' = %s
+          AND deleted_at IS NULL
+        """,
+        (root_id, parent_asset_id),
+    )
+    for child in child_assets:
+        member_path = str(getattr(child, "member_path"))
+        child_path = f"{parent_relative_path}/{member_path}"
+        cur.execute(
+            """
+            SELECT id::text
+            FROM source_assets
+            WHERE root_id = %s
+              AND path = %s
+            """,
+            (root_id, child_path),
+        )
+        previous = cur.fetchone()
+        previous_id = previous[0] if previous else None
+        canonical_id = _find_canonical_asset_id(cur, getattr(child, "content_hash", None), previous_id)
+        status = str(getattr(child, "extraction_status", "metadata_only") or "metadata_only")
+        if canonical_id and status == "indexed":
+            status = "duplicate_suppressed"
+        metadata = {
+            "source": "container_extractor",
+            "container_asset_id": parent_asset_id,
+            "parent_asset_id": parent_asset_id,
+            "container_member_path": member_path,
+            **(getattr(child, "metadata", {}) or {}),
+        }
+        cur.execute(
+            """
+            INSERT INTO source_assets (
+                root_id, path, uri, file_kind, mime_type, extension, size_bytes,
+                mtime_ns, quick_hash, content_hash, canonical_asset_id,
+                extraction_status, extraction_tier, last_seen_at, indexed_at, deleted_at, metadata
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                now(), CASE WHEN %s = 'indexed' THEN now() ELSE NULL END, NULL, %s::jsonb
+            )
+            ON CONFLICT (root_id, path) DO UPDATE SET
+                uri = EXCLUDED.uri,
+                file_kind = EXCLUDED.file_kind,
+                mime_type = EXCLUDED.mime_type,
+                extension = EXCLUDED.extension,
+                size_bytes = EXCLUDED.size_bytes,
+                mtime_ns = EXCLUDED.mtime_ns,
+                quick_hash = EXCLUDED.quick_hash,
+                content_hash = EXCLUDED.content_hash,
+                canonical_asset_id = EXCLUDED.canonical_asset_id,
+                extraction_status = EXCLUDED.extraction_status,
+                extraction_tier = EXCLUDED.extraction_tier,
+                last_seen_at = now(),
+                indexed_at = CASE WHEN EXCLUDED.extraction_status = 'indexed' THEN now() ELSE source_assets.indexed_at END,
+                deleted_at = NULL,
+                metadata = source_assets.metadata || EXCLUDED.metadata,
+                updated_at = now()
+            RETURNING id::text
+            """,
+            (
+                root_id,
+                child_path,
+                f"{parent_uri}#member={quote(member_path, safe='')}",
+                getattr(child, "file_kind", "binary"),
+                getattr(child, "mime_type", None),
+                getattr(child, "extension", ""),
+                int(getattr(child, "size_bytes", 0) or 0),
+                parent_mtime_ns,
+                getattr(child, "quick_hash", None),
+                getattr(child, "content_hash", None),
+                canonical_id,
+                status,
+                getattr(child, "extraction_tier", "metadata_only"),
+                status,
+                _json(metadata),
+            ),
+        )
+        child_id = cur.fetchone()[0]
+        _replace_asset_chunks(cur, child_id, () if canonical_id else tuple(getattr(child, "chunks", ()) or ()))
 
 
 def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> int:

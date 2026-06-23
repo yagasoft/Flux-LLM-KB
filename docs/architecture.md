@@ -60,8 +60,9 @@ single file. Small text-like files are extracted and chunked locally; heavy
 documents, images, audio, and video are queued for local deferred processing.
 Images are dimensioned locally, media uses sidecar transcripts and `ffprobe`
 when available, Draw.io and modern VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are
-parsed structurally, and archives or unknown binaries remain metadata-only
-unless explicitly enabled later.
+parsed structurally, bounded archive/container enumeration records related
+child assets without recursive extraction, and unknown binaries remain
+metadata-only.
 
 File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,

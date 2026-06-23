@@ -73,14 +73,68 @@ def test_scan_path_records_image_metadata_without_ocr(monkeypatch, tmp_path):
     ]
 
 
-def test_classify_file_uses_metadata_only_for_archives(tmp_path):
-    archive = tmp_path / "bundle.zip"
-    archive.write_bytes(b"PK")
+def test_classify_archive_and_container_extensions_as_deferred(tmp_path):
+    archive_extensions = {
+        ".zip",
+        ".7z",
+        ".rar",
+        ".tar",
+        ".tgz",
+        ".gz",
+        ".bz2",
+        ".xz",
+        ".zst",
+        ".lz4",
+        ".cab",
+        ".ar",
+        ".cpio",
+        ".iso",
+        ".dmg",
+    }
+    container_extensions = {
+        ".jar",
+        ".war",
+        ".ear",
+        ".apk",
+        ".ipa",
+        ".nupkg",
+        ".whl",
+        ".egg",
+        ".gem",
+        ".crate",
+        ".deb",
+        ".rpm",
+        ".vsix",
+        ".xpi",
+        ".crx",
+    }
 
-    classification = classify_file(archive, CorpusPolicy(root_path=tmp_path))
+    for extension in sorted(archive_extensions | container_extensions):
+        path = tmp_path / f"bundle{extension}"
+        path.write_bytes(b"container placeholder")
 
-    assert classification.file_kind == "archive"
-    assert classification.extraction_tier == "metadata_only"
+        classification = classify_file(path, CorpusPolicy(root_path=tmp_path))
+
+        assert classification.file_kind == ("container" if extension in container_extensions else "archive"), extension
+        assert classification.extraction_tier == "deferred", extension
+
+
+def test_scan_path_queues_archives_and_package_containers(tmp_path):
+    root = tmp_path / "containers"
+    root.mkdir()
+    (root / "bundle.zip").write_bytes(b"PK")
+    (root / "package.whl").write_bytes(b"PK")
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert {asset.relative_path: asset.file_kind for asset in plan.assets} == {
+        "bundle.zip": "archive",
+        "package.whl": "container",
+    }
+    assert {(job["job_type"], job["relative_path"], job["reason"]) for job in plan.deferred_jobs} == {
+        ("corpus_extract_archive", "bundle.zip", "deferred_extractor"),
+        ("corpus_extract_container", "package.whl", "deferred_extractor"),
+    }
 
 
 def test_classify_business_document_extensions_as_deferred_documents(tmp_path):

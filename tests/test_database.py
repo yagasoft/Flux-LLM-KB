@@ -1,10 +1,12 @@
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from flux_llm_kb import database
+from flux_llm_kb.crawler import AssetChunk
 from flux_llm_kb.database import forget_episode
 
 
@@ -429,6 +431,89 @@ def test_complete_corpus_job_clears_previous_error(monkeypatch):
 
     sql = "\n".join(item[0] for item in executed)
     assert "last_error = NULL" in sql
+
+
+def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql and "a.root_id::text" in sql:
+                return ("asset-parent", None, "root-1", "file:///docs/bundle.zip", 123)
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
+                return ("asset-parent", None)
+            if "SELECT id::text FROM source_assets" in sql:
+                return None
+            if "INSERT INTO source_assets" in sql:
+                return ("child-1",)
+            if "INSERT INTO asset_chunks" in sql:
+                return ("chunk-1",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    child = SimpleNamespace(
+        member_path="docs/readme.md",
+        file_kind="text",
+        mime_type="text/markdown",
+        extension=".md",
+        size_bytes=20,
+        quick_hash="quick-child",
+        content_hash="hash-child",
+        extraction_tier="inline",
+        extraction_status="indexed",
+        chunks=(
+            AssetChunk(
+                chunk_index=0,
+                title="docs/readme.md",
+                body="Archive child body",
+                modality="text",
+                locator="char:0-18",
+                token_estimate=3,
+            ),
+        ),
+        metadata={"container_member_path": "docs/readme.md", "container_format": "zip"},
+    )
+    result = SimpleNamespace(status="metadata_only", metadata={"extractor": "container"}, chunks=(), child_assets=(child,))
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
+
+    database.apply_extraction_result(root_name="docs", relative_path="bundle.zip", result=result)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    params_json = "\n".join(str(params) for _statement, params in executed)
+    assert "metadata->>'container_asset_id' = %s" in sql
+    assert "INSERT INTO source_assets" in sql
+    assert "bundle.zip/docs/readme.md" in params_json
+    assert "container_asset_id" in params_json
+    assert "parent_asset_id" in params_json
+    assert "container_member_path" in params_json
+    assert "INSERT INTO asset_chunks" in sql
 
 
 def test_clear_completed_corpus_job_errors_clears_legacy_errors(monkeypatch):
