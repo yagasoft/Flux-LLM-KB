@@ -31,3 +31,25 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
     cleanup_index = script.index("git worktree remove")
 
     assert deploy_index < probe_index < cleanup_index
+
+
+def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    install_step = (
+        'Invoke-FeatureStep -Name "dashboard-install" '
+        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci'"
+    )
+    test_step = (
+        'Invoke-FeatureStep -Name "dashboard-test" '
+        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard test'"
+    )
+    build_step = (
+        'Invoke-FeatureStep -Name "dashboard-build" '
+        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard run build'"
+    )
+
+    assert install_step in script
+    assert test_step in script
+    assert build_step in script
+    assert script.index(install_step) < script.index(test_step) < script.index(build_step)
