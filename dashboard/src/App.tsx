@@ -368,6 +368,22 @@ type CaptureReviewPayload = {
   jobs?: CaptureReviewJob[];
 };
 
+type AuditEvent = {
+  id?: string;
+  event_type?: string;
+  actor?: string | null;
+  target_id?: string | null;
+  details?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+type AuditPayload = AuditEvent[] | { events?: AuditEvent[] };
+
+type CaptureDecisionState = {
+  job: CaptureReviewJob;
+  decision: "approve" | "reject";
+};
+
 type TabId = "health" | "corpus" | "mail" | "settings" | "retrieval" | "review" | "jobs";
 
 type ProfileForm = {
@@ -481,6 +497,9 @@ export default function App() {
   const [reviewStateFilter, setReviewStateFilter] = useState("");
   const [claimReview, setClaimReview] = useState<ClaimReviewPayload>({ claims: [], counts: {} });
   const [captureReview, setCaptureReview] = useState<CaptureReviewPayload>({ jobs: [] });
+  const [captureReviewAudit, setCaptureReviewAudit] = useState<AuditEvent[]>([]);
+  const [captureDecision, setCaptureDecision] = useState<CaptureDecisionState | null>(null);
+  const [captureDecisionReason, setCaptureDecisionReason] = useState("");
   const [selectedClaimId, setSelectedClaimId] = useState("");
   const [claimGraph, setClaimGraph] = useState<GraphPayload>({ edges: [] });
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -798,13 +817,15 @@ export default function App() {
       params.set("review", reviewFilter);
       if (reviewStateFilter) params.set("state", reviewStateFilter);
       params.set("limit", "50");
-      const [claims, capture] = await Promise.all([
+      const [claims, capture, audit] = await Promise.all([
         fetchRequiredJson<ClaimReviewPayload>(`/api/claims?${params.toString()}`),
-        getJson<CaptureReviewPayload>("/api/capture/review?limit=50", { jobs: [] })
+        getJson<CaptureReviewPayload>("/api/capture/review?limit=50", { jobs: [] }),
+        getJson<AuditPayload>("/api/audit?limit=50", [])
       ]);
       const nextClaims = claims.claims ?? [];
       setClaimReview({ claims: nextClaims, counts: claims.counts ?? {} });
       setCaptureReview(capture);
+      setCaptureReviewAudit(captureReviewAuditEvents(audit));
       setSelectedClaimId((current) => nextClaims.some((claim) => claim.id === current) ? current : nextClaims[0]?.id ?? "");
     } catch (error) {
       setToast(`Could not load claim review queue: ${errorMessage(error)}`);
@@ -837,6 +858,29 @@ export default function App() {
       await loadReview();
     } catch (error) {
       setToast(`Claim transition failed for ${claim.id}: ${errorMessage(error)}`);
+    }
+  }
+
+  function openCaptureDecision(job: CaptureReviewJob, decision: "approve" | "reject") {
+    setCaptureDecision({ job, decision });
+    setCaptureDecisionReason("");
+  }
+
+  async function decideCaptureReviewJob() {
+    if (!captureDecision?.job.id) return;
+    const rationale = captureDecisionReason.trim();
+    if (!rationale) return;
+    try {
+      await sendJson(`/api/capture/review/${encodeURIComponent(captureDecision.job.id)}/decision`, "POST", {
+        decision: captureDecision.decision,
+        rationale
+      });
+      setToast(`Capture job ${captureDecision.decision} recorded for ${captureDecision.job.id}.`);
+      setCaptureDecision(null);
+      setCaptureDecisionReason("");
+      await loadReview();
+    } catch (error) {
+      setToast(`Capture review decision failed for ${captureDecision.job.id}: ${errorMessage(error)}`);
     }
   }
 
@@ -1102,6 +1146,7 @@ export default function App() {
           <ReviewTab
             payload={claimReview}
             capture={captureReview}
+            captureAudit={captureReviewAudit}
             graph={claimGraph}
             selectedClaim={selectedClaim}
             loading={reviewLoading}
@@ -1111,6 +1156,7 @@ export default function App() {
             onStateFilter={setReviewStateFilter}
             onSelectClaim={(claim) => setSelectedClaimId(claim.id)}
             onTransition={(claim, transition) => void transitionReviewClaim(claim, transition)}
+            onCaptureDecision={openCaptureDecision}
             onRefresh={() => void loadReview()}
           />
         )}
@@ -1162,6 +1208,16 @@ export default function App() {
           confirmLabel="Confirm and save"
           onCancel={() => setConfirmSetting(null)}
           onConfirm={() => void saveSetting(true)}
+        />
+      )}
+
+      {captureDecision && (
+        <CaptureDecisionDialog
+          decision={captureDecision}
+          reason={captureDecisionReason}
+          onReason={setCaptureDecisionReason}
+          onClose={() => setCaptureDecision(null)}
+          onSave={() => void decideCaptureReviewJob()}
         />
       )}
 
@@ -2007,6 +2063,7 @@ function RetrievalTab({
 function ReviewTab({
   payload,
   capture,
+  captureAudit,
   graph,
   selectedClaim,
   loading,
@@ -2016,10 +2073,12 @@ function ReviewTab({
   onStateFilter,
   onSelectClaim,
   onTransition,
+  onCaptureDecision,
   onRefresh
 }: {
   payload: ClaimReviewPayload;
   capture: CaptureReviewPayload;
+  captureAudit: AuditEvent[];
   graph: GraphPayload;
   selectedClaim?: ClaimReviewClaim;
   loading: boolean;
@@ -2029,6 +2088,7 @@ function ReviewTab({
   onStateFilter: (value: string) => void;
   onSelectClaim: (claim: ClaimReviewClaim) => void;
   onTransition: (claim: ClaimReviewClaim, transition: string) => void;
+  onCaptureDecision: (job: CaptureReviewJob, decision: "approve" | "reject") => void;
   onRefresh: () => void;
 }) {
   const claims = payload.claims ?? [];
@@ -2074,7 +2134,10 @@ function ReviewTab({
         <GraphEdgeTable graph={graph} />
       </Panel>
       <Panel title="Capture Review Queue">
-        <CaptureReviewTable jobs={capture.jobs ?? []} />
+        <CaptureReviewTable jobs={capture.jobs ?? []} onDecision={onCaptureDecision} />
+      </Panel>
+      <Panel title="Capture Review Decisions">
+        <CaptureReviewAuditList events={captureAudit} />
       </Panel>
     </section>
   );
@@ -2205,7 +2268,13 @@ function GraphEdgeTable({ graph }: { graph: GraphPayload }) {
   );
 }
 
-function CaptureReviewTable({ jobs }: { jobs: CaptureReviewJob[] }) {
+function CaptureReviewTable({
+  jobs,
+  onDecision
+}: {
+  jobs: CaptureReviewJob[];
+  onDecision: (job: CaptureReviewJob, decision: "approve" | "reject") => void;
+}) {
   if (jobs.length === 0) return <p className="muted padded">No pending capture review jobs.</p>;
   return (
     <div className="review-table-wrap">
@@ -2217,6 +2286,7 @@ function CaptureReviewTable({ jobs }: { jobs: CaptureReviewJob[] }) {
             <th>Status</th>
             <th>Target</th>
             <th>Updated</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -2227,10 +2297,108 @@ function CaptureReviewTable({ jobs }: { jobs: CaptureReviewJob[] }) {
               <td><JobStatusBadge status={job.status ?? "pending_review"} /></td>
               <td className="claim-object" title={captureReviewTarget(job)}>{captureReviewTarget(job)}</td>
               <td>{formatDate(job.updated_at)}</td>
+              <td>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    aria-label={`Approve capture job ${job.id ?? index + 1}`}
+                    title={`Approve ${job.id ?? "capture job"}`}
+                    onClick={() => onDecision(job, "approve")}
+                  >
+                    <CheckCircle2 size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Reject capture job ${job.id ?? index + 1}`}
+                    title={`Reject ${job.id ?? "capture job"}`}
+                    onClick={() => onDecision(job, "reject")}
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function CaptureReviewAuditList({ events }: { events: AuditEvent[] }) {
+  if (events.length === 0) return <p className="muted padded">No capture review decisions recorded yet.</p>;
+  return (
+    <div className="review-table-wrap">
+      <table className="profile-table review-table" aria-label="Capture review decisions">
+        <thead>
+          <tr>
+            <th>Event</th>
+            <th>Job</th>
+            <th>Rationale</th>
+            <th>Actor</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody>
+          {events.map((event, index) => (
+            <tr key={event.id ?? `${event.event_type}-${index}`}>
+              <td>{event.event_type ?? "-"}</td>
+              <td>{event.target_id ?? "-"}</td>
+              <td className="claim-object" title={captureReviewAuditReason(event)}>{captureReviewAuditReason(event)}</td>
+              <td>{event.actor ?? "-"}</td>
+              <td>{formatDate(event.created_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CaptureDecisionDialog({
+  decision,
+  reason,
+  onReason,
+  onClose,
+  onSave
+}: {
+  decision: CaptureDecisionState;
+  reason: string;
+  onReason: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const approve = decision.decision === "approve";
+  const title = `${approve ? "Approve" : "Reject"} capture review`;
+  return (
+    <div className="modal-backdrop top-layer">
+      <form
+        className="modal capture-review-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="capture-review-dialog-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (reason.trim()) onSave();
+        }}
+      >
+        <header>
+          <h2 id="capture-review-dialog-title">{title}</h2>
+          <button type="button" aria-label="Close capture review decision" onClick={onClose}><X size={18} /></button>
+        </header>
+        <div className="setting-editor">
+          <strong>{decision.job.id ?? "Capture job"}</strong>
+          <p className="muted">{captureReviewTarget(decision.job)}</p>
+          <label>
+            Rationale
+            <textarea value={reason} maxLength={1000} onChange={(event) => onReason(event.target.value)} />
+          </label>
+        </div>
+        <footer>
+          <button className="ghost-action compact" type="button" onClick={onClose}>Cancel</button>
+          <button className="small-primary" type="submit" disabled={!reason.trim()}>{approve ? "Approve" : "Reject"}</button>
+        </footer>
+      </form>
     </div>
   );
 }
@@ -2246,6 +2414,17 @@ function captureReviewTarget(job: CaptureReviewJob) {
     ?? stringFromUnknown(payload.source)
     ?? stringFromUnknown(payload.source_dir)
     ?? stringFromUnknown(payload.file)
+    ?? "-";
+}
+
+function captureReviewAuditEvents(payload: AuditPayload): AuditEvent[] {
+  const events = Array.isArray(payload) ? payload : payload.events ?? [];
+  return events.filter((event) => (event.event_type ?? "").startsWith("capture.review_")).slice(0, 8);
+}
+
+function captureReviewAuditReason(event: AuditEvent) {
+  return stringFromUnknown(event.details?.rationale)
+    ?? stringFromUnknown(event.details?.message)
     ?? "-";
 }
 

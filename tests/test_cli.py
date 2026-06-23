@@ -256,3 +256,55 @@ def test_cli_graph_traverse_uses_service(monkeypatch, capsys):
         "direction": "out",
         "limit": 100,
     }
+
+
+def test_cli_capture_review_list_and_decide_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = {}
+
+    class FakeService:
+        def list_capture_review_jobs(self, **kwargs):
+            calls["list"] = kwargs
+            return {"jobs": [{"id": "job-1", "status": "pending_review"}]}
+
+        def review_capture_job(self, **kwargs):
+            calls["decide"] = kwargs
+            return {
+                "job": {"id": kwargs["job_id"], "status": "rejected"},
+                "review": {"decision": kwargs["decision"], "rationale": kwargs["rationale"], "actor": kwargs["actor"]},
+                "audit_event": {"id": "audit-1", "event_type": "capture.review_rejected"},
+            }
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["capture", "review", "list", "--limit", "25"]) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+
+    assert list_payload["jobs"][0]["id"] == "job-1"
+    assert calls["list"] == {"limit": 25}
+
+    assert (
+        cli.main(
+            [
+                "capture",
+                "review",
+                "decide",
+                "job-1",
+                "--decision",
+                "reject",
+                "--rationale",
+                "not useful",
+            ]
+        )
+        == 0
+    )
+    decide_payload = json.loads(capsys.readouterr().out)
+
+    assert decide_payload["audit_event"]["event_type"] == "capture.review_rejected"
+    assert calls["decide"] == {
+        "job_id": "job-1",
+        "decision": "reject",
+        "rationale": "not useful",
+        "actor": "cli",
+    }

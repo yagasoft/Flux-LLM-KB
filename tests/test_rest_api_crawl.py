@@ -397,6 +397,37 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
                 ]
             }
 
+        def review_capture_job(self, **kwargs):
+            calls["review_capture_job"] = kwargs
+            return {
+                "job": {
+                    "id": kwargs["job_id"],
+                    "job_type": "codex_backfill",
+                    "status": "approved",
+                    "payload": {
+                        "status": "approved",
+                        "path": "sessions/session.json",
+                        "review": {
+                            "decision": kwargs["decision"],
+                            "rationale": kwargs["rationale"],
+                            "actor": kwargs["actor"],
+                            "reviewed_at": "2026-06-23T10:00:00+00:00",
+                            "audit_event_id": "audit-1",
+                        },
+                    },
+                },
+                "review": {
+                    "decision": kwargs["decision"],
+                    "rationale": kwargs["rationale"],
+                    "actor": kwargs["actor"],
+                    "reviewed_at": "2026-06-23T10:00:00+00:00",
+                    "audit_event_id": "audit-1",
+                },
+                "audit_event_id": "audit-1",
+                "audit_event": {"id": "audit-1", "event_type": "capture.review_approved"},
+                "links": [{"label": "Audit event", "href": "/api/audit?limit=50", "audit_event_id": "audit-1"}],
+            }
+
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
     client = fastapi_testclient.TestClient(create_app())
 
@@ -405,6 +436,10 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
         params={"review": "needs_review", "state": "stale", "q": "postgres", "limit": 500},
     )
     capture = client.get("/api/capture/review", params={"limit": 500})
+    decision = client.post(
+        "/api/capture/review/job-1/decision",
+        json={"decision": "approve", "rationale": "verified enough"},
+    )
 
     assert claims.status_code == 200
     assert claims.json()["claims"][0]["review_reasons"] == ["stale", "retention:deprioritize"]
@@ -417,6 +452,42 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
     assert capture.status_code == 200
     assert capture.json()["jobs"][0]["payload"] == {"status": "pending_review", "path": "sessions/session.json"}
     assert calls["list_capture_review_jobs"] == {"limit": 500}
+    assert decision.status_code == 200
+    assert decision.json()["audit_event"]["event_type"] == "capture.review_approved"
+    assert decision.json()["audit_event_id"] == "audit-1"
+    assert calls["review_capture_job"] == {
+        "job_id": "job-1",
+        "decision": "approve",
+        "rationale": "verified enough",
+        "actor": "api",
+    }
+
+
+@pytest.mark.parametrize(
+    ("exc", "status_code", "code"),
+    [
+        (ValueError("rationale is required"), 400, "capture_review.decision_invalid"),
+        (LookupError("capture review job not found: job-1"), 404, "capture_review.job_not_found"),
+        (RuntimeError("capture review job already decided: job-1"), 409, "capture_review.job_conflict"),
+    ],
+)
+def test_capture_review_decision_route_maps_errors(monkeypatch, exc, status_code, code):
+    from flux_llm_kb.rest_api import create_app
+
+    class FakeService:
+        def review_capture_job(self, **_kwargs):
+            raise exc
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post(
+        "/api/capture/review/job-1/decision",
+        json={"decision": "approve", "rationale": "verified enough"},
+    )
+
+    assert response.status_code == status_code
+    assert response.json()["error"]["code"] == code
 
 
 def test_corpus_lookup_routes_return_assets_and_chunks(monkeypatch):

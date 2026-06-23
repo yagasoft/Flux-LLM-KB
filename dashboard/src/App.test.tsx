@@ -254,6 +254,8 @@ let jobsPayload: unknown;
 let crawlSyncErrorPayload: unknown;
 let reviewPayload: unknown;
 let captureReviewPayload: unknown;
+let captureReviewDecisionPayload: unknown;
+let auditPayload: unknown;
 let graphPayload: unknown;
 let claimTransitionPayload: unknown;
 
@@ -321,6 +323,19 @@ describe("Flux dashboard", () => {
         }
       ]
     };
+    captureReviewDecisionPayload = undefined;
+    auditPayload = {
+      events: [
+        {
+          id: "audit-old",
+          event_type: "capture.review_rejected",
+          actor: "dashboard",
+          target_id: "job-old",
+          details: { decision: "reject", rationale: "duplicate capture", status: "rejected" },
+          created_at: "2026-06-23T09:05:00+00:00"
+        }
+      ]
+    };
     graphPayload = {
       start_entity_id: "entity-1",
       edges: [
@@ -384,7 +399,36 @@ describe("Flux dashboard", () => {
       if (url.startsWith("/api/corpus/assets/") && url.endsWith("/actions")) return json(fileActionPayload);
       if (url.startsWith("/api/claims/") && url.endsWith("/transitions")) return json(claimTransitionPayload);
       if (url.startsWith("/api/claims")) return json(reviewPayload);
+      if (url === "/api/capture/review/job-review/decision" && init?.method === "POST") {
+        captureReviewDecisionPayload = JSON.parse(String(init.body));
+        captureReviewPayload = { jobs: [] };
+        auditPayload = {
+          events: [
+            {
+              id: "audit-approved",
+              event_type: "capture.review_approved",
+              actor: "api",
+              target_id: "job-review",
+              details: { decision: "approve", rationale: "Verified source summary", status: "approved" },
+              created_at: "2026-06-23T10:06:00+00:00"
+            }
+          ]
+        };
+        return json({
+          job: { id: "job-review", status: "approved" },
+          review: {
+            decision: "approve",
+            rationale: "Verified source summary",
+            actor: "api",
+            reviewed_at: "2026-06-23T10:06:00+00:00",
+            audit_event_id: "audit-approved"
+          },
+          audit_event_id: "audit-approved",
+          audit_event: { id: "audit-approved", event_type: "capture.review_approved" }
+        });
+      }
       if (url.startsWith("/api/capture/review")) return json(captureReviewPayload);
+      if (url.startsWith("/api/audit")) return json(auditPayload);
       if (url.startsWith("/api/graph/traverse")) return json(graphPayload);
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
@@ -540,6 +584,41 @@ describe("Flux dashboard", () => {
         })
       );
     });
+  });
+
+  test("capture review queue requires rationale, posts decisions, refreshes, and shows audit decisions", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Review" }));
+
+    const table = await screen.findByRole("table", { name: "Capture review queue" });
+    expect(within(table).getByRole("button", { name: "Approve capture job job-review" })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: "Reject capture job job-review" })).toBeInTheDocument();
+    expect(await screen.findByText("capture.review_rejected")).toBeInTheDocument();
+    expect(screen.getByText("duplicate capture")).toBeInTheDocument();
+
+    await user.click(within(table).getByRole("button", { name: "Approve capture job job-review" }));
+    const dialog = await screen.findByRole("dialog", { name: "Approve capture review" });
+    expect(within(dialog).getByRole("button", { name: "Approve" })).toBeDisabled();
+
+    await user.type(within(dialog).getByLabelText("Rationale"), "Verified source summary");
+    await user.click(within(dialog).getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/capture/review/job-review/decision",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ decision: "approve", rationale: "Verified source summary" })
+        })
+      );
+    });
+    expect(captureReviewDecisionPayload).toEqual({ decision: "approve", rationale: "Verified source summary" });
+    expect(await screen.findByText("No pending capture review jobs.")).toBeInTheDocument();
+    expect(await screen.findByText("capture.review_approved")).toBeInTheDocument();
+    expect(screen.getByText("Verified source summary")).toBeInTheDocument();
   });
 
   test("job queue renders readable rows and expandable details instead of primary raw JSON", async () => {

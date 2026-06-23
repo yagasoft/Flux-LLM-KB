@@ -75,6 +75,7 @@ Endpoints:
 - `POST /api/claims/{claim_id}/transitions`
 - `GET /api/graph/traverse?entity_id=<id>&relation_type=<type>&max_depth=<n>`
 - `GET /api/capture/review?limit=<n>`
+- `POST /api/capture/review/{job_id}/decision`
 - `GET /api/corpus/assets`
 - `GET /api/corpus/assets/{asset_id}`
 - `GET /api/corpus/chunks/{chunk_id}`
@@ -101,6 +102,8 @@ kernel-level automation:
 flux-kb claim upsert --subject-type project --subject Flux --predicate uses --object PostgreSQL --confidence 0.8
 flux-kb claim transition <claim-id> confirm --reason "verified"
 flux-kb graph traverse <entity-id> --relation-type depends_on --max-depth 2
+flux-kb capture review list --limit 50
+flux-kb capture review decide <job-id> --decision approve --rationale "Verified metadata and source."
 ```
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
@@ -111,9 +114,12 @@ The dashboard Review tab uses `GET /api/claims` and `GET /api/graph/traverse`
 to browse lifecycle review work and selected-entity graph edges. The
 `needs_review` filter includes stale, contradicted, superseded, and retired
 claims, plus claims with non-`keep` retention actions. `GET /api/capture/review`
-is read-only and returns pending capture-review job metadata only; approve/reject
-capture actions are intentionally deferred until an explicit approval-state
-model is added.
+returns pending capture-review job metadata only. Operators can approve or reject
+pending review jobs with `POST /api/capture/review/{job_id}/decision` and a
+required `rationale`; decisions update job status, store `payload.review`, keep
+raw capture payload fields out of responses, and append audit-visible
+`capture.review_approved` or `capture.review_rejected` events. Approved Codex
+backfill ingestion remains future work.
 
 Lookup endpoints are read-only and return stable JSON payloads for asset and
 chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a

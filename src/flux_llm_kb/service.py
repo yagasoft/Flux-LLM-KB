@@ -129,6 +129,37 @@ class KnowledgeService:
     def list_capture_review_jobs(self, *, limit: int = 50) -> dict[str, Any]:
         return {"jobs": database.list_capture_review_jobs(limit=limit)}
 
+    def review_capture_job(
+        self,
+        *,
+        job_id: str,
+        decision: str,
+        rationale: str,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        return database.review_capture_job(
+            job_id=job_id,
+            decision=decision,
+            rationale=rationale,
+            actor=actor,
+        )
+
+    def decide_capture_review_job(
+        self,
+        *,
+        job_id: str,
+        decision: str,
+        reason: str | None = None,
+        rationale: str | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        return self.review_capture_job(
+            job_id=job_id,
+            decision=decision,
+            rationale=rationale if rationale is not None else reason or "",
+            actor=actor,
+        )
+
     def transition_claim(
         self,
         *,

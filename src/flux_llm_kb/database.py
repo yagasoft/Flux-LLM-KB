@@ -1800,19 +1800,125 @@ def list_capture_review_jobs(*, limit: int = 50, url: str | None = None) -> list
                 """,
                 (max(1, min(limit, 200)),),
             )
-            return [
-                {
-                    "id": row[0],
-                    "job_type": row[1],
-                    "status": row[2],
-                    "payload": _metadata_only_payload(row[3] or {}),
-                    "attempts": row[4],
-                    "last_error": row[5],
-                    "created_at": row[6].isoformat(),
-                    "updated_at": row[7].isoformat(),
-                }
-                for row in cur.fetchall()
-            ]
+            return [_capture_job_row(row, metadata_only=True) for row in cur.fetchall()]
+
+
+def review_capture_job(
+    *,
+    job_id: str,
+    decision: str,
+    rationale: str,
+    actor: str = "system",
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_decision = (decision or "").strip().lower()
+    if normalized_decision not in {"approve", "reject"}:
+        raise ValueError("decision must be one of: approve, reject")
+
+    normalized_rationale = (rationale or "").strip()
+    if not normalized_rationale:
+        raise ValueError("rationale is required")
+    capped_rationale = normalized_rationale[:1000]
+    normalized_actor = (actor or "system").strip() or "system"
+    reviewed_at = datetime.now(UTC).isoformat()
+    target_status = "approved" if normalized_decision == "approve" else "rejected"
+    event_type = f"capture.review_{target_status}"
+    review_payload = {
+        "decision": normalized_decision,
+        "rationale": capped_rationale,
+        "actor": normalized_actor,
+        "reviewed_at": reviewed_at,
+    }
+
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
+                FROM capture_jobs
+                WHERE id::text = %s
+                FOR UPDATE
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"capture review job not found: {job_id}")
+            current_payload = row[3] or {}
+            current_payload_status = current_payload.get("status") if isinstance(current_payload, dict) else None
+            if row[2] != "pending_review" and current_payload_status != "pending_review":
+                raise RuntimeError(f"capture review job already decided: {job_id}")
+
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, actor, target_table, target_id, details)
+                VALUES (%s, %s, 'capture_jobs', %s::uuid, %s::jsonb)
+                RETURNING id::text
+                """,
+                (
+                    event_type,
+                    normalized_actor,
+                    row[0],
+                    _json(
+                        {
+                            "decision": normalized_decision,
+                            "rationale": capped_rationale,
+                            "status": target_status,
+                            "job_type": row[1],
+                        }
+                    ),
+                ),
+            )
+            audit_id = cur.fetchone()[0]
+            review_payload["audit_event_id"] = audit_id
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = %s,
+                    payload = jsonb_set(
+                        jsonb_set(COALESCE(payload, '{}'::jsonb), '{review}', %s::jsonb, true),
+                        '{status}',
+                        to_jsonb(%s::text),
+                        true
+                    ),
+                    last_error = NULL,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id::text = %s
+                RETURNING id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
+                """,
+                (target_status, _json(review_payload), target_status, job_id),
+            )
+            updated = cur.fetchone()
+            if updated is None:
+                raise LookupError(f"capture review job not found: {job_id}")
+            return {
+                "job": _capture_job_row(updated, metadata_only=True),
+                "review": review_payload,
+                "audit_event_id": audit_id,
+                "audit_event": {"id": audit_id, "event_type": event_type},
+                "links": [{"label": "Audit event", "href": "/api/audit?limit=50", "audit_event_id": audit_id}],
+            }
+
+
+def decide_capture_review_job(
+    *,
+    job_id: str,
+    decision: str,
+    reason: str | None = None,
+    rationale: str | None = None,
+    actor: str = "system",
+    url: str | None = None,
+) -> dict[str, Any]:
+    return review_capture_job(
+        job_id=job_id,
+        decision=decision,
+        rationale=rationale if rationale is not None else reason or "",
+        actor=actor,
+        url=url,
+    )
 
 
 def cancel_duplicate_corpus_jobs(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
@@ -4023,6 +4129,22 @@ def _metadata_only_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_metadata_only_payload(item) for item in value[:50]]
     return value
+
+
+def _capture_job_row(row: tuple[Any, ...], *, metadata_only: bool = False) -> dict[str, Any]:
+    payload = row[3] or {}
+    if metadata_only:
+        payload = _metadata_only_payload(payload)
+    return {
+        "id": row[0],
+        "job_type": row[1],
+        "status": row[2],
+        "payload": payload,
+        "attempts": row[4],
+        "last_error": row[5],
+        "created_at": row[6].isoformat(),
+        "updated_at": row[7].isoformat(),
+    }
 
 
 def _claim_lifecycle_events(cur: Any, claim_id: str) -> list[dict[str, Any]]:

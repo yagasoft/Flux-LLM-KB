@@ -81,6 +81,19 @@ def create_server():
             limit=limit,
         )
 
+    @mcp.tool(name="kb.capture_review")
+    def capture_review(limit: int = 50):
+        return service.list_capture_review_jobs(limit=limit)
+
+    @mcp.tool(name="kb.capture_review_decide")
+    def capture_review_decide(job_id: str, decision: str, rationale: str):
+        return service.review_capture_job(
+            job_id=job_id,
+            decision=decision,
+            rationale=rationale,
+            actor="mcp",
+        )
+
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str):
         return service.remember(title, summary, metadata={"source": "finalize_turn"}).__dict__

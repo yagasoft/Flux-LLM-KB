@@ -62,6 +62,10 @@ def create_app():
         reason: str | None = None
         confidence_delta: float = 0.0
 
+    class CaptureReviewDecisionRequest(BaseModel):
+        decision: str
+        rationale: str
+
     class ForgetRequest(BaseModel):
         memory_id: str
         reason: str = "user_request"
@@ -316,6 +320,46 @@ def create_app():
     @app.get("/api/capture/review")
     def capture_review(limit: int = 50):
         return service.list_capture_review_jobs(limit=limit)
+
+    @app.post("/api/capture/review/{job_id}/decision")
+    def capture_review_decision(job_id: str, request: CaptureReviewDecisionRequest = Body(...)):
+        try:
+            return service.review_capture_job(
+                job_id=job_id,
+                decision=request.decision,
+                rationale=request.rationale,
+                actor="api",
+            )
+        except ValueError as exc:
+            raise FluxApiError(
+                code="capture_review.decision_invalid",
+                message=str(exc),
+                status_code=400,
+                component="review",
+                retryable=False,
+                user_action="Use decision approve or reject and include a rationale.",
+                target={"type": "capture_review_job", "id": job_id},
+            ) from exc
+        except LookupError as exc:
+            raise FluxApiError(
+                code="capture_review.job_not_found",
+                message=str(exc),
+                status_code=404,
+                component="review",
+                retryable=False,
+                user_action="Refresh the capture review queue before retrying.",
+                target={"type": "capture_review_job", "id": job_id},
+            ) from exc
+        except RuntimeError as exc:
+            raise FluxApiError(
+                code="capture_review.job_conflict",
+                message=str(exc),
+                status_code=409,
+                component="review",
+                retryable=False,
+                user_action="Refresh the capture review queue; this job is no longer pending review.",
+                target={"type": "capture_review_job", "id": job_id},
+            ) from exc
 
     @app.get("/api/corpus/assets")
     def corpus_assets(root_name: str | None = None, path: str | None = None, limit: int = 50):

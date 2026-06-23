@@ -1,5 +1,8 @@
 from datetime import datetime, timezone
+import json
 from pathlib import Path
+
+import pytest
 
 from flux_llm_kb import database
 from flux_llm_kb.database import forget_episode
@@ -642,3 +645,145 @@ def test_list_capture_review_jobs_returns_pending_review_metadata_only(monkeypat
     assert "payload->>'status' = 'pending_review'" in sql
     assert params == (200,)
     assert jobs[0]["payload"] == {"status": "pending_review", "path": "sessions/session.json"}
+
+
+def test_review_capture_job_updates_payload_sanitizes_and_audits(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql, params = executed[-1]
+            if "SELECT id::text, job_type, status, payload" in sql:
+                return (
+                    "job-1",
+                    "codex_backfill",
+                    "pending",
+                    {"status": "pending_review", "path": "sessions/session.json", "content": "raw text"},
+                    0,
+                    None,
+                    timestamp,
+                    timestamp,
+                )
+            if "INSERT INTO audit_events" in sql:
+                return ("audit-1",)
+            if "UPDATE capture_jobs" in sql:
+                review_payload = json.loads(params[1])
+                return (
+                    "job-1",
+                    "codex_backfill",
+                    "approved",
+                    {
+                        "status": "approved",
+                        "path": "sessions/session.json",
+                        "content": "raw text",
+                        "review": review_payload,
+                    },
+                    0,
+                    None,
+                    timestamp,
+                    timestamp,
+                )
+            raise AssertionError(sql)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.review_capture_job(
+        job_id="job-1",
+        decision="approve",
+        rationale=f" {'x' * 1200} ",
+        actor="dashboard",
+    )
+
+    sql = "\n".join(item[0] for item in executed)
+    assert "FOR UPDATE" in sql
+    assert "jsonb_set" in sql
+    audit_params = next(params for statement, params in executed if "INSERT INTO audit_events" in statement)
+    assert "capture.review_approved" in audit_params
+    assert result["job"]["status"] == "approved"
+    assert result["job"]["payload"] == {
+        "status": "approved",
+        "path": "sessions/session.json",
+        "review": result["review"],
+    }
+    assert result["review"]["decision"] == "approve"
+    assert result["review"]["rationale"] == "x" * 1000
+    assert result["review"]["actor"] == "dashboard"
+    assert result["review"]["audit_event_id"] == "audit-1"
+    assert result["audit_event_id"] == "audit-1"
+    assert result["audit_event"] == {"id": "audit-1", "event_type": "capture.review_approved"}
+    assert result["links"][0]["audit_event_id"] == "audit-1"
+
+
+def test_review_capture_job_rejects_invalid_inputs_without_database():
+    with pytest.raises(ValueError, match="decision"):
+        database.review_capture_job(job_id="job-1", decision="maybe", rationale="because")
+    with pytest.raises(ValueError, match="rationale"):
+        database.review_capture_job(job_id="job-1", decision="approve", rationale="   ")
+
+
+def test_review_capture_job_conflicts_when_job_is_not_pending(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql, _params = executed[-1]
+            if "SELECT id::text, job_type, status, payload" in sql:
+                return ("job-1", "codex_backfill", "completed", {"status": "completed"}, 0, None, datetime.now(timezone.utc), datetime.now(timezone.utc))
+            raise AssertionError(sql)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    with pytest.raises(RuntimeError, match="already decided"):
+        database.review_capture_job(
+            job_id="job-1",
+            decision="reject",
+            rationale="not useful",
+            actor="dashboard",
+        )

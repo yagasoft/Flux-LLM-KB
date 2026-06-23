@@ -62,6 +62,20 @@ def main(argv: list[str] | None = None) -> int:
     graph_traverse.add_argument("--direction", choices=["out", "in", "both"], default="out")
     graph_traverse.add_argument("--limit", type=int, default=100)
 
+    capture_parser = subparsers.add_parser("capture", help="Manage capture review workflows")
+    capture_subparsers = capture_parser.add_subparsers(dest="capture_command", required=True)
+    capture_review_parser = capture_subparsers.add_parser("review", help="Review pending capture jobs")
+    capture_review_subparsers = capture_review_parser.add_subparsers(
+        dest="capture_review_command",
+        required=True,
+    )
+    capture_review_list = capture_review_subparsers.add_parser("list", help="List pending capture review jobs")
+    capture_review_list.add_argument("--limit", type=int, default=50)
+    capture_review_decide = capture_review_subparsers.add_parser("decide", help="Approve or reject a capture review job")
+    capture_review_decide.add_argument("job_id")
+    capture_review_decide.add_argument("--decision", required=True, choices=["approve", "reject"])
+    capture_review_decide.add_argument("--rationale", required=True)
+
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
     forget_parser.add_argument("--reason", default="user_request")
@@ -247,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         "remember": _remember,
         "claim": _claim,
         "graph": _graph,
+        "capture": _capture,
         "forget": _forget,
         "audit": _audit,
         "backfill-codex": _backfill_codex,
@@ -353,6 +368,31 @@ def _graph(args: argparse.Namespace) -> int:
         direction=args.direction,
         limit=args.limit,
     )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _capture(args: argparse.Namespace) -> int:
+    if args.capture_command == "review":
+        return _capture_review(args)
+    raise ValueError(args.capture_command)  # pragma: no cover - argparse prevents this
+
+
+def _capture_review(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.capture_review_command == "list":
+        payload = service.list_capture_review_jobs(limit=args.limit)
+    elif args.capture_review_command == "decide":
+        payload = service.review_capture_job(
+            job_id=args.job_id,
+            decision=args.decision,
+            rationale=args.rationale,
+            actor="cli",
+        )
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.capture_review_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
