@@ -273,7 +273,7 @@ def test_post_body_models_are_bound_from_json(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
     class FakeService:
-        def search(self, query, limit=5):
+        def search(self, query, limit=5, **_kwargs):
             return [{"query": query, "limit": limit}]
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
@@ -288,23 +288,120 @@ def test_post_body_models_are_bound_from_json(monkeypatch):
 def test_get_search_and_brief_support_external_consumers(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
+    calls = {}
+
     class FakeService:
-        def search(self, query, limit=5):
+        def search(self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first"):
+            calls["search"] = {
+                "query": query,
+                "limit": limit,
+                "cwd": cwd,
+                "root_name": root_name,
+                "scope_mode": scope_mode,
+            }
             return [{"kind": "corpus_chunk", "query": query, "limit": limit}]
 
-        def brief(self, query, token_budget=None):
+        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+            calls["brief"] = {
+                "query": query,
+                "token_budget": token_budget,
+                "cwd": cwd,
+                "root_name": root_name,
+                "scope_mode": scope_mode,
+            }
             return f"{query}:{token_budget}"
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
     client = fastapi_testclient.TestClient(create_app())
 
-    search = client.get("/api/search", params={"query": "RFP", "limit": 3})
-    brief = client.get("/api/brief", params={"query": "RFP", "token_budget": 900})
+    search = client.get(
+        "/api/search",
+        params={
+            "query": "RFP",
+            "limit": 3,
+            "cwd": "E:/Repo",
+            "root_name": "repo",
+            "scope_mode": "local_only",
+        },
+    )
+    brief = client.get(
+        "/api/brief",
+        params={
+            "query": "RFP",
+            "token_budget": 900,
+            "cwd": "E:/Repo",
+            "root_name": "repo",
+            "scope_mode": "local_only",
+        },
+    )
 
     assert search.status_code == 200
     assert search.json() == [{"kind": "corpus_chunk", "query": "RFP", "limit": 3}]
     assert brief.status_code == 200
     assert brief.json() == {"brief": "RFP:900"}
+    assert calls["search"] == {
+        "query": "RFP",
+        "limit": 3,
+        "cwd": "E:/Repo",
+        "root_name": "repo",
+        "scope_mode": "local_only",
+    }
+    assert calls["brief"] == {
+        "query": "RFP",
+        "token_budget": 900,
+        "cwd": "E:/Repo",
+        "root_name": "repo",
+        "scope_mode": "local_only",
+    }
+
+
+def test_post_search_and_brief_accept_scope_fields(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = {}
+
+    class FakeService:
+        def search(self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first"):
+            calls["search"] = {
+                "query": query,
+                "limit": limit,
+                "cwd": cwd,
+                "root_name": root_name,
+                "scope_mode": scope_mode,
+            }
+            return [{"query": query, "scope_mode": scope_mode}]
+
+        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+            calls["brief"] = {
+                "query": query,
+                "token_budget": token_budget,
+                "cwd": cwd,
+                "root_name": root_name,
+                "scope_mode": scope_mode,
+            }
+            return f"{query}:{scope_mode}:{token_budget}"
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    search = client.post(
+        "/api/search",
+        json={"query": "RFP", "limit": 2, "cwd": "E:/Repo", "scope_mode": "local_only"},
+    )
+    brief = client.post(
+        "/api/brief",
+        json={"query": "RFP", "token_budget": 700, "root_name": "repo", "scope_mode": "global"},
+    )
+
+    assert search.status_code == 200
+    assert search.json() == [{"query": "RFP", "scope_mode": "local_only"}]
+    assert brief.status_code == 200
+    assert brief.json() == {"brief": "RFP:global:700"}
+    assert calls["search"]["cwd"] == "E:/Repo"
+    assert calls["search"]["scope_mode"] == "local_only"
+    assert calls["brief"]["root_name"] == "repo"
+    assert calls["brief"]["scope_mode"] == "global"
+    assert calls["brief"]["token_budget"] == 700
 
 
 def test_claim_and_graph_routes_are_exposed(monkeypatch):

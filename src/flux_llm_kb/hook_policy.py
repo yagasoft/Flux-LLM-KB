@@ -50,26 +50,63 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any]:
 
     try:
         service = KnowledgeService()
-        results = service.search(prompt, limit=5)
+        scope_mode = "local_first"
+        results = service.search(prompt, limit=5, cwd=common["cwd"], scope_mode=scope_mode)
+        retrieval_scope = _retrieval_scope_label(results)
         if not _has_relevant_evidence(results):
             if settings.capture_guidance_enabled:
                 _audit(
                     "codex_hook.preflight_guidance",
-                    {**common, "reason": "no_relevant_evidence", "result_count": len(results)},
+                    {
+                        **common,
+                        "reason": "no_relevant_evidence",
+                        "result_count": len(results),
+                        "scope_mode": scope_mode,
+                        "retrieval_scope": "skipped",
+                    },
                 )
                 return _additional_context("UserPromptSubmit", CAPTURE_GUIDANCE)
             _audit(
                 "codex_hook.preflight_skipped",
-                {**common, "reason": "no_relevant_evidence", "result_count": len(results)},
+                {
+                    **common,
+                    "reason": "no_relevant_evidence",
+                    "result_count": len(results),
+                    "scope_mode": scope_mode,
+                    "retrieval_scope": "skipped",
+                },
             )
             return {"continue": True}
 
-        brief = service.brief(prompt, token_budget=settings.token_budget).strip()
+        brief = service.brief(
+            prompt,
+            token_budget=settings.token_budget,
+            cwd=common["cwd"],
+            scope_mode=scope_mode,
+        ).strip()
         if not brief:
             if settings.capture_guidance_enabled:
-                _audit("codex_hook.preflight_guidance", {**common, "reason": "empty_brief", "result_count": len(results)})
+                _audit(
+                    "codex_hook.preflight_guidance",
+                    {
+                        **common,
+                        "reason": "empty_brief",
+                        "result_count": len(results),
+                        "scope_mode": scope_mode,
+                        "retrieval_scope": retrieval_scope,
+                    },
+                )
                 return _additional_context("UserPromptSubmit", CAPTURE_GUIDANCE)
-            _audit("codex_hook.preflight_skipped", {**common, "reason": "empty_brief", "result_count": len(results)})
+            _audit(
+                "codex_hook.preflight_skipped",
+                {
+                    **common,
+                    "reason": "empty_brief",
+                    "result_count": len(results),
+                    "scope_mode": scope_mode,
+                    "retrieval_scope": retrieval_scope,
+                },
+            )
             return {"continue": True}
 
         _audit(
@@ -79,10 +116,17 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any]:
                 "result_count": len(results),
                 "token_budget": settings.token_budget,
                 "brief_chars": len(brief),
+                "scope_mode": scope_mode,
+                "retrieval_scope": retrieval_scope,
             },
         )
         prefix = f"{CAPTURE_GUIDANCE}\n\n" if settings.capture_guidance_enabled else ""
-        return _additional_context("UserPromptSubmit", f"{prefix}Flux-LLM-KB relevant memory:\n{brief}")
+        header = (
+            "Flux-LLM-KB global fallback memory"
+            if retrieval_scope == "global_fallback"
+            else "Flux-LLM-KB relevant memory"
+        )
+        return _additional_context("UserPromptSubmit", f"{prefix}{header}:\n{brief}")
     except Exception as exc:  # pragma: no cover - exact integration failures are environment-specific
         _audit("codex_hook.preflight_error", {**common, "error": str(exc), "error_type": type(exc).__name__})
         return {"continue": True, "systemMessage": "Flux-LLM-KB preflight failed; continuing without memory brief."}
@@ -245,6 +289,17 @@ def _has_relevant_evidence(results: list[dict[str, Any]]) -> bool:
         if any("lexical" in stream or "fuzzy" in stream for stream in streams):
             return True
     return False
+
+
+def _retrieval_scope_label(results: list[dict[str, Any]]) -> str:
+    scopes = [str(result.get("retrieval_scope") or "global") for result in results]
+    if "local" in scopes:
+        return "local"
+    if "global_fallback" in scopes:
+        return "global_fallback"
+    if scopes:
+        return scopes[0]
+    return "none"
 
 
 def _truncate_capture(message: str, max_chars: int) -> tuple[str, bool]:

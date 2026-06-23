@@ -25,6 +25,18 @@ class RememberResult:
     redaction_count: int
 
 
+@dataclass(frozen=True)
+class RetrievalScope:
+    mode: str
+    cwd: str | None = None
+    root_name: str | None = None
+    root_path: str | None = None
+
+    @property
+    def is_scoped(self) -> bool:
+        return bool(self.cwd or self.root_name or self.root_path)
+
+
 class KnowledgeService:
     def remember(self, title: str, body: str, metadata: dict[str, Any] | None = None) -> RememberResult:
         redacted_title, title_findings = redact_text(title)
@@ -37,8 +49,47 @@ class KnowledgeService:
         )
         return RememberResult(id=episode_id, redaction_count=len(all_findings))
 
-    def search(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        cwd: str | None = None,
+        root_name: str | None = None,
+        scope_mode: str = "local_first",
+    ) -> list[dict[str, Any]]:
+        scope = _resolve_retrieval_scope(cwd=cwd, root_name=root_name, scope_mode=scope_mode)
+        if scope.mode == "global" or not scope.is_scoped:
+            return self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global")
+
+        scoped_results = self._search_once(query, limit=limit, scope=scope, label="local")
+        if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
+            return scoped_results
+
+        return self._search_once(
+            query,
+            limit=limit,
+            scope=RetrievalScope(mode="global"),
+            label="global_fallback",
+        )
+
+    def _search_once(self, query: str, *, limit: int, scope: RetrievalScope, label: str) -> list[dict[str, Any]]:
         corpus_limit = max(limit * 4, 20)
+        is_local = label == "local"
+        episode_items = (
+            database.search_episodes(
+                query,
+                limit=limit,
+                cwd=scope.cwd,
+                root_path=scope.root_path,
+            )
+            if not is_local or scope.cwd or scope.root_path
+            else []
+        )
+        corpus_items = (
+            database.search_corpus_chunks(query, limit=corpus_limit, root_name=scope.root_name)
+            if not is_local or scope.root_name
+            else []
+        )
         episodes = [
             {
                 "kind": "episode",
@@ -48,23 +99,37 @@ class KnowledgeService:
                 "detail_ref": {"kind": "episode", "id": item.get("id")},
                 "related_evidence_count": 0,
             }
-            for item in database.search_episodes(query, limit=limit)
+            for item in episode_items
         ]
         corpus = collapse_mail_spool_search_results(
             [
                 decorate_corpus_search_item({"kind": "corpus_chunk", **_format_corpus_search_item(item)})
-                for item in database.search_corpus_chunks(query, limit=corpus_limit)
+                for item in corpus_items
             ]
         )
-        return collapse_version_families(
+        results = collapse_version_families(
             sorted(corpus + episodes, key=lambda item: item["score"], reverse=True),
             limit=limit,
         )
+        return [_tag_retrieval_scope(item, label) for item in results]
 
-    def brief(self, query: str, token_budget: int | None = None) -> str:
+    def brief(
+        self,
+        query: str,
+        token_budget: int | None = None,
+        cwd: str | None = None,
+        root_name: str | None = None,
+        scope_mode: str = "local_first",
+    ) -> str:
         if token_budget is None:
             token_budget = _configured_token_budget()
-        search_results = self.search(query, limit=10)
+        search_results = self.search(
+            query,
+            limit=10,
+            cwd=cwd,
+            root_name=root_name,
+            scope_mode=scope_mode,
+        )
         current_results = [item for item in search_results if _is_current_evidence(item)]
         if current_results:
             search_results = current_results
@@ -588,6 +653,72 @@ def _mail_manifest_summary(manifest: dict[str, Any]) -> str:
         count = int(manifest.get("attachment_count") or 0)
         parts.append(f"{count} attachment{'s' if count != 1 else ''}")
     return "; ".join(parts) + "." if parts else ""
+
+
+def _resolve_retrieval_scope(*, cwd: str | None, root_name: str | None, scope_mode: str) -> RetrievalScope:
+    mode = _normalize_scope_mode(scope_mode)
+    if mode == "global":
+        return RetrievalScope(mode=mode)
+
+    cleaned_cwd = _clean_optional_text(cwd)
+    cleaned_root_name = _clean_optional_text(root_name)
+    root = _retrieval_root(cleaned_root_name, cleaned_cwd)
+    if root is None:
+        return RetrievalScope(mode=mode, cwd=cleaned_cwd, root_name=cleaned_root_name)
+    return RetrievalScope(
+        mode=mode,
+        cwd=cleaned_cwd,
+        root_name=str(root.get("name") or cleaned_root_name or ""),
+        root_path=str(root.get("root_path") or "") or None,
+    )
+
+
+def _normalize_scope_mode(scope_mode: str) -> str:
+    mode = str(scope_mode or "local_first").strip().lower()
+    if mode not in {"local_first", "local_only", "global"}:
+        raise ValueError("scope_mode must be one of: local_first, local_only, global")
+    return mode
+
+
+def _clean_optional_text(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _retrieval_root(root_name: str | None, cwd: str | None) -> dict[str, Any] | None:
+    try:
+        roots = database.list_monitored_roots()
+    except Exception:
+        roots = []
+    enabled_roots = [root for root in roots if root.get("enabled", True)]
+    if root_name:
+        for root in enabled_roots:
+            if root.get("name") == root_name:
+                return root
+        return None
+    if cwd:
+        matching = [
+            root
+            for root in enabled_roots
+            if _path_is_under_root(cwd, str(root.get("root_path") or ""))
+        ]
+        if matching:
+            return sorted(matching, key=lambda item: len(str(item.get("root_path") or "")), reverse=True)[0]
+    return None
+
+
+def _has_lexical_or_fuzzy_evidence(results: list[dict[str, Any]]) -> bool:
+    for result in results:
+        streams = {str(stream) for stream in result.get("streams", [])}
+        if any("lexical" in stream or "fuzzy" in stream for stream in streams):
+            return True
+    return False
+
+
+def _tag_retrieval_scope(item: dict[str, Any], label: str) -> dict[str, Any]:
+    result = dict(item)
+    result["retrieval_scope"] = label
+    return result
 
 
 def _redact_metadata(value: Any) -> tuple[Any, list[RedactionFinding]]:

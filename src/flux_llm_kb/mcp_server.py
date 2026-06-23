@@ -14,17 +14,27 @@ def create_server():
         "Flux-LLM-KB",
         instructions=(
             "Use kb.brief before non-trivial work. Store only redacted, durable "
-            "knowledge. Do not persist secrets, raw transcripts, or private exports."
+            "knowledge. You may query mid-turn with kb.brief or kb.search when you "
+            "need prior decisions, unresolved project context, previous fixes, or "
+            "user-referenced history; skip it when local files, the prompt, or current "
+            "tool output already answer the question. Do not persist secrets, raw "
+            "transcripts, or private exports."
         ),
     )
 
     @mcp.tool(name="kb.search")
-    def search(query: str, limit: int = 5):
-        return service.search(query, limit=limit)
+    def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+        return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
 
     @mcp.tool(name="kb.brief")
-    def brief(query: str, token_budget: int = 1200):
-        return service.brief(query, token_budget=token_budget)
+    def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+        return service.brief(
+            query,
+            token_budget=token_budget,
+            cwd=cwd,
+            root_name=root_name,
+            scope_mode=scope_mode,
+        )
 
     @mcp.tool(name="kb.remember")
     def remember(title: str, body: str):

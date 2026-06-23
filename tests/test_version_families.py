@@ -11,11 +11,11 @@ def test_document_family_key_removes_common_version_noise():
 def test_service_search_suppresses_same_document_version_siblings(monkeypatch):
     from flux_llm_kb import database
 
-    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5: [])
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
     monkeypatch.setattr(
         database,
         "search_corpus_chunks",
-        lambda query, limit=5: [
+        lambda query, limit=5, **_kwargs: [
             {
                 "id": "chunk-v1",
                 "title": "RFP Response",

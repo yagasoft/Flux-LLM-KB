@@ -95,6 +95,12 @@ External consumers should use one of three read paths:
   `mcp__flux_llm_kb.kb_brief`.
 - CLI for local shell automation: `flux-kb search "customer RFP" --limit 5`.
 
+Search and brief reads accept optional `cwd`, `root_name`, and `scope_mode`
+parameters. `scope_mode=local_first` is the default: Flux searches matching
+workspace/root evidence first, then falls back to global memory only when local
+results have no lexical or fuzzy evidence. Use `local_only` to forbid global
+fallback, or `global` for deliberate cross-workspace retrieval.
+
 Claim lifecycle and graph primitives are available through the same surfaces for
 kernel-level automation:
 
@@ -242,7 +248,10 @@ Codex has three Flux integration surfaces:
   appear as raw MCP names such as `kb.brief`, `kb.search`, and
   `kb.finalize_turn`, or as Codex wrappers such as
   `mcp__flux_llm_kb.kb_brief`, `mcp__flux_llm_kb.kb_search`, and
-  `mcp__flux_llm_kb.kb_finalize_turn`.
+  `mcp__flux_llm_kb.kb_finalize_turn`. Models may query mid-turn when they need
+  prior decisions, unresolved project context, previous fixes, or
+  user-referenced history; they should skip KB retrieval when local files, the
+  prompt, or current tool output already answer the question.
 - REST remains the fallback surface for tools that can call the local API
   directly, for example `GET /api/brief?query=...`.
 
@@ -275,8 +284,9 @@ Codex hooks run a configurable local policy by default:
 
 - `UserPromptSubmit` skips empty, short, slash-command, and trivial prompts; for
   non-trivial prompts it injects guidance for indexable final responses and
-  retrieves a compact Flux brief when search results include lexical or fuzzy
-  evidence.
+  retrieves a compact workspace-scoped Flux brief when search results include
+  lexical or fuzzy evidence. If only global fallback evidence is available, the
+  injected context is labeled as global fallback memory and audited as such.
 - `Stop` captures the final assistant message once per `session_id` and
   `turn_id`, subject to the global `capture.enabled` setting and Codex hook
   capture limits. It can also index bounded public web references and file

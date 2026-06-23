@@ -278,6 +278,8 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "Make final responses indexable" in skill
     assert "commands/tests run" in skill
     assert "mcp__flux_llm_kb.kb_brief" in skill
+    assert "mid-turn" in skill
+    assert "prior decisions" in skill
     assert "mcp__flux_llm_kb.kb_finalize_turn" in skill
 
 

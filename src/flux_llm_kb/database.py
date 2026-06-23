@@ -127,11 +127,20 @@ def insert_episode(
             return episode_id
 
 
-def search_episodes(query: str, *, limit: int = 5, url: str | None = None) -> list[dict[str, Any]]:
+def search_episodes(
+    query: str,
+    *,
+    limit: int = 5,
+    cwd: str | None = None,
+    root_path: str | None = None,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     limit = max(1, min(limit, 50))
     candidate_limit = max(limit * 4, 12)
     query_vector = to_pgvector_literal(embed_text(query))
+    scope_sql, scope_params = _path_scope_sql("metadata->>'cwd'", cwd=cwd, root_path=root_path)
+    aliased_scope_sql, aliased_scope_params = _path_scope_sql("e.metadata->>'cwd'", cwd=cwd, root_path=root_path)
 
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -139,33 +148,35 @@ def search_episodes(query: str, *, limit: int = 5, url: str | None = None) -> li
             details: dict[str, dict[str, Any]] = {}
 
             cur.execute(
-                """
+                f"""
                 SELECT id::text, title, summary,
                        ts_rank(search_vector, plainto_tsquery('english', %s)) AS score
                 FROM episodes
                 WHERE search_vector @@ plainto_tsquery('english', %s)
+                  {scope_sql}
                 ORDER BY score DESC, updated_at DESC
                 LIMIT %s
                 """,
-                (query, query, candidate_limit),
+                (query, query, *scope_params, candidate_limit),
             )
             _add_ranked_rows("lexical", cur.fetchall(), streams, details)
 
             cur.execute(
-                """
+                f"""
                 SELECT id::text, title, summary,
                        greatest(similarity(title, %s), similarity(summary, %s)) AS score
                 FROM episodes
-                WHERE similarity(title, %s) > 0.10 OR similarity(summary, %s) > 0.05
+                WHERE (similarity(title, %s) > 0.10 OR similarity(summary, %s) > 0.05)
+                  {scope_sql}
                 ORDER BY score DESC, updated_at DESC
                 LIMIT %s
                 """,
-                (query, query, query, query, candidate_limit),
+                (query, query, query, query, *scope_params, candidate_limit),
             )
             _add_ranked_rows("fuzzy", cur.fetchall(), streams, details)
 
             cur.execute(
-                """
+                f"""
                 SELECT e.id::text, e.title, e.summary,
                        1 - (emb.embedding <=> %s::vector) AS score
                 FROM embeddings emb
@@ -173,15 +184,16 @@ def search_episodes(query: str, *, limit: int = 5, url: str | None = None) -> li
                   ON emb.owner_table = 'episodes'
                  AND emb.owner_id = e.id
                 WHERE emb.model = %s
+                  {aliased_scope_sql}
                 ORDER BY emb.embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (query_vector, DEFAULT_EMBEDDING_MODEL, query_vector, candidate_limit),
+                (query_vector, DEFAULT_EMBEDDING_MODEL, *aliased_scope_params, query_vector, candidate_limit),
             )
             _add_ranked_rows("vector", cur.fetchall(), streams, details)
 
             cur.execute(
-                """
+                f"""
                 SELECT e.id::text, e.title, e.summary,
                        max(ts_rank(c.search_vector, plainto_tsquery('english', %s))) AS score,
                        jsonb_build_object(
@@ -198,16 +210,17 @@ def search_episodes(query: str, *, limit: int = 5, url: str | None = None) -> li
                 FROM claims c
                 JOIN episodes e ON e.id = c.episode_id
                 WHERE c.search_vector @@ plainto_tsquery('english', %s)
+                  {aliased_scope_sql}
                 GROUP BY e.id, e.title, e.summary
                 ORDER BY score DESC, max(c.updated_at) DESC
                 LIMIT %s
                 """,
-                (query, query, candidate_limit),
+                (query, query, *aliased_scope_params, candidate_limit),
             )
             _add_ranked_rows("claim_lifecycle", cur.fetchall(), streams, details)
 
             cur.execute(
-                """
+                f"""
                 WITH matched_entities AS (
                     SELECT DISTINCT subject_entity_id AS entity_id
                     FROM claims
@@ -237,11 +250,12 @@ def search_episodes(query: str, *, limit: int = 5, url: str | None = None) -> li
                 JOIN claims c ON c.subject_entity_id = a.entity_id
                 JOIN episodes e ON e.id = c.episode_id
                 WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
+                  {aliased_scope_sql}
                 GROUP BY e.id, e.title, e.summary
                 ORDER BY score DESC, max(c.updated_at) DESC
                 LIMIT %s
                 """,
-                (query, candidate_limit),
+                (query, *aliased_scope_params, candidate_limit),
             )
             _add_ranked_rows("graph", cur.fetchall(), streams, details)
 
@@ -282,11 +296,19 @@ def search_episodes(query: str, *, limit: int = 5, url: str | None = None) -> li
     return sorted(results, key=lambda row: (-float(row["score"]), row["title"], row["id"]))[:limit]
 
 
-def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) -> list[dict[str, Any]]:
+def search_corpus_chunks(
+    query: str,
+    *,
+    limit: int = 5,
+    root_name: str | None = None,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     limit = max(1, min(limit, 50))
     candidate_limit = max(limit * 4, 12)
     query_vector = to_pgvector_literal(embed_text(query))
+    root_name_sql = "AND r.name = %s" if root_name else ""
+    root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
 
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -294,7 +316,7 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
             details: dict[str, dict[str, Any]] = {}
 
             cur.execute(
-                """
+                f"""
                 SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                        (
                            SELECT count(*)
@@ -310,15 +332,16 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
                   AND c.search_vector @@ plainto_tsquery('english', %s)
+                  {root_name_sql}
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
                 """,
-                (query, query, candidate_limit),
+                (query, query, *root_name_params, candidate_limit),
             )
             _add_ranked_corpus_rows("corpus_lexical", cur.fetchall(), streams, details)
 
             cur.execute(
-                """
+                f"""
                 SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                        (
                            SELECT count(*)
@@ -334,15 +357,16 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
                   AND (similarity(c.title, %s) > 0.10 OR similarity(c.body, %s) > 0.15)
+                  {root_name_sql}
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
                 """,
-                (query, query, query, query, candidate_limit),
+                (query, query, query, query, *root_name_params, candidate_limit),
             )
             _add_ranked_corpus_rows("corpus_fuzzy", cur.fetchall(), streams, details)
 
             cur.execute(
-                """
+                f"""
                 SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                        (
                            SELECT count(*)
@@ -362,16 +386,24 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                   AND a.canonical_asset_id IS NULL
                   AND emb.model = %s
                   AND 1 - (emb.embedding <=> %s::vector) > 0.25
+                  {root_name_sql}
                 ORDER BY emb.embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (query_vector, DEFAULT_EMBEDDING_MODEL, query_vector, query_vector, candidate_limit),
+                (
+                    query_vector,
+                    DEFAULT_EMBEDDING_MODEL,
+                    query_vector,
+                    *root_name_params,
+                    query_vector,
+                    candidate_limit,
+                ),
             )
             _add_ranked_corpus_rows("corpus_vector", cur.fetchall(), streams, details)
 
             if details:
                 cur.execute(
-                    """
+                    f"""
                     SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                            (
                                SELECT count(*)
@@ -384,14 +416,15 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
+                      {root_name_sql}
                     ORDER BY r.trust_rank ASC, c.updated_at DESC
                     """,
-                    (list(details.keys()),),
+                    (list(details.keys()), *root_name_params),
                 )
                 _add_ranked_corpus_rows("corpus_trust", cur.fetchall(), streams, details)
 
                 cur.execute(
-                    """
+                    f"""
                     SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
                            (
                                SELECT count(*)
@@ -409,9 +442,10 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
+                      {root_name_sql}
                     ORDER BY score DESC, c.updated_at DESC
                     """,
-                    (list(details.keys()),),
+                    (list(details.keys()), *root_name_params),
                 )
                 _add_ranked_corpus_rows("corpus_freshness", cur.fetchall(), streams, details)
 
@@ -3964,6 +3998,56 @@ def enqueue_capture_job(
                 (job_id, _json({"job_type": job_type})),
             )
             return job_id
+
+
+def _path_scope_sql(
+    column_sql: str,
+    *,
+    cwd: str | None = None,
+    root_path: str | None = None,
+) -> tuple[str, tuple[Any, ...]]:
+    scope_path = str(root_path or cwd or "").strip()
+    if not scope_path:
+        return "", ()
+
+    exact_values: list[str] = []
+    prefix_values: list[str] = []
+    for variant in _path_scope_variants(scope_path):
+        exact_values.append(variant)
+        escaped = _like_escape(variant)
+        prefix_values.append(f"{escaped}\\\\%")
+        prefix_values.append(f"{escaped}/%")
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    for value in _dedupe_preserving_order(exact_values):
+        clauses.append(f"{column_sql} = %s")
+        params.append(value)
+    for value in _dedupe_preserving_order(prefix_values):
+        clauses.append(f"{column_sql} LIKE %s")
+        params.append(value)
+    return f"AND ({' OR '.join(clauses)})", tuple(params)
+
+
+def _path_scope_variants(path: str) -> list[str]:
+    cleaned = path.strip().rstrip("\\/")
+    if not cleaned:
+        return []
+    return _dedupe_preserving_order([cleaned, cleaned.replace("\\", "/"), cleaned.replace("/", "\\")])
+
+
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def _add_ranked_rows(

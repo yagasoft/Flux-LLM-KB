@@ -56,19 +56,32 @@ def test_user_prompt_hook_injects_real_brief_for_relevant_non_trivial_prompt(mon
     audits = []
 
     class FakeService:
-        def search(self, query, limit=5):
-            observed["search"] = {"query": query, "limit": limit}
+        def search(self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first"):
+            observed["search"] = {
+                "query": query,
+                "limit": limit,
+                "cwd": cwd,
+                "root_name": root_name,
+                "scope_mode": scope_mode,
+            }
             return [
                 {
                     "title": "Prior RFP plan",
                     "summary": "Use the established RFP workflow.",
                     "score": 0.42,
                     "streams": ["lexical"],
+                    "retrieval_scope": "local",
                 }
             ]
 
-        def brief(self, query, token_budget=None):
-            observed["brief"] = {"query": query, "token_budget": token_budget}
+        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+            observed["brief"] = {
+                "query": query,
+                "token_budget": token_budget,
+                "cwd": cwd,
+                "root_name": root_name,
+                "scope_mode": scope_mode,
+            }
             return "### Prior RFP plan\nUse the established RFP workflow."
 
     monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
@@ -92,10 +105,56 @@ def test_user_prompt_hook_injects_real_brief_for_relevant_non_trivial_prompt(mon
     assert "Flux-LLM-KB relevant memory" in context
     assert "Use the established RFP workflow." in context
     assert observed["search"]["limit"] == 5
+    assert observed["search"]["cwd"] == "E:/Repo"
+    assert observed["search"]["scope_mode"] == "local_first"
     assert observed["brief"]["token_budget"] == 900
+    assert observed["brief"]["cwd"] == "E:/Repo"
+    assert observed["brief"]["scope_mode"] == "local_first"
     assert audits[-1]["event_type"] == "codex_hook.preflight_injected"
     assert audits[-1]["details"]["session_id"] == "session-1"
     assert audits[-1]["details"]["turn_id"] == "turn-1"
+    assert audits[-1]["details"]["retrieval_scope"] == "local"
+    assert audits[-1]["details"]["scope_mode"] == "local_first"
+
+
+def test_user_prompt_hook_labels_global_fallback_memory(monkeypatch):
+    install_settings(monkeypatch)
+    audits = []
+
+    class FakeService:
+        def search(self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first"):
+            return [
+                {
+                    "title": "Prior global plan",
+                    "summary": "Use fallback workflow.",
+                    "score": 0.42,
+                    "streams": ["lexical"],
+                    "retrieval_scope": "global_fallback",
+                }
+            ]
+
+        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+            return "### Prior global plan\nUse fallback workflow."
+
+    monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    output = run_hook(
+        "user-prompt-submit",
+        json.dumps(
+            {
+                "session_id": "session-1",
+                "turn_id": "turn-fallback",
+                "cwd": "E:/Repo",
+                "prompt": "Please continue the customer RFP analysis using the prior project context.",
+            }
+        ),
+    )
+
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "Flux-LLM-KB global fallback memory" in context
+    assert "Use fallback workflow." in context
+    assert audits[-1]["details"]["retrieval_scope"] == "global_fallback"
 
 
 def test_user_prompt_hook_injects_indexable_capture_guidance_without_memory_evidence(monkeypatch):
@@ -103,7 +162,7 @@ def test_user_prompt_hook_injects_indexable_capture_guidance_without_memory_evid
     audits = []
 
     class FakeService:
-        def search(self, query, limit=5):
+        def search(self, query, limit=5, **_kwargs):
             return []
 
         def brief(self, *_args, **_kwargs):

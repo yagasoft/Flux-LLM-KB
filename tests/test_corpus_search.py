@@ -9,7 +9,7 @@ def test_service_search_includes_corpus_chunks(monkeypatch):
     monkeypatch.setattr(
         database,
         "search_episodes",
-        lambda query, limit=5: [
+        lambda query, limit=5, **_kwargs: [
             {
                 "id": "episode-1",
                 "title": "Prior decision",
@@ -23,7 +23,7 @@ def test_service_search_includes_corpus_chunks(monkeypatch):
     monkeypatch.setattr(
         database,
         "search_corpus_chunks",
-        lambda query, limit=5: [
+        lambda query, limit=5, **_kwargs: [
             {
                 "id": "chunk-1",
                 "title": "architecture.md",
@@ -51,11 +51,11 @@ def test_service_search_formats_mail_manifest_results(monkeypatch):
         "source_folder": "FluxCapture",
         "attachment_count": 1,
     }
-    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5: [])
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
     monkeypatch.setattr(
         database,
         "search_corpus_chunks",
-        lambda query, limit=20: [
+        lambda query, limit=20, **_kwargs: [
             {
                 "id": "chunk-1",
                 "title": "manifest.json",
@@ -89,11 +89,11 @@ def test_service_search_collapses_mail_spool_siblings(monkeypatch):
         "source_folder": "FluxCapture",
         "attachment_count": 1,
     }
-    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5: [])
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
     monkeypatch.setattr(
         database,
         "search_corpus_chunks",
-        lambda query, limit=20: [
+        lambda query, limit=20, **_kwargs: [
             {
                 "id": "chunk-body",
                 "asset_id": "asset-body",
@@ -155,7 +155,7 @@ def test_service_brief_uses_configured_token_budget(monkeypatch):
             return FakeSetting()
 
     monkeypatch.setattr(service, "SettingsService", FakeSettingsService)
-    monkeypatch.setattr(KnowledgeService, "search", lambda self, query, limit=10: [])
+    monkeypatch.setattr(KnowledgeService, "search", lambda self, query, limit=10, **_kwargs: [])
     monkeypatch.setattr(
         service,
         "pack_context",
@@ -167,7 +167,7 @@ def test_service_brief_uses_configured_token_budget(monkeypatch):
 
 
 def test_service_brief_prefers_current_lifecycle_evidence(monkeypatch):
-    def fake_search(_self, _query, limit=10):
+    def fake_search(_self, _query, limit=10, **_kwargs):
         return [
             {
                 "kind": "episode",
@@ -199,7 +199,7 @@ def test_service_search_preserves_lifecycle_and_graph_metadata(monkeypatch):
     monkeypatch.setattr(
         database,
         "search_episodes",
-        lambda query, limit=5: [
+        lambda query, limit=5, **_kwargs: [
             {
                 "id": "episode-1",
                 "title": "Graph decision",
@@ -212,7 +212,7 @@ def test_service_search_preserves_lifecycle_and_graph_metadata(monkeypatch):
             }
         ],
     )
-    monkeypatch.setattr(database, "search_corpus_chunks", lambda query, limit=20: [])
+    monkeypatch.setattr(database, "search_corpus_chunks", lambda query, limit=20, **_kwargs: [])
 
     result = KnowledgeService().search("graph decision", limit=5)[0]
 

@@ -46,6 +46,16 @@ def create_app():
     class SearchRequest(BaseModel):
         query: str
         limit: int = 5
+        cwd: str | None = None
+        root_name: str | None = None
+        scope_mode: str = "local_first"
+
+    class BriefRequest(BaseModel):
+        query: str
+        token_budget: int | None = None
+        cwd: str | None = None
+        root_name: str | None = None
+        scope_mode: str = "local_first"
 
     class ClaimRequest(BaseModel):
         subject_type: str
@@ -208,19 +218,53 @@ def create_app():
 
     @app.post("/api/search")
     def search(request: SearchRequest = Body(...)):
-        return service.search(request.query, limit=request.limit)
+        return service.search(
+            request.query,
+            limit=request.limit,
+            cwd=request.cwd,
+            root_name=request.root_name,
+            scope_mode=request.scope_mode,
+        )
 
     @app.get("/api/search")
-    def search_get(query: str, limit: int = 5):
-        return service.search(query, limit=limit)
+    def search_get(
+        query: str,
+        limit: int = 5,
+        cwd: str | None = None,
+        root_name: str | None = None,
+        scope_mode: str = "local_first",
+    ):
+        return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
 
     @app.post("/api/brief")
-    def brief(request: SearchRequest = Body(...)):
-        return {"brief": service.brief(request.query)}
+    def brief(request: BriefRequest = Body(...)):
+        return {
+            "brief": service.brief(
+                request.query,
+                token_budget=request.token_budget,
+                cwd=request.cwd,
+                root_name=request.root_name,
+                scope_mode=request.scope_mode,
+            )
+        }
 
     @app.get("/api/brief")
-    def brief_get(query: str, token_budget: int | None = None):
-        return {"brief": service.brief(query, token_budget=token_budget)}
+    def brief_get(
+        query: str,
+        token_budget: int | None = None,
+        cwd: str | None = None,
+        root_name: str | None = None,
+        scope_mode: str = "local_first",
+    ):
+        return {
+            "brief": service.brief(
+                query,
+                token_budget=token_budget,
+                cwd=cwd,
+                root_name=root_name,
+                scope_mode=scope_mode,
+            )
+        }
 
     @app.post("/api/claims")
     def claim_upsert(request: ClaimRequest = Body(...)):
