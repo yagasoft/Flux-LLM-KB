@@ -28,6 +28,10 @@ parser or local tool exists.
 - Legacy Microsoft formats are not generic binaries. `doc`, `xls`, `ppt`, `vsd`,
   `mdb`, and related formats should use LibreOffice, Windows COM, or other local
   adapters when available, and otherwise report `blocked_missing_dependency`.
+- Business document variants are extracted locally where possible: Office
+  macro/template packages use existing Python parsers or LibreOffice conversion,
+  OpenDocument text/spreadsheet/presentation files use LibreOffice conversion,
+  and legacy Excel/PowerPoint binaries can fall back to Windows COM.
 - Diagram formats should preserve structure where possible, not just OCR a
   screenshot. Draw.io XML and modern VSDX zipped XML are local structured
   extractors; legacy Visio formats still need local-tool adapters.
@@ -78,9 +82,10 @@ parser or local tool exists.
 
 ## Extraction Notes
 
-- `doc`, `xls`, and `ppt` should use local legacy Office adapters. On Windows,
-  host-agent extraction may use Office COM when installed; cross-platform
-  extraction should prefer LibreOffice or equivalent local tools.
+- Office and OpenDocument business files should use local adapters only.
+  Cross-platform extraction prefers bundled Python parsers or LibreOffice
+  conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy
+  binary formats when available.
 - `drawio`, `drawio.svg`, and `drawio.png` parse embedded XML when present and
   index page names, shapes, labels, connectors, and links.
 - `vsdx` and related modern Visio files are ZIP/XML containers and are parsed

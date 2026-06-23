@@ -13,7 +13,7 @@ import re
 import shutil
 import struct
 import tempfile
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
@@ -27,6 +27,15 @@ from .redaction import redact_text
 DIAGRAM_MAX_ZIP_MEMBERS = 200
 DIAGRAM_MAX_TOTAL_BYTES = 25 * 1024 * 1024
 DIAGRAM_MAX_MEMBER_BYTES = 5 * 1024 * 1024
+
+LEGACY_WORD_EXTENSIONS = {".doc", ".dot", ".rtf"}
+CONVERTED_WORD_EXTENSIONS = {".docm", ".dotm", ".dotx", ".odt", ".ott"}
+OPENPYXL_EXTENSIONS = {".xlsx", ".xlsm", ".xltm", ".xltx"}
+LEGACY_SPREADSHEET_EXTENSIONS = {".xls", ".xlsb", ".xlt"}
+OPENDOCUMENT_SPREADSHEET_EXTENSIONS = {".ods", ".ots"}
+PPTX_PACKAGE_EXTENSIONS = {".pptx", ".pptm", ".potm", ".potx", ".ppsm", ".ppsx"}
+LEGACY_PRESENTATION_EXTENSIONS = {".ppt", ".pot", ".pps"}
+OPENDOCUMENT_PRESENTATION_EXTENSIONS = {".odp", ".otp"}
 
 
 @dataclass(frozen=True)
@@ -69,6 +78,8 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "catdoc": _tool_check("catdoc"),
         "wvText": _tool_check("wvText"),
         "word_com": _word_com_check(),
+        "excel_com": _excel_com_check(),
+        "powerpoint_com": _powerpoint_com_check(),
         "ffprobe": _tool_check("ffprobe"),
         "ffmpeg": _tool_check("ffmpeg"),
         "tesseract": _tool_check("tesseract"),
@@ -102,12 +113,22 @@ def _extract_document(path: Path, policy: CorpusPolicy) -> ExtractionResult:
         return _extract_pdf(path)
     if ext == ".docx":
         return _extract_docx(path)
-    if ext == ".pptx":
-        return _extract_pptx(path)
-    if ext == ".xlsx":
-        return _extract_xlsx(path)
-    if ext in {".doc", ".rtf"}:
+    if ext in LEGACY_WORD_EXTENSIONS:
         return _extract_legacy_word_document(path)
+    if ext in CONVERTED_WORD_EXTENSIONS:
+        return _extract_converted_word_document(path)
+    if ext in OPENPYXL_EXTENSIONS:
+        return _extract_xlsx(path, extractor=ext.lstrip("."))
+    if ext in LEGACY_SPREADSHEET_EXTENSIONS:
+        return _extract_legacy_spreadsheet(path)
+    if ext in OPENDOCUMENT_SPREADSHEET_EXTENSIONS:
+        return _extract_opendocument_spreadsheet(path)
+    if ext in PPTX_PACKAGE_EXTENSIONS:
+        return _extract_pptx(path, extractor=ext.lstrip("."))
+    if ext in LEGACY_PRESENTATION_EXTENSIONS:
+        return _extract_legacy_presentation(path)
+    if ext in OPENDOCUMENT_PRESENTATION_EXTENSIONS:
+        return _extract_opendocument_presentation(path)
     return ExtractionResult(status="metadata_only", metadata={"extractor": "document", "extension": ext})
 
 
@@ -126,22 +147,22 @@ def _extract_pdf(path: Path) -> ExtractionResult:
     )
 
 
-def _extract_docx(path: Path) -> ExtractionResult:
+def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
     try:
         from docx import Document
     except ImportError:
-        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "docx"}, message="python-docx not installed")
+        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="python-docx not installed")
     document = Document(str(path))
     text = "\n".join(paragraph.text for paragraph in document.paragraphs).strip()
     chunks = _chunks_from_text(text, path.name)
-    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": "docx"})
+    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": extractor})
 
 
-def _extract_pptx(path: Path) -> ExtractionResult:
+def _extract_pptx(path: Path, *, extractor: str = "pptx") -> ExtractionResult:
     try:
         from pptx import Presentation
     except ImportError:
-        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pptx"}, message="python-pptx not installed")
+        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="python-pptx not installed")
     presentation = Presentation(str(path))
     parts: list[str] = []
     for slide in presentation.slides:
@@ -152,15 +173,15 @@ def _extract_pptx(path: Path) -> ExtractionResult:
     return ExtractionResult(
         status="indexed" if chunks else "metadata_only",
         chunks=chunks,
-        metadata={"extractor": "pptx", "slide_count": len(presentation.slides)},
+        metadata={"extractor": extractor, "slide_count": len(presentation.slides)},
     )
 
 
-def _extract_xlsx(path: Path) -> ExtractionResult:
+def _extract_xlsx(path: Path, *, extractor: str = "xlsx") -> ExtractionResult:
     try:
         import openpyxl
     except ImportError:
-        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "xlsx"}, message="openpyxl not installed")
+        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="openpyxl not installed")
     workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     parts: list[str] = []
     for worksheet in workbook.worksheets[:10]:
@@ -173,8 +194,179 @@ def _extract_xlsx(path: Path) -> ExtractionResult:
     return ExtractionResult(
         status="indexed" if chunks else "metadata_only",
         chunks=chunks,
-        metadata={"extractor": "xlsx", "sheet_count": len(workbook.worksheets)},
+        metadata={"extractor": extractor, "sheet_count": len(workbook.worksheets)},
     )
+
+
+def _extract_converted_word_document(path: Path) -> ExtractionResult:
+    result = _extract_via_libreoffice_conversion(
+        path,
+        target_format="docx",
+        target_suffix=".docx",
+        read_converted=lambda converted_path: _extract_docx(converted_path),
+    )
+    if result is not None:
+        return result
+    ext = path.suffix.lower()
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata={"extractor": "word_document", "extension": ext, "attempted": ["libreoffice"]},
+        message="Word-like document extraction requires LibreOffice for this format.",
+    )
+
+
+def _extract_legacy_spreadsheet(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    result = _extract_via_libreoffice_conversion(
+        path,
+        target_format="xlsx",
+        target_suffix=".xlsx",
+        read_converted=lambda converted_path: _extract_xlsx(converted_path),
+    )
+    if result is not None and result.status != "blocked_missing_dependency":
+        return result
+    text = _extract_with_excel_com(path)
+    if text:
+        chunks = _chunks_from_text(text, path.name)
+        return ExtractionResult(
+            status="indexed" if chunks else "metadata_only",
+            chunks=chunks,
+            metadata={"extractor": "excel_com", "source_extension": ext},
+        )
+    if result is not None:
+        return result
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata={"extractor": "legacy_spreadsheet", "extension": ext, "attempted": ["libreoffice", "excel_com"]},
+        message="Legacy spreadsheet extraction requires LibreOffice or Windows Excel COM.",
+    )
+
+
+def _extract_opendocument_spreadsheet(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    result = _extract_via_libreoffice_conversion(
+        path,
+        target_format="xlsx",
+        target_suffix=".xlsx",
+        read_converted=lambda converted_path: _extract_xlsx(converted_path),
+    )
+    if result is not None:
+        return result
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata={"extractor": "opendocument_spreadsheet", "extension": ext, "attempted": ["libreoffice"]},
+        message="OpenDocument spreadsheet extraction requires LibreOffice.",
+    )
+
+
+def _extract_legacy_presentation(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    result = _extract_via_libreoffice_conversion(
+        path,
+        target_format="pptx",
+        target_suffix=".pptx",
+        read_converted=lambda converted_path: _extract_pptx(converted_path),
+    )
+    if result is not None and result.status != "blocked_missing_dependency":
+        return result
+    text = _extract_with_powerpoint_com(path)
+    if text:
+        chunks = _chunks_from_text(text, path.name)
+        return ExtractionResult(
+            status="indexed" if chunks else "metadata_only",
+            chunks=chunks,
+            metadata={"extractor": "powerpoint_com", "source_extension": ext},
+        )
+    if result is not None:
+        return result
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata={"extractor": "legacy_presentation", "extension": ext, "attempted": ["libreoffice", "powerpoint_com"]},
+        message="Legacy presentation extraction requires LibreOffice or Windows PowerPoint COM.",
+    )
+
+
+def _extract_opendocument_presentation(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    result = _extract_via_libreoffice_conversion(
+        path,
+        target_format="pptx",
+        target_suffix=".pptx",
+        read_converted=lambda converted_path: _extract_pptx(converted_path),
+    )
+    if result is not None:
+        return result
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata={"extractor": "opendocument_presentation", "extension": ext, "attempted": ["libreoffice"]},
+        message="OpenDocument presentation extraction requires LibreOffice.",
+    )
+
+
+def _extract_via_libreoffice_conversion(
+    path: Path,
+    *,
+    target_format: str,
+    target_suffix: str,
+    read_converted: Callable[[Path], ExtractionResult],
+) -> ExtractionResult | None:
+    with tempfile.TemporaryDirectory(prefix="flux-kb-lo-") as temp_dir:
+        converted_path = _convert_with_libreoffice(
+            path,
+            target_format=target_format,
+            target_suffix=target_suffix,
+            output_dir=Path(temp_dir),
+        )
+        if converted_path is None:
+            return None
+        result = read_converted(converted_path)
+        metadata = {
+            **result.metadata,
+            "extractor": "libreoffice",
+            "source_extension": path.suffix.lower(),
+            "converted_extension": target_suffix,
+        }
+        return ExtractionResult(
+            status=result.status,
+            chunks=result.chunks,
+            metadata=metadata,
+            message=result.message,
+        )
+
+
+def _convert_with_libreoffice(
+    path: Path,
+    *,
+    target_format: str,
+    target_suffix: str,
+    output_dir: Path,
+) -> Path | None:
+    command = shutil.which("soffice") or shutil.which("libreoffice")
+    if command is None:
+        return None
+    try:
+        result = run_no_window(
+            [
+                command,
+                "--headless",
+                "--convert-to",
+                target_format,
+                "--outdir",
+                str(output_dir),
+                str(path),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        output_path = output_dir / f"{path.stem}{target_suffix}"
+        candidates = [output_path] if output_path.exists() else sorted(output_dir.glob(f"*{target_suffix}"))
+        return candidates[0] if candidates else None
+    except Exception:
+        return None
 
 
 def _extract_legacy_word_document(path: Path) -> ExtractionResult:
@@ -334,6 +526,135 @@ def _extract_with_word_com(path: Path) -> str | None:
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
+
+
+def _extract_with_excel_com(path: Path) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        import pythoncom
+        import win32com.client
+    except Exception:
+        return None
+
+    excel = None
+    workbook = None
+    initialized = False
+    try:
+        pythoncom.CoInitialize()
+        initialized = True
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        workbook = excel.Workbooks.Open(
+            Filename=str(path),
+            ReadOnly=True,
+            UpdateLinks=0,
+            AddToMru=False,
+        )
+        parts: list[str] = []
+        sheet_count = min(int(workbook.Worksheets.Count), 10)
+        for sheet_index in range(1, sheet_count + 1):
+            worksheet = workbook.Worksheets(sheet_index)
+            parts.append(f"Sheet: {worksheet.Name}")
+            for row in _com_table_rows(worksheet.UsedRange.Value, max_rows=200, max_cols=30):
+                if row:
+                    parts.append(" | ".join(row))
+        return "\n".join(parts).strip() or None
+    except Exception:
+        return None
+    finally:
+        if workbook is not None:
+            try:
+                workbook.Close(False)
+            except Exception:
+                pass
+        if excel is not None:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+        if initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
+def _extract_with_powerpoint_com(path: Path) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        import pythoncom
+        import win32com.client
+    except Exception:
+        return None
+
+    powerpoint = None
+    presentation = None
+    initialized = False
+    try:
+        pythoncom.CoInitialize()
+        initialized = True
+        powerpoint = win32com.client.DispatchEx("PowerPoint.Application")
+        presentation = powerpoint.Presentations.Open(
+            FileName=str(path),
+            ReadOnly=True,
+            Untitled=False,
+            WithWindow=False,
+        )
+        parts: list[str] = []
+        slide_count = min(int(presentation.Slides.Count), 200)
+        for slide_index in range(1, slide_count + 1):
+            slide = presentation.Slides(slide_index)
+            slide_parts: list[str] = []
+            for shape_index in range(1, int(slide.Shapes.Count) + 1):
+                shape = slide.Shapes(shape_index)
+                if bool(getattr(shape, "HasTextFrame", False)) and bool(shape.TextFrame.HasText):
+                    text = str(shape.TextFrame.TextRange.Text or "").strip()
+                    if text:
+                        slide_parts.append(" ".join(text.split()))
+            if slide_parts:
+                parts.append(f"Slide {slide_index}: {' '.join(slide_parts)}")
+        return "\n".join(parts).strip() or None
+    except Exception:
+        return None
+    finally:
+        if presentation is not None:
+            try:
+                presentation.Close()
+            except Exception:
+                pass
+        if powerpoint is not None:
+            try:
+                powerpoint.Quit()
+            except Exception:
+                pass
+        if initialized:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+
+def _com_table_rows(value: Any, *, max_rows: int, max_cols: int) -> list[list[str]]:
+    if value is None:
+        return []
+    if not isinstance(value, tuple):
+        return [[str(value)]]
+    if not value:
+        return []
+    if not isinstance(value[0], tuple):
+        rows = (value,)
+    else:
+        rows = value
+    normalized: list[list[str]] = []
+    for row in rows[:max_rows]:
+        cells = row if isinstance(row, tuple) else (row,)
+        values = [str(cell) for cell in cells[:max_cols] if cell is not None]
+        if values:
+            normalized.append(values)
+    return normalized
 
 
 def _extract_diagram(path: Path) -> ExtractionResult:
@@ -759,5 +1080,19 @@ def _first_tool_check(label: str, commands: tuple[str, ...]) -> dict[str, Any]:
 def _word_com_check() -> dict[str, Any]:
     if os.name != "nt":
         return {"ok": False, "message": "Windows Word COM is only available on Windows"}
+    ok = importlib.util.find_spec("win32com") is not None
+    return {"ok": ok, "message": "pywin32 available" if ok else "pywin32 not installed"}
+
+
+def _excel_com_check() -> dict[str, Any]:
+    if os.name != "nt":
+        return {"ok": False, "message": "Windows Excel COM is only available on Windows"}
+    ok = importlib.util.find_spec("win32com") is not None
+    return {"ok": ok, "message": "pywin32 available" if ok else "pywin32 not installed"}
+
+
+def _powerpoint_com_check() -> dict[str, Any]:
+    if os.name != "nt":
+        return {"ok": False, "message": "Windows PowerPoint COM is only available on Windows"}
     ok = importlib.util.find_spec("win32com") is not None
     return {"ok": ok, "message": "pywin32 available" if ok else "pywin32 not installed"}

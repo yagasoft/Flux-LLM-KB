@@ -481,10 +481,38 @@ def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
 
 def test_persist_crawl_plan_requeues_legacy_metadata_only_documents():
     source = Path(database.__file__).read_text(encoding="utf-8")
+    expected_extensions = {
+        ".doc",
+        ".rtf",
+        ".dot",
+        ".docm",
+        ".dotx",
+        ".dotm",
+        ".xls",
+        ".xlt",
+        ".xlsb",
+        ".xlsm",
+        ".xltx",
+        ".xltm",
+        ".ppt",
+        ".pot",
+        ".pps",
+        ".pptm",
+        ".potx",
+        ".potm",
+        ".ppsx",
+        ".ppsm",
+        ".odt",
+        ".ott",
+        ".ods",
+        ".ots",
+        ".odp",
+        ".otp",
+    }
 
     assert "source_assets.extraction_status = 'metadata_only'" in source
-    assert "source_assets.extension IN ('.doc', '.rtf')" in source
     assert "EXCLUDED.extraction_status = 'queued'" in source
+    assert database.REQUEUE_DOCUMENT_EXTENSIONS == expected_extensions
 
 
 def test_corpus_status_queries_include_lock_tolerant_states():

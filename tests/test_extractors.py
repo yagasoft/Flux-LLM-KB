@@ -1,4 +1,6 @@
 import base64
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
 from zipfile import ZipFile
@@ -99,6 +101,192 @@ def test_extract_legacy_doc_blocks_when_no_local_extractor(monkeypatch, tmp_path
     assert result.status == "blocked_missing_dependency"
     assert result.metadata["extractor"] == "legacy_document"
     assert "LibreOffice" in (result.message or "")
+
+
+def test_extract_legacy_xls_uses_libreoffice_conversion(monkeypatch, tmp_path):
+    path = tmp_path / "budget.xls"
+    path.write_bytes(b"legacy spreadsheet placeholder")
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/soffice.exe" if command == "soffice" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/soffice.exe"
+        assert "--convert-to" in command
+        assert "xlsx" in command
+        out_dir = Path(command[command.index("--outdir") + 1])
+        (out_dir / f"{path.stem}.xlsx").write_bytes(b"converted spreadsheet")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeWorksheet:
+        title = "Budget"
+
+        def iter_rows(self, max_row, max_col, values_only):
+            assert (max_row, max_col, values_only) == (200, 30, True)
+            return iter([("Quarter", "Amount"), ("Q1", 1200)])
+
+    fake_openpyxl = SimpleNamespace(
+        load_workbook=lambda _path, read_only, data_only: SimpleNamespace(worksheets=[FakeWorksheet()])
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "openpyxl", fake_openpyxl)
+    monkeypatch.setattr("flux_llm_kb.extractors._extract_with_excel_com", lambda _path: None, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "libreoffice"
+    assert result.metadata["source_extension"] == ".xls"
+    assert result.metadata["converted_extension"] == ".xlsx"
+    assert result.metadata["sheet_count"] == 1
+    assert "Q1 | 1200" in result.chunks[0].body
+
+
+def test_extract_legacy_xls_uses_excel_com_fallback(monkeypatch, tmp_path):
+    path = tmp_path / "forecast.xls"
+    path.write_bytes(b"legacy spreadsheet placeholder")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr("flux_llm_kb.extractors._extract_with_excel_com", lambda _path: "Sheet: Forecast\nA | B", raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "excel_com"
+    assert result.metadata["source_extension"] == ".xls"
+    assert "Sheet: Forecast" in result.chunks[0].body
+
+
+def test_extract_legacy_xls_blocks_when_no_local_extractor(monkeypatch, tmp_path):
+    path = tmp_path / "forecast.xls"
+    path.write_bytes(b"legacy spreadsheet placeholder")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr("flux_llm_kb.extractors._extract_with_excel_com", lambda _path: None, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.metadata["extractor"] == "legacy_spreadsheet"
+    assert result.metadata["attempted"] == ["libreoffice", "excel_com"]
+    assert "Excel COM" in (result.message or "")
+
+
+def test_extract_legacy_ppt_uses_libreoffice_conversion(monkeypatch, tmp_path):
+    path = tmp_path / "briefing.ppt"
+    path.write_bytes(b"legacy presentation placeholder")
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/soffice.exe" if command == "soffice" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/soffice.exe"
+        assert "--convert-to" in command
+        assert "pptx" in command
+        out_dir = Path(command[command.index("--outdir") + 1])
+        (out_dir / f"{path.stem}.pptx").write_bytes(b"converted presentation")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeShape:
+        text = "Launch Plan"
+
+    fake_pptx = SimpleNamespace(Presentation=lambda _path: SimpleNamespace(slides=[SimpleNamespace(shapes=[FakeShape()])]))
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "pptx", fake_pptx)
+    monkeypatch.setattr("flux_llm_kb.extractors._extract_with_powerpoint_com", lambda _path: None, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "libreoffice"
+    assert result.metadata["source_extension"] == ".ppt"
+    assert result.metadata["converted_extension"] == ".pptx"
+    assert result.metadata["slide_count"] == 1
+    assert "Launch Plan" in result.chunks[0].body
+
+
+def test_extract_legacy_ppt_uses_powerpoint_com_fallback(monkeypatch, tmp_path):
+    path = tmp_path / "briefing.ppt"
+    path.write_bytes(b"legacy presentation placeholder")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._extract_with_powerpoint_com",
+        lambda _path: "Slide 1: Launch Plan",
+        raising=False,
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "powerpoint_com"
+    assert result.metadata["source_extension"] == ".ppt"
+    assert "Launch Plan" in result.chunks[0].body
+
+
+def test_extract_legacy_ppt_blocks_when_no_local_extractor(monkeypatch, tmp_path):
+    path = tmp_path / "briefing.ppt"
+    path.write_bytes(b"legacy presentation placeholder")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr("flux_llm_kb.extractors._extract_with_powerpoint_com", lambda _path: None, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.metadata["extractor"] == "legacy_presentation"
+    assert result.metadata["attempted"] == ["libreoffice", "powerpoint_com"]
+    assert "PowerPoint COM" in (result.message or "")
+
+
+def test_extract_opendocument_spreadsheet_uses_libreoffice_conversion(monkeypatch, tmp_path):
+    path = tmp_path / "budget.ods"
+    path.write_bytes(b"opendocument spreadsheet placeholder")
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/soffice.exe" if command == "soffice" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/soffice.exe"
+        assert "--convert-to" in command
+        assert "xlsx" in command
+        out_dir = Path(command[command.index("--outdir") + 1])
+        (out_dir / f"{path.stem}.xlsx").write_bytes(b"converted spreadsheet")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeWorksheet:
+        title = "ODS Budget"
+
+        def iter_rows(self, max_row, max_col, values_only):
+            return iter([("Line", "Amount"), ("Travel", 500)])
+
+    fake_openpyxl = SimpleNamespace(
+        load_workbook=lambda _path, read_only, data_only: SimpleNamespace(worksheets=[FakeWorksheet()])
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "openpyxl", fake_openpyxl)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "libreoffice"
+    assert result.metadata["source_extension"] == ".ods"
+    assert result.metadata["converted_extension"] == ".xlsx"
+    assert "Travel | 500" in result.chunks[0].body
+
+
+def test_extractor_availability_reports_office_com_extractors():
+    availability = extractor_availability()
+
+    assert "excel_com" in availability
+    assert "powerpoint_com" in availability
+    assert all("ok" in availability[name] and "message" in availability[name] for name in ("excel_com", "powerpoint_com"))
 
 
 def test_extract_drawio_indexes_plain_xml_structure(tmp_path):

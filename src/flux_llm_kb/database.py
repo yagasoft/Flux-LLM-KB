@@ -22,6 +22,34 @@ DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
 _MIGRATION_ADVISORY_LOCK_ID = 570_221_876_500_815
 _RETENTION_MEMORY_CLASSES = {"episode", "claim", "corpus"}
 _RETENTION_ACTIONS = {"review", "deprioritize", "retire"}
+REQUEUE_DOCUMENT_EXTENSIONS = {
+    ".doc",
+    ".docm",
+    ".dot",
+    ".dotm",
+    ".dotx",
+    ".odp",
+    ".ods",
+    ".odt",
+    ".otp",
+    ".ots",
+    ".ott",
+    ".pot",
+    ".potm",
+    ".potx",
+    ".pps",
+    ".ppsm",
+    ".ppsx",
+    ".ppt",
+    ".pptm",
+    ".rtf",
+    ".xls",
+    ".xlsb",
+    ".xlsm",
+    ".xlt",
+    ".xltm",
+    ".xltx",
+}
 
 
 @dataclass(frozen=True)
@@ -1761,7 +1789,7 @@ def persist_crawl_plan(
                     previous is not None
                     and not changed_asset
                     and previous[2] == "metadata_only"
-                    and asset.extension in {".doc", ".rtf"}
+                    and asset.extension in REQUEUE_DOCUMENT_EXTENSIONS
                     and asset.extraction_tier == "deferred"
                     and canonical_id is None
                 )
@@ -1792,7 +1820,7 @@ def persist_crawl_plan(
                             WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status = 'metadata_only'
-                                 AND source_assets.extension IN ('.doc', '.rtf')
+                                 AND source_assets.extension = ANY(%s)
                                  AND EXCLUDED.extraction_status = 'queued'
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')
@@ -1827,6 +1855,7 @@ def persist_crawl_plan(
                         asset.extraction_tier,
                         status,
                         _json({"source": "corpus_crawler", **asset.metadata}),
+                        sorted(REQUEUE_DOCUMENT_EXTENSIONS),
                     ),
                 )
                 asset_id = cur.fetchone()[0]

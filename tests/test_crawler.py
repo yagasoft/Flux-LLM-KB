@@ -83,6 +83,44 @@ def test_classify_file_uses_metadata_only_for_archives(tmp_path):
     assert classification.extraction_tier == "metadata_only"
 
 
+def test_classify_business_document_extensions_as_deferred_documents(tmp_path):
+    extensions = {
+        ".dot",
+        ".docm",
+        ".dotx",
+        ".dotm",
+        ".xls",
+        ".xlt",
+        ".xlsb",
+        ".xlsm",
+        ".xltx",
+        ".xltm",
+        ".ppt",
+        ".pot",
+        ".pps",
+        ".pptm",
+        ".potx",
+        ".potm",
+        ".ppsx",
+        ".ppsm",
+        ".odt",
+        ".ott",
+        ".ods",
+        ".ots",
+        ".odp",
+        ".otp",
+    }
+
+    for extension in sorted(extensions):
+        path = tmp_path / f"sample{extension}"
+        path.write_bytes(b"business document placeholder")
+
+        classification = classify_file(path, CorpusPolicy(root_path=tmp_path))
+
+        assert classification.file_kind == "document", extension
+        assert classification.extraction_tier == "deferred", extension
+
+
 def test_scan_path_classifies_structured_diagrams_as_deferred(tmp_path):
     root = tmp_path / "diagrams"
     root.mkdir()

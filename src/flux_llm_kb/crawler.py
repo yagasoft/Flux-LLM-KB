@@ -49,7 +49,38 @@ CODE_EXTENSIONS = {
     ".sql",
     ".ts",
 }
-DOCUMENT_EXTENSIONS = {".doc", ".docx", ".pdf", ".ppt", ".pptx", ".rtf", ".xls", ".xlsx"}
+DOCUMENT_EXTENSIONS = {
+    ".doc",
+    ".docm",
+    ".docx",
+    ".dot",
+    ".dotm",
+    ".dotx",
+    ".odp",
+    ".ods",
+    ".odt",
+    ".otp",
+    ".ots",
+    ".ott",
+    ".pdf",
+    ".pot",
+    ".potm",
+    ".potx",
+    ".pps",
+    ".ppsm",
+    ".ppsx",
+    ".ppt",
+    ".pptm",
+    ".pptx",
+    ".rtf",
+    ".xls",
+    ".xlsb",
+    ".xlsm",
+    ".xlsx",
+    ".xlt",
+    ".xltm",
+    ".xltx",
+}
 DIAGRAM_EXTENSIONS = {".dio", ".drawio", ".vsdm", ".vsdx", ".vssm", ".vssx", ".vstm", ".vstx"}
 DIAGRAM_COMPOUND_SUFFIXES = (".drawio.png", ".drawio.svg")
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"}
