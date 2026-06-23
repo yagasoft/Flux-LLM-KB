@@ -390,6 +390,31 @@ def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) 
                 )
                 _add_ranked_corpus_rows("corpus_trust", cur.fetchall(), streams, details)
 
+                cur.execute(
+                    """
+                    SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
+                           (
+                               SELECT count(*)
+                               FROM source_assets duplicate
+                               WHERE duplicate.canonical_asset_id = a.id
+                           ) AS duplicate_count,
+                           r.trust_rank,
+                           1.0 / (
+                               1.0 + (
+                                   GREATEST(EXTRACT(EPOCH FROM (now() - c.updated_at)), 0)
+                                   / 86400.0 / 30.0
+                               )
+                           ) AS score
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE c.id = ANY(%s::uuid[])
+                    ORDER BY score DESC, c.updated_at DESC
+                    """,
+                    (list(details.keys()),),
+                )
+                _add_ranked_corpus_rows("corpus_freshness", cur.fetchall(), streams, details)
+
     fused = reciprocal_rank_fusion(streams)
     results: list[dict[str, Any]] = []
     for item in fused[:limit]:

@@ -59,6 +59,18 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
     assert any("FOR UPDATE SKIP LOCKED" in sql for sql in executed_sql)
 
 
+def test_search_corpus_chunks_includes_freshness_stream():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    function = source.split("def search_corpus_chunks", 1)[1].split("\ndef ", 1)[0]
+
+    assert "corpus_lexical" in function
+    assert "corpus_fuzzy" in function
+    assert "corpus_vector" in function
+    assert "corpus_trust" in function
+    assert "corpus_freshness" in function
+    assert "EXTRACT(EPOCH FROM (now() - c.updated_at))" in function
+
+
 def test_codex_hook_capture_exists_checks_session_and_turn_metadata(monkeypatch):
     executed = []
 

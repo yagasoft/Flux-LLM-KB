@@ -11,7 +11,7 @@ from typing import Any
 from .crawler import CorpusPolicy, scan_path
 from . import database
 from .glob_policy import effective_glob_policy
-from .redaction import redact_text
+from .redaction import RedactionFinding, redact_text
 from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
 from .scoring import ContextCandidate, pack_context
 from .settings import SettingsService
@@ -97,14 +97,26 @@ class KnowledgeService:
         episode_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        redacted_subject, subject_findings = redact_text(subject_name)
+        redacted_predicate, predicate_findings = redact_text(predicate)
+        redacted_object, object_findings = redact_text(object_text)
+        redacted_metadata, metadata_findings = _redact_metadata(metadata or {})
+        all_findings = subject_findings + predicate_findings + object_findings + metadata_findings
+        if all_findings:
+            existing_redactions = redacted_metadata.get("redactions")
+            redactions = existing_redactions if isinstance(existing_redactions, list) else []
+            redacted_metadata = {
+                **redacted_metadata,
+                "redactions": [*redactions, *(finding.kind for finding in all_findings)],
+            }
         return database.upsert_claim(
             subject_type=subject_type,
-            subject_name=subject_name,
-            predicate=predicate,
-            object_text=object_text,
+            subject_name=redacted_subject,
+            predicate=redacted_predicate,
+            object_text=redacted_object,
             confidence=confidence,
             episode_id=episode_id,
-            metadata=metadata,
+            metadata=redacted_metadata,
         )
 
     def get_claim(self, claim_id: str) -> dict[str, Any]:
@@ -576,6 +588,30 @@ def _mail_manifest_summary(manifest: dict[str, Any]) -> str:
         count = int(manifest.get("attachment_count") or 0)
         parts.append(f"{count} attachment{'s' if count != 1 else ''}")
     return "; ".join(parts) + "." if parts else ""
+
+
+def _redact_metadata(value: Any) -> tuple[Any, list[RedactionFinding]]:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        redacted_items: list[Any] = []
+        findings: list[RedactionFinding] = []
+        for item in value:
+            redacted_item, item_findings = _redact_metadata(item)
+            redacted_items.append(redacted_item)
+            findings.extend(item_findings)
+        return redacted_items, findings
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        findings: list[RedactionFinding] = []
+        for key, item in value.items():
+            redacted_key, key_findings = redact_text(str(key))
+            redacted_item, item_findings = _redact_metadata(item)
+            redacted[redacted_key] = redacted_item
+            findings.extend(key_findings)
+            findings.extend(item_findings)
+        return redacted, findings
+    return value, []
 
 
 def _is_current_evidence(item: dict[str, Any]) -> bool:
