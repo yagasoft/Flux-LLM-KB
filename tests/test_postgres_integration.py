@@ -149,3 +149,58 @@ def test_postgres_corpus_search_includes_vector_stream(tmp_path, monkeypatch):
         with psycopg.connect(TEST_DATABASE_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM monitored_roots WHERE name = %s", (name,))
+
+
+def test_postgres_claim_lifecycle_and_graph_traversal_are_migration_backed():
+    run_migrations(TEST_DATABASE_URL)
+    marker = f"graph-lifecycle-{uuid4()}"
+
+    try:
+        claim = database.upsert_claim(
+            subject_type="project",
+            subject_name=f"{marker}-flux",
+            predicate="uses",
+            object_text=f"{marker} PostgreSQL pgvector",
+            confidence=0.82,
+            url=TEST_DATABASE_URL,
+        )
+        replacement = database.upsert_claim(
+            subject_type="project",
+            subject_name=f"{marker}-flux",
+            predicate="uses",
+            object_text=f"{marker} PostgreSQL plus lifecycle graph scoring",
+            confidence=0.9,
+            url=TEST_DATABASE_URL,
+        )
+        contradicted = database.transition_claim(
+            claim_id=claim["id"],
+            transition="contradict",
+            related_claim_id=replacement["id"],
+            reason="newer evidence",
+            url=TEST_DATABASE_URL,
+        )
+        database.upsert_entity_relation(
+            from_entity_id=claim["subject_entity_id"],
+            to_entity_id=replacement["subject_entity_id"],
+            relation_type="depends_on",
+            confidence=0.7,
+            url=TEST_DATABASE_URL,
+        )
+
+        traversal = database.traverse_entity_graph(
+            entity_id=claim["subject_entity_id"],
+            relation_types=["depends_on"],
+            max_depth=2,
+            url=TEST_DATABASE_URL,
+        )
+        fetched = database.get_claim(claim["id"], url=TEST_DATABASE_URL)
+
+        assert contradicted["lifecycle_state"] == "contradicted"
+        assert fetched["lifecycle"]["audit_events"]
+        assert fetched["lifecycle"]["related_claims"][0]["relation_type"] == "contradicts"
+        assert traversal["edges"][0]["relation_type"] == "depends_on"
+    finally:
+        psycopg = database._load_psycopg()
+        with psycopg.connect(TEST_DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM entities WHERE name LIKE %s", (f"{marker}%",))

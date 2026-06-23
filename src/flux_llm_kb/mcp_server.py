@@ -30,6 +30,57 @@ def create_server():
     def remember(title: str, body: str):
         return service.remember(title, body).__dict__
 
+    @mcp.tool(name="kb.claim_upsert")
+    def claim_upsert(
+        subject_type: str,
+        subject: str,
+        predicate: str,
+        object_text: str,
+        confidence: float = 0.5,
+        episode_id: str | None = None,
+    ):
+        return service.upsert_claim(
+            subject_type=subject_type,
+            subject_name=subject,
+            predicate=predicate,
+            object_text=object_text,
+            confidence=confidence,
+            episode_id=episode_id,
+        )
+
+    @mcp.tool(name="kb.claim_transition")
+    def claim_transition(
+        claim_id: str,
+        transition: str,
+        related_claim_id: str | None = None,
+        reason: str | None = None,
+        confidence_delta: float = 0.0,
+    ):
+        return service.transition_claim(
+            claim_id=claim_id,
+            transition=transition,
+            related_claim_id=related_claim_id,
+            reason=reason,
+            confidence_delta=confidence_delta,
+            actor="mcp",
+        )
+
+    @mcp.tool(name="kb.graph_traverse")
+    def graph_traverse(
+        entity_id: str,
+        relation_types: list[str] | None = None,
+        max_depth: int = 2,
+        direction: str = "out",
+        limit: int = 100,
+    ):
+        return service.traverse_graph(
+            entity_id=entity_id,
+            relation_types=relation_types,
+            max_depth=max_depth,
+            direction=direction,
+            limit=limit,
+        )
+
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str):
         return service.remember(title, summary, metadata={"source": "finalize_turn"}).__dict__

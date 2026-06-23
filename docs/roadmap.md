@@ -29,7 +29,7 @@ scripts:
 | Version | Status | Summary |
 | --- | --- | --- |
 | V0 Foundation | shipped | Public repo, safety model, ADRs, PostgreSQL/pgvector migrations, Docker Compose, fixtures, and initial interfaces exist. |
-| V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, Codex hooks, Codex MCP setup, and safe reference capture exist; graph/lifecycle depth still needs hardening. |
+| V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, Codex hooks, Codex MCP setup, safe reference capture, and V1 graph/lifecycle backend hardening exist; review UI depth remains future work. |
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics still need hardening. |
@@ -52,7 +52,7 @@ scripts:
 
 | Piece | Roadmap Intent | Status | Current Evidence / Remaining Gap | Queued Next |
 | --- | --- | --- | --- | --- |
-| Storage and retrieval core | Hybrid retrieval with lexical, vector, graph, and lifecycle scoring. | in progress | PostgreSQL full-text, pgvector, local deterministic `flux-hash-v1` embeddings, JSONB/GIN, trigram fuzzy matching, and hybrid RRF ranking exist. Graph traversal, claim lifecycle, confidence decay, contradiction handling, and lifecycle scoring need deeper implementation and tests. | Harden graph traversal, claim lifecycle transitions, confidence decay, contradiction handling, and lifecycle scoring before later retrieval polish. |
+| Storage and retrieval core | Hybrid retrieval with lexical, vector, graph, and lifecycle scoring. | in progress | PostgreSQL full-text, pgvector, local deterministic `flux-hash-v1` embeddings, JSONB/GIN, trigram fuzzy matching, hybrid RRF ranking, durable claim lifecycle events, claim relations, bounded typed graph traversal, lifecycle scoring decay, and CLI/REST/MCP graph/claim primitives exist. V2 review UX and deeper retrieval explainability remain planned. | Add V2 graph browsing, stale claim review, contradiction review, capture approval, and retention tuning after this backend contract. |
 | Codex integration | Codex hooks for automatic preflight retrieval and session capture. | shipped | Automatic non-trivial prompt briefs, final-turn capture, opt-out settings, dashboard-visible status, and audit records exist. | Continue real-session proof across Codex surfaces, long-running turns, opt-out habits, and duplicate capture review. |
 | Hook policy | Configurable Codex hook policy with relevance gating, context-budget limits, opt-out controls, audit records, dashboard health/status, and suppression for trivial prompts. | shipped | Hook policy controls and status are available through settings, dashboard, and audit flow. | Keep policy tuning tied to real-session feedback. |
 | Codex MCP/plugin setup | Codex personal plugin and MCP configuration for callable Flux tools. | shipped | `flux-kb codex install-plugin` configures MCP; Codex may expose raw names such as `kb.brief` or wrappers such as `mcp__flux_llm_kb.kb_brief`. | Keep installer diagnostics current when Codex plugin/MCP discovery changes. |
@@ -152,18 +152,16 @@ scripts:
 
 ## Queued Work In Roadmap Order
 
-1. Harden V1 graph traversal, claim lifecycle transitions, confidence decay,
-   contradiction handling, and lifecycle scoring with tests.
-2. Add V2 graph browsing, stale claim review, contradiction review, capture
+1. Add V2 graph browsing, stale claim review, contradiction review, capture
    approval, and retention tuning once V1 lifecycle semantics are stronger.
-3. Continue V2.5 extractor expansion for advanced document, diagram, archive,
+2. Continue V2.5 extractor expansion for advanced document, diagram, archive,
    OCR, vision, ASR, and embedded-media stages with semantic near-duplicate
    grouping deferred until retrieval foundations are ready.
-4. Implement V2.6/V2.7 provider-specific mail post-process policies with dry-run
+3. Implement V2.6/V2.7 provider-specific mail post-process policies with dry-run
    and audit views.
-5. Add V2.7 query-aware retrieval snippets, explainability, filters, and deeper
+4. Add V2.7 query-aware retrieval snippets, explainability, filters, and deeper
    operator debug views.
-6. Design and implement V2.8 acceleration: hardware detection, local inference
+5. Design and implement V2.8 acceleration: hardware detection, local inference
    routing, permanent caches, bounded media/OCR/ASR workers, vector batching,
    native watcher evaluation, and throughput telemetry.
 

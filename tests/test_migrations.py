@@ -28,6 +28,13 @@ def test_load_migrations_returns_ordered_sql_files():
     assert any("CREATE TABLE IF NOT EXISTS outlook_sync_requests" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS outlook_host_state" in item.sql for item in migrations)
     assert any("sync_interval_seconds" in item.sql for item in migrations)
+    graph_migration = next(item for item in migrations if item.name == "0010_graph_lifecycle")
+    assert "CREATE TABLE IF NOT EXISTS claim_lifecycle_events" in graph_migration.sql
+    assert "CREATE TABLE IF NOT EXISTS claim_relations" in graph_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS lifecycle_state" in graph_migration.sql
+    assert "idx_claim_lifecycle_events_claim" in graph_migration.sql
+    assert "idx_claim_relations_from" in graph_migration.sql
+    assert "idx_claims_search_vector" in graph_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

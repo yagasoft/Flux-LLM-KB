@@ -167,3 +167,92 @@ def test_cli_crawl_worker_run_once_invokes_backfill_loop(monkeypatch, capsys):
 
     assert payload["worker"]["once"] is True
     assert payload["worker"]["limit"] == 2
+
+
+def test_cli_claim_upsert_and_transition_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = {}
+
+    class FakeService:
+        def upsert_claim(self, **kwargs):
+            calls["upsert"] = kwargs
+            return {"id": "claim-1", "lifecycle_state": "active"}
+
+        def transition_claim(self, **kwargs):
+            calls["transition"] = kwargs
+            return {"id": "claim-1", "lifecycle_state": "confirmed"}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "claim",
+                "upsert",
+                "--subject-type",
+                "project",
+                "--subject",
+                "Flux",
+                "--predicate",
+                "uses",
+                "--object",
+                "PostgreSQL",
+                "--confidence",
+                "0.82",
+            ]
+        )
+        == 0
+    )
+    upsert_payload = json.loads(capsys.readouterr().out)
+
+    assert upsert_payload["id"] == "claim-1"
+    assert calls["upsert"]["subject_type"] == "project"
+    assert calls["upsert"]["object_text"] == "PostgreSQL"
+
+    assert cli.main(["claim", "transition", "claim-1", "confirm", "--reason", "verified"]) == 0
+    transition_payload = json.loads(capsys.readouterr().out)
+
+    assert transition_payload["lifecycle_state"] == "confirmed"
+    assert calls["transition"]["claim_id"] == "claim-1"
+    assert calls["transition"]["transition"] == "confirm"
+
+
+def test_cli_graph_traverse_uses_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = {}
+
+    class FakeService:
+        def traverse_graph(self, **kwargs):
+            calls.update(kwargs)
+            return {"start_entity_id": kwargs["entity_id"], "edges": []}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "graph",
+                "traverse",
+                "entity-1",
+                "--relation-type",
+                "depends_on",
+                "--max-depth",
+                "2",
+                "--direction",
+                "out",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["start_entity_id"] == "entity-1"
+    assert calls == {
+        "entity_id": "entity-1",
+        "relation_types": ["depends_on"],
+        "max_depth": 2,
+        "direction": "out",
+        "limit": 100,
+    }

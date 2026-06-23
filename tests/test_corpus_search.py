@@ -164,3 +164,58 @@ def test_service_brief_uses_configured_token_budget(monkeypatch):
 
     assert KnowledgeService().brief("anything") == "brief"
     assert observed["token_budget"] == 321
+
+
+def test_service_brief_prefers_current_lifecycle_evidence(monkeypatch):
+    def fake_search(_self, _query, limit=10):
+        return [
+            {
+                "kind": "episode",
+                "id": "old",
+                "title": "Old Decision",
+                "summary": "Use the retired path.",
+                "score": 0.99,
+                "lifecycle": {"state": "superseded", "current": False, "audit_visible": True},
+            },
+            {
+                "kind": "episode",
+                "id": "new",
+                "title": "Current Decision",
+                "summary": "Use the current path.",
+                "score": 0.5,
+                "lifecycle": {"state": "active", "current": True, "audit_visible": False},
+            },
+        ]
+
+    monkeypatch.setattr(KnowledgeService, "search", fake_search)
+
+    brief = KnowledgeService().brief("decision", token_budget=100)
+
+    assert "Current Decision" in brief
+    assert "Old Decision" not in brief
+
+
+def test_service_search_preserves_lifecycle_and_graph_metadata(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "search_episodes",
+        lambda query, limit=5: [
+            {
+                "id": "episode-1",
+                "title": "Graph decision",
+                "summary": "Claim-backed graph result.",
+                "score": 0.8,
+                "streams": ["claim_lifecycle", "graph"],
+                "raw_scores": {"claim_lifecycle": 0.7, "graph": 0.4},
+                "lifecycle": {"state": "active", "score": 0.7, "current": True},
+                "graph": {"matched_claim_ids": ["claim-1"], "entity_ids": ["entity-1"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "search_corpus_chunks", lambda query, limit=20: [])
+
+    result = KnowledgeService().search("graph decision", limit=5)[0]
+
+    assert result["lifecycle"]["state"] == "active"
+    assert result["graph"]["matched_claim_ids"] == ["claim-1"]
+    assert result["streams"] == ["claim_lifecycle", "graph"]

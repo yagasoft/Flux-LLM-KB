@@ -31,7 +31,7 @@ from .service import KnowledgeService
 
 def create_app():
     try:
-        from fastapi import Body, FastAPI, HTTPException, Request
+        from fastapi import Body, FastAPI, HTTPException, Query, Request
         from fastapi.exceptions import RequestValidationError
         from fastapi.responses import HTMLResponse, JSONResponse
         from fastapi.staticfiles import StaticFiles
@@ -46,6 +46,21 @@ def create_app():
     class SearchRequest(BaseModel):
         query: str
         limit: int = 5
+
+    class ClaimRequest(BaseModel):
+        subject_type: str
+        subject: str
+        predicate: str
+        object_text: str
+        confidence: float = 0.5
+        episode_id: str | None = None
+        metadata: dict | None = None
+
+    class ClaimTransitionRequest(BaseModel):
+        transition: str
+        related_claim_id: str | None = None
+        reason: str | None = None
+        confidence_delta: float = 0.0
 
     class ForgetRequest(BaseModel):
         memory_id: str
@@ -202,6 +217,81 @@ def create_app():
     @app.get("/api/brief")
     def brief_get(query: str, token_budget: int | None = None):
         return {"brief": service.brief(query, token_budget=token_budget)}
+
+    @app.post("/api/claims")
+    def claim_upsert(request: ClaimRequest = Body(...)):
+        return service.upsert_claim(
+            subject_type=request.subject_type,
+            subject_name=request.subject,
+            predicate=request.predicate,
+            object_text=request.object_text,
+            confidence=request.confidence,
+            episode_id=request.episode_id,
+            metadata=request.metadata,
+        )
+
+    @app.get("/api/claims/{claim_id}")
+    def claim_get(claim_id: str):
+        try:
+            return service.get_claim(claim_id)
+        except LookupError as exc:
+            raise FluxApiError(
+                code="claim.not_found",
+                message=str(exc),
+                status_code=404,
+                component="retrieval",
+                retryable=False,
+                user_action="Refresh claim results or create the claim before reading it.",
+                target={"type": "claim", "id": claim_id},
+            ) from exc
+
+    @app.post("/api/claims/{claim_id}/transitions")
+    def claim_transition(claim_id: str, request: ClaimTransitionRequest = Body(...)):
+        try:
+            return service.transition_claim(
+                claim_id=claim_id,
+                transition=request.transition,
+                related_claim_id=request.related_claim_id,
+                reason=request.reason,
+                confidence_delta=request.confidence_delta,
+                actor="api",
+            )
+        except LookupError as exc:
+            raise FluxApiError(
+                code="claim.not_found",
+                message=str(exc),
+                status_code=404,
+                component="retrieval",
+                retryable=False,
+                user_action="Refresh claim results or create the claim before transitioning it.",
+                target={"type": "claim", "id": claim_id},
+            ) from exc
+        except ValueError as exc:
+            raise FluxApiError(
+                code="claim.transition_invalid",
+                message=str(exc),
+                status_code=400,
+                component="retrieval",
+                retryable=False,
+                user_action="Use a supported claim lifecycle transition.",
+                target={"type": "claim", "id": claim_id},
+            ) from exc
+
+    @app.get("/api/graph/traverse")
+    def graph_traverse(
+        entity_id: str,
+        relation_type: list[str] | None = Query(None),
+        max_depth: int = 2,
+        direction: str = "out",
+        limit: int = 100,
+    ):
+        return service.traverse_graph(
+            entity_id=entity_id,
+            relation_types=relation_type,
+            max_depth=max_depth,
+            direction=direction,
+            limit=limit,
+        )
 
     @app.get("/api/corpus/assets")
     def corpus_assets(root_name: str | None = None, path: str | None = None, limit: int = 50):

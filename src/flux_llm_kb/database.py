@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import os
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from .embeddings import (
     to_pgvector_literal,
 )
 from .migrations import load_migrations
-from .scoring import reciprocal_rank_fusion
+from .scoring import LifecycleScoreInput, lifecycle_score, reciprocal_rank_fusion
 
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
@@ -179,21 +180,106 @@ def search_episodes(query: str, *, limit: int = 5, url: str | None = None) -> li
             )
             _add_ranked_rows("vector", cur.fetchall(), streams, details)
 
+            cur.execute(
+                """
+                SELECT e.id::text, e.title, e.summary,
+                       max(ts_rank(c.search_vector, plainto_tsquery('english', %s))) AS score,
+                       jsonb_build_object(
+                         'lifecycle', jsonb_build_object(
+                           'state', (array_agg(c.lifecycle_state ORDER BY c.updated_at DESC))[1],
+                           'current', bool_or(c.lifecycle_state IN ('active', 'confirmed', 'reinforced')),
+                           'audit_visible', bool_or(c.lifecycle_state IN ('superseded', 'contradicted', 'stale', 'retired'))
+                         ),
+                         'graph', jsonb_build_object(
+                           'matched_claim_ids', jsonb_agg(DISTINCT c.id::text),
+                           'entity_ids', jsonb_agg(DISTINCT c.subject_entity_id::text)
+                         )
+                       ) AS metadata
+                FROM claims c
+                JOIN episodes e ON e.id = c.episode_id
+                WHERE c.search_vector @@ plainto_tsquery('english', %s)
+                GROUP BY e.id, e.title, e.summary
+                ORDER BY score DESC, max(c.updated_at) DESC
+                LIMIT %s
+                """,
+                (query, query, candidate_limit),
+            )
+            _add_ranked_rows("claim_lifecycle", cur.fetchall(), streams, details)
+
+            cur.execute(
+                """
+                WITH matched_entities AS (
+                    SELECT DISTINCT subject_entity_id AS entity_id
+                    FROM claims
+                    WHERE search_vector @@ plainto_tsquery('english', %s)
+                      AND subject_entity_id IS NOT NULL
+                ),
+                adjacent_entities AS (
+                    SELECT r.to_entity_id AS entity_id
+                    FROM relations r
+                    JOIN matched_entities m ON m.entity_id = r.from_entity_id
+                    WHERE r.lifecycle_state <> 'retired'
+                    UNION
+                    SELECT r.from_entity_id AS entity_id
+                    FROM relations r
+                    JOIN matched_entities m ON m.entity_id = r.to_entity_id
+                    WHERE r.lifecycle_state <> 'retired'
+                )
+                SELECT e.id::text, e.title, e.summary,
+                       max(c.confidence) AS score,
+                       jsonb_build_object(
+                         'graph', jsonb_build_object(
+                           'matched_claim_ids', jsonb_agg(DISTINCT c.id::text),
+                           'entity_ids', jsonb_agg(DISTINCT c.subject_entity_id::text)
+                         )
+                       ) AS metadata
+                FROM adjacent_entities a
+                JOIN claims c ON c.subject_entity_id = a.entity_id
+                JOIN episodes e ON e.id = c.episode_id
+                WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
+                GROUP BY e.id, e.title, e.summary
+                ORDER BY score DESC, max(c.updated_at) DESC
+                LIMIT %s
+                """,
+                (query, candidate_limit),
+            )
+            _add_ranked_rows("graph", cur.fetchall(), streams, details)
+
+            if details:
+                cur.execute(
+                    """
+                    SELECT id::text, confidence, usage_count,
+                           superseded_by IS NOT NULL AS superseded,
+                           lifecycle_state, contradiction_count, retention_action,
+                           created_at, updated_at
+                    FROM episodes
+                    WHERE id = ANY(%s::uuid[])
+                    """,
+                    (list(details.keys()),),
+                )
+                _add_episode_lifecycle_rows(cur.fetchall(), details)
+
     fused = reciprocal_rank_fusion(streams)
     results: list[dict[str, Any]] = []
-    for item in fused[:limit]:
+    for item in fused:
         result = details[item.item_id]
-        results.append(
-            {
-                "id": item.item_id,
-                "title": result["title"],
-                "summary": result["summary"],
-                "score": item.score,
-                "streams": list(item.streams),
-                "raw_scores": result["raw_scores"],
-            }
-        )
-    return results
+        lifecycle = result.get("lifecycle") or {}
+        lifecycle_score_value = float(lifecycle.get("score", 1.0) if isinstance(lifecycle, dict) else 1.0)
+        adjusted_score = item.score * (0.5 + (0.5 * lifecycle_score_value))
+        payload = {
+            "id": item.item_id,
+            "title": result["title"],
+            "summary": result["summary"],
+            "score": adjusted_score,
+            "streams": list(item.streams),
+            "raw_scores": result["raw_scores"],
+        }
+        if "lifecycle" in result:
+            payload["lifecycle"] = result["lifecycle"]
+        if "graph" in result:
+            payload["graph"] = result["graph"]
+        results.append(payload)
+    return sorted(results, key=lambda row: (-float(row["score"]), row["title"], row["id"]))[:limit]
 
 
 def search_corpus_chunks(query: str, *, limit: int = 5, url: str | None = None) -> list[dict[str, Any]]:
@@ -399,6 +485,444 @@ def list_episodes(*, limit: int = 500, url: str | None = None) -> list[dict[str,
                 }
                 for row in cur.fetchall()
             ]
+
+
+def upsert_entity(
+    *,
+    entity_type: str,
+    name: str,
+    attributes: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entities (type, name, attributes)
+                VALUES (%s, %s, %s::jsonb)
+                ON CONFLICT (type, name) DO UPDATE SET
+                    attributes = entities.attributes || EXCLUDED.attributes
+                RETURNING id::text, type, name, attributes, created_at
+                """,
+                (entity_type, name, _json(attributes or {})),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "type": row[1],
+                "name": row[2],
+                "attributes": row[3] or {},
+                "created_at": row[4].isoformat() if row[4] else None,
+            }
+
+
+def upsert_claim(
+    *,
+    subject_type: str,
+    subject_name: str,
+    predicate: str,
+    object_text: str,
+    confidence: float = 0.5,
+    episode_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entities (type, name, attributes)
+                VALUES (%s, %s, '{}'::jsonb)
+                ON CONFLICT (type, name) DO UPDATE SET
+                    attributes = entities.attributes
+                RETURNING id::text, type, name, attributes, created_at
+                """,
+                (subject_type, subject_name),
+            )
+            entity = cur.fetchone()
+            cur.execute(
+                """
+                INSERT INTO claims (
+                    episode_id, subject_entity_id, predicate, object_text,
+                    confidence, metadata, last_confirmed_at, lifecycle_state, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, now(), 'active', now())
+                ON CONFLICT (subject_entity_id, predicate, object_text) DO UPDATE SET
+                    episode_id = COALESCE(EXCLUDED.episode_id, claims.episode_id),
+                    confidence = greatest(claims.confidence, EXCLUDED.confidence),
+                    metadata = claims.metadata || EXCLUDED.metadata,
+                    last_confirmed_at = now(),
+                    lifecycle_state = CASE
+                        WHEN claims.lifecycle_state IN ('retired', 'deleted') THEN claims.lifecycle_state
+                        ELSE 'confirmed'
+                    END,
+                    updated_at = now()
+                RETURNING id::text, episode_id::text, subject_entity_id::text, predicate,
+                          object_text, confidence, superseded_by::text, created_at,
+                          last_confirmed_at, lifecycle_state, usage_count,
+                          reinforcement_count, contradiction_count, last_reinforced_at,
+                          retention_action, metadata, updated_at, retired_at, stale_at
+                """,
+                (
+                    episode_id,
+                    entity[0],
+                    predicate,
+                    object_text,
+                    _clamp_float(confidence),
+                    _json(metadata or {}),
+                ),
+            )
+            claim = _claim_row(cur.fetchone(), subject=_entity_row(entity))
+            cur.execute(
+                """
+                INSERT INTO claim_lifecycle_events (
+                    claim_id, transition_type, actor, from_state, to_state, details
+                )
+                VALUES (%s, 'upsert', 'system', NULL, %s, %s::jsonb)
+                """,
+                (claim["id"], claim["lifecycle_state"], _json({"predicate": predicate})),
+            )
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, target_table, target_id, details)
+                VALUES ('claim.upserted', 'claims', %s, %s::jsonb)
+                """,
+                (claim["id"], _json({"subject_entity_id": entity[0]})),
+            )
+            return claim
+
+
+def get_claim(claim_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT c.id::text, c.episode_id::text, c.subject_entity_id::text,
+                       c.predicate, c.object_text, c.confidence, c.superseded_by::text,
+                       c.created_at, c.last_confirmed_at, c.lifecycle_state, c.usage_count,
+                       c.reinforcement_count, c.contradiction_count, c.last_reinforced_at,
+                       c.retention_action, c.metadata, c.updated_at, c.retired_at, c.stale_at,
+                       e.id::text, e.type, e.name, e.attributes, e.created_at
+                FROM claims c
+                LEFT JOIN entities e ON e.id = c.subject_entity_id
+                WHERE c.id = %s
+                """,
+                (claim_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            subject = _entity_row(row[19:24]) if row[19] else None
+            claim = _claim_row(row[:19], subject=subject)
+            claim["lifecycle"]["audit_events"] = _claim_lifecycle_events(cur, claim["id"])
+            claim["lifecycle"]["related_claims"] = _claim_related_claims(cur, claim["id"])
+            return claim
+
+
+def upsert_entity_relation(
+    *,
+    from_entity_id: str,
+    to_entity_id: str,
+    relation_type: str,
+    confidence: float = 0.5,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO relations (
+                    from_entity_id, to_entity_id, relation_type, confidence, metadata,
+                    lifecycle_state, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, 'active', now())
+                ON CONFLICT (from_entity_id, to_entity_id, relation_type) DO UPDATE SET
+                    confidence = greatest(relations.confidence, EXCLUDED.confidence),
+                    metadata = relations.metadata || EXCLUDED.metadata,
+                    lifecycle_state = 'active',
+                    updated_at = now()
+                RETURNING id::text, from_entity_id::text, to_entity_id::text,
+                          relation_type, confidence, metadata, lifecycle_state, created_at, updated_at
+                """,
+                (
+                    from_entity_id,
+                    to_entity_id,
+                    relation_type,
+                    _clamp_float(confidence),
+                    _json(metadata or {}),
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "from_entity_id": row[1],
+                "to_entity_id": row[2],
+                "relation_type": row[3],
+                "confidence": float(row[4] or 0.0),
+                "metadata": row[5] or {},
+                "lifecycle_state": row[6],
+                "created_at": row[7].isoformat() if row[7] else None,
+                "updated_at": row[8].isoformat() if row[8] else None,
+            }
+
+
+def transition_claim(
+    *,
+    claim_id: str,
+    transition: str,
+    related_claim_id: str | None = None,
+    reason: str | None = None,
+    actor: str = "system",
+    confidence_delta: float = 0.0,
+    url: str | None = None,
+) -> dict[str, Any]:
+    transition_name = transition.lower().replace("-", "_")
+    if transition_name not in {
+        "reinforce",
+        "confirm",
+        "supersede",
+        "contradict",
+        "stale",
+        "deprioritize",
+        "retire",
+        "delete",
+    }:
+        raise ValueError(f"unsupported claim transition: {transition}")
+
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT lifecycle_state, confidence, contradiction_count, reinforcement_count
+                FROM claims
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (claim_id,),
+            )
+            old = cur.fetchone()
+            if old is None:
+                raise LookupError(f"claim not found: {claim_id}")
+            from_state = old[0]
+            to_state = _claim_transition_state(transition_name)
+            event_type = {
+                "reinforce": "claim.reinforced",
+                "confirm": "claim.confirmed",
+                "supersede": "claim.superseded",
+                "contradict": "claim.contradicted",
+                "stale": "claim.stale",
+                "deprioritize": "claim.stale",
+                "retire": "claim.retired",
+                "delete": "claim.retired",
+            }[transition_name]
+            relation_type = {
+                "reinforce": "reinforces",
+                "supersede": "supersedes",
+                "contradict": "contradicts",
+            }.get(transition_name)
+            cur.execute(
+                """
+                UPDATE claims
+                SET lifecycle_state = %s,
+                    confidence = greatest(0.0, least(1.0, confidence + %s)),
+                    last_confirmed_at = CASE WHEN %s IN ('confirm', 'reinforce') THEN now() ELSE last_confirmed_at END,
+                    last_reinforced_at = CASE WHEN %s = 'reinforce' THEN now() ELSE last_reinforced_at END,
+                    reinforcement_count = CASE WHEN %s = 'reinforce' THEN reinforcement_count + 1 ELSE reinforcement_count END,
+                    contradiction_count = CASE WHEN %s = 'contradict' THEN contradiction_count + 1 ELSE contradiction_count END,
+                    superseded_by = CASE WHEN %s = 'supersede' THEN %s ELSE superseded_by END,
+                    stale_at = CASE WHEN %s IN ('stale', 'deprioritize') THEN now() ELSE stale_at END,
+                    retired_at = CASE WHEN %s IN ('retire', 'delete') THEN now() ELSE retired_at END,
+                    retention_action = CASE
+                        WHEN %s = 'deprioritize' THEN 'deprioritize'
+                        WHEN %s IN ('retire', 'delete') THEN 'retire'
+                        ELSE retention_action
+                    END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    to_state,
+                    confidence_delta,
+                    transition_name,
+                    transition_name,
+                    transition_name,
+                    transition_name,
+                    transition_name,
+                    related_claim_id,
+                    transition_name,
+                    transition_name,
+                    transition_name,
+                    transition_name,
+                    claim_id,
+                ),
+            )
+            if relation_type and related_claim_id:
+                cur.execute(
+                    """
+                    INSERT INTO claim_relations (
+                        from_claim_id, to_claim_id, relation_type, confidence, metadata
+                    )
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    ON CONFLICT (from_claim_id, to_claim_id, relation_type) DO UPDATE SET
+                        confidence = greatest(claim_relations.confidence, EXCLUDED.confidence),
+                        metadata = claim_relations.metadata || EXCLUDED.metadata
+                    """,
+                    (
+                        claim_id,
+                        related_claim_id,
+                        relation_type,
+                        1.0 if transition_name in {"supersede", "contradict"} else 0.75,
+                        _json({"transition": transition_name, "reason": reason}),
+                    ),
+                )
+            cur.execute(
+                """
+                INSERT INTO claim_lifecycle_events (
+                    claim_id, transition_type, actor, from_state, to_state,
+                    related_claim_id, confidence_delta, details
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    claim_id,
+                    transition_name,
+                    actor,
+                    from_state,
+                    to_state,
+                    related_claim_id,
+                    confidence_delta,
+                    _json({"reason": reason} if reason else {}),
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, actor, target_table, target_id, details)
+                VALUES (%s, %s, 'claims', %s, %s::jsonb)
+                """,
+                (
+                    event_type,
+                    actor,
+                    claim_id,
+                    _json(
+                        {
+                            "from_state": from_state,
+                            "to_state": to_state,
+                            "related_claim_id": related_claim_id,
+                            "reason": reason,
+                        }
+                    ),
+                ),
+            )
+    claim = get_claim(claim_id, url=url)
+    if claim is None:
+        raise LookupError(f"claim not found: {claim_id}")
+    return claim
+
+
+def traverse_entity_graph(
+    *,
+    entity_id: str,
+    relation_types: list[str] | None = None,
+    max_depth: int = 2,
+    direction: str = "out",
+    limit: int = 100,
+    url: str | None = None,
+) -> dict[str, Any]:
+    if direction not in {"out", "in", "both"}:
+        raise ValueError("direction must be one of: out, in, both")
+    depth_limit = max(1, min(max_depth, 5))
+    row_limit = max(1, min(limit, 500))
+    relation_filter = relation_types or None
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH RECURSIVE relation_edges AS (
+                    SELECT id, from_entity_id, to_entity_id, relation_type, confidence, metadata
+                    FROM relations
+                    WHERE %s IN ('out', 'both')
+                      AND lifecycle_state <> 'retired'
+                    UNION ALL
+                    SELECT id, to_entity_id AS from_entity_id, from_entity_id AS to_entity_id,
+                           relation_type, confidence, metadata
+                    FROM relations
+                    WHERE %s IN ('in', 'both')
+                      AND lifecycle_state <> 'retired'
+                ),
+                graph AS (
+                    SELECT re.id AS relation_id, re.from_entity_id, re.to_entity_id,
+                           re.to_entity_id AS next_entity_id, re.relation_type,
+                           re.confidence, re.metadata, 1 AS depth,
+                           ARRAY[%s::uuid, re.to_entity_id] AS path
+                    FROM relation_edges re
+                    WHERE re.from_entity_id = %s
+                      AND (%s::text[] IS NULL OR relation_type = ANY(%s::text[]))
+                    UNION ALL
+                    SELECT re.id AS relation_id, re.from_entity_id, re.to_entity_id,
+                           edge.next_entity_id, re.relation_type, re.confidence,
+                           re.metadata, graph.depth + 1 AS depth,
+                           graph.path || edge.next_entity_id AS path
+                    FROM graph
+                    JOIN relation_edges re ON re.from_entity_id = graph.next_entity_id
+                    JOIN LATERAL (SELECT re.to_entity_id AS next_entity_id) edge ON true
+                    WHERE graph.depth < %s
+                      AND (%s::text[] IS NULL OR relation_type = ANY(%s::text[]))
+                      AND NOT next_entity_id = ANY(path)
+                )
+                SELECT graph.relation_id::text, graph.from_entity_id::text,
+                       from_entity.type, from_entity.name,
+                       graph.to_entity_id::text, to_entity.type, to_entity.name,
+                       graph.relation_type, graph.confidence, graph.metadata,
+                       graph.depth, graph.path::text[]
+                FROM graph
+                JOIN entities from_entity ON from_entity.id = graph.from_entity_id
+                JOIN entities to_entity ON to_entity.id = graph.to_entity_id
+                ORDER BY depth ASC, relation_type ASC, from_entity.name ASC,
+                         to_entity.name ASC, relation_id ASC
+                LIMIT %s
+                """,
+                (
+                    direction,
+                    direction,
+                    entity_id,
+                    entity_id,
+                    relation_filter,
+                    relation_filter,
+                    depth_limit,
+                    relation_filter,
+                    relation_filter,
+                    row_limit,
+                ),
+            )
+            edges = [
+                {
+                    "relation_id": row[0],
+                    "from_entity_id": row[1],
+                    "from_entity": {"type": row[2], "name": row[3]},
+                    "to_entity_id": row[4],
+                    "to_entity": {"type": row[5], "name": row[6]},
+                    "relation_type": row[7],
+                    "confidence": float(row[8] or 0.0),
+                    "metadata": row[9] or {},
+                    "depth": int(row[10] or 0),
+                    "path": list(row[11] or []),
+                }
+                for row in cur.fetchall()
+            ]
+            return {
+                "start_entity_id": entity_id,
+                "relation_types": relation_types or [],
+                "max_depth": depth_limit,
+                "direction": direction,
+                "edges": edges,
+            }
 
 
 def codex_hook_capture_exists(*, session_id: str, turn_id: str, url: str | None = None) -> bool:
@@ -3204,6 +3728,60 @@ def _add_ranked_rows(
             {"title": row[1], "summary": row[2], "raw_scores": {}},
         )
         detail["raw_scores"][stream] = float(row[3] or 0.0)
+        if len(row) > 4 and isinstance(row[4], dict):
+            for key, value in row[4].items():
+                if key == "graph" and isinstance(value, dict) and isinstance(detail.get("graph"), dict):
+                    detail["graph"] = _merge_graph_metadata(detail["graph"], value)
+                elif key == "lifecycle" and isinstance(value, dict) and isinstance(detail.get("lifecycle"), dict):
+                    detail["lifecycle"] = {**detail["lifecycle"], **value}
+                else:
+                    detail[key] = value
+
+
+def _add_episode_lifecycle_rows(
+    rows: list[tuple[Any, ...]],
+    details: dict[str, dict[str, Any]],
+) -> None:
+    for row in rows:
+        item_id = row[0]
+        detail = details.get(item_id)
+        if detail is None:
+            continue
+        score = lifecycle_score(
+            LifecycleScoreInput(
+                confidence=float(row[1] or 0.0),
+                usage_count=int(row[2] or 0),
+                superseded=bool(row[3]),
+                lifecycle_state=row[4] or "active",
+                contradiction_count=int(row[5] or 0),
+                retention_action=row[6] or "keep",
+                age_days=_age_days(row[7]),
+                confirmation_age_days=_age_days(row[8]),
+            )
+        )
+        lifecycle = detail.setdefault("lifecycle", {})
+        if isinstance(lifecycle, dict):
+            lifecycle.update(
+                {
+                    "state": lifecycle.get("state") or row[4] or "active",
+                    "score": score.score,
+                    "current": lifecycle.get("current", row[4] in {"active", "confirmed", "reinforced"}),
+                    "audit_visible": lifecycle.get(
+                        "audit_visible",
+                        row[4] in {"superseded", "contradicted", "stale", "retired"},
+                    ),
+                    "explanation": score.explanation,
+                }
+            )
+
+
+def _merge_graph_metadata(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    for key in {"matched_claim_ids", "entity_ids"}:
+        values = [str(value) for value in merged.get(key, []) if value is not None]
+        values.extend(str(value) for value in right.get(key, []) if value is not None)
+        merged[key] = sorted(set(values))
+    return merged
 
 
 def _add_ranked_corpus_rows(
@@ -3229,6 +3807,144 @@ def _add_ranked_corpus_rows(
             },
         )
         detail["raw_scores"][stream] = float(row[7] or 0.0)
+
+
+def _entity_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "type": row[1],
+        "name": row[2],
+        "attributes": row[3] or {},
+        "created_at": row[4].isoformat() if row[4] else None,
+    }
+
+
+def _claim_row(row: tuple[Any, ...], *, subject: dict[str, Any] | None = None) -> dict[str, Any]:
+    score = lifecycle_score(
+        LifecycleScoreInput(
+            confidence=float(row[5] or 0.0),
+            usage_count=int(row[10] or 0),
+            superseded=bool(row[6]),
+            lifecycle_state=row[9] or "active",
+            reinforcement_count=int(row[11] or 0),
+            reinforcement_age_days=_age_days(row[13]),
+            contradiction_count=int(row[12] or 0),
+            retention_action=row[14] or "keep",
+            age_days=_age_days(row[7]),
+            confirmation_age_days=_age_days(row[8]),
+        )
+    )
+    return {
+        "id": row[0],
+        "episode_id": row[1],
+        "subject_entity_id": row[2],
+        "subject": subject,
+        "predicate": row[3],
+        "object_text": row[4],
+        "confidence": float(row[5] or 0.0),
+        "superseded_by": row[6],
+        "created_at": row[7].isoformat() if row[7] else None,
+        "last_confirmed_at": row[8].isoformat() if row[8] else None,
+        "lifecycle_state": row[9],
+        "usage_count": int(row[10] or 0),
+        "reinforcement_count": int(row[11] or 0),
+        "contradiction_count": int(row[12] or 0),
+        "last_reinforced_at": row[13].isoformat() if row[13] else None,
+        "retention_action": row[14],
+        "metadata": row[15] or {},
+        "updated_at": row[16].isoformat() if row[16] else None,
+        "retired_at": row[17].isoformat() if row[17] else None,
+        "stale_at": row[18].isoformat() if row[18] else None,
+        "lifecycle": {
+            "state": row[9],
+            "score": score.score,
+            "current": row[9] in {"active", "confirmed", "reinforced"},
+            "audit_visible": row[9] in {"superseded", "contradicted", "stale", "retired"},
+            "explanation": score.explanation,
+            "audit_events": [],
+            "related_claims": [],
+        },
+    }
+
+
+def _claim_lifecycle_events(cur: Any, claim_id: str) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id::text, transition_type, actor, from_state, to_state,
+               related_claim_id::text, confidence_delta, details, created_at
+        FROM claim_lifecycle_events
+        WHERE claim_id = %s
+        ORDER BY created_at DESC, id DESC
+        LIMIT 50
+        """,
+        (claim_id,),
+    )
+    return [
+        {
+            "id": row[0],
+            "transition_type": row[1],
+            "actor": row[2],
+            "from_state": row[3],
+            "to_state": row[4],
+            "related_claim_id": row[5],
+            "confidence_delta": float(row[6] or 0.0),
+            "details": row[7] or {},
+            "created_at": row[8].isoformat() if row[8] else None,
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def _claim_related_claims(cur: Any, claim_id: str) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id::text, from_claim_id::text, to_claim_id::text,
+               relation_type, confidence, metadata, created_at
+        FROM claim_relations
+        WHERE from_claim_id = %s OR to_claim_id = %s
+        ORDER BY relation_type ASC, created_at DESC, id DESC
+        LIMIT 50
+        """,
+        (claim_id, claim_id),
+    )
+    return [
+        {
+            "id": row[0],
+            "from_claim_id": row[1],
+            "to_claim_id": row[2],
+            "relation_type": row[3],
+            "confidence": float(row[4] or 0.0),
+            "metadata": row[5] or {},
+            "created_at": row[6].isoformat() if row[6] else None,
+        }
+        for row in cur.fetchall()
+    ]
+
+
+def _claim_transition_state(transition: str) -> str:
+    return {
+        "reinforce": "reinforced",
+        "confirm": "confirmed",
+        "supersede": "superseded",
+        "contradict": "contradicted",
+        "stale": "stale",
+        "deprioritize": "stale",
+        "retire": "retired",
+        "delete": "retired",
+    }[transition]
+
+
+def _age_days(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        timestamp = value if value.tzinfo else value.replace(tzinfo=UTC)
+        return max((datetime.now(UTC) - timestamp.astimezone(UTC)).total_seconds() / 86400.0, 0.0)
+    return None
+
+
+def _clamp_float(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
 
 
 def _root_row(row: tuple[Any, ...]) -> dict[str, Any]:

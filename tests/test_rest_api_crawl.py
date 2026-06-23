@@ -307,6 +307,60 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
     assert brief.json() == {"brief": "RFP:900"}
 
 
+def test_claim_and_graph_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = {}
+
+    class FakeService:
+        def upsert_claim(self, **kwargs):
+            calls["upsert"] = kwargs
+            return {"id": "claim-1", "lifecycle_state": "active"}
+
+        def get_claim(self, claim_id):
+            calls["get_claim"] = claim_id
+            return {"id": claim_id, "lifecycle_state": "active"}
+
+        def transition_claim(self, **kwargs):
+            calls["transition"] = kwargs
+            return {"id": kwargs["claim_id"], "lifecycle_state": "contradicted"}
+
+        def traverse_graph(self, **kwargs):
+            calls["traverse"] = kwargs
+            return {"start_entity_id": kwargs["entity_id"], "edges": []}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    created = client.post(
+        "/api/claims",
+        json={
+            "subject_type": "project",
+            "subject": "Flux",
+            "predicate": "uses",
+            "object_text": "PostgreSQL",
+            "confidence": 0.8,
+        },
+    )
+    fetched = client.get("/api/claims/claim-1")
+    transitioned = client.post(
+        "/api/claims/claim-1/transitions",
+        json={"transition": "contradict", "related_claim_id": "claim-2", "reason": "newer evidence"},
+    )
+    graph = client.get(
+        "/api/graph/traverse",
+        params={"entity_id": "entity-1", "relation_type": "depends_on", "max_depth": 2, "direction": "out"},
+    )
+
+    assert created.status_code == 200
+    assert fetched.status_code == 200
+    assert transitioned.status_code == 200
+    assert graph.status_code == 200
+    assert calls["upsert"]["subject_name"] == "Flux"
+    assert calls["transition"]["transition"] == "contradict"
+    assert calls["traverse"]["relation_types"] == ["depends_on"]
+
+
 def test_corpus_lookup_routes_return_assets_and_chunks(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

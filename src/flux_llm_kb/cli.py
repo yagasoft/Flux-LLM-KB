@@ -34,6 +34,34 @@ def main(argv: list[str] | None = None) -> int:
     remember_parser.add_argument("title")
     remember_parser.add_argument("body")
 
+    claim_parser = subparsers.add_parser("claim", help="Manage durable claims")
+    claim_subparsers = claim_parser.add_subparsers(dest="claim_command", required=True)
+    claim_upsert = claim_subparsers.add_parser("upsert", help="Create or update a claim")
+    claim_upsert.add_argument("--subject-type", required=True)
+    claim_upsert.add_argument("--subject", required=True)
+    claim_upsert.add_argument("--predicate", required=True)
+    claim_upsert.add_argument("--object", required=True, dest="object_text")
+    claim_upsert.add_argument("--confidence", type=float, default=0.5)
+    claim_upsert.add_argument("--episode-id")
+    claim_transition = claim_subparsers.add_parser("transition", help="Apply a lifecycle transition to a claim")
+    claim_transition.add_argument("claim_id")
+    claim_transition.add_argument(
+        "transition",
+        choices=["reinforce", "confirm", "supersede", "contradict", "stale", "deprioritize", "retire", "delete"],
+    )
+    claim_transition.add_argument("--related-claim-id")
+    claim_transition.add_argument("--reason")
+    claim_transition.add_argument("--confidence-delta", type=float, default=0.0)
+
+    graph_parser = subparsers.add_parser("graph", help="Traverse entity graph relations")
+    graph_subparsers = graph_parser.add_subparsers(dest="graph_command", required=True)
+    graph_traverse = graph_subparsers.add_parser("traverse", help="Traverse relations from an entity")
+    graph_traverse.add_argument("entity_id")
+    graph_traverse.add_argument("--relation-type", action="append", dest="relation_types")
+    graph_traverse.add_argument("--max-depth", type=int, default=2)
+    graph_traverse.add_argument("--direction", choices=["out", "in", "both"], default="out")
+    graph_traverse.add_argument("--limit", type=int, default=100)
+
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
     forget_parser.add_argument("--reason", default="user_request")
@@ -217,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         "status": _status,
         "search": _search,
         "remember": _remember,
+        "claim": _claim,
+        "graph": _graph,
         "forget": _forget,
         "audit": _audit,
         "backfill-codex": _backfill_codex,
@@ -280,6 +310,50 @@ def _remember(args: argparse.Namespace) -> int:
 
     result = KnowledgeService().remember(args.title, args.body)
     print(json.dumps({"id": result.id, "redaction_count": result.redaction_count}, indent=2))
+    return 0
+
+
+def _claim(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.claim_command == "upsert":
+        payload = service.upsert_claim(
+            subject_type=args.subject_type,
+            subject_name=args.subject,
+            predicate=args.predicate,
+            object_text=args.object_text,
+            confidence=args.confidence,
+            episode_id=args.episode_id,
+        )
+    elif args.claim_command == "transition":
+        payload = service.transition_claim(
+            claim_id=args.claim_id,
+            transition=args.transition,
+            related_claim_id=args.related_claim_id,
+            reason=args.reason,
+            confidence_delta=args.confidence_delta,
+            actor="cli",
+        )
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.claim_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _graph(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    if args.graph_command != "traverse":  # pragma: no cover - argparse prevents this
+        raise ValueError(args.graph_command)
+    payload = KnowledgeService().traverse_graph(
+        entity_id=args.entity_id,
+        relation_types=args.relation_types,
+        max_depth=args.max_depth,
+        direction=args.direction,
+        limit=args.limit,
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 

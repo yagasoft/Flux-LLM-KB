@@ -64,6 +64,10 @@ class KnowledgeService:
     def brief(self, query: str, token_budget: int | None = None) -> str:
         if token_budget is None:
             token_budget = _configured_token_budget()
+        search_results = self.search(query, limit=10)
+        current_results = [item for item in search_results if _is_current_evidence(item)]
+        if current_results:
+            search_results = current_results
         candidates = [
             ContextCandidate(
                 id=item["id"],
@@ -71,7 +75,7 @@ class KnowledgeService:
                 body=item["summary"],
                 score=item["score"],
             )
-            for item in self.search(query, limit=10)
+            for item in search_results
         ]
         return pack_context(candidates, token_budget=token_budget)
 
@@ -81,6 +85,69 @@ class KnowledgeService:
     def forget(self, memory_id: str, reason: str = "user_request") -> dict[str, Any]:
         deleted = database.forget_episode(memory_id, reason=reason)
         return {"id": memory_id, "deleted": deleted}
+
+    def upsert_claim(
+        self,
+        *,
+        subject_type: str,
+        subject_name: str,
+        predicate: str,
+        object_text: str,
+        confidence: float = 0.5,
+        episode_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return database.upsert_claim(
+            subject_type=subject_type,
+            subject_name=subject_name,
+            predicate=predicate,
+            object_text=object_text,
+            confidence=confidence,
+            episode_id=episode_id,
+            metadata=metadata,
+        )
+
+    def get_claim(self, claim_id: str) -> dict[str, Any]:
+        claim = database.get_claim(claim_id)
+        if claim is None:
+            raise LookupError(f"claim not found: {claim_id}")
+        return claim
+
+    def transition_claim(
+        self,
+        *,
+        claim_id: str,
+        transition: str,
+        related_claim_id: str | None = None,
+        reason: str | None = None,
+        actor: str = "system",
+        confidence_delta: float = 0.0,
+    ) -> dict[str, Any]:
+        return database.transition_claim(
+            claim_id=claim_id,
+            transition=transition,
+            related_claim_id=related_claim_id,
+            reason=reason,
+            actor=actor,
+            confidence_delta=confidence_delta,
+        )
+
+    def traverse_graph(
+        self,
+        *,
+        entity_id: str,
+        relation_types: list[str] | None = None,
+        max_depth: int = 2,
+        direction: str = "out",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return database.traverse_entity_graph(
+            entity_id=entity_id,
+            relation_types=relation_types,
+            max_depth=max_depth,
+            direction=direction,
+            limit=limit,
+        )
 
     def export_wiki(self, output_dir: str | Path, limit: int = 500) -> dict[str, Any]:
         path = Path(output_dir)
@@ -462,6 +529,15 @@ def _mail_manifest_summary(manifest: dict[str, Any]) -> str:
         count = int(manifest.get("attachment_count") or 0)
         parts.append(f"{count} attachment{'s' if count != 1 else ''}")
     return "; ".join(parts) + "." if parts else ""
+
+
+def _is_current_evidence(item: dict[str, Any]) -> bool:
+    lifecycle = item.get("lifecycle")
+    if not isinstance(lifecycle, dict):
+        return True
+    if lifecycle.get("current") is False:
+        return False
+    return str(lifecycle.get("state") or "active") not in {"superseded", "contradicted", "retired"}
 
 
 def _display_address(value: Any) -> str:

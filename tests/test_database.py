@@ -440,3 +440,32 @@ def test_imap_mail_schedule_has_due_query_and_advances_after_sync_run():
     assert "UPDATE mail_profiles" in record_function
     assert "last_sync_at = now()" in record_function
     assert "make_interval(secs => sync_interval_seconds)" in record_function
+
+
+def test_claim_lifecycle_primitives_record_events_audit_and_relations():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "def upsert_entity" in source
+    assert "def upsert_claim" in source
+    assert "def transition_claim" in source
+    transition = source.split("def transition_claim", 1)[1].split("def ", 1)[0]
+    assert "claim_lifecycle_events" in transition
+    assert "claim_relations" in transition
+    assert "audit_events" in transition
+    assert "claim.reinforced" in transition
+    assert "claim.superseded" in transition
+    assert "claim.contradicted" in transition
+    assert "claim.retired" in transition
+
+
+def test_graph_traversal_query_is_bounded_typed_stable_and_cycle_safe():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "def traverse_entity_graph" in source
+    traversal = source.split("def traverse_entity_graph", 1)[1].split("def ", 1)[0]
+    assert "WITH RECURSIVE relation_edges" in traversal
+    assert "graph AS" in traversal
+    assert "depth < %s" in traversal
+    assert "relation_type = ANY" in traversal
+    assert "NOT next_entity_id = ANY(path)" in traversal
+    assert "ORDER BY depth ASC, relation_type ASC" in traversal

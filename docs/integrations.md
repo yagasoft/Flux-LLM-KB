@@ -17,6 +17,9 @@ Tools:
 - `kb.brief`
 - `kb.search`
 - `kb.remember`
+- `kb.claim_upsert`
+- `kb.claim_transition`
+- `kb.graph_traverse`
 - `kb.finalize_turn`
 - `kb.audit`
 - `kb.forget`
@@ -66,6 +69,10 @@ Endpoints:
 - `GET /api/search?query=<q>&limit=<n>`
 - `POST /api/brief`
 - `GET /api/brief?query=<q>&token_budget=<n>`
+- `POST /api/claims`
+- `GET /api/claims/{claim_id}`
+- `POST /api/claims/{claim_id}/transitions`
+- `GET /api/graph/traverse?entity_id=<id>&relation_type=<type>&max_depth=<n>`
 - `GET /api/corpus/assets`
 - `GET /api/corpus/assets/{asset_id}`
 - `GET /api/corpus/chunks/{chunk_id}`
@@ -84,6 +91,19 @@ External consumers should use one of three read paths:
   wrapper names such as `mcp__flux_llm_kb.kb_search` and
   `mcp__flux_llm_kb.kb_brief`.
 - CLI for local shell automation: `flux-kb search "customer RFP" --limit 5`.
+
+Claim lifecycle and graph primitives are available through the same surfaces for
+kernel-level automation:
+
+```powershell
+flux-kb claim upsert --subject-type project --subject Flux --predicate uses --object PostgreSQL --confidence 0.8
+flux-kb claim transition <claim-id> confirm --reason "verified"
+flux-kb graph traverse <entity-id> --relation-type depends_on --max-depth 2
+```
+
+Lifecycle transitions append audit-visible events. Superseded, contradicted,
+stale, and retired claims remain available for review but normal brief packing
+prefers current evidence.
 
 Lookup endpoints are read-only and return stable JSON payloads for asset and
 chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a

@@ -20,6 +20,26 @@ class ContextCandidate:
     score: float
 
 
+@dataclass(frozen=True)
+class LifecycleScoreInput:
+    confidence: float
+    age_days: float
+    confirmation_age_days: float | None = None
+    reinforcement_count: int = 0
+    reinforcement_age_days: float | None = None
+    usage_count: int = 0
+    lifecycle_state: str = "active"
+    superseded: bool = False
+    contradiction_count: int = 0
+    retention_action: str = "keep"
+
+
+@dataclass(frozen=True)
+class LifecycleScoreResult:
+    score: float
+    explanation: dict[str, dict[str, float] | str]
+
+
 def reciprocal_rank_fusion(
     ranked_streams: Mapping[str, Iterable[str]], k: int = 60
 ) -> list[RankedItem]:
@@ -37,16 +57,44 @@ def reciprocal_rank_fusion(
     ]
 
 
-def lifecycle_score(
-    *, confidence: float, age_days: float, usage_count: int, superseded: bool
-) -> float:
-    confidence = _clamp(confidence)
-    recency = exp(-max(age_days, 0.0) / 90.0)
-    reinforcement = min(log1p(max(usage_count, 0)) / log1p(20), 1.0)
-    score = (confidence * 0.55) + (recency * 0.30) + (reinforcement * 0.15)
-    if superseded:
-        score *= 0.15
-    return _clamp(score)
+def lifecycle_score(signal: LifecycleScoreInput) -> LifecycleScoreResult:
+    confidence = _clamp(signal.confidence)
+    recency = exp(-max(signal.age_days, 0.0) / 120.0)
+    confirmation = _freshness_factor(signal.confirmation_age_days, half_life_days=90.0)
+    reinforcement = _reinforcement_factor(
+        count=signal.reinforcement_count,
+        age_days=signal.reinforcement_age_days,
+    )
+    usage = min(log1p(max(signal.usage_count, 0)) / log1p(20), 1.0)
+
+    base = (
+        (confidence * 0.40)
+        + (recency * 0.20)
+        + (confirmation * 0.20)
+        + (reinforcement * 0.15)
+        + (usage * 0.05)
+    )
+    penalties = _lifecycle_penalties(signal)
+    score = base
+    for penalty in penalties.values():
+        score *= penalty
+
+    score = _clamp(score)
+    return LifecycleScoreResult(
+        score=score,
+        explanation={
+            "state": signal.lifecycle_state,
+            "retention_action": signal.retention_action,
+            "factors": {
+                "confidence": confidence,
+                "recency": recency,
+                "confirmation": confirmation,
+                "reinforcement": reinforcement,
+                "usage": usage,
+            },
+            "penalties": penalties,
+        },
+    )
 
 
 def pack_context(candidates: Iterable[ContextCandidate], token_budget: int) -> str:
@@ -72,3 +120,44 @@ def _estimate_tokens(text: str) -> int:
 
 def _clamp(value: float) -> float:
     return max(0.0, min(1.0, value))
+
+
+def _freshness_factor(age_days: float | None, *, half_life_days: float) -> float:
+    if age_days is None:
+        return 0.35
+    return exp(-max(age_days, 0.0) / half_life_days)
+
+
+def _reinforcement_factor(*, count: int, age_days: float | None) -> float:
+    volume = min(log1p(max(count, 0)) / log1p(10), 1.0)
+    freshness = _freshness_factor(age_days, half_life_days=60.0) if count > 0 else 0.0
+    return _clamp((volume * 0.7) + (freshness * 0.3))
+
+
+def _lifecycle_penalties(signal: LifecycleScoreInput) -> dict[str, float]:
+    state = signal.lifecycle_state.lower().replace("-", "_")
+    state_penalties = {
+        "active": 1.0,
+        "confirmed": 1.0,
+        "reinforced": 1.0,
+        "stale": 0.55,
+        "deprioritized": 0.55,
+        "superseded": 0.25,
+        "contradicted": 0.45,
+        "retired": 0.0,
+        "deleted": 0.0,
+    }
+    retention_penalties = {
+        "keep": 1.0,
+        "review": 0.85,
+        "deprioritize": 0.60,
+        "retire": 0.20,
+        "delete": 0.0,
+    }
+    contradiction_count = max(signal.contradiction_count, 0)
+    return {
+        "state": state_penalties.get(state, 0.75),
+        "supersession": 0.25 if signal.superseded or state == "superseded" else 1.0,
+        "contradiction": 1.0 / (1.0 + (0.45 * contradiction_count)),
+        "retention": retention_penalties.get(signal.retention_action.lower(), 0.75),
+    }
