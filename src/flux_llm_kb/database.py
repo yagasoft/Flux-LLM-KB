@@ -133,14 +133,27 @@ def search_episodes(
     limit: int = 5,
     cwd: str | None = None,
     root_path: str | None = None,
+    workspace_key: str | None = None,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     limit = max(1, min(limit, 50))
     candidate_limit = max(limit * 4, 12)
     query_vector = to_pgvector_literal(embed_text(query))
-    scope_sql, scope_params = _path_scope_sql("metadata->>'cwd'", cwd=cwd, root_path=root_path)
-    aliased_scope_sql, aliased_scope_params = _path_scope_sql("e.metadata->>'cwd'", cwd=cwd, root_path=root_path)
+    scope_sql, scope_params = _episode_scope_sql(
+        "metadata->>'cwd'",
+        "metadata->>'workspace_key'",
+        cwd=cwd,
+        root_path=root_path,
+        workspace_key=workspace_key,
+    )
+    aliased_scope_sql, aliased_scope_params = _episode_scope_sql(
+        "e.metadata->>'cwd'",
+        "e.metadata->>'workspace_key'",
+        cwd=cwd,
+        root_path=root_path,
+        workspace_key=workspace_key,
+    )
 
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -150,7 +163,8 @@ def search_episodes(
             cur.execute(
                 f"""
                 SELECT id::text, title, summary,
-                       ts_rank(search_vector, plainto_tsquery('english', %s)) AS score
+                       ts_rank(search_vector, plainto_tsquery('english', %s)) AS score,
+                       jsonb_build_object('metadata', metadata) AS metadata
                 FROM episodes
                 WHERE search_vector @@ plainto_tsquery('english', %s)
                   {scope_sql}
@@ -164,7 +178,8 @@ def search_episodes(
             cur.execute(
                 f"""
                 SELECT id::text, title, summary,
-                       greatest(similarity(title, %s), similarity(summary, %s)) AS score
+                       greatest(similarity(title, %s), similarity(summary, %s)) AS score,
+                       jsonb_build_object('metadata', metadata) AS metadata
                 FROM episodes
                 WHERE (similarity(title, %s) > 0.10 OR similarity(summary, %s) > 0.05)
                   {scope_sql}
@@ -178,7 +193,8 @@ def search_episodes(
             cur.execute(
                 f"""
                 SELECT e.id::text, e.title, e.summary,
-                       1 - (emb.embedding <=> %s::vector) AS score
+                       1 - (emb.embedding <=> %s::vector) AS score,
+                       jsonb_build_object('metadata', e.metadata) AS metadata
                 FROM embeddings emb
                 JOIN episodes e
                   ON emb.owner_table = 'episodes'
@@ -197,6 +213,7 @@ def search_episodes(
                 SELECT e.id::text, e.title, e.summary,
                        max(ts_rank(c.search_vector, plainto_tsquery('english', %s))) AS score,
                        jsonb_build_object(
+                         'metadata', e.metadata,
                          'lifecycle', jsonb_build_object(
                            'state', (array_agg(c.lifecycle_state ORDER BY c.updated_at DESC))[1],
                            'current', bool_or(c.lifecycle_state IN ('active', 'confirmed', 'reinforced')),
@@ -241,6 +258,7 @@ def search_episodes(
                 SELECT e.id::text, e.title, e.summary,
                        max(c.confidence) AS score,
                        jsonb_build_object(
+                         'metadata', e.metadata,
                          'graph', jsonb_build_object(
                            'matched_claim_ids', jsonb_agg(DISTINCT c.id::text),
                            'entity_ids', jsonb_agg(DISTINCT c.subject_entity_id::text)
@@ -292,6 +310,8 @@ def search_episodes(
             payload["lifecycle"] = result["lifecycle"]
         if "graph" in result:
             payload["graph"] = result["graph"]
+        if "metadata" in result:
+            payload["metadata"] = result["metadata"]
         results.append(payload)
     return sorted(results, key=lambda row: (-float(row["score"]), row["title"], row["id"]))[:limit]
 
@@ -501,6 +521,38 @@ def list_audit_events(*, limit: int = 50, url: str | None = None) -> list[dict[s
                 }
                 for row in cur.fetchall()
             ]
+
+
+def backfill_episode_workspace_scope(
+    *,
+    episode_ids: list[str],
+    metadata_patch: dict[str, Any],
+    dry_run: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    ids = [str(item).strip() for item in episode_ids if str(item).strip()]
+    if not ids:
+        raise ValueError("scope-backfill requires at least one episode id")
+    patch = {key: value for key, value in metadata_patch.items() if value is not None}
+    if not patch:
+        raise ValueError("scope-backfill requires non-empty workspace metadata")
+    if dry_run:
+        return {"updated": 0, "dry_run": True, "episode_ids": ids, "metadata_patch": patch}
+
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE episodes
+                   SET metadata = metadata || %s::jsonb,
+                       updated_at = now()
+                 WHERE id = ANY(%s::uuid[])
+                """,
+                (_json(patch), ids),
+            )
+            updated = int(cur.rowcount or 0)
+    return {"updated": updated, "dry_run": False, "episode_ids": ids, "metadata_patch": patch}
 
 
 def forget_episode(memory_id: str, *, reason: str = "user_request", url: str | None = None) -> bool:
@@ -4032,6 +4084,31 @@ def _path_scope_sql(
     for value in _dedupe_preserving_order(prefix_values):
         clauses.append(f"{column_sql} LIKE %s")
         params.append(value)
+    return f"AND ({' OR '.join(clauses)})", tuple(params)
+
+
+def _episode_scope_sql(
+    cwd_column_sql: str,
+    workspace_key_column_sql: str,
+    *,
+    cwd: str | None = None,
+    root_path: str | None = None,
+    workspace_key: str | None = None,
+) -> tuple[str, tuple[Any, ...]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    cleaned_workspace_key = str(workspace_key or "").strip()
+    if cleaned_workspace_key:
+        clauses.append(f"{workspace_key_column_sql} = %s")
+        params.append(cleaned_workspace_key)
+
+    path_sql, path_params = _path_scope_sql(cwd_column_sql, cwd=cwd, root_path=root_path)
+    if path_sql:
+        clauses.append(path_sql.removeprefix("AND ").strip())
+        params.extend(path_params)
+
+    if not clauses:
+        return "", ()
     return f"AND ({' OR '.join(clauses)})", tuple(params)
 
 

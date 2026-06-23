@@ -33,6 +33,16 @@ def main(argv: list[str] | None = None) -> int:
     remember_parser = subparsers.add_parser("remember", help="Store a manual memory")
     remember_parser.add_argument("title")
     remember_parser.add_argument("body")
+    remember_parser.add_argument("--cwd", default=None)
+    remember_parser.add_argument("--root-name")
+
+    episodes_parser = subparsers.add_parser("episodes", help="Manage stored episode metadata")
+    episodes_subparsers = episodes_parser.add_subparsers(dest="episodes_command", required=True)
+    episodes_scope = episodes_subparsers.add_parser("scope-backfill", help="Backfill workspace metadata for explicit episode IDs")
+    episodes_scope.add_argument("--cwd", required=True)
+    episodes_scope.add_argument("--root-name")
+    episodes_scope.add_argument("--id", action="append", required=True, dest="episode_ids")
+    episodes_scope.add_argument("--dry-run", action="store_true")
 
     claim_parser = subparsers.add_parser("claim", help="Manage durable claims")
     claim_subparsers = claim_parser.add_subparsers(dest="claim_command", required=True)
@@ -259,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": _status,
         "search": _search,
         "remember": _remember,
+        "episodes": _episodes,
         "claim": _claim,
         "graph": _graph,
         "capture": _capture,
@@ -323,9 +334,25 @@ def _search(args: argparse.Namespace) -> int:
 def _remember(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
-    result = KnowledgeService().remember(args.title, args.body)
+    cwd = args.cwd if args.cwd is not None else str(Path.cwd())
+    result = KnowledgeService().remember(args.title, args.body, cwd=cwd, root_name=args.root_name)
     print(json.dumps({"id": result.id, "redaction_count": result.redaction_count}, indent=2))
     return 0
+
+
+def _episodes(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    if args.episodes_command == "scope-backfill":
+        payload = KnowledgeService().backfill_episode_workspace_scope(
+            episode_ids=args.episode_ids,
+            cwd=args.cwd,
+            root_name=args.root_name,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(payload, indent=2))
+        return 0
+    raise ValueError(f"unknown episodes command: {args.episodes_command}")
 
 
 def _claim(args: argparse.Namespace) -> int:

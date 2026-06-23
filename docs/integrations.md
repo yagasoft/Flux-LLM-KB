@@ -106,6 +106,13 @@ while suppressing weak trust-only global matches. Briefing should keep the
 default `local_first` mode unless the caller intentionally requests a broader
 scope.
 
+Memory writes accept optional `cwd` and `root_name` as workspace provenance.
+Pass the active workspace `cwd` when calling `kb.remember`,
+`kb.finalize_turn`, `/api/remember`, or `flux-kb remember`; the CLI defaults
+manual remembers to its current directory. Explicit repair of older unscoped
+episodes is available through `flux-kb episodes scope-backfill --cwd <path>
+--id <episode-id> [--dry-run]`; it only updates caller-selected IDs.
+
 Claim lifecycle and graph primitives are available through the same surfaces for
 kernel-level automation:
 
@@ -285,7 +292,8 @@ finalize tools are callable through either naming form. A successful test should
 call `kb.status`/`mcp__flux_llm_kb.kb_status`, call
 `kb.brief`/`mcp__flux_llm_kb.kb_brief` with a harmless smoke-test task, and
 store only a redacted outcome through
-`kb.finalize_turn`/`mcp__flux_llm_kb.kb_finalize_turn`.
+`kb.finalize_turn`/`mcp__flux_llm_kb.kb_finalize_turn`, passing the active
+workspace `cwd` so the saved memory remains locally retrievable.
 
 Codex hooks run a configurable local policy by default:
 

@@ -42,6 +42,8 @@ def create_app():
     class RememberRequest(BaseModel):
         title: str
         body: str
+        cwd: str | None = None
+        root_name: str | None = None
 
     class SearchRequest(BaseModel):
         query: str
@@ -484,7 +486,7 @@ def create_app():
 
     @app.post("/api/remember")
     def remember(request: RememberRequest = Body(...)):
-        return service.remember(request.title, request.body).__dict__
+        return service.remember(request.title, request.body, cwd=request.cwd, root_name=request.root_name).__dict__
 
     @app.get("/api/audit")
     def audit(limit: int = 50):

@@ -12,6 +12,12 @@ def _episode(item_id, title, streams, score=0.5, summary=None):
     }
 
 
+def _episode_with_metadata(item_id, title, streams, score=0.5, metadata=None, summary=None):
+    item = _episode(item_id, title, streams, score=score, summary=summary)
+    item["metadata"] = metadata or {}
+    return item
+
+
 def _chunk(item_id, title, streams, score=0.5, source_path="note.md", summary=None):
     return {
         "id": item_id,
@@ -27,6 +33,29 @@ def _chunk(item_id, title, streams, score=0.5, source_path="note.md", summary=No
     }
 
 
+def test_remember_enriches_workspace_metadata_for_unmonitored_git_workspace(monkeypatch):
+    captured = {}
+
+    def fake_insert_episode(**kwargs):
+        captured.update(kwargs)
+        return "episode-1"
+
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [])
+    monkeypatch.setattr(database, "insert_episode", fake_insert_episode)
+    monkeypatch.setattr("flux_llm_kb.service._git_repo_root", lambda _cwd: "E:\\LLM KB")
+
+    result = KnowledgeService().remember(
+        "Scoped finalization",
+        "Durable memory for the workspace.",
+        cwd="E:\\LLM KB\\src",
+    )
+
+    assert result.id == "episode-1"
+    assert captured["metadata"]["cwd"] == "E:\\LLM KB\\src"
+    assert captured["metadata"]["workspace_root"] == "E:\\LLM KB"
+    assert captured["metadata"]["workspace_key"] == "path:e:/llm kb"
+
+
 def test_local_first_uses_scoped_results_when_they_have_lexical_evidence(monkeypatch):
     calls = []
 
@@ -36,7 +65,7 @@ def test_local_first_uses_scoped_results_when_they_have_lexical_evidence(monkeyp
         lambda: [{"name": "flux", "root_path": "E:\\LLM KB", "enabled": True}],
     )
 
-    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, url=None):
+    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None):
         calls.append(("episodes", cwd, root_path))
         if root_path:
             return [_episode("local-episode", "Local Flux plan", ["lexical"], score=0.8)]
@@ -71,7 +100,7 @@ def test_local_first_falls_back_to_global_when_scoped_results_have_no_lexical_or
         lambda: [{"name": "flux", "root_path": "E:\\LLM KB", "enabled": True}],
     )
 
-    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, url=None):
+    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None):
         if root_path:
             return [_episode("local-vector", "Local semantic-only memory", ["vector"], score=0.8)]
         return [_episode("global-episode", "Global fallback memory", ["lexical"], score=0.5)]
@@ -120,17 +149,27 @@ def test_workspace_boosted_blends_local_and_strong_cross_workspace_results(monke
         lambda: [{"name": "flux", "root_path": "E:\\LLM KB", "enabled": True}],
     )
 
-    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, url=None):
+    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None):
         if root_path:
             return [_episode("local-episode", "Local scoped decision", ["lexical"], score=0.6)]
-        return [_episode("global-episode", "Cross workspace previous fix", ["fuzzy"], score=0.9)]
+        return [
+            _episode_with_metadata(
+                "global-episode",
+                "Cross workspace previous fix",
+                ["fuzzy"],
+                score=0.9,
+                metadata={"workspace_key": "path:e:/other"},
+            )
+        ]
 
     def fake_search_corpus_chunks(query, *, limit=5, root_name=None, url=None):
         if root_name == "flux":
             return [_chunk("local-chunk", "Local corpus note", ["corpus_lexical"], score=0.7)]
+        global_chunk = _chunk("global-chunk", "General indexed PC document", ["corpus_vector"], score=0.65)
+        global_chunk["root_name"] = "docs"
         return [
             _chunk("local-chunk", "Duplicate local from global search", ["corpus_lexical"], score=0.99),
-            _chunk("global-chunk", "General indexed PC document", ["corpus_vector"], score=0.65),
+            global_chunk,
             _chunk("weak-trust", "Broad trust-only document", ["corpus_trust"], score=0.99),
         ]
 
@@ -155,6 +194,46 @@ def test_workspace_boosted_blends_local_and_strong_cross_workspace_results(monke
     assert scopes["global-chunk"] == "cross_workspace"
 
 
+def test_workspace_boosted_labels_unscoped_global_episode_without_cross_workspace_claim(monkeypatch):
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [])
+
+    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None):
+        if workspace_key:
+            return [_episode_with_metadata("local-episode", "Local scoped decision", ["lexical"], score=0.6)]
+        return [
+            _episode_with_metadata(
+                "unscoped",
+                "Legacy unscoped memory",
+                ["fuzzy"],
+                score=0.9,
+                metadata={},
+            ),
+            _episode_with_metadata(
+                "other-workspace",
+                "Other workspace memory",
+                ["fuzzy"],
+                score=0.8,
+                metadata={"workspace_key": "path:e:/other"},
+            ),
+        ]
+
+    monkeypatch.setattr(database, "search_episodes", fake_search_episodes)
+    monkeypatch.setattr(database, "search_corpus_chunks", lambda *args, **kwargs: [])
+    monkeypatch.setattr("flux_llm_kb.service._git_repo_root", lambda _cwd: "E:\\LLM KB")
+
+    results = KnowledgeService().search(
+        "expanded mid-turn search",
+        limit=5,
+        cwd="E:\\LLM KB\\src",
+        scope_mode="workspace_boosted",
+    )
+    scopes = {item["id"]: item["retrieval_scope"] for item in results}
+
+    assert scopes["local-episode"] == "local"
+    assert scopes["unscoped"] == "unscoped_global"
+    assert scopes["other-workspace"] == "cross_workspace"
+
+
 def test_workspace_boosted_caps_cross_workspace_results_when_local_evidence_exists(monkeypatch):
     monkeypatch.setattr(
         database,
@@ -165,7 +244,7 @@ def test_workspace_boosted_caps_cross_workspace_results_when_local_evidence_exis
     monkeypatch.setattr(
         database,
         "search_episodes",
-        lambda query, *, limit=5, cwd=None, root_path=None, url=None: [
+        lambda query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None: [
             _episode("local-episode", "Local lexical match", ["lexical"], score=0.6)
         ]
         if root_path
@@ -208,10 +287,10 @@ def test_cwd_only_scope_does_not_mix_global_corpus_into_local_results(monkeypatc
     monkeypatch.setattr(
         database,
         "search_episodes",
-        lambda query, *, limit=5, cwd=None, root_path=None, url=None: [
-            _episode("local-episode", f"Scoped to {cwd}", ["lexical"], score=0.8)
+        lambda query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None: [
+            _episode("local-episode", f"Scoped to {workspace_key}", ["lexical"], score=0.8)
         ]
-        if cwd
+        if workspace_key
         else [_episode("global-episode", "Global episode", ["lexical"], score=0.9)],
     )
     monkeypatch.setattr(
@@ -229,6 +308,31 @@ def test_cwd_only_scope_does_not_mix_global_corpus_into_local_results(monkeypatc
     )
 
     assert [item["id"] for item in results] == ["local-episode"]
+
+
+def test_unmonitored_git_workspace_uses_workspace_key_for_local_episode_search(monkeypatch):
+    calls = []
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [])
+    monkeypatch.setattr("flux_llm_kb.service._git_repo_root", lambda _cwd: "E:\\LLM KB")
+
+    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None):
+        calls.append({"cwd": cwd, "root_path": root_path, "workspace_key": workspace_key})
+        if workspace_key == "path:e:/llm kb":
+            return [_episode("scoped-finalize", "Scoped finalize memory", ["lexical"], score=0.8)]
+        return [_episode("global", "Global memory", ["lexical"], score=0.9)]
+
+    monkeypatch.setattr(database, "search_episodes", fake_search_episodes)
+    monkeypatch.setattr(database, "search_corpus_chunks", lambda *args, **kwargs: [])
+
+    results = KnowledgeService().search(
+        "workspace scoped brief",
+        cwd="E:\\LLM KB\\src",
+        scope_mode="local_only",
+    )
+
+    assert [item["id"] for item in results] == ["scoped-finalize"]
+    assert results[0]["retrieval_scope"] == "local"
+    assert calls[0]["workspace_key"] == "path:e:/llm kb"
 
 
 def test_brief_keeps_current_evidence_filtering_with_scoped_search(monkeypatch):
@@ -279,8 +383,10 @@ def test_search_episodes_accepts_cwd_and_root_path_filter():
 
     assert "cwd: str | None = None" in function
     assert "root_path: str | None = None" in function
+    assert "workspace_key: str | None = None" in function
+    assert "metadata->>'workspace_key'" in function
     assert "metadata->>'cwd'" in function
-    assert "_path_scope_sql" in function
+    assert "_episode_scope_sql" in function
 
 
 def test_path_scope_sql_escapes_windows_backslashes_for_like_prefixes():

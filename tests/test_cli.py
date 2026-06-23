@@ -55,6 +55,65 @@ def test_cli_search_uses_service_search(monkeypatch, capsys):
     assert payload == [{"kind": "corpus_chunk", "title": "dashboard", "limit": 2}]
 
 
+def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    captured = {}
+
+    class FakeService:
+        def remember(self, title, body, metadata=None, cwd=None, root_name=None):
+            captured.update({"title": title, "body": body, "metadata": metadata, "cwd": cwd, "root_name": root_name})
+            return type("Result", (), {"id": "episode-1", "redaction_count": 0})()
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["remember", "Title", "Body", "--cwd", "E:/Repo", "--root-name", "repo"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload == {"id": "episode-1", "redaction_count": 0}
+    assert captured["cwd"] == "E:/Repo"
+    assert captured["root_name"] == "repo"
+
+
+def test_cli_episodes_scope_backfill_requires_explicit_ids(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    captured = {}
+
+    class FakeService:
+        def backfill_episode_workspace_scope(self, **kwargs):
+            captured.update(kwargs)
+            return {"updated": 0, "dry_run": True, "episode_ids": kwargs["episode_ids"]}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "episodes",
+                "scope-backfill",
+                "--cwd",
+                "E:/Repo",
+                "--id",
+                "episode-1",
+                "--id",
+                "episode-2",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert captured == {
+        "episode_ids": ["episode-1", "episode-2"],
+        "cwd": "E:/Repo",
+        "root_name": None,
+        "dry_run": True,
+    }
+    assert payload == {"updated": 0, "dry_run": True, "episode_ids": ["episode-1", "episode-2"]}
+
+
 def test_cli_crawl_watch_enable_outputs_json(monkeypatch, capsys):
     monkeypatch.setattr(
         cli.database,

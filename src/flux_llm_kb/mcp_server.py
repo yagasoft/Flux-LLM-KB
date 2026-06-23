@@ -41,8 +41,8 @@ def create_server():
         )
 
     @mcp.tool(name="kb.remember")
-    def remember(title: str, body: str):
-        return service.remember(title, body).__dict__
+    def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None):
+        return service.remember(title, body, cwd=cwd, root_name=root_name).__dict__
 
     @mcp.tool(name="kb.claim_upsert")
     def claim_upsert(
@@ -109,8 +109,8 @@ def create_server():
         )
 
     @mcp.tool(name="kb.finalize_turn")
-    def finalize_turn(title: str, summary: str):
-        return service.remember(title, summary, metadata={"source": "finalize_turn"}).__dict__
+    def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
+        return service.remember(title, summary, metadata={"source": "finalize_turn"}, cwd=cwd, root_name=root_name).__dict__
 
     @mcp.tool(name="kb.audit")
     def audit(limit: int = 50):

@@ -11,6 +11,7 @@ from typing import Any
 from .crawler import CorpusPolicy, scan_path
 from . import database
 from .glob_policy import effective_glob_policy
+from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
 from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
 from .scoring import ContextCandidate, pack_context
@@ -35,21 +36,31 @@ class RetrievalScope:
     cwd: str | None = None
     root_name: str | None = None
     root_path: str | None = None
+    workspace_root: str | None = None
+    workspace_key: str | None = None
 
     @property
     def is_scoped(self) -> bool:
-        return bool(self.cwd or self.root_name or self.root_path)
+        return bool(self.cwd or self.root_name or self.root_path or self.workspace_key)
 
 
 class KnowledgeService:
-    def remember(self, title: str, body: str, metadata: dict[str, Any] | None = None) -> RememberResult:
+    def remember(
+        self,
+        title: str,
+        body: str,
+        metadata: dict[str, Any] | None = None,
+        cwd: str | None = None,
+        root_name: str | None = None,
+    ) -> RememberResult:
         redacted_title, title_findings = redact_text(title)
         redacted, findings = redact_text(body)
         all_findings = title_findings + findings
+        enriched_metadata = _enrich_workspace_metadata(metadata or {}, cwd=cwd, root_name=root_name)
         episode_id = database.insert_episode(
             title=redacted_title,
             summary=redacted,
-            metadata={**(metadata or {}), "redactions": [finding.kind for finding in all_findings]},
+            metadata={**enriched_metadata, "redactions": [finding.kind for finding in all_findings]},
         )
         return RememberResult(id=episode_id, redaction_count=len(all_findings))
 
@@ -88,6 +99,7 @@ class KnowledgeService:
             query,
             limit=cross_candidate_limit,
             scope=RetrievalScope(mode="global"),
+            label_scope=scope,
             label="cross_workspace",
         )
         cross_results = [
@@ -106,7 +118,15 @@ class KnowledgeService:
             limit=limit,
         )
 
-    def _search_once(self, query: str, *, limit: int, scope: RetrievalScope, label: str) -> list[dict[str, Any]]:
+    def _search_once(
+        self,
+        query: str,
+        *,
+        limit: int,
+        scope: RetrievalScope,
+        label: str,
+        label_scope: RetrievalScope | None = None,
+    ) -> list[dict[str, Any]]:
         corpus_limit = max(limit * 4, 20)
         is_local = label == "local"
         episode_items = (
@@ -115,8 +135,9 @@ class KnowledgeService:
                 limit=limit,
                 cwd=scope.cwd,
                 root_path=scope.root_path,
+                workspace_key=scope.workspace_key,
             )
-            if not is_local or scope.cwd or scope.root_path
+            if not is_local or scope.cwd or scope.root_path or scope.workspace_key
             else []
         )
         corpus_items = (
@@ -145,7 +166,7 @@ class KnowledgeService:
             sorted(corpus + episodes, key=lambda item: item["score"], reverse=True),
             limit=limit,
         )
-        return [_tag_retrieval_scope(item, label, scope=scope) for item in results]
+        return [_tag_retrieval_scope(item, label, scope=label_scope or scope) for item in results]
 
     def brief(
         self,
@@ -372,6 +393,23 @@ class KnowledgeService:
         )
         plan = scan_path(root["root_path"], policy, target_path=path)
         return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run, reason=reason)
+
+    def backfill_episode_workspace_scope(
+        self,
+        *,
+        episode_ids: list[str],
+        cwd: str | None,
+        root_name: str | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        metadata_patch = _workspace_metadata(cwd=cwd, root_name=root_name)
+        if not metadata_patch.get("workspace_key"):
+            raise ValueError("scope-backfill requires a cwd or root_name that can resolve to a workspace")
+        return database.backfill_episode_workspace_scope(
+            episode_ids=episode_ids,
+            metadata_patch=metadata_patch,
+            dry_run=dry_run,
+        )
 
     def reconcile_watch_roots(
         self,
@@ -697,13 +735,22 @@ def _resolve_retrieval_scope(*, cwd: str | None, root_name: str | None, scope_mo
     cleaned_cwd = _clean_optional_text(cwd)
     cleaned_root_name = _clean_optional_text(root_name)
     root = _retrieval_root(cleaned_root_name, cleaned_cwd)
+    workspace = _workspace_identity(cwd=cleaned_cwd, root_name=cleaned_root_name, root=root)
     if root is None:
-        return RetrievalScope(mode=mode, cwd=cleaned_cwd, root_name=cleaned_root_name)
+        return RetrievalScope(
+            mode=mode,
+            cwd=cleaned_cwd,
+            root_name=cleaned_root_name,
+            workspace_root=workspace.get("workspace_root"),
+            workspace_key=workspace.get("workspace_key"),
+        )
     return RetrievalScope(
         mode=mode,
         cwd=cleaned_cwd,
         root_name=str(root.get("name") or cleaned_root_name or ""),
         root_path=str(root.get("root_path") or "") or None,
+        workspace_root=workspace.get("workspace_root"),
+        workspace_key=workspace.get("workspace_key"),
     )
 
 
@@ -741,6 +788,81 @@ def _retrieval_root(root_name: str | None, cwd: str | None) -> dict[str, Any] | 
         if matching:
             return sorted(matching, key=lambda item: len(str(item.get("root_path") or "")), reverse=True)[0]
     return None
+
+
+def _enrich_workspace_metadata(
+    metadata: dict[str, Any],
+    *,
+    cwd: str | None = None,
+    root_name: str | None = None,
+) -> dict[str, Any]:
+    result = dict(metadata)
+    metadata_cwd = _clean_optional_text(cwd) or _clean_optional_text(result.get("cwd"))
+    metadata_root_name = _clean_optional_text(root_name) or _clean_optional_text(result.get("root_name"))
+    result.update(_workspace_metadata(cwd=metadata_cwd, root_name=metadata_root_name))
+    return result
+
+
+def _workspace_metadata(*, cwd: str | None = None, root_name: str | None = None) -> dict[str, str]:
+    cleaned_cwd = _clean_optional_text(cwd)
+    cleaned_root_name = _clean_optional_text(root_name)
+    root = _retrieval_root(cleaned_root_name, cleaned_cwd)
+    return _workspace_identity(cwd=cleaned_cwd, root_name=cleaned_root_name, root=root)
+
+
+def _workspace_identity(
+    *,
+    cwd: str | None,
+    root_name: str | None,
+    root: dict[str, Any] | None,
+) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    if cwd:
+        metadata["cwd"] = cwd
+    if root is not None:
+        resolved_root_name = str(root.get("name") or root_name or "").strip()
+        root_path = str(root.get("root_path") or "").strip()
+        if resolved_root_name:
+            metadata["root_name"] = resolved_root_name
+            metadata["workspace_key"] = f"root:{resolved_root_name}"
+        if root_path:
+            metadata["workspace_root"] = root_path
+        return metadata
+    if root_name:
+        metadata["root_name"] = root_name
+
+    workspace_root = _git_repo_root(cwd) if cwd else None
+    if not workspace_root and cwd:
+        workspace_root = cwd
+    if workspace_root:
+        metadata["workspace_root"] = workspace_root
+        metadata["workspace_key"] = f"path:{_normalised_workspace_path(workspace_root)}"
+    return metadata
+
+
+def _git_repo_root(cwd: str | None) -> str | None:
+    if not cwd:
+        return None
+    try:
+        completed = run_no_window(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    root = completed.stdout.strip()
+    return root or None
+
+
+def _normalised_workspace_path(path: str) -> str:
+    cleaned = str(path).strip().rstrip("\\/")
+    return cleaned.replace("\\", "/").lower()
 
 
 def _has_lexical_or_fuzzy_evidence(results: list[dict[str, Any]]) -> bool:
@@ -789,7 +911,7 @@ def _with_scope_score_boost(item: dict[str, Any], boost: float) -> dict[str, Any
 
 def _tag_retrieval_scope(item: dict[str, Any], label: str, *, scope: RetrievalScope | None = None) -> dict[str, Any]:
     result = dict(item)
-    result["retrieval_scope"] = label
+    result["retrieval_scope"] = _truthful_retrieval_label(result, label, scope=scope)
     if scope:
         if scope.cwd:
             result["retrieval_cwd"] = scope.cwd
@@ -797,7 +919,48 @@ def _tag_retrieval_scope(item: dict[str, Any], label: str, *, scope: RetrievalSc
             result["retrieval_root_name"] = scope.root_name
         if scope.root_path:
             result["retrieval_root_path"] = scope.root_path
+        if scope.workspace_root:
+            result["retrieval_workspace_root"] = scope.workspace_root
+        if scope.workspace_key:
+            result["retrieval_workspace_key"] = scope.workspace_key
     return result
+
+
+def _truthful_retrieval_label(item: dict[str, Any], label: str, *, scope: RetrievalScope | None = None) -> str:
+    if label != "cross_workspace":
+        return label
+    if _matches_scope_provenance(item, scope):
+        return "local"
+    if _has_known_workspace_provenance(item):
+        return "cross_workspace"
+    return "unscoped_global"
+
+
+def _matches_scope_provenance(item: dict[str, Any], scope: RetrievalScope | None) -> bool:
+    if scope is None:
+        return False
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    item_workspace_key = _clean_optional_text(metadata.get("workspace_key"))
+    if item_workspace_key and scope.workspace_key:
+        return item_workspace_key == scope.workspace_key
+    item_root_name = _clean_optional_text(item.get("root_name")) or _clean_optional_text(metadata.get("root_name"))
+    if item_root_name and scope.root_name:
+        return item_root_name == scope.root_name
+    item_cwd = _clean_optional_text(metadata.get("cwd"))
+    if item_cwd and (scope.root_path or scope.cwd):
+        return _path_is_under_root(item_cwd, scope.root_path or scope.cwd or "")
+    return False
+
+
+def _has_known_workspace_provenance(item: dict[str, Any]) -> bool:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    return bool(
+        _clean_optional_text(item.get("root_name"))
+        or _clean_optional_text(metadata.get("root_name"))
+        or _clean_optional_text(metadata.get("workspace_key"))
+        or _clean_optional_text(metadata.get("workspace_root"))
+        or _clean_optional_text(metadata.get("cwd"))
+    )
 
 
 def _redact_metadata(value: Any) -> tuple[Any, list[RedactionFinding]]:

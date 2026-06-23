@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,6 +7,35 @@ from flux_llm_kb import database
 
 
 fastapi_testclient = pytest.importorskip("fastapi.testclient")
+
+
+def test_remember_endpoint_passes_workspace_scope(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    captured = {}
+
+    class FakeService:
+        def remember(self, title, body, metadata=None, cwd=None, root_name=None):
+            captured.update({"title": title, "body": body, "metadata": metadata, "cwd": cwd, "root_name": root_name})
+            return SimpleNamespace(id="episode-1", redaction_count=0)
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post(
+        "/api/remember",
+        json={"title": "Scoped", "body": "Memory", "cwd": "E:/Repo", "root_name": "repo"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"id": "episode-1", "redaction_count": 0}
+    assert captured == {
+        "title": "Scoped",
+        "body": "Memory",
+        "metadata": None,
+        "cwd": "E:/Repo",
+        "root_name": "repo",
+    }
 
 
 def test_crawl_root_create_endpoint_validates_and_adds_root(tmp_path, monkeypatch):

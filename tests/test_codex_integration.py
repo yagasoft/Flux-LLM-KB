@@ -283,6 +283,7 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "workspace_boosted" in skill
     assert "local files, the prompt, or current tool output already answer" in skill
     assert "mcp__flux_llm_kb.kb_finalize_turn" in skill
+    assert "active workspace `cwd`" in skill
 
 
 def test_codex_status_reports_discovery_cache_and_restart_need(tmp_path, monkeypatch):

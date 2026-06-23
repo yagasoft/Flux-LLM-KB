@@ -12,6 +12,59 @@ def test_forget_episode_rejects_invalid_uuid_without_database():
     assert forget_episode("not-a-uuid") is False
 
 
+def test_backfill_episode_workspace_scope_updates_explicit_episode_ids(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 2
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.backfill_episode_workspace_scope(
+        episode_ids=["episode-1", "episode-2"],
+        metadata_patch={"workspace_key": "path:e:/repo", "cwd": "E:/Repo"},
+        dry_run=False,
+    )
+
+    sql, params = executed[0]
+    assert "UPDATE episodes" in sql
+    assert "metadata = metadata || %s::jsonb" in sql
+    assert "id = ANY(%s::uuid[])" in sql
+    assert params == (
+        json.dumps({"workspace_key": "path:e:/repo", "cwd": "E:/Repo"}, sort_keys=True),
+        ["episode-1", "episode-2"],
+    )
+    assert result == {
+        "updated": 2,
+        "dry_run": False,
+        "episode_ids": ["episode-1", "episode-2"],
+        "metadata_patch": {"workspace_key": "path:e:/repo", "cwd": "E:/Repo"},
+    }
+
+
 def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
     executed_sql = []
 
