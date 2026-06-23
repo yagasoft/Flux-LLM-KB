@@ -30,6 +30,29 @@ def test_windows_run_no_window_sets_creation_flags(monkeypatch):
     assert calls[0]["creationflags"] & processes.WINDOWS_CREATE_NO_WINDOW
 
 
+def test_run_no_window_detaches_child_stdin_by_default(monkeypatch):
+    calls: list[dict] = []
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(*_args, **kwargs):
+        calls.append(kwargs)
+        return FakeCompleted()
+
+    monkeypatch.setattr(processes.subprocess, "run", fake_run)
+
+    processes.run_no_window(["git", "rev-parse", "--show-toplevel"], text=True, capture_output=True)
+    processes.run_no_window(["tool"], stdin="explicit")
+    processes.run_no_window(["tool"], input="payload", text=True)
+
+    assert calls[0]["stdin"] is processes.subprocess.DEVNULL
+    assert calls[1]["stdin"] == "explicit"
+    assert "stdin" not in calls[2]
+
+
 def test_production_modules_do_not_call_subprocess_run_directly():
     offenders: list[str] = []
     for path in (ROOT / "src").rglob("*.py"):
