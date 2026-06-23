@@ -63,12 +63,18 @@ function Invoke-FeatureStep {
     }
     Push-Location $Cwd
     try {
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         powershell -NoProfile -ExecutionPolicy Bypass -Command $Command *> $logPath
+        $ErrorActionPreference = $previousErrorActionPreference
         $record.exit_code = $LASTEXITCODE
         if ($LASTEXITCODE -ne 0) {
             throw "Step '$Name' failed with exit code $LASTEXITCODE. See $logPath"
         }
     } catch {
+        if ($null -ne $previousErrorActionPreference) {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($record.exit_code -eq 0) { $record.exit_code = 1 }
         $script:FailedStep = $Name
         $_ | Out-File -FilePath $logPath -Append -Encoding UTF8

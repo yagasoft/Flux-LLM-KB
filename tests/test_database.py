@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 from flux_llm_kb import database
@@ -469,3 +470,175 @@ def test_graph_traversal_query_is_bounded_typed_stable_and_cycle_safe():
     assert "relation_type = ANY" in traversal
     assert "NOT next_entity_id = ANY(path)" in traversal
     assert "ORDER BY depth ASC, relation_type ASC" in traversal
+
+
+def test_list_claims_filters_review_state_search_and_marks_reasons(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+            return [
+                (
+                    "claim-1",
+                    None,
+                    "entity-1",
+                    "uses",
+                    "PostgreSQL",
+                    0.8,
+                    None,
+                    timestamp,
+                    timestamp,
+                    "stale",
+                    0,
+                    0,
+                    1,
+                    None,
+                    "deprioritize",
+                    {},
+                    timestamp,
+                    None,
+                    timestamp,
+                    "entity-1",
+                    "project",
+                    "Flux",
+                    {},
+                    timestamp,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    claims = database.list_claims(review="needs_review", state="stale", q="postgres", limit=500)
+
+    sql, params = executed[0]
+    assert "retention_action <> 'keep'" in sql
+    assert "c.lifecycle_state = %s" in sql
+    assert "ILIKE %s" in sql
+    assert "LIMIT %s" in sql
+    assert params[-1] == 200
+    assert claims[0]["subject"]["name"] == "Flux"
+    assert claims[0]["review_reasons"] == ["stale", "retention:deprioritize"]
+
+
+def test_claim_review_counts_returns_total_current_and_review_breakdown(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (6, 2, 4, 1, 1, 1, 1, 2)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    counts = database.claim_review_counts()
+
+    assert "FILTER" in executed[0][0]
+    assert counts == {
+        "total": 6,
+        "current": 2,
+        "needs_review": 4,
+        "stale": 1,
+        "contradicted": 1,
+        "superseded": 1,
+        "retired": 1,
+        "retention_action": 2,
+    }
+
+
+def test_list_capture_review_jobs_returns_pending_review_metadata_only(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+            return [
+                (
+                    "job-1",
+                    "codex_backfill",
+                    "pending",
+                    {"status": "pending_review", "path": "sessions/session.json", "content": "raw text"},
+                    0,
+                    None,
+                    timestamp,
+                    timestamp,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    jobs = database.list_capture_review_jobs(limit=500)
+
+    sql, params = executed[0]
+    assert "status = 'pending_review'" in sql
+    assert "payload->>'status' = 'pending_review'" in sql
+    assert params == (200,)
+    assert jobs[0]["payload"] == {"status": "pending_review", "path": "sessions/session.json"}

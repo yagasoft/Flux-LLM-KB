@@ -69,10 +69,12 @@ Endpoints:
 - `GET /api/search?query=<q>&limit=<n>`
 - `POST /api/brief`
 - `GET /api/brief?query=<q>&token_budget=<n>`
+- `GET /api/claims?review=<all|needs_review|current>&state=<state>&q=<q>&limit=<n>`
 - `POST /api/claims`
 - `GET /api/claims/{claim_id}`
 - `POST /api/claims/{claim_id}/transitions`
 - `GET /api/graph/traverse?entity_id=<id>&relation_type=<type>&max_depth=<n>`
+- `GET /api/capture/review?limit=<n>`
 - `GET /api/corpus/assets`
 - `GET /api/corpus/assets/{asset_id}`
 - `GET /api/corpus/chunks/{chunk_id}`
@@ -104,6 +106,14 @@ flux-kb graph traverse <entity-id> --relation-type depends_on --max-depth 2
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
 stale, and retired claims remain available for review but normal brief packing
 prefers current evidence.
+
+The dashboard Review tab uses `GET /api/claims` and `GET /api/graph/traverse`
+to browse lifecycle review work and selected-entity graph edges. The
+`needs_review` filter includes stale, contradicted, superseded, and retired
+claims, plus claims with non-`keep` retention actions. `GET /api/capture/review`
+is read-only and returns pending capture-review job metadata only; approve/reject
+capture actions are intentionally deferred until an explicit approval-state
+model is added.
 
 Lookup endpoints are read-only and return stable JSON payloads for asset and
 chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a

@@ -230,6 +230,26 @@ def create_app():
             metadata=request.metadata,
         )
 
+    @app.get("/api/claims")
+    def claim_list(
+        review: str = "all",
+        state: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+    ):
+        try:
+            return service.list_claims(review=review, state=state, q=q, limit=limit)
+        except ValueError as exc:
+            raise FluxApiError(
+                code="claim.review_filter_invalid",
+                message=str(exc),
+                status_code=400,
+                component="retrieval",
+                retryable=False,
+                user_action="Use review=all, review=needs_review, or review=current.",
+                target={"type": "claim_review", "id": review},
+            ) from exc
+
     @app.get("/api/claims/{claim_id}")
     def claim_get(claim_id: str):
         try:
@@ -292,6 +312,10 @@ def create_app():
             direction=direction,
             limit=limit,
         )
+
+    @app.get("/api/capture/review")
+    def capture_review(limit: int = 50):
+        return service.list_capture_review_jobs(limit=limit)
 
     @app.get("/api/corpus/assets")
     def corpus_assets(root_name: str | None = None, path: str | None = None, limit: int = 50):

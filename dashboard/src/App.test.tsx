@@ -252,6 +252,10 @@ let healthPayload: unknown;
 let crawlPayload: unknown;
 let jobsPayload: unknown;
 let crawlSyncErrorPayload: unknown;
+let reviewPayload: unknown;
+let captureReviewPayload: unknown;
+let graphPayload: unknown;
+let claimTransitionPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -279,6 +283,61 @@ describe("Flux dashboard", () => {
     crawlSyncErrorPayload = undefined;
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
     searchPayload = [{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }];
+    reviewPayload = {
+      counts: {
+        total: 2,
+        current: 1,
+        needs_review: 1,
+        stale: 1,
+        contradicted: 0,
+        superseded: 0,
+        retired: 0,
+        retention_action: 1
+      },
+      claims: [
+        {
+          id: "claim-stale",
+          subject_entity_id: "entity-1",
+          subject: { id: "entity-1", type: "project", name: "Flux" },
+          predicate: "uses",
+          object_text: "PostgreSQL",
+          confidence: 0.8,
+          lifecycle_state: "stale",
+          retention_action: "deprioritize",
+          review_reasons: ["stale", "retention:deprioritize"],
+          updated_at: "2026-06-23T10:00:00+00:00",
+          lifecycle: { score: 0.42, current: false, audit_visible: true, audit_events: [], related_claims: [] }
+        }
+      ]
+    };
+    captureReviewPayload = {
+      jobs: [
+        {
+          id: "job-review",
+          job_type: "codex_backfill",
+          status: "pending",
+          payload: { status: "pending_review", path: "sessions/session.json" },
+          updated_at: "2026-06-23T10:05:00+00:00"
+        }
+      ]
+    };
+    graphPayload = {
+      start_entity_id: "entity-1",
+      edges: [
+        {
+          relation_id: "rel-1",
+          from_entity_id: "entity-1",
+          from_entity: { type: "project", name: "Flux" },
+          to_entity_id: "entity-2",
+          to_entity: { type: "system", name: "PostgreSQL" },
+          relation_type: "depends_on",
+          confidence: 0.7,
+          depth: 1,
+          path: ["entity-1", "entity-2"]
+        }
+      ]
+    };
+    claimTransitionPayload = { id: "claim-stale", lifecycle_state: "confirmed" };
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -323,6 +382,10 @@ describe("Flux dashboard", () => {
       if (url === "/api/search") return json(searchPayload);
       if (url.startsWith("/api/results/")) return json(resultDetailPayload);
       if (url.startsWith("/api/corpus/assets/") && url.endsWith("/actions")) return json(fileActionPayload);
+      if (url.startsWith("/api/claims/") && url.endsWith("/transitions")) return json(claimTransitionPayload);
+      if (url.startsWith("/api/claims")) return json(reviewPayload);
+      if (url.startsWith("/api/capture/review")) return json(captureReviewPayload);
+      if (url.startsWith("/api/graph/traverse")) return json(graphPayload);
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
       }
@@ -440,6 +503,43 @@ describe("Flux dashboard", () => {
 
     await user.click(screen.getByRole("button", { name: "Corpus" }));
     expect(await screen.findByRole("heading", { name: "Corpus Monitor" })).toBeInTheDocument();
+  });
+
+  test("review tab lists claim review work, graph edges, capture queue, and lifecycle actions", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Review" }));
+
+    expect(await screen.findByRole("heading", { name: "Claim Review" })).toBeInTheDocument();
+    expect(screen.getByText("1 needs review")).toBeInTheDocument();
+    const table = await screen.findByRole("table", { name: "Claim review queue" });
+    expect(within(table).getByText("Flux")).toBeInTheDocument();
+    expect(within(table).getByText("uses")).toBeInTheDocument();
+    expect(within(table).getByText("PostgreSQL")).toBeInTheDocument();
+    expect(within(table).getByText("stale")).toBeInTheDocument();
+    expect(screen.getByText("retention:deprioritize")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Entity Graph" })).toBeInTheDocument();
+    expect(screen.getByText("depends_on")).toBeInTheDocument();
+    expect(screen.getByText("Capture Review Queue")).toBeInTheDocument();
+    expect(screen.getByText("job-review")).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText("Review filter"), "all");
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/api/claims?review=all&limit=50");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Confirm claim claim-stale" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/claims/claim-stale/transitions",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ transition: "confirm", reason: "dashboard review" })
+        })
+      );
+    });
   });
 
   test("job queue renders readable rows and expandable details instead of primary raw JSON", async () => {

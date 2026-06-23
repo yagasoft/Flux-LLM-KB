@@ -622,6 +622,98 @@ def get_claim(claim_id: str, *, url: str | None = None) -> dict[str, Any] | None
             return claim
 
 
+def list_claims(
+    *,
+    review: str = "all",
+    state: str | None = None,
+    q: str | None = None,
+    limit: int = 50,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    review_filter = (review or "all").lower()
+    if review_filter not in {"all", "needs_review", "current"}:
+        raise ValueError("review must be one of: all, needs_review, current")
+
+    filters: list[str] = []
+    params: list[Any] = []
+    if review_filter == "needs_review":
+        filters.append("(c.lifecycle_state IN ('stale', 'contradicted', 'superseded', 'retired') OR c.retention_action <> 'keep')")
+    elif review_filter == "current":
+        filters.append("(c.lifecycle_state IN ('active', 'confirmed', 'reinforced') AND c.retention_action = 'keep')")
+    if state:
+        filters.append("c.lifecycle_state = %s")
+        params.append(state)
+    if q:
+        pattern = f"%{q}%"
+        filters.append("(e.name ILIKE %s OR c.predicate ILIKE %s OR c.object_text ILIKE %s)")
+        params.extend([pattern, pattern, pattern])
+    params.append(max(1, min(limit, 200)))
+
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT c.id::text, c.episode_id::text, c.subject_entity_id::text,
+                       c.predicate, c.object_text, c.confidence, c.superseded_by::text,
+                       c.created_at, c.last_confirmed_at, c.lifecycle_state, c.usage_count,
+                       c.reinforcement_count, c.contradiction_count, c.last_reinforced_at,
+                       c.retention_action, c.metadata, c.updated_at, c.retired_at, c.stale_at,
+                       e.id::text, e.type, e.name, e.attributes, e.created_at
+                FROM claims c
+                LEFT JOIN entities e ON e.id = c.subject_entity_id
+                {where}
+                ORDER BY c.updated_at DESC, c.created_at DESC, c.id
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            claims: list[dict[str, Any]] = []
+            for row in cur.fetchall():
+                subject = _entity_row(row[19:24]) if row[19] else None
+                claim = _claim_row(row[:19], subject=subject)
+                claim["review_reasons"] = _claim_review_reasons(claim)
+                claims.append(claim)
+            return claims
+
+
+def claim_review_counts(*, url: str | None = None) -> dict[str, int]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*) AS total,
+                       count(*) FILTER (
+                         WHERE lifecycle_state IN ('active', 'confirmed', 'reinforced')
+                           AND retention_action = 'keep'
+                       ) AS current,
+                       count(*) FILTER (
+                         WHERE lifecycle_state IN ('stale', 'contradicted', 'superseded', 'retired')
+                            OR retention_action <> 'keep'
+                       ) AS needs_review,
+                       count(*) FILTER (WHERE lifecycle_state = 'stale') AS stale,
+                       count(*) FILTER (WHERE lifecycle_state = 'contradicted') AS contradicted,
+                       count(*) FILTER (WHERE lifecycle_state = 'superseded') AS superseded,
+                       count(*) FILTER (WHERE lifecycle_state = 'retired') AS retired,
+                       count(*) FILTER (WHERE retention_action <> 'keep') AS retention_action
+                FROM claims
+                """
+            )
+            row = cur.fetchone()
+            return {
+                "total": int(row[0] or 0),
+                "current": int(row[1] or 0),
+                "needs_review": int(row[2] or 0),
+                "stale": int(row[3] or 0),
+                "contradicted": int(row[4] or 0),
+                "superseded": int(row[5] or 0),
+                "retired": int(row[6] or 0),
+                "retention_action": int(row[7] or 0),
+            }
+
+
 def upsert_entity_relation(
     *,
     from_entity_id: str,
@@ -1684,6 +1776,36 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
                     "job_type": row[1],
                     "status": row[2],
                     "payload": row[3],
+                    "attempts": row[4],
+                    "last_error": row[5],
+                    "created_at": row[6].isoformat(),
+                    "updated_at": row[7].isoformat(),
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def list_capture_review_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
+                FROM capture_jobs
+                WHERE status = 'pending_review'
+                   OR payload->>'status' = 'pending_review'
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                (max(1, min(limit, 200)),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "job_type": row[1],
+                    "status": row[2],
+                    "payload": _metadata_only_payload(row[3] or {}),
                     "attempts": row[4],
                     "last_error": row[5],
                     "created_at": row[6].isoformat(),
@@ -3819,6 +3941,17 @@ def _entity_row(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+def _claim_review_reasons(claim: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    state = str(claim.get("lifecycle_state") or "")
+    if state in {"stale", "contradicted", "superseded", "retired"}:
+        reasons.append(state)
+    retention_action = str(claim.get("retention_action") or "keep")
+    if retention_action != "keep":
+        reasons.append(f"retention:{retention_action}")
+    return reasons
+
+
 def _claim_row(row: tuple[Any, ...], *, subject: dict[str, Any] | None = None) -> dict[str, Any]:
     score = lifecycle_score(
         LifecycleScoreInput(
@@ -3865,6 +3998,31 @@ def _claim_row(row: tuple[Any, ...], *, subject: dict[str, Any] | None = None) -
             "related_claims": [],
         },
     }
+
+
+_RAW_CAPTURE_PAYLOAD_KEYS = {
+    "body",
+    "content",
+    "html",
+    "message",
+    "raw",
+    "raw_text",
+    "summary",
+    "text",
+    "transcript",
+}
+
+
+def _metadata_only_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _metadata_only_payload(item)
+            for key, item in value.items()
+            if key.lower() not in _RAW_CAPTURE_PAYLOAD_KEYS
+        }
+    if isinstance(value, list):
+        return [_metadata_only_payload(item) for item in value[:50]]
+    return value
 
 
 def _claim_lifecycle_events(cur: Any, claim_id: str) -> list[dict[str, Any]]:

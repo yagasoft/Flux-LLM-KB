@@ -1510,6 +1510,101 @@ kbd {
   background: var(--surface);
 }
 
+.review-grid {
+  grid-template-columns: minmax(680px, 1.35fr) minmax(360px, .75fr);
+}
+
+.review-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px 16px 0;
+}
+
+.review-inline-status {
+  padding: 8px 16px 0;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.review-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.review-controls label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.review-controls select {
+  min-width: 180px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.review-table-wrap {
+  overflow-x: auto;
+}
+
+.review-table th,
+.review-table td {
+  white-space: nowrap;
+}
+
+.review-table .claim-object {
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.claim-inspector {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.claim-statement {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.reason-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reason-row span {
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--surface-soft);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.padded {
+  margin: 0;
+  padding: 16px;
+}
+
 .data-rows {
   display: grid;
   gap: 10px;
@@ -1887,6 +1982,7 @@ kbd {
 @media (max-width: 1320px) {
   .topbar,
   .main-grid,
+  .review-grid,
   .host-grid {
     grid-template-columns: 1fr;
   }
@@ -2002,6 +2098,10 @@ kbd {
     grid-template-columns: 1fr;
   }
 
+  .review-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .profile-table {
     min-width: 880px;
   }
@@ -2042,11 +2142,16 @@ kbd {
     grid-template-columns: 1fr;
   }
 
+  .review-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .topbar,
   .top-actions,
   .health-strip,
   .main-grid,
   .lower-grid,
+  .review-grid,
   .host-grid,
   .panel,
   .metric-card {

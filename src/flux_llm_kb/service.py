@@ -113,6 +113,22 @@ class KnowledgeService:
             raise LookupError(f"claim not found: {claim_id}")
         return claim
 
+    def list_claims(
+        self,
+        *,
+        review: str = "all",
+        state: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return {
+            "claims": database.list_claims(review=review, state=state, q=q, limit=limit),
+            "counts": database.claim_review_counts(),
+        }
+
+    def list_capture_review_jobs(self, *, limit: int = 50) -> dict[str, Any]:
+        return {"jobs": database.list_capture_review_jobs(limit=limit)}
+
     def transition_claim(
         self,
         *,

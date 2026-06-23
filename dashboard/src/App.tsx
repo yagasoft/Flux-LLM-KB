@@ -308,7 +308,67 @@ type LoadState = {
   settings: SettingRow[];
 };
 
-type TabId = "health" | "corpus" | "mail" | "settings" | "retrieval" | "jobs";
+type ClaimReviewFilter = "all" | "needs_review" | "current";
+
+type ClaimReviewCounts = {
+  total?: number;
+  current?: number;
+  needs_review?: number;
+  stale?: number;
+  contradicted?: number;
+  superseded?: number;
+  retired?: number;
+  retention_action?: number;
+};
+
+type ClaimReviewClaim = {
+  id: string;
+  subject_entity_id?: string | null;
+  subject?: { id?: string; type?: string; name?: string } | null;
+  predicate?: string;
+  object_text?: string;
+  confidence?: number;
+  lifecycle_state?: string;
+  retention_action?: string;
+  review_reasons?: string[];
+  updated_at?: string | null;
+  lifecycle?: { score?: number; current?: boolean; audit_visible?: boolean };
+};
+
+type ClaimReviewPayload = {
+  claims?: ClaimReviewClaim[];
+  counts?: ClaimReviewCounts;
+};
+
+type GraphEdge = {
+  relation_id?: string;
+  from_entity?: { type?: string; name?: string };
+  to_entity?: { type?: string; name?: string };
+  relation_type?: string;
+  confidence?: number;
+  depth?: number;
+};
+
+type GraphPayload = {
+  start_entity_id?: string;
+  edges?: GraphEdge[];
+};
+
+type CaptureReviewJob = {
+  id?: string;
+  job_type?: string;
+  status?: string;
+  payload?: Record<string, unknown>;
+  attempts?: number;
+  last_error?: string | null;
+  updated_at?: string | null;
+};
+
+type CaptureReviewPayload = {
+  jobs?: CaptureReviewJob[];
+};
+
+type TabId = "health" | "corpus" | "mail" | "settings" | "retrieval" | "review" | "jobs";
 
 type ProfileForm = {
   name: string;
@@ -382,6 +442,7 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
   { id: "mail", label: "Mail", icon: <Mail size={20} /> },
   { id: "settings", label: "Settings", icon: <Settings size={20} /> },
   { id: "retrieval", label: "Retrieval", icon: <Search size={20} /> },
+  { id: "review", label: "Review", icon: <ShieldCheck size={20} /> },
   { id: "jobs", label: "Jobs", icon: <ListFilter size={20} /> }
 ];
 
@@ -416,6 +477,13 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [resultDetail, setResultDetail] = useState<ResultDetail | null>(null);
   const [resultDetailLoading, setResultDetailLoading] = useState(false);
+  const [reviewFilter, setReviewFilter] = useState<ClaimReviewFilter>("needs_review");
+  const [reviewStateFilter, setReviewStateFilter] = useState("");
+  const [claimReview, setClaimReview] = useState<ClaimReviewPayload>({ claims: [], counts: {} });
+  const [captureReview, setCaptureReview] = useState<CaptureReviewPayload>({ jobs: [] });
+  const [selectedClaimId, setSelectedClaimId] = useState("");
+  const [claimGraph, setClaimGraph] = useState<GraphPayload>({ edges: [] });
+  const [reviewLoading, setReviewLoading] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
 
   async function load(options: { showLoading?: boolean } = {}) {
@@ -453,6 +521,10 @@ export default function App() {
   const selectedRoot = useMemo(() => {
     return rootSummaries.find((root) => root.name === selectedRootName) ?? rootSummaries[0];
   }, [rootSummaries, selectedRootName]);
+  const reviewClaims = claimReview.claims ?? [];
+  const selectedClaim = useMemo(() => {
+    return reviewClaims.find((claim) => claim.id === selectedClaimId) ?? reviewClaims[0];
+  }, [reviewClaims, selectedClaimId]);
 
   useEffect(() => {
     if (!selectedName && selectedProfile?.name) {
@@ -471,6 +543,20 @@ export default function App() {
       setSettingValue(String(settingEditor.value ?? ""));
     }
   }, [settingEditor]);
+
+  useEffect(() => {
+    if (activeTab === "review") {
+      void loadReview();
+    }
+  }, [activeTab, reviewFilter, reviewStateFilter]);
+
+  useEffect(() => {
+    if (activeTab !== "review" || !selectedClaim?.subject_entity_id) {
+      setClaimGraph({ edges: [] });
+      return;
+    }
+    void loadClaimGraph(selectedClaim.subject_entity_id);
+  }, [activeTab, selectedClaim?.subject_entity_id]);
 
   const pollSeconds = dashboardPollSeconds(state.settings);
 
@@ -703,6 +789,55 @@ export default function App() {
     await sendJson("/api/settings/apply", "POST", { component: component ?? null });
     setToast(component ? `Apply request acknowledged for ${component}.` : "Apply requests acknowledged.");
     await load();
+  }
+
+  async function loadReview() {
+    setReviewLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("review", reviewFilter);
+      if (reviewStateFilter) params.set("state", reviewStateFilter);
+      params.set("limit", "50");
+      const [claims, capture] = await Promise.all([
+        fetchRequiredJson<ClaimReviewPayload>(`/api/claims?${params.toString()}`),
+        getJson<CaptureReviewPayload>("/api/capture/review?limit=50", { jobs: [] })
+      ]);
+      const nextClaims = claims.claims ?? [];
+      setClaimReview({ claims: nextClaims, counts: claims.counts ?? {} });
+      setCaptureReview(capture);
+      setSelectedClaimId((current) => nextClaims.some((claim) => claim.id === current) ? current : nextClaims[0]?.id ?? "");
+    } catch (error) {
+      setToast(`Could not load claim review queue: ${errorMessage(error)}`);
+    } finally {
+      setReviewLoading(false);
+    }
+  }
+
+  async function loadClaimGraph(entityId: string) {
+    try {
+      const params = new URLSearchParams();
+      params.set("entity_id", entityId);
+      params.set("direction", "both");
+      params.set("max_depth", "2");
+      params.set("limit", "100");
+      setClaimGraph(await fetchRequiredJson<GraphPayload>(`/api/graph/traverse?${params.toString()}`));
+    } catch (error) {
+      setClaimGraph({ edges: [] });
+      setToast(`Could not load entity graph: ${errorMessage(error)}`);
+    }
+  }
+
+  async function transitionReviewClaim(claim: ClaimReviewClaim, transition: string) {
+    try {
+      await sendJson(`/api/claims/${encodeURIComponent(claim.id)}/transitions`, "POST", {
+        transition,
+        reason: "dashboard review"
+      });
+      setToast(`Claim ${transition} recorded for ${claim.id}.`);
+      await loadReview();
+    } catch (error) {
+      setToast(`Claim transition failed for ${claim.id}: ${errorMessage(error)}`);
+    }
   }
 
   async function runSearch(event: FormEvent) {
@@ -960,6 +1095,23 @@ export default function App() {
             onClear={() => { setSearchOpen(false); setSearchResults([]); }}
             onErrorDetail={setErrorDetail}
             onOpenResult={(result) => void openSearchResult(result)}
+          />
+        )}
+
+        {activeTab === "review" && (
+          <ReviewTab
+            payload={claimReview}
+            capture={captureReview}
+            graph={claimGraph}
+            selectedClaim={selectedClaim}
+            loading={reviewLoading}
+            reviewFilter={reviewFilter}
+            stateFilter={reviewStateFilter}
+            onReviewFilter={(value) => setReviewFilter(value)}
+            onStateFilter={setReviewStateFilter}
+            onSelectClaim={(claim) => setSelectedClaimId(claim.id)}
+            onTransition={(claim, transition) => void transitionReviewClaim(claim, transition)}
+            onRefresh={() => void loadReview()}
           />
         )}
 
@@ -1850,6 +2002,251 @@ function RetrievalTab({
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
     </section>
   );
+}
+
+function ReviewTab({
+  payload,
+  capture,
+  graph,
+  selectedClaim,
+  loading,
+  reviewFilter,
+  stateFilter,
+  onReviewFilter,
+  onStateFilter,
+  onSelectClaim,
+  onTransition,
+  onRefresh
+}: {
+  payload: ClaimReviewPayload;
+  capture: CaptureReviewPayload;
+  graph: GraphPayload;
+  selectedClaim?: ClaimReviewClaim;
+  loading: boolean;
+  reviewFilter: ClaimReviewFilter;
+  stateFilter: string;
+  onReviewFilter: (value: ClaimReviewFilter) => void;
+  onStateFilter: (value: string) => void;
+  onSelectClaim: (claim: ClaimReviewClaim) => void;
+  onTransition: (claim: ClaimReviewClaim, transition: string) => void;
+  onRefresh: () => void;
+}) {
+  const claims = payload.claims ?? [];
+  const counts = payload.counts ?? {};
+  return (
+    <section className="tab-grid review-grid">
+      <Panel title="Claim Review" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
+        <div className="review-summary">
+          <Stat label="Total" value={String(counts.total ?? 0)} />
+          <Stat label="Current" value={String(counts.current ?? 0)} />
+          <Stat label="Needs Review" value={String(counts.needs_review ?? 0)} />
+          <Stat label="Retention" value={String(counts.retention_action ?? 0)} />
+        </div>
+        <div className="review-inline-status">{counts.needs_review ?? 0} needs review</div>
+        <div className="review-controls">
+          <label>Review filter
+            <select value={reviewFilter} onChange={(event) => onReviewFilter(event.target.value as ClaimReviewFilter)}>
+              <option value="needs_review">Needs review</option>
+              <option value="current">Current</option>
+              <option value="all">All claims</option>
+            </select>
+          </label>
+          <label>Lifecycle state
+            <select value={stateFilter} onChange={(event) => onStateFilter(event.target.value)}>
+              <option value="">Any state</option>
+              <option value="active">Active</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="reinforced">Reinforced</option>
+              <option value="stale">Stale</option>
+              <option value="contradicted">Contradicted</option>
+              <option value="superseded">Superseded</option>
+              <option value="retired">Retired</option>
+            </select>
+          </label>
+          {loading && <span className="muted">Loading review queue...</span>}
+        </div>
+        <ClaimReviewTable claims={claims} selectedClaim={selectedClaim} onSelectClaim={onSelectClaim} />
+      </Panel>
+      <Panel title="Selected Claim">
+        <SelectedClaimPanel claim={selectedClaim} onTransition={onTransition} />
+      </Panel>
+      <Panel title="Entity Graph">
+        <GraphEdgeTable graph={graph} />
+      </Panel>
+      <Panel title="Capture Review Queue">
+        <CaptureReviewTable jobs={capture.jobs ?? []} />
+      </Panel>
+    </section>
+  );
+}
+
+function ClaimReviewTable({
+  claims,
+  selectedClaim,
+  onSelectClaim
+}: {
+  claims: ClaimReviewClaim[];
+  selectedClaim?: ClaimReviewClaim;
+  onSelectClaim: (claim: ClaimReviewClaim) => void;
+}) {
+  if (claims.length === 0) return <p className="muted padded">No claims match this review filter.</p>;
+  return (
+    <div className="review-table-wrap">
+      <table className="profile-table review-table" aria-label="Claim review queue">
+        <thead>
+          <tr>
+            <th>Subject</th>
+            <th>Predicate</th>
+            <th>Object</th>
+            <th>State</th>
+            <th>Reasons</th>
+            <th>Score</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {claims.map((claim) => (
+            <tr key={claim.id} className={claim.id === selectedClaim?.id ? "selected" : ""} onClick={() => onSelectClaim(claim)}>
+              <td>
+                <button className="row-select" type="button" aria-label={`Select claim ${claim.id}`} onClick={(event) => { event.stopPropagation(); onSelectClaim(claim); }}>
+                  {claim.id === selectedClaim?.id ? <Play size={14} fill="currentColor" /> : <Square size={12} />}
+                </button>
+                <div>
+                  <strong>{claim.subject?.name ?? claim.subject_entity_id ?? "-"}</strong>
+                  <span>{claim.subject?.type ?? "entity"}</span>
+                </div>
+              </td>
+              <td>{claim.predicate ?? "-"}</td>
+              <td className="claim-object" title={claim.object_text ?? ""}>{claim.object_text ?? "-"}</td>
+              <td><RootStateBadge state={claim.lifecycle_state ?? "unknown"} /></td>
+              <td>{(claim.review_reasons ?? []).join(", ") || "-"}</td>
+              <td>{typeof claim.lifecycle?.score === "number" ? claim.lifecycle.score.toFixed(3) : "-"}</td>
+              <td>{formatDate(claim.updated_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SelectedClaimPanel({ claim, onTransition }: { claim?: ClaimReviewClaim; onTransition: (claim: ClaimReviewClaim, transition: string) => void }) {
+  if (!claim) return <p className="muted padded">Select a claim to inspect lifecycle details.</p>;
+  const actions: Array<[string, string]> = [
+    ["confirm", "Confirm"],
+    ["reinforce", "Reinforce"],
+    ["stale", "Mark stale"],
+    ["deprioritize", "Deprioritize"],
+    ["retire", "Retire"]
+  ];
+  return (
+    <div className="claim-inspector">
+      <div className="detail-grid">
+        <DetailField label="Claim id" value={claim.id} />
+        <DetailField label="Subject entity" value={claim.subject_entity_id} />
+        <DetailField label="State" value={claim.lifecycle_state} />
+        <DetailField label="Retention" value={claim.retention_action} />
+      </div>
+      <section className="result-section">
+        <h3>Statement</h3>
+        <p className="claim-statement">{claim.subject?.name ?? "Entity"} {claim.predicate ?? "relates to"} {claim.object_text ?? "-"}</p>
+      </section>
+      <section className="result-section">
+        <h3>Review Reasons</h3>
+        <div className="reason-row">
+          {(claim.review_reasons ?? []).length > 0 ? claim.review_reasons?.map((reason) => <span key={reason}>{reason}</span>) : <span>current</span>}
+        </div>
+      </section>
+      <div className="file-action-row">
+        {actions.map(([transition, label]) => (
+          <button
+            className="ghost-action compact"
+            key={transition}
+            type="button"
+            aria-label={`${label === "Confirm" ? "Confirm" : label} claim ${claim.id}`}
+            onClick={() => onTransition(claim, transition)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function GraphEdgeTable({ graph }: { graph: GraphPayload }) {
+  const edges = graph.edges ?? [];
+  if (edges.length === 0) return <p className="muted padded">No graph edges are available for the selected claim entity.</p>;
+  return (
+    <div className="review-table-wrap">
+      <table className="profile-table review-table" aria-label="Entity graph edges">
+        <thead>
+          <tr>
+            <th>From</th>
+            <th>Relation</th>
+            <th>To</th>
+            <th>Depth</th>
+            <th>Confidence</th>
+          </tr>
+        </thead>
+        <tbody>
+          {edges.map((edge, index) => (
+            <tr key={edge.relation_id ?? `${edge.relation_type}-${index}`}>
+              <td>{entityLabel(edge.from_entity)}</td>
+              <td>{edge.relation_type ?? "-"}</td>
+              <td>{entityLabel(edge.to_entity)}</td>
+              <td>{edge.depth ?? "-"}</td>
+              <td>{typeof edge.confidence === "number" ? edge.confidence.toFixed(2) : "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CaptureReviewTable({ jobs }: { jobs: CaptureReviewJob[] }) {
+  if (jobs.length === 0) return <p className="muted padded">No pending capture review jobs.</p>;
+  return (
+    <div className="review-table-wrap">
+      <table className="profile-table review-table" aria-label="Capture review queue">
+        <thead>
+          <tr>
+            <th>Job</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Target</th>
+            <th>Updated</th>
+          </tr>
+        </thead>
+        <tbody>
+          {jobs.map((job, index) => (
+            <tr key={job.id ?? `capture-review-${index}`}>
+              <td><strong>{job.id ?? "-"}</strong></td>
+              <td>{jobTypeLabel(job.job_type)}</td>
+              <td><JobStatusBadge status={job.status ?? "pending_review"} /></td>
+              <td className="claim-object" title={captureReviewTarget(job)}>{captureReviewTarget(job)}</td>
+              <td>{formatDate(job.updated_at)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function entityLabel(entity?: { type?: string; name?: string }) {
+  if (!entity) return "-";
+  return [entity.type, entity.name].filter(Boolean).join(": ");
+}
+
+function captureReviewTarget(job: CaptureReviewJob) {
+  const payload = job.payload ?? {};
+  return stringFromUnknown(payload.path)
+    ?? stringFromUnknown(payload.source)
+    ?? stringFromUnknown(payload.source_dir)
+    ?? stringFromUnknown(payload.file)
+    ?? "-";
 }
 
 function ResultDetailDialog({

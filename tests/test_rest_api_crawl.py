@@ -361,6 +361,64 @@ def test_claim_and_graph_routes_are_exposed(monkeypatch):
     assert calls["traverse"]["relation_types"] == ["depends_on"]
 
 
+def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = {}
+
+    class FakeService:
+        def list_claims(self, **kwargs):
+            calls["list_claims"] = kwargs
+            return {
+                "claims": [
+                    {
+                        "id": "claim-1",
+                        "subject_entity_id": "entity-1",
+                        "predicate": "uses",
+                        "object_text": "PostgreSQL",
+                        "lifecycle_state": "stale",
+                        "retention_action": "deprioritize",
+                        "review_reasons": ["stale", "retention:deprioritize"],
+                    }
+                ],
+                "counts": {"total": 1, "needs_review": 1, "current": 0},
+            }
+
+        def list_capture_review_jobs(self, **kwargs):
+            calls["list_capture_review_jobs"] = kwargs
+            return {
+                "jobs": [
+                    {
+                        "id": "job-1",
+                        "job_type": "codex_backfill",
+                        "status": "pending",
+                        "payload": {"status": "pending_review", "path": "sessions/session.json"},
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    claims = client.get(
+        "/api/claims",
+        params={"review": "needs_review", "state": "stale", "q": "postgres", "limit": 500},
+    )
+    capture = client.get("/api/capture/review", params={"limit": 500})
+
+    assert claims.status_code == 200
+    assert claims.json()["claims"][0]["review_reasons"] == ["stale", "retention:deprioritize"]
+    assert calls["list_claims"] == {
+        "review": "needs_review",
+        "state": "stale",
+        "q": "postgres",
+        "limit": 500,
+    }
+    assert capture.status_code == 200
+    assert capture.json()["jobs"][0]["payload"] == {"status": "pending_review", "path": "sessions/session.json"}
+    assert calls["list_capture_review_jobs"] == {"limit": 500}
+
+
 def test_corpus_lookup_routes_return_assets_and_chunks(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

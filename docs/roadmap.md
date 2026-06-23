@@ -30,7 +30,7 @@ scripts:
 | --- | --- | --- |
 | V0 Foundation | shipped | Public repo, safety model, ADRs, PostgreSQL/pgvector migrations, Docker Compose, fixtures, and initial interfaces exist. |
 | V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, Codex hooks, Codex MCP setup, safe reference capture, and V1 graph/lifecycle backend hardening exist; review UI depth remains future work. |
-| V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
+| V2 Review And Visualization | in progress | React dashboard is the unified operational UI; graph browsing, claim lifecycle review, and read-only capture-review visibility exist; approval actions and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics still need hardening. |
 | V2.7 Mail And Retrieval Production Hardening | in progress | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, and lock-tolerant indexing/watch states exist; mail post-processing and retrieval explainability remain. |
@@ -64,9 +64,9 @@ scripts:
 
 | Piece | Roadmap Intent | Status | Current Evidence / Remaining Gap | Queued Next |
 | --- | --- | --- | --- | --- |
-| Unified operations dashboard | Unified dashboard for health, monitoring, watcher status, crawler stats, search, graph browsing, stale claims, contradictions, capture review, runtime settings, and mail ingestion status. | in progress | React/Vite dashboard served by FastAPI is the unified operations UI for health, corpus monitoring, runtime settings, mail capture, worker state, and Outlook COM host status. Graph browsing, stale claim review, contradiction review, and capture approval remain incomplete. | Add graph browsing, stale claim review, contradiction review, and capture approval views after V1 graph/lifecycle hardening. |
-| Retention and quality | Retention policy tuning and memory quality reports. | planned | Retention policy concepts exist in the architecture; dashboard tuning/reporting is not complete. | Add retention tuning and memory quality reporting after review workflows have enough data to inspect. |
-| Sensitive capture review | Manual approval flows for sensitive or low-confidence captures. | planned | Capture and audit paths exist, but manual approval workflows remain planned. | Add approval queues with status, rationale, and audit links. |
+| Unified operations dashboard | Unified dashboard for health, monitoring, watcher status, crawler stats, search, graph browsing, stale claims, contradictions, capture review, runtime settings, and mail ingestion status. | in progress | React/Vite dashboard served by FastAPI is the unified operations UI for health, corpus monitoring, runtime settings, mail capture, worker state, Outlook COM host status, claim lifecycle review, selected-entity graph browsing, and read-only capture-review queue visibility. Approval mutations and retention tuning remain incomplete. | Add approval actions and retention tuning after the review console has enough live usage feedback. |
+| Retention and quality | Retention policy tuning and memory quality reports. | planned | Retention policy concepts exist in the architecture; dashboard tuning/reporting is not complete. | Add retention tuning and memory quality reporting after claim review workflows have enough data to inspect. |
+| Sensitive capture review | Manual approval flows for sensitive or low-confidence captures. | in progress | Capture and audit paths exist, and the dashboard now exposes a read-only pending capture-review queue. Approval/rejection mutations, status rationale, and audit links remain planned. | Add approval queues with mutation actions, rationale capture, and audit links. |
 | Drill-down diagnostics | Dashboard drill-down views for retrieval explanations, watcher events, and worker history. | in progress | Dashboard has operational panels and structured diagnostics; deeper drill-down remains uneven. | Add retrieval explanation, watcher event, and worker history drill-downs in roadmap order after core review workflows. |
 
 ## V2.5: Autonomous Corpus Expansion
@@ -152,8 +152,8 @@ scripts:
 
 ## Queued Work In Roadmap Order
 
-1. Add V2 graph browsing, stale claim review, contradiction review, capture
-   approval, and retention tuning once V1 lifecycle semantics are stronger.
+1. Extend the V2 review console with capture approval mutations, status
+   rationale, audit links, retention tuning, and memory quality reporting.
 2. Continue V2.5 extractor expansion for advanced document, diagram, archive,
    OCR, vision, ASR, and embedded-media stages with semantic near-duplicate
    grouping deferred until retrieval foundations are ready.

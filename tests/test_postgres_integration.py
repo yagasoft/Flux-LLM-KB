@@ -204,3 +204,65 @@ def test_postgres_claim_lifecycle_and_graph_traversal_are_migration_backed():
         with psycopg.connect(TEST_DATABASE_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM entities WHERE name LIKE %s", (f"{marker}%",))
+
+
+def test_postgres_claim_review_list_counts_and_graph_work_together():
+    run_migrations(TEST_DATABASE_URL)
+    marker = f"claim-review-{uuid4()}"
+
+    try:
+        active = database.upsert_claim(
+            subject_type="project",
+            subject_name=f"{marker}-flux",
+            predicate="uses",
+            object_text=f"{marker} active PostgreSQL",
+            confidence=0.8,
+            url=TEST_DATABASE_URL,
+        )
+        stale = database.upsert_claim(
+            subject_type="project",
+            subject_name=f"{marker}-flux",
+            predicate="uses",
+            object_text=f"{marker} stale PostgreSQL",
+            confidence=0.7,
+            url=TEST_DATABASE_URL,
+        )
+        replacement = database.upsert_claim(
+            subject_type="system",
+            subject_name=f"{marker}-pgvector",
+            predicate="supports",
+            object_text=f"{marker} graph review traversal",
+            confidence=0.9,
+            url=TEST_DATABASE_URL,
+        )
+        database.transition_claim(
+            claim_id=stale["id"],
+            transition="deprioritize",
+            reason="review queue",
+            url=TEST_DATABASE_URL,
+        )
+        database.upsert_entity_relation(
+            from_entity_id=active["subject_entity_id"],
+            to_entity_id=replacement["subject_entity_id"],
+            relation_type="depends_on",
+            confidence=0.7,
+            url=TEST_DATABASE_URL,
+        )
+
+        claims = database.list_claims(review="needs_review", q=marker, limit=10, url=TEST_DATABASE_URL)
+        counts = database.claim_review_counts(url=TEST_DATABASE_URL)
+        graph = database.traverse_entity_graph(
+            entity_id=active["subject_entity_id"],
+            relation_types=["depends_on"],
+            url=TEST_DATABASE_URL,
+        )
+
+        assert [claim["id"] for claim in claims] == [stale["id"]]
+        assert claims[0]["review_reasons"] == ["stale", "retention:deprioritize"]
+        assert counts["needs_review"] >= 1
+        assert graph["edges"][0]["relation_type"] == "depends_on"
+    finally:
+        psycopg = database._load_psycopg()
+        with psycopg.connect(TEST_DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM entities WHERE name LIKE %s", (f"{marker}%",))
