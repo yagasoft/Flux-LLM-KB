@@ -23,6 +23,13 @@ Tools:
 - `kb.status`
 - `kb.mail_status`
 
+Codex may expose these tools through MCP wrapper names rather than literal
+top-level `kb.*` names. For example, `kb.status`, `kb.brief`, and
+`kb.finalize_turn` can appear as `mcp__flux_llm_kb.kb_status`,
+`mcp__flux_llm_kb.kb_brief`, and
+`mcp__flux_llm_kb.kb_finalize_turn`. Treat either naming form as the same Flux
+MCP surface.
+
 ## REST
 
 Install API dependencies:
@@ -73,7 +80,9 @@ External consumers should use one of three read paths:
 - REST for simple tools and scripts:
   `GET /api/search?query=customer%20RFP&limit=5` or
   `GET /api/brief?query=customer%20RFP&token_budget=1200`.
-- MCP for agent runtimes: `kb.search` and `kb.brief`.
+- MCP for agent runtimes: `kb.search`/`kb.brief` in raw MCP clients, or Codex
+  wrapper names such as `mcp__flux_llm_kb.kb_search` and
+  `mcp__flux_llm_kb.kb_brief`.
 - CLI for local shell automation: `flux-kb search "customer RFP" --limit 5`.
 
 Lookup endpoints are read-only and return stable JSON payloads for asset and
@@ -192,9 +201,12 @@ Codex has three Flux integration surfaces:
 
 - Plugin hooks and skills provide automatic context/capture behavior and user
   guidance inside Codex turns.
-- MCP tools provide direct callable tools such as `kb.brief`, `kb.search`, and
-  `kb.finalize_turn` when `[mcp_servers.flux_llm_kb]` is present in
-  `~/.codex/config.toml`.
+- MCP tools provide callable Flux tools when `[mcp_servers.flux_llm_kb]` is
+  present in `~/.codex/config.toml`. Depending on Codex tool discovery, they may
+  appear as raw MCP names such as `kb.brief`, `kb.search`, and
+  `kb.finalize_turn`, or as Codex wrappers such as
+  `mcp__flux_llm_kb.kb_brief`, `mcp__flux_llm_kb.kb_search`, and
+  `mcp__flux_llm_kb.kb_finalize_turn`.
 - REST remains the fallback surface for tools that can call the local API
   directly, for example `GET /api/brief?query=...`.
 
@@ -215,6 +227,13 @@ The command prefers `FLUX_KB_PYTHON`, then the production app virtual
 environment when available, then the active Python. `flux-kb codex status` and
 dashboard health report whether this MCP block is configured, enabled, and able
 to import the optional MCP dependency.
+
+For an end-to-end Codex smoke test, verify that at least the status, brief, and
+finalize tools are callable through either naming form. A successful test should
+call `kb.status`/`mcp__flux_llm_kb.kb_status`, call
+`kb.brief`/`mcp__flux_llm_kb.kb_brief` with a harmless smoke-test task, and
+store only a redacted outcome through
+`kb.finalize_turn`/`mcp__flux_llm_kb.kb_finalize_turn`.
 
 Codex hooks run a configurable local policy by default:
 

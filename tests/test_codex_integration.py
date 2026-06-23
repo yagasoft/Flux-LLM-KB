@@ -277,6 +277,8 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "files changed or referenced" in prompts
     assert "Make final responses indexable" in skill
     assert "commands/tests run" in skill
+    assert "mcp__flux_llm_kb.kb_brief" in skill
+    assert "mcp__flux_llm_kb.kb_finalize_turn" in skill
 
 
 def test_codex_status_reports_discovery_cache_and_restart_need(tmp_path, monkeypatch):

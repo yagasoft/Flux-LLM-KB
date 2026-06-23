@@ -70,8 +70,9 @@ scripts:
 - Codex hook policy for automatic non-trivial prompt briefs, final-turn capture,
   opt-out runtime settings, dashboard-visible status, and audit records.
 - Codex MCP server configuration through `flux-kb codex install-plugin`, making
-  Flux tools such as `kb.brief` directly callable in Codex sessions when the
-  optional MCP dependency is installed.
+  Flux MCP tools callable in Codex sessions when the optional MCP dependency is
+  installed. Codex may expose raw names such as `kb.brief` or wrapper names such
+  as `mcp__flux_llm_kb.kb_brief`; both are valid.
 - Codex Stop hook reference indexing for bounded public web references and
   existing monitored-root file references, with duplicate checks and audit
   records.
