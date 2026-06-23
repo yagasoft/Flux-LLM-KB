@@ -53,6 +53,7 @@ flux_llm_kb = ["sql/*.sql", "dashboard_static/*.html", "dashboard_static/assets/
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["src"]
 filterwarnings = [
   "ignore:Using `httpx` with `starlette.testclient` is deprecated.*"
 ]
