@@ -280,6 +280,8 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "mcp__flux_llm_kb.kb_brief" in skill
     assert "mid-turn" in skill
     assert "prior decisions" in skill
+    assert "workspace_boosted" in skill
+    assert "local files, the prompt, or current tool output already answer" in skill
     assert "mcp__flux_llm_kb.kb_finalize_turn" in skill
 
 

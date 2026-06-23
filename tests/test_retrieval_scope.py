@@ -113,6 +113,95 @@ def test_local_only_never_returns_global_fallback(monkeypatch):
     assert results == []
 
 
+def test_workspace_boosted_blends_local_and_strong_cross_workspace_results(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [{"name": "flux", "root_path": "E:\\LLM KB", "enabled": True}],
+    )
+
+    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, url=None):
+        if root_path:
+            return [_episode("local-episode", "Local scoped decision", ["lexical"], score=0.6)]
+        return [_episode("global-episode", "Cross workspace previous fix", ["fuzzy"], score=0.9)]
+
+    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, url=None):
+        if root_name == "flux":
+            return [_chunk("local-chunk", "Local corpus note", ["corpus_lexical"], score=0.7)]
+        return [
+            _chunk("local-chunk", "Duplicate local from global search", ["corpus_lexical"], score=0.99),
+            _chunk("global-chunk", "General indexed PC document", ["corpus_vector"], score=0.65),
+            _chunk("weak-trust", "Broad trust-only document", ["corpus_trust"], score=0.99),
+        ]
+
+    monkeypatch.setattr(database, "search_episodes", fake_search_episodes)
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    results = KnowledgeService().search(
+        "expanded mid-turn search",
+        limit=5,
+        cwd="E:\\LLM KB\\src",
+        scope_mode="workspace_boosted",
+    )
+
+    ids = [item["id"] for item in results]
+    scopes = {item["id"]: item["retrieval_scope"] for item in results}
+    assert {"local-episode", "local-chunk", "global-episode", "global-chunk"}.issubset(ids)
+    assert "weak-trust" not in ids
+    assert ids.count("local-chunk") == 1
+    assert scopes["local-episode"] == "local"
+    assert scopes["local-chunk"] == "local"
+    assert scopes["global-episode"] == "cross_workspace"
+    assert scopes["global-chunk"] == "cross_workspace"
+
+
+def test_workspace_boosted_caps_cross_workspace_results_when_local_evidence_exists(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [{"name": "flux", "root_path": "E:\\LLM KB", "enabled": True}],
+    )
+
+    monkeypatch.setattr(
+        database,
+        "search_episodes",
+        lambda query, *, limit=5, cwd=None, root_path=None, url=None: [
+            _episode("local-episode", "Local lexical match", ["lexical"], score=0.6)
+        ]
+        if root_path
+        else [
+            _episode(f"global-{index}", f"Strong global match {index}", ["fuzzy"], score=0.95 - index / 100)
+            for index in range(4)
+        ],
+    )
+    monkeypatch.setattr(database, "search_corpus_chunks", lambda *args, **kwargs: [])
+
+    results = KnowledgeService().search(
+        "expanded mid-turn search",
+        limit=4,
+        cwd="E:\\LLM KB",
+        scope_mode="workspace_boosted",
+    )
+
+    assert any(item["retrieval_scope"] == "local" for item in results)
+    assert sum(item["retrieval_scope"] == "cross_workspace" for item in results) <= 2
+
+
+def test_global_scope_preserves_broad_results(monkeypatch):
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [])
+    monkeypatch.setattr(database, "search_episodes", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks",
+        lambda *args, **kwargs: [_chunk("trust-only", "Trust ranked global note", ["corpus_trust"], score=0.9)],
+    )
+
+    results = KnowledgeService().search("broad search", scope_mode="global")
+
+    assert [item["id"] for item in results] == ["trust-only"]
+    assert results[0]["retrieval_scope"] == "global"
+
+
 def test_cwd_only_scope_does_not_mix_global_corpus_into_local_results(monkeypatch):
     monkeypatch.setattr(database, "list_monitored_roots", lambda: [])
 
@@ -180,6 +269,7 @@ def test_search_corpus_chunks_accepts_root_name_filter_in_all_streams():
 
     assert "root_name: str | None = None" in function
     assert "r.name = %s" in function
+    assert "r.name AS root_name" in function
     assert "root_name_params" in function
 
 

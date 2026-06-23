@@ -386,7 +386,7 @@ def test_post_search_and_brief_accept_scope_fields(monkeypatch):
 
     search = client.post(
         "/api/search",
-        json={"query": "RFP", "limit": 2, "cwd": "E:/Repo", "scope_mode": "local_only"},
+        json={"query": "RFP", "limit": 2, "cwd": "E:/Repo", "scope_mode": "workspace_boosted"},
     )
     brief = client.post(
         "/api/brief",
@@ -394,11 +394,11 @@ def test_post_search_and_brief_accept_scope_fields(monkeypatch):
     )
 
     assert search.status_code == 200
-    assert search.json() == [{"query": "RFP", "scope_mode": "local_only"}]
+    assert search.json() == [{"query": "RFP", "scope_mode": "workspace_boosted"}]
     assert brief.status_code == 200
     assert brief.json() == {"brief": "RFP:global:700"}
     assert calls["search"]["cwd"] == "E:/Repo"
-    assert calls["search"]["scope_mode"] == "local_only"
+    assert calls["search"]["scope_mode"] == "workspace_boosted"
     assert calls["brief"]["root_name"] == "repo"
     assert calls["brief"]["scope_mode"] == "global"
     assert calls["brief"]["token_budget"] == 700

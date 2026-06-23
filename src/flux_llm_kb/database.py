@@ -324,6 +324,7 @@ def search_corpus_chunks(
                            WHERE duplicate.canonical_asset_id = a.id
                        ) AS duplicate_count,
                        r.trust_rank,
+                       r.name AS root_name,
                        ts_rank(c.search_vector, plainto_tsquery('english', %s)) AS score
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
@@ -349,6 +350,7 @@ def search_corpus_chunks(
                            WHERE duplicate.canonical_asset_id = a.id
                        ) AS duplicate_count,
                        r.trust_rank,
+                       r.name AS root_name,
                        greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
@@ -374,6 +376,7 @@ def search_corpus_chunks(
                            WHERE duplicate.canonical_asset_id = a.id
                        ) AS duplicate_count,
                        r.trust_rank,
+                       r.name AS root_name,
                        1 - (emb.embedding <=> %s::vector) AS score
                 FROM embeddings emb
                 JOIN asset_chunks c
@@ -411,6 +414,7 @@ def search_corpus_chunks(
                                WHERE duplicate.canonical_asset_id = a.id
                            ) AS duplicate_count,
                            r.trust_rank,
+                           r.name AS root_name,
                            1.0 / greatest(r.trust_rank, 1) AS score
                     FROM asset_chunks c
                     JOIN source_assets a ON a.id = c.asset_id
@@ -432,6 +436,7 @@ def search_corpus_chunks(
                                WHERE duplicate.canonical_asset_id = a.id
                            ) AS duplicate_count,
                            r.trust_rank,
+                           r.name AS root_name,
                            1.0 / (
                                1.0 + (
                                    GREATEST(EXTRACT(EPOCH FROM (now() - c.updated_at)), 0)
@@ -463,6 +468,7 @@ def search_corpus_chunks(
                 "raw_scores": result["raw_scores"],
                 "asset_id": result["asset_id"],
                 "source_path": result["source_path"],
+                "root_name": result["root_name"],
                 "duplicate_count": result["duplicate_count"],
                 "trust_rank": result["trust_rank"],
             }
@@ -4140,10 +4146,11 @@ def _add_ranked_corpus_rows(
                 "source_path": row[4],
                 "duplicate_count": int(row[5] or 0),
                 "trust_rank": int(row[6] or 500),
+                "root_name": row[7],
                 "raw_scores": {},
             },
         )
-        detail["raw_scores"][stream] = float(row[7] or 0.0)
+        detail["raw_scores"][stream] = float(row[8] or 0.0)
 
 
 def _entity_row(row: tuple[Any, ...]) -> dict[str, Any]:

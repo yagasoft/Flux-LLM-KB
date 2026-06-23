@@ -99,7 +99,12 @@ Search and brief reads accept optional `cwd`, `root_name`, and `scope_mode`
 parameters. `scope_mode=local_first` is the default: Flux searches matching
 workspace/root evidence first, then falls back to global memory only when local
 results have no lexical or fuzzy evidence. Use `local_only` to forbid global
-fallback, or `global` for deliberate cross-workspace retrieval.
+fallback, or `global` for deliberate cross-workspace retrieval. Explicit
+mid-turn searches can use `scope_mode=workspace_boosted` to blend local
+workspace/root evidence with strong cross-workspace or general indexed evidence
+while suppressing weak trust-only global matches. Briefing should keep the
+default `local_first` mode unless the caller intentionally requests a broader
+scope.
 
 Claim lifecycle and graph primitives are available through the same surfaces for
 kernel-level automation:
@@ -249,9 +254,11 @@ Codex has three Flux integration surfaces:
   `kb.finalize_turn`, or as Codex wrappers such as
   `mcp__flux_llm_kb.kb_brief`, `mcp__flux_llm_kb.kb_search`, and
   `mcp__flux_llm_kb.kb_finalize_turn`. Models may query mid-turn when they need
-  prior decisions, unresolved project context, previous fixes, or
-  user-referenced history; they should skip KB retrieval when local files, the
-  prompt, or current tool output already answer the question.
+  prior decisions, unresolved project context, patterns from other workspaces,
+  general indexed documents, previous fixes, or user-referenced history. Use
+  `kb.brief` for compact workspace-scoped context and `kb.search` with
+  `scope_mode=workspace_boosted` for expanded discovery; skip KB retrieval when
+  local files, the prompt, or current tool output already answer the question.
 - REST remains the fallback surface for tools that can call the local API
   directly, for example `GET /api/brief?query=...`.
 

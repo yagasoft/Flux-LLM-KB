@@ -13,21 +13,25 @@ def create_server():
     mcp = FastMCP(
         "Flux-LLM-KB",
         instructions=(
-            "Use kb.brief before non-trivial work. Store only redacted, durable "
-            "knowledge. You may query mid-turn with kb.brief or kb.search when you "
-            "need prior decisions, unresolved project context, previous fixes, or "
-            "user-referenced history; skip it when local files, the prompt, or current "
-            "tool output already answer the question. Do not persist secrets, raw "
-            "transcripts, or private exports."
+            "Use kb.brief before non-trivial work for compact workspace-scoped context. "
+            "You may query mid-turn with expanded kb.search using "
+            "scope_mode=\"workspace_boosted\" when "
+            "you need prior decisions, unresolved project context, patterns from other "
+            "workspaces, general indexed documents, previous fixes, or user-referenced "
+            "history. Skip KB queries when local files, the prompt, or current tool "
+            "output already answer the question. Store only redacted, durable knowledge. "
+            "Do not persist secrets, raw transcripts, or private exports."
         ),
     )
 
     @mcp.tool(name="kb.search")
     def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+        """Search Flux memory. Use scope_mode="workspace_boosted" for explicit expanded mid-turn discovery."""
         return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
 
     @mcp.tool(name="kb.brief")
     def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+        """Build a compact brief. Default local_first keeps automatic context workspace scoped."""
         return service.brief(
             query,
             token_budget=token_budget,

@@ -19,6 +19,10 @@ from .versioning import collapse_version_families
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
 
 
+LOCAL_SCOPE_SCORE_BOOST = 1.15
+STRONG_VECTOR_MIN_SCORE = 0.35
+
+
 @dataclass(frozen=True)
 class RememberResult:
     id: str
@@ -60,6 +64,8 @@ class KnowledgeService:
         scope = _resolve_retrieval_scope(cwd=cwd, root_name=root_name, scope_mode=scope_mode)
         if scope.mode == "global" or not scope.is_scoped:
             return self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global")
+        if scope.mode == "workspace_boosted":
+            return self._search_workspace_boosted(query, limit=limit, scope=scope)
 
         scoped_results = self._search_once(query, limit=limit, scope=scope, label="local")
         if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
@@ -70,6 +76,34 @@ class KnowledgeService:
             limit=limit,
             scope=RetrievalScope(mode="global"),
             label="global_fallback",
+        )
+
+    def _search_workspace_boosted(self, query: str, *, limit: int, scope: RetrievalScope) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit or 5), 50))
+        local_results = self._search_once(query, limit=limit, scope=scope, label="local")
+        local_keys = {_result_identity(item) for item in local_results}
+
+        cross_candidate_limit = min(max(limit * 2, 8), 50)
+        cross_results = self._search_once(
+            query,
+            limit=cross_candidate_limit,
+            scope=RetrievalScope(mode="global"),
+            label="cross_workspace",
+        )
+        cross_results = [
+            item
+            for item in cross_results
+            if _result_identity(item) not in local_keys and _is_strong_cross_workspace_evidence(item)
+        ]
+        if _has_lexical_or_fuzzy_evidence(local_results):
+            cross_results = cross_results[: max(1, limit // 2)]
+
+        combined = _dedupe_search_results(
+            [_with_scope_score_boost(item, LOCAL_SCOPE_SCORE_BOOST) for item in local_results] + cross_results
+        )
+        return collapse_version_families(
+            sorted(combined, key=lambda item: float(item.get("score") or 0.0), reverse=True),
+            limit=limit,
         )
 
     def _search_once(self, query: str, *, limit: int, scope: RetrievalScope, label: str) -> list[dict[str, Any]]:
@@ -111,7 +145,7 @@ class KnowledgeService:
             sorted(corpus + episodes, key=lambda item: item["score"], reverse=True),
             limit=limit,
         )
-        return [_tag_retrieval_scope(item, label) for item in results]
+        return [_tag_retrieval_scope(item, label, scope=scope) for item in results]
 
     def brief(
         self,
@@ -675,8 +709,10 @@ def _resolve_retrieval_scope(*, cwd: str | None, root_name: str | None, scope_mo
 
 def _normalize_scope_mode(scope_mode: str) -> str:
     mode = str(scope_mode or "local_first").strip().lower()
-    if mode not in {"local_first", "local_only", "global"}:
-        raise ValueError("scope_mode must be one of: local_first, local_only, global")
+    if mode == "expanded":
+        mode = "workspace_boosted"
+    if mode not in {"local_first", "local_only", "global", "workspace_boosted"}:
+        raise ValueError("scope_mode must be one of: local_first, local_only, global, workspace_boosted")
     return mode
 
 
@@ -715,9 +751,52 @@ def _has_lexical_or_fuzzy_evidence(results: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _tag_retrieval_scope(item: dict[str, Any], label: str) -> dict[str, Any]:
+def _is_strong_cross_workspace_evidence(item: dict[str, Any]) -> bool:
+    streams = {str(stream) for stream in item.get("streams", [])}
+    if any("lexical" in stream or "fuzzy" in stream for stream in streams):
+        return True
+    if any("vector" in stream for stream in streams):
+        return float(item.get("score") or 0.0) >= STRONG_VECTOR_MIN_SCORE
+    return False
+
+
+def _result_identity(item: dict[str, Any]) -> tuple[str, str]:
+    kind = str(item.get("logical_kind") or item.get("kind") or "")
+    identifier = str(item.get("id") or item.get("asset_id") or item.get("source_path") or item.get("title") or "")
+    return kind, identifier
+
+
+def _dedupe_search_results(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        identity = _result_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        deduped.append(item)
+    return deduped
+
+
+def _with_scope_score_boost(item: dict[str, Any], boost: float) -> dict[str, Any]:
+    result = dict(item)
+    base_score = float(result.get("score") or 0.0)
+    result["base_score"] = base_score
+    result["scope_score_boost"] = boost
+    result["score"] = base_score * boost
+    return result
+
+
+def _tag_retrieval_scope(item: dict[str, Any], label: str, *, scope: RetrievalScope | None = None) -> dict[str, Any]:
     result = dict(item)
     result["retrieval_scope"] = label
+    if scope:
+        if scope.cwd:
+            result["retrieval_cwd"] = scope.cwd
+        if scope.root_name:
+            result["retrieval_root_name"] = scope.root_name
+        if scope.root_path:
+            result["retrieval_root_path"] = scope.root_path
     return result
 
 
