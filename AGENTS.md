@@ -9,7 +9,12 @@
 - Feature closeout for `codex/...` branches must use `scripts/dev/complete-feature.ps1`.
   Do not manually run the commit/squash-merge/push/deploy/purge sequence unless
   explicitly overridden. If the script fails, stop and report its JSON
-  `failed_step` and `log_path`, fix only that failure, then rerun it. Use
+  `failed_step` and `log_path`, fix only that failure, then rerun it. If a
+  closeout failure or repeated manual workaround shows that
+  `complete-feature.ps1` itself is missing required setup, validation,
+  environment handling, or diagnostics, update the script in the active branch
+  with focused tests or verification, then rerun the script instead of relying
+  on ad hoc pre-steps. Use
   `-DryRun`, `-SkipDeploy`, or `-KeepWorktree` only when explicitly appropriate.
   Never use `git reset --hard`, force-push, or delete a worktree/branch before
   merge, push, deploy, and probes have succeeded.
