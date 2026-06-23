@@ -678,12 +678,21 @@ kbd {
   background: #eaf4ff;
 }
 
+.state-pill.error {
+  color: var(--red);
+  background: #fff0ef;
+}
+
 [data-theme="dark"] .state-pill.warning {
   background: #332415;
 }
 
 [data-theme="dark"] .state-pill.info {
   background: #10273c;
+}
+
+[data-theme="dark"] .state-pill.error {
+  background: #3a1212;
 }
 
 .inspector {
@@ -1228,6 +1237,134 @@ kbd {
   background: var(--surface-soft);
   font-size: 13px;
   font-weight: 650;
+}
+
+.job-table-wrap {
+  overflow-x: auto;
+}
+
+.profile-table.job-table td:first-child {
+  display: table-cell;
+}
+
+.job-table .state-pill {
+  display: inline-flex;
+  white-space: nowrap;
+}
+
+.job-table th,
+.job-table td {
+  white-space: nowrap;
+}
+
+.job-table .job-target,
+.job-table .job-error {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-table .job-target {
+  color: var(--ink);
+}
+
+.job-table .job-error {
+  color: var(--muted);
+}
+
+.job-table .row-button {
+  margin-right: 0;
+  white-space: nowrap;
+}
+
+.chevron-open {
+  transform: rotate(180deg);
+}
+
+.job-detail-row td {
+  padding: 0;
+  background: var(--surface-soft);
+}
+
+.job-detail-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.job-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.job-detail-grid div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.job-detail-grid dt {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.job-detail-grid dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.job-detail-error {
+  padding: 10px 12px;
+  border: 1px solid #f0b8b8;
+  border-radius: 6px;
+  background: #fff7f7;
+}
+
+.job-detail-error strong,
+.job-detail-error p {
+  display: block;
+  margin: 0;
+}
+
+.job-detail-error p {
+  margin-top: 4px;
+  color: var(--red);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.job-raw-payload {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.job-raw-payload summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.job-raw-payload pre {
+  max-height: 240px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+  background: #0f1a25;
+  color: #d6f2ff;
+  font-size: 12px;
 }
 
 .search-results {

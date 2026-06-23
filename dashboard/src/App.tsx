@@ -34,7 +34,7 @@ import {
   X
 } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 type HealthPayload = {
   database?: { ok?: boolean; message?: string };
@@ -1958,11 +1958,171 @@ function JobsTab({ state, onRefresh }: { state: LoadState; onRefresh: () => void
   return (
     <section className="tab-grid">
       <Panel title="Job Queue" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
-        <DataRows rows={jobs} empty="No queued extraction jobs." />
+        <JobQueueTable jobs={jobs} />
       </Panel>
       <BacklogPanel health={state.health} blockedJobs={state.health.jobs?.blocked ?? 0} />
     </section>
   );
+}
+
+function JobQueueTable({ jobs }: { jobs: Array<Record<string, unknown>> }) {
+  const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  if (jobs.length === 0) return <p className="muted">No queued extraction jobs.</p>;
+  return (
+    <div className="job-table-wrap">
+      <table className="profile-table job-table" aria-label="Extraction jobs">
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Job type</th>
+            <th>Target</th>
+            <th>Root</th>
+            <th>Attempts</th>
+            <th>Updated</th>
+            <th>Last error</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          {jobs.map((job, index) => {
+            const id = jobId(job, index);
+            const payload = jobPayload(job);
+            const target = jobTarget(job, payload);
+            const status = stringFromUnknown(job.status) ?? "unknown";
+            const expanded = expandedJobId === id;
+            return (
+              <Fragment key={id}>
+                <tr>
+                  <td><JobStatusBadge status={status} /></td>
+                  <td><strong>{jobTypeLabel(stringFromUnknown(job.job_type))}</strong></td>
+                  <td className="job-target" title={target.path}>{target.path}</td>
+                  <td>{target.root}</td>
+                  <td>{numberFromUnknown(job.attempts) ?? 0}</td>
+                  <td>{formatDate(stringFromUnknown(job.updated_at))}</td>
+                  <td className="job-error" title={stringFromUnknown(job.last_error) ?? ""}>{stringFromUnknown(job.last_error) ?? "-"}</td>
+                  <td>
+                    <button
+                      className="row-button"
+                      type="button"
+                      aria-expanded={expanded}
+                      aria-label={`${expanded ? "Hide" : "Show"} details for job ${id}`}
+                      onClick={() => setExpandedJobId(expanded ? null : id)}
+                    >
+                      <ChevronDown className={expanded ? "chevron-open" : ""} size={15} /> Details
+                    </button>
+                  </td>
+                </tr>
+                {expanded ? <JobDetailRow job={job} payload={payload} target={target} id={id} status={status} /> : null}
+              </Fragment>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function JobDetailRow({
+  job,
+  payload,
+  target,
+  id,
+  status
+}: {
+  job: Record<string, unknown>;
+  payload: Record<string, unknown>;
+  target: { path: string; root: string };
+  id: string;
+  status: string;
+}) {
+  const details = [
+    ["Job id", id],
+    ["Status", humanizeIdentifier(status)],
+    ["Job type", jobTypeLabel(stringFromUnknown(job.job_type))],
+    ["Root", target.root],
+    ["Path", target.path],
+    ["Asset id", stringFromUnknown(payload.asset_id)],
+    ["Source id", stringFromUnknown(payload.source_id)],
+    ["Attempts", String(numberFromUnknown(job.attempts) ?? 0)],
+    ["Created", formatDate(stringFromUnknown(job.created_at))],
+    ["Updated", formatDate(stringFromUnknown(job.updated_at))]
+  ].filter(([, value]) => value && value !== "-");
+  return (
+    <tr className="job-detail-row">
+      <td colSpan={8}>
+        <div className="job-detail-panel">
+          <dl className="job-detail-grid">
+            {details.map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+          {stringFromUnknown(job.last_error) ? (
+            <div className="job-detail-error">
+              <strong>Last error</strong>
+              <p>{stringFromUnknown(job.last_error)}</p>
+            </div>
+          ) : null}
+          <details className="job-raw-payload">
+            <summary>Raw payload</summary>
+            <pre>{JSON.stringify(payload, null, 2)}</pre>
+          </details>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function JobStatusBadge({ status }: { status: string }) {
+  const tone = ["completed", "metadata_only"].includes(status)
+    ? "enabled"
+    : ["pending", "running", "processing", "retrying_locked"].includes(status)
+      ? "info"
+      : status === "failed"
+        ? "error"
+        : status.startsWith("blocked") || status.startsWith("cancelled")
+          ? "warning"
+          : "";
+  return <span className={`state-pill ${tone}`}>{humanizeIdentifier(status)}</span>;
+}
+
+function jobId(job: Record<string, unknown>, index: number) {
+  return stringFromUnknown(job.id) ?? `job-${index + 1}`;
+}
+
+function jobPayload(job: Record<string, unknown>) {
+  return job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload as Record<string, unknown> : {};
+}
+
+function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown>) {
+  const path = stringFromUnknown(payload.path)
+    ?? stringFromUnknown(payload.canonical_path)
+    ?? stringFromUnknown(payload.file_path)
+    ?? stringFromUnknown(job.path)
+    ?? "No path";
+  const root = stringFromUnknown(payload.root_name) ?? stringFromUnknown(job.root_name) ?? "-";
+  return { path, root };
+}
+
+function jobTypeLabel(value?: string) {
+  return humanizeIdentifier(value?.replace(/^corpus_/, "") ?? "job");
+}
+
+function humanizeIdentifier(value: string) {
+  return value
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => formatIdentifierWord(word))
+    .join(" ");
+}
+
+function formatIdentifierWord(word: string) {
+  const upper = word.toUpperCase();
+  if (["API", "HTML", "ID", "IMAP", "JSON", "OCR", "PDF", "UID", "URL", "VSS"].includes(upper)) return upper;
+  return `${word.charAt(0).toUpperCase()}${word.slice(1).toLowerCase()}`;
 }
 
 function HealthStrip({ health, mail, blockedJobs }: { health: HealthPayload; mail: MailStatus; blockedJobs: number }) {
@@ -2517,6 +2677,10 @@ function uniqueActionReasons(detail: ResultDetail) {
 
 function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function StatusChip({ label, ok }: { label: string; ok?: boolean }) {

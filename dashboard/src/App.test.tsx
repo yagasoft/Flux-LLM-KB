@@ -197,12 +197,32 @@ let resultDetailPayload: unknown;
 let fileActionPayload: unknown;
 let healthPayload: unknown;
 let crawlPayload: unknown;
+let jobsPayload: unknown;
 let crawlSyncErrorPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
     healthPayload = health;
     crawlPayload = JSON.parse(JSON.stringify(crawl));
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-pdf",
+          job_type: "corpus_extract_pdf",
+          status: "retrying_locked",
+          payload: {
+            root_name: "docs",
+            path: "docs/open.pdf",
+            asset_id: "asset-1",
+            source_id: "source-1"
+          },
+          attempts: 2,
+          last_error: "file is locked by another process",
+          created_at: "2026-06-23T06:00:00+00:00",
+          updated_at: "2026-06-23T06:04:00+00:00"
+        }
+      ]
+    };
     crawlSyncErrorPayload = undefined;
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
     searchPayload = [{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }];
@@ -225,7 +245,7 @@ describe("Flux dashboard", () => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(healthPayload);
       if (url === "/api/dashboard/crawl") return json(crawlPayload);
-      if (url === "/api/dashboard/jobs") return json({ jobs: [{ id: "job-1", job_type: "corpus_extract_pdf", status: "pending" }] });
+      if (url === "/api/dashboard/jobs") return json(jobsPayload);
       if (url === "/api/dashboard/retrieval-stats") return json({ retrieval: health.retrieval, duplicate_assets: 0 });
       if (url === "/api/mail/status") return json(mail);
       if (url === "/api/outlook-host/status") return json(outlook);
@@ -367,6 +387,42 @@ describe("Flux dashboard", () => {
 
     await user.click(screen.getByRole("button", { name: "Corpus" }));
     expect(await screen.findByRole("heading", { name: "Corpus Monitor" })).toBeInTheDocument();
+  });
+
+  test("job queue renders readable rows and expandable details instead of primary raw JSON", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    const table = await screen.findByRole("table", { name: "Extraction jobs" });
+    expect(within(table).getByText("Retrying Locked")).toBeInTheDocument();
+    expect(within(table).getByText("Extract PDF")).toBeInTheDocument();
+    expect(within(table).getByText("docs/open.pdf")).toBeInTheDocument();
+    expect(within(table).getByText("docs")).toBeInTheDocument();
+    expect(within(table).getByText("2")).toBeInTheDocument();
+    expect(within(table).getByText("file is locked by another process")).toBeInTheDocument();
+    expect(screen.queryByText(/"asset_id"/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show details for job job-pdf" }));
+
+    expect(screen.getByText("job-pdf")).toBeInTheDocument();
+    expect(screen.getByText("asset-1")).toBeInTheDocument();
+    expect(screen.getByText("source-1")).toBeInTheDocument();
+    expect(screen.getByText("Raw payload")).toBeInTheDocument();
+  });
+
+  test("job queue keeps the readable empty state when no jobs are queued", async () => {
+    jobsPayload = { jobs: [] };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    expect(await screen.findByText("No queued extraction jobs.")).toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Extraction jobs" })).not.toBeInTheDocument();
   });
 
   test("corpus dashboard surfaces unstable and locked indexing states", async () => {
