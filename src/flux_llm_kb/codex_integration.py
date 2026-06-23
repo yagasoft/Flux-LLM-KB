@@ -209,14 +209,23 @@ def _write_flux_mcp_server_config(config_path: Path, app_root: Path) -> None:
 
 def _resolve_mcp_python(app_root: Path) -> str:
     requested = os.environ.get("FLUX_KB_PYTHON")
-    if requested:
-        return requested
-    for candidate in (
+    venv_candidates = (
         app_root / ".venv" / "Scripts" / "python.exe",
         app_root / ".venv" / "bin" / "python",
-    ):
+    )
+    candidates: list[str] = []
+    if requested:
+        candidates.append(requested)
+    candidates.extend(str(candidate) for candidate in venv_candidates)
+    candidates.append(sys.executable)
+    for candidate in candidates:
+        if _mcp_python_usable(candidate, app_root):
+            return candidate
+    for candidate in venv_candidates:
         if candidate.exists():
             return str(candidate)
+    if requested:
+        return requested
     return sys.executable
 
 
@@ -317,10 +326,14 @@ def _parse_simple_toml_value(raw_value: str) -> Any:
 
 
 def _mcp_dependency_available(command: str, cwd: str) -> bool:
+    return _mcp_python_usable(command, Path(cwd))
+
+
+def _mcp_python_usable(command: str | Path, cwd: str | Path) -> bool:
     try:
         result = run_no_window(
-            [command, "-c", "import mcp.server.fastmcp"],
-            cwd=cwd,
+            [str(command), "-c", "import flux_llm_kb; import mcp.server.fastmcp"],
+            cwd=str(cwd),
             text=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

@@ -104,7 +104,16 @@ def test_codex_install_plugin_preserves_unrelated_config_and_replaces_stale_mcp_
         encoding="utf-8",
     )
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("FLUX_KB_PYTHON", "C:\\Python\\python.exe")
+    venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FLUX_KB_PYTHON", "C:\\CodexBundled\\python.exe")
+    monkeypatch.setattr(
+        codex_integration,
+        "_mcp_python_usable",
+        lambda command, cwd: str(command) == str(venv_python),
+        raising=False,
+    )
 
     install_plugin(repo_root=repo_root)
 
@@ -113,8 +122,41 @@ def test_codex_install_plugin_preserves_unrelated_config_and_replaces_stale_mcp_
     assert '[mcp_servers.other]' in config
     assert '[profiles.personal]' in config
     assert 'command = "stale-python"' not in config
-    assert 'command = "C:\\\\Python\\\\python.exe"' in config
+    assert f"command = {json.dumps(str(venv_python))}" in config
     assert f"cwd = {json.dumps(str(repo_root))}" in config
+
+
+def test_resolve_mcp_python_ignores_stale_env_when_app_venv_is_usable(tmp_path, monkeypatch):
+    app_root = tmp_path / "app"
+    venv_python = app_root / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+    stale_python = tmp_path / "codex-python.exe"
+    stale_python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FLUX_KB_PYTHON", str(stale_python))
+    monkeypatch.setattr(
+        codex_integration,
+        "_mcp_python_usable",
+        lambda command, cwd: str(command) == str(venv_python),
+        raising=False,
+    )
+
+    assert codex_integration._resolve_mcp_python(app_root) == str(venv_python)
+
+
+def test_resolve_mcp_python_keeps_valid_env_override(tmp_path, monkeypatch):
+    app_root = tmp_path / "app"
+    requested = tmp_path / "custom-python.exe"
+    requested.write_text("", encoding="utf-8")
+    monkeypatch.setenv("FLUX_KB_PYTHON", str(requested))
+    monkeypatch.setattr(
+        codex_integration,
+        "_mcp_python_usable",
+        lambda command, cwd: str(command) == str(requested),
+        raising=False,
+    )
+
+    assert codex_integration._resolve_mcp_python(app_root) == str(requested)
 
 
 def test_codex_status_reports_mcp_configuration_health(tmp_path, monkeypatch):
