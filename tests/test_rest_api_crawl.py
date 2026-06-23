@@ -590,6 +590,82 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
     }
 
 
+def test_retention_policy_and_quality_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = {}
+
+    class FakeService:
+        def list_retention_policies(self):
+            calls["list_retention_policies"] = True
+            return {"policies": [{"memory_class": "claim", "half_life_days": 120, "min_confidence": 0.35, "action": "review"}]}
+
+        def set_retention_policy(self, **kwargs):
+            calls["set_retention_policy"] = kwargs
+            return {
+                "policy": {
+                    "memory_class": kwargs["memory_class"],
+                    "half_life_days": kwargs["half_life_days"],
+                    "min_confidence": kwargs["min_confidence"],
+                    "action": kwargs["action"],
+                },
+                "audit_event": {"id": "audit-1", "event_type": "retention.policy_updated"},
+            }
+
+        def retention_quality_report(self, **kwargs):
+            calls["retention_quality_report"] = kwargs
+            return {
+                "summary": {"total": 1, "needs_review": 1, "by_class": {"claim": 1}, "by_bucket": {"review": 1}},
+                "candidates": [{"id": "claim-1", "memory_class": "claim", "label": "Flux uses PostgreSQL", "reason": "stale"}],
+            }
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    policies = client.get("/api/retention/policies")
+    updated = client.put(
+        "/api/retention/policies/claim",
+        json={"half_life_days": 90, "min_confidence": 0.45, "action": "deprioritize", "reason": "live review"},
+    )
+    quality = client.get("/api/retention/quality", params={"limit": 10})
+
+    assert policies.status_code == 200
+    assert policies.json()["policies"][0]["memory_class"] == "claim"
+    assert updated.status_code == 200
+    assert updated.json()["audit_event"]["event_type"] == "retention.policy_updated"
+    assert quality.status_code == 200
+    assert quality.json()["candidates"][0]["label"] == "Flux uses PostgreSQL"
+    assert calls["list_retention_policies"] is True
+    assert calls["set_retention_policy"] == {
+        "memory_class": "claim",
+        "half_life_days": 90,
+        "min_confidence": 0.45,
+        "action": "deprioritize",
+        "actor": "api",
+        "reason": "live review",
+    }
+    assert calls["retention_quality_report"] == {"limit": 10}
+
+
+def test_retention_policy_route_maps_validation_errors(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    class FakeService:
+        def set_retention_policy(self, **_kwargs):
+            raise ValueError("action must be one of: review, deprioritize, retire")
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.put(
+        "/api/retention/policies/claim",
+        json={"half_life_days": 90, "min_confidence": 0.45, "action": "delete", "reason": "bad"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "retention.policy_invalid"
+
+
 @pytest.mark.parametrize(
     ("exc", "status_code", "code"),
     [

@@ -78,6 +78,12 @@ def create_app():
         decision: str
         rationale: str
 
+    class RetentionPolicyRequest(BaseModel):
+        half_life_days: int
+        min_confidence: float
+        action: str
+        reason: str
+
     class ForgetRequest(BaseModel):
         memory_id: str
         reason: str = "user_request"
@@ -412,6 +418,36 @@ def create_app():
                 user_action="Refresh the capture review queue; this job is no longer pending review.",
                 target={"type": "capture_review_job", "id": job_id},
             ) from exc
+
+    @app.get("/api/retention/policies")
+    def retention_policies():
+        return service.list_retention_policies()
+
+    @app.put("/api/retention/policies/{memory_class}")
+    def retention_policy_update(memory_class: str, request: RetentionPolicyRequest = Body(...)):
+        try:
+            return service.set_retention_policy(
+                memory_class=memory_class,
+                half_life_days=request.half_life_days,
+                min_confidence=request.min_confidence,
+                action=request.action,
+                actor="api",
+                reason=request.reason,
+            )
+        except ValueError as exc:
+            raise FluxApiError(
+                code="retention.policy_invalid",
+                message=str(exc),
+                status_code=400,
+                component="review",
+                retryable=False,
+                user_action="Use memory_class claim, episode, or corpus and action review, deprioritize, or retire.",
+                target={"type": "retention_policy", "id": memory_class},
+            ) from exc
+
+    @app.get("/api/retention/quality")
+    def retention_quality(limit: int = 25):
+        return service.retention_quality_report(limit=limit)
 
     @app.get("/api/corpus/assets")
     def corpus_assets(root_name: str | None = None, path: str | None = None, limit: int = 50):

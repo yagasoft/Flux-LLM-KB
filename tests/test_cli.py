@@ -367,3 +367,73 @@ def test_cli_capture_review_list_and_decide_use_service(monkeypatch, capsys):
         "rationale": "not useful",
         "actor": "cli",
     }
+
+
+def test_cli_retention_policy_and_quality_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = {}
+
+    class FakeService:
+        def list_retention_policies(self):
+            calls["list"] = True
+            return {"policies": [{"memory_class": "claim", "half_life_days": 120, "min_confidence": 0.35, "action": "review"}]}
+
+        def set_retention_policy(self, **kwargs):
+            calls["set"] = kwargs
+            return {
+                "policy": {"memory_class": kwargs["memory_class"], "half_life_days": kwargs["half_life_days"]},
+                "audit_event": {"id": "audit-1", "event_type": "retention.policy_updated"},
+            }
+
+        def retention_quality_report(self, **kwargs):
+            calls["quality"] = kwargs
+            return {
+                "summary": {"total": 1, "needs_review": 1},
+                "candidates": [{"id": "claim-1", "memory_class": "claim", "label": "Flux uses PostgreSQL"}],
+            }
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["retention", "policy", "list"]) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+
+    assert list_payload["policies"][0]["memory_class"] == "claim"
+    assert calls["list"] is True
+
+    assert (
+        cli.main(
+            [
+                "retention",
+                "policy",
+                "set",
+                "claim",
+                "--half-life-days",
+                "90",
+                "--min-confidence",
+                "0.45",
+                "--action",
+                "deprioritize",
+                "--reason",
+                "live review",
+            ]
+        )
+        == 0
+    )
+    set_payload = json.loads(capsys.readouterr().out)
+
+    assert set_payload["audit_event"]["event_type"] == "retention.policy_updated"
+    assert calls["set"] == {
+        "memory_class": "claim",
+        "half_life_days": 90,
+        "min_confidence": 0.45,
+        "action": "deprioritize",
+        "actor": "cli",
+        "reason": "live review",
+    }
+
+    assert cli.main(["retention", "quality", "--limit", "10"]) == 0
+    quality_payload = json.loads(capsys.readouterr().out)
+
+    assert quality_payload["candidates"][0]["label"] == "Flux uses PostgreSQL"
+    assert calls["quality"] == {"limit": 10}

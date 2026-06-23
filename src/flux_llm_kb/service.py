@@ -258,6 +258,31 @@ class KnowledgeService:
             "counts": database.claim_review_counts(),
         }
 
+    def list_retention_policies(self) -> dict[str, Any]:
+        return {"policies": database.list_retention_policies()}
+
+    def set_retention_policy(
+        self,
+        *,
+        memory_class: str,
+        half_life_days: int,
+        min_confidence: float,
+        action: str,
+        actor: str = "system",
+        reason: str,
+    ) -> dict[str, Any]:
+        return database.set_retention_policy(
+            memory_class=memory_class,
+            half_life_days=half_life_days,
+            min_confidence=min_confidence,
+            action=action,
+            actor=actor,
+            reason=reason,
+        )
+
+    def retention_quality_report(self, *, limit: int = 25) -> dict[str, Any]:
+        return database.retention_quality_report(limit=limit)
+
     def list_capture_review_jobs(self, *, limit: int = 50) -> dict[str, Any]:
         return {"jobs": database.list_capture_review_jobs(limit=limit)}
 

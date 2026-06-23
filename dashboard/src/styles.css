@@ -1554,6 +1554,30 @@ kbd {
   background: var(--surface);
 }
 
+.retention-table input,
+.retention-table select {
+  width: 100%;
+  min-width: 110px;
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.compact-field {
+  display: grid;
+  gap: 5px;
+  min-width: 120px;
+}
+
+.compact-field span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
 .review-table-wrap {
   overflow-x: auto;
 }

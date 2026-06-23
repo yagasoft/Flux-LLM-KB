@@ -272,6 +272,9 @@ let auditPayload: unknown;
 let graphPayload: unknown;
 let claimTransitionPayload: unknown;
 let postProcessDryRunPayload: unknown;
+let retentionPoliciesPayload: unknown;
+let retentionQualityPayload: unknown;
+let retentionPolicyUpdatePayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -368,6 +371,45 @@ describe("Flux dashboard", () => {
     };
     claimTransitionPayload = { id: "claim-stale", lifecycle_state: "confirmed" };
     postProcessDryRunPayload = undefined;
+    retentionPoliciesPayload = {
+      policies: [
+        { memory_class: "claim", half_life_days: 120, min_confidence: 0.35, action: "review", updated_by: "system" },
+        { memory_class: "episode", half_life_days: 180, min_confidence: 0.25, action: "deprioritize", updated_by: "system" },
+        { memory_class: "corpus", half_life_days: 365, min_confidence: 0.2, action: "review", updated_by: "system" }
+      ]
+    };
+    retentionQualityPayload = {
+      summary: {
+        total: 3,
+        needs_review: 2,
+        by_class: { claim: 1, episode: 1, corpus: 1 },
+        by_bucket: { healthy: 1, review: 1, deprioritize: 1, retire: 0 }
+      },
+      candidates: [
+        {
+          id: "claim-stale",
+          memory_class: "claim",
+          label: "Flux uses PostgreSQL",
+          reason: "retention:deprioritize",
+          quality_bucket: "deprioritize",
+          confidence: 0.8,
+          lifecycle_state: "stale",
+          retention_action: "deprioritize",
+          updated_at: "2026-06-23T10:00:00+00:00"
+        },
+        {
+          id: "asset-blocked",
+          memory_class: "corpus",
+          label: "blocked.pdf",
+          reason: "blocked_missing_dependency",
+          quality_bucket: "review",
+          confidence: 0.2,
+          extraction_status: "blocked_missing_dependency",
+          updated_at: "2026-06-23T09:00:00+00:00"
+        }
+      ]
+    };
+    retentionPolicyUpdatePayload = undefined;
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -422,6 +464,19 @@ describe("Flux dashboard", () => {
       if (url.startsWith("/api/corpus/assets/") && url.endsWith("/actions")) return json(fileActionPayload);
       if (url.startsWith("/api/claims/") && url.endsWith("/transitions")) return json(claimTransitionPayload);
       if (url.startsWith("/api/claims")) return json(reviewPayload);
+      if (url === "/api/retention/policies" && init?.method !== "PUT") return json(retentionPoliciesPayload);
+      if (url.startsWith("/api/retention/policies/") && init?.method === "PUT") {
+        retentionPolicyUpdatePayload = JSON.parse(String(init.body));
+        return json({
+          policy: {
+            memory_class: decodeURIComponent(url.split("/").pop() ?? ""),
+            ...retentionPolicyUpdatePayload,
+            updated_by: "api"
+          },
+          audit_event: { id: "audit-retention", event_type: "retention.policy_updated" }
+        });
+      }
+      if (url.startsWith("/api/retention/quality")) return json(retentionQualityPayload);
       if (url === "/api/capture/review/job-review/decision" && init?.method === "POST") {
         captureReviewDecisionPayload = JSON.parse(String(init.body));
         captureReviewPayload = { jobs: [] };
@@ -586,7 +641,7 @@ describe("Flux dashboard", () => {
     expect(within(table).getByText("uses")).toBeInTheDocument();
     expect(within(table).getByText("PostgreSQL")).toBeInTheDocument();
     expect(within(table).getByText("stale")).toBeInTheDocument();
-    expect(screen.getByText("retention:deprioritize")).toBeInTheDocument();
+    expect(table).toHaveTextContent("retention:deprioritize");
     expect(screen.getByRole("heading", { name: "Entity Graph" })).toBeInTheDocument();
     expect(screen.getByText("depends_on")).toBeInTheDocument();
     expect(screen.getByText("Capture Review Queue")).toBeInTheDocument();
@@ -606,6 +661,54 @@ describe("Flux dashboard", () => {
           body: JSON.stringify({ transition: "confirm", reason: "dashboard review" })
         })
       );
+    });
+  });
+
+  test("review tab shows retention tuning and memory quality reporting", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Review" }));
+
+    expect(await screen.findByRole("heading", { name: "Retention Tuning" })).toBeInTheDocument();
+    const policyTable = await screen.findByRole("table", { name: "Retention policies" });
+    expect(within(policyTable).getByText("claim")).toBeInTheDocument();
+    expect(within(policyTable).getByDisplayValue("120")).toBeInTheDocument();
+    expect(within(policyTable).getByDisplayValue("0.35")).toBeInTheDocument();
+
+    expect(screen.getByRole("heading", { name: "Memory Quality" })).toBeInTheDocument();
+    expect(screen.getByText("2 need attention")).toBeInTheDocument();
+    const qualityTable = await screen.findByRole("table", { name: "Memory quality candidates" });
+    expect(within(qualityTable).getByText("Flux uses PostgreSQL")).toBeInTheDocument();
+    expect(within(qualityTable).getAllByText("blocked_missing_dependency").length).toBeGreaterThan(0);
+
+    await user.clear(screen.getByLabelText("Claim half-life days"));
+    await user.type(screen.getByLabelText("Claim half-life days"), "90");
+    await user.selectOptions(screen.getByLabelText("Claim retention action"), "deprioritize");
+    await user.clear(screen.getByLabelText("Claim retention reason"));
+    await user.type(screen.getByLabelText("Claim retention reason"), "live review");
+    await user.click(screen.getByRole("button", { name: "Save claim retention policy" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/retention/policies/claim",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({
+            half_life_days: 90,
+            min_confidence: 0.35,
+            action: "deprioritize",
+            reason: "live review"
+          })
+        })
+      );
+    });
+    expect(retentionPolicyUpdatePayload).toEqual({
+      half_life_days: 90,
+      min_confidence: 0.35,
+      action: "deprioritize",
+      reason: "live review"
     });
   });
 

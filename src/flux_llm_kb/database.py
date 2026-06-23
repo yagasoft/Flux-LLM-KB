@@ -20,6 +20,8 @@ from .scoring import LifecycleScoreInput, lifecycle_score, reciprocal_rank_fusio
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
 _MIGRATION_ADVISORY_LOCK_ID = 570_221_876_500_815
+_RETENTION_MEMORY_CLASSES = {"episode", "claim", "corpus"}
+_RETENTION_ACTIONS = {"review", "deprioritize", "retire"}
 
 
 @dataclass(frozen=True)
@@ -829,6 +831,154 @@ def claim_review_counts(*, url: str | None = None) -> dict[str, int]:
                 "retired": int(row[6] or 0),
                 "retention_action": int(row[7] or 0),
             }
+
+
+def list_retention_policies(*, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            return _fetch_retention_policies(cur)
+
+
+def set_retention_policy(
+    *,
+    memory_class: str,
+    half_life_days: int,
+    min_confidence: float,
+    action: str,
+    actor: str = "system",
+    reason: str,
+    url: str | None = None,
+) -> dict[str, Any]:
+    memory_class = _validate_retention_policy_input(
+        memory_class=memory_class,
+        half_life_days=half_life_days,
+        min_confidence=min_confidence,
+        action=action,
+        reason=reason,
+    )
+    metadata = {"reason": reason.strip()}
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, memory_class, half_life_days, min_confidence,
+                       action, updated_by, metadata, created_at, updated_at
+                FROM retention_policies
+                WHERE memory_class = %s
+                """,
+                (memory_class,),
+            )
+            old_row = cur.fetchone()
+            old_policy = _retention_policy_row(old_row) if old_row else None
+            cur.execute(
+                """
+                INSERT INTO retention_policies (
+                    memory_class, half_life_days, min_confidence, action,
+                    updated_by, metadata, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, now())
+                ON CONFLICT (memory_class) DO UPDATE SET
+                    half_life_days = EXCLUDED.half_life_days,
+                    min_confidence = EXCLUDED.min_confidence,
+                    action = EXCLUDED.action,
+                    updated_by = EXCLUDED.updated_by,
+                    metadata = retention_policies.metadata || EXCLUDED.metadata,
+                    updated_at = now()
+                RETURNING id::text, memory_class, half_life_days, min_confidence,
+                          action, updated_by, metadata, created_at, updated_at
+                """,
+                (
+                    memory_class,
+                    int(half_life_days),
+                    float(min_confidence),
+                    action,
+                    actor,
+                    _json(metadata),
+                ),
+            )
+            policy = _retention_policy_row(cur.fetchone())
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, actor, target_table, target_id, details)
+                VALUES ('retention.policy_updated', %s, 'retention_policies', %s, %s::jsonb)
+                RETURNING id::text, event_type
+                """,
+                (
+                    actor,
+                    policy["id"],
+                    _json(
+                        {
+                            "memory_class": memory_class,
+                            "old": old_policy,
+                            "new": policy,
+                            "reason": reason.strip(),
+                        }
+                    ),
+                ),
+            )
+            audit = cur.fetchone()
+            return {
+                "policy": policy,
+                "audit_event": {"id": audit[0], "event_type": audit[1]},
+            }
+
+
+def retention_quality_report(*, limit: int = 25, url: str | None = None) -> dict[str, Any]:
+    row_limit = max(1, min(limit, 200))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            policies = {policy["memory_class"]: policy for policy in _fetch_retention_policies(cur)}
+            candidates: list[dict[str, Any]] = []
+            cur.execute(
+                """
+                SELECT c.id::text, e.name, c.predicate, c.object_text,
+                       c.confidence, c.lifecycle_state, c.retention_action,
+                       c.updated_at, c.created_at, c.contradiction_count,
+                       c.superseded_by::text
+                FROM claims c
+                LEFT JOIN entities e ON e.id = c.subject_entity_id
+                ORDER BY c.updated_at DESC, c.created_at DESC, c.id
+                LIMIT %s
+                """,
+                (row_limit,),
+            )
+            candidates.extend(_claim_quality_candidate(row, policies.get("claim")) for row in cur.fetchall())
+            cur.execute(
+                """
+                SELECT id::text, title, confidence, created_at, updated_at, superseded_by::text
+                FROM episodes
+                ORDER BY updated_at DESC, created_at DESC, id
+                LIMIT %s
+                """,
+                (row_limit,),
+            )
+            candidates.extend(_episode_quality_candidate(row, policies.get("episode")) for row in cur.fetchall())
+            cur.execute(
+                """
+                SELECT a.id::text, a.path,
+                       least(greatest(coalesce(r.trust_rank, 0)::double precision / 10.0, 0.0), 1.0) AS confidence,
+                       a.extraction_status, a.extraction_tier,
+                       a.canonical_asset_id IS NULL AS is_canonical,
+                       a.deleted_at, a.last_seen_at, a.updated_at
+                FROM source_assets a
+                LEFT JOIN monitored_roots r ON r.id = a.root_id
+                ORDER BY a.updated_at DESC, a.last_seen_at DESC, a.id
+                LIMIT %s
+                """,
+                (row_limit,),
+            )
+            candidates.extend(_corpus_quality_candidate(row, policies.get("corpus")) for row in cur.fetchall())
+
+    bounded = candidates[:row_limit]
+    summary = _retention_quality_summary(bounded)
+    return {
+        "summary": summary,
+        "policies": list(policies.values()),
+        "candidates": bounded,
+    }
 
 
 def upsert_entity_relation(
@@ -4383,6 +4533,203 @@ def _entity_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "attributes": row[3] or {},
         "created_at": row[4].isoformat() if row[4] else None,
     }
+
+
+def _fetch_retention_policies(cur: Any) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT id::text, memory_class, half_life_days, min_confidence,
+               action, updated_by, metadata, created_at, updated_at
+        FROM retention_policies
+        ORDER BY CASE memory_class
+                   WHEN 'claim' THEN 1
+                   WHEN 'episode' THEN 2
+                   WHEN 'corpus' THEN 3
+                   ELSE 4
+                 END,
+                 memory_class
+        """
+    )
+    return [_retention_policy_row(row) for row in cur.fetchall()]
+
+
+def _retention_policy_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "memory_class": row[1],
+        "half_life_days": int(row[2] or 0),
+        "min_confidence": float(row[3] or 0.0),
+        "action": row[4],
+        "updated_by": row[5],
+        "metadata": row[6] or {},
+        "created_at": row[7].isoformat() if row[7] else None,
+        "updated_at": row[8].isoformat() if row[8] else None,
+    }
+
+
+def _validate_retention_policy_input(
+    *,
+    memory_class: str,
+    half_life_days: int,
+    min_confidence: float,
+    action: str,
+    reason: str,
+) -> str:
+    normalized_class = str(memory_class or "").strip().lower()
+    if normalized_class not in _RETENTION_MEMORY_CLASSES:
+        raise ValueError("memory_class must be one of: claim, corpus, episode")
+    if int(half_life_days) <= 0:
+        raise ValueError("half_life_days must be greater than 0")
+    if not 0.0 <= float(min_confidence) <= 1.0:
+        raise ValueError("min_confidence must be between 0 and 1")
+    if action not in _RETENTION_ACTIONS:
+        raise ValueError("action must be one of: review, deprioritize, retire")
+    if not str(reason or "").strip():
+        raise ValueError("reason is required")
+    return normalized_class
+
+
+def _claim_quality_candidate(row: tuple[Any, ...], policy: dict[str, Any] | None) -> dict[str, Any]:
+    confidence = float(row[4] or 0.0)
+    state = row[5] or "active"
+    retention_action = row[6] or "keep"
+    contradiction_count = int(row[9] or 0)
+    superseded = bool(row[10])
+    policy_action = _policy_action(policy)
+    reason = "current"
+    bucket = "healthy"
+    if retention_action != "keep":
+        reason = f"retention:{retention_action}"
+        bucket = retention_action
+    elif state in {"stale", "contradicted", "superseded", "retired"}:
+        reason = state
+        bucket = policy_action
+    elif confidence < _policy_min_confidence(policy):
+        reason = "low_confidence"
+        bucket = policy_action
+    elif contradiction_count > 0:
+        reason = "contradiction"
+        bucket = policy_action
+    elif superseded:
+        reason = "superseded"
+        bucket = policy_action
+    elif _older_than_policy(row[8], policy):
+        reason = "age_exceeds_policy"
+        bucket = policy_action
+    return {
+        "id": row[0],
+        "memory_class": "claim",
+        "label": _safe_label(" ".join(str(part or "") for part in (row[1], row[2], row[3]))),
+        "reason": reason,
+        "quality_bucket": bucket,
+        "confidence": confidence,
+        "lifecycle_state": state,
+        "retention_action": retention_action,
+        "updated_at": row[7].isoformat() if row[7] else None,
+    }
+
+
+def _episode_quality_candidate(row: tuple[Any, ...], policy: dict[str, Any] | None) -> dict[str, Any]:
+    confidence = float(row[2] or 0.0)
+    policy_action = _policy_action(policy)
+    reason = "current"
+    bucket = "healthy"
+    if bool(row[5]):
+        reason = "superseded"
+        bucket = policy_action
+    elif confidence < _policy_min_confidence(policy):
+        reason = "low_confidence"
+        bucket = policy_action
+    elif _older_than_policy(row[3], policy):
+        reason = "age_exceeds_policy"
+        bucket = policy_action
+    return {
+        "id": row[0],
+        "memory_class": "episode",
+        "label": _safe_label(row[1]),
+        "reason": reason,
+        "quality_bucket": bucket,
+        "confidence": confidence,
+        "updated_at": row[4].isoformat() if row[4] else None,
+    }
+
+
+def _corpus_quality_candidate(row: tuple[Any, ...], policy: dict[str, Any] | None) -> dict[str, Any]:
+    confidence = float(row[2] or 0.0)
+    status = row[3] or "unknown"
+    tier = row[4] or "metadata_only"
+    is_canonical = bool(row[5])
+    deleted = bool(row[6])
+    policy_action = _policy_action(policy)
+    reason = "current"
+    bucket = "healthy"
+    if deleted:
+        reason = "deleted"
+        bucket = "retire"
+    elif not is_canonical:
+        reason = "duplicate"
+        bucket = "deprioritize"
+    elif str(status).startswith("blocked") or status in {"failed", "retrying_locked"}:
+        reason = status
+        bucket = "review"
+    elif status == "metadata_only" or tier == "metadata_only":
+        reason = "metadata_only"
+        bucket = policy_action
+    elif confidence < _policy_min_confidence(policy):
+        reason = "low_trust"
+        bucket = policy_action
+    return {
+        "id": row[0],
+        "memory_class": "corpus",
+        "label": _safe_label(Path(str(row[1] or "")).name or row[1]),
+        "reason": reason,
+        "quality_bucket": bucket,
+        "confidence": confidence,
+        "extraction_status": status,
+        "retention_action": None,
+        "updated_at": row[8].isoformat() if row[8] else None,
+    }
+
+
+def _retention_quality_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    by_class = {"claim": 0, "episode": 0, "corpus": 0}
+    by_bucket = {"healthy": 0, "review": 0, "deprioritize": 0, "retire": 0}
+    needs_review = 0
+    for candidate in candidates:
+        memory_class = str(candidate.get("memory_class") or "unknown")
+        bucket = str(candidate.get("quality_bucket") or "healthy")
+        by_class[memory_class] = by_class.get(memory_class, 0) + 1
+        by_bucket[bucket] = by_bucket.get(bucket, 0) + 1
+        if bucket != "healthy":
+            needs_review += 1
+    return {
+        "total": len(candidates),
+        "needs_review": needs_review,
+        "by_class": by_class,
+        "by_bucket": by_bucket,
+    }
+
+
+def _policy_action(policy: dict[str, Any] | None) -> str:
+    action = str((policy or {}).get("action") or "review")
+    return action if action in _RETENTION_ACTIONS else "review"
+
+
+def _policy_min_confidence(policy: dict[str, Any] | None) -> float:
+    return float((policy or {}).get("min_confidence") or 0.0)
+
+
+def _older_than_policy(created_at: Any, policy: dict[str, Any] | None) -> bool:
+    age_days = _age_days(created_at)
+    half_life_days = int((policy or {}).get("half_life_days") or 0)
+    return age_days is not None and half_life_days > 0 and age_days > half_life_days
+
+
+def _safe_label(value: Any, *, max_length: int = 120) -> str:
+    label = " ".join(str(value or "").split())
+    if not label:
+        return "-"
+    return label if len(label) <= max_length else f"{label[: max_length - 1]}..."
 
 
 def _claim_review_reasons(claim: dict[str, Any]) -> list[str]:

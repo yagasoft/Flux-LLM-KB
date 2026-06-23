@@ -108,6 +108,14 @@ def create_server():
             actor="mcp",
         )
 
+    @mcp.tool(name="kb.retention_policies")
+    def retention_policies():
+        return service.list_retention_policies()
+
+    @mcp.tool(name="kb.retention_quality")
+    def retention_quality(limit: int = 25):
+        return service.retention_quality_report(limit=limit)
+
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
         return service.remember(title, summary, metadata={"source": "finalize_turn"}, cwd=cwd, root_name=root_name).__dict__

@@ -39,6 +39,16 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "CREATE TABLE IF NOT EXISTS mail_post_process_events" in mail_post_process_migration.sql
     assert "ADD COLUMN IF NOT EXISTS post_process_status" in mail_post_process_migration.sql
     assert "idx_mail_post_process_events_profile" in mail_post_process_migration.sql
+    retention_quality_migration = next(item for item in migrations if item.name == "0012_retention_quality")
+    assert "ALTER TABLE retention_policies" in retention_quality_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS created_at" in retention_quality_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS updated_by" in retention_quality_migration.sql
+    assert "retention_policies_half_life_positive" in retention_quality_migration.sql
+    assert "retention_policies_min_confidence_range" in retention_quality_migration.sql
+    assert "retention_policies_action_allowed" in retention_quality_migration.sql
+    assert "VALUES ('episode'" in retention_quality_migration.sql
+    assert "VALUES ('claim'" in retention_quality_migration.sql
+    assert "VALUES ('corpus'" in retention_quality_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

@@ -384,6 +384,49 @@ type CaptureReviewPayload = {
   jobs?: CaptureReviewJob[];
 };
 
+type RetentionPolicy = {
+  memory_class: string;
+  half_life_days?: number;
+  min_confidence?: number;
+  action?: string;
+  updated_by?: string | null;
+  updated_at?: string | null;
+};
+
+type RetentionPolicyPayload = {
+  policies?: RetentionPolicy[];
+};
+
+type RetentionPolicyUpdate = {
+  half_life_days: number;
+  min_confidence: number;
+  action: string;
+  reason: string;
+};
+
+type RetentionQualityCandidate = {
+  id?: string;
+  memory_class?: string;
+  label?: string;
+  reason?: string;
+  quality_bucket?: string;
+  confidence?: number;
+  lifecycle_state?: string;
+  extraction_status?: string;
+  retention_action?: string | null;
+  updated_at?: string | null;
+};
+
+type RetentionQualityPayload = {
+  summary?: {
+    total?: number;
+    needs_review?: number;
+    by_class?: Record<string, number>;
+    by_bucket?: Record<string, number>;
+  };
+  candidates?: RetentionQualityCandidate[];
+};
+
 type AuditEvent = {
   id?: string;
   event_type?: string;
@@ -517,6 +560,8 @@ export default function App() {
   const [claimReview, setClaimReview] = useState<ClaimReviewPayload>({ claims: [], counts: {} });
   const [captureReview, setCaptureReview] = useState<CaptureReviewPayload>({ jobs: [] });
   const [captureReviewAudit, setCaptureReviewAudit] = useState<AuditEvent[]>([]);
+  const [retentionPolicies, setRetentionPolicies] = useState<RetentionPolicyPayload>({ policies: [] });
+  const [retentionQuality, setRetentionQuality] = useState<RetentionQualityPayload>({ summary: {}, candidates: [] });
   const [captureDecision, setCaptureDecision] = useState<CaptureDecisionState | null>(null);
   const [captureDecisionReason, setCaptureDecisionReason] = useState("");
   const [selectedClaimId, setSelectedClaimId] = useState("");
@@ -858,15 +903,19 @@ export default function App() {
       params.set("review", reviewFilter);
       if (reviewStateFilter) params.set("state", reviewStateFilter);
       params.set("limit", "50");
-      const [claims, capture, audit] = await Promise.all([
+      const [claims, capture, audit, policies, quality] = await Promise.all([
         fetchRequiredJson<ClaimReviewPayload>(`/api/claims?${params.toString()}`),
         getJson<CaptureReviewPayload>("/api/capture/review?limit=50", { jobs: [] }),
-        getJson<AuditPayload>("/api/audit?limit=50", [])
+        getJson<AuditPayload>("/api/audit?limit=50", []),
+        getJson<RetentionPolicyPayload>("/api/retention/policies", { policies: [] }),
+        getJson<RetentionQualityPayload>("/api/retention/quality?limit=25", { summary: {}, candidates: [] })
       ]);
       const nextClaims = claims.claims ?? [];
       setClaimReview({ claims: nextClaims, counts: claims.counts ?? {} });
       setCaptureReview(capture);
       setCaptureReviewAudit(captureReviewAuditEvents(audit));
+      setRetentionPolicies(policies);
+      setRetentionQuality(quality);
       setSelectedClaimId((current) => nextClaims.some((claim) => claim.id === current) ? current : nextClaims[0]?.id ?? "");
     } catch (error) {
       setToast(`Could not load claim review queue: ${errorMessage(error)}`);
@@ -899,6 +948,16 @@ export default function App() {
       await loadReview();
     } catch (error) {
       setToast(`Claim transition failed for ${claim.id}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function saveRetentionPolicy(policy: RetentionPolicy, update: RetentionPolicyUpdate) {
+    try {
+      await sendJson(`/api/retention/policies/${encodeURIComponent(policy.memory_class)}`, "PUT", update);
+      setToast(`Retention policy saved for ${policy.memory_class}.`);
+      await loadReview();
+    } catch (error) {
+      setToast(`Retention policy update failed for ${policy.memory_class}: ${errorMessage(error)}`);
     }
   }
 
@@ -1189,6 +1248,8 @@ export default function App() {
             payload={claimReview}
             capture={captureReview}
             captureAudit={captureReviewAudit}
+            retentionPolicies={retentionPolicies}
+            retentionQuality={retentionQuality}
             graph={claimGraph}
             selectedClaim={selectedClaim}
             loading={reviewLoading}
@@ -1199,6 +1260,7 @@ export default function App() {
             onSelectClaim={(claim) => setSelectedClaimId(claim.id)}
             onTransition={(claim, transition) => void transitionReviewClaim(claim, transition)}
             onCaptureDecision={openCaptureDecision}
+            onRetentionPolicySave={(policy, update) => void saveRetentionPolicy(policy, update)}
             onRefresh={() => void loadReview()}
           />
         )}
@@ -2150,6 +2212,8 @@ function ReviewTab({
   payload,
   capture,
   captureAudit,
+  retentionPolicies,
+  retentionQuality,
   graph,
   selectedClaim,
   loading,
@@ -2160,11 +2224,14 @@ function ReviewTab({
   onSelectClaim,
   onTransition,
   onCaptureDecision,
+  onRetentionPolicySave,
   onRefresh
 }: {
   payload: ClaimReviewPayload;
   capture: CaptureReviewPayload;
   captureAudit: AuditEvent[];
+  retentionPolicies: RetentionPolicyPayload;
+  retentionQuality: RetentionQualityPayload;
   graph: GraphPayload;
   selectedClaim?: ClaimReviewClaim;
   loading: boolean;
@@ -2175,6 +2242,7 @@ function ReviewTab({
   onSelectClaim: (claim: ClaimReviewClaim) => void;
   onTransition: (claim: ClaimReviewClaim, transition: string) => void;
   onCaptureDecision: (job: CaptureReviewJob, decision: "approve" | "reject") => void;
+  onRetentionPolicySave: (policy: RetentionPolicy, update: RetentionPolicyUpdate) => void;
   onRefresh: () => void;
 }) {
   const claims = payload.claims ?? [];
@@ -2218,6 +2286,12 @@ function ReviewTab({
       </Panel>
       <Panel title="Entity Graph">
         <GraphEdgeTable graph={graph} />
+      </Panel>
+      <Panel title="Retention Tuning">
+        <RetentionPolicyTable policies={retentionPolicies.policies ?? []} onSave={onRetentionPolicySave} />
+      </Panel>
+      <Panel title="Memory Quality">
+        <RetentionQualityReport payload={retentionQuality} />
       </Panel>
       <Panel title="Capture Review Queue">
         <CaptureReviewTable jobs={capture.jobs ?? []} onDecision={onCaptureDecision} />
@@ -2351,6 +2425,147 @@ function GraphEdgeTable({ graph }: { graph: GraphPayload }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function RetentionPolicyTable({ policies, onSave }: { policies: RetentionPolicy[]; onSave: (policy: RetentionPolicy, update: RetentionPolicyUpdate) => void }) {
+  if (policies.length === 0) return <p className="muted padded">No retention policies are available.</p>;
+  return (
+    <div className="review-table-wrap">
+      <table className="profile-table review-table retention-table" aria-label="Retention policies">
+        <thead>
+          <tr>
+            <th>Class</th>
+            <th>Half-life</th>
+            <th>Minimum Confidence</th>
+            <th>Action</th>
+            <th>Reason</th>
+            <th>Updated By</th>
+            <th>Save</th>
+          </tr>
+        </thead>
+        <tbody>
+          {policies.map((policy) => <RetentionPolicyRow key={policy.memory_class} policy={policy} onSave={onSave} />)}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RetentionPolicyRow({ policy, onSave }: { policy: RetentionPolicy; onSave: (policy: RetentionPolicy, update: RetentionPolicyUpdate) => void }) {
+  const classLabel = titleCase(policy.memory_class);
+  const [halfLife, setHalfLife] = useState(String(policy.half_life_days ?? ""));
+  const [minConfidence, setMinConfidence] = useState(String(policy.min_confidence ?? ""));
+  const [action, setAction] = useState(policy.action ?? "review");
+  const [reason, setReason] = useState("dashboard review");
+
+  useEffect(() => {
+    setHalfLife(String(policy.half_life_days ?? ""));
+    setMinConfidence(String(policy.min_confidence ?? ""));
+    setAction(policy.action ?? "review");
+    setReason("dashboard review");
+  }, [policy.half_life_days, policy.min_confidence, policy.action]);
+
+  const update: RetentionPolicyUpdate = {
+    half_life_days: Number.parseInt(halfLife, 10),
+    min_confidence: Number.parseFloat(minConfidence),
+    action,
+    reason: reason.trim()
+  };
+  const saveDisabled = !Number.isFinite(update.half_life_days) || update.half_life_days <= 0 || !Number.isFinite(update.min_confidence) || update.min_confidence < 0 || update.min_confidence > 1 || !update.reason;
+
+  return (
+    <tr>
+      <td><strong>{policy.memory_class}</strong></td>
+      <td>
+        <label className="compact-field">
+          <span>{classLabel} half-life days</span>
+          <input type="number" min="1" value={halfLife} onChange={(event) => setHalfLife(event.target.value)} />
+        </label>
+      </td>
+      <td>
+        <label className="compact-field">
+          <span>{classLabel} minimum confidence</span>
+          <input type="number" min="0" max="1" step="0.01" value={minConfidence} onChange={(event) => setMinConfidence(event.target.value)} />
+        </label>
+      </td>
+      <td>
+        <label className="compact-field">
+          <span>{classLabel} retention action</span>
+          <select value={action} onChange={(event) => setAction(event.target.value)}>
+            <option value="review">review</option>
+            <option value="deprioritize">deprioritize</option>
+            <option value="retire">retire</option>
+          </select>
+        </label>
+      </td>
+      <td>
+        <label className="compact-field">
+          <span>{classLabel} retention reason</span>
+          <input value={reason} onChange={(event) => setReason(event.target.value)} />
+        </label>
+      </td>
+      <td>{policy.updated_by ?? "-"}</td>
+      <td>
+        <button
+          className="ghost-action compact"
+          type="button"
+          aria-label={`Save ${policy.memory_class} retention policy`}
+          disabled={saveDisabled}
+          onClick={() => onSave(policy, update)}
+        >
+          Save
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function RetentionQualityReport({ payload }: { payload: RetentionQualityPayload }) {
+  const summary = payload.summary ?? {};
+  const candidates = payload.candidates ?? [];
+  return (
+    <>
+      <div className="review-summary">
+        <Stat label="Total" value={String(summary.total ?? 0)} />
+        <Stat label="Needs Review" value={String(summary.needs_review ?? 0)} />
+        <Stat label="Review" value={String(summary.by_bucket?.review ?? 0)} />
+        <Stat label="Deprioritize" value={String(summary.by_bucket?.deprioritize ?? 0)} />
+      </div>
+      <div className="review-inline-status">{summary.needs_review ?? 0} need attention</div>
+      {candidates.length === 0 ? (
+        <p className="muted padded">No memory quality candidates.</p>
+      ) : (
+        <div className="review-table-wrap">
+          <table className="profile-table review-table" aria-label="Memory quality candidates">
+            <thead>
+              <tr>
+                <th>Class</th>
+                <th>Label</th>
+                <th>Reason</th>
+                <th>Bucket</th>
+                <th>Confidence</th>
+                <th>State</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {candidates.map((candidate) => (
+                <tr key={`${candidate.memory_class}-${candidate.id}`}>
+                  <td>{candidate.memory_class ?? "-"}</td>
+                  <td className="claim-object" title={candidate.label ?? ""}>{candidate.label ?? "-"}</td>
+                  <td>{candidate.reason ?? "-"}</td>
+                  <td><RootStateBadge state={candidate.quality_bucket ?? "healthy"} /></td>
+                  <td>{typeof candidate.confidence === "number" ? candidate.confidence.toFixed(2) : "-"}</td>
+                  <td>{candidate.lifecycle_state ?? candidate.extraction_status ?? candidate.retention_action ?? "-"}</td>
+                  <td>{formatDate(candidate.updated_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -3658,4 +3873,10 @@ function formatDate(value?: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function titleCase(value?: string | null) {
+  const text = String(value ?? "").replace(/[_-]+/g, " ").trim();
+  if (!text) return "";
+  return text.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }

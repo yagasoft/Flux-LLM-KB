@@ -86,6 +86,20 @@ def main(argv: list[str] | None = None) -> int:
     capture_review_decide.add_argument("--decision", required=True, choices=["approve", "reject"])
     capture_review_decide.add_argument("--rationale", required=True)
 
+    retention_parser = subparsers.add_parser("retention", help="Inspect and tune retention quality")
+    retention_subparsers = retention_parser.add_subparsers(dest="retention_command", required=True)
+    retention_policy = retention_subparsers.add_parser("policy", help="Manage retention policies")
+    retention_policy_subparsers = retention_policy.add_subparsers(dest="retention_policy_command", required=True)
+    retention_policy_subparsers.add_parser("list", help="List retention policies")
+    retention_policy_set = retention_policy_subparsers.add_parser("set", help="Update a retention policy")
+    retention_policy_set.add_argument("memory_class", choices=["claim", "episode", "corpus"])
+    retention_policy_set.add_argument("--half-life-days", type=int, required=True)
+    retention_policy_set.add_argument("--min-confidence", type=float, required=True)
+    retention_policy_set.add_argument("--action", required=True, choices=["review", "deprioritize", "retire"])
+    retention_policy_set.add_argument("--reason", required=True)
+    retention_quality = retention_subparsers.add_parser("quality", help="Show memory quality report")
+    retention_quality.add_argument("--limit", type=int, default=25)
+
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
     forget_parser.add_argument("--reason", default="user_request")
@@ -287,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         "claim": _claim,
         "graph": _graph,
         "capture": _capture,
+        "retention": _retention,
         "forget": _forget,
         "audit": _audit,
         "backfill-codex": _backfill_codex,
@@ -434,6 +449,32 @@ def _capture_review(args: argparse.Namespace) -> int:
         )
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.capture_review_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _retention(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.retention_command == "policy":
+        if args.retention_policy_command == "list":
+            payload = service.list_retention_policies()
+        elif args.retention_policy_command == "set":
+            payload = service.set_retention_policy(
+                memory_class=args.memory_class,
+                half_life_days=args.half_life_days,
+                min_confidence=args.min_confidence,
+                action=args.action,
+                actor="cli",
+                reason=args.reason,
+            )
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.retention_policy_command)
+    elif args.retention_command == "quality":
+        payload = service.retention_quality_report(limit=args.limit)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.retention_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

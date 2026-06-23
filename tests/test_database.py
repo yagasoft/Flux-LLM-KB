@@ -838,6 +838,217 @@ def test_claim_review_counts_returns_total_current_and_review_breakdown(monkeypa
     }
 
 
+def test_retention_policies_list_and_update_are_audited(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                ("policy-claim", "claim", 120, 0.35, "review", "system", {}, timestamp, timestamp),
+                ("policy-episode", "episode", 180, 0.25, "deprioritize", "system", {}, timestamp, timestamp),
+            ]
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, memory_class" in sql:
+                return ("policy-claim", "claim", 120, 0.35, "review", "system", {}, timestamp, timestamp)
+            if "INSERT INTO retention_policies" in sql:
+                return ("policy-claim", "claim", 90, 0.45, "deprioritize", "tester", {"reason": "live review"}, timestamp, timestamp)
+            if "INSERT INTO audit_events" in sql:
+                return ("audit-1", "retention.policy_updated")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    policies = database.list_retention_policies()
+    result = database.set_retention_policy(
+        memory_class="claim",
+        half_life_days=90,
+        min_confidence=0.45,
+        action="deprioritize",
+        actor="tester",
+        reason="live review",
+    )
+
+    assert policies[0]["memory_class"] == "claim"
+    assert policies[0]["min_confidence"] == 0.35
+    assert result["policy"]["half_life_days"] == 90
+    assert result["audit_event"] == {"id": "audit-1", "event_type": "retention.policy_updated"}
+    audit_sql, audit_params = next(item for item in executed if "INSERT INTO audit_events" in item[0])
+    assert "retention.policy_updated" in audit_sql
+    assert audit_params[0] == "tester"
+    assert audit_params[1] == "policy-claim"
+    assert json.loads(audit_params[2])["reason"] == "live review"
+
+
+def test_retention_policy_update_rejects_invalid_inputs_without_database():
+    with pytest.raises(ValueError, match="memory_class"):
+        database.set_retention_policy(
+            memory_class="mail",
+            half_life_days=90,
+            min_confidence=0.3,
+            action="review",
+            actor="tester",
+            reason="invalid",
+        )
+    with pytest.raises(ValueError, match="half_life_days"):
+        database.set_retention_policy(
+            memory_class="claim",
+            half_life_days=0,
+            min_confidence=0.3,
+            action="review",
+            actor="tester",
+            reason="invalid",
+        )
+    with pytest.raises(ValueError, match="min_confidence"):
+        database.set_retention_policy(
+            memory_class="claim",
+            half_life_days=90,
+            min_confidence=1.5,
+            action="review",
+            actor="tester",
+            reason="invalid",
+        )
+    with pytest.raises(ValueError, match="action"):
+        database.set_retention_policy(
+            memory_class="claim",
+            half_life_days=90,
+            min_confidence=0.3,
+            action="delete",
+            actor="tester",
+            reason="invalid",
+        )
+    with pytest.raises(ValueError, match="reason"):
+        database.set_retention_policy(
+            memory_class="claim",
+            half_life_days=90,
+            min_confidence=0.3,
+            action="review",
+            actor="tester",
+            reason="   ",
+        )
+
+
+def test_retention_quality_report_aggregates_sanitized_candidates(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "FROM retention_policies" in sql:
+                return [
+                    ("policy-claim", "claim", 120, 0.5, "review", "system", {}, timestamp, timestamp),
+                    ("policy-episode", "episode", 180, 0.7, "deprioritize", "system", {}, timestamp, timestamp),
+                    ("policy-corpus", "corpus", 365, 0.2, "review", "system", {}, timestamp, timestamp),
+                ]
+            if "FROM claims c" in sql:
+                return [
+                    (
+                        "claim-1",
+                        "Flux",
+                        "uses",
+                        "PostgreSQL",
+                        0.42,
+                        "stale",
+                        "deprioritize",
+                        timestamp,
+                        timestamp,
+                        1,
+                        None,
+                    )
+                ]
+            if "FROM episodes" in sql:
+                return [
+                    (
+                        "episode-1",
+                        "Roadmap session",
+                        0.4,
+                        timestamp,
+                        timestamp,
+                        None,
+                    )
+                ]
+            if "FROM source_assets" in sql:
+                return [
+                    (
+                        "asset-1",
+                        "docs/blocked.pdf",
+                        0.8,
+                        "blocked_missing_dependency",
+                        "metadata_only",
+                        True,
+                        None,
+                        timestamp,
+                        timestamp,
+                    )
+                ]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    report = database.retention_quality_report(limit=10)
+
+    assert report["summary"]["total"] == 3
+    assert report["summary"]["needs_review"] == 3
+    assert report["summary"]["by_class"] == {"claim": 1, "episode": 1, "corpus": 1}
+    assert report["summary"]["by_bucket"]["review"] == 1
+    assert report["summary"]["by_bucket"]["deprioritize"] == 2
+    assert report["candidates"][0]["memory_class"] == "claim"
+    assert report["candidates"][0]["label"] == "Flux uses PostgreSQL"
+    assert report["candidates"][1]["label"] == "Roadmap session"
+    assert "summary" not in report["candidates"][1]
+    assert "body" not in json.dumps(report)
+    assert report["candidates"][2]["reason"] == "blocked_missing_dependency"
+
+
 def test_list_capture_review_jobs_returns_pending_review_metadata_only(monkeypatch):
     executed = []
 
