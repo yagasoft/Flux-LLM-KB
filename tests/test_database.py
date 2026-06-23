@@ -418,6 +418,16 @@ def test_persist_crawl_plan_requeues_legacy_metadata_only_documents():
     assert "EXCLUDED.extraction_status = 'queued'" in source
 
 
+def test_corpus_status_queries_include_lock_tolerant_states():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "asset.extraction_status" in source
+    assert "pending_stable" in source
+    assert "retrying_locked" in source
+    assert "blocked_locked" in source
+    assert "status IN ('pending', 'retrying_locked')" in source
+
+
 def test_imap_mail_schedule_has_due_query_and_advances_after_sync_run():
     source = Path(database.__file__).read_text(encoding="utf-8")
 

@@ -33,7 +33,7 @@ scripts:
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
-| V2.7 Mail And Retrieval Production Hardening | in progress | Search result content actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, and structured actionable error diagnostics are implemented; lock-tolerant indexing, mail post-processing, retrieval explainability, and scheduler reliability remain. |
+| V2.7 Mail And Retrieval Production Hardening | in progress | Search result content actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured actionable error diagnostics, and lock-tolerant indexing/watch stability states are implemented; mail post-processing, retrieval explainability, and scheduler reliability remain. |
 | V2.8 Indexer Acceleration And Local Inference Optimization | planned | Dedicated acceleration lane for GPU/local inference routing, caches, bounded workers, OCR/ASR/vision batching, native watchers, vectorization throughput, and indexing benchmarks. |
 | V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, optional ParadeDB/BM25, and local librarian workers. |
 | V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
@@ -53,6 +53,11 @@ scripts:
 - Separate Windows Outlook COM host process model for selected-folder catch-up.
 - Automatic Docker worker processing for Docker-visible corpus and mail jobs.
 - Automatic host-agent worker processing for host-only roots.
+- Lock-tolerant corpus states for unstable or locked files, stable-candidate
+  watcher gating, worker retry/cooldown for locked reads, and dashboard
+  visibility for `pending_stable`, `retrying_locked`, and `blocked_locked`.
+- Host-agent VSS capability/settings reporting with VSS disabled by default and
+  locked-file fallback to retry/cooldown until snapshot extraction is implemented.
 - Exact duplicate suppression and conservative version-family suppression.
 - REST/CLI/MCP consumer search and brief access.
 - Dashboard search result content actions with sanitized in-app mail viewing,
@@ -113,15 +118,12 @@ scripts:
 
 ### V2.7
 
-- Watcher debounce exists as a roadmap/runtime concern, but needs stronger
-  documented guarantees and tests for burst coalescing, stable-size/mtime
-  windows, cloud-sync rename bursts, and large file writes.
-- Lock-tolerant indexing is planned: shared read handles, temporary extraction
-  copies, locked-file retry/cooldown states, and optional Windows VSS fallback
-  for local NTFS roots when normal reads cannot access an important file.
-- OneDrive/SharePoint/Dropbox coexistence needs explicit verification so
-  monitoring remains non-invasive and indexing reports actionable states instead
-  of fighting sync clients.
+- Watcher stability gating and lock-tolerant indexing states exist. Broader
+  real-world verification should continue against OneDrive/SharePoint/Dropbox,
+  Office files open during indexing, and large files still being written.
+- Windows VSS controls and dashboard capability reporting exist, but actual VSS
+  snapshot extraction is not implemented; locked files still use retry/cooldown
+  fallback.
 - Mail post-processing, retrieval explainability, and scheduler reliability
   remain planned hardening items. See
   [roadmap.md](roadmap.md#v27-mail-and-retrieval-production-hardening).
@@ -154,15 +156,13 @@ scripts:
 
 ## Immediate Next Queue
 
-1. Add lock-tolerant indexing states, debounce/stability tests, and optional
-   Windows VSS design/controls for locked files.
-2. Promote IMAP scheduled sync into a claimable scheduler state machine.
-3. Improve retrieval snippets with query-aware highlights and explainability.
-4. Add provider-specific mail post-process policies with dry-run and audit views.
-5. Design V2.8 indexer acceleration: hardware detection, local inference
+1. Promote IMAP scheduled sync into a claimable scheduler state machine.
+2. Improve retrieval snippets with query-aware highlights and explainability.
+3. Add provider-specific mail post-process policies with dry-run and audit views.
+4. Design V2.8 indexer acceleration: hardware detection, local inference
    provider routing, permanent caches, bounded media/OCR/ASR workers, vector
    batching, and throughput telemetry.
-6. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
+5. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
    prioritizing common Office legacy files, diagrams, archives, and embedded
    media.
 

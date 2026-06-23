@@ -66,6 +66,7 @@ def status_payload() -> dict[str, Any]:
         "platform": platform.system() or "unknown",
         "process_id": os.getpid(),
         "browse_supported": _native_browse_supported(),
+        "vss": _vss_status(),
         "codex": _host_codex_status(),
         "runtime": _host_runtime_checks(),
         "workers": [item for item in components if str(item.get("name", "")).startswith("corpus-worker:")],
@@ -186,6 +187,9 @@ class HostAgentWatcherLoop:
             lambda: _load_host_watch_roots(self.root_name),
             on_change=None,
             interval_seconds=interval_seconds,
+            debounce_seconds=_configured_watcher_debounce_seconds(),
+            stability_quiet_seconds=_configured_stability_quiet_seconds(),
+            max_queue_size=_configured_watcher_max_queue_size(),
         )
 
     def start(self) -> None:
@@ -566,6 +570,70 @@ def _configured_reconcile_interval_seconds() -> int:
         return int(SettingsService().resolve("watcher.reconcile_interval_seconds").raw_value)
     except Exception:
         return 3600
+
+
+def _configured_watcher_debounce_seconds() -> float:
+    try:
+        from .settings import SettingsService
+
+        return float(SettingsService().resolve("watcher.debounce_seconds").raw_value)
+    except Exception:
+        return 0.75
+
+
+def _configured_watcher_max_queue_size() -> int:
+    try:
+        from .settings import SettingsService
+
+        return int(SettingsService().resolve("watcher.max_queue_size").raw_value)
+    except Exception:
+        return 1000
+
+
+def _configured_stability_quiet_seconds() -> float:
+    try:
+        from .settings import SettingsService
+
+        return float(SettingsService().resolve("watcher.stability_quiet_seconds").raw_value)
+    except Exception:
+        return 2.0
+
+
+def _vss_status() -> dict[str, Any]:
+    try:
+        from .settings import SettingsService
+
+        settings = SettingsService()
+        enabled = bool(settings.resolve("host_agent.vss_enabled").raw_value)
+        max_file_bytes = int(settings.resolve("host_agent.vss_max_file_bytes").raw_value)
+        timeout_seconds = int(settings.resolve("host_agent.vss_timeout_seconds").raw_value)
+    except Exception:
+        enabled = False
+        max_file_bytes = 512 * 1024 * 1024
+        timeout_seconds = 30
+    if not enabled:
+        return {
+            "enabled": False,
+            "status": "disabled",
+            "max_file_bytes": max_file_bytes,
+            "timeout_seconds": timeout_seconds,
+            "message": "VSS fallback is disabled; locked files use retry/cooldown states.",
+        }
+    if platform.system() != "Windows":
+        return {
+            "enabled": True,
+            "status": "unavailable",
+            "max_file_bytes": max_file_bytes,
+            "timeout_seconds": timeout_seconds,
+            "message": "VSS fallback is only available on Windows host-agent roots.",
+        }
+    return {
+        "enabled": True,
+        "status": "unavailable",
+        "max_file_bytes": max_file_bytes,
+        "timeout_seconds": timeout_seconds,
+        "message": "VSS fallback is not implemented yet; locked files use retry/cooldown states.",
+    }
 
 
 def _is_host_agent_root(root: dict[str, Any]) -> bool:

@@ -1376,7 +1376,12 @@ function RootTable({
         </tr>
       </thead>
       <tbody>
-        {roots.map((root) => (
+        {roots.map((root) => {
+          const pendingStableAssets = root.asset_counts?.pending_stable ?? 0;
+          const lockedAssets = (root.asset_counts?.retrying_locked ?? 0) + (root.asset_counts?.blocked_locked ?? 0);
+          const retryingLockedJobs = root.job_counts?.retrying_locked ?? 0;
+          const blockedLockedJobs = root.job_counts?.blocked_locked ?? 0;
+          return (
           <tr
             key={root.name}
             className={selectedRoot?.name === root.name ? "selected" : ""}
@@ -1396,10 +1401,12 @@ function RootTable({
             <td>
               <strong>{root.asset_counts?.indexed ?? 0} indexed</strong>
               <span>{root.asset_counts?.queued ?? 0} queued - {root.asset_counts?.duplicate_suppressed ?? 0} duplicate</span>
+              {(pendingStableAssets || lockedAssets) ? <span>{pendingStableAssets} pending stable - {lockedAssets} locked</span> : null}
             </td>
             <td>
               <strong>{root.job_counts?.pending ?? 0} pending</strong>
               <span>{root.job_counts?.blocked ?? 0} blocked - {root.job_counts?.failed ?? 0} failed</span>
+              {(retryingLockedJobs || blockedLockedJobs) ? <span>{retryingLockedJobs} retrying locked - {blockedLockedJobs} blocked locked</span> : null}
             </td>
             <td>
               <strong>{root.watch_enabled ? "On" : "Off"}</strong>
@@ -1418,7 +1425,8 @@ function RootTable({
               </div>
             </td>
           </tr>
-        ))}
+        );
+        })}
         {roots.length === 0 && (
           <tr>
             <td colSpan={7} className="empty-row">No monitored roots configured yet.</td>
@@ -1537,15 +1545,22 @@ function JobRows({ jobs }: { jobs: Array<Record<string, unknown>> }) {
 
 function RootStateBadge({ state }: { state?: string }) {
   const normalized = state ?? "unknown";
+  const label = LOCK_TOLERANT_STATE_LABELS[normalized] ?? normalized;
   const tone = ["watching", "indexed", "completed"].includes(normalized)
     ? "enabled"
-    : ["queued", "processing", "crawling", "changed", "watch_enabled"].includes(normalized)
+    : ["queued", "processing", "crawling", "changed", "watch_enabled", "pending_stable", "retrying_locked"].includes(normalized)
       ? "info"
-      : ["blocked", "failed", "stale", "deleted", "blocked_missing_dependency"].includes(normalized)
+      : ["blocked", "failed", "stale", "deleted", "blocked_missing_dependency", "blocked_locked"].includes(normalized)
         ? "warning"
         : "";
-  return <span className={`state-pill ${tone}`}>{normalized}</span>;
+  return <span className={`state-pill ${tone}`}>{label}</span>;
 }
+
+const LOCK_TOLERANT_STATE_LABELS: Record<string, string> = {
+  pending_stable: "Pending Stable",
+  retrying_locked: "Retrying Locked",
+  blocked_locked: "Blocked Locked"
+};
 
 function CrawlRootDialog({ root, onClose, onSave }: { root?: RootSummary; onClose: () => void; onSave: (form: CrawlRootForm) => void }) {
   const [form, setForm] = useState<CrawlRootForm>(() => ({

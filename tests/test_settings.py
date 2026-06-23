@@ -13,8 +13,15 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.token_budget" in keys
     assert "crawler.max_inline_bytes" in keys
     assert "watcher.interval_seconds" in keys
+    assert "watcher.stability_quiet_seconds" in keys
+    assert "watcher.large_file_stability_quiet_seconds" in keys
     assert "watcher.reconcile_on_start" in keys
     assert "watcher.reconcile_interval_seconds" in keys
+    assert "worker.lock_retry_cooldown_seconds" in keys
+    assert "worker.lock_max_attempts" in keys
+    assert "host_agent.vss_enabled" in keys
+    assert "host_agent.vss_max_file_bytes" in keys
+    assert "host_agent.vss_timeout_seconds" in keys
     assert "mail.imap.poll_interval_seconds" in keys
     assert "mail.post_process.default_policy" in keys
     assert "codex.hooks.enabled" in keys
@@ -50,6 +57,20 @@ def test_codex_hook_settings_are_enabled_by_default(monkeypatch):
     assert service.resolve("codex.hooks.min_prompt_chars").raw_value == 32
     assert service.resolve("codex.hooks.capture_min_chars").raw_value == 160
     assert service.resolve("codex.hooks.capture_max_chars").raw_value == 8000
+
+
+def test_lock_tolerant_indexing_settings_defaults(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+
+    service = SettingsService()
+
+    assert service.resolve("watcher.stability_quiet_seconds").raw_value == 2.0
+    assert service.resolve("watcher.large_file_stability_quiet_seconds").raw_value == 10.0
+    assert service.resolve("worker.lock_retry_cooldown_seconds").raw_value == 300
+    assert service.resolve("worker.lock_max_attempts").raw_value == 3
+    assert service.resolve("host_agent.vss_enabled").raw_value is False
+    assert service.resolve("host_agent.vss_max_file_bytes").raw_value == 512 * 1024 * 1024
+    assert service.resolve("host_agent.vss_timeout_seconds").raw_value == 30
 
 
 def test_settings_service_uses_env_over_database_and_masks_secret(monkeypatch):

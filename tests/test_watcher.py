@@ -76,6 +76,52 @@ def test_reloadable_watcher_debounces_and_bounds_events(tmp_path):
     assert [event.relative_path for event in watcher.drain_events()] == ["one.md"]
 
 
+def test_reloadable_watcher_waits_for_stable_fingerprint_before_change(tmp_path):
+    root = tmp_path / "stable"
+    root.mkdir()
+    clock = {"now": 100.0}
+    watcher = ReloadableCorpusWatcher(
+        lambda: [WatchRoot(name="docs", root_path=root, watch_enabled=True)],
+        debounce_seconds=0,
+        stability_quiet_seconds=2.0,
+        clock=lambda: clock["now"],
+    )
+
+    watcher.poll_once(seed=True)
+    (root / "draft.md").write_text("first", encoding="utf-8")
+    assert watcher.poll_once() == []
+
+    clock["now"] += 1.0
+    (root / "draft.md").write_text("second", encoding="utf-8")
+    assert watcher.poll_once() == []
+
+    clock["now"] += 2.1
+    events = watcher.poll_once()
+
+    assert [event.relative_path for event in events] == ["draft.md"]
+    assert events[0].action == "changed"
+    assert [event.relative_path for event in watcher.drain_events()] == ["draft.md"]
+
+
+def test_reloadable_watcher_emits_deletes_without_stability_wait(tmp_path):
+    root = tmp_path / "delete"
+    root.mkdir()
+    target = root / "old.md"
+    target.write_text("remove me", encoding="utf-8")
+    watcher = ReloadableCorpusWatcher(
+        lambda: [WatchRoot(name="docs", root_path=root, watch_enabled=True)],
+        debounce_seconds=0,
+        stability_quiet_seconds=60.0,
+    )
+
+    watcher.poll_once(seed=True)
+    target.unlink()
+    events = watcher.poll_once()
+
+    assert [event.action for event in events] == ["deleted"]
+    assert [event.relative_path for event in events] == ["old.md"]
+
+
 def test_summarize_watcher_staleness_marks_old_heartbeats():
     payload = summarize_watcher_staleness(
         [

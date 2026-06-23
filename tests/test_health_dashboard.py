@@ -228,11 +228,19 @@ def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):
                 "name": "docs",
                 "root_path": "E:/Docs",
                 "state": "watching",
-                "asset_counts": {"indexed": 3, "queued": 1},
-                "job_counts": {"pending": 1, "blocked": 0},
+                "asset_counts": {"indexed": 3, "queued": 1, "pending_stable": 2, "retrying_locked": 1, "blocked_locked": 1},
+                "job_counts": {"pending": 1, "blocked": 0, "retrying_locked": 1, "blocked_locked": 1},
                 "latest_crawl": {"status": "completed", "files_seen": 4},
-                "recent_assets": [{"path": "README.md", "status": "indexed"}],
-                "recent_jobs": [],
+                "recent_assets": [
+                    {"path": "README.md", "status": "indexed"},
+                    {"path": "draft.md", "status": "pending_stable"},
+                    {"path": "open.docx", "status": "retrying_locked"},
+                    {"path": "stuck.xlsx", "status": "blocked_locked"},
+                ],
+                "recent_jobs": [
+                    {"id": "job-lock", "status": "retrying_locked", "path": "open.docx"},
+                    {"id": "job-blocked", "status": "blocked_locked", "path": "stuck.xlsx"},
+                ],
             }
         ],
     )
@@ -242,6 +250,13 @@ def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):
     assert payload["roots"][0]["name"] == "docs"
     assert payload["root_summaries"][0]["state"] == "watching"
     assert payload["root_summaries"][0]["asset_counts"]["indexed"] == 3
+    assert payload["root_summaries"][0]["asset_counts"]["pending_stable"] == 2
+    assert payload["root_summaries"][0]["asset_counts"]["retrying_locked"] == 1
+    assert payload["root_summaries"][0]["asset_counts"]["blocked_locked"] == 1
+    assert payload["root_summaries"][0]["job_counts"]["retrying_locked"] == 1
+    assert payload["root_summaries"][0]["job_counts"]["blocked_locked"] == 1
+    assert payload["root_summaries"][0]["recent_assets"][1]["status"] == "pending_stable"
+    assert payload["root_summaries"][0]["recent_jobs"][0]["status"] == "retrying_locked"
     assert payload["recent_errors"] == ["bad file"]
 
 

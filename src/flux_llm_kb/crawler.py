@@ -5,7 +5,8 @@ import fnmatch
 import hashlib
 import mimetypes
 from pathlib import Path
-from typing import Iterable
+import time
+from typing import Callable, Iterable
 
 from .redaction import redact_text
 
@@ -53,6 +54,7 @@ IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".t
 AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".wma"}
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"}
 ARCHIVE_EXTENSIONS = {".7z", ".gz", ".rar", ".tar", ".tgz", ".zip"}
+TRANSIENT_SUFFIXES = {".tmp", ".partial", ".crdownload", ".download", ".part"}
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,9 @@ class CorpusPolicy:
     max_inline_bytes: int = 256 * 1024
     heavy_threshold_bytes: int = 10 * 1024 * 1024
     hash_max_bytes: int = 512 * 1024 * 1024
+    stability_quiet_seconds: float = 0.0
+    large_file_stability_quiet_seconds: float = 0.0
+    clock: Callable[[], float] | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +101,7 @@ class DiscoveredAsset:
     quick_hash: str
     content_hash: str | None
     extraction_tier: str
+    extraction_status: str | None = None
     chunks: tuple[AssetChunk, ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
 
@@ -131,6 +137,9 @@ def scan_path(
             relative_path = path.relative_to(root).as_posix()
             if not _is_included(relative_path, active_policy, marker_patterns):
                 continue
+            if _should_wait_for_stability(path, root, active_policy):
+                assets.append(_status_asset(path, root, "pending_stable", "mtime_not_stable", active_policy))
+                continue
             asset = discover_asset(path, root, active_policy)
             assets.append(asset)
             if asset.extraction_tier == "deferred":
@@ -142,6 +151,9 @@ def scan_path(
                     }
                 )
         except Exception as exc:
+            if _is_locked_error(exc):
+                assets.append(_status_asset(path, root, "retrying_locked", "file_locked", active_policy, error=str(exc)))
+                continue
             errors.append({"path": str(path), "error": str(exc)})
 
     return CrawlPlan(
@@ -216,14 +228,14 @@ def _iter_files(root: Path, *, recursive: bool, target: Path | None = None) -> I
     if target is not None:
         if not _is_relative_to(target, root):
             raise ValueError(f"target path is outside monitored root: {target}")
-        if target.is_file():
+        if target.is_file() and not _is_transient_artifact(target):
             return iter([target])
         if not target.exists():
             return iter(())
         iterator = target.rglob("*") if recursive else target.iterdir()
-        return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES)
+        return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES and not _is_transient_artifact(path))
     iterator = root.rglob("*") if recursive else root.iterdir()
-    return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES)
+    return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES and not _is_transient_artifact(path))
 
 
 def _file_kind(ext: str, mime_type: str | None) -> str:
@@ -244,6 +256,82 @@ def _file_kind(ext: str, mime_type: str | None) -> str:
     if mime_type and mime_type.startswith("text/"):
         return "text"
     return "binary"
+
+
+def _should_wait_for_stability(path: Path, root: Path, policy: CorpusPolicy) -> bool:
+    quiet_seconds = _stability_quiet_seconds(path, policy)
+    if quiet_seconds <= 0:
+        return False
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    now = policy.clock() if policy.clock else time.time()
+    return now - stat.st_mtime < quiet_seconds
+
+
+def _stability_quiet_seconds(path: Path, policy: CorpusPolicy) -> float:
+    if policy.large_file_stability_quiet_seconds <= 0:
+        return policy.stability_quiet_seconds
+    try:
+        if path.stat().st_size > policy.heavy_threshold_bytes:
+            return max(policy.stability_quiet_seconds, policy.large_file_stability_quiet_seconds)
+    except OSError:
+        return policy.stability_quiet_seconds
+    return policy.stability_quiet_seconds
+
+
+def _status_asset(
+    path: Path,
+    root: Path,
+    status: str,
+    reason: str,
+    policy: CorpusPolicy,
+    *,
+    error: str | None = None,
+) -> DiscoveredAsset:
+    resolved = path.expanduser().resolve()
+    try:
+        stat = resolved.stat()
+        size_bytes = stat.st_size
+        mtime_ns = stat.st_mtime_ns
+    except OSError:
+        size_bytes = 0
+        mtime_ns = 0
+    mime_type, _ = mimetypes.guess_type(resolved.name)
+    ext = resolved.suffix.lower()
+    metadata: dict[str, object] = {
+        "readiness_status": status,
+        "readiness_reason": reason,
+        "stability_quiet_seconds": policy.stability_quiet_seconds,
+    }
+    if error:
+        metadata["error"] = error
+    return DiscoveredAsset(
+        path=resolved,
+        relative_path=resolved.relative_to(root.resolve()).as_posix(),
+        file_kind=_file_kind(ext, mime_type),
+        mime_type=mime_type,
+        extension=ext,
+        size_bytes=size_bytes,
+        mtime_ns=mtime_ns,
+        quick_hash=_quick_hash(resolved, size_bytes, mtime_ns),
+        content_hash=None,
+        extraction_tier="metadata_only",
+        extraction_status=status,
+        chunks=(),
+        metadata=metadata,
+    )
+
+
+def _is_locked_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return isinstance(exc, PermissionError) or "locked" in text or "being used by another process" in text
+
+
+def _is_transient_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    return name.startswith("~$") or path.suffix.lower() in TRANSIENT_SUFFIXES
 
 
 def _load_marker_patterns(root: Path) -> list[str]:

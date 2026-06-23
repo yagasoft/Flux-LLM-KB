@@ -870,6 +870,7 @@ def persist_crawl_plan(
                     "deferred": "queued",
                     "metadata_only": "metadata_only",
                 }[asset.extraction_tier]
+                status = asset.extraction_status or status
                 canonical_id = _find_canonical_asset_id(cur, asset.content_hash, previous[0] if previous else None)
                 if canonical_id:
                     status = "duplicate_suppressed"
@@ -957,6 +958,19 @@ def persist_crawl_plan(
                             (
                                 f"corpus_extract_{asset.file_kind}",
                                 _json({"root_name": root_name, "path": asset.relative_path}),
+                            ),
+                        )
+                        jobs_queued += 1
+                    elif asset.extraction_status == "retrying_locked" and not canonical_id:
+                        cur.execute(
+                            """
+                            INSERT INTO capture_jobs (job_type, payload, status, last_error, next_attempt_at)
+                            VALUES (%s, %s::jsonb, 'retrying_locked', %s, now() + make_interval(secs => 300))
+                            """,
+                            (
+                                f"corpus_extract_{asset.file_kind}",
+                                _json({"root_name": root_name, "path": asset.relative_path}),
+                                str(asset.metadata.get("error") or "file locked"),
                             ),
                         )
                         jobs_queued += 1
@@ -1240,7 +1254,7 @@ def claim_corpus_jobs(
                     SELECT id
                     FROM capture_jobs
                     WHERE job_type LIKE 'corpus_%%'
-                      AND status = 'pending'
+                      AND status IN ('pending', 'retrying_locked')
                       AND next_attempt_at <= now()
                       {root_filter}
                       {host_root_filter}
@@ -1374,7 +1388,12 @@ def clear_completed_corpus_job_errors(
 
 
 def retry_corpus_job(
-    *, job_id: str, error: str, cooldown_seconds: int = 300, url: str | None = None
+    *,
+    job_id: str,
+    error: str,
+    cooldown_seconds: int = 300,
+    status: str = "pending",
+    url: str | None = None,
 ) -> None:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -1382,7 +1401,7 @@ def retry_corpus_job(
             cur.execute(
                 """
                 UPDATE capture_jobs
-                SET status = 'pending',
+                SET status = %s,
                     last_error = %s,
                     next_attempt_at = now() + make_interval(secs => %s),
                     locked_at = NULL,
@@ -1391,7 +1410,7 @@ def retry_corpus_job(
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
                 """,
-                (error, max(1, cooldown_seconds), job_id),
+                (status, error, max(1, cooldown_seconds), job_id),
             )
 
 
@@ -3003,9 +3022,12 @@ def _root_asset_counts(cur: Any, root_id: str) -> dict[str, int]:
             count(*) FILTER (WHERE deleted_at IS NULL) AS total,
             count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'indexed') AS indexed,
             count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'queued') AS queued,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'pending_stable') AS pending_stable,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'retrying_locked') AS retrying_locked,
             count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'metadata_only') AS metadata_only,
             count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'duplicate_suppressed') AS duplicate_suppressed,
             count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status LIKE 'blocked%%') AS blocked,
+            count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'blocked_locked') AS blocked_locked,
             count(*) FILTER (WHERE deleted_at IS NULL AND extraction_status = 'failed') AS failed,
             count(*) FILTER (WHERE deleted_at IS NOT NULL) AS deleted
         FROM source_assets
@@ -3018,9 +3040,12 @@ def _root_asset_counts(cur: Any, root_id: str) -> dict[str, int]:
         "total",
         "indexed",
         "queued",
+        "pending_stable",
+        "retrying_locked",
         "metadata_only",
         "duplicate_suppressed",
         "blocked",
+        "blocked_locked",
         "failed",
         "deleted",
     ]
@@ -3032,8 +3057,10 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
         """
         SELECT
             count(*) FILTER (WHERE status = 'pending') AS pending,
+            count(*) FILTER (WHERE status = 'retrying_locked') AS retrying_locked,
             count(*) FILTER (WHERE status = 'running') AS running,
-            count(*) FILTER (WHERE status = 'blocked_missing_dependency') AS blocked,
+            count(*) FILTER (WHERE status LIKE 'blocked%%') AS blocked,
+            count(*) FILTER (WHERE status = 'blocked_locked') AS blocked_locked,
             count(*) FILTER (WHERE status = 'failed') AS failed,
             count(*) FILTER (WHERE status = 'completed') AS completed,
             count(*) FILTER (WHERE status = 'cancelled_duplicate') AS duplicate_suppressed
@@ -3044,7 +3071,7 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
         (root_name,),
     )
     row = cur.fetchone()
-    keys = ["pending", "running", "blocked", "failed", "completed", "duplicate_suppressed"]
+    keys = ["pending", "retrying_locked", "running", "blocked", "blocked_locked", "failed", "completed", "duplicate_suppressed"]
     return {key: int(row[index] or 0) for index, key in enumerate(keys)}
 
 

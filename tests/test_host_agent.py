@@ -380,6 +380,9 @@ def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
     assert "platform" in result
     assert result["codex"]["status"] == "ready"
     assert result["runtime"]["git"]["ok"] is True
+    assert result["vss"]["enabled"] is False
+    assert result["vss"]["status"] in {"disabled", "unavailable"}
+    assert "message" in result["vss"]
 
 
 def test_run_server_exits_cleanly_when_host_agent_already_owns_port(monkeypatch):

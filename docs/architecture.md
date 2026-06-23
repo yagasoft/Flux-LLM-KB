@@ -96,24 +96,38 @@ media files do not slow normal crawl/watch loops.
 Deferred workers claim jobs with `FOR UPDATE SKIP LOCKED`, use retry/cooldown
 state in `capture_jobs`, and do not call cloud providers by default. Jobs move to
 explicit terminal states such as `completed`, `metadata_only`, or
-`blocked_missing_dependency`; they are not completed merely because they were
-claimed. Duplicate content is suppressed by content hash while preserving every
-observed path and source asset record. Retrieval also applies a conservative
-same-document/version-family collapse for common filename variants such as
+`blocked_missing_dependency`; locked reads move through `retrying_locked` with
+`next_attempt_at` cooldown and then `blocked_locked` after configured attempts.
+Files observed before their size/mtime fingerprint stabilizes are recorded as
+`pending_stable` instead of failing the root crawl. Jobs are not completed merely
+because they were claimed. Duplicate content is suppressed by content hash while
+preserving every observed path and source asset record. Retrieval also applies a
+conservative same-document/version-family collapse for common filename variants such as
 `v1`, `v2`, `final`, dated copies, and copy suffixes. It suppresses sibling
 versions only in result presentation and exposes the canonical path plus
 suppressed sibling count.
 
 The watcher runtime reloads enabled roots while running, so `watch enable` and
-`watch disable` take effect without a restart. It applies debounce, a bounded
-event queue, heartbeat recording, and stale-state reporting. Live filesystem
-events are not the only correctness mechanism: watcher services run startup reconciliation
-and periodic reconciliation for enabled watched roots. A
+`watch disable` take effect without a restart. It applies a stable-candidate
+gate before emitting change events: the same size/mtime fingerprint must survive
+the configured quiet window, and the timer resets while the file keeps changing.
+Large files can use a longer quiet window. Deletes remain immediate, and the
+runtime still keeps a bounded event queue, heartbeat recording, and stale-state
+reporting. Live filesystem events are not the only correctness mechanism:
+watcher services run startup reconciliation and periodic reconciliation for
+enabled watched roots. A
 reconciliation is a full-root sync recorded in `crawl_runs.reason` as
 `startup_reconcile` or `periodic_reconcile`; it compares the current filesystem
 snapshot with persisted `source_assets` hashes, marks deleted files as deleted,
 queues changed deferred files, and treats empty folders as a clean no-op. Watch
 events continue to use targeted sync with reason `watch_event`.
+
+VSS is a host-agent controlled future fallback for Windows local NTFS roots, not
+a Docker/API desktop action. The setting is disabled by default; the host agent
+reports disabled or unavailable capability, size and timeout limits, and locked
+files fall back to retry/cooldown states until snapshot extraction is
+implemented. Future VSS use must be opt-in, permission-aware, audited, bounded
+by file size and timeout, and must fall back cleanly when unavailable.
 
 Production deployments are intentionally not repo-coupled. The default Windows
 PC install root is `D:\FluxLLMKB`, with deployed app files under `app`, private

@@ -196,11 +196,13 @@ let searchPayload: unknown;
 let resultDetailPayload: unknown;
 let fileActionPayload: unknown;
 let healthPayload: unknown;
+let crawlPayload: unknown;
 let crawlSyncErrorPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
     healthPayload = health;
+    crawlPayload = JSON.parse(JSON.stringify(crawl));
     crawlSyncErrorPayload = undefined;
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
     searchPayload = [{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }];
@@ -222,7 +224,7 @@ describe("Flux dashboard", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(healthPayload);
-      if (url === "/api/dashboard/crawl") return json(crawl);
+      if (url === "/api/dashboard/crawl") return json(crawlPayload);
       if (url === "/api/dashboard/jobs") return json({ jobs: [{ id: "job-1", job_type: "corpus_extract_pdf", status: "pending" }] });
       if (url === "/api/dashboard/retrieval-stats") return json({ retrieval: health.retrieval, duplicate_assets: 0 });
       if (url === "/api/mail/status") return json(mail);
@@ -365,6 +367,53 @@ describe("Flux dashboard", () => {
 
     await user.click(screen.getByRole("button", { name: "Corpus" }));
     expect(await screen.findByRole("heading", { name: "Corpus Monitor" })).toBeInTheDocument();
+  });
+
+  test("corpus dashboard surfaces unstable and locked indexing states", async () => {
+    const root = (crawl.root_summaries[0]);
+    crawlPayload = {
+      ...crawl,
+      root_summaries: [
+        {
+          ...root,
+          asset_counts: {
+            ...root.asset_counts,
+            pending_stable: 2,
+            retrying_locked: 1,
+            blocked_locked: 1
+          },
+          job_counts: {
+            ...root.job_counts,
+            retrying_locked: 1,
+            blocked_locked: 1
+          },
+          recent_assets: [
+            { path: "draft.md", file_kind: "text", status: "pending_stable", size_bytes: 2500 },
+            { path: "open.docx", file_kind: "document", status: "retrying_locked", size_bytes: 64000 },
+            { path: "stuck.xlsx", file_kind: "document", status: "blocked_locked", size_bytes: 32000 }
+          ],
+          recent_jobs: [
+            { id: "job-lock", job_type: "corpus_extract_document", status: "retrying_locked", path: "open.docx" },
+            { id: "job-blocked", job_type: "corpus_extract_document", status: "blocked_locked", path: "stuck.xlsx" }
+          ]
+        }
+      ]
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Corpus" }));
+
+    expect(await screen.findByRole("heading", { name: "Corpus Monitor" })).toBeInTheDocument();
+    expect(await screen.findByText("2 pending stable - 2 locked")).toBeInTheDocument();
+    expect(screen.getByText("1 retrying locked - 1 blocked locked")).toBeInTheDocument();
+    expect(screen.getByText("draft.md")).toBeInTheDocument();
+    expect(screen.getAllByText("Pending Stable").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("open.docx").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Retrying Locked").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("stuck.xlsx").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Blocked Locked").length).toBeGreaterThan(0);
   });
 
   test("mail tab shows only mail-focused panels and profile-scoped OAuth actions", async () => {

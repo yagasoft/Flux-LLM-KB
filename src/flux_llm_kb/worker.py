@@ -37,7 +37,17 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         max_inline_bytes=root["max_inline_bytes"],
         heavy_threshold_bytes=root["heavy_threshold_bytes"],
     )
-    result = extract_file(path, policy)
+    try:
+        result = extract_file(path, policy)
+    except OSError as exc:
+        if _is_locked_error(exc):
+            return JobProcessResult(status="retrying_locked", message=str(exc))
+        raise
     if result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
         database.apply_extraction_result(root_name=root_name, relative_path=relative_path, result=result)
     return JobProcessResult(status=result.status, message=result.message)
+
+
+def _is_locked_error(exc: OSError) -> bool:
+    text = str(exc).lower()
+    return isinstance(exc, PermissionError) or "locked" in text or "being used by another process" in text

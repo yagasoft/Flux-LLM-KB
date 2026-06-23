@@ -75,16 +75,21 @@ class ReloadableCorpusWatcher:
         on_change: Callable[[WatchEvent], None] | None = None,
         interval_seconds: float = 2.0,
         debounce_seconds: float = 0.75,
+        stability_quiet_seconds: float = 0.0,
         max_queue_size: int = 1000,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.load_roots = load_roots
         self.on_change = on_change
         self.interval_seconds = interval_seconds
         self.debounce_seconds = debounce_seconds
+        self.stability_quiet_seconds = max(0.0, stability_quiet_seconds)
+        self._clock = clock or time.monotonic
         self._queue: deque[WatchEvent] = deque()
         self._max_queue_size = max(1, max_queue_size)
         self._snapshots: dict[str, dict[str, tuple[int, int]]] = {}
         self._last_event_at: dict[tuple[str, str], float] = {}
+        self._pending_stable: dict[tuple[str, str], tuple[tuple[int, int], float]] = {}
 
     def poll_once(self, *, seed: bool = False) -> list[WatchEvent]:
         active_roots = {root.name: root for root in self.load_roots() if root.watch_enabled}
@@ -120,18 +125,58 @@ class ReloadableCorpusWatcher:
         events: list[WatchEvent] = []
         for relative_path, fingerprint in current.items():
             if previous.get(relative_path) != fingerprint:
-                event = _event(root, relative_path, "changed")
-                if self._enqueue(event):
-                    events.append(event)
+                if self._is_stability_ready(root, relative_path, fingerprint):
+                    event = _event(root, relative_path, "changed")
+                    if self._enqueue(event):
+                        events.append(event)
+        events.extend(self._stable_candidate_events(root, current))
         for relative_path in previous.keys() - current.keys():
+            self._pending_stable.pop((root.name, relative_path), None)
             event = _event(root, relative_path, "deleted")
             if self._enqueue(event):
                 events.append(event)
         return events
 
+    def _is_stability_ready(self, root: WatchRoot, relative_path: str, fingerprint: tuple[int, int]) -> bool:
+        if self.stability_quiet_seconds <= 0:
+            return True
+        key = (root.name, relative_path)
+        current = self._pending_stable.get(key)
+        now = self._clock()
+        if current is None or current[0] != fingerprint:
+            self._pending_stable[key] = (fingerprint, now)
+            return False
+        return now - current[1] >= self.stability_quiet_seconds
+
+    def _stable_candidate_events(self, root: WatchRoot, current: dict[str, tuple[int, int]]) -> list[WatchEvent]:
+        if self.stability_quiet_seconds <= 0:
+            return []
+        events: list[WatchEvent] = []
+        now = self._clock()
+        root_keys = [key for key in self._pending_stable if key[0] == root.name]
+        for key in root_keys:
+            _, relative_path = key
+            pending = self._pending_stable.get(key)
+            if pending is None:
+                continue
+            fingerprint, first_seen_at = pending
+            current_fingerprint = current.get(relative_path)
+            if current_fingerprint is None:
+                self._pending_stable.pop(key, None)
+                continue
+            if current_fingerprint != fingerprint:
+                self._pending_stable[key] = (current_fingerprint, now)
+                continue
+            if now - first_seen_at >= self.stability_quiet_seconds:
+                event = _event(root, relative_path, "changed")
+                if self._enqueue(event):
+                    events.append(event)
+                    self._pending_stable.pop(key, None)
+        return events
+
     def _enqueue(self, event: WatchEvent) -> bool:
         key = (event.root_name, event.relative_path)
-        now = time.monotonic()
+        now = self._clock()
         if now - self._last_event_at.get(key, -1_000_000.0) < self.debounce_seconds:
             return False
         self._last_event_at[key] = now
@@ -154,7 +199,12 @@ class WatchdogCorpusWatcher(ReloadableCorpusWatcher):
     def poll_once(self, *, seed: bool = False) -> list[WatchEvent]:
         self._ensure_observer()
         self._sync_watches()
-        return []
+        emitted: list[WatchEvent] = []
+        if not seed:
+            active_roots = {root.name: root for root in self.load_roots() if root.watch_enabled}
+            for root in active_roots.values():
+                emitted.extend(self._stable_candidate_events(root, _snapshot(root)))
+        return emitted
 
     def run_forever(self) -> None:
         self.poll_once(seed=True)
@@ -203,7 +253,16 @@ class WatchdogCorpusWatcher(ReloadableCorpusWatcher):
                 except ValueError:
                     return
                 action = "deleted" if event.event_type == "deleted" else "changed"
-                watcher._enqueue(_event(root, relative_path, action))
+                if action == "deleted":
+                    watcher._pending_stable.pop((root.name, relative_path), None)
+                    watcher._enqueue(_event(root, relative_path, action))
+                    return
+                try:
+                    fingerprint = _fingerprint(event_path)
+                except OSError:
+                    return
+                if watcher._is_stability_ready(root, relative_path, fingerprint):
+                    watcher._enqueue(_event(root, relative_path, action))
 
         return Handler()
 
@@ -214,6 +273,7 @@ def create_corpus_watcher(
     on_change: Callable[[WatchEvent], None] | None = None,
     interval_seconds: float = 2.0,
     debounce_seconds: float = 0.75,
+    stability_quiet_seconds: float = 0.0,
     max_queue_size: int = 1000,
 ):
     watcher_cls = WatchdogCorpusWatcher if importlib.util.find_spec("watchdog") is not None else ReloadableCorpusWatcher
@@ -222,6 +282,7 @@ def create_corpus_watcher(
         on_change=on_change,
         interval_seconds=interval_seconds,
         debounce_seconds=debounce_seconds,
+        stability_quiet_seconds=stability_quiet_seconds,
         max_queue_size=max_queue_size,
     )
 
@@ -249,9 +310,13 @@ def _snapshot(root: WatchRoot) -> dict[str, tuple[int, int]]:
     for path in iterator:
         if not path.is_file():
             continue
-        stat = path.stat()
-        snapshot[path.relative_to(root_path).as_posix()] = (stat.st_size, stat.st_mtime_ns)
+        snapshot[path.relative_to(root_path).as_posix()] = _fingerprint(path)
     return snapshot
+
+
+def _fingerprint(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return (stat.st_size, stat.st_mtime_ns)
 
 
 def _event(root: WatchRoot, relative_path: str, action: str) -> WatchEvent:

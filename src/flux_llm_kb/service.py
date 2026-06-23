@@ -142,6 +142,8 @@ class KnowledgeService:
             exclude_globs=tuple(glob_policy["exclude_globs"]),
             max_inline_bytes=root["max_inline_bytes"],
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
+            stability_quiet_seconds=_configured_stability_quiet_seconds() if reason == "watch_event" else 0.0,
+            large_file_stability_quiet_seconds=_configured_large_file_stability_quiet_seconds() if reason == "watch_event" else 0.0,
         )
         plan = scan_path(root["root_path"], policy, target_path=path)
         return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run, reason=reason)
@@ -200,6 +202,9 @@ class KnowledgeService:
             lambda: _load_watch_roots(root_name),
             on_change=self._handle_watch_event,
             interval_seconds=interval_seconds,
+            debounce_seconds=_configured_watcher_debounce_seconds(),
+            stability_quiet_seconds=_configured_stability_quiet_seconds(),
+            max_queue_size=_configured_watcher_max_queue_size(),
         )
         last_reconcile_at = 0.0
         if _configured_reconcile_on_start():
@@ -263,6 +268,22 @@ class KnowledgeService:
                     error=process_result.message or "blocked_missing_dependency",
                 )
                 blocked += 1
+            elif process_result.status == "retrying_locked":
+                if int(job.get("attempts") or 0) >= _configured_lock_max_attempts():
+                    database.block_corpus_job(
+                        job_id=job["id"],
+                        error=process_result.message or "blocked_locked",
+                        status="blocked_locked",
+                    )
+                    blocked += 1
+                else:
+                    database.retry_corpus_job(
+                        job_id=job["id"],
+                        error=process_result.message or "retrying_locked",
+                        cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
+                        status="retrying_locked",
+                    )
+                    retried += 1
             else:
                 database.retry_corpus_job(
                     job_id=job["id"],
@@ -499,6 +520,48 @@ def _configured_reconcile_interval_seconds() -> int:
         return int(SettingsService().resolve("watcher.reconcile_interval_seconds").raw_value)
     except Exception:
         return 3600
+
+
+def _configured_watcher_debounce_seconds() -> float:
+    try:
+        return float(SettingsService().resolve("watcher.debounce_seconds").raw_value)
+    except Exception:
+        return 0.75
+
+
+def _configured_watcher_max_queue_size() -> int:
+    try:
+        return int(SettingsService().resolve("watcher.max_queue_size").raw_value)
+    except Exception:
+        return 1000
+
+
+def _configured_stability_quiet_seconds() -> float:
+    try:
+        return float(SettingsService().resolve("watcher.stability_quiet_seconds").raw_value)
+    except Exception:
+        return 2.0
+
+
+def _configured_large_file_stability_quiet_seconds() -> float:
+    try:
+        return float(SettingsService().resolve("watcher.large_file_stability_quiet_seconds").raw_value)
+    except Exception:
+        return 10.0
+
+
+def _configured_lock_retry_cooldown_seconds() -> int:
+    try:
+        return int(SettingsService().resolve("worker.lock_retry_cooldown_seconds").raw_value)
+    except Exception:
+        return 300
+
+
+def _configured_lock_max_attempts() -> int:
+    try:
+        return int(SettingsService().resolve("worker.lock_max_attempts").raw_value)
+    except Exception:
+        return 3
 
 
 def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:
