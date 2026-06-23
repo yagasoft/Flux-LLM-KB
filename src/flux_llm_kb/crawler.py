@@ -50,6 +50,8 @@ CODE_EXTENSIONS = {
     ".ts",
 }
 DOCUMENT_EXTENSIONS = {".doc", ".docx", ".pdf", ".ppt", ".pptx", ".rtf", ".xls", ".xlsx"}
+DIAGRAM_EXTENSIONS = {".dio", ".drawio", ".vsdm", ".vsdx", ".vssm", ".vssx", ".vstm", ".vstx"}
+DIAGRAM_COMPOUND_SUFFIXES = (".drawio.png", ".drawio.svg")
 IMAGE_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"}
 AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav", ".wma"}
 VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"}
@@ -204,11 +206,11 @@ def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
     ext = file_path.suffix.lower()
     size = file_path.stat().st_size
     mime_type, _ = mimetypes.guess_type(file_path.name)
-    file_kind = _file_kind(ext, mime_type)
+    file_kind = _file_kind(file_path, mime_type)
 
     if file_kind == "archive":
         return FileClassification(file_kind=file_kind, extraction_tier="metadata_only", mime_type=mime_type)
-    if file_kind in {"image", "audio", "video"}:
+    if file_kind in {"diagram", "image", "audio", "video"}:
         return FileClassification(file_kind=file_kind, extraction_tier="deferred", mime_type=mime_type)
     if size > policy.heavy_threshold_bytes:
         return FileClassification(
@@ -238,7 +240,12 @@ def _iter_files(root: Path, *, recursive: bool, target: Path | None = None) -> I
     return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES and not _is_transient_artifact(path))
 
 
-def _file_kind(ext: str, mime_type: str | None) -> str:
+def _file_kind(path: str | Path, mime_type: str | None) -> str:
+    file_path = Path(path)
+    ext = file_path.suffix.lower()
+    name = file_path.name.lower()
+    if ext in DIAGRAM_EXTENSIONS or any(name.endswith(suffix) for suffix in DIAGRAM_COMPOUND_SUFFIXES):
+        return "diagram"
     if ext in CODE_EXTENSIONS:
         return "code"
     if ext in TEXT_EXTENSIONS:
@@ -310,7 +317,7 @@ def _status_asset(
     return DiscoveredAsset(
         path=resolved,
         relative_path=resolved.relative_to(root.resolve()).as_posix(),
-        file_kind=_file_kind(ext, mime_type),
+        file_kind=_file_kind(resolved, mime_type),
         mime_type=mime_type,
         extension=ext,
         size_bytes=size_bytes,

@@ -83,6 +83,43 @@ def test_classify_file_uses_metadata_only_for_archives(tmp_path):
     assert classification.extraction_tier == "metadata_only"
 
 
+def test_scan_path_classifies_structured_diagrams_as_deferred(tmp_path):
+    root = tmp_path / "diagrams"
+    root.mkdir()
+    (root / "architecture.drawio").write_text("<mxfile></mxfile>", encoding="utf-8")
+    (root / "workflow.drawio.svg").write_text("<svg></svg>", encoding="utf-8")
+    (root / "network.drawio.png").write_bytes(b"not a real png")
+    (root / "process.vsdx").write_bytes(b"PK")
+    (root / "icon.svg").write_text("<svg></svg>", encoding="utf-8")
+    (root / "pixel.png").write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAADZrBkAAAAAD0lEQVR4nGP8z8AARLJAgAEACPwD"
+            "Aaz3RyoAAAAASUVORK5CYII="
+        )
+    )
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    kinds = {asset.relative_path: asset.file_kind for asset in plan.assets}
+    tiers = {asset.relative_path: asset.extraction_tier for asset in plan.assets}
+    assert kinds["architecture.drawio"] == "diagram"
+    assert kinds["workflow.drawio.svg"] == "diagram"
+    assert kinds["network.drawio.png"] == "diagram"
+    assert kinds["process.vsdx"] == "diagram"
+    assert tiers["architecture.drawio"] == "deferred"
+    assert tiers["process.vsdx"] == "deferred"
+    assert kinds["icon.svg"] == "image"
+    assert kinds["pixel.png"] == "image"
+    assert {(job["job_type"], job["relative_path"], job["reason"]) for job in plan.deferred_jobs} == {
+        ("corpus_extract_diagram", "architecture.drawio", "deferred_extractor"),
+        ("corpus_extract_diagram", "network.drawio.png", "deferred_extractor"),
+        ("corpus_extract_image", "icon.svg", "deferred_extractor"),
+        ("corpus_extract_image", "pixel.png", "deferred_extractor"),
+        ("corpus_extract_diagram", "process.vsdx", "deferred_extractor"),
+        ("corpus_extract_diagram", "workflow.drawio.svg", "deferred_extractor"),
+    }
+
+
 def test_scan_path_records_locked_files_as_retrying_locked(monkeypatch, tmp_path):
     root = tmp_path / "locked"
     root.mkdir()

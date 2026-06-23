@@ -1049,6 +1049,8 @@ def _select_root(*, root_name: str | None, path: str | Path | None) -> dict[str,
 def _job_matches_kind(job_type: str, kind: str) -> bool:
     if kind == "images":
         return job_type == "corpus_extract_image"
+    if kind == "diagrams":
+        return job_type == "corpus_extract_diagram"
     if kind == "media":
         return job_type in {"corpus_extract_audio", "corpus_extract_video"}
     if kind == "text":

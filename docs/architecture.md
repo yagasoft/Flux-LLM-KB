@@ -59,8 +59,9 @@ for every supported file type. Sync can target a full root, a subtree, or a
 single file. Small text-like files are extracted and chunked locally; heavy
 documents, images, audio, and video are queued for local deferred processing.
 Images are dimensioned locally, media uses sidecar transcripts and `ffprobe`
-when available, and archives or unknown binaries remain metadata-only unless
-explicitly enabled later.
+when available, Draw.io and modern VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are
+parsed structurally, and archives or unknown binaries remain metadata-only
+unless explicitly enabled later.
 
 File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
@@ -90,7 +91,7 @@ both root-local globs and the effective policy used by crawl/watch.
 
 The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
-structure, sidecar transcripts, and decorative-image skips. Optional richer
+and modern Visio structure, sidecar transcripts, and decorative-image skips. Optional richer
 stages can then run as bounded jobs: Tesseract or PaddleOCR OCR, local
 Ollama/ONNX image descriptions, frame sampling, and faster-whisper audio/video
 transcription. Semantic media embeddings are a separate backfill phase so large

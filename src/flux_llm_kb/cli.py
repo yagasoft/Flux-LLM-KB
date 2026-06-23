@@ -153,14 +153,14 @@ def main(argv: list[str] | None = None) -> int:
     crawl_jobs.add_argument("--limit", type=int, default=50)
 
     crawl_backfill = crawl_subparsers.add_parser("backfill", help="Claim deferred corpus extraction jobs")
-    crawl_backfill.add_argument("--kind", choices=["text", "images", "media", "embeddings", "all"], default="all")
+    crawl_backfill.add_argument("--kind", choices=["text", "images", "diagrams", "media", "embeddings", "all"], default="all")
     crawl_backfill.add_argument("--limit", type=int, default=10)
     crawl_backfill.add_argument("--workers", type=int, default=1)
 
     crawl_worker = crawl_subparsers.add_parser("worker", help="Run the corpus extraction worker")
     crawl_worker_subparsers = crawl_worker.add_subparsers(dest="worker_command", required=True)
     crawl_worker_run = crawl_worker_subparsers.add_parser("run", help="Run the corpus worker loop")
-    crawl_worker_run.add_argument("--kind", choices=["text", "images", "media", "embeddings", "all"], default="all")
+    crawl_worker_run.add_argument("--kind", choices=["text", "images", "diagrams", "media", "embeddings", "all"], default="all")
     crawl_worker_run.add_argument("--limit", type=int, default=10)
     crawl_worker_run.add_argument("--workers", type=int, default=1)
     crawl_worker_run.add_argument("--interval", type=float, default=5.0)

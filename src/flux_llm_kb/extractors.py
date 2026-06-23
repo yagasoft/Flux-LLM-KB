@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass, field
+from html import unescape
 import importlib.util
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
+import re
 import shutil
 import struct
 import tempfile
 from typing import Any
+from urllib.parse import unquote
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
+import zlib
 
 from .crawler import AssetChunk, CorpusPolicy, classify_file
 from .processes import run_no_window
 from .redaction import redact_text
+
+
+DIAGRAM_MAX_ZIP_MEMBERS = 200
+DIAGRAM_MAX_TOTAL_BYTES = 25 * 1024 * 1024
+DIAGRAM_MAX_MEMBER_BYTES = 5 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -30,6 +44,8 @@ def extract_file(path: str | Path, policy: CorpusPolicy) -> ExtractionResult:
         return _extract_text(file_path, policy, extractor=classification.file_kind)
     if classification.file_kind == "document":
         return _extract_document(file_path, policy)
+    if classification.file_kind == "diagram":
+        return _extract_diagram(file_path)
     if classification.file_kind == "image":
         return _extract_image(file_path)
     if classification.file_kind in {"audio", "video"}:
@@ -318,6 +334,293 @@ def _extract_with_word_com(path: Path) -> str | None:
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
+
+
+def _extract_diagram(path: Path) -> ExtractionResult:
+    name = path.name.lower()
+    if path.suffix.lower() in {".vsdm", ".vsdx", ".vssm", ".vssx", ".vstm", ".vstx"}:
+        return _extract_vsdx_diagram(path)
+    if path.suffix.lower() in {".dio", ".drawio"} or name.endswith((".drawio.svg", ".drawio.png")):
+        return _extract_drawio_diagram(path)
+    return ExtractionResult(status="metadata_only", metadata={"extractor": "diagram", "format": "unknown"})
+
+
+def _extract_drawio_diagram(path: Path) -> ExtractionResult:
+    metadata = _diagram_metadata("drawio")
+    try:
+        raw = _read_limited_file(path, DIAGRAM_MAX_TOTAL_BYTES)
+        mxfile_xml = _embedded_mxfile_xml(raw)
+        if not mxfile_xml:
+            metadata["warnings"].append("drawio mxfile payload not found")
+            return ExtractionResult(status="metadata_only", metadata=metadata)
+        root = ElementTree.fromstring(mxfile_xml)
+    except ValueError as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=str(exc))
+    except ElementTree.ParseError as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=f"drawio XML parse failed: {exc}")
+
+    page_blocks: list[str] = []
+    try:
+        pages = _drawio_pages(root)
+    except ValueError as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=str(exc))
+    metadata["page_count"] = len(pages)
+    for page_name, page_root in pages:
+        if page_root is None:
+            metadata["warnings"].append(f"page payload could not be decoded: {page_name}")
+            continue
+        page_lines, page_stats = _summarize_drawio_page(page_name, page_root)
+        _merge_diagram_stats(metadata, page_stats)
+        if page_lines:
+            page_blocks.append("\n".join([f"Page: {page_name}", *page_lines]))
+
+    text = "\n\n".join(page_blocks)
+    chunks = _chunks_from_text(text, path.name, modality="diagram")
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata=metadata,
+    )
+
+
+def _extract_vsdx_diagram(path: Path) -> ExtractionResult:
+    metadata = _diagram_metadata("vsdx")
+    try:
+        with ZipFile(path) as archive:
+            infos = archive.infolist()
+            if len(infos) > DIAGRAM_MAX_ZIP_MEMBERS:
+                raise ValueError(f"diagram container has too many members: {len(infos)}")
+            total_bytes = 0
+            page_members = []
+            for info in infos:
+                member_name = _safe_zip_member_name(info.filename)
+                if member_name is None:
+                    raise ValueError(f"unsafe diagram container member: {info.filename}")
+                if info.file_size > DIAGRAM_MAX_MEMBER_BYTES:
+                    raise ValueError(f"diagram member exceeds size limit: {member_name}")
+                total_bytes += int(info.file_size or 0)
+                if total_bytes > DIAGRAM_MAX_TOTAL_BYTES:
+                    raise ValueError("diagram container exceeds readable XML limit")
+                normalized = member_name.lower()
+                if normalized.startswith("visio/pages/") and normalized.endswith(".xml"):
+                    page_members.append((member_name, info))
+
+            page_blocks: list[str] = []
+            metadata["page_count"] = len(page_members)
+            for member_name, info in page_members:
+                xml_text = archive.read(info).decode("utf-8", errors="replace")
+                page_name = PurePosixPath(member_name).stem
+                try:
+                    page_root = ElementTree.fromstring(xml_text)
+                except ElementTree.ParseError as exc:
+                    metadata["warnings"].append(f"{member_name}: XML parse failed: {exc}")
+                    continue
+                page_lines, page_stats = _summarize_vsdx_page(page_name, page_root)
+                _merge_diagram_stats(metadata, page_stats)
+                if page_lines:
+                    page_blocks.append("\n".join([f"Page: {page_name}", *page_lines]))
+    except BadZipFile as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=f"vsdx ZIP parse failed: {exc}")
+    except ValueError as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=str(exc))
+
+    if metadata["page_count"] == 0:
+        metadata["warnings"].append("no Visio page XML members found")
+    text = "\n\n".join(page_blocks)
+    chunks = _chunks_from_text(text, path.name, modality="diagram")
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata=metadata,
+    )
+
+
+def _diagram_metadata(format_name: str) -> dict[str, Any]:
+    return {
+        "extractor": "diagram",
+        "format": format_name,
+        "page_count": 0,
+        "shape_count": 0,
+        "connector_count": 0,
+        "text_count": 0,
+        "warnings": [],
+    }
+
+
+def _read_limited_file(path: Path, limit: int) -> bytes:
+    size = path.stat().st_size
+    if size > limit:
+        raise ValueError("diagram file exceeds readable size limit")
+    return path.read_bytes()
+
+
+def _embedded_mxfile_xml(raw: bytes) -> str:
+    text = raw.decode("utf-8", errors="ignore")
+    for candidate in (text, unescape(text)):
+        start = candidate.find("<mxfile")
+        end = candidate.find("</mxfile>")
+        if start >= 0 and end >= start:
+            return candidate[start : end + len("</mxfile>")]
+        if candidate.lstrip().startswith("<mxfile"):
+            return candidate.strip()
+    return ""
+
+
+def _drawio_pages(root: ElementTree.Element) -> list[tuple[str, ElementTree.Element | None]]:
+    root_name = _local_name(root.tag)
+    if root_name == "mxGraphModel":
+        return [("Page 1", root)]
+    diagrams = [element for element in root.iter() if _local_name(element.tag) == "diagram"]
+    pages: list[tuple[str, ElementTree.Element | None]] = []
+    for index, diagram in enumerate(diagrams, start=1):
+        page_name = _clean_diagram_text(diagram.attrib.get("name") or f"Page {index}") or f"Page {index}"
+        child_models = [child for child in list(diagram) if _local_name(child.tag) == "mxGraphModel"]
+        if child_models:
+            pages.append((page_name, child_models[0]))
+            continue
+        decoded = _decode_drawio_payload("".join(diagram.itertext()).strip())
+        if decoded:
+            try:
+                pages.append((page_name, ElementTree.fromstring(decoded)))
+            except ElementTree.ParseError:
+                pages.append((page_name, None))
+        else:
+            pages.append((page_name, None))
+    return pages
+
+
+def _decode_drawio_payload(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    candidates = [unescape(text), unquote(unescape(text))]
+    for encoded in {text, unquote(unescape(text))}:
+        try:
+            compressed = base64.b64decode("".join(encoded.split()), validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if len(compressed) > DIAGRAM_MAX_MEMBER_BYTES:
+            raise ValueError("embedded drawio payload exceeds size limit")
+        for wbits in (-15, zlib.MAX_WBITS):
+            try:
+                inflated = zlib.decompress(compressed, wbits)
+            except zlib.error:
+                continue
+            if len(inflated) > DIAGRAM_MAX_MEMBER_BYTES:
+                raise ValueError("inflated drawio payload exceeds size limit")
+            decoded = inflated.decode("utf-8", errors="replace")
+            candidates.extend([decoded, unquote(decoded)])
+    for candidate in candidates:
+        cleaned = candidate.strip()
+        if cleaned.startswith("<"):
+            return cleaned
+    return ""
+
+
+def _summarize_drawio_page(page_name: str, root: ElementTree.Element) -> tuple[list[str], dict[str, int]]:
+    lines: list[str] = []
+    stats = {"shape_count": 0, "connector_count": 0, "text_count": 0}
+    for cell in root.iter():
+        if _local_name(cell.tag) != "mxCell":
+            continue
+        value = _clean_diagram_text(cell.attrib.get("value"))
+        link = _clean_diagram_text(cell.attrib.get("link"))
+        source = _clean_diagram_text(cell.attrib.get("source"))
+        target = _clean_diagram_text(cell.attrib.get("target"))
+        is_connector = cell.attrib.get("edge") == "1" or bool(source or target)
+        if is_connector:
+            stats["connector_count"] += 1
+            parts = []
+            if value:
+                parts.append(value)
+                stats["text_count"] += 1
+            if source or target:
+                parts.append(f"{source or '?'} -> {target or '?'}")
+            if link:
+                parts.append(f"link {link}")
+                stats["text_count"] += 1
+            if parts:
+                lines.append(f"Connector: {'; '.join(parts)}")
+            continue
+        if value or link:
+            stats["shape_count"] += 1
+            parts = []
+            if value:
+                parts.append(value)
+                stats["text_count"] += 1
+            if link:
+                parts.append(f"link {link}")
+                stats["text_count"] += 1
+            lines.append(f"Shape: {'; '.join(parts)}")
+    return lines, stats
+
+
+def _summarize_vsdx_page(page_name: str, root: ElementTree.Element) -> tuple[list[str], dict[str, int]]:
+    lines: list[str] = []
+    stats = {"shape_count": 0, "connector_count": 0, "text_count": 0}
+    for shape in root.iter():
+        if _local_name(shape.tag) != "Shape":
+            continue
+        label = _shape_label(shape)
+        text = _shape_text(shape)
+        if not text:
+            continue
+        stats["shape_count"] += 1
+        stats["text_count"] += 1
+        lines.append(f"Shape {label}: {text}" if label else f"Shape: {text}")
+    for connect in root.iter():
+        if _local_name(connect.tag) != "Connect":
+            continue
+        stats["connector_count"] += 1
+        source = _clean_diagram_text(connect.attrib.get("FromSheet"))
+        target = _clean_diagram_text(connect.attrib.get("ToSheet"))
+        if source or target:
+            lines.append(f"Connector: {source or '?'} -> {target or '?'}")
+    return lines, stats
+
+
+def _shape_label(shape: ElementTree.Element) -> str:
+    return _clean_diagram_text(
+        shape.attrib.get("NameU")
+        or shape.attrib.get("Name")
+        or shape.attrib.get("ID")
+        or shape.attrib.get("id")
+    )
+
+
+def _shape_text(shape: ElementTree.Element) -> str:
+    parts: list[str] = []
+    for element in shape.iter():
+        if _local_name(element.tag) == "Text":
+            text = _clean_diagram_text(" ".join(element.itertext()))
+            if text:
+                parts.append(text)
+    return " ".join(dict.fromkeys(parts))
+
+
+def _merge_diagram_stats(metadata: dict[str, Any], stats: dict[str, int]) -> None:
+    for key in ("shape_count", "connector_count", "text_count"):
+        metadata[key] = int(metadata.get(key) or 0) + int(stats.get(key) or 0)
+
+
+def _safe_zip_member_name(name: str) -> str | None:
+    normalized = str(name or "").replace("\\", "/")
+    if not normalized or normalized.startswith("/"):
+        return None
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path.as_posix()
+
+
+def _clean_diagram_text(value: Any) -> str:
+    text = unquote(unescape(str(value or "")))
+    text = re.sub(r"<[^>]+>", " ", text)
+    return " ".join(text.split())
+
+
+def _local_name(tag: str) -> str:
+    return str(tag).rsplit("}", 1)[-1]
 
 
 def _extract_image(path: Path) -> ExtractionResult:

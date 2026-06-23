@@ -29,8 +29,8 @@ parser or local tool exists.
   `mdb`, and related formats should use LibreOffice, Windows COM, or other local
   adapters when available, and otherwise report `blocked_missing_dependency`.
 - Diagram formats should preserve structure where possible, not just OCR a
-  screenshot. Draw.io XML and VSDX zipped XML are high-priority structured
-  extractors.
+  screenshot. Draw.io XML and modern VSDX zipped XML are local structured
+  extractors; legacy Visio formats still need local-tool adapters.
 - Proprietary or unsafe formats still get metadata, hashes, duplicate/version
   grouping, and optional sidecar extraction.
 - Cloud OCR, cloud transcription, and provider LLM calls are off by default.
@@ -81,11 +81,11 @@ parser or local tool exists.
 - `doc`, `xls`, and `ppt` should use local legacy Office adapters. On Windows,
   host-agent extraction may use Office COM when installed; cross-platform
   extraction should prefer LibreOffice or equivalent local tools.
-- `drawio`, `drawio.svg`, and `drawio.png` should parse embedded XML when present
-  and index page names, shapes, labels, connectors, and links.
-- `vsdx` and related modern Visio files are ZIP/XML containers and should be
-  parsed before falling back to rendered-image OCR. Legacy `vsd` can use a local
-  converter where available.
+- `drawio`, `drawio.svg`, and `drawio.png` parse embedded XML when present and
+  index page names, shapes, labels, connectors, and links.
+- `vsdx` and related modern Visio files are ZIP/XML containers and are parsed
+  with bounded in-memory reads before any future rendered-image OCR fallback.
+  Legacy `vsd` can use a local converter where available.
 - Archives and package containers must not expand recursively without limits.
   Expansion must enforce maximum depth, total uncompressed bytes, file count,
   path traversal protection, and per-root policy.

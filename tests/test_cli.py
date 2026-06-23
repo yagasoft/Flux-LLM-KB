@@ -228,6 +228,33 @@ def test_cli_crawl_worker_run_once_invokes_backfill_loop(monkeypatch, capsys):
     assert payload["worker"]["limit"] == 2
 
 
+def test_cli_crawl_backfill_and_worker_accept_diagrams_kind(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = {}
+
+    class FakeService:
+        def run_corpus_backfill(self, **kwargs):
+            calls["backfill"] = kwargs
+            return {"backfill": kwargs}
+
+        def run_corpus_worker(self, **kwargs):
+            calls["worker"] = kwargs
+            return {"worker": kwargs}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["crawl", "backfill", "--kind", "diagrams", "--limit", "3"]) == 0
+    backfill_payload = json.loads(capsys.readouterr().out)
+    assert backfill_payload["backfill"] == {"kind": "diagrams", "limit": 3, "workers": 1}
+    assert calls["backfill"]["kind"] == "diagrams"
+
+    assert cli.main(["crawl", "worker", "run", "--once", "--kind", "diagrams", "--limit", "4"]) == 0
+    worker_payload = json.loads(capsys.readouterr().out)
+    assert worker_payload["worker"]["kind"] == "diagrams"
+    assert worker_payload["worker"]["limit"] == 4
+
+
 def test_cli_claim_upsert_and_transition_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 
