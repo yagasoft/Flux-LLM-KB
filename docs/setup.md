@@ -114,6 +114,8 @@ flux-kb settings set retrieval.token_budget 1600
 flux-kb mail profile add-imap --name gmail-capture --account me@gmail.com --folder FluxCapture --spool private\mail-spool\gmail-capture
 flux-kb mail oauth gmail start --profile gmail-capture --client-config private\google-oauth-client.json
 flux-kb mail oauth status --profile gmail-capture
+flux-kb mail post-process dry-run --profile gmail-capture
+flux-kb mail post-process events --profile gmail-capture
 flux-kb mail profile add-outlook --name outlook-catchup --folder "Mailbox - Me\Inbox\Flux Capture" --spool private\mail-spool\outlook-catchup
 flux-kb outlook-host status
 flux-kb outlook-host sync --profile outlook-catchup
@@ -179,6 +181,17 @@ token. Flux refreshes short-lived access tokens before IMAP login and reports
 token health in the dashboard. The default post-process policy moves messages to
 a processed folder or removes the capture label; permanent trash/delete is not
 the default.
+
+Profile post-processing supports `none`, `move_to_processed`, `remove_label`,
+and `trash`. Gmail profiles use Gmail IMAP label commands for label operations
+and Trash handling. Generic IMAP profiles use folder copy plus delete/expunge
+only for policies that require it, and can copy to `trash_folder` before deleting
+when trash is configured. `trash` requires explicit destructive confirmation in
+CLI/API/dashboard profile metadata. Use `flux-kb mail
+post-process dry-run --profile <name>` before enabling a new policy, then review
+recent command outcomes with `flux-kb mail post-process events --profile
+<name>`. Event views show operational metadata and errors, not raw mail body
+content.
 
 Outlook COM profiles are for catch-up from selected classic Outlook folder
 paths. They use local Outlook automation and write into the same spool shape as

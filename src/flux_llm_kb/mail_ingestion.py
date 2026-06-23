@@ -13,6 +13,7 @@ import time
 from typing import Any, Iterable
 
 from . import database
+from .mail_post_process import apply_mail_post_process_policy
 
 
 @dataclass(frozen=True)
@@ -177,6 +178,9 @@ def add_mail_profile(
     account: str | None = None,
     server: str | None = None,
     post_process_policy: str = "move_to_processed",
+    processed_folder: str | None = None,
+    trash_folder: str | None = None,
+    destructive_post_process_confirmed: bool = False,
     trust_rank: int = 450,
     sync_enabled: bool = False,
     sync_interval_seconds: int = 900,
@@ -184,6 +188,11 @@ def add_mail_profile(
     max_messages_per_run: int = 200,
 ) -> dict[str, Any]:
     spool = Path(spool_path).expanduser().resolve()
+    metadata = {
+        "processed_folder": (processed_folder or "").strip(),
+        "trash_folder": (trash_folder or "").strip(),
+        "destructive_post_process_confirmed": destructive_post_process_confirmed,
+    }
     profile = database.insert_mail_profile(
         name=name,
         source_type=source_type,
@@ -197,7 +206,7 @@ def add_mail_profile(
         sync_interval_seconds=sync_interval_seconds,
         sync_window_days=sync_window_days,
         max_messages_per_run=max_messages_per_run,
-        metadata={},
+        metadata=metadata,
     )
     ready_root = spool / "ready"
     ready_root.mkdir(parents=True, exist_ok=True)
@@ -230,6 +239,39 @@ def mail_status() -> dict[str, Any]:
     except Exception as exc:
         payload["oauth"] = {"status": "unavailable", "error": str(exc)}
     return payload
+
+
+def dry_run_mail_post_process(*, profile_name: str, limit: int = 5) -> dict[str, Any]:
+    profiles = database.list_mail_profiles(name=profile_name)
+    if not profiles:
+        raise ValueError(f"mail profile not found: {profile_name}")
+    profile = profiles[0]
+    capped_limit = max(1, min(limit, 50))
+    events: list[dict[str, Any]] = []
+    for folder in profile.get("folder_paths") or []:
+        result = apply_mail_post_process_policy(
+            client=_DryRunImapClient(),
+            profile=profile,
+            folder=str(folder),
+            uid=0,
+            dry_run=True,
+        )
+        events.append(
+            database.record_mail_post_process_event(
+                profile_name=profile["name"],
+                provider=result["provider"],
+                policy=result["policy"],
+                action=result["action"],
+                status=result["status"],
+                dry_run=True,
+                commands=result.get("commands") or [],
+                error=result.get("error"),
+                metadata={"folder": folder, "sample": True, **(result.get("metadata") or {})},
+            )
+        )
+        if len(events) >= capped_limit:
+            break
+    return {"profile_name": profile["name"], "dry_run": True, "events": events, "count": len(events)}
 
 
 def sync_mail_profile(
@@ -353,6 +395,8 @@ def sync_imap_folder(
     previous_uidvalidity: int | None = None,
     post_process_policy: str = "move_to_processed",
     processed_folder: str | None = None,
+    profile_metadata: dict[str, Any] | None = None,
+    sync_run_id: str | None = None,
 ) -> dict[str, Any]:
     client.select(folder)
     uidvalidity = _imap_uidvalidity(client)
@@ -364,6 +408,7 @@ def sync_imap_folder(
     uids = _parse_uids(data)
     exported = 0
     last_uid = previous_uid if not uidvalidity_changed else 0
+    post_process_errors: list[dict[str, Any]] = []
     for uid in uids:
         fetch_status, fetch_data = client.uid("FETCH", str(uid), "(RFC822)")
         if fetch_status != "OK":
@@ -385,7 +430,7 @@ def sync_imap_folder(
             source_message_id=f"uid:{uid}",
             extra_metadata={"account": account, "uid": uid, "uidvalidity": uidvalidity},
         )
-        database.record_mail_message(
+        mail_message = database.record_mail_message(
             profile_name=profile_name,
             source_message_id=f"imap:{folder}:{uid}",
             source_folder=folder,
@@ -395,15 +440,35 @@ def sync_imap_folder(
             internet_message_id=result.manifest.get("message_id"),
             metadata={"account": account, "uid": uid, "uidvalidity": uidvalidity},
         )
-        _post_process_imap_message(
-            client,
+        post_process = _post_process_imap_message(
+            client=client,
+            profile_name=profile_name,
+            account=account,
+            folder=folder,
             uid=uid,
             post_process_policy=post_process_policy,
             processed_folder=processed_folder,
+            profile_metadata=profile_metadata,
+        )
+        event = database.record_mail_post_process_event(
+            profile_name=profile_name,
+            sync_run_id=sync_run_id,
+            mail_message_id=mail_message.get("id"),
+            provider=post_process["provider"],
+            policy=post_process["policy"],
+            action=post_process["action"],
+            status=post_process["status"],
+            dry_run=bool(post_process.get("dry_run")),
+            commands=post_process.get("commands") or [],
+            error=post_process.get("error"),
+            metadata={"folder": folder, **(post_process.get("metadata") or {})},
         )
         exported += 1
+        if event["status"] in {"failed", "blocked_config"}:
+            post_process_errors.append(event)
+            break
         last_uid = max(last_uid, uid)
-    return {
+    payload = {
         "profile_name": profile_name,
         "folder": folder,
         "uidvalidity": uidvalidity,
@@ -412,6 +477,9 @@ def sync_imap_folder(
         "seen": len(uids),
         "exported": exported,
     }
+    if post_process_errors:
+        payload["post_process_errors"] = post_process_errors
+    return payload
 
 
 def export_outlook_item_to_spool(
@@ -543,6 +611,8 @@ def _sync_imap_profile(
                     previous_uidvalidity=previous.get("uidvalidity"),
                     post_process_policy=profile["post_process_policy"],
                     processed_folder=(profile.get("metadata") or {}).get("processed_folder"),
+                    profile_metadata=profile.get("metadata") or {},
+                    sync_run_id=run_id,
                 )
             except Exception as exc:
                 errors = [_mail_sync_error(folder=folder, stage="sync_folder", error=exc)]
@@ -564,10 +634,38 @@ def _sync_imap_profile(
                     "exported": total_exported,
                     "errors": errors,
                 }
-            cursors[folder] = {"last_uid": result["last_uid"], "uidvalidity": result["uidvalidity"]}
             folder_results.append(result)
             total_seen += result["seen"]
             total_exported += result["exported"]
+            if result.get("post_process_errors"):
+                errors = [
+                    {
+                        "folder": folder,
+                        "stage": "post_process",
+                        "error": error.get("error") or error.get("status"),
+                        "status": error.get("status"),
+                    }
+                    for error in result["post_process_errors"]
+                ]
+                _complete_imap_sync_run(
+                    run_id=run_id,
+                    profile_name=profile["name"],
+                    status="backoff" if run_id else "failed",
+                    messages_seen=total_seen,
+                    messages_exported=total_exported,
+                    last_cursor=cursors,
+                    errors=errors,
+                    backoff_seconds=_imap_backoff_seconds(attempt_count) if run_id else None,
+                )
+                return {
+                    "profile": profile["name"],
+                    "status": "backoff" if run_id else "failed",
+                    "run_id": run_id,
+                    "folders": folder_results,
+                    "exported": total_exported,
+                    "errors": errors,
+                }
+            cursors[folder] = {"last_uid": result["last_uid"], "uidvalidity": result["uidvalidity"]}
         finally:
             _close_imap_client(client)
     metadata = dict(profile.get("metadata") or {})
@@ -741,28 +839,42 @@ def _extract_fetch_rfc822(fetch_data: Any) -> bytes:
 
 
 def _post_process_imap_message(
-    client: Any,
     *,
+    client: Any,
+    profile_name: str,
+    account: str,
+    folder: str,
     uid: int,
     post_process_policy: str,
     processed_folder: str | None,
-) -> None:
-    if post_process_policy == "none":
-        return
-    if post_process_policy == "move_to_processed" and processed_folder:
-        client.uid("COPY", str(uid), processed_folder)
-        client.uid("STORE", str(uid), "+FLAGS", r"(\Deleted)")
-        _expunge_imap_deleted(client)
-        return
-    if post_process_policy == "trash":
-        client.uid("STORE", str(uid), "+FLAGS", r"(\Deleted)")
-        _expunge_imap_deleted(client)
+    profile_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    metadata = dict(profile_metadata or {})
+    if processed_folder and not metadata.get("processed_folder"):
+        metadata["processed_folder"] = processed_folder
+    profile = {
+        "name": profile_name,
+        "source_type": "imap",
+        "account": account,
+        "server": metadata.get("server"),
+        "post_process_policy": post_process_policy,
+        "metadata": metadata,
+    }
+    return apply_mail_post_process_policy(client=client, profile=profile, folder=folder, uid=uid)
 
 
 def _expunge_imap_deleted(client: Any) -> None:
     expunge = getattr(client, "expunge", None)
     if expunge:
         expunge()
+
+
+class _DryRunImapClient:
+    def uid(self, *_args):
+        raise RuntimeError("dry-run post-process must not execute IMAP UID commands")
+
+    def expunge(self):
+        raise RuntimeError("dry-run post-process must not execute IMAP EXPUNGE")
 
 
 def _close_imap_client(client: Any) -> None:

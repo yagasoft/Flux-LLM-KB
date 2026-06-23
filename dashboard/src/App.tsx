@@ -157,12 +157,28 @@ type MailSchedulerStatus = {
   diagnostics?: ErrorDiagnostic[];
 };
 
+type MailPostProcessEvent = {
+  id?: string;
+  profile_name?: string | null;
+  provider?: string;
+  policy?: string;
+  action?: string;
+  status?: string;
+  dry_run?: boolean;
+  error?: string | null;
+  created_at?: string | null;
+};
+
 type MailStatus = {
   enabled_profiles?: number;
   exported_messages?: number;
   errored_messages?: number;
   profiles?: MailProfile[];
   scheduler?: MailSchedulerStatus;
+  post_process?: {
+    counts?: Record<string, number>;
+    recent_events?: MailPostProcessEvent[];
+  };
   oauth?: {
     profiles?: Array<{ profile_name?: string; status?: string; expires_at?: string | null; has_refresh_token?: boolean }>;
   };
@@ -394,6 +410,9 @@ type ProfileForm = {
   folder_paths: string;
   spool_path: string;
   post_process_policy: string;
+  processed_folder: string;
+  trash_folder: string;
+  destructive_post_process_confirmed: boolean;
   sync_enabled: boolean;
   sync_interval_seconds: number;
   sync_window_days: number;
@@ -629,6 +648,9 @@ export default function App() {
       folder_paths: splitLines(form.folder_paths),
       spool_path: form.spool_path.trim(),
       post_process_policy: form.post_process_policy,
+      processed_folder: form.processed_folder.trim(),
+      trash_folder: form.trash_folder.trim(),
+      destructive_post_process_confirmed: form.destructive_post_process_confirmed,
       sync_enabled: form.sync_enabled,
       sync_interval_seconds: Number(form.sync_interval_seconds),
       sync_window_days: Number(form.sync_window_days),
@@ -639,6 +661,25 @@ export default function App() {
     setSelectedName(payload.name);
     setToast("Mail profile saved.");
     await load();
+  }
+
+  async function runPostProcessDryRun(profile = selectedProfile) {
+    if (!profile) {
+      setToast("Select a mail profile first.");
+      return;
+    }
+    try {
+      const payload = await sendJson<{ events?: MailPostProcessEvent[] }>(
+        `/api/mail/profiles/${encodeURIComponent(profile.name)}/post-process/dry-run`,
+        "POST",
+        { limit: 5 }
+      );
+      const planned = payload.events?.length ?? 0;
+      setToast(`Post-process dry-run planned ${planned} action${planned === 1 ? "" : "s"}.`);
+      await load();
+    } catch (error) {
+      setToast(`Post-process dry-run failed for ${profile.name}: ${errorMessage(error)}`);
+    }
   }
 
   async function startGmailOAuth(profile: MailProfile, clientConfigPath: string) {
@@ -1085,6 +1126,7 @@ export default function App() {
             onEditProfile={setProfileDialog}
             onSelectProfile={(profile) => setSelectedName(profile.name)}
             onSyncProfile={(profile) => void requestProfileSync(profile)}
+            onPostProcessDryRun={(profile) => void runPostProcessDryRun(profile)}
             onOAuthStart={(profile, clientPath) => void startGmailOAuth(profile, clientPath)}
             onOAuthPathSave={(profile, clientPath) => void saveGmailOAuthClientPath(profile, clientPath)}
             onErrorDetail={setErrorDetail}
@@ -1262,6 +1304,7 @@ function MailTab({
   onEditProfile,
   onSelectProfile,
   onSyncProfile,
+  onPostProcessDryRun,
   onOAuthStart,
   onOAuthPathSave,
   onErrorDetail
@@ -1278,6 +1321,7 @@ function MailTab({
   onEditProfile: (profile: MailProfile) => void;
   onSelectProfile: (profile: MailProfile) => void;
   onSyncProfile: (profile: MailProfile) => void;
+  onPostProcessDryRun: (profile: MailProfile) => void;
   onOAuthStart: (profile: MailProfile, clientPath: string) => void;
   onOAuthPathSave: (profile: MailProfile, clientPath: string) => void;
   onErrorDetail: (error: string) => void;
@@ -1323,6 +1367,7 @@ function MailTab({
 
       <section className="lower-grid">
         <MailSchedulerPanel scheduler={state.mail.scheduler} />
+        <MailPostProcessPanel mail={state.mail} selectedProfile={selectedProfile} onDryRun={onPostProcessDryRun} />
         <MailStatusPanel mail={state.mail} hostStatus={hostStatus} showOutlook={hasOutlookProfiles} />
         <MailErrorsPanel mail={state.mail} errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
         {hasOutlookProfiles && <OutlookHostPanel host={host} hostStatus={hostStatus} pending={state.outlook.pending_requests?.length ?? 0} />}
@@ -1361,10 +1406,13 @@ function MailSchedulerPanel({ scheduler }: { scheduler?: MailSchedulerStatus }) 
 }
 
 function MailStatusPanel({ mail, hostStatus, showOutlook }: { mail: MailStatus; hostStatus: string; showOutlook: boolean }) {
+  const postProcessCounts = mail.post_process?.counts ?? {};
   const rows = [
     ["Profiles", "enabled", String(mail.enabled_profiles ?? 0)],
     ["Exports", "messages", String(mail.exported_messages ?? 0)],
-    ["Errors", "messages", String(mail.errored_messages ?? 0)]
+    ["Errors", "messages", String(mail.errored_messages ?? 0)],
+    ["Post-process failed", "events", String(postProcessCounts.failed ?? 0)],
+    ["Post-process blocked", "events", String(postProcessCounts.blocked_config ?? 0)]
   ];
   if (showOutlook) {
     rows.push(["Outlook host", "state", hostStatusLabel(hostStatus)]);
@@ -1372,6 +1420,44 @@ function MailStatusPanel({ mail, hostStatus, showOutlook }: { mail: MailStatus; 
   return (
     <Panel title="Mail Runtime">
       <MiniTable rows={rows} />
+    </Panel>
+  );
+}
+
+function MailPostProcessPanel({ mail, selectedProfile, onDryRun }: { mail: MailStatus; selectedProfile?: MailProfile; onDryRun: (profile: MailProfile) => void }) {
+  const events = mail.post_process?.recent_events ?? [];
+  return (
+    <Panel
+      title="Post Process"
+      action={selectedProfile ? (
+        <button
+          className="ghost-action compact"
+          type="button"
+          aria-label={`Dry run post process for ${selectedProfile.name}`}
+          title={`Preview post-process commands for ${selectedProfile.name}`}
+          onClick={() => onDryRun(selectedProfile)}
+        >
+          <Play size={15} /> Dry run
+        </button>
+      ) : undefined}
+    >
+      <div className="run-history">
+        {events.slice(0, 5).map((event) => (
+          <div className="run-row" key={event.id ?? `${event.profile_name}-${event.created_at}-${event.action}`}>
+            <div>
+              <span className={event.status === "failed" || event.status === "blocked_config" ? "state-pill warning" : "state-pill enabled"}>{mailPostProcessStatusLabel(event.status)}</span>
+              <strong>{mailPostProcessPolicyLabel(event.policy)}</strong>
+              <span>{event.profile_name ?? "profile"} - {mailPostProcessActionLabel(event.action)}{event.dry_run ? " - dry-run" : ""}</span>
+            </div>
+            <div>
+              <span>{event.provider ?? "provider"}</span>
+              <span>{formatDate(event.created_at)}</span>
+            </div>
+            {event.error && <p>{event.error}</p>}
+          </div>
+        ))}
+        {events.length === 0 && <p className="muted">No recent post-process events.</p>}
+      </div>
     </Panel>
   );
 }
@@ -2991,6 +3077,7 @@ function RunHistory({ runs }: { runs: MailSyncRun[] }) {
 }
 
 function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; onClose: () => void; onSave: (form: ProfileForm) => void }) {
+  const metadata = profile?.metadata ?? {};
   const [form, setForm] = useState<ProfileForm>(() => ({
     name: profile?.name ?? "gmail-capture",
     source_type: (profile?.source_type === "outlook_com" ? "outlook_com" : "imap"),
@@ -2999,6 +3086,9 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
     folder_paths: (profile?.folder_paths ?? ["FluxCapture"]).join("\n"),
     spool_path: profile?.spool_path ?? "private/mail-spool/gmail-capture",
     post_process_policy: profile?.post_process_policy ?? "move_to_processed",
+    processed_folder: metadataString(metadata, "processed_folder", "FluxProcessed"),
+    trash_folder: metadataString(metadata, "trash_folder", ""),
+    destructive_post_process_confirmed: Boolean(metadata.destructive_post_process_confirmed),
     sync_enabled: Boolean(profile?.sync_enabled),
     sync_interval_seconds: profile?.sync_interval_seconds ?? 900,
     sync_window_days: profile?.sync_window_days ?? 30,
@@ -3033,13 +3123,17 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
           <label className="span-2">Private spool path<input value={form.spool_path} onChange={(event) => update("spool_path", event.target.value)} required /></label>
           <label>Post process<select value={form.post_process_policy} onChange={(event) => update("post_process_policy", event.target.value)}>
             <option value="move_to_processed">Move to processed</option>
+            <option value="remove_label">Remove label</option>
             <option value="none">Leave in place</option>
             <option value="trash">Trash/delete</option>
           </select></label>
+          <label>Processed folder or label<input value={form.processed_folder} onChange={(event) => update("processed_folder", event.target.value)} /></label>
+          <label>Trash folder<input value={form.trash_folder} onChange={(event) => update("trash_folder", event.target.value)} /></label>
           <label>Interval seconds<input type="number" min="60" value={form.sync_interval_seconds} onChange={(event) => update("sync_interval_seconds", Number(event.target.value))} /></label>
           <label>Window days<input type="number" min="1" value={form.sync_window_days} onChange={(event) => update("sync_window_days", Number(event.target.value))} /></label>
           <label>Max messages/run<input type="number" min="1" value={form.max_messages_per_run} onChange={(event) => update("max_messages_per_run", Number(event.target.value))} /></label>
           <label className="checkbox-label"><input type="checkbox" checked={form.sync_enabled} onChange={(event) => update("sync_enabled", event.target.checked)} /> Scheduled sync enabled</label>
+          <label className="checkbox-label"><input type="checkbox" checked={form.destructive_post_process_confirmed} onChange={(event) => update("destructive_post_process_confirmed", event.target.checked)} /> Confirm destructive post-process action</label>
         </div>
         <footer>
           <button className="ghost-action compact" type="button" onClick={onClose}>Cancel</button>
@@ -3310,6 +3404,27 @@ function runStatusLabel(status?: string) {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function mailPostProcessStatusLabel(status?: string) {
+  return runStatusLabel(status);
+}
+
+function mailPostProcessPolicyLabel(policy?: string) {
+  if (policy === "remove_label") return "Remove Label";
+  if (policy === "move_to_processed") return "Move To Processed";
+  if (policy === "trash") return "Trash";
+  if (policy === "none") return "Leave In Place";
+  return runStatusLabel(policy);
+}
+
+function mailPostProcessActionLabel(action?: string) {
+  return runStatusLabel(action);
+}
+
+function metadataString(metadata: Record<string, unknown>, key: string, fallback: string) {
+  const value = metadata[key];
+  return typeof value === "string" ? value : fallback;
 }
 
 function nextMailRun(runs: MailSyncRun[]) {

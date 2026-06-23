@@ -26,9 +26,11 @@ system rather than a large prompt-injected memory file.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
-- `mail_profiles`, `mail_messages`, and `mail_sync_runs`: IMAP and Outlook COM
-  capture profiles, per-message export state, cursors, errors, claimable IMAP
-  scheduler runs, drift/missed-run metadata, backoff state, and sync history.
+- `mail_profiles`, `mail_messages`, `mail_post_process_events`, and
+  `mail_sync_runs`: IMAP and Outlook COM capture profiles, per-message export
+  and post-process state, cursors, errors, claimable IMAP scheduler runs,
+  provider-specific mailbox action audit records, drift/missed-run metadata,
+  backoff state, and sync history.
 - `outlook_host_state` and `outlook_sync_requests`: Windows host heartbeat and
   pull-request coordination for Outlook COM catch-up profiles.
 
@@ -181,8 +183,14 @@ IMAP profiles are the preferred ongoing capture mechanism. They connect over
 TLS, use Gmail installed-app OAuth plus XOAUTH2 when configured, refresh access
 tokens before login, track UID/UIDVALIDITY cursors per folder or label, and
 always run reconciliation so restarts and missed events are recovered.
-Post-processing defaults to moving/removing the capture label or moving the
-message to a processed folder; permanent delete is not the default.
+Post-processing is policy-driven per profile. Gmail profiles use Gmail IMAP
+label commands for remove-label, processed-label, and Trash handling. Generic
+IMAP profiles use COPY, delete flags, and EXPUNGE only for policies that require
+moving or deletion, including optional `trash_folder` copy before source
+deletion. Destructive trash/delete policies require explicit confirmation. Every
+exported IMAP message records a post-process event; failure
+preserves the ready spool export, surfaces in the sync run, and keeps the folder
+cursor retry-safe by not advancing past the failed UID.
 
 Scheduled IMAP sync is represented as explicit `mail_sync_runs` lifecycle state.
 Due profiles are selected from enabled/sync-enabled profile settings and

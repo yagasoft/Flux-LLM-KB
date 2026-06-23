@@ -198,13 +198,17 @@ flux-kb mail profile add-imap `
   --account me@gmail.com `
   --server imap.gmail.com `
   --folder FluxCapture `
-  --spool private\mail-spool\gmail-capture
+  --spool private\mail-spool\gmail-capture `
+  --post-process remove_label `
+  --processed-folder FluxProcessed
 
 flux-kb mail oauth gmail start `
   --profile gmail-capture `
   --client-config private\google-oauth-client.json
 
 flux-kb mail oauth status --profile gmail-capture
+flux-kb mail post-process dry-run --profile gmail-capture --limit 5
+flux-kb mail post-process events --profile gmail-capture --limit 20
 flux-kb mail watch run --profile gmail-capture
 ```
 
@@ -212,6 +216,26 @@ Open the returned authorization URL, approve the local desktop app, and let the
 loopback callback complete through the local dashboard/API. Flux stores the
 refresh token locally, masks it in all responses, and refreshes short-lived
 access tokens before XOAUTH2 IMAP login.
+
+Mail post-processing is policy-driven per profile:
+
+- `none`: export only and leave the message in place.
+- `remove_label`: Gmail-only; remove the capture label with Gmail IMAP label
+  commands.
+- `move_to_processed`: Gmail adds the processed label and removes the capture
+  label; generic IMAP copies to the processed folder, marks the source deleted,
+  and expunges.
+- `trash`: confirmation-gated; Gmail applies Trash semantics and generic IMAP
+  copies to `trash_folder` when configured, then deletes and expunges the
+  source message.
+
+Use `flux-kb mail post-process dry-run` or
+`POST /api/mail/profiles/{profile}/post-process/dry-run` before enabling a new
+policy. Recent outcomes are available through
+`flux-kb mail post-process events` and
+`GET /api/mail/post-process/events?profile_name=<name>`. Audit views include
+profile, provider, policy, action, status, command metadata, and errors, but not
+raw mail bodies.
 
 Classic Outlook COM catch-up is scoped to selected folder paths:
 

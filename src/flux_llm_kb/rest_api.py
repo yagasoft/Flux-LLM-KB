@@ -141,6 +141,9 @@ def create_app():
         account: str | None = None
         server: str | None = None
         post_process_policy: str = "move_to_processed"
+        processed_folder: str | None = None
+        trash_folder: str | None = None
+        destructive_post_process_confirmed: bool = False
         sync_enabled: bool = False
         sync_interval_seconds: int = 900
         sync_window_days: int = 30
@@ -148,6 +151,9 @@ def create_app():
 
     class MailSyncRequest(BaseModel):
         profile_name: str | None = None
+
+    class MailPostProcessDryRunRequest(BaseModel):
+        limit: int = 5
 
     class GmailOAuthStartRequest(BaseModel):
         profile_name: str
@@ -722,11 +728,38 @@ def create_app():
             folder_paths=request.folder_paths,
             spool_path=request.spool_path,
             post_process_policy=request.post_process_policy,
+            processed_folder=request.processed_folder,
+            trash_folder=request.trash_folder,
+            destructive_post_process_confirmed=request.destructive_post_process_confirmed,
             sync_enabled=request.sync_enabled,
             sync_interval_seconds=request.sync_interval_seconds,
             sync_window_days=request.sync_window_days,
             max_messages_per_run=request.max_messages_per_run,
         )
+
+    @app.post("/api/mail/profiles/{profile_name}/post-process/dry-run")
+    def mail_post_process_dry_run(profile_name: str, request: MailPostProcessDryRunRequest = Body(default=MailPostProcessDryRunRequest())):
+        from .mail_ingestion import dry_run_mail_post_process
+
+        try:
+            return dry_run_mail_post_process(profile_name=profile_name, limit=request.limit)
+        except ValueError as exc:
+            raise FluxApiError(
+                code="mail.profile_not_found",
+                message=str(exc),
+                status_code=404,
+                component="mail",
+                retryable=False,
+                user_action="Refresh the Mail tab and choose an existing profile.",
+                target={"type": "mail_profile", "id": profile_name},
+                links=[{"label": "Mail", "tab": "mail", "profile": profile_name}],
+            ) from exc
+
+    @app.get("/api/mail/post-process/events")
+    def mail_post_process_events(profile_name: str | None = None, limit: int = 20):
+        from . import database
+
+        return {"events": database.list_mail_post_process_events(profile_name=profile_name, limit=limit)}
 
     @app.put("/api/mail/profiles/{profile_name}/oauth-client-config")
     def mail_profile_oauth_client_config(profile_name: str, request: GmailOAuthClientConfigRequest = Body(...)):

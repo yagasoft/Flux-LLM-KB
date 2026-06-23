@@ -127,6 +127,7 @@ def test_sync_imap_folder_resets_cursor_when_uidvalidity_changes(monkeypatch, tm
 
     records = []
     monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: records.append(kwargs) or {"id": "mail-1"})
+    monkeypatch.setattr(database, "record_mail_post_process_event", lambda **kwargs: kwargs)
 
     result = sync_imap_folder(
         client=FakeClient(),
@@ -170,6 +171,7 @@ def test_sync_imap_folder_trash_policy_executes_delete_and_expunge(monkeypatch, 
             return "OK", []
 
     monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: {"id": "mail-1"})
+    monkeypatch.setattr(database, "record_mail_post_process_event", lambda **kwargs: kwargs)
 
     result = sync_imap_folder(
         client=FakeClient(),
@@ -178,11 +180,55 @@ def test_sync_imap_folder_trash_policy_executes_delete_and_expunge(monkeypatch, 
         folder="FluxCapture",
         spool_path=tmp_path,
         post_process_policy="trash",
+        profile_metadata={"provider": "imap", "destructive_post_process_confirmed": True},
     )
 
     assert result["exported"] == 1
     assert ("STORE", ("7", "+FLAGS", r"(\Deleted)")) in calls
     assert ("EXPUNGE", ()) in calls
+
+
+def test_sync_imap_folder_records_post_process_failure_without_advancing_cursor(monkeypatch, tmp_path):
+    class FakeClient:
+        def select(self, folder):
+            return "OK", [b"1"]
+
+        def response(self, key):
+            return "OK", [b"1"]
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                return "OK", [b"7"]
+            if command == "FETCH":
+                return "OK", [(b"7 (RFC822)", _sample_message())]
+            if command == "COPY":
+                raise RuntimeError("COPY denied")
+            raise AssertionError(command)
+
+    events = []
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: {"id": "mail-1", "export_state": kwargs["export_state"]})
+    monkeypatch.setattr(database, "record_mail_post_process_event", lambda **kwargs: events.append(kwargs) or kwargs)
+
+    result = sync_imap_folder(
+        client=FakeClient(),
+        profile_name="gmail-capture",
+        account="me@gmail.com",
+        folder="FluxCapture",
+        spool_path=tmp_path,
+        previous_uid=6,
+        post_process_policy="move_to_processed",
+        processed_folder="FluxProcessed",
+        profile_metadata={"provider": "imap"},
+        sync_run_id="run-1",
+    )
+
+    assert result["exported"] == 1
+    assert result["last_uid"] == 6
+    assert result["post_process_errors"][0]["status"] == "failed"
+    assert "COPY denied" in result["post_process_errors"][0]["error"]
+    assert events[0]["mail_message_id"] == "mail-1"
+    assert events[0]["sync_run_id"] == "run-1"
+    assert events[0]["status"] == "failed"
 
 
 def test_export_outlook_item_to_spool_writes_msg_backup_and_manifest(tmp_path):

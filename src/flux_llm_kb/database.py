@@ -3743,6 +3743,131 @@ def record_mail_message(
             return {"id": row[0], "export_state": row[1]}
 
 
+def record_mail_post_process_event(
+    *,
+    profile_name: str,
+    provider: str,
+    policy: str,
+    action: str,
+    status: str,
+    dry_run: bool = False,
+    sync_run_id: str | None = None,
+    mail_message_id: str | None = None,
+    commands: list[dict[str, Any]] | None = None,
+    error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM mail_profiles WHERE name = %s", (profile_name,))
+            profile = cur.fetchone()
+            if profile is None:
+                raise ValueError(f"mail profile not found: {profile_name}")
+            profile_id = profile[0]
+            cur.execute(
+                """
+                INSERT INTO mail_post_process_events (
+                    profile_id, sync_run_id, mail_message_id, provider, policy,
+                    action, status, dry_run, commands, error, metadata
+                )
+                VALUES (
+                    %s,
+                    %s::uuid,
+                    %s::uuid,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s::jsonb,
+                    %s,
+                    %s::jsonb
+                )
+                RETURNING id::text,
+                          (SELECT name FROM mail_profiles WHERE id = %s),
+                          sync_run_id::text, mail_message_id::text, provider,
+                          policy, action, status, dry_run, commands, error,
+                          metadata, created_at
+                """,
+                (
+                    profile_id,
+                    sync_run_id,
+                    mail_message_id,
+                    provider,
+                    policy,
+                    action,
+                    status,
+                    dry_run,
+                    _json_list(commands or []),
+                    error,
+                    _json(metadata or {}),
+                    profile_id,
+                ),
+            )
+            row = cur.fetchone()
+            if mail_message_id:
+                cur.execute(
+                    """
+                    UPDATE mail_messages
+                    SET post_process_policy = %s,
+                        post_process_status = %s,
+                        post_process_action = %s,
+                        post_process_error = %s,
+                        post_process_dry_run = %s,
+                        post_processed_at = CASE WHEN NOT %s THEN now() ELSE post_processed_at END,
+                        post_process_metadata = post_process_metadata || %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (
+                        policy,
+                        status,
+                        action,
+                        error,
+                        dry_run,
+                        dry_run,
+                        _json(metadata or {}),
+                        mail_message_id,
+                    ),
+                )
+            return _mail_post_process_event_row(row)
+
+
+def list_mail_post_process_events(
+    *,
+    profile_name: str | None = None,
+    limit: int = 20,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    filters: list[str] = []
+    params: list[Any] = []
+    if profile_name:
+        filters.append("p.name = %s")
+        params.append(profile_name)
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(max(1, min(limit, 200)))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT e.id::text, p.name, e.sync_run_id::text,
+                       e.mail_message_id::text, e.provider, e.policy, e.action,
+                       e.status, e.dry_run, e.commands, e.error, e.metadata,
+                       e.created_at
+                FROM mail_post_process_events e
+                LEFT JOIN mail_profiles p ON p.id = e.profile_id
+                {where}
+                ORDER BY e.created_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            return [_mail_post_process_event_row(row) for row in cur.fetchall()]
+
+
 def mail_status(*, url: str | None = None) -> dict[str, Any]:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -3753,6 +3878,17 @@ def mail_status(*, url: str | None = None) -> dict[str, Any]:
             exported_messages = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM mail_messages WHERE export_state = 'error'")
             errored_messages = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status = 'planned') AS planned,
+                    count(*) FILTER (WHERE status = 'applied') AS applied,
+                    count(*) FILTER (WHERE status = 'failed') AS failed,
+                    count(*) FILTER (WHERE status = 'blocked_config') AS blocked_config
+                FROM mail_post_process_events
+                """
+            )
+            post_process_counts = cur.fetchone()
             profiles = list_mail_profiles(url=url)
             return {
                 "enabled_profiles": enabled_profiles,
@@ -3760,6 +3896,15 @@ def mail_status(*, url: str | None = None) -> dict[str, Any]:
                 "errored_messages": errored_messages,
                 "profiles": profiles,
                 "scheduler": mail_scheduler_status(url=url),
+                "post_process": {
+                    "counts": {
+                        "planned": int(post_process_counts[0] or 0),
+                        "applied": int(post_process_counts[1] or 0),
+                        "failed": int(post_process_counts[2] or 0),
+                        "blocked_config": int(post_process_counts[3] or 0),
+                    },
+                    "recent_events": list_mail_post_process_events(limit=10, url=url),
+                },
             }
 
 
@@ -4532,6 +4677,24 @@ def _mail_message_detail_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "received_at": row[10].isoformat() if row[10] else None,
         "exported_at": row[11].isoformat() if row[11] else None,
         "metadata": row[12] or {},
+    }
+
+
+def _mail_post_process_event_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "profile_name": row[1],
+        "sync_run_id": row[2],
+        "mail_message_id": row[3],
+        "provider": row[4],
+        "policy": row[5],
+        "action": row[6],
+        "status": row[7],
+        "dry_run": bool(row[8]),
+        "commands": row[9] or [],
+        "error": row[10],
+        "metadata": row[11] or {},
+        "created_at": row[12].isoformat() if row[12] else None,
     }
 
 

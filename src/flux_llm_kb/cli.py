@@ -211,12 +211,18 @@ def main(argv: list[str] | None = None) -> int:
     mail_add_imap.add_argument("--folder", action="append", required=True)
     mail_add_imap.add_argument("--spool", required=True)
     mail_add_imap.add_argument("--post-process", default="move_to_processed")
+    mail_add_imap.add_argument("--processed-folder")
+    mail_add_imap.add_argument("--trash-folder")
+    mail_add_imap.add_argument("--confirm-destructive-post-process", action="store_true")
     _add_mail_schedule_args(mail_add_imap)
     mail_add_outlook = mail_profile_subparsers.add_parser("add-outlook", help="Add an Outlook COM catch-up profile")
     mail_add_outlook.add_argument("--name", required=True)
     mail_add_outlook.add_argument("--folder", action="append", required=True)
     mail_add_outlook.add_argument("--spool", required=True)
     mail_add_outlook.add_argument("--post-process", default="move_to_processed")
+    mail_add_outlook.add_argument("--processed-folder")
+    mail_add_outlook.add_argument("--trash-folder")
+    mail_add_outlook.add_argument("--confirm-destructive-post-process", action="store_true")
     _add_mail_schedule_args(mail_add_outlook)
     mail_profile_subparsers.add_parser("list", help="List mail profiles")
     mail_subparsers.add_parser("status", help="Show mail ingestion status")
@@ -239,6 +245,14 @@ def main(argv: list[str] | None = None) -> int:
     gmail_oauth_complete.add_argument("--code", required=True)
     mail_oauth_status = mail_oauth_subparsers.add_parser("status", help="Show mail OAuth status")
     mail_oauth_status.add_argument("--profile")
+    mail_post_process = mail_subparsers.add_parser("post-process", help="Preview and inspect post-process actions")
+    mail_post_process_subparsers = mail_post_process.add_subparsers(dest="mail_post_process_command", required=True)
+    mail_post_process_dry_run = mail_post_process_subparsers.add_parser("dry-run", help="Preview selected profile post-process actions")
+    mail_post_process_dry_run.add_argument("--profile", required=True)
+    mail_post_process_dry_run.add_argument("--limit", type=int, default=5)
+    mail_post_process_events = mail_post_process_subparsers.add_parser("events", help="List recent post-process events")
+    mail_post_process_events.add_argument("--profile")
+    mail_post_process_events.add_argument("--limit", type=int, default=20)
     mail_render = mail_subparsers.add_parser("render-outlook-config", help="Render an Outlook COM catch-up config")
     mail_render.add_argument("--profile", required=True)
     mail_render.add_argument("--spool", required=True)
@@ -619,6 +633,9 @@ def _mail(args: argparse.Namespace) -> int:
                 folder_paths=args.folder,
                 spool_path=args.spool,
                 post_process_policy=args.post_process,
+                processed_folder=args.processed_folder,
+                trash_folder=args.trash_folder,
+                destructive_post_process_confirmed=args.confirm_destructive_post_process,
                 sync_enabled=args.sync_enabled,
                 sync_interval_seconds=args.sync_interval_seconds,
                 sync_window_days=args.sync_window_days,
@@ -633,6 +650,9 @@ def _mail(args: argparse.Namespace) -> int:
                 folder_paths=args.folder,
                 spool_path=args.spool,
                 post_process_policy=args.post_process,
+                processed_folder=args.processed_folder,
+                trash_folder=args.trash_folder,
+                destructive_post_process_confirmed=args.confirm_destructive_post_process,
                 sync_enabled=args.sync_enabled,
                 sync_interval_seconds=args.sync_interval_seconds,
                 sync_window_days=args.sync_window_days,
@@ -646,6 +666,18 @@ def _mail(args: argparse.Namespace) -> int:
         payload = mail_ingestion.mail_status()
     elif args.mail_command == "sync":
         payload = mail_ingestion.sync_mail_profile(profile_name=args.profile)
+    elif args.mail_command == "post-process":
+        if args.mail_post_process_command == "dry-run":
+            payload = mail_ingestion.dry_run_mail_post_process(profile_name=args.profile, limit=args.limit)
+        elif args.mail_post_process_command == "events":
+            payload = {
+                "events": database.list_mail_post_process_events(
+                    profile_name=args.profile,
+                    limit=args.limit,
+                )
+            }
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.mail_post_process_command)
     elif args.mail_command == "watch":
         if args.mail_watch_command != "run":  # pragma: no cover - argparse prevents this
             raise ValueError(args.mail_watch_command)

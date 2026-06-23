@@ -74,6 +74,8 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     assert "/api/mail/status" in routes
     assert "/api/mail/profiles" in routes
     assert "/api/mail/profiles/{profile_name}/oauth-client-config" in routes
+    assert "/api/mail/profiles/{profile_name}/post-process/dry-run" in routes
+    assert "/api/mail/post-process/events" in routes
     assert "/api/mail/oauth/gmail/start" in routes
     assert "/api/mail/oauth/gmail/callback" in routes
     assert "/api/mail/oauth/status" in routes
@@ -81,6 +83,47 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     assert "/api/outlook-host/request-sync" in routes
     assert "/api/outlook-host/profiles/{name}/enable" in routes
     assert "/api/outlook-host/profiles/{name}/disable" in routes
+
+
+def test_rest_mail_post_process_dry_run_calls_mail_ingestion(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_ingestion
+
+    captured = {}
+    monkeypatch.setattr(
+        mail_ingestion,
+        "dry_run_mail_post_process",
+        lambda **kwargs: captured.update(kwargs) or {
+            "profile_name": kwargs["profile_name"],
+            "dry_run": True,
+            "events": [{"profile_name": kwargs["profile_name"], "status": "planned"}],
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.post("/api/mail/profiles/gmail/post-process/dry-run", json={"limit": 3})
+
+    assert response.status_code == 200
+    assert captured == {"profile_name": "gmail", "limit": 3}
+    assert response.json()["events"][0]["status"] == "planned"
+
+
+def test_rest_mail_post_process_events_list_database_events(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    captured = {}
+    monkeypatch.setattr(
+        database,
+        "list_mail_post_process_events",
+        lambda **kwargs: captured.update(kwargs) or [{"profile_name": kwargs["profile_name"], "status": "applied"}],
+    )
+    client = TestClient(create_app())
+
+    response = client.get("/api/mail/post-process/events?profile_name=gmail&limit=4")
+
+    assert response.status_code == 200
+    assert captured == {"profile_name": "gmail", "limit": 4}
+    assert response.json()["events"][0]["status"] == "applied"
 
 
 def test_cli_mail_oauth_start_outputs_authorization_url(monkeypatch, tmp_path, capsys):
@@ -293,3 +336,71 @@ def test_cli_mail_profile_add_imap_accepts_schedule_fields(monkeypatch, tmp_path
     assert captured["sync_interval_seconds"] == 900
     assert captured["sync_window_days"] == 14
     assert captured["max_messages_per_run"] == 50
+
+
+def test_cli_mail_profile_add_imap_accepts_post_process_fields(monkeypatch, tmp_path, capsys):
+    from flux_llm_kb import mail_ingestion
+
+    captured = {}
+    monkeypatch.setattr(mail_ingestion, "add_mail_profile", lambda **kwargs: captured.update(kwargs) or {"name": kwargs["name"]})
+
+    assert cli.main(
+        [
+            "mail",
+            "profile",
+            "add-imap",
+            "--name",
+            "gmail",
+            "--account",
+            "me@gmail.com",
+            "--folder",
+            "FluxCapture",
+            "--spool",
+            str(tmp_path),
+            "--post-process",
+            "remove_label",
+            "--processed-folder",
+            "FluxProcessed",
+            "--trash-folder",
+            "[Gmail]/Trash",
+            "--confirm-destructive-post-process",
+        ]
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out)["name"] == "gmail"
+    assert captured["post_process_policy"] == "remove_label"
+    assert captured["processed_folder"] == "FluxProcessed"
+    assert captured["trash_folder"] == "[Gmail]/Trash"
+    assert captured["destructive_post_process_confirmed"] is True
+
+
+def test_cli_mail_post_process_dry_run_outputs_planned_events(monkeypatch, capsys):
+    from flux_llm_kb import mail_ingestion
+
+    captured = {}
+    monkeypatch.setattr(
+        mail_ingestion,
+        "dry_run_mail_post_process",
+        lambda **kwargs: captured.update(kwargs) or {"profile_name": kwargs["profile_name"], "events": [{"status": "planned"}]},
+    )
+
+    assert cli.main(["mail", "post-process", "dry-run", "--profile", "gmail", "--limit", "2"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert captured == {"profile_name": "gmail", "limit": 2}
+    assert payload["events"][0]["status"] == "planned"
+
+
+def test_cli_mail_post_process_events_outputs_database_events(monkeypatch, capsys):
+    captured = {}
+    monkeypatch.setattr(
+        database,
+        "list_mail_post_process_events",
+        lambda **kwargs: captured.update(kwargs) or [{"profile_name": kwargs["profile_name"], "status": "applied"}],
+    )
+
+    assert cli.main(["mail", "post-process", "events", "--profile", "gmail", "--limit", "2"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert captured == {"profile_name": "gmail", "limit": 2}
+    assert payload["events"][0]["status"] == "applied"

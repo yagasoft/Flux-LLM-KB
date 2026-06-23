@@ -511,6 +511,185 @@ def test_imap_mail_schedule_has_due_query_and_advances_after_sync_run():
     assert "make_interval(secs => sync_interval_seconds)" in record_function
 
 
+def test_mail_post_process_event_helpers_persist_events_and_update_messages(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql, _params = executed[-1]
+            if "SELECT id FROM mail_profiles" in sql:
+                return ("profile-1",)
+            if "INSERT INTO mail_post_process_events" in sql:
+                return (
+                    "event-1",
+                    "gmail-capture",
+                    "run-1",
+                    "mail-1",
+                    "gmail",
+                    "move_to_processed",
+                    "gmail_move_label",
+                    "applied",
+                    False,
+                    [{"command": "STORE"}],
+                    None,
+                    {"uid": 42},
+                    timestamp,
+                )
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.record_mail_post_process_event(
+        profile_name="gmail-capture",
+        sync_run_id="run-1",
+        mail_message_id="mail-1",
+        provider="gmail",
+        policy="move_to_processed",
+        action="gmail_move_label",
+        status="applied",
+        dry_run=False,
+        commands=[{"command": "STORE"}],
+        metadata={"uid": 42},
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result["id"] == "event-1"
+    assert result["status"] == "applied"
+    assert "mail_post_process_events" in sql
+    assert "post_process_status" in sql
+    assert "post_process_policy" in sql
+    assert "post_process_metadata" in sql
+
+
+def test_record_mail_post_process_event_rejects_unknown_profile(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    with pytest.raises(ValueError, match="mail profile not found"):
+        database.record_mail_post_process_event(
+            profile_name="missing",
+            provider="gmail",
+            policy="remove_label",
+            action="gmail_remove_label",
+            status="planned",
+        )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "SELECT id FROM mail_profiles" in sql
+    assert "INSERT INTO mail_post_process_events" not in sql
+
+
+def test_list_mail_post_process_events_filters_by_profile(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "event-1",
+                    "gmail-capture",
+                    "run-1",
+                    "mail-1",
+                    "gmail",
+                    "remove_label",
+                    "gmail_remove_label",
+                    "planned",
+                    True,
+                    [{"command": "STORE"}],
+                    None,
+                    {"uid": 42},
+                    timestamp,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    events = database.list_mail_post_process_events(profile_name="gmail-capture", limit=500)
+
+    sql, params = executed[0]
+    assert "p.name = %s" in sql
+    assert params == ("gmail-capture", 200)
+    assert events[0]["profile_name"] == "gmail-capture"
+    assert events[0]["dry_run"] is True
+    assert "body" not in json.dumps(events[0]).lower()
+
+
 def test_claim_lifecycle_primitives_record_events_audit_and_relations():
     source = Path(database.__file__).read_text(encoding="utf-8")
 

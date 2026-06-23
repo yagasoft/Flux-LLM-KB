@@ -159,6 +159,19 @@ const mail = {
       { profile_name: "gmail-capture", status: "blocked_auth_required", has_refresh_token: false }
     ]
   },
+  post_process: {
+    recent_events: [
+      {
+        id: "post-process-1",
+        profile_name: "gmail-capture",
+        policy: "remove_label",
+        action: "gmail_remove_label",
+        status: "planned",
+        dry_run: true,
+        created_at: "2026-06-23T10:20:00+00:00"
+      }
+    ]
+  },
   profiles: [
     {
       name: "gmail-capture",
@@ -258,6 +271,7 @@ let captureReviewDecisionPayload: unknown;
 let auditPayload: unknown;
 let graphPayload: unknown;
 let claimTransitionPayload: unknown;
+let postProcessDryRunPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -353,6 +367,7 @@ describe("Flux dashboard", () => {
       ]
     };
     claimTransitionPayload = { id: "claim-stale", lifecycle_state: "confirmed" };
+    postProcessDryRunPayload = undefined;
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -390,6 +405,14 @@ describe("Flux dashboard", () => {
         return json({
           name: decodeURIComponent(url.split("/").at(-2) ?? ""),
           metadata: { gmail_oauth_client_config_path: JSON.parse(String(init.body)).client_config_path }
+        });
+      }
+      if (url.startsWith("/api/mail/profiles/") && url.endsWith("/post-process/dry-run") && init?.method === "POST") {
+        postProcessDryRunPayload = JSON.parse(String(init.body));
+        return json({
+          profile_name: decodeURIComponent(url.split("/").at(-3) ?? ""),
+          dry_run: true,
+          events: [{ status: "planned", policy: "remove_label", action: "gmail_remove_label" }]
         });
       }
       if (url === "/api/mail/sync") return json(mailSyncPayload);
@@ -752,6 +775,27 @@ describe("Flux dashboard", () => {
     expect(within(details as HTMLElement).getByText("1 missed")).toBeInTheDocument();
   });
 
+  test("mail tab shows post-process outcomes and runs dry-run for selected profile", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Select gmail-capture" }));
+
+    const panel = screen.getByRole("heading", { name: "Post Process" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("Remove Label")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Planned")).toBeInTheDocument();
+
+    await user.click(within(panel as HTMLElement).getByRole("button", { name: "Dry run post process for gmail-capture" }));
+
+    await waitFor(() => {
+      expect(postProcessDryRunPayload).toEqual({ limit: 5 });
+    });
+    expect(await screen.findByText("Post-process dry-run planned 1 action.")).toBeInTheDocument();
+  });
+
   test("manual IMAP sync surfaces the created run state", async () => {
     mailSyncPayload = {
       profiles: [{ profile: "gmail-capture", status: "queued", run_id: "run-manual", exported: 0 }],
@@ -921,6 +965,9 @@ describe("Flux dashboard", () => {
             folder_paths: ["FluxCapture", "Archive/Flux"],
             spool_path: "private/mail-spool/team-gmail",
             post_process_policy: "move_to_processed",
+            processed_folder: "FluxProcessed",
+            trash_folder: "",
+            destructive_post_process_confirmed: false,
             sync_enabled: false,
             sync_interval_seconds: 900,
             sync_window_days: 30,
@@ -930,6 +977,53 @@ describe("Flux dashboard", () => {
       );
     });
     expect(await screen.findByText("Mail profile saved.")).toBeInTheDocument();
+  });
+
+  test("mail profile form persists post-process policy metadata", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Add Profile" }));
+
+    await user.clear(screen.getByLabelText("Profile name"));
+    await user.type(screen.getByLabelText("Profile name"), "team-gmail");
+    await user.clear(screen.getByLabelText("Private spool path"));
+    await user.type(screen.getByLabelText("Private spool path"), "private/mail-spool/team-gmail");
+    await user.selectOptions(screen.getByLabelText("Post process"), "remove_label");
+    await user.clear(screen.getByLabelText("Processed folder or label"));
+    await user.type(screen.getByLabelText("Processed folder or label"), "FluxProcessed");
+    await user.clear(screen.getByLabelText("Trash folder"));
+    await user.click(screen.getByLabelText("Trash folder"));
+    await user.paste("[Gmail]/Trash");
+    await user.click(screen.getByLabelText("Confirm destructive post-process action"));
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/mail/profiles",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            name: "team-gmail",
+            source_type: "imap",
+            account: "me@gmail.com",
+            server: "imap.gmail.com",
+            folder_paths: ["FluxCapture"],
+            spool_path: "private/mail-spool/team-gmail",
+            post_process_policy: "remove_label",
+            processed_folder: "FluxProcessed",
+            trash_folder: "[Gmail]/Trash",
+            destructive_post_process_confirmed: true,
+            sync_enabled: false,
+            sync_interval_seconds: 900,
+            sync_window_days: 30,
+            max_messages_per_run: 200
+          })
+        })
+      );
+    });
   });
 
   test("corpus tab can add a watched path with policy fields", async () => {

@@ -35,6 +35,10 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "idx_claim_lifecycle_events_claim" in graph_migration.sql
     assert "idx_claim_relations_from" in graph_migration.sql
     assert "idx_claims_search_vector" in graph_migration.sql
+    mail_post_process_migration = next(item for item in migrations if item.name == "0011_mail_post_process")
+    assert "CREATE TABLE IF NOT EXISTS mail_post_process_events" in mail_post_process_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS post_process_status" in mail_post_process_migration.sql
+    assert "idx_mail_post_process_events_profile" in mail_post_process_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 
