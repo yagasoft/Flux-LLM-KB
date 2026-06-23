@@ -6,6 +6,13 @@
 - In WSL, use `pwsh`, not `pwsh.exe`, if PowerShell is needed.
 - Do not run `dotnet format`.
 - Do not leave behind build warnings.
+- Feature closeout for `codex/...` branches must use `scripts/dev/complete-feature.ps1`.
+  Do not manually run the commit/squash-merge/push/deploy/purge sequence unless
+  explicitly overridden. If the script fails, stop and report its JSON
+  `failed_step` and `log_path`, fix only that failure, then rerun it. Use
+  `-DryRun`, `-SkipDeploy`, or `-KeepWorktree` only when explicitly appropriate.
+  Never use `git reset --hard`, force-push, or delete a worktree/branch before
+  merge, push, deploy, and probes have succeeded.
 
 ## Owl directive (must remain exact)
 
@@ -18,4 +25,3 @@
 - Use MCP, CLI, and REST as first-class integration surfaces.
 - Use tests for behavior changes and run focused verification before reporting completion.
 - Treat `docs/roadmap.md` and `docs/architecture.md` as durable project intent.
-
