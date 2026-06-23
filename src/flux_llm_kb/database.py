@@ -2138,6 +2138,366 @@ def list_due_imap_mail_profiles(*, limit: int = 10, url: str | None = None) -> l
             return [_mail_profile_row(row) for row in cur.fetchall()]
 
 
+def create_imap_sync_run(
+    *,
+    profile_name: str,
+    trigger: str = "manual",
+    requested_by: str = "dashboard",
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH profile AS (
+                    SELECT id, name
+                    FROM mail_profiles
+                    WHERE name = %s
+                      AND source_type = 'imap'
+                      AND enabled
+                    FOR UPDATE
+                ),
+                active AS (
+                    SELECT r.id::text, p.name, r.status, r.trigger, r.requested_by,
+                           r.claimed_by, r.claimed_at, r.worker_id, r.attempt_count,
+                           r.last_error, r.next_attempt_at, r.drift_seconds,
+                           r.missed_runs, r.started_at, r.finished_at,
+                           r.messages_seen, r.messages_exported, r.last_cursor, r.errors
+                    FROM mail_sync_runs r
+                    JOIN profile p ON p.id = r.profile_id
+                    WHERE r.status IN ('queued', 'claimed', 'running', 'backoff')
+                    ORDER BY r.started_at DESC
+                    LIMIT 1
+                ),
+                inserted AS (
+                    INSERT INTO mail_sync_runs (
+                        profile_id, status, trigger, requested_by, drift_seconds, missed_runs
+                    )
+                    SELECT p.id, 'queued', %s, %s, 0, 0
+                    FROM profile p
+                    WHERE NOT EXISTS (SELECT 1 FROM active)
+                    RETURNING id::text, status, trigger, requested_by, claimed_by,
+                              claimed_at, worker_id, attempt_count, last_error,
+                              next_attempt_at, drift_seconds, missed_runs, started_at,
+                              finished_at, messages_seen, messages_exported, last_cursor,
+                              errors
+                )
+                SELECT i.id, p.name, i.status, i.trigger, i.requested_by,
+                       i.claimed_by, i.claimed_at, i.worker_id, i.attempt_count,
+                       i.last_error, i.next_attempt_at, i.drift_seconds,
+                       i.missed_runs, i.started_at, i.finished_at, i.messages_seen,
+                       i.messages_exported, i.last_cursor, i.errors
+                FROM inserted i
+                CROSS JOIN profile p
+                UNION ALL
+                SELECT id, name, status, trigger, requested_by, claimed_by, claimed_at,
+                       worker_id, attempt_count, last_error, next_attempt_at,
+                       drift_seconds, missed_runs, started_at, finished_at,
+                       messages_seen, messages_exported, last_cursor, errors
+                FROM active
+                LIMIT 1
+                """,
+                (profile_name, trigger, requested_by),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"IMAP profile not found or disabled: {profile_name}")
+            return _mail_sync_run_row(row)
+
+
+def claim_due_imap_sync_runs(
+    *,
+    limit: int = 10,
+    worker_id: str = "flux-kb-mail-worker",
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    capped_limit = max(1, min(limit, 100))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH due_profiles AS (
+                    SELECT p.id,
+                           GREATEST(EXTRACT(EPOCH FROM (now() - COALESCE(p.next_sync_at, now())))::integer, 0) AS drift_seconds,
+                           CASE
+                               WHEN p.next_sync_at IS NULL OR p.sync_interval_seconds <= 0 THEN 0
+                               ELSE GREATEST(FLOOR(EXTRACT(EPOCH FROM (now() - p.next_sync_at)) / p.sync_interval_seconds)::integer, 0)
+                           END AS missed_runs
+                    FROM mail_profiles p
+                    WHERE p.source_type = 'imap'
+                      AND p.enabled
+                      AND p.sync_enabled
+                      AND (p.next_sync_at IS NULL OR p.next_sync_at <= now())
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM mail_sync_runs active
+                          WHERE active.profile_id = p.id
+                            AND active.status IN ('queued', 'claimed', 'running', 'backoff')
+                      )
+                    ORDER BY COALESCE(p.next_sync_at, now()), p.name
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                )
+                INSERT INTO mail_sync_runs (
+                    profile_id, status, trigger, requested_by, drift_seconds, missed_runs
+                )
+                SELECT id, 'queued', 'schedule', 'scheduler', drift_seconds, missed_runs
+                FROM due_profiles
+                ON CONFLICT DO NOTHING
+                """,
+                (capped_limit,),
+            )
+            cur.execute(
+                """
+                WITH claimable AS (
+                    SELECT r.id
+                    FROM mail_sync_runs r
+                    JOIN mail_profiles p ON p.id = r.profile_id
+                    WHERE p.source_type = 'imap'
+                      AND p.enabled
+                      AND r.status IN ('queued', 'backoff')
+                      AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now())
+                    ORDER BY CASE WHEN r.trigger = 'manual' THEN 0 ELSE 1 END,
+                             COALESCE(r.next_attempt_at, r.started_at),
+                             r.started_at
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE mail_sync_runs r
+                SET status = 'claimed',
+                    claimed_by = %s,
+                    claimed_at = now(),
+                    worker_id = %s,
+                    attempt_count = r.attempt_count + 1,
+                    updated_at = now()
+                FROM claimable
+                JOIN mail_profiles p ON p.id = r.profile_id
+                WHERE r.id = claimable.id
+                RETURNING r.id::text, p.name, r.status, r.trigger, r.requested_by,
+                          r.claimed_by, r.claimed_at, r.worker_id, r.attempt_count,
+                          r.last_error, r.next_attempt_at, r.drift_seconds,
+                          r.missed_runs, r.started_at, r.finished_at, r.messages_seen,
+                          r.messages_exported, r.last_cursor, r.errors,
+                          p.id::text, p.source_type, p.account, p.server,
+                          p.folder_paths, p.spool_path, p.post_process_policy,
+                          p.enabled, p.trust_rank, p.metadata, p.sync_enabled,
+                          p.sync_interval_seconds, p.sync_window_days,
+                          p.max_messages_per_run, p.last_sync_at, p.next_sync_at
+                """,
+                (capped_limit, worker_id, worker_id),
+            )
+            return [_mail_sync_run_row(row, include_profile=True) for row in cur.fetchall()]
+
+
+def mark_mail_sync_run_running(
+    *,
+    run_id: str,
+    worker_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_sync_runs
+                SET status = 'running',
+                    worker_id = COALESCE(%s, worker_id),
+                    attempt_count = CASE WHEN attempt_count = 0 THEN 1 ELSE attempt_count END,
+                    started_at = now(),
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text, status
+                """,
+                (worker_id, run_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"mail sync run not found: {run_id}")
+            return {"id": row[0], "status": row[1]}
+
+
+def complete_mail_sync_run(
+    *,
+    run_id: str,
+    profile_name: str,
+    status: str,
+    messages_seen: int = 0,
+    messages_exported: int = 0,
+    last_cursor: dict[str, Any] | None = None,
+    errors: list[dict[str, Any]] | None = None,
+    backoff_seconds: int | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    error_payload = errors or []
+    last_error = _mail_last_error(error_payload)
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_sync_runs r
+                SET status = %s,
+                    finished_at = now(),
+                    messages_seen = %s,
+                    messages_exported = %s,
+                    last_cursor = %s::jsonb,
+                    errors = %s::jsonb,
+                    last_error = %s,
+                    next_attempt_at = CASE
+                        WHEN %s::integer IS NOT NULL THEN now() + make_interval(secs => %s::integer)
+                        ELSE NULL
+                    END,
+                    updated_at = now()
+                FROM mail_profiles p
+                WHERE r.id = %s
+                  AND p.id = r.profile_id
+                  AND p.name = %s
+                RETURNING r.id::text, p.id, r.status
+                """,
+                (
+                    status,
+                    messages_seen,
+                    messages_exported,
+                    _json(last_cursor or {}),
+                    _json_list(error_payload),
+                    last_error,
+                    backoff_seconds,
+                    backoff_seconds,
+                    run_id,
+                    profile_name,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"mail sync run not found: {run_id}")
+            cur.execute(
+                """
+                UPDATE mail_profiles
+                SET last_sync_at = now(),
+                    next_sync_at = CASE
+                        WHEN NOT sync_enabled THEN NULL
+                        WHEN %s::integer IS NOT NULL THEN now() + make_interval(secs => %s::integer)
+                        ELSE now() + make_interval(secs => sync_interval_seconds)
+                    END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (backoff_seconds, backoff_seconds, row[1]),
+            )
+            return {"id": row[0], "profile_name": profile_name, "status": row[2]}
+
+
+def list_mail_sync_runs(
+    *,
+    profile_name: str | None = None,
+    limit: int = 20,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    capped_limit = max(1, min(limit, 100))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            if profile_name:
+                cur.execute(
+                    """
+                    SELECT r.id::text, p.name, r.status, r.trigger, r.requested_by,
+                           r.claimed_by, r.claimed_at, r.worker_id, r.attempt_count,
+                           r.last_error, r.next_attempt_at, r.drift_seconds,
+                           r.missed_runs, r.started_at, r.finished_at,
+                           r.messages_seen, r.messages_exported, r.last_cursor, r.errors
+                    FROM mail_sync_runs r
+                    JOIN mail_profiles p ON p.id = r.profile_id
+                    WHERE p.name = %s
+                    ORDER BY r.updated_at DESC, r.started_at DESC
+                    LIMIT %s
+                    """,
+                    (profile_name, capped_limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT r.id::text, p.name, r.status, r.trigger, r.requested_by,
+                           r.claimed_by, r.claimed_at, r.worker_id, r.attempt_count,
+                           r.last_error, r.next_attempt_at, r.drift_seconds,
+                           r.missed_runs, r.started_at, r.finished_at,
+                           r.messages_seen, r.messages_exported, r.last_cursor, r.errors
+                    FROM mail_sync_runs r
+                    JOIN mail_profiles p ON p.id = r.profile_id
+                    WHERE p.source_type = 'imap'
+                    ORDER BY r.updated_at DESC, r.started_at DESC
+                    LIMIT %s
+                    """,
+                    (capped_limit,),
+                )
+            return [_mail_sync_run_row(row) for row in cur.fetchall()]
+
+
+def mail_scheduler_status(*, url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    counts = {
+        "due": 0,
+        "queued": 0,
+        "claimed": 0,
+        "running": 0,
+        "failed": 0,
+        "blocked_auth": 0,
+        "backoff": 0,
+    }
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*)
+                FROM mail_profiles p
+                WHERE p.source_type = 'imap'
+                  AND p.enabled
+                  AND p.sync_enabled
+                  AND (p.next_sync_at IS NULL OR p.next_sync_at <= now())
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM mail_sync_runs active
+                      WHERE active.profile_id = p.id
+                        AND active.status IN ('queued', 'claimed', 'running', 'backoff')
+                  )
+                """
+            )
+            counts["due"] = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE r.status = 'queued') AS queued,
+                    count(*) FILTER (WHERE r.status = 'claimed') AS claimed,
+                    count(*) FILTER (WHERE r.status = 'running') AS running,
+                    count(*) FILTER (WHERE r.status = 'failed') AS failed,
+                    count(*) FILTER (WHERE r.status IN ('blocked_auth_required', 'auth_expired', 'auth_failed')) AS blocked_auth,
+                    count(*) FILTER (WHERE r.status = 'backoff') AS backoff
+                FROM mail_sync_runs r
+                JOIN mail_profiles p ON p.id = r.profile_id
+                WHERE p.source_type = 'imap'
+                """
+            )
+            row = cur.fetchone()
+            counts.update(
+                {
+                    "queued": int(row[0] or 0),
+                    "claimed": int(row[1] or 0),
+                    "running": int(row[2] or 0),
+                    "failed": int(row[3] or 0),
+                    "blocked_auth": int(row[4] or 0),
+                    "backoff": int(row[5] or 0),
+                }
+            )
+    recent_runs = list_mail_sync_runs(limit=20, url=url)
+    return {
+        "counts": counts,
+        "recent_runs": recent_runs,
+        "diagnostics": [_mail_scheduler_diagnostic(run) for run in recent_runs if _mail_run_needs_action(run)],
+    }
+
+
 def update_mail_profile_metadata(
     *,
     name: str,
@@ -2530,6 +2890,7 @@ def mail_status(*, url: str | None = None) -> dict[str, Any]:
                 "exported_messages": exported_messages,
                 "errored_messages": errored_messages,
                 "profiles": profiles,
+                "scheduler": mail_scheduler_status(url=url),
             }
 
 
@@ -3206,6 +3567,94 @@ def _mail_profile_row(row: tuple[Any, ...]) -> dict[str, Any]:
             }
         )
     return payload
+
+
+def _mail_sync_run_row(row: tuple[Any, ...], *, include_profile: bool = False) -> dict[str, Any]:
+    payload = {
+        "id": row[0],
+        "profile_name": row[1],
+        "status": row[2],
+        "trigger": row[3],
+        "requested_by": row[4],
+        "claimed_by": row[5],
+        "claimed_at": row[6].isoformat() if row[6] else None,
+        "worker_id": row[7],
+        "attempt_count": int(row[8] or 0),
+        "last_error": row[9],
+        "next_attempt_at": row[10].isoformat() if row[10] else None,
+        "drift_seconds": int(row[11] or 0),
+        "missed_runs": int(row[12] or 0),
+        "started_at": row[13].isoformat() if row[13] else None,
+        "completed_at": row[14].isoformat() if row[14] else None,
+        "messages_seen": int(row[15] or 0),
+        "messages_exported": int(row[16] or 0),
+        "last_cursor": row[17] or {},
+        "errors": row[18] or [],
+    }
+    if include_profile and len(row) > 34:
+        run_id = payload["id"]
+        profile_row = (
+            row[19],
+            row[1],
+            row[20],
+            row[21],
+            row[22],
+            row[23],
+            row[24],
+            row[25],
+            row[26],
+            row[27],
+            row[28],
+            row[29],
+            row[30],
+            row[31],
+            row[32],
+            row[33],
+            row[34],
+        )
+        profile_payload = _mail_profile_row(profile_row)
+        payload.update(profile_payload)
+        payload["id"] = run_id
+        payload["run_id"] = run_id
+        payload["profile_id"] = profile_payload["id"]
+        payload["profile_name"] = profile_payload["name"]
+    return payload
+
+
+def _mail_last_error(errors: list[dict[str, Any]]) -> str | None:
+    for item in errors:
+        if isinstance(item, dict):
+            message = item.get("error") or item.get("message")
+            if message:
+                return str(message)
+    return None
+
+
+def _mail_run_needs_action(run: dict[str, Any]) -> bool:
+    return run.get("status") in {"failed", "backoff", "blocked_auth_required", "auth_expired", "auth_failed"}
+
+
+def _mail_scheduler_diagnostic(run: dict[str, Any]) -> dict[str, Any]:
+    status = str(run.get("status") or "unknown")
+    profile_name = str(run.get("profile_name") or "unknown")
+    message = str(run.get("last_error") or status)
+    auth_blocked = status in {"blocked_auth_required", "auth_expired", "auth_failed"}
+    return {
+        "code": "mail.imap_auth_blocked" if auth_blocked else f"mail.imap_sync_{status}",
+        "message": message,
+        "severity": "warning" if auth_blocked or status == "backoff" else "error",
+        "component": "mail",
+        "stage": "imap_scheduler",
+        "retryable": not auth_blocked,
+        "user_action": (
+            "Open Mail and reconnect Gmail OAuth for this profile."
+            if auth_blocked
+            else "Open Mail, inspect the run history, and retry after the backoff window or fixing the IMAP error."
+        ),
+        "technical_detail": f"IMAP scheduler run {run.get('id')} for {profile_name} ended with {status}: {message}",
+        "target": {"type": "mail_profile", "id": profile_name},
+        "links": [{"label": "Mail", "tab": "mail", "profile": profile_name}],
+    }
 
 
 def _mail_oauth_state_row(row: tuple[Any, ...], *, profile_name: str) -> dict[str, Any]:

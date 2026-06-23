@@ -32,8 +32,8 @@ scripts:
 | V1 Working Knowledge Kernel | in progress | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, automatic Codex hook preflight/capture, direct Codex MCP tool configuration, and safe reference capture exist; graph/lifecycle depth still needs hardening. |
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
-| V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
-| V2.7 Mail And Retrieval Production Hardening | in progress | Search result content actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured actionable error diagnostics, and lock-tolerant indexing/watch stability states are implemented; mail post-processing, retrieval explainability, and scheduler reliability remain. |
+| V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics still need hardening. |
+| V2.7 Mail And Retrieval Production Hardening | in progress | Search result content actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured actionable error diagnostics, claimable IMAP sync runs, and lock-tolerant indexing/watch stability states are implemented; mail post-processing and retrieval explainability remain. |
 | V2.8 Indexer Acceleration And Local Inference Optimization | planned | Dedicated acceleration lane for GPU/local inference routing, caches, bounded workers, OCR/ASR/vision batching, native watchers, vectorization throughput, and indexing benchmarks. |
 | V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, optional ParadeDB/BM25, and local librarian workers. |
 | V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
@@ -50,6 +50,10 @@ scripts:
   reconciliation, and host-side worker processing.
 - Corpus root add/edit/delete/sync/watch controls in the dashboard.
 - IMAP Gmail OAuth setup and profile-scoped mail capture through a private spool.
+- Claimable IMAP scheduled sync runs with queued/claimed/running/completed,
+  auth-blocked, failed, and backoff lifecycle state; run history, drift/missed
+  run fields, owner/attempt metadata, health diagnostics, and dashboard
+  scheduler counts are visible without recording private mail content.
 - Separate Windows Outlook COM host process model for selected-folder catch-up.
 - Automatic Docker worker processing for Docker-visible corpus and mail jobs.
 - Automatic host-agent worker processing for host-only roots.
@@ -90,8 +94,8 @@ scripts:
 
 - Dashboard is operational, but graph browsing, stale claim review,
   contradiction review, capture approval, and retention tuning are not complete.
-- Dashboard needs deeper drill-down views for retrieval explanations, mail sync
-  runs, watcher events, and worker history.
+- Dashboard needs deeper drill-down views for retrieval explanations, watcher
+  events, and worker history.
 
 ### V2.5
 
@@ -106,8 +110,10 @@ scripts:
 
 ### V2.6
 
-- IMAP scheduled sync works through the worker loop, but needs first-class run
-  records, claiming, drift reporting, backoff, and dashboard history.
+- IMAP scheduled sync has first-class run records, claiming, drift reporting,
+  backoff, blocked-auth states, dashboard counts, and profile run history.
+  Broader live-provider validation should continue across Gmail and
+  standards-compliant IMAP servers.
 - Mail post-processing needs provider-specific semantics, dry-run/audit views,
   and clearer UI around destructive actions.
 - Outlook COM host model exists, but broader real-world Outlook catch-up
@@ -124,8 +130,8 @@ scripts:
 - Windows VSS controls and dashboard capability reporting exist, but actual VSS
   snapshot extraction is not implemented; locked files still use retry/cooldown
   fallback.
-- Mail post-processing, retrieval explainability, and scheduler reliability
-  remain planned hardening items. See
+- Mail post-processing and retrieval explainability remain planned hardening
+  items. See
   [roadmap.md](roadmap.md#v27-mail-and-retrieval-production-hardening).
 
 ### V2.8
@@ -156,9 +162,10 @@ scripts:
 
 ## Immediate Next Queue
 
-1. Promote IMAP scheduled sync into a claimable scheduler state machine.
-2. Improve retrieval snippets with query-aware highlights and explainability.
-3. Add provider-specific mail post-process policies with dry-run and audit views.
+1. Improve retrieval snippets with query-aware highlights and explainability.
+2. Add provider-specific mail post-process policies with dry-run and audit views.
+3. Broaden live validation for IMAP scheduler behavior across Gmail and
+   standards-compliant IMAP providers.
 4. Design V2.8 indexer acceleration: hardware detection, local inference
    provider routing, permanent caches, bounded media/OCR/ASR workers, vector
    batching, and throughput telemetry.

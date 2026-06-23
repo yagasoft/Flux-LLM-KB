@@ -238,6 +238,7 @@ def sync_mail_profile(
     access_token: str | None = None,
     imap_client_factory: Any | None = None,
     allow_outlook_com: bool = False,
+    requested_by: str = "dashboard",
 ) -> dict[str, Any]:
     profiles = database.list_mail_profiles(name=profile_name)
     results: list[dict[str, Any]] = []
@@ -245,7 +246,25 @@ def sync_mail_profile(
         if not profile["enabled"]:
             continue
         if profile["source_type"] == "imap":
-            result = _sync_imap_profile(profile, access_token=access_token, imap_client_factory=imap_client_factory)
+            run = database.create_imap_sync_run(profile_name=profile["name"], trigger="manual", requested_by=requested_by)
+            if run.get("status") in {"running", "claimed", "backoff"}:
+                result = {
+                    "profile": profile["name"],
+                    "status": run["status"],
+                    "run_id": run["id"],
+                    "exported": int(run.get("messages_exported") or 0),
+                    "errors": run.get("errors") or [],
+                }
+            else:
+                database.mark_mail_sync_run_running(run_id=run["id"], worker_id="manual")
+                result = _sync_imap_profile(
+                    profile,
+                    access_token=access_token,
+                    imap_client_factory=imap_client_factory,
+                    run_id=run["id"],
+                    worker_id="manual",
+                    attempt_count=max(1, int(run.get("attempt_count") or 1)),
+                )
         elif profile["source_type"] == "outlook_com":
             if allow_outlook_com:
                 result = _sync_outlook_profile(profile)
@@ -269,11 +288,20 @@ def sync_due_mail_profiles(
     limit: int = 10,
     access_token: str | None = None,
     imap_client_factory: Any | None = None,
+    worker_id: str = "flux-kb-mail-worker",
 ) -> dict[str, Any]:
-    profiles = database.list_due_imap_mail_profiles(limit=limit)
+    profiles = database.claim_due_imap_sync_runs(limit=limit, worker_id=worker_id)
     results: list[dict[str, Any]] = []
     for profile in profiles:
-        result = _sync_imap_profile(profile, access_token=access_token, imap_client_factory=imap_client_factory)
+        database.mark_mail_sync_run_running(run_id=profile["id"], worker_id=worker_id)
+        result = _sync_imap_profile(
+            profile,
+            access_token=access_token,
+            imap_client_factory=imap_client_factory,
+            run_id=profile["id"],
+            worker_id=worker_id,
+            attempt_count=max(1, int(profile.get("attempt_count") or 1)),
+        )
         result["spool_sync"] = sync_mail_spool(profile_name=profile["name"])
         results.append(result)
     return {"profiles": results, "count": len(results)}
@@ -445,24 +473,33 @@ def _sync_imap_profile(
     *,
     access_token: str | None,
     imap_client_factory: Any | None,
+    run_id: str | None = None,
+    worker_id: str = "manual",
+    attempt_count: int = 1,
 ) -> dict[str, Any]:
     token = access_token or _oauth_access_token(profile["name"])
     if not token:
         token = _legacy_oauth_token()
     if not token:
-        database.record_mail_sync_run(
+        errors = [{"error": "Gmail OAuth is not configured for this mail profile"}]
+        _complete_imap_sync_run(
+            run_id=run_id,
             profile_name=profile["name"],
             status="blocked_auth_required",
-            errors=[{"error": "Gmail OAuth is not configured for this mail profile"}],
+            errors=errors,
+            backoff_seconds=86400,
         )
-        return {"profile": profile["name"], "status": "blocked_auth_required", "exported": 0}
+        return {"profile": profile["name"], "status": "blocked_auth_required", "run_id": run_id, "exported": 0, "errors": errors}
     if token == "__auth_expired__":
-        database.record_mail_sync_run(
+        errors = [{"error": "Gmail OAuth refresh failed; re-run OAuth setup"}]
+        _complete_imap_sync_run(
+            run_id=run_id,
             profile_name=profile["name"],
             status="auth_expired",
-            errors=[{"error": "Gmail OAuth refresh failed; re-run OAuth setup"}],
+            errors=errors,
+            backoff_seconds=86400,
         )
-        return {"profile": profile["name"], "status": "auth_expired", "exported": 0}
+        return {"profile": profile["name"], "status": "auth_expired", "run_id": run_id, "exported": 0, "errors": errors}
     factory = imap_client_factory or ImapSyncClient
     cursors = dict((profile.get("metadata") or {}).get("cursors") or {})
     folder_results: list[dict[str, Any]] = []
@@ -476,17 +513,20 @@ def _sync_imap_profile(
                     client.authenticate_xoauth2(profile.get("account") or "", token)
                 except Exception as exc:
                     errors = [_mail_sync_error(folder=folder, stage="authenticate_xoauth2", error=exc)]
-                    database.record_mail_sync_run(
+                    _complete_imap_sync_run(
+                        run_id=run_id,
                         profile_name=profile["name"],
                         status="auth_failed",
                         messages_seen=total_seen,
                         messages_exported=total_exported,
                         last_cursor=cursors,
                         errors=errors,
+                        backoff_seconds=86400,
                     )
                     return {
                         "profile": profile["name"],
                         "status": "auth_failed",
+                        "run_id": run_id,
                         "folders": folder_results,
                         "exported": total_exported,
                         "errors": errors,
@@ -506,17 +546,20 @@ def _sync_imap_profile(
                 )
             except Exception as exc:
                 errors = [_mail_sync_error(folder=folder, stage="sync_folder", error=exc)]
-                database.record_mail_sync_run(
+                _complete_imap_sync_run(
+                    run_id=run_id,
                     profile_name=profile["name"],
-                    status="failed",
+                    status="backoff" if run_id else "failed",
                     messages_seen=total_seen,
                     messages_exported=total_exported,
                     last_cursor=cursors,
                     errors=errors,
+                    backoff_seconds=_imap_backoff_seconds(attempt_count) if run_id else None,
                 )
                 return {
                     "profile": profile["name"],
-                    "status": "failed",
+                    "status": "backoff" if run_id else "failed",
+                    "run_id": run_id,
                     "folders": folder_results,
                     "exported": total_exported,
                     "errors": errors,
@@ -530,14 +573,57 @@ def _sync_imap_profile(
     metadata = dict(profile.get("metadata") or {})
     metadata["cursors"] = cursors
     database.update_mail_profile_metadata(name=profile["name"], metadata=metadata)
-    database.record_mail_sync_run(
+    _complete_imap_sync_run(
+        run_id=run_id,
         profile_name=profile["name"],
         status="completed",
         messages_seen=total_seen,
         messages_exported=total_exported,
         last_cursor=cursors,
     )
-    return {"profile": profile["name"], "status": "completed", "folders": folder_results, "exported": total_exported}
+    return {
+        "profile": profile["name"],
+        "status": "completed",
+        "run_id": run_id,
+        "folders": folder_results,
+        "exported": total_exported,
+    }
+
+
+def _complete_imap_sync_run(
+    *,
+    run_id: str | None,
+    profile_name: str,
+    status: str,
+    messages_seen: int = 0,
+    messages_exported: int = 0,
+    last_cursor: dict[str, Any] | None = None,
+    errors: list[dict[str, Any]] | None = None,
+    backoff_seconds: int | None = None,
+) -> dict[str, Any]:
+    if run_id:
+        return database.complete_mail_sync_run(
+            run_id=run_id,
+            profile_name=profile_name,
+            status=status,
+            messages_seen=messages_seen,
+            messages_exported=messages_exported,
+            last_cursor=last_cursor,
+            errors=errors,
+            backoff_seconds=backoff_seconds,
+        )
+    return database.record_mail_sync_run(
+        profile_name=profile_name,
+        status=status,
+        messages_seen=messages_seen,
+        messages_exported=messages_exported,
+        last_cursor=last_cursor,
+        errors=errors,
+    )
+
+
+def _imap_backoff_seconds(attempt_count: int) -> int:
+    return min(3600, max(60, 60 * (2 ** max(0, attempt_count - 1))))
 
 
 def _mail_sync_error(*, folder: str, stage: str, error: Exception) -> dict[str, str]:

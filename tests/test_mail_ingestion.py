@@ -269,14 +269,17 @@ def test_sync_imap_profile_refreshes_oauth_token_before_login(monkeypatch, tmp_p
     }
     runs = []
     monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
+    monkeypatch.setattr(database, "create_imap_sync_run", lambda **kwargs: {"id": "run-manual", "status": "queued", "attempt_count": 0})
+    monkeypatch.setattr(database, "mark_mail_sync_run_running", lambda **kwargs: None)
+    monkeypatch.setattr(database, "complete_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": kwargs["run_id"], "status": kwargs["status"]})
     monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: profile | {"metadata": kwargs["metadata"]})
-    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
     monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
     monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: "fresh-access-token")
 
     result = mail_ingestion.sync_mail_profile(profile_name="gmail", imap_client_factory=FakeClient)
 
     assert result["profiles"][0]["status"] == "completed"
+    assert result["profiles"][0]["run_id"] == "run-manual"
     assert auth_calls == [("me@gmail.com", "fresh-access-token")]
     assert runs[0]["status"] == "completed"
 
@@ -297,7 +300,9 @@ def test_sync_imap_profile_reports_auth_required_without_crashing(monkeypatch, t
     }
     runs = []
     monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
-    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(database, "create_imap_sync_run", lambda **kwargs: {"id": "run-manual", "status": "queued", "attempt_count": 0})
+    monkeypatch.setattr(database, "mark_mail_sync_run_running", lambda **kwargs: None)
+    monkeypatch.setattr(database, "complete_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": kwargs["run_id"], "status": kwargs["status"]})
     monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
     monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: None)
 
@@ -323,7 +328,9 @@ def test_sync_imap_profile_reports_expired_oauth_without_crashing(monkeypatch, t
     }
     runs = []
     monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
-    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(database, "create_imap_sync_run", lambda **kwargs: {"id": "run-manual", "status": "queued", "attempt_count": 0})
+    monkeypatch.setattr(database, "mark_mail_sync_run_running", lambda **kwargs: None)
+    monkeypatch.setattr(database, "complete_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": kwargs["run_id"], "status": kwargs["status"]})
     monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
     monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: (_ for _ in ()).throw(mail_oauth.OAuthAuthExpired("invalid_grant")))
 
@@ -363,7 +370,9 @@ def test_sync_imap_profile_reports_auth_failure_without_500(monkeypatch, tmp_pat
     }
     runs = []
     monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
-    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(database, "create_imap_sync_run", lambda **kwargs: {"id": "run-manual", "status": "queued", "attempt_count": 0})
+    monkeypatch.setattr(database, "mark_mail_sync_run_running", lambda **kwargs: None)
+    monkeypatch.setattr(database, "complete_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": kwargs["run_id"], "status": kwargs["status"]})
     monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
     monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: "fresh-access-token")
 
@@ -418,19 +427,21 @@ def test_sync_due_mail_profiles_runs_due_imap_profiles(monkeypatch, tmp_path):
     runs = []
     monkeypatch.setattr(
         database,
-        "list_due_imap_mail_profiles",
-        lambda limit=10: listed_limits.append(limit) or [profile],
+        "claim_due_imap_sync_runs",
+        lambda *, limit=10, worker_id="flux-kb-mail-worker": listed_limits.append((limit, worker_id)) or [{"id": "run-1", "attempt_count": 1, **profile}],
     )
+    monkeypatch.setattr(database, "mark_mail_sync_run_running", lambda **kwargs: None)
     monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: profile | {"metadata": kwargs["metadata"]})
-    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": "run-1"})
+    monkeypatch.setattr(database, "complete_mail_sync_run", lambda **kwargs: runs.append(kwargs) or {"id": kwargs["run_id"], "status": kwargs["status"]})
     monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
     monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: "fresh-access-token")
 
     result = mail_ingestion.sync_due_mail_profiles(limit=3, imap_client_factory=FakeClient)
 
-    assert listed_limits == [3]
+    assert listed_limits == [(3, "flux-kb-mail-worker")]
     assert result["count"] == 1
     assert result["profiles"][0]["profile"] == "gmail"
     assert result["profiles"][0]["status"] == "completed"
+    assert result["profiles"][0]["run_id"] == "run-1"
     assert auth_calls == [("me@gmail.com", "fresh-access-token")]
     assert runs[0]["status"] == "completed"

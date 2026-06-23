@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  AlertTriangle,
   Archive,
   BriefcaseBusiness,
   CheckCircle2,
@@ -120,11 +121,48 @@ type MailProfile = {
   metadata?: Record<string, unknown>;
 };
 
+type MailSchedulerCounts = {
+  due?: number;
+  queued?: number;
+  claimed?: number;
+  running?: number;
+  failed?: number;
+  blocked_auth?: number;
+  backoff?: number;
+};
+
+type MailSyncRun = {
+  id?: string;
+  profile_name?: string;
+  status?: string;
+  trigger?: string;
+  requested_by?: string;
+  claimed_by?: string | null;
+  worker_id?: string | null;
+  attempt_count?: number;
+  last_error?: string | null;
+  next_attempt_at?: string | null;
+  drift_seconds?: number;
+  missed_runs?: number;
+  started_at?: string | null;
+  completed_at?: string | null;
+  messages_seen?: number;
+  messages_exported?: number;
+  errors?: MailSyncError[];
+};
+
+type MailSchedulerStatus = {
+  counts?: MailSchedulerCounts;
+  recent_runs?: MailSyncRun[];
+  diagnostics?: ErrorDiagnostic[];
+};
+
 type MailStatus = {
   enabled_profiles?: number;
   exported_messages?: number;
   errored_messages?: number;
   profiles?: MailProfile[];
+  scheduler?: MailSchedulerStatus;
   oauth?: {
     profiles?: Array<{ profile_name?: string; status?: string; expires_at?: string | null; has_refresh_token?: boolean }>;
   };
@@ -254,6 +292,7 @@ type MailSyncError = {
 type MailSyncProfileResult = {
   profile?: string;
   status?: string;
+  run_id?: string;
   exported?: number;
   errors?: MailSyncError[];
   spool_sync?: { count?: number };
@@ -465,7 +504,9 @@ export default function App() {
         if (mailSyncStatusFailed(status)) {
           setToast(`Sync failed for ${profile.name}: ${status}${details ? ` - ${details}` : ""}`);
         } else {
-          setToast(`IMAP sync ${status} for ${profile.name}; exported ${exported} message${exported === 1 ? "" : "s"}.`);
+          const runText = result?.run_id ? ` (run ${result.run_id})` : "";
+          const exportedText = status === "queued" || status === "claimed" || status === "running" ? "" : `; exported ${exported} message${exported === 1 ? "" : "s"}`;
+          setToast(`IMAP sync ${status} for ${profile.name}${runText}${exportedText}.`);
         }
       }
       await load();
@@ -842,7 +883,7 @@ export default function App() {
         </header>
 
         {toast && (
-          <div className={`toast ${currentToastTone}`} role={currentToastTone === "error" ? "alert" : "status"}>
+          <div className={`toast ${currentToastTone}`} role={currentToastTone === "success" ? "status" : "alert"}>
             {currentToastTone === "error" ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
             <span>{toast}</span>
             <button type="button" aria-label="Dismiss notification" onClick={() => setToast("")}><X size={15} /></button>
@@ -1063,6 +1104,7 @@ function MailTab({
             hostStatus={hostStatus}
             hostCommand={host?.command}
             oauthProfile={oauthProfiles.find((row) => row.profile_name === selectedProfile?.name)}
+            runs={(state.mail.scheduler?.recent_runs ?? []).filter((run) => run.profile_name === selectedProfile?.name)}
             onSync={() => selectedProfile && onSyncProfile(selectedProfile)}
             onEdit={() => selectedProfile && onEditProfile(selectedProfile)}
             onOAuthStart={(clientPath) => selectedProfile && onOAuthStart(selectedProfile, clientPath)}
@@ -1072,11 +1114,41 @@ function MailTab({
       </section>
 
       <section className="lower-grid">
+        <MailSchedulerPanel scheduler={state.mail.scheduler} />
         <MailStatusPanel mail={state.mail} hostStatus={hostStatus} showOutlook={hasOutlookProfiles} />
         <MailErrorsPanel mail={state.mail} errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
         {hasOutlookProfiles && <OutlookHostPanel host={host} hostStatus={hostStatus} pending={state.outlook.pending_requests?.length ?? 0} />}
       </section>
     </>
+  );
+}
+
+function MailSchedulerPanel({ scheduler }: { scheduler?: MailSchedulerStatus }) {
+  const counts = scheduler?.counts ?? {};
+  const rows: Array<[string, string, string]> = [
+    ["Due", "profiles", `${counts.due ?? 0} due`],
+    ["Queued", "runs", `${counts.queued ?? 0} queued`],
+    ["Claimed", "runs", `${counts.claimed ?? 0} claimed`],
+    ["Running", "runs", `${counts.running ?? 0} running`],
+    ["Blocked Auth", "profiles", `${counts.blocked_auth ?? 0} blocked`],
+    ["Backoff", "runs", `${counts.backoff ?? 0} retrying`],
+    ["Failed", "runs", `${counts.failed ?? 0} failed`]
+  ];
+  const nextRun = nextMailRun(scheduler?.recent_runs ?? []);
+  return (
+    <Panel title="IMAP Scheduler">
+      <MiniTable rows={rows} />
+      <div className="scheduler-note">
+        <span>Next run</span>
+        <strong>{nextRun}</strong>
+      </div>
+      {(scheduler?.diagnostics?.length ?? 0) > 0 && (
+        <div className="scheduler-warning">
+          <AlertTriangle size={16} />
+          <span>{scheduler?.diagnostics?.[0]?.message ?? "Mail scheduler requires attention."}</span>
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -2217,6 +2289,7 @@ function Inspector({
   hostStatus,
   hostCommand,
   oauthProfile,
+  runs,
   onSync,
   onEdit,
   onOAuthStart,
@@ -2226,6 +2299,7 @@ function Inspector({
   hostStatus: string;
   hostCommand?: string;
   oauthProfile?: { profile_name?: string; status?: string; expires_at?: string | null; has_refresh_token?: boolean };
+  runs?: MailSyncRun[];
   onSync: () => void;
   onEdit: () => void;
   onOAuthStart: (clientPath: string) => void;
@@ -2290,6 +2364,7 @@ function Inspector({
         <Stat label="Last Sync" value={formatDate(profile.last_sync_at)} />
         <Stat label="Next Sync" value={formatDate(profile.next_sync_at)} />
       </div>
+      <RunHistory runs={runs ?? []} />
       <div className="button-row">
         <button className="sync-selected" type="button" title={`Sync ${profile.name} now`} onClick={onSync}>
           <RefreshCcw size={17} />
@@ -2300,6 +2375,41 @@ function Inspector({
           Edit profile
         </button>
       </div>
+    </div>
+  );
+}
+
+function RunHistory({ runs }: { runs: MailSyncRun[] }) {
+  return (
+    <div className="run-history">
+      <div className="run-history-head">
+        <strong>Run History</strong>
+        <span>{runs.length ? `${runs.length} recent` : "No runs yet"}</span>
+      </div>
+      {runs.slice(0, 5).map((run) => {
+        const status = runStatusLabel(run.status);
+        const warning = ["Backoff", "Blocked Auth Required", "Auth Expired", "Auth Failed", "Failed"].includes(status);
+        return (
+          <div className="run-row" key={run.id ?? `${run.profile_name}-${run.started_at}`}>
+            <div>
+              <span className={warning ? "state-pill warning" : "state-pill enabled"}>{status}</span>
+              <strong>{run.trigger === "manual" ? "Manual" : "Scheduled"} run</strong>
+              <span>{formatDate(run.started_at)} - {formatDate(run.completed_at)}</span>
+            </div>
+            <div>
+              <span>{run.messages_seen ?? 0} seen</span>
+              <span>{run.messages_exported ?? 0} exported</span>
+              <span>{run.missed_runs ?? 0} missed</span>
+            </div>
+            {(run.last_error || run.next_attempt_at) && (
+              <p>
+                {run.last_error && <span>{run.last_error}</span>}
+                {run.next_attempt_at && <span>{run.last_error ? " " : ""}Next attempt {formatDate(run.next_attempt_at)}.</span>}
+              </p>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2612,6 +2722,26 @@ function parseApiErrorDetail(body: string) {
 
 function mailSyncStatusFailed(status: string) {
   return ["auth_failed", "auth_expired", "blocked_auth_required", "blocked_missing_dependency", "failed"].includes(status) || status.endsWith("_failed");
+}
+
+function runStatusLabel(status?: string) {
+  const value = status ?? "unknown";
+  if (value === "blocked_auth_required") return "Blocked Auth Required";
+  if (value === "auth_expired") return "Auth Expired";
+  if (value === "auth_failed") return "Auth Failed";
+  return value
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function nextMailRun(runs: MailSyncRun[]) {
+  const candidates = runs
+    .map((run) => run.next_attempt_at)
+    .filter((value): value is string => Boolean(value))
+    .sort();
+  return candidates[0] ? formatDate(candidates[0]) : "-";
 }
 
 function mailSyncErrorDetail(result?: MailSyncProfileResult) {

@@ -101,6 +101,59 @@ const mail = {
   enabled_profiles: 2,
   exported_messages: 10,
   errored_messages: 1,
+  scheduler: {
+    counts: {
+      due: 1,
+      queued: 1,
+      claimed: 0,
+      running: 1,
+      failed: 1,
+      blocked_auth: 1,
+      backoff: 1
+    },
+    recent_runs: [
+      {
+        id: "run-backoff",
+        profile_name: "gmail-capture",
+        status: "backoff",
+        trigger: "schedule",
+        attempt_count: 2,
+        messages_seen: 0,
+        messages_exported: 0,
+        last_error: "IMAP search timed out",
+        next_attempt_at: "2026-06-21T13:20:00+00:00",
+        drift_seconds: 300,
+        missed_runs: 1,
+        started_at: "2026-06-21T13:16:00+00:00",
+        finished_at: "2026-06-21T13:16:10+00:00"
+      },
+      {
+        id: "run-auth",
+        profile_name: "gmail-capture",
+        status: "blocked_auth_required",
+        trigger: "schedule",
+        attempt_count: 1,
+        messages_seen: 0,
+        messages_exported: 0,
+        last_error: "Gmail OAuth is not configured for this mail profile",
+        next_attempt_at: "2026-06-22T13:16:00+00:00",
+        drift_seconds: 0,
+        missed_runs: 0,
+        started_at: "2026-06-21T13:16:00+00:00",
+        finished_at: "2026-06-21T13:16:01+00:00"
+      }
+    ],
+    diagnostics: [
+      {
+        code: "mail.scheduler_backoff",
+        message: "gmail-capture is waiting for retry backoff",
+        severity: "warning",
+        component: "mail",
+        stage: "imap_scheduler",
+        target: { type: "mail_profile", id: "gmail-capture" }
+      }
+    ]
+  },
   oauth: {
     profiles: [
       { profile_name: "gmail-capture", status: "blocked_auth_required", has_refresh_token: false }
@@ -490,6 +543,50 @@ describe("Flux dashboard", () => {
     expect(profileDetails).not.toBeNull();
     expect(within(profileDetails as HTMLElement).getByRole("button", { name: /Gmail OAuth/i })).toBeInTheDocument();
     expect(within(profileDetails as HTMLElement).getByText("blocked_auth_required")).toBeInTheDocument();
+  });
+
+  test("mail dashboard renders IMAP scheduler counts and selected profile run history", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Select gmail-capture" }));
+
+    const schedulerPanel = await screen.findByRole("heading", { name: "IMAP Scheduler" }).then((heading) => heading.closest(".panel"));
+    expect(schedulerPanel).not.toBeNull();
+    expect(within(schedulerPanel as HTMLElement).getByText("Due")).toBeInTheDocument();
+    expect(within(schedulerPanel as HTMLElement).getByText("1 due")).toBeInTheDocument();
+    expect(within(schedulerPanel as HTMLElement).getByText("Running")).toBeInTheDocument();
+    expect(within(schedulerPanel as HTMLElement).getByText("1 running")).toBeInTheDocument();
+    expect(within(schedulerPanel as HTMLElement).getByText("Blocked Auth")).toBeInTheDocument();
+    expect(within(schedulerPanel as HTMLElement).getByText("1 blocked")).toBeInTheDocument();
+    expect(within(schedulerPanel as HTMLElement).getByText("Backoff")).toBeInTheDocument();
+    expect(within(schedulerPanel as HTMLElement).getByText("1 retrying")).toBeInTheDocument();
+
+    const details = screen.getByRole("heading", { name: "Profile Details" }).closest(".panel");
+    expect(details).not.toBeNull();
+    expect(within(details as HTMLElement).getByText("Run History")).toBeInTheDocument();
+    expect(within(details as HTMLElement).getByText("Backoff")).toBeInTheDocument();
+    expect(within(details as HTMLElement).getByText("Blocked Auth Required")).toBeInTheDocument();
+    expect(within(details as HTMLElement).getByText("IMAP search timed out")).toBeInTheDocument();
+    expect(within(details as HTMLElement).getByText("1 missed")).toBeInTheDocument();
+  });
+
+  test("manual IMAP sync surfaces the created run state", async () => {
+    mailSyncPayload = {
+      profiles: [{ profile: "gmail-capture", status: "queued", run_id: "run-manual", exported: 0 }],
+      count: 1
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Select gmail-capture" }));
+    await user.click(screen.getByRole("button", { name: "Sync selected profile" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("IMAP sync queued for gmail-capture (run run-manual)");
   });
 
   test("mail profile inspector saves the Gmail OAuth client JSON path", async () => {

@@ -362,7 +362,7 @@ class KnowledgeService:
                 try:
                     from . import mail_ingestion
 
-                    last_result["mail_sync"] = mail_ingestion.sync_due_mail_profiles(limit=limit)
+                    last_result["mail_sync"] = mail_ingestion.sync_due_mail_profiles(limit=limit, worker_id=component_name)
                 except Exception as exc:
                     last_result["mail_sync"] = {"status": "failed", "error": str(exc)}
             database.record_runtime_component_heartbeat(

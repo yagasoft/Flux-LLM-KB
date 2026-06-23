@@ -161,12 +161,13 @@ def test_docker_corpus_worker_processes_due_imap_mail_profiles(monkeypatch):
     monkeypatch.setattr(
         mail_ingestion,
         "sync_due_mail_profiles",
-        lambda limit=10: mail_sync_limits.append(limit) or {"count": 1, "profiles": [{"profile": "gmail", "status": "completed"}]},
+        lambda limit=10, worker_id="flux-kb-mail-worker": mail_sync_limits.append((limit, worker_id))
+        or {"count": 1, "profiles": [{"profile": "gmail", "status": "completed"}]},
     )
 
     result = KnowledgeService().run_corpus_worker(once=True, limit=7, host_agent_roots=False)
 
-    assert mail_sync_limits == [7]
+    assert mail_sync_limits == [(7, "corpus-worker:docker")]
     assert result["last_result"]["mail_sync"]["count"] == 1
     assert heartbeats[-1]["metadata"]["last_result"]["mail_sync"]["profiles"][0]["profile"] == "gmail"
 

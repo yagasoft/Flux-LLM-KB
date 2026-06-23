@@ -779,6 +779,89 @@ kbd {
   gap: 12px;
 }
 
+.scheduler-note {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 16px 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.scheduler-note strong {
+  color: var(--ink);
+}
+
+.scheduler-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 16px;
+  padding: 10px;
+  border: 1px solid #ffd7ad;
+  border-radius: 6px;
+  color: var(--orange);
+  background: #fff8ef;
+  font-size: 13px;
+}
+
+.run-history {
+  display: grid;
+  gap: 8px;
+}
+
+.run-history-head,
+.run-row > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.run-history-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-row {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  font-size: 12px;
+}
+
+.run-row > div:first-child {
+  align-items: flex-start;
+}
+
+.run-row > div:first-child strong,
+.run-row > div:first-child span:last-child,
+.run-row p {
+  overflow-wrap: anywhere;
+}
+
+.run-row > div:first-child {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.run-row > div:first-child span:last-child {
+  grid-column: 2;
+  color: var(--muted);
+}
+
+.run-row > div:nth-child(2) {
+  color: var(--muted);
+}
+
+.run-row p {
+  margin: 0;
+  color: var(--orange);
+}
+
 .stat {
   display: grid;
   gap: 3px;

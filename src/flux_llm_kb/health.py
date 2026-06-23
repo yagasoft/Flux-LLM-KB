@@ -313,6 +313,10 @@ def _dashboard_error_details(
                 links=[{"label": "Mail", "tab": "mail"}],
             )
         )
+    scheduler = mail.get("scheduler") if isinstance(mail, dict) else {}
+    if isinstance(scheduler, dict):
+        for item in scheduler.get("diagnostics", []) or []:
+            details.append(coerce_error_detail(item))
     return _dedupe_error_details(details)
 
 

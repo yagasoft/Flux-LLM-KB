@@ -27,7 +27,8 @@ system rather than a large prompt-injected memory file.
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
 - `mail_profiles`, `mail_messages`, and `mail_sync_runs`: IMAP and Outlook COM
-  capture profiles, per-message export state, cursors, errors, and sync runs.
+  capture profiles, per-message export state, cursors, errors, claimable IMAP
+  scheduler runs, drift/missed-run metadata, backoff state, and sync history.
 - `outlook_host_state` and `outlook_sync_requests`: Windows host heartbeat and
   pull-request coordination for Outlook COM catch-up profiles.
 
@@ -182,6 +183,14 @@ tokens before login, track UID/UIDVALIDITY cursors per folder or label, and
 always run reconciliation so restarts and missed events are recovered.
 Post-processing defaults to moving/removing the capture label or moving the
 message to a processed folder; permanent delete is not the default.
+
+Scheduled IMAP sync is represented as explicit `mail_sync_runs` lifecycle state.
+Due profiles are selected from enabled/sync-enabled profile settings and
+`next_sync_at`, then claimed with database row locks so competing workers do not
+process the same profile concurrently. Runs record queued, claimed, running,
+completed, failed, auth-blocked, and backoff states, with worker ownership,
+attempt count, errors, next attempts, and drift/missed-run fields for dashboard
+and health diagnostics. Manual dashboard sync also creates an explicit run.
 
 Classic Outlook COM catch-up profiles pull selected folder paths from local
 Outlook for historical or missed messages. They are intentionally scoped

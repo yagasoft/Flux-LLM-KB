@@ -185,6 +185,20 @@ def test_dashboard_health_includes_actionable_error_details(monkeypatch):
             "errored_messages": 1,
             "profiles": [{"name": "gmail-capture"}],
             "oauth": {"status": "unavailable", "error": "OAuth database unavailable"},
+            "scheduler": {
+                "diagnostics": [
+                    {
+                        "code": "mail.imap_sync_backoff",
+                        "message": "IMAP search timed out",
+                        "severity": "warning",
+                        "component": "mail",
+                        "stage": "imap_scheduler",
+                        "retryable": True,
+                        "target": {"type": "mail_profile", "id": "gmail-capture"},
+                        "links": [{"label": "Mail", "tab": "mail", "profile": "gmail-capture"}],
+                    }
+                ]
+            },
         },
     )
 
@@ -207,6 +221,10 @@ def test_dashboard_health_includes_actionable_error_details(monkeypatch):
     mail = next(item for item in details if item["code"] == "mail.oauth_unavailable")
     assert mail["component"] == "mail"
     assert mail["links"][0]["tab"] == "mail"
+    scheduler = next(item for item in details if item["code"] == "mail.imap_sync_backoff")
+    assert scheduler["component"] == "mail"
+    assert scheduler["target"] == {"type": "mail_profile", "id": "gmail-capture"}
+    assert scheduler["links"][0]["profile"] == "gmail-capture"
 
 
 def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):
