@@ -10,6 +10,7 @@ from typing import Any
 
 from . import database
 from .codex_integration import codex_status
+from .error_diagnostics import coerce_error_detail, error_envelope
 from .extractors import extractor_availability
 from .glob_policy import effective_glob_policy
 from .hook_policy import codex_hook_policy_status
@@ -96,6 +97,18 @@ def collect_dashboard_payload() -> dict[str, Any]:
             },
         ),
     }
+    extractors = extractor_availability()
+    mail_payload = _safe(
+        lambda: __import__("flux_llm_kb.mail_ingestion", fromlist=["mail_status"]).mail_status(),
+        {"enabled_profiles": 0, "profiles": []},
+    )
+    recent_error_details = _dashboard_error_details(
+        crawl=crawl,
+        roots=roots,
+        host_agent_status=host_agent_status,
+        extractors=extractors,
+        mail=mail_payload,
+    )
     return {
         "database": {"ok": db_status.ok, "message": db_status.message},
         "runtime": runtime_checks,
@@ -112,7 +125,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
             "blocked": crawl.get("blocked_jobs", 0),
         },
         "retrieval": retrieval,
-        "extractors": extractor_availability(),
+        "extractors": extractors,
         "host_agent": host_agent_status,
         "codex": codex,
         "workers": {
@@ -122,8 +135,9 @@ def collect_dashboard_payload() -> dict[str, Any]:
         "deployment": _deployment_status(),
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],
+        "recent_error_details": recent_error_details,
         "settings": _safe(lambda: __import__("flux_llm_kb.settings", fromlist=["SettingsService"]).SettingsService().public_list(), []),
-        "mail": _safe(lambda: __import__("flux_llm_kb.mail_ingestion", fromlist=["mail_status"]).mail_status(), {"enabled_profiles": 0, "profiles": []}),
+        "mail": mail_payload,
     }
 
 
@@ -185,6 +199,135 @@ def _safe(callable_obj, fallback):
         return callable_obj()
     except Exception:
         return fallback
+
+
+def _dashboard_error_details(
+    *,
+    crawl: dict[str, Any],
+    roots: list[dict[str, Any]],
+    host_agent_status: dict[str, Any],
+    extractors: dict[str, dict[str, Any]],
+    mail: dict[str, Any],
+) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    for item in crawl.get("recent_error_details", []) or []:
+        details.append(coerce_error_detail(item))
+    for message in crawl.get("recent_errors", []) or []:
+        details.append(
+            error_envelope(
+                code="runtime.error",
+                message=str(message),
+                severity="error",
+                component="runtime",
+                retryable=True,
+                user_action="Open the related dashboard panel and review the failing component.",
+            )
+        )
+    for watcher in crawl.get("watchers", []) or []:
+        message = watcher.get("last_error")
+        if not message:
+            continue
+        root_name = str(watcher.get("root_name") or "")
+        details.append(
+            error_envelope(
+                code="watcher.error",
+                message=str(message),
+                severity="error",
+                component="watcher",
+                stage=str(watcher.get("status") or "watch"),
+                retryable=True,
+                user_action="Open the Corpus tab, inspect this watched path, then restart watch or sync after fixing the issue.",
+                technical_detail=str(message),
+                target={"type": "root", "id": root_name or "unknown"},
+                links=[{"label": "Corpus", "tab": "corpus", "root": root_name}],
+            )
+        )
+    for job in _safe(lambda: database.list_capture_jobs(limit=20), []):
+        message = job.get("last_error")
+        if not message:
+            continue
+        status = str(job.get("status") or "")
+        severity = "warning" if status.startswith("blocked") else "error"
+        details.append(
+            error_envelope(
+                code="corpus.job_blocked" if severity == "warning" else "corpus.job_failed",
+                message=str(message),
+                severity=severity,
+                component="worker",
+                stage=str(job.get("job_type") or "corpus_job"),
+                retryable=True,
+                user_action="Open Jobs to inspect the queued extraction task and retry after fixing the dependency or file state.",
+                technical_detail=f"{job.get('job_type')} {status}: {message}",
+                target={"type": "job", "id": str(job.get("id") or "")},
+                links=[{"label": "Jobs", "tab": "jobs"}],
+            )
+        )
+    if not _host_agent_is_running(host_agent_status) and any(_root_uses_host_agent(root) for root in roots):
+        message = str(host_agent_status.get("message") or host_agent_status.get("status") or "host agent offline")
+        details.append(
+            error_envelope(
+                code="host_agent.offline",
+                message=message,
+                severity="error",
+                component="host-agent",
+                stage="status",
+                retryable=True,
+                user_action="Start the Flux host agent, then refresh the dashboard.",
+                technical_detail=message,
+                target={"type": "component", "id": "host-agent"},
+                links=[{"label": "Corpus", "tab": "corpus"}],
+            )
+        )
+    for name, status in extractors.items():
+        if status.get("ok") is not False:
+            continue
+        message = str(status.get("message") or f"{name} unavailable")
+        details.append(
+            error_envelope(
+                code="extractor.missing_dependency",
+                message=message,
+                severity="warning",
+                component="extractor",
+                stage=name,
+                retryable=True,
+                user_action="Install the optional local tool only if you need this extractor family.",
+                technical_detail=message,
+                target={"type": "extractor", "id": name},
+                links=[{"label": "Health", "tab": "health"}],
+            )
+        )
+    oauth = mail.get("oauth")
+    if isinstance(oauth, dict) and oauth.get("status") == "unavailable":
+        message = str(oauth.get("error") or oauth.get("message") or "mail OAuth status unavailable")
+        details.append(
+            error_envelope(
+                code="mail.oauth_unavailable",
+                message=message,
+                severity="error",
+                component="mail",
+                stage="oauth",
+                retryable=True,
+                user_action="Open Mail and recheck OAuth configuration for the affected profile.",
+                technical_detail=message,
+                target={"type": "mail", "id": "oauth"},
+                links=[{"label": "Mail", "tab": "mail"}],
+            )
+        )
+    return _dedupe_error_details(details)
+
+
+def _dedupe_error_details(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for item in details:
+        target = item.get("target") if isinstance(item.get("target"), dict) else {}
+        target_key = f"{target.get('type', '')}:{target.get('id', '')}"
+        key = (str(item.get("code") or ""), str(item.get("message") or ""), target_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique[:12]
 
 
 def _with_effective_globs(root: dict[str, Any]) -> dict[str, Any]:

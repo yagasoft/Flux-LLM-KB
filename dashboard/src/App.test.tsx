@@ -195,9 +195,13 @@ let mailSyncPayload: unknown;
 let searchPayload: unknown;
 let resultDetailPayload: unknown;
 let fileActionPayload: unknown;
+let healthPayload: unknown;
+let crawlSyncErrorPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
+    healthPayload = health;
+    crawlSyncErrorPayload = undefined;
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
     searchPayload = [{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }];
     resultDetailPayload = {
@@ -217,7 +221,7 @@ describe("Flux dashboard", () => {
     fileActionPayload = { state: "opened", asset_id: "asset-1", action: "open" };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/dashboard/health") return json(health);
+      if (url === "/api/dashboard/health") return json(healthPayload);
       if (url === "/api/dashboard/crawl") return json(crawl);
       if (url === "/api/dashboard/jobs") return json({ jobs: [{ id: "job-1", job_type: "corpus_extract_pdf", status: "pending" }] });
       if (url === "/api/dashboard/retrieval-stats") return json({ retrieval: health.retrieval, duplicate_assets: 0 });
@@ -255,7 +259,10 @@ describe("Flux dashboard", () => {
         return json({ id: url.split("/").pop()?.split("?")[0], deleted: true, purged_index: true });
       }
       if (url === "/api/crawl/backfill") return json({ completed: 1, blocked: 0, retried: 0 });
-      if (url === "/api/crawl/sync") return json({ root_name: JSON.parse(String(init?.body)).root_name ?? null, dry_run: JSON.parse(String(init?.body)).dry_run });
+      if (url === "/api/crawl/sync") {
+        if (crawlSyncErrorPayload) return errorJson(crawlSyncErrorPayload, 400, "Bad Request");
+        return json({ root_name: JSON.parse(String(init?.body)).root_name ?? null, dry_run: JSON.parse(String(init?.body)).dry_run });
+      }
       if (url === "/api/crawl/watch") return json({ updated: 1, watch_enabled: JSON.parse(String(init?.body)).enabled });
       if (url.endsWith("/enable") || url.endsWith("/disable")) return json({ status: "updated" });
       return json({});
@@ -724,6 +731,103 @@ describe("Flux dashboard", () => {
     expect(screen.getByRole("dialog", { name: "Error detail" })).toHaveTextContent("ffprobe command not found");
   });
 
+  test("health renders structured diagnostics with details, copy, and target navigation", async () => {
+    const writeText = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText }
+    });
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText }
+    });
+    expect(window.navigator.clipboard?.writeText).toBe(writeText);
+    healthPayload = {
+      ...health,
+      recent_error_details: [
+        {
+          code: "mail.oauth_unavailable",
+          message: "OAuth database unavailable",
+          severity: "error",
+          component: "mail",
+          stage: "oauth",
+          retryable: true,
+          user_action: "Open Mail and recheck OAuth configuration.",
+          technical_detail: "mail OAuth lookup failed for gmail-capture",
+          target: { type: "mail_profile", id: "gmail-capture" },
+          links: [{ label: "Mail", tab: "mail", profile: "gmail-capture" }],
+          status_code: null
+        },
+        {
+          code: "corpus.job_failed",
+          message: "PDF extraction failed",
+          severity: "error",
+          component: "worker",
+          stage: "corpus_extract_pdf",
+          retryable: true,
+          user_action: "Open Jobs and inspect the failed task.",
+          technical_detail: "job-1 failed while extracting docs/proposal.pdf",
+          target: { type: "job", id: "job-1" },
+          links: [{ label: "Jobs", tab: "jobs" }],
+          status_code: null
+      }
+      ]
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    const panel = screen.getByRole("heading", { name: "Actionable Diagnostics" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("OAuth database unavailable")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Open Mail and recheck OAuth configuration.")).toBeInTheDocument();
+
+    await user.click(within(panel as HTMLElement).getByRole("button", { name: "Show diagnostic detail mail.oauth_unavailable" }));
+    expect(within(panel as HTMLElement).getByText("mail OAuth lookup failed for gmail-capture")).toBeInTheDocument();
+
+    const expandedPanel = screen.getByRole("heading", { name: "Actionable Diagnostics" }).closest(".panel");
+    await user.click(within(expandedPanel as HTMLElement).getByRole("button", { name: "Copy diagnostic mail.oauth_unavailable" }));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"code": "mail.oauth_unavailable"'));
+    });
+
+    await user.click(within(expandedPanel as HTMLElement).getByRole("button", { name: "Open Mail for mail.oauth_unavailable" }));
+    expect(await screen.findByRole("heading", { name: "Mail Profiles" })).toBeInTheDocument();
+    expect(screen.getAllByText("gmail-capture").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Health" }));
+    await user.click(screen.getByRole("button", { name: "Open Jobs for corpus.job_failed" }));
+    expect(await screen.findByRole("heading", { name: "Job Queue" })).toBeInTheDocument();
+  });
+
+  test("structured API error envelopes produce readable error toasts", async () => {
+    crawlSyncErrorPayload = {
+      error: {
+        code: "crawl.root_invalid",
+        message: "Watched path is missing",
+        severity: "error",
+        component: "crawler",
+        stage: "validate_path",
+        retryable: false,
+        user_action: "Choose an existing directory.",
+        technical_detail: "directory does not exist: E:/Missing",
+        target: { type: "root", id: "docs" },
+        links: [{ label: "Corpus", tab: "corpus" }],
+        status_code: 400
+      }
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Corpus" }));
+    await user.click(screen.getByRole("button", { name: "Sync docs" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Watched path is missing");
+    expect(alert).not.toHaveTextContent("code=crawl.root_invalid");
+  });
+
   test("clicking a mail search result opens a sanitized in-app mail detail viewer", async () => {
     searchPayload = [
       {
@@ -883,6 +987,16 @@ describe("Flux dashboard", () => {
 function json(payload: unknown): Response {
   return {
     ok: true,
+    json: async () => payload
+  } as Response;
+}
+
+function errorJson(payload: unknown, status: number, statusText: string): Response {
+  return {
+    ok: false,
+    status,
+    statusText,
+    text: async () => JSON.stringify(payload),
     json: async () => payload
   } as Response;
 }

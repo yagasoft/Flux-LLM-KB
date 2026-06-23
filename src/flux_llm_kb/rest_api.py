@@ -12,6 +12,12 @@ from .host_agent import (
     remote_file_action,
     validate_host_path,
 )
+from .error_diagnostics import (
+    FluxApiError,
+    error_response_payload,
+    http_error_envelope,
+    validation_error_envelope,
+)
 from .health import (
     build_dashboard_html,
     collect_crawl_payload,
@@ -25,8 +31,9 @@ from .service import KnowledgeService
 
 def create_app():
     try:
-        from fastapi import Body, FastAPI, HTTPException
-        from fastapi.responses import HTMLResponse
+        from fastapi import Body, FastAPI, HTTPException, Request
+        from fastapi.exceptions import RequestValidationError
+        from fastapi.responses import HTMLResponse, JSONResponse
         from fastapi.staticfiles import StaticFiles
         from pydantic import BaseModel, ConfigDict, Field
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -133,6 +140,20 @@ def create_app():
     if dashboard_assets.exists():
         app.mount("/dashboard/assets", StaticFiles(directory=str(dashboard_assets)), name="dashboard-assets")
 
+    @app.exception_handler(FluxApiError)
+    async def flux_api_error_handler(_request: Request, exc: FluxApiError):
+        return JSONResponse(status_code=exc.status_code, content=error_response_payload(exc.envelope()))
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(_request: Request, exc: HTTPException):
+        envelope = http_error_envelope(exc.status_code, exc.detail)
+        return JSONResponse(status_code=exc.status_code, content=error_response_payload(envelope))
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+        envelope = validation_error_envelope(exc.errors())
+        return JSONResponse(status_code=422, content=error_response_payload(envelope))
+
     @app.get("/", response_class=HTMLResponse)
     def root(state: str | None = None, code: str | None = None, error: str | None = None):
         if not state and not code and not error:
@@ -194,7 +215,16 @@ def create_app():
 
         asset = database.get_source_asset(asset_id)
         if asset is None:
-            raise HTTPException(status_code=404, detail="source asset not found")
+            raise FluxApiError(
+                code="corpus.asset_not_found",
+                message="source asset not found",
+                status_code=404,
+                component="corpus",
+                retryable=False,
+                user_action="Refresh the corpus view or sync the watched path again.",
+                target={"type": "asset", "id": asset_id},
+                links=[{"label": "Corpus", "tab": "corpus"}],
+            )
         return asset
 
     @app.get("/api/corpus/chunks/{chunk_id}")
@@ -203,7 +233,16 @@ def create_app():
 
         chunk = database.get_asset_chunk(chunk_id)
         if chunk is None:
-            raise HTTPException(status_code=404, detail="asset chunk not found")
+            raise FluxApiError(
+                code="corpus.chunk_not_found",
+                message="asset chunk not found",
+                status_code=404,
+                component="corpus",
+                retryable=False,
+                user_action="Refresh search results and open the result again.",
+                target={"type": "chunk", "id": chunk_id},
+                links=[{"label": "Retrieval", "tab": "retrieval"}],
+            )
         return chunk
 
     @app.get("/api/results/{kind}/{result_id}")
@@ -213,9 +252,27 @@ def create_app():
         try:
             return build_result_detail(kind, result_id)
         except LookupError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise FluxApiError(
+                code="result.not_found",
+                message=str(exc),
+                status_code=404,
+                component="retrieval",
+                retryable=False,
+                user_action="Refresh search results and open the result again.",
+                target={"type": kind, "id": result_id},
+                links=[{"label": "Retrieval", "tab": "retrieval"}],
+            ) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise FluxApiError(
+                code="result.kind_invalid",
+                message=str(exc),
+                status_code=400,
+                component="retrieval",
+                retryable=False,
+                user_action="Use a supported result detail kind.",
+                target={"type": kind, "id": result_id},
+                links=[{"label": "Retrieval", "tab": "retrieval"}],
+            ) from exc
 
     @app.post("/api/corpus/assets/{asset_id}/actions")
     def corpus_asset_action(asset_id: str, request: FileActionRequest = Body(...)):
@@ -252,11 +309,11 @@ def create_app():
 
         name = request.name.strip()
         if not name:
-            raise HTTPException(status_code=400, detail="root name is required")
+            raise _crawl_root_error("root name is required", root_name=name, root_path=request.root_path)
         root_path_text = request.root_path.strip()
         validation = _validate_root_path(root_path_text)
         if validation["status"] != "ok":
-            raise HTTPException(status_code=400, detail=validation["message"])
+            raise _crawl_root_error(str(validation["message"]), root_name=name, root_path=root_path_text)
 
         settings = SettingsService()
         max_inline_bytes = request.max_inline_bytes
@@ -267,7 +324,7 @@ def create_app():
             heavy_threshold_bytes = int(settings.resolve("crawler.heavy_threshold_bytes").raw_value)
 
         if max_inline_bytes <= 0 or heavy_threshold_bytes <= 0:
-            raise HTTPException(status_code=400, detail="size thresholds must be positive")
+            raise _crawl_root_error("size thresholds must be positive", root_name=name, root_path=root_path_text)
 
         root = database.add_monitored_root(
             name=name,
@@ -302,11 +359,11 @@ def create_app():
 
         name = request.name.strip()
         if not name:
-            raise HTTPException(status_code=400, detail="root name is required")
+            raise _crawl_root_error("root name is required", root_name=name, root_path=request.root_path)
         root_path_text = request.root_path.strip()
         validation = _validate_root_path(root_path_text)
         if validation["status"] != "ok":
-            raise HTTPException(status_code=400, detail=validation["message"])
+            raise _crawl_root_error(str(validation["message"]), root_name=name, root_path=root_path_text)
 
         settings = SettingsService()
         max_inline_bytes = request.max_inline_bytes
@@ -317,7 +374,7 @@ def create_app():
             heavy_threshold_bytes = int(settings.resolve("crawler.heavy_threshold_bytes").raw_value)
 
         if max_inline_bytes <= 0 or heavy_threshold_bytes <= 0:
-            raise HTTPException(status_code=400, detail="size thresholds must be positive")
+            raise _crawl_root_error("size thresholds must be positive", root_name=name, root_path=root_path_text)
 
         try:
             return database.update_monitored_root(
@@ -340,7 +397,16 @@ def create_app():
                 },
             )
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise FluxApiError(
+                code="crawl.root_not_found",
+                message=str(exc),
+                status_code=404,
+                component="crawler",
+                retryable=False,
+                user_action="Refresh the Corpus tab and choose an existing watched path.",
+                target={"type": "root", "id": root_id},
+                links=[{"label": "Corpus", "tab": "corpus"}],
+            ) from exc
 
     @app.delete("/api/crawl/roots/{root_id}")
     def crawl_root_delete(root_id: str, purge_index: bool = True):
@@ -349,7 +415,16 @@ def create_app():
         try:
             return database.delete_monitored_root(root_id=root_id, purge_index=purge_index, actor="dashboard")
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise FluxApiError(
+                code="crawl.root_not_found",
+                message=str(exc),
+                status_code=400,
+                component="crawler",
+                retryable=False,
+                user_action="Refresh the Corpus tab and choose an existing watched path.",
+                target={"type": "root", "id": root_id},
+                links=[{"label": "Corpus", "tab": "corpus"}],
+            ) from exc
 
     @app.get("/api/crawl/jobs")
     def crawl_jobs(limit: int = 50):
@@ -459,7 +534,16 @@ def create_app():
                 client_config_path=request.client_config_path,
             )
         except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise FluxApiError(
+                code="mail.profile_not_found",
+                message=str(exc),
+                status_code=404,
+                component="mail",
+                retryable=False,
+                user_action="Refresh the Mail tab and choose an existing profile.",
+                target={"type": "mail_profile", "id": profile_name},
+                links=[{"label": "Mail", "tab": "mail", "profile": profile_name}],
+            ) from exc
 
     @app.post("/api/mail/sync")
     def mail_sync(request: MailSyncRequest = Body(...)):
@@ -566,6 +650,20 @@ def host_agent_backfill(
 
 def host_agent_file_action(*, asset_id: str, action: str) -> dict:
     return remote_file_action(asset_id=asset_id, action=action)
+
+
+def _crawl_root_error(message: str, *, root_name: str | None = None, root_path: str | None = None) -> FluxApiError:
+    return FluxApiError(
+        code="crawl.root_invalid",
+        message=message,
+        status_code=400,
+        component="crawler",
+        retryable=False,
+        user_action="Choose an existing directory and valid crawl thresholds, then save the watched path again.",
+        technical_detail=message,
+        target={"type": "root", "id": root_name or root_path or "new"},
+        links=[{"label": "Corpus", "tab": "corpus"}],
+    )
 
 
 def _validate_root_path(root_path_text: str) -> dict:

@@ -128,6 +128,16 @@ and future graph/review workflows. The UI is a React/Vite operations console
 bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
 
+REST errors preserve a readable `detail`/`message` string for existing clients
+and also include a structured `error` envelope for operators. Envelopes carry a
+stable code, severity, component, stage, retryability, user action, technical
+detail, target metadata, links, and status code. Dashboard health keeps legacy
+`recent_errors` strings and adds structured `recent_error_details`; the UI
+renders those as actionable alerts with expandable detail, copyable JSON, and
+navigation to the relevant profile, root, or job when available. Diagnostics
+redact secrets only, so local paths, profile names, root names, and job ids can
+remain visible on the local PC.
+
 ## Runtime Configuration
 
 Settings are defined in a typed settings catalog with defaults, optional environment

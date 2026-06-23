@@ -47,6 +47,7 @@ type HealthPayload = {
     components?: Array<{ name?: string; status?: string; heartbeat_age_seconds?: number | null; metadata?: Record<string, unknown> }>;
   };
   recent_errors?: string[];
+  recent_error_details?: ErrorDiagnostic[];
   extractors?: Record<string, { ok?: boolean; message?: string }>;
   host_agent?: { status?: string; browse_supported?: boolean; message?: string };
   deployment?: {
@@ -85,6 +86,20 @@ type HealthPayload = {
       recent_events?: Array<{ event_type?: string; created_at?: string; details?: Record<string, unknown> }>;
     };
   };
+};
+
+type ErrorDiagnostic = {
+  code?: string;
+  message?: string;
+  severity?: "error" | "warning" | "info" | string;
+  component?: string;
+  stage?: string | null;
+  retryable?: boolean;
+  user_action?: string | null;
+  technical_detail?: string | null;
+  target?: { type?: string; id?: string };
+  links?: Array<{ label?: string; tab?: string; profile?: string; root?: string }>;
+  status_code?: number | null;
 };
 
 type MailProfile = {
@@ -700,6 +715,28 @@ export default function App() {
     }
   }
 
+  async function copyDiagnostic(diagnostic: ErrorDiagnostic) {
+    const clipboard = window.navigator.clipboard ?? globalThis.navigator?.clipboard;
+    if (!clipboard?.writeText) {
+      setToast("Clipboard access is unavailable in this browser context.");
+      return;
+    }
+    try {
+      await clipboard.writeText(JSON.stringify(diagnostic, null, 2));
+      setToast("Diagnostic copied.");
+    } catch (error) {
+      setToast(`Could not copy diagnostic: ${errorMessage(error)}`);
+    }
+  }
+
+  function navigateDiagnostic(diagnostic: ErrorDiagnostic) {
+    const link = diagnostic.links?.find((item) => item.tab && navItems.some((nav) => nav.id === item.tab));
+    if (!link?.tab) return;
+    if (link.profile) setSelectedName(link.profile);
+    if (link.root) setSelectedRootName(link.root);
+    setActiveTab(link.tab as TabId);
+  }
+
   async function runResultFileAction(detail: ResultDetail, action: "open" | "reveal") {
     if (!detail.asset_id) {
       setToast("No indexed asset id is available for this result.");
@@ -840,6 +877,8 @@ export default function App() {
             hostStatus={hostStatus}
             restartRows={restartRows}
             onErrorDetail={setErrorDetail}
+            onCopyDiagnostic={(diagnostic) => void copyDiagnostic(diagnostic)}
+            onNavigateDiagnostic={navigateDiagnostic}
             onApplySettings={() => void applySettings()}
           />
         )}
@@ -1078,7 +1117,23 @@ function MailErrorsPanel({ mail, errors, onErrorDetail }: { mail: MailStatus; er
   );
 }
 
-function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySettings }: { state: LoadState; hostStatus: string; restartRows: SettingRow[]; onErrorDetail: (error: string) => void; onApplySettings: () => void }) {
+function HealthTab({
+  state,
+  hostStatus,
+  restartRows,
+  onErrorDetail,
+  onCopyDiagnostic,
+  onNavigateDiagnostic,
+  onApplySettings
+}: {
+  state: LoadState;
+  hostStatus: string;
+  restartRows: SettingRow[];
+  onErrorDetail: (error: string) => void;
+  onCopyDiagnostic: (diagnostic: ErrorDiagnostic) => void;
+  onNavigateDiagnostic: (diagnostic: ErrorDiagnostic) => void;
+  onApplySettings: () => void;
+}) {
   const runtimeRows = Object.entries(state.health.runtime ?? {});
   const hostAgent = state.health.host_agent;
   const codex = state.health.codex;
@@ -1119,11 +1174,70 @@ function HealthTab({ state, hostStatus, restartRows, onErrorDetail, onApplySetti
           <StatusTile label="Data Dir" ok={Boolean(deployment?.data_dir)} message={deployment?.data_dir ?? "not configured"} />
         </div>
       </Panel>
+      <ActionableDiagnostics diagnostics={state.health.recent_error_details ?? []} onCopy={onCopyDiagnostic} onNavigate={onNavigateDiagnostic} />
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
       <Panel title={`Runtime Actions (${restartRows.length})`} action={<button className="small-primary" type="button" onClick={onApplySettings}>Apply acknowledged</button>}>
         <SettingsPreview rows={restartRows} />
       </Panel>
     </section>
+  );
+}
+
+function ActionableDiagnostics({
+  diagnostics,
+  onCopy,
+  onNavigate
+}: {
+  diagnostics: ErrorDiagnostic[];
+  onCopy: (diagnostic: ErrorDiagnostic) => void;
+  onNavigate: (diagnostic: ErrorDiagnostic) => void;
+}) {
+  const [openCodes, setOpenCodes] = useState<Record<string, boolean>>({});
+  return (
+    <Panel title="Actionable Diagnostics">
+      <div className="diagnostics-list">
+        {diagnostics.slice(0, 6).map((diagnostic, index) => {
+          const code = diagnostic.code || `diagnostic-${index}`;
+          const open = Boolean(openCodes[code]);
+          const canNavigate = Boolean(diagnostic.links?.some((link) => link.tab));
+          const navigateLabel = diagnostic.links?.find((link) => link.tab)?.label ?? "Open";
+          return (
+            <article className={`diagnostic-item ${diagnostic.severity === "warning" ? "warning" : diagnostic.severity === "info" ? "info" : "error"}`} role={diagnostic.severity === "warning" ? "status" : "alert"} key={`${code}-${index}`}>
+              <div className="diagnostic-main">
+                <span className="diagnostic-code">{code}</span>
+                <strong>{diagnostic.message ?? "Unknown diagnostic"}</strong>
+                <p>{diagnostic.user_action ?? "Review the related dashboard panel for details."}</p>
+                <div className="diagnostic-meta">
+                  <span>{diagnostic.component ?? "component"}</span>
+                  {diagnostic.stage && <span>{diagnostic.stage}</span>}
+                  <span>{diagnostic.retryable ? "retryable" : "not retryable"}</span>
+                  {diagnostic.target?.id && <span>{diagnostic.target.type ?? "target"}: {diagnostic.target.id}</span>}
+                </div>
+              </div>
+              <div className="diagnostic-actions">
+                <button type="button" aria-label={`Show diagnostic detail ${code}`} onClick={() => setOpenCodes((current) => ({ ...current, [code]: !open }))}>
+                  <ChevronDown size={15} /> Details
+                </button>
+                <button type="button" aria-label={`Copy diagnostic ${code}`} onClick={() => onCopy(diagnostic)}>
+                  <Copy size={15} /> Copy
+                </button>
+                {canNavigate && (
+                  <button type="button" aria-label={`Open ${navigateLabel} for ${code}`} onClick={() => onNavigate(diagnostic)}>
+                    <ExternalLink size={15} /> {navigateLabel}
+                  </button>
+                )}
+              </div>
+              {open && (
+                <pre className="diagnostic-detail">
+                  {diagnostic.technical_detail ?? JSON.stringify(diagnostic, null, 2)}
+                </pre>
+              )}
+            </article>
+          );
+        })}
+        {diagnostics.length === 0 && <p className="muted">No structured diagnostics.</p>}
+      </div>
+    </Panel>
   );
 }
 
@@ -2301,6 +2415,13 @@ function parseApiErrorDetail(body: string) {
   if (!body.trim()) return "";
   try {
     const payload = JSON.parse(body) as Record<string, unknown>;
+    const structured = payload.error;
+    if (structured && typeof structured === "object") {
+      const error = structured as Record<string, unknown>;
+      const message = stringFromUnknown(error.message);
+      const action = stringFromUnknown(error.user_action);
+      if (message) return action ? `${message} ${action}` : message;
+    }
     const detail = payload.detail ?? payload.message ?? payload.error;
     if (Array.isArray(detail)) {
       return detail.map((item) => objectSummary(item)).filter(Boolean).join("; ");

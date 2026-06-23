@@ -93,6 +93,8 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["jobs"]["pending"] == 2
     assert payload["retrieval"]["asset_chunks"] == 5
     assert payload["recent_errors"] == ["bad file"]
+    assert payload["recent_error_details"][0]["message"] == "bad file"
+    assert payload["recent_error_details"][0]["severity"] == "error"
     assert "extractors" in payload
     assert payload["codex"]["status"] == "ready"
     assert payload["codex"]["mcp"]["configured"] is True
@@ -105,6 +107,106 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["deployment"]["install_root"] == "D:\\FluxLLMKB"
     assert payload["deployment"]["image_tag"] == "abc123"
     assert "repo_coupled" in payload["deployment"]
+
+
+def test_dashboard_health_includes_actionable_error_details(monkeypatch):
+    monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {
+                "name": "docs",
+                "root_path": "E:/Flux Docs",
+                "watch_enabled": True,
+                "enabled": True,
+                "metadata": {"host_access": "host_agent"},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        database,
+        "crawl_status",
+        lambda: {
+            "active_watch_roots": 1,
+            "disabled_watch_roots": 0,
+            "pending_jobs": 0,
+            "failed_jobs": 1,
+            "blocked_jobs": 1,
+            "recent_errors": ["ffprobe command not found", "watch root failed"],
+            "watchers": [
+                {
+                    "root_name": "docs",
+                    "status": "error",
+                    "last_error": "watch root failed",
+                    "heartbeat_age_seconds": 90,
+                }
+            ],
+            "recent_error_details": [
+                {
+                    "code": "corpus.job_blocked",
+                    "message": "ffprobe command not found",
+                    "severity": "warning",
+                    "component": "worker",
+                    "stage": "corpus_extract_video",
+                    "retryable": True,
+                    "user_action": "Install ffmpeg or leave video extraction blocked.",
+                    "technical_detail": "capture job job-1 blocked_missing_dependency",
+                    "target": {"type": "job", "id": "job-1"},
+                    "links": [{"label": "Jobs", "tab": "jobs"}],
+                    "status_code": None,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "embeddings": 0})
+    monkeypatch.setattr(database, "list_runtime_components", lambda: [], raising=False)
+    monkeypatch.setattr(
+        health,
+        "remote_status",
+        lambda: {"status": "host_agent_offline", "message": "connection refused"},
+    )
+    monkeypatch.setattr(health, "codex_status", lambda: {"status": "ready"})
+    monkeypatch.setattr(
+        health,
+        "codex_hook_policy_status",
+        lambda: {"status": "active", "enabled": True, "preflight_enabled": True, "capture_enabled": True, "recent_events": []},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        health,
+        "extractor_availability",
+        lambda: {"ffprobe": {"ok": False, "message": "ffprobe command not found"}},
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.mail_ingestion.mail_status",
+        lambda: {
+            "enabled_profiles": 1,
+            "errored_messages": 1,
+            "profiles": [{"name": "gmail-capture"}],
+            "oauth": {"status": "unavailable", "error": "OAuth database unavailable"},
+        },
+    )
+
+    payload = collect_dashboard_payload()
+
+    assert payload["recent_errors"] == ["ffprobe command not found", "watch root failed"]
+    details = payload["recent_error_details"]
+    assert any(item["code"] == "corpus.job_blocked" and item["target"] == {"type": "job", "id": "job-1"} for item in details)
+    watcher = next(item for item in details if item["code"] == "watcher.error")
+    assert watcher["component"] == "watcher"
+    assert watcher["target"] == {"type": "root", "id": "docs"}
+    assert watcher["links"][0]["tab"] == "corpus"
+    host = next(item for item in details if item["code"] == "host_agent.offline")
+    assert host["severity"] == "error"
+    assert host["retryable"] is True
+    assert "Start the Flux host agent" in host["user_action"]
+    extractor = next(item for item in details if item["code"] == "extractor.missing_dependency")
+    assert extractor["severity"] == "warning"
+    assert extractor["component"] == "extractor"
+    mail = next(item for item in details if item["code"] == "mail.oauth_unavailable")
+    assert mail["component"] == "mail"
+    assert mail["links"][0]["tab"] == "mail"
 
 
 def test_collect_crawl_payload_includes_enriched_root_summaries(monkeypatch):

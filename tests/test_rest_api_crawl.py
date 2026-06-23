@@ -141,7 +141,15 @@ def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_p
     )
 
     assert response.status_code == 400
-    assert "directory does not exist" in response.json()["detail"]
+    payload = response.json()
+    assert "directory does not exist" in payload["detail"]
+    assert payload["message"] == payload["detail"]
+    assert payload["error"]["code"] == "crawl.root_invalid"
+    assert payload["error"]["component"] == "crawler"
+    assert payload["error"]["severity"] == "error"
+    assert payload["error"]["retryable"] is False
+    assert "Choose an existing directory" in payload["error"]["user_action"]
+    assert payload["error"]["status_code"] == 400
 
 
 def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path):
@@ -390,3 +398,84 @@ def test_file_action_route_rejects_browser_supplied_path(monkeypatch):
     )
 
     assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"]["code"] == "api.request_invalid"
+    assert payload["error"]["component"] == "api"
+    assert payload["error"]["severity"] == "error"
+    assert payload["error"]["retryable"] is False
+    assert "path" in payload["message"]
+
+
+def test_lookup_routes_return_structured_error_envelopes(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr(database, "get_source_asset", lambda _asset_id: None, raising=False)
+    monkeypatch.setattr(database, "get_asset_chunk", lambda _chunk_id: None, raising=False)
+    monkeypatch.setattr(
+        "flux_llm_kb.result_details.result_detail",
+        lambda _kind, _result_id: (_ for _ in ()).throw(LookupError("result not found")),
+        raising=False,
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+
+    asset = client.get("/api/corpus/assets/asset-missing")
+    chunk = client.get("/api/corpus/chunks/chunk-missing")
+    result = client.get("/api/results/corpus_chunk/chunk-missing")
+
+    assert asset.status_code == 404
+    assert asset.json()["error"]["code"] == "corpus.asset_not_found"
+    assert asset.json()["error"]["target"] == {"type": "asset", "id": "asset-missing"}
+    assert asset.json()["detail"] == "source asset not found"
+    assert chunk.status_code == 404
+    assert chunk.json()["error"]["code"] == "corpus.chunk_not_found"
+    assert chunk.json()["error"]["target"] == {"type": "chunk", "id": "chunk-missing"}
+    assert result.status_code == 404
+    assert result.json()["error"]["code"] == "result.not_found"
+    assert result.json()["error"]["target"] == {"type": "corpus_chunk", "id": "chunk-missing"}
+
+
+def test_result_detail_invalid_kind_returns_structured_bad_request(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr(
+        "flux_llm_kb.result_details.result_detail",
+        lambda _kind, _result_id: (_ for _ in ()).throw(ValueError("unsupported result kind: unknown")),
+        raising=False,
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.get("/api/results/unknown/id-1")
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "result.kind_invalid"
+    assert payload["error"]["component"] == "retrieval"
+    assert payload["error"]["retryable"] is False
+    assert payload["error"]["target"] == {"type": "unknown", "id": "id-1"}
+
+
+def test_mail_profile_lookup_failure_returns_structured_error(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+    from flux_llm_kb import mail_ingestion
+
+    monkeypatch.setattr(
+        mail_ingestion,
+        "update_mail_profile_oauth_client_config_path",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("mail profile not found: gmail-missing")),
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.put(
+        "/api/mail/profiles/gmail-missing/oauth-client-config",
+        json={"client_config_path": "private/client.json"},
+    )
+
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"]["code"] == "mail.profile_not_found"
+    assert payload["error"]["component"] == "mail"
+    assert payload["error"]["target"] == {"type": "mail_profile", "id": "gmail-missing"}
+    assert payload["message"] == "mail profile not found: gmail-missing"

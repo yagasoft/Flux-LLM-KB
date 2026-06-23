@@ -33,7 +33,7 @@ scripts:
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; review workflows for graph browsing, stale claims, contradictions, capture approval, and retention tuning remain planned. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, and broad file-type roadmap exist; deeper extractors/media/archive stages remain planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, Outlook host split, dashboard controls, and consumer access exist; provider-specific mail semantics and scheduler state need hardening. |
-| V2.7 Mail And Retrieval Production Hardening | in progress | Search result content actions, in-app mail/file detail views, host-agent file actions, and logical mail grouping are implemented; lock-tolerant indexing, mail post-processing, retrieval explainability, scheduler reliability, and error diagnostics remain. |
+| V2.7 Mail And Retrieval Production Hardening | in progress | Search result content actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, and structured actionable error diagnostics are implemented; lock-tolerant indexing, mail post-processing, retrieval explainability, and scheduler reliability remain. |
 | V2.8 Indexer Acceleration And Local Inference Optimization | planned | Dedicated acceleration lane for GPU/local inference routing, caches, bounded workers, OCR/ASR/vision batching, native watchers, vectorization throughput, and indexing benchmarks. |
 | V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, optional ParadeDB/BM25, and local librarian workers. |
 | V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
@@ -107,8 +107,9 @@ scripts:
   and clearer UI around destructive actions.
 - Outlook COM host model exists, but broader real-world Outlook catch-up
   verification remains a Windows-host validation task.
-- Error reporting is improving but still needs a standard API error envelope and
-  consistently red, actionable dashboard rendering.
+- Error reporting has a standard API envelope and dashboard actionable
+  diagnostics; remaining mail hardening should add deeper per-run history and
+  provider-specific post-process detail.
 
 ### V2.7
 
@@ -121,8 +122,8 @@ scripts:
 - OneDrive/SharePoint/Dropbox coexistence needs explicit verification so
   monitoring remains non-invasive and indexing reports actionable states instead
   of fighting sync clients.
-- Mail post-processing, retrieval explainability, scheduler reliability, and
-  detailed red error diagnostics remain planned hardening items. See
+- Mail post-processing, retrieval explainability, and scheduler reliability
+  remain planned hardening items. See
   [roadmap.md](roadmap.md#v27-mail-and-retrieval-production-hardening).
 
 ### V2.8
@@ -153,16 +154,15 @@ scripts:
 
 ## Immediate Next Queue
 
-1. Implement V2.7 detailed error envelopes and dashboard red actionable errors.
-2. Add lock-tolerant indexing states, debounce/stability tests, and optional
+1. Add lock-tolerant indexing states, debounce/stability tests, and optional
    Windows VSS design/controls for locked files.
-3. Promote IMAP scheduled sync into a claimable scheduler state machine.
-4. Improve retrieval snippets with query-aware highlights and explainability.
-5. Add provider-specific mail post-process policies with dry-run and audit views.
-6. Design V2.8 indexer acceleration: hardware detection, local inference
+2. Promote IMAP scheduled sync into a claimable scheduler state machine.
+3. Improve retrieval snippets with query-aware highlights and explainability.
+4. Add provider-specific mail post-process policies with dry-run and audit views.
+5. Design V2.8 indexer acceleration: hardware detection, local inference
    provider routing, permanent caches, bounded media/OCR/ASR workers, vector
    batching, and throughput telemetry.
-7. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
+6. Continue extractor expansion from [file-type-coverage.md](file-type-coverage.md),
    prioritizing common Office legacy files, diagrams, archives, and embedded
    media.
 
