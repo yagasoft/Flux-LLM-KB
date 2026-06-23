@@ -1,6 +1,38 @@
+import ast
 from pathlib import Path
 
 from flux_llm_kb import mcp_server
+
+
+def _mcp_tool_functions(source: str) -> list[ast.FunctionDef]:
+    tree = ast.parse(source)
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(decorator, ast.Call)
+            and isinstance(decorator.func, ast.Attribute)
+            and decorator.func.attr == "tool"
+            for decorator in node.decorator_list
+        )
+    ]
+
+
+def _mcp_tool_names(source: str) -> list[str]:
+    names: list[str] = []
+    for node in _mcp_tool_functions(source):
+        for decorator in node.decorator_list:
+            if not (
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr == "tool"
+            ):
+                continue
+            for keyword in decorator.keywords:
+                if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                    names.append(str(keyword.value.value))
+    return sorted(names)
 
 
 def test_mcp_exposes_claim_and_graph_tools():
@@ -10,6 +42,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = \"local_first\")" in source
     assert "def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None)" in source
     assert "def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None)" in source
+    assert "Finalize the current agent turn by storing a redacted durable summary." in source
     assert "service.remember(title, summary, metadata={\"source\": \"finalize_turn\"}, cwd=cwd, root_name=root_name)" in source
     assert "scope_mode=scope_mode" in source
     assert "workspace_boosted" in source
@@ -25,3 +58,22 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def capture_review_decide(job_id: str, decision: str, rationale: str)" in source
     assert "def retention_quality(limit: int = 25)" in source
     assert "review_capture_job(" in source
+
+
+def test_all_mcp_tools_have_discoverable_docstrings():
+    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
+    tool_functions = _mcp_tool_functions(source)
+
+    missing = [node.name for node in tool_functions if not ast.get_docstring(node)]
+
+    assert missing == []
+
+
+def test_integrations_docs_list_every_mcp_tool():
+    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
+    repo_root = Path(mcp_server.__file__).resolve().parents[2]
+    docs = (repo_root / "docs" / "integrations.md").read_text(encoding="utf-8")
+
+    missing = [tool_name for tool_name in _mcp_tool_names(source) if f"`{tool_name}`" not in docs]
+
+    assert missing == []

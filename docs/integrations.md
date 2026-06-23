@@ -14,17 +14,29 @@ python -m flux_llm_kb.mcp_server
 
 Tools:
 
-- `kb.brief`
-- `kb.search`
-- `kb.remember`
-- `kb.claim_upsert`
-- `kb.claim_transition`
-- `kb.graph_traverse`
-- `kb.finalize_turn`
-- `kb.audit`
-- `kb.forget`
-- `kb.status`
-- `kb.mail_status`
+| Tool | Purpose |
+| --- | --- |
+| `kb.search` | Search Flux memory and corpus evidence, optionally scoped by workspace/root. |
+| `kb.brief` | Build a compact task brief for non-trivial work. |
+| `kb.remember` | Store a redacted durable memory with optional workspace provenance. |
+| `kb.finalize_turn` | Store a redacted summary at the end of meaningful agent work. |
+| `kb.claim_upsert` | Create or update an atomic claim. |
+| `kb.claim_transition` | Move a claim through lifecycle states with audit-visible rationale. |
+| `kb.graph_traverse` | Traverse typed knowledge graph relations from an entity. |
+| `kb.capture_review` | List pending capture-review jobs without raw capture payloads. |
+| `kb.capture_review_decide` | Approve or reject a capture-review job with rationale. |
+| `kb.retention_policies` | List retention policies for claims, episodes, and corpus assets. |
+| `kb.retention_quality` | Report retention and memory-quality candidates without raw content. |
+| `kb.audit` | List recent audit events. |
+| `kb.forget` | Forget a memory item by id with an audit reason. |
+| `kb.status` | Return Flux health and runtime status. |
+| `kb.crawl_status` | Return corpus crawler, watcher, job, and retrieval status. |
+| `kb.crawl_sync` | Sync monitored corpus roots or paths, optionally as a dry run. |
+| `kb.crawl_watch_status` | List watched roots and watcher runtime state. |
+| `kb.crawl_watch_enable` | Enable filesystem watching for one root or all roots. |
+| `kb.crawl_watch_disable` | Disable filesystem watching for one root or all roots. |
+| `kb.crawl_jobs` | List recent corpus extraction and capture jobs. |
+| `kb.mail_status` | Return mail ingestion, OAuth, profile, and scheduler status. |
 
 Codex may expose these tools through MCP wrapper names rather than literal
 top-level `kb.*` names. For example, `kb.status`, `kb.brief`, and

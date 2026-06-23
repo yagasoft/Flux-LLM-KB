@@ -42,6 +42,7 @@ def create_server():
 
     @mcp.tool(name="kb.remember")
     def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None):
+        """Store a redacted durable memory with optional workspace provenance."""
         return service.remember(title, body, cwd=cwd, root_name=root_name).__dict__
 
     @mcp.tool(name="kb.claim_upsert")
@@ -53,6 +54,7 @@ def create_server():
         confidence: float = 0.5,
         episode_id: str | None = None,
     ):
+        """Create or update an atomic claim linked to an optional source episode."""
         return service.upsert_claim(
             subject_type=subject_type,
             subject_name=subject,
@@ -70,6 +72,7 @@ def create_server():
         reason: str | None = None,
         confidence_delta: float = 0.0,
     ):
+        """Transition a claim lifecycle state and append an audit-visible event."""
         return service.transition_claim(
             claim_id=claim_id,
             transition=transition,
@@ -87,6 +90,7 @@ def create_server():
         direction: str = "out",
         limit: int = 100,
     ):
+        """Traverse typed knowledge graph relations from an entity."""
         return service.traverse_graph(
             entity_id=entity_id,
             relation_types=relation_types,
@@ -97,10 +101,12 @@ def create_server():
 
     @mcp.tool(name="kb.capture_review")
     def capture_review(limit: int = 50):
+        """List pending capture-review jobs without raw capture payloads."""
         return service.list_capture_review_jobs(limit=limit)
 
     @mcp.tool(name="kb.capture_review_decide")
     def capture_review_decide(job_id: str, decision: str, rationale: str):
+        """Approve or reject a capture-review job with a required rationale."""
         return service.review_capture_job(
             job_id=job_id,
             decision=decision,
@@ -110,66 +116,79 @@ def create_server():
 
     @mcp.tool(name="kb.retention_policies")
     def retention_policies():
+        """List retention policies for claims, episodes, and corpus assets."""
         return service.list_retention_policies()
 
     @mcp.tool(name="kb.retention_quality")
     def retention_quality(limit: int = 25):
+        """Report retention and memory quality candidates without raw content."""
         return service.retention_quality_report(limit=limit)
 
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
+        """Finalize the current agent turn by storing a redacted durable summary."""
         return service.remember(title, summary, metadata={"source": "finalize_turn"}, cwd=cwd, root_name=root_name).__dict__
 
     @mcp.tool(name="kb.audit")
     def audit(limit: int = 50):
+        """List recent audit events for memory and corpus operations."""
         return service.audit(limit=limit)
 
     @mcp.tool(name="kb.forget")
     def forget(memory_id: str, reason: str = "user_request"):
+        """Forget a memory item by id with an audit reason."""
         return service.forget(memory_id, reason=reason)
 
     @mcp.tool(name="kb.status")
     def status():
+        """Return Flux health, settings, extractor, and runtime status."""
         from .health import doctor_payload
 
         return doctor_payload()
 
     @mcp.tool(name="kb.crawl_status")
     def crawl_status():
+        """Return corpus crawler, watcher, job, and retrieval status."""
         from .health import collect_crawl_payload
 
         return collect_crawl_payload()
 
     @mcp.tool(name="kb.crawl_sync")
     def crawl_sync(root_name: str | None = None, path: str | None = None, dry_run: bool = False):
+        """Sync monitored corpus roots or paths, optionally as a dry run."""
         return service.sync_corpus(root_name=root_name, path=path, dry_run=dry_run)
 
     @mcp.tool(name="kb.crawl_watch_status")
     def crawl_watch_status():
+        """List watched corpus roots and watcher runtime state."""
         from . import database
 
         return database.crawl_status()
 
     @mcp.tool(name="kb.crawl_watch_enable")
     def crawl_watch_enable(root_name: str | None = None):
+        """Enable corpus filesystem watching for one root or all roots."""
         from . import database
 
         return database.set_watch_enabled(root_name=root_name, enabled=True)
 
     @mcp.tool(name="kb.crawl_watch_disable")
     def crawl_watch_disable(root_name: str | None = None):
+        """Disable corpus filesystem watching for one root or all roots."""
         from . import database
 
         return database.set_watch_enabled(root_name=root_name, enabled=False)
 
     @mcp.tool(name="kb.crawl_jobs")
     def crawl_jobs(limit: int = 50):
+        """List recent corpus extraction and capture jobs."""
         from . import database
 
         return {"jobs": database.list_capture_jobs(limit=limit)}
 
     @mcp.tool(name="kb.mail_status")
     def mail_status():
+        """Return mail ingestion, profile, OAuth, and scheduler status."""
         from .mail_ingestion import mail_status as collect_mail_status
 
         return collect_mail_status()
