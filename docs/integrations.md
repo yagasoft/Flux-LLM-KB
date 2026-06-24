@@ -18,8 +18,8 @@ Tools:
 | --- | --- |
 | `kb.search` | Search Flux memory and corpus evidence, optionally scoped by workspace/root. |
 | `kb.brief` | Build a compact task brief for non-trivial work. |
-| `kb.remember` | Store a redacted durable memory with optional workspace provenance. |
-| `kb.finalize_turn` | Store a redacted summary at the end of meaningful agent work. |
+| `kb.remember` | Store a concise redacted durable atomic save with optional workspace provenance. |
+| `kb.finalize_turn` | Store a redacted end-of-turn summary for meaningful agent work. |
 | `kb.claim_upsert` | Create or update an atomic claim. |
 | `kb.claim_transition` | Move a claim through lifecycle states with audit-visible rationale. |
 | `kb.graph_traverse` | Traverse typed knowledge graph relations from an entity. |
@@ -121,9 +121,13 @@ scope.
 Memory writes accept optional `cwd` and `root_name` as workspace provenance.
 Pass the active workspace `cwd` when calling `kb.remember`,
 `kb.finalize_turn`, `/api/remember`, or `flux-kb remember`; the CLI defaults
-manual remembers to its current directory. Explicit repair of older unscoped
-episodes is available through `flux-kb episodes scope-backfill --cwd <path>
---id <episode-id> [--dry-run]`; it only updates caller-selected IDs.
+manual remembers to its current directory. Use `kb.remember` for concise
+redacted durable atomic saves when a verified decision, fix, reusable
+procedure, command, or project fact should be retrievable before the turn ends.
+Use `kb.finalize_turn` at the end of meaningful work for the turn summary, and
+avoid duplicating every prior `kb.remember` item. Explicit repair of older
+unscoped episodes is available through `flux-kb episodes scope-backfill --cwd
+<path> --id <episode-id> [--dry-run]`; it only updates caller-selected IDs.
 
 Claim lifecycle and graph primitives are available through the same surfaces for
 kernel-level automation:
@@ -294,14 +298,18 @@ Codex has three Flux integration surfaces:
 - MCP tools provide callable Flux tools when `[mcp_servers.flux_llm_kb]` is
   present in `~/.codex/config.toml`. Depending on Codex tool discovery, they may
   appear as raw MCP names such as `kb.brief`, `kb.search`, and
-  `kb.finalize_turn`, or as Codex wrappers such as
+  `kb.remember`, `kb.finalize_turn`, or as Codex wrappers such as
   `mcp__flux_llm_kb.kb_brief`, `mcp__flux_llm_kb.kb_search`, and
+  `mcp__flux_llm_kb.kb_remember`, and
   `mcp__flux_llm_kb.kb_finalize_turn`. Models may query mid-turn when they need
   prior decisions, unresolved project context, patterns from other workspaces,
   general indexed documents, previous fixes, or user-referenced history. Use
   `kb.brief` for compact workspace-scoped context and `kb.search` with
   `scope_mode=workspace_boosted` for expanded discovery; skip KB retrieval when
   local files, the prompt, or current tool output already answer the question.
+  Use `kb.remember` for concise redacted durable atomic saves during work, with
+  active `cwd` or `root_name` provenance, and use `kb.finalize_turn` for the
+  end-of-turn summary without repeating every mid-turn save.
 - REST remains the fallback surface for tools that can call the local API
   directly, for example `GET /api/brief?query=...`.
 

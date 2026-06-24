@@ -5,12 +5,18 @@ description: Use before non-trivial Codex work to retrieve compact Flux-LLM-KB c
 
 # Flux Memory Workflow
 
-1. Before non-trivial work, call the Flux-LLM-KB MCP brief tool with the user's current task. In Codex, this may be exposed as the wrapper `mcp__flux_llm_kb.kb_brief`; in raw MCP clients the underlying tool name is `kb.brief`.
-2. Query mid-turn with `mcp__flux_llm_kb.kb_brief` only when you need a compact workspace-scoped brief.
-3. Query mid-turn with expanded `mcp__flux_llm_kb.kb_search` using `scope_mode="workspace_boosted"` when you need prior decisions, unresolved project context, patterns from other workspaces, general indexed documents, previous fixes, or user-referenced history.
-4. Do not query mid-turn when local files, the prompt, or current tool output already answer the question.
-5. Use only compact, relevant returned context; do not inject broad memory dumps.
-6. After durable findings, decisions, fixes, or reusable procedures emerge, call the finalize tool with the active workspace `cwd` so the saved memory remains locally retrievable. In Codex, this may be exposed as `mcp__flux_llm_kb.kb_finalize_turn`; in raw MCP clients the underlying tool name is `kb.finalize_turn`.
-7. Make final responses indexable: include concrete decisions, files changed or referenced, commands/tests run, important web/file references, and unresolved gaps.
-8. Never store secrets, raw transcripts, private customer data, or unredacted credentials.
-9. If retrieval or capture fails, report the failure and continue without fabricating memory.
+In Codex, Flux MCP tools may be exposed as wrappers like `mcp__flux_llm_kb.kb_brief`; in raw MCP clients the underlying names are `kb.brief`, `kb.search`, `kb.remember`, and `kb.finalize_turn`.
+
+| Tool | Use when | Guardrails |
+| --- | --- | --- |
+| `mcp__flux_llm_kb.kb_brief` | Before non-trivial work, or mid-turn when you need a compact workspace-scoped brief. | Pass the user's current task and active workspace `cwd` when available. |
+| `mcp__flux_llm_kb.kb_search` | Mid-turn targeted discovery when local files, the prompt, or current tool output do not answer the question. | Use `scope_mode="workspace_boosted"` for prior decisions, unresolved project context, cross-workspace patterns, general indexed documents, previous fixes, or user-referenced history. |
+| `mcp__flux_llm_kb.kb_remember` | During work for durable atomic saves: verified decisions, fixes, reusable procedures, commands, or project facts that should be retrievable before the turn ends. | Keep each save concise, redacted, and scoped with active workspace `cwd` or `root_name`; never store secrets, raw transcripts, private customer data, or unredacted credentials. |
+| `mcp__flux_llm_kb.kb_finalize_turn` | At the end of meaningful work to store a redacted durable summary. | Include concrete outcomes and unresolved gaps, but avoid duplicating every prior `kb_remember` item from the same turn. |
+
+Additional rules:
+
+1. Do not query mid-turn when local files, the prompt, or current tool output already answer the question.
+2. Use only compact, relevant returned context; do not inject broad memory dumps.
+3. Make final responses indexable: include concrete decisions, files changed or referenced, commands/tests run, important web/file references, and unresolved gaps.
+4. If retrieval or capture fails, report the failure and continue without fabricating memory.

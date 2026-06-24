@@ -275,6 +275,8 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     prompts = "\n".join(manifest["interface"]["defaultPrompt"])
     assert "Make final responses indexable" in prompts
     assert "files changed or referenced" in prompts
+    assert "concise redacted durable saves" in prompts
+    assert "reusable mid-turn outcomes" in prompts
     assert "Make final responses indexable" in skill
     assert "commands/tests run" in skill
     assert "mcp__flux_llm_kb.kb_brief" in skill
@@ -282,7 +284,11 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "prior decisions" in skill
     assert "workspace_boosted" in skill
     assert "local files, the prompt, or current tool output already answer" in skill
+    assert "mcp__flux_llm_kb.kb_remember" in skill
+    assert "durable atomic saves" in skill
+    assert "concise, redacted, and scoped" in skill
     assert "mcp__flux_llm_kb.kb_finalize_turn" in skill
+    assert "avoid duplicating every prior" in skill
     assert "active workspace `cwd`" in skill
 
 

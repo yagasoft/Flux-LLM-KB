@@ -19,14 +19,19 @@ def create_server():
             "you need prior decisions, unresolved project context, patterns from other "
             "workspaces, general indexed documents, previous fixes, or user-referenced "
             "history. Skip KB queries when local files, the prompt, or current tool "
-            "output already answer the question. Store only redacted, durable knowledge. "
-            "Do not persist secrets, raw transcripts, or private exports."
+            "output already answer the question. Use kb.remember for concise durable "
+            "atomic saves when a verified decision, fix, reusable procedure, command, "
+            "or project fact should be retrievable before turn end; do not wait for turn finalization. "
+            "Pass cwd or root_name for workspace provenance. "
+            "Finalize with kb.finalize_turn at turn end for meaningful outcomes; avoid "
+            "duplicating every prior kb.remember item. Store only redacted, durable "
+            "knowledge. Do not persist secrets, raw transcripts, or private exports."
         ),
     )
 
     @mcp.tool(name="kb.search")
     def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
-        """Search Flux memory. Use scope_mode="workspace_boosted" for explicit expanded mid-turn discovery."""
+        """Search Flux memory. Use scope_mode="workspace_boosted" for explicit expanded mid-turn discovery when local context is insufficient."""
         return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
 
     @mcp.tool(name="kb.brief")
@@ -42,7 +47,7 @@ def create_server():
 
     @mcp.tool(name="kb.remember")
     def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None):
-        """Store a redacted durable memory with optional workspace provenance."""
+        """Use kb.remember for concise durable atomic saves during work; pass cwd or root_name and store only redacted knowledge."""
         return service.remember(title, body, cwd=cwd, root_name=root_name).__dict__
 
     @mcp.tool(name="kb.claim_upsert")
@@ -126,7 +131,7 @@ def create_server():
 
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
-        """Finalize the current agent turn by storing a redacted durable summary."""
+        """Finalize the current agent turn by storing a redacted durable summary. Finalize with kb.finalize_turn at turn end; avoid duplicating every prior kb.remember item."""
         return service.remember(title, summary, metadata={"source": "finalize_turn"}, cwd=cwd, root_name=root_name).__dict__
 
     @mcp.tool(name="kb.audit")

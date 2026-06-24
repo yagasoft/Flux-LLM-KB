@@ -43,6 +43,10 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None)" in source
     assert "def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None)" in source
     assert "Finalize the current agent turn by storing a redacted durable summary." in source
+    assert "Use kb.remember for concise durable atomic saves" in source
+    assert "do not wait for turn finalization" in source
+    assert "Finalize with kb.finalize_turn at turn end" in source
+    assert "avoid duplicating every prior kb.remember item" in source
     assert "service.remember(title, summary, metadata={\"source\": \"finalize_turn\"}, cwd=cwd, root_name=root_name)" in source
     assert "scope_mode=scope_mode" in source
     assert "workspace_boosted" in source

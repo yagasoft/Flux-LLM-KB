@@ -32,6 +32,7 @@
     "termsOfServiceURL": "https://github.com/yagasoft/Flux-LLM-KB/blob/main/LICENSE",
     "defaultPrompt": [
       "Use Flux LLM-KB to retrieve relevant project memory before starting non-trivial work",
+      "Use Flux LLM-KB for concise redacted durable saves of reusable mid-turn outcomes when decisions, fixes, procedures, commands, or verified project facts should be retrievable before the turn ends",
       "Make final responses indexable for Flux LLM-KB by summarizing decisions, files changed or referenced, commands/tests run, and unresolved gaps without including secrets"
     ],
     "brandColor": "#0891B2",
