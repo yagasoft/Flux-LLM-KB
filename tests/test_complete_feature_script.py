@@ -67,6 +67,14 @@ def test_complete_feature_script_repairs_shared_editable_install_before_worktree
     assert 'python -m pip install -e "$MainRoot[dev]"' in script
 
 
+def test_complete_feature_script_is_safe_to_rerun_after_empty_squash_merge():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert 'Invoke-FeatureStep -Name "main-commit"' in script
+    assert "No staged changes to commit." in script
+    assert "git commit -m '$CommitMessage'" in script
+
+
 def test_dev_flux_kb_wrapper_is_worktree_safe():
     wrapper_path = ROOT / "scripts" / "dev" / "flux-kb.ps1"
     assert wrapper_path.exists()
