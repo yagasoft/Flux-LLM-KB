@@ -93,6 +93,58 @@ function Invoke-FeatureStepOptional {
     Invoke-FeatureStep -Name $Name -Command $Command -Cwd $Cwd
 }
 
+$RepairEditableInstallCommand = @'
+$MainRoot = $env:FLUX_KB_REPAIR_MAIN_ROOT
+$FeatureWorktree = $env:FLUX_KB_REPAIR_FEATURE_WORKTREE
+
+function Normalize-FluxPath {
+    param([string]$Path)
+    if (-not $Path) { return "" }
+    try {
+        $fullPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    } catch {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+    }
+    return $fullPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar).Replace([System.IO.Path]::AltDirectorySeparatorChar, [System.IO.Path]::DirectorySeparatorChar)
+}
+
+function Test-UnderPath {
+    param([string]$Path, [string]$Root)
+    $normalizedPath = Normalize-FluxPath -Path $Path
+    $normalizedRoot = Normalize-FluxPath -Path $Root
+    if (-not $normalizedPath -or -not $normalizedRoot) { return $false }
+    if ($normalizedPath.Equals($normalizedRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    $prefix = "$normalizedRoot$([System.IO.Path]::DirectorySeparatorChar)"
+    return $normalizedPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+$editableLocation = $null
+$pipShow = python -m pip show flux-llm-kb 2>$null
+if ($LASTEXITCODE -eq 0) {
+    foreach ($line in $pipShow) {
+        if ($line -like "Editable project location:*") {
+            $editableLocation = $line.Substring("Editable project location:".Length).Trim()
+            break
+        }
+    }
+}
+
+$needsRepair = $false
+if (-not $editableLocation) {
+    $needsRepair = $true
+} elseif (-not (Test-Path -LiteralPath $editableLocation)) {
+    $needsRepair = $true
+} elseif (Test-UnderPath -Path $editableLocation -Root $FeatureWorktree) {
+    $needsRepair = $true
+} elseif (Test-UnderPath -Path $editableLocation -Root $MainRoot) {
+    $needsRepair = $false
+}
+
+if ($needsRepair) {
+    python -m pip install -e "$MainRoot[dev]"
+}
+'@
+
 $FeatureWorktree = (Resolve-Path $FeatureWorktree).Path
 if (-not $MainRoot) {
     $MainRoot = Get-MainWorktreePath -Worktree $FeatureWorktree
@@ -126,6 +178,16 @@ try {
         Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1'
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 15 | Out-Null'
+    }
+    $previousRepairMainRoot = $env:FLUX_KB_REPAIR_MAIN_ROOT
+    $previousRepairFeatureWorktree = $env:FLUX_KB_REPAIR_FEATURE_WORKTREE
+    try {
+        $env:FLUX_KB_REPAIR_MAIN_ROOT = $MainRoot
+        $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $FeatureWorktree
+        Invoke-FeatureStep -Name "repair-python-editable-install" -Cwd $MainRoot -Command $RepairEditableInstallCommand
+    } finally {
+        $env:FLUX_KB_REPAIR_MAIN_ROOT = $previousRepairMainRoot
+        $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $previousRepairFeatureWorktree
     }
     if (-not $KeepWorktree) {
         Invoke-FeatureStep -Name "cleanup-worktree" -Cwd $MainRoot -Command "git worktree remove '$FeatureWorktree'; git worktree prune; git branch -D $Branch"

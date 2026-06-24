@@ -28,9 +28,10 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
 
     deploy_index = script.index("scripts\\deploy\\update-flux.ps1")
     probe_index = script.index("http://127.0.0.1:8765/api/dashboard/health")
+    repair_index = script.index('Invoke-FeatureStep -Name "repair-python-editable-install"')
     cleanup_index = script.index("git worktree remove")
 
-    assert deploy_index < probe_index < cleanup_index
+    assert deploy_index < probe_index < repair_index < cleanup_index
 
 
 def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
@@ -53,3 +54,36 @@ def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
     assert test_step in script
     assert build_step in script
     assert script.index(install_step) < script.index(test_step) < script.index(build_step)
+
+
+def test_complete_feature_script_repairs_shared_editable_install_before_worktree_cleanup():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert 'Invoke-FeatureStep -Name "repair-python-editable-install"' in script
+    assert "python -m pip show flux-llm-kb" in script
+    assert "Editable project location:" in script
+    assert "Test-Path -LiteralPath $editableLocation" in script
+    assert "Test-UnderPath -Path $editableLocation -Root $FeatureWorktree" in script
+    assert 'python -m pip install -e "$MainRoot[dev]"' in script
+
+
+def test_dev_flux_kb_wrapper_is_worktree_safe():
+    wrapper_path = ROOT / "scripts" / "dev" / "flux-kb.ps1"
+    assert wrapper_path.exists()
+
+    wrapper = wrapper_path.read_text(encoding="utf-8")
+    assert "ValueFromRemainingArguments" in wrapper
+    assert "FLUX_KB_DEV_PYTHON" in wrapper
+    assert "FLUX_KB_PYTHON" in wrapper
+    assert "PYTHONPATH" in wrapper
+    assert "-m flux_llm_kb.cli" in wrapper
+    assert "pip install" not in wrapper
+
+
+def test_setup_docs_describe_worktree_safe_flux_cli_wrapper():
+    setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
+
+    assert ".\\scripts\\dev\\flux-kb.ps1 lint" in setup
+    assert "worktree-safe" in setup
+    assert "Do not run `python -m pip install -e .` inside temporary worktrees" in setup
+    assert "D:\\FluxLLMKB\\app\\.venv" in setup

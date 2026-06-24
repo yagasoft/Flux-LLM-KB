@@ -45,6 +45,10 @@ flux-kb search "pgvector decision"
 .\scripts\start-dashboard-dev.ps1
 ```
 
+In temporary worktrees, prefer `.\scripts\dev\flux-kb.ps1 lint` and other
+wrapper calls over `python -m pip install -e .`; the wrapper runs the checkout
+through `PYTHONPATH` without changing the shared Python environment.
+
 Docker Compose is the default runtime profile. If Docker is missing, the setup
 scripts fail clearly instead of silently switching storage engines.
 

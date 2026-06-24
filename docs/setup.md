@@ -64,6 +64,19 @@ desktop session.
 
 ### Developer Install
 
+For temporary feature worktrees, use the worktree-safe wrapper instead of
+changing the shared Python editable install:
+
+```powershell
+.\scripts\dev\flux-kb.ps1 lint
+.\scripts\dev\flux-kb.ps1 status
+```
+
+The wrapper sets `PYTHONPATH` to the current checkout's `src` directory and then
+runs `python -m flux_llm_kb.cli`. It is only for repository development. Do not run `python -m pip install -e .` inside temporary worktrees when using the shared `D:\FluxLLMKB\python` runtime; that can leave the global `flux-kb` launcher pointing at a worktree that will later be deleted. Production deployment continues to use the permanent `D:\FluxLLMKB\app\.venv` runtime.
+
+For a long-lived development checkout, install the package in editable mode:
+
 ```powershell
 python -m pip install -e .[dev]
 Copy-Item .env.example .env
@@ -90,6 +103,15 @@ External tools are detected at runtime and reported by `flux-kb crawl doctor`.
 called through cloud services by default.
 
 ## Useful Commands
+
+From a temporary worktree, prefer the dev wrapper:
+
+```powershell
+.\scripts\dev\flux-kb.ps1 lint
+.\scripts\dev\flux-kb.ps1 search "decision title"
+```
+
+From the permanent checkout or production environment:
 
 ```powershell
 flux-kb lint
