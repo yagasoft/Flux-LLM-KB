@@ -448,7 +448,37 @@ def test_extract_image_blocks_unsupported_vision_provider_without_remote_call(mo
     assert result.status == "blocked_missing_dependency"
     assert result.metadata["vision"]["status"] == "blocked_config"
     assert result.metadata["vision"]["provider"] == "openai_compatible"
-    assert result.message == "vision provider openai_compatible is not supported"
+    assert result.message == "vision provider openai_compatible is not implemented for vision enrichment in this build"
+
+
+def test_extract_image_keeps_ocr_indexing_when_vision_provider_is_blocked(monkeypatch, tmp_path):
+    path = tmp_path / "scan.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path, provider="openai_compatible")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("blocked provider must not call network")),
+        raising=False,
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/tesseract.exe"
+        return SimpleNamespace(returncode=0, stdout="OCR text survives blocked vision", stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].modality == "ocr"
+    assert result.chunks[0].body == "OCR text survives blocked vision"
+    assert result.metadata["ocr"]["status"] == "completed"
+    assert result.metadata["vision"]["status"] == "blocked_config"
+    assert result.metadata["vision"]["provider"] == "openai_compatible"
 
 
 def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_path):

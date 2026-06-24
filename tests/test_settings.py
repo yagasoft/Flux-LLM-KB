@@ -134,6 +134,15 @@ def test_vision_and_video_settings_defaults_and_env_overrides(monkeypatch, tmp_p
     assert service.resolve("acceleration.video.frame_max_duration_seconds").raw_value == 60
 
 
+def test_vision_model_setting_description_is_provider_neutral():
+    definitions = {definition.key: definition for definition in SETTING_REGISTRY}
+    description = definitions["acceleration.vision.model"].description.lower()
+
+    assert "local vision model identifier" in description
+    assert "provider" in description
+    assert "ollama" not in description
+
+
 def test_container_cap_settings_defaults_and_env_overrides(monkeypatch):
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     service = SettingsService()

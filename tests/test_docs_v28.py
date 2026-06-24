@@ -31,3 +31,9 @@ def test_v28_docs_describe_local_visual_media_enrichment_policy():
     assert "scene-transition" in combined
     assert "thumbnail cache" in combined
     assert "loopback" in combined
+    assert "configured loopback local inference" in combined
+    assert "ollama-compatible" in combined
+    assert "gemma-class" in combined
+    assert "loopback ollama" not in combined
+    assert "ollama only" not in combined
+    assert "only through loopback ollama" not in combined

@@ -113,11 +113,14 @@ The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
 and modern Visio structure, sidecar transcripts, and decorative-image skips.
 Optional richer stages can then run as bounded jobs: Tesseract or PaddleOCR OCR,
-local Ollama image descriptions through loopback-only inference,
-scene-transition frame sampling with thumbnail cache reuse, and faster-whisper
-audio/video transcription. Vision requires `acceleration.vision.enabled`, a
-local model name, and `acceleration.local_inference.*` pointing at a loopback
-Ollama server. ASR requires `ffmpeg`, the `faster-whisper` Python
+configured loopback local inference for image descriptions, scene-transition
+frame sampling with thumbnail cache reuse, and faster-whisper audio/video
+transcription. Vision requires `acceleration.vision.enabled`, a configured
+local vision model identifier in `acceleration.vision.model`, and
+`acceleration.local_inference.*` pointing at a healthy loopback local provider.
+The first implemented vision runtime uses an Ollama-compatible API, so local
+Gemma-class vision models can be selected by model tag when that runtime has
+them installed. ASR requires `ffmpeg`, the `faster-whisper` Python
 module, and `acceleration.asr.model_path`; Flux passes `local_files_only=True`
 and never performs a remote model download. Redacted ASR cache entries live
 under the ASR cache directory and expose cache hit/miss plus segment telemetry.

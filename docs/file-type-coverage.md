@@ -51,12 +51,16 @@ parser or local tool exists.
   Missing ASR tools or model paths report `blocked_missing_dependency`; redacted
   ASR cache entries stay under the private ASR cache root with hit/miss and
   segment telemetry exposed through worker-family status.
-- Optional local vision is cache-backed and loopback-only. Image and sampled
-  video-frame descriptions run only when `acceleration.vision.enabled` is true,
-  `acceleration.vision.model` is configured, and `acceleration.local_inference.*`
-  points at a local Ollama endpoint. Redacted captions stay under the private
-  vision cache, sampled frames stay under the private thumbnail cache, and
-  decorative-image spacers are skipped before OCR or vision.
+- Optional local vision is cache-backed and uses configured loopback local
+  inference. Image and sampled video-frame descriptions run only when
+  `acceleration.vision.enabled` is true, `acceleration.vision.model` is
+  configured, and `acceleration.local_inference.*` points at a healthy local
+  provider/runtime. The first implemented runtime path uses an
+  Ollama-compatible API; Gemma-class local vision models can be selected through
+  `acceleration.vision.model` when installed in the configured runtime.
+  Redacted captions stay under the private vision cache, sampled frames stay
+  under the private thumbnail cache, and decorative-image spacers are skipped
+  before OCR or vision.
 - Video frame sampling is scene-transition based, not fixed-position sampling.
   Deferred video jobs use local `ffmpeg` scene detection with
   `acceleration.video.scene_threshold`, sample up to
@@ -118,9 +122,9 @@ parser or local tool exists.
   text is not written to public docs or dashboard metadata.
 - Audio/video ASR uses local tools only. Sidecar transcripts remain preferred;
   otherwise bounded media jobs can sample scene-transition video frames into the
-  thumbnail cache, run optional loopback local vision captions into the vision
-  cache, extract temporary mono 16 kHz audio with `ffmpeg`, and transcribe with
-  faster-whisper using `acceleration.asr.model_path`.
+  thumbnail cache, run optional configured loopback local inference captions
+  into the vision cache, extract temporary mono 16 kHz audio with `ffmpeg`, and
+  transcribe with faster-whisper using `acceleration.asr.model_path`.
   ASR output is redacted before chunking and before ASR cache writes. Cloud
   transcription stays off by default, and raw transcript text is not written to
   public docs or dashboard metadata.

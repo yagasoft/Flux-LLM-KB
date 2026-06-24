@@ -2412,7 +2412,7 @@ def _vision_image(path: Path, *, source_label: str) -> VisionResult:
         return VisionResult(
             status="blocked_config",
             metadata={**metadata, "status": "blocked_config", "blocked_dependency_count": 1},
-            message=f"vision provider {settings['provider']} is not supported",
+            message=f"vision provider {settings['provider']} is not implemented for vision enrichment in this build",
         )
     if not settings["model"]:
         return VisionResult(
@@ -2435,9 +2435,10 @@ def _vision_image(path: Path, *, source_label: str) -> VisionResult:
             text=cached,
             metadata={**metadata, "status": "cache_hit", "cache_hits": 1, "cache_misses": 0, "descriptions": 1 if cached else 0},
         )
-    return _vision_with_ollama(
+    return _vision_with_ollama_compatible(
         path,
         source_label=source_label,
+        provider=settings["provider"],
         base_url=base_url,
         model=settings["model"],
         timeout_seconds=settings["timeout_seconds"],
@@ -2486,10 +2487,11 @@ def _vision_metadata(*, status: str, provider: str, model: str) -> dict[str, Any
     }
 
 
-def _vision_with_ollama(
+def _vision_with_ollama_compatible(
     path: Path,
     *,
     source_label: str,
+    provider: str,
     base_url: str,
     model: str,
     timeout_seconds: int,
@@ -2518,7 +2520,7 @@ def _vision_with_ollama(
         text = _vision_response_text(decoded)
         redacted, _ = redact_text(text)
         clean = redacted.strip()
-        _write_vision_cache(path, provider="ollama", model=model, text=clean)
+        _write_vision_cache(path, provider=provider, model=model, text=clean)
         return VisionResult(
             status="completed",
             text=clean,
