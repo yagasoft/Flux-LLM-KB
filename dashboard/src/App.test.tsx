@@ -19,7 +19,7 @@ const health = {
       nvidia: { ok: false, state: "missing", message: "nvidia-smi not found" },
       onnxruntime: { ok: true, providers: ["CPUExecutionProvider"] },
       local_model: { ok: false, state: "disabled", provider: "ollama" },
-      watcher_backend: { ok: true, state: "available", provider: "watchdog" },
+      watcher_backend: { ok: true, state: "available", provider: "watchdog", policy: "auto", selected_backend: "watchdog", native: true },
       cpu: { ok: true, count: 16 },
       memory: { ok: true, total_bytes: 34359738368 }
     },
@@ -38,9 +38,14 @@ const health = {
       }
     },
     worker_families: [
-      { family: "media", resource_class: "gpu", configured_cap: 1, pending: 2, running: 1, blocked: 1, failed: 0, avg_duration_ms: 24, p95_duration_ms: 95, ocr_cache_hits: 6, ocr_cache_misses: 2, asr_cache_hits: 4, asr_cache_misses: 1, asr_segments: 9, vision_cache_hits: 5, vision_cache_misses: 2, vision_descriptions: 3, vision_blocked_dependency_count: 1, decorative_image_skips: 4, frame_sample_count: 6, thumbnail_cache_hits: 7, thumbnail_cache_misses: 8, embedding_vectors: 10, embedding_skipped_unchanged: 2, embedding_batches: 1, embedding_cache_hits: 3, embedding_cache_misses: 4 },
+      { family: "media", resource_class: "gpu", configured_cap: 1, cap_available: 0, backpressure: "cap_reached", pending: 2, running: 1, blocked: 1, failed: 0, oldest_pending_age_seconds: 120, retrying_locked: 2, blocked_locked: 1, avg_duration_ms: 24, p95_duration_ms: 95, ocr_cache_hits: 6, ocr_cache_misses: 2, asr_cache_hits: 4, asr_cache_misses: 1, asr_segments: 9, vision_cache_hits: 5, vision_cache_misses: 2, vision_descriptions: 3, vision_blocked_dependency_count: 1, decorative_image_skips: 4, frame_sample_count: 6, thumbnail_cache_hits: 7, thumbnail_cache_misses: 8, parser_cache_hits: 3, parser_cache_misses: 1, manifest_skipped_unchanged: 5, embedding_vectors: 10, embedding_skipped_unchanged: 2, embedding_batches: 1, embedding_cache_hits: 3, embedding_cache_misses: 4 },
       { family: "office", resource_class: "cpu", configured_cap: 2, pending: 3, running: 0, blocked: 0, failed: 1, avg_duration_ms: 12, p95_duration_ms: 40 }
-    ]
+    ],
+    benchmarks: {
+      history: [
+        { id: "run-2", fixture: "image-heavy", status: "completed", file_count: 10, elapsed_ms: 1000, throughput_files_per_second: 10, previous_elapsed_delta_ms: -250, warm_state: "warm", cache_hits: 7, cache_misses: 3 }
+      ]
+    }
   },
   workers: {
     active: 1,
@@ -652,9 +657,18 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("nvidia-smi not found")).toBeInTheDocument();
     expect(screen.getByText("Local Model")).toBeInTheDocument();
     expect(screen.getByText("disabled")).toBeInTheDocument();
+    expect(screen.getByText("Watcher Policy")).toBeInTheDocument();
+    expect(screen.getAllByText("watchdog").length).toBeGreaterThan(0);
+    expect(screen.getByText("auto")).toBeInTheDocument();
     expect(screen.getByText("D:/FluxLLMKB/private/cache")).toBeInTheDocument();
-    expect(screen.getByText("media")).toBeInTheDocument();
+    expect(screen.getAllByText("media").length).toBeGreaterThan(0);
     expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss; ASR 4 hit / 1 miss; 9 segments; Vision 5 hit / 2 miss; 3 descriptions; 1 blocked; 4 decorative skips; Frames 6 sampled; thumbnails 7 hit / 8 miss; Embeddings 10 vectors; 2 skipped; 1 batches; cache 3 hit / 4 miss")).toBeInTheDocument();
+    expect(screen.getByText("Family Backpressure")).toBeInTheDocument();
+    expect(screen.getByText("cap 1/1")).toBeInTheDocument();
+    expect(screen.getByText("Cap Reached; oldest 120s; retry 2; blocked locks 1; parser 3 hit / 1 miss; 5 manifest skips")).toBeInTheDocument();
+    expect(screen.getByText("Benchmark History")).toBeInTheDocument();
+    expect(screen.getByText("image-heavy")).toBeInTheDocument();
+    expect(screen.getByText("10 files/s; -250ms delta")).toBeInTheDocument();
     expect(screen.getByText("office")).toBeInTheDocument();
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });

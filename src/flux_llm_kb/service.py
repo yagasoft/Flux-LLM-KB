@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
+import hashlib
 import json
 from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
 import re
+import tempfile
 import time
 from typing import Any
 
-from .acceleration import kind_to_job_families
+from .acceleration import (
+    BENCHMARK_FIXTURES,
+    FAMILY_DEFAULT_CAPS,
+    collect_acceleration_status,
+    job_family_for_type,
+    kind_to_job_families,
+)
 from .crawler import CorpusPolicy, scan_path
 from . import database
 from .glob_policy import effective_glob_policy
@@ -19,7 +28,7 @@ from .result_details import collapse_mail_spool_search_results, decorate_corpus_
 from .scoring import ContextCandidate, pack_context, pack_context_with_trace
 from .settings import SettingsService
 from .versioning import collapse_version_families
-from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
+from .watcher import WatchEvent, WatchRoot, create_corpus_watcher, probe_watcher_backend
 
 
 LOCAL_SCOPE_SCORE_BOOST = 1.15
@@ -544,11 +553,85 @@ class KnowledgeService:
             max_inline_bytes=root["max_inline_bytes"],
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
             **_configured_container_limits(),
+            hash_parallelism=_configured_hash_parallelism(),
+            manifest_lookup=_manifest_lookup(root["name"]),
             stability_quiet_seconds=_configured_stability_quiet_seconds() if reason == "watch_event" else 0.0,
             large_file_stability_quiet_seconds=_configured_large_file_stability_quiet_seconds() if reason == "watch_event" else 0.0,
         )
         plan = scan_path(root["root_path"], policy, target_path=path)
         return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run, reason=reason)
+
+    def watch_probe(self, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+        return probe_watcher_backend(
+            backend_policy=_configured_watcher_backend(),
+            timeout_seconds=max(0.1, float(timeout_seconds or 2.0)),
+        )
+
+    def worker_status(self, *, family: str = "all") -> dict[str, Any]:
+        rows = collect_acceleration_status()["worker_families"]
+        normalized = str(family or "all").lower()
+        if normalized != "all":
+            rows = [row for row in rows if row.get("family") == normalized]
+        return {"family": normalized, "families": rows}
+
+    def watch_events(self, *, limit: int = 50) -> dict[str, Any]:
+        return {"events": database.list_watch_events(limit=limit)}
+
+    def benchmark_history(self, *, fixture: str | None = None, limit: int = 20) -> dict[str, Any]:
+        normalized = None if fixture in {None, "", "all"} else str(fixture)
+        return {"fixture": normalized or "all", "runs": database.list_benchmark_runs(fixture=normalized, limit=limit)}
+
+    def run_benchmark(self, *, fixture: str = "all", files: int = 10) -> dict[str, Any]:
+        fixture_names = [item["name"] for item in BENCHMARK_FIXTURES]
+        requested = str(fixture or "all")
+        names = fixture_names if requested == "all" else [requested]
+        unknown = [name for name in names if name not in fixture_names]
+        if unknown:
+            raise ValueError(f"unknown benchmark fixture: {unknown[0]}")
+        file_count = max(1, min(int(files or 10), 500))
+        runs = [self._run_single_benchmark(name, file_count) for name in names]
+        return {
+            "fixture": requested if requested != "all" else "all",
+            "files": file_count,
+            "runs": runs,
+        }
+
+    def _run_single_benchmark(self, fixture: str, files: int) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="flux-kb-benchmark-") as temp_dir:
+            root = Path(temp_dir)
+            _write_benchmark_fixture(root, fixture, files)
+            started = time.perf_counter()
+            plan = scan_path(root, CorpusPolicy(root_path=root))
+            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        per_file_ms = max(0, int(elapsed_ms / max(1, len(plan.assets))))
+        family_breakdown = _benchmark_family_breakdown(plan)
+        recorded = database.record_benchmark_run(
+            fixture=fixture,
+            file_count=len(plan.assets),
+            elapsed_ms=elapsed_ms,
+            timings_ms=[per_file_ms for _asset in plan.assets],
+            warm_state="cold",
+            cache_hits=0,
+            cache_misses=len(plan.assets),
+            jobs_queued=len(plan.deferred_jobs),
+            jobs_completed=len(plan.assets) - len(plan.deferred_jobs),
+            jobs_blocked=len(plan.errors),
+            worker_family_breakdown=family_breakdown,
+            metadata={
+                "provider": "synthetic",
+                "path_scope": "temporary",
+                "watcher_backend": _configured_watcher_backend(),
+            },
+        )
+        return {
+            "id": recorded.get("id"),
+            "fixture": fixture,
+            "file_count": len(plan.assets),
+            "elapsed_ms": elapsed_ms,
+            "throughput_files_per_second": (len(plan.assets) / (elapsed_ms / 1000.0)) if elapsed_ms else 0.0,
+            "jobs_queued": len(plan.deferred_jobs),
+            "worker_family_breakdown": family_breakdown,
+        }
 
     def backfill_episode_workspace_scope(
         self,
@@ -624,6 +707,7 @@ class KnowledgeService:
             debounce_seconds=_configured_watcher_debounce_seconds(),
             stability_quiet_seconds=_configured_stability_quiet_seconds(),
             max_queue_size=_configured_watcher_max_queue_size(),
+            backend_policy=_configured_watcher_backend(),
         )
         last_reconcile_at = 0.0
         if _configured_reconcile_on_start():
@@ -632,7 +716,7 @@ class KnowledgeService:
         watcher.poll_once(seed=True)
         while True:
             for root in _load_watch_roots(root_name):
-                database.record_watcher_heartbeat(root_name=root.name)
+                database.record_watcher_heartbeat(root_name=root.name, metadata={"watcher_backend": watcher.backend_status})
             watcher.poll_once()
             reconcile_interval = _configured_reconcile_interval_seconds()
             if reconcile_interval > 0 and time.monotonic() - last_reconcile_at >= reconcile_interval:
@@ -662,6 +746,7 @@ class KnowledgeService:
             claim_kwargs["job_families"] = list(job_families)
         if host_agent_roots is not None:
             claim_kwargs["host_agent_roots"] = host_agent_roots
+        claim_kwargs["family_caps"] = _configured_worker_caps()
         claimed = database.claim_corpus_jobs(**claim_kwargs)
         completed = 0
         blocked = 0
@@ -817,7 +902,12 @@ class KnowledgeService:
 
     def _handle_watch_event(self, event: WatchEvent) -> None:
         try:
-            database.record_watch_event(root_name=event.root_name)
+            database.record_watch_event(
+                root_name=event.root_name,
+                action=event.action,
+                path_hash=_watch_event_path_hash(event),
+                metadata={"action": event.action},
+            )
             self.sync_corpus(root_name=event.root_name, path=event.path, reason="watch_event")
         except Exception as exc:  # pragma: no cover - environment-specific watcher loop
             database.record_watch_error(root_name=event.root_name, error=str(exc))
@@ -1452,6 +1542,31 @@ def _configured_large_file_stability_quiet_seconds() -> float:
         return 10.0
 
 
+def _configured_watcher_backend() -> str:
+    try:
+        return str(SettingsService().resolve("watcher.backend").raw_value)
+    except Exception:
+        return "auto"
+
+
+def _configured_hash_parallelism() -> int:
+    try:
+        return int(SettingsService().resolve("crawler.hash_parallelism").raw_value)
+    except Exception:
+        return 1
+
+
+def _configured_worker_caps() -> dict[str, int]:
+    settings = SettingsService()
+    caps: dict[str, int] = {}
+    for family, default in FAMILY_DEFAULT_CAPS.items():
+        try:
+            caps[family] = int(settings.resolve(f"acceleration.worker_cap.{family}").raw_value)
+        except Exception:
+            caps[family] = int(default)
+    return caps
+
+
 def _configured_lock_retry_cooldown_seconds() -> int:
     try:
         return int(SettingsService().resolve("worker.lock_retry_cooldown_seconds").raw_value)
@@ -1482,6 +1597,84 @@ def _configured_container_limits() -> dict[str, int]:
         except Exception:
             resolved[field_name] = int(getattr(defaults, field_name))
     return resolved
+
+
+def _manifest_lookup(root_name: str):
+    def lookup(relative_path: str) -> dict[str, Any] | None:
+        try:
+            return database.lookup_scan_manifest(root_name=root_name, path=relative_path)
+        except Exception:
+            return None
+
+    return lookup
+
+
+def _watch_event_path_hash(event: WatchEvent) -> str:
+    digest = hashlib.sha256(f"{event.root_name}:{event.relative_path}".encode("utf-8", errors="ignore")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _benchmark_family_breakdown(plan: Any) -> dict[str, dict[str, int]]:
+    breakdown: dict[str, dict[str, int]] = {}
+    for asset in plan.assets:
+        family = job_family_for_type(f"corpus_extract_{asset.file_kind}")
+        row = breakdown.setdefault(family, {"files": 0, "deferred": 0, "inline": 0, "metadata_only": 0})
+        row["files"] += 1
+        if asset.extraction_tier == "deferred":
+            row["deferred"] += 1
+        elif asset.extraction_tier == "inline":
+            row["inline"] += 1
+        else:
+            row["metadata_only"] += 1
+    return breakdown
+
+
+def _write_benchmark_fixture(root: Path, fixture: str, files: int) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    writers = {
+        "text-heavy": _write_text_fixture,
+        "office-pdf-heavy": _write_office_pdf_fixture,
+        "archive-container-heavy": _write_archive_fixture,
+        "image-heavy": _write_image_fixture,
+        "audio-video-heavy": _write_media_fixture,
+    }
+    writers[fixture](root, files)
+
+
+def _write_text_fixture(root: Path, files: int) -> None:
+    for index in range(files):
+        (root / f"note-{index:04d}.md").write_text(
+            f"# Synthetic note {index}\n\nThis benchmark fixture contains deterministic public-safe text.\n",
+            encoding="utf-8",
+        )
+
+
+def _write_office_pdf_fixture(root: Path, files: int) -> None:
+    extensions = [".pdf", ".docx", ".xlsx", ".pptx"]
+    for index in range(files):
+        (root / f"document-{index:04d}{extensions[index % len(extensions)]}").write_bytes(
+            f"synthetic office/pdf fixture {index}".encode("utf-8")
+        )
+
+
+def _write_archive_fixture(root: Path, files: int) -> None:
+    extensions = [".zip", ".tar", ".whl", ".jar"]
+    for index in range(files):
+        (root / f"package-{index:04d}{extensions[index % len(extensions)]}").write_bytes(b"PK synthetic container")
+
+
+def _write_image_fixture(root: Path, files: int) -> None:
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAADZrBkAAAAAD0lEQVR4nGP8z8AARLJAgAEACPwDAaz3RyoAAAAASUVORK5CYII="
+    )
+    for index in range(files):
+        (root / f"image-{index:04d}.png").write_bytes(png)
+
+
+def _write_media_fixture(root: Path, files: int) -> None:
+    extensions = [".mp3", ".wav", ".mp4", ".webm"]
+    for index in range(files):
+        (root / f"media-{index:04d}{extensions[index % len(extensions)]}").write_bytes(b"synthetic media")
 
 
 def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:

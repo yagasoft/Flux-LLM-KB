@@ -65,6 +65,10 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.semantic_duplicates_refresh")' in source
     assert '@mcp.tool(name="kb.semantic_duplicates_list")' in source
     assert '@mcp.tool(name="kb.acceleration_status")' in source
+    assert '@mcp.tool(name="kb.watch_probe")' in source
+    assert '@mcp.tool(name="kb.worker_status")' in source
+    assert '@mcp.tool(name="kb.benchmark_run")' in source
+    assert '@mcp.tool(name="kb.benchmark_history")' in source
     assert '@mcp.tool(name="kb.embeddings_status")' in source
     assert '@mcp.tool(name="kb.embeddings_enqueue")' in source
     assert '@mcp.tool(name="kb.embeddings_backfill")' in source
@@ -73,6 +77,10 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert 'def semantic_duplicates_refresh(memory_class: str = "all", root_name: str | None = None, threshold: float | None = None, limit: int = 1000)' in source
     assert "def semantic_duplicates_list(memory_class: str | None = None, root_name: str | None = None, limit: int = 50)" in source
     assert "def acceleration_status()" in source
+    assert "def watch_probe(timeout_seconds: float = 2.0)" in source
+    assert "def worker_status(family: str = \"all\")" in source
+    assert "def benchmark_run(fixture: str = \"all\", files: int = 10)" in source
+    assert "def benchmark_history(fixture: str | None = None, limit: int = 20)" in source
     assert "review_capture_job(" in source
 
 

@@ -11,6 +11,8 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 from urllib.request import urlopen as _urlopen
 
+from .watcher import resolve_watcher_backend
+
 
 JOB_FAMILIES: tuple[str, ...] = (
     "text",
@@ -191,6 +193,7 @@ def collect_acceleration_status(
     urlopen: Callable[..., Any] | None = None,
     worker_family_stats: Callable[[], list[dict[str, Any]]] | None = None,
     benchmark_stats: Callable[[], list[dict[str, Any]]] | None = None,
+    benchmark_history: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     resolved = _resolved_settings(settings)
     runner = command_runner or _run_command
@@ -198,7 +201,7 @@ def collect_acceleration_status(
     opener = urlopen or _urlopen
     cache = resolve_cache_layout(str(resolved.get("acceleration.cache_root") or ""))
     family_stats = _worker_family_status_rows(resolved, worker_family_stats)
-    benchmarks = _benchmark_status_rows(benchmark_stats)
+    benchmarks = _benchmark_status_rows(benchmark_stats, benchmark_history)
     return {
         "capabilities": {
             "cpu": _cpu_status(),
@@ -207,7 +210,7 @@ def collect_acceleration_status(
             "nvidia": _nvidia_status(runner),
             "onnxruntime": _onnxruntime_status(importer),
             "local_model": _local_model_status(resolved, opener),
-            "watcher_backend": _watcher_backend_status(importer),
+            "watcher_backend": _watcher_backend_status(importer, str(resolved.get("watcher.backend") or "auto")),
         },
         "cache": cache,
         "worker_families": family_stats,
@@ -222,6 +225,7 @@ def _resolved_settings(overrides: dict[str, Any] | None) -> dict[str, Any]:
         "acceleration.local_inference.provider": "ollama",
         "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
         "acceleration.local_inference.probe_timeout_seconds": 1,
+        "watcher.backend": os.environ.get("FLUX_KB_WATCHER_BACKEND", "auto"),
     }
     for family, cap in FAMILY_DEFAULT_CAPS.items():
         defaults[f"acceleration.worker_cap.{family}"] = cap
@@ -351,14 +355,37 @@ def _onnxruntime_status(module_importer: Callable[[str], Any]) -> dict[str, Any]
     }
 
 
-def _watcher_backend_status(module_importer: Callable[[str], Any]) -> dict[str, Any]:
+def _watcher_backend_status(module_importer: Callable[[str], Any], policy: str) -> dict[str, Any]:
     try:
-        module_importer("watchdog.observers")
-    except ModuleNotFoundError:
-        return {"ok": False, "state": "missing", "provider": "watchdog", "message": "watchdog not installed"}
+        status = resolve_watcher_backend(policy, module_finder=module_importer)
+    except RuntimeError as exc:
+        return {
+            "ok": False,
+            "state": "missing",
+            "provider": "watchdog",
+            "policy": policy,
+            "selected_backend": "watchdog",
+            "native": False,
+            "fallback_reason": "watchdog_missing",
+            "message": str(exc),
+        }
     except Exception as exc:
-        return {"ok": False, "state": "unavailable", "provider": "watchdog", "message": str(exc)}
-    return {"ok": True, "state": "available", "provider": "watchdog", "message": "watchdog available"}
+        return {
+            "ok": False,
+            "state": "unavailable",
+            "provider": "watchdog",
+            "policy": policy,
+            "selected_backend": None,
+            "native": False,
+            "fallback_reason": "backend_resolution_error",
+            "message": str(exc),
+        }
+    return {
+        "ok": True,
+        "state": "available" if status["native"] else "fallback",
+        "provider": status["selected_backend"],
+        **status,
+    }
 
 
 def _local_model_status(settings: dict[str, Any], opener: Callable[..., Any]) -> dict[str, Any]:
@@ -437,14 +464,26 @@ def _worker_family_status_rows(
 
 
 def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> dict[str, Any]:
+    configured_cap = int(settings.get(f"acceleration.worker_cap.{family}") or FAMILY_DEFAULT_CAPS.get(family, 1))
+    running = int(row.get("running") or 0)
+    pending = int(row.get("pending") or 0)
+    blocked = int(row.get("blocked") or 0)
+    failed = int(row.get("failed") or 0)
+    cap_available = max(0, configured_cap - running)
     return {
         "family": family,
         "resource_class": row.get("resource_class") or resource_class_for_family(family),
-        "configured_cap": int(settings.get(f"acceleration.worker_cap.{family}") or FAMILY_DEFAULT_CAPS.get(family, 1)),
-        "pending": int(row.get("pending") or 0),
-        "running": int(row.get("running") or 0),
-        "blocked": int(row.get("blocked") or 0),
-        "failed": int(row.get("failed") or 0),
+        "configured_cap": configured_cap,
+        "cap_available": cap_available,
+        "backpressure": _backpressure_reason(pending=pending, running=running, blocked=blocked, failed=failed, cap_available=cap_available),
+        "pending": pending,
+        "running": running,
+        "blocked": blocked,
+        "failed": failed,
+        "oldest_pending_age_seconds": _int_or_none(row.get("oldest_pending_age_seconds")),
+        "slowest_recent_jobs": _slow_job_rows(row.get("slowest_recent_jobs")),
+        "retrying_locked": int(row.get("retrying_locked") or 0),
+        "blocked_locked": int(row.get("blocked_locked") or 0),
         "avg_duration_ms": _int_or_none(row.get("avg_duration_ms")),
         "p95_duration_ms": _int_or_none(row.get("p95_duration_ms")),
         "max_duration_ms": _int_or_none(row.get("max_duration_ms")),
@@ -465,6 +504,9 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
         "frame_sample_count": int(row.get("frame_sample_count") or 0),
         "thumbnail_cache_hits": int(row.get("thumbnail_cache_hits") or 0),
         "thumbnail_cache_misses": int(row.get("thumbnail_cache_misses") or 0),
+        "parser_cache_hits": int(row.get("parser_cache_hits") or 0),
+        "parser_cache_misses": int(row.get("parser_cache_misses") or 0),
+        "manifest_skipped_unchanged": int(row.get("manifest_skipped_unchanged") or 0),
         "embedding_vectors": int(row.get("embedding_vectors") or 0),
         "embedding_skipped_unchanged": int(row.get("embedding_skipped_unchanged") or 0),
         "embedding_batches": int(row.get("embedding_batches") or 0),
@@ -473,7 +515,38 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
     }
 
 
-def _benchmark_status_rows(stats_loader: Callable[[], list[dict[str, Any]]] | None) -> dict[str, Any]:
+def _backpressure_reason(*, pending: int, running: int, blocked: int, failed: int, cap_available: int) -> str | None:
+    if pending > 0 and running > 0 and cap_available <= 0:
+        return "cap_reached"
+    if blocked > 0:
+        return "blocked_jobs"
+    if failed > 0:
+        return "failed_jobs"
+    if pending > 0:
+        return "pending"
+    return None
+
+
+def _slow_job_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[:10]:
+        if not isinstance(item, dict):
+            continue
+        row = {
+            "id": str(item.get("id") or ""),
+            "path": Path(str(item.get("path") or "")).name,
+            "duration_ms": _int_or_none(item.get("duration_ms")),
+        }
+        rows.append({key: val for key, val in row.items() if val not in {"", None}})
+    return rows
+
+
+def _benchmark_status_rows(
+    stats_loader: Callable[[], list[dict[str, Any]]] | None,
+    history_loader: Callable[[], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     if stats_loader is None:
         try:
             from . import database
@@ -511,7 +584,43 @@ def _benchmark_status_rows(stats_loader: Callable[[], list[dict[str, Any]]] | No
         for key in totals:
             totals[key] += int(item[key])
         fixtures.append(item)
-    return {"fixtures": fixtures, "totals": totals}
+    if history_loader is None:
+        try:
+            from . import database
+
+            history_loader = database.latest_benchmark_runs
+        except Exception:
+            history_loader = lambda: []
+    try:
+        history = [_benchmark_history_row(row) for row in history_loader()]
+    except Exception:
+        history = []
+    return {"fixtures": fixtures, "totals": totals, "history": history}
+
+
+def _benchmark_history_row(row: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(row)
+    normalized: dict[str, Any] = {
+        "id": str(payload.get("id") or ""),
+        "fixture": str(payload.get("fixture") or payload.get("name") or ""),
+        "status": str(payload.get("status") or "completed"),
+        "file_count": int(payload.get("file_count") or 0),
+        "elapsed_ms": int(payload.get("elapsed_ms") or 0),
+        "throughput_files_per_second": float(payload.get("throughput_files_per_second") or 0.0),
+        "p50_ms": _int_or_none(payload.get("p50_ms")),
+        "p95_ms": _int_or_none(payload.get("p95_ms")),
+        "max_ms": _int_or_none(payload.get("max_ms")),
+        "warm_state": str(payload.get("warm_state") or "cold"),
+        "cache_hits": int(payload.get("cache_hits") or 0),
+        "cache_misses": int(payload.get("cache_misses") or 0),
+        "jobs_queued": int(payload.get("jobs_queued") or 0),
+        "jobs_completed": int(payload.get("jobs_completed") or 0),
+        "jobs_blocked": int(payload.get("jobs_blocked") or 0),
+        "previous_elapsed_delta_ms": _int_or_none(payload.get("previous_elapsed_delta_ms")),
+        "worker_family_breakdown": payload.get("worker_family_breakdown") if isinstance(payload.get("worker_family_breakdown"), dict) else {},
+        "created_at": payload.get("created_at"),
+    }
+    return {key: value for key, value in normalized.items() if value is not None and value != ""}
 
 
 def _int_or_none(value: Any) -> int | None:

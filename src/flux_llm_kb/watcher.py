@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from collections import deque
 import importlib.util
 from pathlib import Path
+import tempfile
 import time
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,13 @@ class ReloadableCorpusWatcher:
         self._snapshots: dict[str, dict[str, tuple[int, int]]] = {}
         self._last_event_at: dict[tuple[str, str], float] = {}
         self._pending_stable: dict[tuple[str, str], tuple[tuple[int, int], float]] = {}
+        self.backend_status = {
+            "policy": "polling",
+            "selected_backend": "polling",
+            "native": False,
+            "fallback_reason": None,
+            "message": "polling watcher active",
+        }
 
     def poll_once(self, *, seed: bool = False) -> list[WatchEvent]:
         active_roots = {root.name: root for root in self.load_roots() if root.watch_enabled}
@@ -275,9 +283,11 @@ def create_corpus_watcher(
     debounce_seconds: float = 0.75,
     stability_quiet_seconds: float = 0.0,
     max_queue_size: int = 1000,
+    backend_policy: str = "auto",
 ):
-    watcher_cls = WatchdogCorpusWatcher if importlib.util.find_spec("watchdog") is not None else ReloadableCorpusWatcher
-    return watcher_cls(
+    backend_status = resolve_watcher_backend(backend_policy)
+    watcher_cls = WatchdogCorpusWatcher if backend_status["selected_backend"] == "watchdog" else ReloadableCorpusWatcher
+    watcher = watcher_cls(
         load_roots,
         on_change=on_change,
         interval_seconds=interval_seconds,
@@ -285,6 +295,94 @@ def create_corpus_watcher(
         stability_quiet_seconds=stability_quiet_seconds,
         max_queue_size=max_queue_size,
     )
+    watcher.backend_status = backend_status
+    return watcher
+
+
+def resolve_watcher_backend(
+    policy: str | None = "auto",
+    *,
+    module_finder: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    normalized = str(policy or "auto").strip().lower()
+    if normalized not in {"auto", "watchdog", "polling"}:
+        raise ValueError("watcher backend must be auto, watchdog, or polling")
+    finder = module_finder or importlib.util.find_spec
+    watchdog_available = _watchdog_available(finder)
+    if normalized == "polling":
+        return {
+            "policy": normalized,
+            "selected_backend": "polling",
+            "native": False,
+            "fallback_reason": "policy_polling",
+            "message": "polling watcher selected by policy",
+        }
+    if normalized == "watchdog":
+        if not watchdog_available:
+            raise RuntimeError("watchdog is not installed")
+        return {
+            "policy": normalized,
+            "selected_backend": "watchdog",
+            "native": True,
+            "fallback_reason": None,
+            "message": "watchdog available",
+        }
+    if watchdog_available:
+        return {
+            "policy": normalized,
+            "selected_backend": "watchdog",
+            "native": True,
+            "fallback_reason": None,
+            "message": "watchdog available",
+        }
+    return {
+        "policy": normalized,
+        "selected_backend": "polling",
+        "native": False,
+        "fallback_reason": "watchdog_missing",
+        "message": "watchdog missing; polling fallback active",
+    }
+
+
+def probe_watcher_backend(
+    *,
+    backend_policy: str = "auto",
+    timeout_seconds: float = 2.0,
+) -> dict[str, Any]:
+    events: list[WatchEvent] = []
+    started = time.perf_counter()
+    with tempfile.TemporaryDirectory(prefix="flux-kb-watch-probe-") as temp_dir:
+        root_path = Path(temp_dir)
+        watcher = create_corpus_watcher(
+            lambda: [WatchRoot(name="probe", root_path=root_path, watch_enabled=True)],
+            on_change=events.append,
+            debounce_seconds=0,
+            stability_quiet_seconds=0,
+            backend_policy=backend_policy,
+            interval_seconds=0.05,
+        )
+        watcher.poll_once(seed=True)
+        probe_file = root_path / "probe.txt"
+        probe_file.write_text("created", encoding="utf-8")
+        _drain_probe(watcher, events, timeout_seconds, minimum_events=1)
+        probe_file.write_text("updated", encoding="utf-8")
+        _drain_probe(watcher, events, timeout_seconds, minimum_events=2)
+        probe_file.unlink()
+        _drain_probe(watcher, events, timeout_seconds, minimum_events=3)
+        if isinstance(watcher, WatchdogCorpusWatcher) and watcher._observer is not None:
+            watcher._observer.stop()
+            watcher._observer.join(timeout=1)
+    elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+    actions = [event.action for event in events]
+    return {
+        "status": "ok" if len(events) >= 3 else "partial",
+        "path_scope": "temporary",
+        "backend": watcher.backend_status,
+        "expected_events": ["changed", "changed", "deleted"],
+        "observed_event_count": len(events),
+        "observed_actions": actions,
+        "latency_ms": elapsed_ms,
+    }
 
 
 def summarize_watcher_staleness(
@@ -301,6 +399,20 @@ def summarize_watcher_staleness(
             stale_count += 1
         summarized.append(item)
     return {"stale_count": stale_count, "states": summarized}
+
+
+def _watchdog_available(module_finder: Callable[[str], Any]) -> bool:
+    try:
+        return bool(module_finder("watchdog.observers") or module_finder("watchdog"))
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+def _drain_probe(watcher: ReloadableCorpusWatcher, events: list[WatchEvent], timeout_seconds: float, *, minimum_events: int) -> None:
+    deadline = time.perf_counter() + max(0.1, timeout_seconds)
+    while time.perf_counter() < deadline and len(events) < minimum_events:
+        watcher.poll_once()
+        time.sleep(0.02)
 
 
 def _snapshot(root: WatchRoot) -> dict[str, tuple[int, int]]:

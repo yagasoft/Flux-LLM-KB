@@ -182,11 +182,18 @@ def create_app():
         root_name: str | None = None
         enabled: bool
 
+    class WatchProbeRequest(BaseModel):
+        timeout_seconds: float = 2.0
+
     class CrawlBackfillRequest(BaseModel):
         kind: str = "all"
         limit: int = 10
         workers: int = 1
         root_name: str | None = None
+
+    class BenchmarkRunRequest(BaseModel):
+        fixture: str = "all"
+        files: int = 10
 
     class SettingUpdateRequest(BaseModel):
         value: object
@@ -272,6 +279,14 @@ def create_app():
         from . import acceleration
 
         return acceleration.collect_acceleration_status()
+
+    @app.post("/api/acceleration/benchmarks/run")
+    def acceleration_benchmark_run(request: BenchmarkRunRequest = Body(...)):
+        return service.run_benchmark(fixture=request.fixture, files=request.files)
+
+    @app.get("/api/acceleration/benchmarks")
+    def acceleration_benchmark_history(fixture: str | None = None, limit: int = 20):
+        return service.benchmark_history(fixture=fixture, limit=limit)
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
@@ -873,6 +888,18 @@ def create_app():
         from . import database
 
         return database.set_watch_enabled(root_name=request.root_name, enabled=request.enabled)
+
+    @app.post("/api/crawl/watch/probe")
+    def crawl_watch_probe(request: WatchProbeRequest = Body(default=WatchProbeRequest())):
+        return service.watch_probe(timeout_seconds=request.timeout_seconds)
+
+    @app.get("/api/crawl/watch/events")
+    def crawl_watch_events(limit: int = 50):
+        return service.watch_events(limit=limit)
+
+    @app.get("/api/crawl/workers")
+    def crawl_workers(family: str = "all"):
+        return service.worker_status(family=family)
 
     @app.get("/api/host/status")
     def host_status():

@@ -279,6 +279,13 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
                     16,
                     17,
                     18,
+                    19,
+                    20,
+                    21,
+                    120,
+                    2,
+                    1,
+                    [{"id": "job-1", "path": "private/root/clip.mp4", "duration_ms": 900}],
                 )
             ]
 
@@ -325,6 +332,11 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
     assert "embedding_batches" in sql
     assert "embedding_cache_hits" in sql
     assert "embedding_cache_misses" in sql
+    assert "parser_cache_hits" in sql
+    assert "parser_cache_misses" in sql
+    assert "manifest_skipped_unchanged" in sql
+    assert "oldest_pending_age_seconds" in sql
+    assert "slowest_recent_jobs" in sql
     assert rows == [
         {
             "family": "media",
@@ -358,8 +370,244 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             "embedding_batches": 16,
             "embedding_cache_hits": 17,
             "embedding_cache_misses": 18,
+            "parser_cache_hits": 19,
+            "parser_cache_misses": 20,
+            "manifest_skipped_unchanged": 21,
+            "oldest_pending_age_seconds": 120,
+            "retrying_locked": 2,
+            "blocked_locked": 1,
+            "slowest_recent_jobs": [{"id": "job-1", "path": "clip.mp4", "duration_ms": 900}],
         }
     ]
+
+
+def test_claim_corpus_jobs_applies_family_caps(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.claim_corpus_jobs(limit=4, worker_id="worker-a", family_caps={"media": 1, "archive": 2})
+
+    sql, params = executed[0]
+    assert "running_family_counts" in sql
+    assert "family_caps" in sql
+    assert params[0] == json.dumps({"archive": 2, "media": 1}, sort_keys=True)
+
+
+def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("run-2", timestamp)
+
+        def fetchall(self):
+            return [
+                (
+                    "run-2",
+                    "image-heavy",
+                    "completed",
+                    10,
+                    1000,
+                    10.0,
+                    75,
+                    120,
+                    180,
+                    "warm",
+                    7,
+                    3,
+                    10,
+                    10,
+                    0,
+                    {"image": {"completed": 10}},
+                    {"provider": "synthetic"},
+                    timestamp,
+                    1250,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    inserted = database.record_benchmark_run(
+        fixture="image-heavy",
+        file_count=10,
+        elapsed_ms=1000,
+        timings_ms=[50, 75, 120, 180],
+        warm_state="warm",
+        cache_hits=7,
+        cache_misses=3,
+        worker_family_breakdown={"image": {"completed": 10}},
+        metadata={"private_path": "E:/secret/root", "provider": "synthetic", "raw_text": "do not store"},
+    )
+    rows = database.list_benchmark_runs(fixture="image-heavy", limit=5)
+
+    insert_sql, insert_params = executed[0]
+    assert "INSERT INTO acceleration_benchmark_runs" in insert_sql
+    assert insert_params[0] == "image-heavy"
+    assert json.loads(insert_params[-2]) == {"image": {"completed": 10}}
+    assert json.loads(insert_params[-1]) == {"provider": "synthetic"}
+    assert inserted["id"] == "run-2"
+    assert rows[0]["previous_elapsed_delta_ms"] == -250
+    assert "private_path" not in json.dumps(rows)
+    assert "raw_text" not in json.dumps(rows)
+
+
+def test_watcher_events_store_metadata_counts_and_sanitized_paths(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            if "SELECT id::text FROM monitored_roots" in executed[-1][0]:
+                return ("root-1",)
+            return ("event-1",)
+
+        def fetchall(self):
+            return [("event-1", "docs", "changed", "sha256:abc", {"backend": "polling"}, timestamp)]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.record_watcher_heartbeat(root_name="docs", metadata={"backend": "polling"})
+    database.record_watch_event(root_name="docs", action="changed", path_hash="sha256:abc", metadata={"private_path": "E:/secret/file.txt", "backend": "polling"})
+    rows = database.list_watch_events(limit=10)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "metadata = watcher_state.metadata || EXCLUDED.metadata" in sql
+    assert "event_count = watcher_state.event_count + CASE" in sql
+    assert "INSERT INTO watcher_events" in sql
+    event_params = next(params for statement, params in executed if "INSERT INTO watcher_events" in statement)
+    assert json.loads(event_params[-1]) == {"backend": "polling"}
+    assert rows[0]["path_hash"] == "sha256:abc"
+    assert "private_path" not in json.dumps(rows)
+
+
+def test_scan_manifest_upsert_and_lookup_are_metadata_only(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            if "SELECT id::text FROM monitored_roots" in executed[-1][0]:
+                return ("root-1",)
+            if "RETURNING" in executed[-1][0]:
+                return ("docs/readme.md",)
+            return ("docs/readme.md", 12, 42, "quick", "content", {"fixture": "text-heavy"})
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.upsert_scan_manifest(
+        root_name="docs",
+        path="docs/readme.md",
+        size_bytes=12,
+        mtime_ns=42,
+        quick_hash="quick",
+        content_hash="content",
+        metadata={"fixture": "text-heavy", "raw_text": "do not store"},
+    )
+    row = database.lookup_scan_manifest(root_name="docs", path="docs/readme.md")
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "INSERT INTO crawl_path_manifests" in sql
+    assert "SELECT path, size_bytes, mtime_ns, quick_hash, content_hash, metadata" in sql
+    manifest_params = next(params for statement, params in executed if "INSERT INTO crawl_path_manifests" in statement)
+    assert json.loads(manifest_params[-1]) == {"fixture": "text-heavy"}
+    assert row["content_hash"] == "content"
 
 
 def test_search_corpus_chunks_includes_freshness_stream():

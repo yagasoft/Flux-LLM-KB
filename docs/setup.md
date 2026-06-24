@@ -130,11 +130,15 @@ flux-kb crawl add E:\Projects --name projects
 flux-kb crawl sync --root projects
 flux-kb crawl sync --path E:\Projects\README.md
 flux-kb crawl watch enable --root projects
+flux-kb crawl watch probe --timeout 2
 flux-kb crawl watch run
 flux-kb host-agent status
 flux-kb host-agent run
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl backfill --kind embeddings --limit 20
+flux-kb crawl worker status --family all
+flux-kb acceleration benchmark run --fixture all --files 10
+flux-kb acceleration benchmark history --fixture text-heavy --limit 10
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
 flux-kb embeddings backfill --owner-class all --limit 100
@@ -194,9 +198,28 @@ worker-family telemetry reports ASR cache hits, misses, and segment counts.
 Recursive archive/container extraction is controlled by
 `crawler.container_max_depth`, `crawler.container_max_members`,
 `crawler.container_max_total_bytes`, and `crawler.container_max_member_bytes`.
+Watcher backend policy is controlled by `watcher.backend` or the
+`FLUX_KB_WATCHER_BACKEND` environment override. Valid values are `auto`,
+`watchdog`, and `polling`; `auto` prefers the native watchdog backend and records
+the polling fallback reason when watchdog is unavailable. Use `flux-kb crawl
+watch probe --timeout <seconds>` to run a temporary-directory create/update/delete
+probe. The probe does not touch private watched roots.
+`crawler.hash_parallelism` defaults to conservative serial hashing. Incremental
+scan manifests record path fingerprints and expose `manifest_skipped_unchanged`
+counters when unchanged files skip expensive hashing/extraction.
 The acceleration status also includes deterministic benchmark fixture summaries
-for text-heavy, Office/PDF-heavy, archive/container-heavy, image-heavy, and
-audio/video-heavy roots.
+and durable benchmark history for text-heavy, Office/PDF-heavy,
+archive/container-heavy, image-heavy, and audio/video-heavy synthetic roots.
+Run `flux-kb acceleration benchmark run --fixture <name|all> --files <n>` and
+inspect prior metadata-only runs with `flux-kb acceleration benchmark history
+--fixture <name> --limit <n>`. Benchmark storage records fixture names, counts,
+timings, cache counters, backend/provider metadata, and sanitized summaries
+only; it does not store raw text, mail contents, private watched roots,
+credentials, or embeddings.
+Worker-family status is available with `flux-kb crawl worker status --family
+<name|all>` and reports configured caps, cap pressure, worker-family
+backpressure, oldest pending age, slow recent jobs, retry/lock transitions,
+parser cache counters, and manifest skip counters.
 Embedding refresh uses the local deterministic `flux-hash-v1` provider by
 default. New vectors keep source hashes and cache keys in embedding metadata
 without raw source text. Use `flux-kb embeddings status` to inspect coverage,

@@ -1996,16 +1996,69 @@ def set_watch_enabled(
             return {"updated": len(root_ids), "root_name": root_name, "watch_enabled": enabled}
 
 
-def record_watcher_heartbeat(*, root_name: str, url: str | None = None) -> None:
-    _update_watcher_state(root_name=root_name, status="running", heartbeat=True, url=url)
+def record_watcher_heartbeat(
+    *,
+    root_name: str,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> None:
+    _update_watcher_state(root_name=root_name, status="running", heartbeat=True, metadata=metadata, url=url)
 
 
-def record_watch_event(*, root_name: str, url: str | None = None) -> None:
-    _update_watcher_state(root_name=root_name, status="running", event=True, url=url)
+def record_watch_event(
+    *,
+    root_name: str,
+    action: str = "changed",
+    path_hash: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> None:
+    _update_watcher_state(
+        root_name=root_name,
+        status="running",
+        event=True,
+        action=action,
+        path_hash=path_hash,
+        metadata=metadata,
+        url=url,
+    )
 
 
-def record_watch_error(*, root_name: str, error: str, url: str | None = None) -> None:
-    _update_watcher_state(root_name=root_name, status="error", error=error, url=url)
+def record_watch_error(
+    *,
+    root_name: str,
+    error: str,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> None:
+    _update_watcher_state(root_name=root_name, status="error", error=error, metadata=metadata, url=url)
+
+
+def list_watch_events(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.id::text, r.name, e.action, e.path_hash, e.metadata, e.created_at
+                FROM watcher_events e
+                JOIN monitored_roots r ON r.id = e.root_id
+                ORDER BY e.created_at DESC
+                LIMIT %s
+                """,
+                (max(1, min(limit, 200)),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "root_name": row[1],
+                    "action": row[2],
+                    "path_hash": row[3],
+                    "metadata": _sanitize_operational_metadata(row[4] or {}),
+                    "created_at": row[5].isoformat() if row[5] else None,
+                }
+                for row in cur.fetchall()
+            ]
 
 
 def persist_crawl_plan(
@@ -2025,6 +2078,7 @@ def persist_crawl_plan(
             "files_seen": len(plan.assets),
             "jobs_queued": len(plan.deferred_jobs),
             "chunks_indexed": sum(len(asset.chunks) for asset in plan.assets),
+            "manifest_skipped_unchanged": sum(1 for asset in plan.assets if asset.metadata.get("manifest_skipped_unchanged")),
         }
 
     psycopg = _load_psycopg()
@@ -2048,8 +2102,11 @@ def persist_crawl_plan(
             chunks_indexed = 0
             jobs_queued = 0
             changed = 0
+            manifest_skipped_unchanged = 0
             for asset in plan.assets:
                 seen_paths.add(asset.relative_path)
+                if asset.metadata.get("manifest_skipped_unchanged"):
+                    manifest_skipped_unchanged += 1
                 cur.execute(
                     """
                     SELECT id::text, quick_hash, extraction_status, extension
@@ -2145,6 +2202,30 @@ def persist_crawl_plan(
                     ),
                 )
                 asset_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    INSERT INTO crawl_path_manifests (
+                        root_id, path, size_bytes, mtime_ns, quick_hash, content_hash, metadata, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                    ON CONFLICT (root_id, path) DO UPDATE SET
+                        size_bytes = EXCLUDED.size_bytes,
+                        mtime_ns = EXCLUDED.mtime_ns,
+                        quick_hash = EXCLUDED.quick_hash,
+                        content_hash = EXCLUDED.content_hash,
+                        metadata = crawl_path_manifests.metadata || EXCLUDED.metadata,
+                        updated_at = now()
+                    """,
+                    (
+                        root_id,
+                        asset.relative_path,
+                        asset.size_bytes,
+                        asset.mtime_ns,
+                        asset.quick_hash,
+                        asset.content_hash,
+                        _json({"source": "corpus_crawler", **_sanitize_operational_metadata(dict(asset.metadata))}),
+                    ),
+                )
                 if changed_asset or legacy_metadata_requeue:
                     chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id else asset.chunks)
                     if asset.extraction_tier == "deferred" and not canonical_id:
@@ -2219,6 +2300,7 @@ def persist_crawl_plan(
                 "files_deleted": deleted,
                 "jobs_queued": jobs_queued,
                 "chunks_indexed": chunks_indexed,
+                "manifest_skipped_unchanged": manifest_skipped_unchanged,
             }
 
 
@@ -2573,12 +2655,32 @@ def claim_corpus_jobs(
     worker_id: str = "flux-kb-worker",
     root_name: str | None = None,
     job_families: list[str] | tuple[str, ...] | None = None,
+    family_caps: dict[str, int] | None = None,
     host_agent_roots: bool | None = None,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     root_filter = "AND payload->>'root_name' = %s" if root_name else ""
     family_filter = "AND job_family = ANY(%s)" if job_families else ""
+    caps_filter = ""
+    caps_cte = ""
+    if family_caps:
+        caps_cte = """
+                WITH family_caps AS (SELECT %s::jsonb AS caps),
+                     running_family_counts AS (
+                         SELECT job_family AS family, count(*)::integer AS running_count
+                         FROM capture_jobs
+                         WHERE job_type LIKE 'corpus_%%'
+                           AND status = 'running'
+                         GROUP BY job_family
+                     )
+        """
+        caps_filter = """
+                      AND COALESCE(
+                          (SELECT running_count FROM running_family_counts WHERE family = capture_jobs.job_family),
+                          0
+                      ) < COALESCE(NULLIF(family_caps.caps ->> capture_jobs.job_family, '')::integer, 2147483647)
+        """
     host_root_filter = ""
     if host_agent_roots is True:
         host_root_filter = """
@@ -2598,7 +2700,10 @@ def claim_corpus_jobs(
                             AND r.metadata->>'host_access' = 'host_agent'
                       )
         """
-    params_list: list[Any] = [worker_id]
+    params_list: list[Any] = []
+    if family_caps:
+        params_list.append(_json({key: max(0, int(value)) for key, value in sorted(family_caps.items())}))
+    params_list.append(worker_id)
     if job_families:
         params_list.append(list(job_families))
     if root_name:
@@ -2609,6 +2714,7 @@ def claim_corpus_jobs(
         with conn.cursor() as cur:
             cur.execute(
                 f"""
+                {caps_cte}
                 UPDATE capture_jobs
                 SET status = 'running',
                     attempts = attempts + 1,
@@ -2620,12 +2726,14 @@ def claim_corpus_jobs(
                 WHERE id IN (
                     SELECT id
                     FROM capture_jobs
+                    {"CROSS JOIN family_caps" if family_caps else ""}
                     WHERE job_type LIKE 'corpus_%%'
                       AND status IN ('pending', 'retrying_locked')
                       AND next_attempt_at <= now()
                       {family_filter}
                       {root_filter}
                       {host_root_filter}
+                      {caps_filter}
                     ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -2901,7 +3009,35 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                        COALESCE(sum((telemetry->>'embedding_skipped_unchanged')::integer), 0)::integer AS embedding_skipped_unchanged,
                        COALESCE(sum((telemetry->>'embedding_batches')::integer), 0)::integer AS embedding_batches,
                        COALESCE(sum((telemetry->>'embedding_cache_hits')::integer), 0)::integer AS embedding_cache_hits,
-                       COALESCE(sum((telemetry->>'embedding_cache_misses')::integer), 0)::integer AS embedding_cache_misses
+                       COALESCE(sum((telemetry->>'embedding_cache_misses')::integer), 0)::integer AS embedding_cache_misses,
+                       COALESCE(sum((telemetry->>'parser_cache_hits')::integer), 0)::integer AS parser_cache_hits,
+                       COALESCE(sum((telemetry->>'parser_cache_misses')::integer), 0)::integer AS parser_cache_misses,
+                       COALESCE(sum((telemetry->>'manifest_skipped_unchanged')::integer), 0)::integer AS manifest_skipped_unchanged,
+                       EXTRACT(EPOCH FROM (now() - min(created_at) FILTER (WHERE status = 'pending')))::integer AS oldest_pending_age_seconds,
+                       count(*) FILTER (WHERE status = 'retrying_locked')::integer AS retrying_locked,
+                       count(*) FILTER (WHERE status LIKE 'blocked_%%' AND locked_at IS NOT NULL)::integer AS blocked_locked,
+                       (
+                           SELECT COALESCE(
+                               jsonb_agg(
+                                   jsonb_build_object(
+                                       'id', recent.id::text,
+                                       'path', recent.payload->>'path',
+                                       'duration_ms', recent.last_duration_ms
+                                   )
+                                   ORDER BY recent.last_duration_ms DESC
+                               ),
+                               '[]'::jsonb
+                           )
+                           FROM (
+                               SELECT id, payload, last_duration_ms
+                               FROM capture_jobs recent
+                               WHERE recent.job_type LIKE 'corpus_%%'
+                                 AND recent.job_family = capture_jobs.job_family
+                                 AND recent.last_duration_ms IS NOT NULL
+                               ORDER BY recent.last_duration_ms DESC NULLS LAST
+                               LIMIT 5
+                           ) recent
+                       ) AS slowest_recent_jobs
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 GROUP BY job_family, resource_class
@@ -2941,6 +3077,13 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                     "embedding_batches": row[28],
                     "embedding_cache_hits": row[29],
                     "embedding_cache_misses": row[30],
+                    "parser_cache_hits": row[31],
+                    "parser_cache_misses": row[32],
+                    "manifest_skipped_unchanged": row[33],
+                    "oldest_pending_age_seconds": row[34],
+                    "retrying_locked": row[35],
+                    "blocked_locked": row[36],
+                    "slowest_recent_jobs": _slow_jobs_from_db(row[37] or []),
                 }
                 for row in cur.fetchall()
             ]
@@ -2980,6 +3123,187 @@ def benchmark_fixture_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                 }
                 for row in cur.fetchall()
             ]
+
+
+def record_benchmark_run(
+    *,
+    fixture: str,
+    file_count: int,
+    elapsed_ms: int,
+    timings_ms: list[int] | tuple[int, ...] | None = None,
+    status: str = "completed",
+    warm_state: str = "cold",
+    cache_hits: int = 0,
+    cache_misses: int = 0,
+    jobs_queued: int | None = None,
+    jobs_completed: int | None = None,
+    jobs_blocked: int = 0,
+    worker_family_breakdown: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_timings = sorted(int(value) for value in (timings_ms or []) if value is not None)
+    p50_ms = _percentile_disc(normalized_timings, 0.50)
+    p95_ms = _percentile_disc(normalized_timings, 0.95)
+    max_ms = max(normalized_timings) if normalized_timings else None
+    safe_file_count = max(0, int(file_count))
+    safe_elapsed_ms = max(0, int(elapsed_ms))
+    throughput = (safe_file_count / (safe_elapsed_ms / 1000.0)) if safe_elapsed_ms > 0 else 0.0
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO acceleration_benchmark_runs (
+                    fixture, status, file_count, elapsed_ms, throughput_files_per_second,
+                    p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
+                    jobs_queued, jobs_completed, jobs_blocked, worker_family_breakdown, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                RETURNING id::text, created_at
+                """,
+                (
+                    fixture,
+                    status,
+                    safe_file_count,
+                    safe_elapsed_ms,
+                    throughput,
+                    p50_ms,
+                    p95_ms,
+                    max_ms,
+                    warm_state,
+                    max(0, int(cache_hits)),
+                    max(0, int(cache_misses)),
+                    max(0, int(jobs_queued if jobs_queued is not None else safe_file_count)),
+                    max(0, int(jobs_completed if jobs_completed is not None else safe_file_count)),
+                    max(0, int(jobs_blocked)),
+                    _json(worker_family_breakdown or {}),
+                    _json(_sanitize_operational_metadata(metadata or {})),
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "fixture": fixture,
+                "status": status,
+                "file_count": safe_file_count,
+                "elapsed_ms": safe_elapsed_ms,
+                "throughput_files_per_second": throughput,
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def latest_benchmark_runs(*, limit: int = 10, url: str | None = None) -> list[dict[str, Any]]:
+    return list_benchmark_runs(limit=limit, url=url)
+
+
+def list_benchmark_runs(
+    *,
+    fixture: str | None = None,
+    limit: int = 20,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    fixture_filter = "WHERE fixture = %s" if fixture else ""
+    params: list[Any] = []
+    if fixture:
+        params.append(fixture)
+    params.append(max(1, min(limit, 200)))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH ordered AS (
+                    SELECT id::text, fixture, status, file_count, elapsed_ms, throughput_files_per_second,
+                           p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
+                           jobs_queued, jobs_completed, jobs_blocked, worker_family_breakdown,
+                           metadata, created_at,
+                           lead(elapsed_ms) OVER (PARTITION BY fixture ORDER BY created_at DESC) AS previous_elapsed_ms
+                    FROM acceleration_benchmark_runs
+                    {fixture_filter}
+                )
+                SELECT id, fixture, status, file_count, elapsed_ms, throughput_files_per_second,
+                       p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
+                       jobs_queued, jobs_completed, jobs_blocked, worker_family_breakdown,
+                       metadata, created_at, previous_elapsed_ms
+                FROM ordered
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            return [_benchmark_run_row(row) for row in cur.fetchall()]
+
+
+def upsert_scan_manifest(
+    *,
+    root_name: str,
+    path: str,
+    size_bytes: int,
+    mtime_ns: int,
+    quick_hash: str | None,
+    content_hash: str | None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            root_id = _root_id_for_name(cur, root_name)
+            cur.execute(
+                """
+                INSERT INTO crawl_path_manifests (
+                    root_id, path, size_bytes, mtime_ns, quick_hash, content_hash, metadata, updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, now())
+                ON CONFLICT (root_id, path) DO UPDATE SET
+                    size_bytes = EXCLUDED.size_bytes,
+                    mtime_ns = EXCLUDED.mtime_ns,
+                    quick_hash = EXCLUDED.quick_hash,
+                    content_hash = EXCLUDED.content_hash,
+                    metadata = crawl_path_manifests.metadata || EXCLUDED.metadata,
+                    updated_at = now()
+                RETURNING path
+                """,
+                (
+                    root_id,
+                    path,
+                    max(0, int(size_bytes)),
+                    max(0, int(mtime_ns)),
+                    quick_hash,
+                    content_hash,
+                    _json(_sanitize_operational_metadata(metadata or {})),
+                ),
+            )
+            row = cur.fetchone()
+            return {"root_name": root_name, "path": row[0]}
+
+
+def lookup_scan_manifest(*, root_name: str, path: str, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            root_id = _root_id_for_name(cur, root_name)
+            cur.execute(
+                """
+                SELECT path, size_bytes, mtime_ns, quick_hash, content_hash, metadata
+                FROM crawl_path_manifests
+                WHERE root_id = %s
+                  AND path = %s
+                """,
+                (root_id, path),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "path": row[0],
+                "size_bytes": row[1],
+                "mtime_ns": row[2],
+                "quick_hash": row[3],
+                "content_hash": row[4],
+                "metadata": _sanitize_operational_metadata(row[5] or {}),
+            }
 
 
 def apply_extraction_result(
@@ -7082,6 +7406,9 @@ def _update_watcher_state(
     status: str,
     heartbeat: bool = False,
     event: bool = False,
+    action: str = "changed",
+    path_hash: str | None = None,
+    metadata: dict[str, Any] | None = None,
     error: str | None = None,
     url: str | None = None,
 ) -> None:
@@ -7093,16 +7420,21 @@ def _update_watcher_state(
             if not row:
                 raise ValueError(f"monitored root not found: {root_name}")
             root_id = row[0]
+            sanitized_metadata = _sanitize_operational_metadata(metadata or {})
             cur.execute(
                 """
                 INSERT INTO watcher_state (
-                    root_id, status, heartbeat_at, last_event_at, last_error, process_id, updated_at
+                    root_id, status, heartbeat_at, last_event_at, last_error, process_id,
+                    event_count, metadata, updated_at
                 )
                 VALUES (
                     %s, %s,
                     CASE WHEN %s THEN now() ELSE NULL END,
                     CASE WHEN %s THEN now() ELSE NULL END,
-                    %s, %s, now()
+                    %s, %s,
+                    CASE WHEN %s THEN 1 ELSE 0 END,
+                    %s::jsonb,
+                    now()
                 )
                 ON CONFLICT (root_id) DO UPDATE SET
                     status = EXCLUDED.status,
@@ -7110,10 +7442,136 @@ def _update_watcher_state(
                     last_event_at = CASE WHEN %s THEN now() ELSE watcher_state.last_event_at END,
                     last_error = EXCLUDED.last_error,
                     process_id = EXCLUDED.process_id,
+                    event_count = watcher_state.event_count + CASE WHEN %s THEN 1 ELSE 0 END,
+                    metadata = watcher_state.metadata || EXCLUDED.metadata,
                     updated_at = now()
                 """,
-                (root_id, status, heartbeat, event, error, os.getpid(), heartbeat, event),
+                (
+                    root_id,
+                    status,
+                    heartbeat,
+                    event,
+                    error,
+                    os.getpid(),
+                    event,
+                    _json(sanitized_metadata),
+                    heartbeat,
+                    event,
+                    event,
+                ),
             )
+            if event:
+                cur.execute(
+                    """
+                    INSERT INTO watcher_events (root_id, action, path_hash, metadata)
+                    VALUES (%s, %s, %s, %s::jsonb)
+                    RETURNING id::text
+                    """,
+                    (root_id, action or "changed", path_hash, _json(sanitized_metadata)),
+                )
+                cur.fetchone()
+
+
+def _root_id_for_name(cur: Any, root_name: str) -> str:
+    cur.execute("SELECT id::text FROM monitored_roots WHERE name = %s", (root_name,))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"monitored root not found: {root_name}")
+    return row[0]
+
+
+def _benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    previous_elapsed_ms = row[18]
+    elapsed_ms = int(row[4] or 0)
+    previous_delta = None if previous_elapsed_ms is None else elapsed_ms - int(previous_elapsed_ms or 0)
+    return {
+        "id": row[0],
+        "fixture": row[1],
+        "status": row[2],
+        "file_count": row[3],
+        "elapsed_ms": elapsed_ms,
+        "throughput_files_per_second": float(row[5] or 0.0),
+        "p50_ms": row[6],
+        "p95_ms": row[7],
+        "max_ms": row[8],
+        "warm_state": row[9],
+        "cache_hits": row[10],
+        "cache_misses": row[11],
+        "jobs_queued": row[12],
+        "jobs_completed": row[13],
+        "jobs_blocked": row[14],
+        "worker_family_breakdown": row[15] or {},
+        "metadata": _sanitize_operational_metadata(row[16] or {}),
+        "created_at": row[17].isoformat() if row[17] else None,
+        "previous_elapsed_delta_ms": previous_delta,
+    }
+
+
+def _percentile_disc(values: list[int], percentile: float) -> int | None:
+    if not values:
+        return None
+    index = max(0, min(len(values) - 1, int((len(values) - 1) * percentile)))
+    return values[index]
+
+
+def _slow_jobs_from_db(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[:5]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        rows.append(
+            {
+                "id": str(item.get("id") or ""),
+                "path": Path(path).name,
+                "duration_ms": item.get("duration_ms"),
+            }
+        )
+    return rows
+
+
+_SENSITIVE_METADATA_FRAGMENTS = (
+    "body",
+    "content",
+    "credential",
+    "embedding",
+    "mail",
+    "password",
+    "private_path",
+    "raw",
+    "root_path",
+    "secret",
+    "token",
+    "uri",
+)
+
+
+def _sanitize_operational_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        lowered = key_text.lower()
+        if any(fragment in lowered for fragment in _SENSITIVE_METADATA_FRAGMENTS):
+            continue
+        sanitized_item = _sanitize_operational_value(item)
+        if sanitized_item is not None:
+            sanitized[key_text] = sanitized_item
+    return sanitized
+
+
+def _sanitize_operational_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:200]
+    if isinstance(value, dict):
+        return _sanitize_operational_metadata(value)
+    if isinstance(value, list):
+        sanitized = [_sanitize_operational_value(item) for item in value[:20]]
+        return [item for item in sanitized if item is not None]
+    return str(value)[:200]
 
 
 def _find_canonical_asset_id(cur: Any, content_hash: str | None, current_id: str | None) -> str | None:

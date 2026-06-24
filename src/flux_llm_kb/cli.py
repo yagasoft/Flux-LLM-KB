@@ -218,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip host-agent owned roots so Docker workers do not open host paths",
     )
+    crawl_worker_status = crawl_worker_subparsers.add_parser("status", help="Show worker family status")
+    crawl_worker_status.add_argument("--family", default="all")
 
     crawl_subparsers.add_parser("doctor", help="Show crawler and watcher health")
 
@@ -232,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     watch_disable = watch_subparsers.add_parser("disable", help="Disable watch mode")
     watch_disable.add_argument("--root")
     watch_disable.add_argument("--all", action="store_true")
+    watch_probe = watch_subparsers.add_parser("probe", help="Probe watcher backend behavior in a temporary directory")
+    watch_probe.add_argument("--timeout", type=float, default=2.0)
     watch_subparsers.add_parser("status", help="Show watcher status")
 
     export_parser = subparsers.add_parser("export-wiki", help="Export human-readable Markdown")
@@ -264,6 +268,14 @@ def main(argv: list[str] | None = None) -> int:
     acceleration_parser = subparsers.add_parser("acceleration", help="Inspect V2.8 acceleration capability and queue status")
     acceleration_subparsers = acceleration_parser.add_subparsers(dest="acceleration_command", required=True)
     acceleration_subparsers.add_parser("status", help="Show local capability, cache, and worker-family status")
+    acceleration_benchmark = acceleration_subparsers.add_parser("benchmark", help="Run or inspect synthetic benchmark history")
+    benchmark_subparsers = acceleration_benchmark.add_subparsers(dest="benchmark_command", required=True)
+    benchmark_run = benchmark_subparsers.add_parser("run", help="Run synthetic indexing benchmarks")
+    benchmark_run.add_argument("--fixture", default="all")
+    benchmark_run.add_argument("--files", type=int, default=10)
+    benchmark_history = benchmark_subparsers.add_parser("history", help="List benchmark run history")
+    benchmark_history.add_argument("--fixture", required=True)
+    benchmark_history.add_argument("--limit", type=int, default=20)
 
     mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
     mail_subparsers = mail_parser.add_subparsers(dest="mail_command", required=True)
@@ -688,25 +700,28 @@ def _crawl(args: argparse.Namespace) -> int:
     elif args.crawl_command == "worker":
         from .service import KnowledgeService
 
-        if args.worker_command != "run":  # pragma: no cover - argparse prevents this
+        if args.worker_command == "status":
+            payload = KnowledgeService().worker_status(family=args.family)
+        elif args.worker_command != "run":  # pragma: no cover - argparse prevents this
             raise ValueError(args.worker_command)
-        host_agent_roots = None
-        component_name = "corpus-worker:manual"
-        if args.host_agent_roots:
-            host_agent_roots = True
-            component_name = "corpus-worker:host-agent"
-        elif args.exclude_host_agent_roots:
-            host_agent_roots = False
-            component_name = "corpus-worker:docker"
-        payload = KnowledgeService().run_corpus_worker(
-            kind=args.kind,
-            limit=args.limit,
-            workers=args.workers,
-            interval_seconds=args.interval,
-            once=args.once,
-            host_agent_roots=host_agent_roots,
-            component_name=component_name,
-        )
+        else:
+            host_agent_roots = None
+            component_name = "corpus-worker:manual"
+            if args.host_agent_roots:
+                host_agent_roots = True
+                component_name = "corpus-worker:host-agent"
+            elif args.exclude_host_agent_roots:
+                host_agent_roots = False
+                component_name = "corpus-worker:docker"
+            payload = KnowledgeService().run_corpus_worker(
+                kind=args.kind,
+                limit=args.limit,
+                workers=args.workers,
+                interval_seconds=args.interval,
+                once=args.once,
+                host_agent_roots=host_agent_roots,
+                component_name=component_name,
+            )
     elif args.crawl_command == "doctor":
         from .health import collect_dashboard_payload
 
@@ -772,6 +787,10 @@ def _crawl_watch(args: argparse.Namespace):
         return database.set_watch_enabled(root_name=None if args.all else args.root, enabled=False)
     if args.watch_command == "status":
         return database.crawl_status()
+    if args.watch_command == "probe":
+        from .service import KnowledgeService
+
+        return KnowledgeService().watch_probe(timeout_seconds=args.timeout)
     if args.watch_command == "run":
         from .service import KnowledgeService
 
@@ -801,11 +820,22 @@ def _settings(args: argparse.Namespace) -> int:
 
 
 def _acceleration(args: argparse.Namespace) -> int:
-    if args.acceleration_command != "status":  # pragma: no cover - argparse prevents this
-        raise ValueError(args.acceleration_command)
-    from .acceleration import collect_acceleration_status
+    if args.acceleration_command == "status":
+        from .acceleration import collect_acceleration_status
 
-    print(json.dumps(collect_acceleration_status(), indent=2, sort_keys=True))
+        payload = collect_acceleration_status()
+    elif args.acceleration_command == "benchmark":
+        from .service import KnowledgeService
+
+        if args.benchmark_command == "run":
+            payload = KnowledgeService().run_benchmark(fixture=args.fixture, files=args.files)
+        elif args.benchmark_command == "history":
+            payload = KnowledgeService().benchmark_history(fixture=args.fixture, limit=args.limit)
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.benchmark_command)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.acceleration_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 

@@ -176,6 +176,62 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
     }
 
 
+def test_collect_status_adds_watcher_policy_backpressure_and_benchmark_history():
+    payload = collect_acceleration_status(
+        settings={
+            "acceleration.cache_root": "",
+            "acceleration.local_inference.enabled": False,
+            "acceleration.local_inference.provider": "ollama",
+            "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+            "acceleration.local_inference.probe_timeout_seconds": 1,
+            "watcher.backend": "polling",
+            "acceleration.worker_cap.media": 1,
+        },
+        command_runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="missing"),
+        module_importer=lambda _name: (_ for _ in ()).throw(ModuleNotFoundError("missing")),
+        worker_family_stats=lambda: [
+            {
+                "family": "media",
+                "pending": 4,
+                "running": 1,
+                "oldest_pending_age_seconds": 120,
+                "slowest_recent_jobs": [{"id": "job-1", "path": "clip.mp4", "duration_ms": 900}],
+                "retrying_locked": 2,
+                "blocked_locked": 1,
+            }
+        ],
+        benchmark_stats=lambda: [],
+        benchmark_history=lambda: [
+            {
+                "id": "run-2",
+                "fixture": "image-heavy",
+                "status": "completed",
+                "file_count": 10,
+                "elapsed_ms": 1000,
+                "throughput_files_per_second": 10.0,
+                "previous_elapsed_delta_ms": -250,
+                "warm_state": "warm",
+                "cache_hits": 7,
+                "cache_misses": 3,
+            }
+        ],
+    )
+
+    watcher = payload["capabilities"]["watcher_backend"]
+    assert watcher["policy"] == "polling"
+    assert watcher["selected_backend"] == "polling"
+    assert watcher["fallback_reason"] == "policy_polling"
+    media = next(row for row in payload["worker_families"] if row["family"] == "media")
+    assert media["configured_cap"] == 1
+    assert media["cap_available"] == 0
+    assert media["backpressure"] == "cap_reached"
+    assert media["oldest_pending_age_seconds"] == 120
+    assert media["retrying_locked"] == 2
+    assert media["blocked_locked"] == 1
+    assert payload["benchmarks"]["history"][0]["fixture"] == "image-heavy"
+    assert payload["benchmarks"]["history"][0]["previous_elapsed_delta_ms"] == -250
+
+
 def test_collect_status_reports_empty_deterministic_benchmark_fixtures():
     payload = collect_acceleration_status(
         settings={

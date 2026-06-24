@@ -31,6 +31,10 @@ Tools:
 | `kb.semantic_duplicates_refresh` | Refresh advisory semantic duplicate clusters for corpus chunks, episodes, or claims. |
 | `kb.semantic_duplicates_list` | List active semantic duplicate clusters without raw suppressed content. |
 | `kb.acceleration_status` | Return local capability, cache layout, and worker-family queue telemetry. |
+| `kb.watch_probe` | Run a temp-directory watcher backend probe without touching private watched roots. |
+| `kb.worker_status` | Return worker-family cap usage, backpressure, retry/lock, and slow-job status. |
+| `kb.benchmark_run` | Run deterministic synthetic indexing benchmarks and store metadata-only history. |
+| `kb.benchmark_history` | List metadata-only synthetic benchmark history with previous-run deltas. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
 | `kb.embeddings_enqueue` | Queue a local `corpus_embed` job for missing or stale vectors. |
 | `kb.embeddings_backfill` | Refresh missing or stale vectors immediately with the local deterministic provider. |
@@ -65,6 +69,8 @@ Endpoints:
 
 - `GET /api/health`
 - `GET /api/acceleration/status`
+- `POST /api/acceleration/benchmarks/run`
+- `GET /api/acceleration/benchmarks?fixture=<name>&limit=<n>`
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -85,6 +91,13 @@ Endpoints:
 - `GET /api/host/status`
 - `POST /api/host/browse-folder`
 - `POST /api/host/validate-path`
+- `GET /api/crawl/status`
+- `POST /api/crawl/sync`
+- `POST /api/crawl/backfill`
+- `POST /api/crawl/watch`
+- `POST /api/crawl/watch/probe`
+- `GET /api/crawl/watch/events`
+- `GET /api/crawl/workers?family=<name|all>`
 - `POST /api/search`
 - `GET /api/search?query=<q>&limit=<n>`
 - `POST /api/brief`
@@ -166,6 +179,10 @@ flux-kb capture review decide <job-id> --decision approve --rationale "Verified 
 flux-kb semantic-duplicates refresh --memory-class all --limit 1000
 flux-kb semantic-duplicates list --memory-class corpus --limit 50
 flux-kb acceleration status
+flux-kb crawl watch probe --timeout 2
+flux-kb crawl worker status --family all
+flux-kb acceleration benchmark run --fixture all --files 10
+flux-kb acceleration benchmark history --fixture text-heavy --limit 10
 ```
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
@@ -225,15 +242,25 @@ flux-kb embeddings backfill --owner-class all --limit 100
 Crawler glob settings are global defaults. Monitored roots can inherit, extend,
 or override them; effective globs are returned in dashboard crawl payloads.
 
-Acceleration settings define the permanent cache root, localhost-only local
-model probing, per-family worker caps, and recursive container caps. Local
-inference probing is disabled by default and rejects non-loopback URLs. The
-read-only acceleration status is available through `flux-kb acceleration
-status`, `GET /api/acceleration/status`, `kb.acceleration_status`, and the
-dashboard Health tab. The payload includes worker-family OCR/ASR/container
-and embedding telemetry plus deterministic benchmark fixture summaries for text-heavy,
+Acceleration settings define the permanent cache root, explicit watcher backend
+policy (`watcher.backend`, with `FLUX_KB_WATCHER_BACKEND` override),
+localhost-only local model probing, per-family worker caps, hash parallelism,
+and recursive container caps. Local inference probing is disabled by default and
+rejects non-loopback URLs. The read-only acceleration status is available
+through `flux-kb acceleration status`, `GET /api/acceleration/status`,
+`kb.acceleration_status`, and the dashboard Health tab. The payload includes
+selected watcher backend, native/fallback state, fallback reason,
+worker-family OCR/ASR/container/parser/embedding telemetry, worker-family
+backpressure, cap usage, retry/lock transitions, `manifest_skipped_unchanged`
+counters, and deterministic benchmark fixture summaries for text-heavy,
 Office/PDF-heavy, archive/container-heavy, image-heavy, and audio/video-heavy
 roots.
+Watcher probes and benchmark runs are metadata-only operational checks. They
+use temporary synthetic files and must not touch private watched roots or store
+raw text, mail contents, private paths, credentials, or embeddings. Benchmark
+history is metadata only and is exposed through CLI, REST, and MCP as fixture names, counts, timings,
+p50/p95/max, throughput, warm/cold state, cache hit/miss counters,
+worker-family breakdowns, and sanitized summaries.
 Embedding status, enqueue, and immediate backfill are also exposed through
 `GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
 `POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,

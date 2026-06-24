@@ -183,6 +183,60 @@ def test_acceleration_status_route_is_exposed(monkeypatch):
     assert payload["worker_families"][0]["ocr_cache_misses"] == 1
 
 
+def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def watch_probe(self, **kwargs):
+            calls.append(("watch_probe", kwargs))
+            return {"path_scope": "temporary", "probe": kwargs}
+
+        def worker_status(self, **kwargs):
+            calls.append(("worker_status", kwargs))
+            return {"families": [{"family": kwargs["family"], "backpressure": "cap_reached"}]}
+
+        def watch_events(self, **kwargs):
+            calls.append(("watch_events", kwargs))
+            return {"events": [{"action": "changed", "path_hash": "sha256:abc"}]}
+
+        def run_benchmark(self, **kwargs):
+            calls.append(("benchmark_run", kwargs))
+            return {"fixture": kwargs["fixture"], "files": kwargs["files"], "runs": []}
+
+        def benchmark_history(self, **kwargs):
+            calls.append(("benchmark_history", kwargs))
+            return {"fixture": kwargs["fixture"], "runs": [{"id": "run-1"}]}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    probe = client.post("/api/crawl/watch/probe", json={"timeout_seconds": 1.5})
+    workers = client.get("/api/crawl/workers", params={"family": "media"})
+    events = client.get("/api/crawl/watch/events", params={"limit": 5})
+    run = client.post("/api/acceleration/benchmarks/run", json={"fixture": "image-heavy", "files": 4})
+    history = client.get("/api/acceleration/benchmarks", params={"fixture": "image-heavy", "limit": 3})
+
+    assert probe.status_code == 200
+    assert probe.json()["path_scope"] == "temporary"
+    assert workers.status_code == 200
+    assert workers.json()["families"][0]["family"] == "media"
+    assert events.status_code == 200
+    assert events.json()["events"][0]["path_hash"] == "sha256:abc"
+    assert run.status_code == 200
+    assert run.json()["fixture"] == "image-heavy"
+    assert history.status_code == 200
+    assert history.json()["runs"] == [{"id": "run-1"}]
+    assert calls == [
+        ("watch_probe", {"timeout_seconds": 1.5}),
+        ("worker_status", {"family": "media"}),
+        ("watch_events", {"limit": 5}),
+        ("benchmark_run", {"fixture": "image-heavy", "files": 4}),
+        ("benchmark_history", {"fixture": "image-heavy", "limit": 3}),
+    ]
+
+
 def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_path):
     from flux_llm_kb.rest_api import create_app
 

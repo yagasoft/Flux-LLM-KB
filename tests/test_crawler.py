@@ -302,3 +302,31 @@ def test_scan_path_skips_transient_editor_and_cloud_artifacts(tmp_path):
     plan = scan_path(root, CorpusPolicy(root_path=root))
 
     assert [asset.relative_path for asset in plan.assets] == ["keep.md"]
+
+
+def test_scan_path_reuses_manifest_hash_for_unchanged_file(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "keep.md"
+    target.write_text("stable", encoding="utf-8")
+    stat = target.stat()
+    quick_hash = crawler._quick_hash(target.resolve(), stat.st_size, stat.st_mtime_ns)
+
+    monkeypatch.setattr(crawler, "_sha256_file", lambda _path: (_ for _ in ()).throw(AssertionError("unchanged files should skip expensive hashing")))
+
+    plan = scan_path(
+        root,
+        CorpusPolicy(
+            root_path=root,
+            manifest_lookup=lambda relative_path: {
+                "path": relative_path,
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "quick_hash": quick_hash,
+                "content_hash": "previous-content-hash",
+            },
+        ),
+    )
+
+    assert plan.assets[0].content_hash == "previous-content-hash"
+    assert plan.assets[0].metadata["manifest_skipped_unchanged"] is True

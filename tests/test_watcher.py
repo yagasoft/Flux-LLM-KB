@@ -1,4 +1,13 @@
-from flux_llm_kb.watcher import WatchRoot, PollingCorpusWatcher, ReloadableCorpusWatcher, summarize_watcher_staleness
+from flux_llm_kb.watcher import (
+    WatchRoot,
+    PollingCorpusWatcher,
+    ReloadableCorpusWatcher,
+    WatchdogCorpusWatcher,
+    create_corpus_watcher,
+    probe_watcher_backend,
+    resolve_watcher_backend,
+    summarize_watcher_staleness,
+)
 
 
 def test_polling_watcher_emits_events_for_enabled_roots(tmp_path):
@@ -141,3 +150,57 @@ def test_summarize_watcher_staleness_marks_old_heartbeats():
 
     assert payload["stale_count"] == 1
     assert payload["states"][1]["status"] == "stale"
+
+
+def test_resolve_watcher_backend_prefers_watchdog_in_auto_when_available():
+    status = resolve_watcher_backend("auto", module_finder=lambda name: object() if name == "watchdog" else None)
+
+    assert status == {
+        "policy": "auto",
+        "selected_backend": "watchdog",
+        "native": True,
+        "fallback_reason": None,
+        "message": "watchdog available",
+    }
+
+
+def test_resolve_watcher_backend_falls_back_to_polling_in_auto_when_watchdog_missing():
+    status = resolve_watcher_backend("auto", module_finder=lambda _name: None)
+
+    assert status["selected_backend"] == "polling"
+    assert status["native"] is False
+    assert status["fallback_reason"] == "watchdog_missing"
+
+
+def test_resolve_watcher_backend_rejects_explicit_watchdog_when_missing():
+    try:
+        resolve_watcher_backend("watchdog", module_finder=lambda _name: None)
+    except RuntimeError as exc:
+        assert "watchdog is not installed" in str(exc)
+    else:  # pragma: no cover - proves the test failed
+        raise AssertionError("explicit watchdog backend should fail when watchdog is unavailable")
+
+
+def test_create_corpus_watcher_honors_explicit_polling_backend(tmp_path):
+    root = tmp_path / "policy"
+    root.mkdir()
+
+    watcher = create_corpus_watcher(
+        lambda: [WatchRoot(name="docs", root_path=root, watch_enabled=True)],
+        backend_policy="polling",
+    )
+
+    assert isinstance(watcher, ReloadableCorpusWatcher)
+    assert not isinstance(watcher, WatchdogCorpusWatcher)
+    assert watcher.backend_status["selected_backend"] == "polling"
+
+
+def test_probe_watcher_backend_uses_temp_files_and_reports_normalized_events():
+    payload = probe_watcher_backend(backend_policy="polling", timeout_seconds=1.0)
+
+    assert payload["status"] == "ok"
+    assert payload["backend"]["selected_backend"] == "polling"
+    assert payload["expected_events"] == ["changed", "changed", "deleted"]
+    assert payload["observed_event_count"] >= 3
+    assert set(payload["observed_actions"]) >= {"changed", "deleted"}
+    assert payload["path_scope"] == "temporary"

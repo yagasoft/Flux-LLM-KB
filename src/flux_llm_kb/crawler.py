@@ -6,7 +6,7 @@ import hashlib
 import mimetypes
 from pathlib import Path
 import time
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable
 
 from .redaction import redact_text
 
@@ -149,6 +149,8 @@ class CorpusPolicy:
     container_max_member_bytes: int = 10 * 1024 * 1024
     stability_quiet_seconds: float = 0.0
     large_file_stability_quiet_seconds: float = 0.0
+    hash_parallelism: int = 1
+    manifest_lookup: Callable[[str], dict[str, Any] | None] | None = None
     clock: Callable[[], float] | None = None
 
 
@@ -251,28 +253,36 @@ def discover_asset(path: Path, root: Path, policy: CorpusPolicy) -> DiscoveredAs
     resolved = path.resolve()
     stat = resolved.stat()
     classification = classify_file(resolved, policy)
-    content_hash = _sha256_file(resolved) if stat.st_size <= policy.hash_max_bytes else None
+    relative_path = resolved.relative_to(root.resolve()).as_posix()
+    quick_hash = _quick_hash(resolved, stat.st_size, stat.st_mtime_ns)
     metadata: dict[str, object] = {}
+    manifest = policy.manifest_lookup(relative_path) if policy.manifest_lookup else None
+    manifest_unchanged = _manifest_matches(manifest, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns, quick_hash=quick_hash)
+    if manifest_unchanged:
+        content_hash = str(manifest.get("content_hash") or "") or None
+        metadata["manifest_skipped_unchanged"] = True
+    else:
+        content_hash = _sha256_file(resolved) if stat.st_size <= policy.hash_max_bytes else None
     chunks: tuple[AssetChunk, ...] = ()
     if classification.file_kind == "image":
         from .extractors import image_metadata
 
-        metadata = image_metadata(resolved)
-    elif classification.extraction_tier == "inline":
+        metadata.update(image_metadata(resolved))
+    elif classification.extraction_tier == "inline" and not manifest_unchanged:
         from .extractors import extract_file
 
         extraction = extract_file(resolved, policy)
-        metadata = extraction.metadata
+        metadata.update(extraction.metadata)
         chunks = extraction.chunks
     return DiscoveredAsset(
         path=resolved,
-        relative_path=resolved.relative_to(root.resolve()).as_posix(),
+        relative_path=relative_path,
         file_kind=classification.file_kind,
         mime_type=classification.mime_type,
         extension=resolved.suffix.lower(),
         size_bytes=stat.st_size,
         mtime_ns=stat.st_mtime_ns,
-        quick_hash=_quick_hash(resolved, stat.st_size, stat.st_mtime_ns),
+        quick_hash=quick_hash,
         content_hash=content_hash,
         extraction_tier=classification.extraction_tier,
         chunks=chunks,
@@ -413,6 +423,25 @@ def _status_asset(
 def _is_locked_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return isinstance(exc, PermissionError) or "locked" in text or "being used by another process" in text
+
+
+def _manifest_matches(
+    manifest: dict[str, Any] | None,
+    *,
+    size_bytes: int,
+    mtime_ns: int,
+    quick_hash: str,
+) -> bool:
+    if not isinstance(manifest, dict) or not manifest.get("content_hash"):
+        return False
+    try:
+        return (
+            int(manifest.get("size_bytes") or -1) == int(size_bytes)
+            and int(manifest.get("mtime_ns") or -1) == int(mtime_ns)
+            and str(manifest.get("quick_hash") or "") == quick_hash
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _is_transient_artifact(path: Path) -> bool:

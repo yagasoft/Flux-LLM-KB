@@ -50,3 +50,24 @@ def test_v28_docs_describe_publication_and_embedded_sidecar_extraction():
     assert "ebook-convert" in combined
     assert "comic archive" in combined
     assert "embedded media sidecar" in combined
+
+
+def test_v28_docs_describe_indexer_reliability_and_benchmark_history():
+    roadmap = (ROOT / "docs" / "roadmap.md").read_text(encoding="utf-8").lower()
+    architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8").lower()
+    setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8").lower()
+    integrations = (ROOT / "docs" / "integrations.md").read_text(encoding="utf-8").lower()
+    combined = "\n".join([roadmap, architecture, setup, integrations])
+
+    assert "watcher.backend" in combined
+    assert "flux_kb_watcher_backend" in combined
+    assert "flux-kb crawl watch probe" in combined
+    assert "kb.watch_probe" in combined
+    assert "acceleration_benchmark_runs" in architecture
+    assert "crawl_path_manifests" in architecture
+    assert "watcher_events" in architecture
+    assert "worker-family backpressure" in combined
+    assert "manifest_skipped_unchanged" in combined
+    assert "metadata only" in combined
+    assert "raw text" in combined
+    assert "private watched roots" in combined

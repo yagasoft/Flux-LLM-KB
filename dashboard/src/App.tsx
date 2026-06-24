@@ -98,6 +98,11 @@ type AccelerationStatus = {
     directories?: Record<string, string>;
   };
   worker_families?: AccelerationWorkerFamily[];
+  benchmarks?: {
+    history?: AccelerationBenchmarkRun[];
+    fixtures?: Array<Record<string, unknown>>;
+    totals?: Record<string, number>;
+  };
 };
 
 type AccelerationCapability = {
@@ -105,6 +110,10 @@ type AccelerationCapability = {
   state?: string;
   message?: string;
   provider?: string;
+  policy?: string;
+  selected_backend?: string;
+  fallback_reason?: string | null;
+  native?: boolean;
   providers?: string[];
   count?: number;
   total_bytes?: number | null;
@@ -115,6 +124,8 @@ type AccelerationWorkerFamily = {
   family?: string;
   resource_class?: string;
   configured_cap?: number;
+  cap_available?: number;
+  backpressure?: string | null;
   pending?: number;
   running?: number;
   blocked?: number;
@@ -122,6 +133,10 @@ type AccelerationWorkerFamily = {
   avg_duration_ms?: number | null;
   p95_duration_ms?: number | null;
   max_duration_ms?: number | null;
+  oldest_pending_age_seconds?: number | null;
+  retrying_locked?: number;
+  blocked_locked?: number;
+  slowest_recent_jobs?: Array<{ id?: string; path?: string; duration_ms?: number | null }>;
   ocr_cache_hits?: number;
   ocr_cache_misses?: number;
   asr_cache_hits?: number;
@@ -135,11 +150,28 @@ type AccelerationWorkerFamily = {
   frame_sample_count?: number;
   thumbnail_cache_hits?: number;
   thumbnail_cache_misses?: number;
+  parser_cache_hits?: number;
+  parser_cache_misses?: number;
+  manifest_skipped_unchanged?: number;
   embedding_vectors?: number;
   embedding_skipped_unchanged?: number;
   embedding_batches?: number;
   embedding_cache_hits?: number;
   embedding_cache_misses?: number;
+};
+
+type AccelerationBenchmarkRun = {
+  id?: string;
+  fixture?: string;
+  status?: string;
+  file_count?: number;
+  elapsed_ms?: number;
+  throughput_files_per_second?: number;
+  previous_elapsed_delta_ms?: number | null;
+  warm_state?: string;
+  cache_hits?: number;
+  cache_misses?: number;
+  created_at?: string | null;
 };
 
 type ErrorDiagnostic = {
@@ -1739,6 +1771,8 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
   const capabilities = acceleration?.capabilities ?? {};
   const cache = acceleration?.cache ?? {};
   const families = acceleration?.worker_families ?? [];
+  const watcherBackend = capabilities.watcher_backend;
+  const benchmarkHistory = acceleration?.benchmarks?.history ?? [];
   const familyRows = families.slice(0, 8).map((family) => {
     const name = family.family ?? "general";
     const pending = family.pending ?? 0;
@@ -1782,6 +1816,33 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
       status
     ] as [string, string, string];
   });
+  const backpressureRows = families
+    .filter((family) => family.backpressure || (family.retrying_locked ?? 0) > 0 || (family.blocked_locked ?? 0) > 0 || (family.manifest_skipped_unchanged ?? 0) > 0 || (family.parser_cache_hits ?? 0) > 0 || (family.parser_cache_misses ?? 0) > 0)
+    .slice(0, 6)
+    .map((family) => {
+      const parts = [
+        family.backpressure ? humanizeIdentifier(family.backpressure) : null,
+        family.oldest_pending_age_seconds != null ? `oldest ${family.oldest_pending_age_seconds}s` : null,
+        (family.retrying_locked ?? 0) > 0 ? `retry ${family.retrying_locked}` : null,
+        (family.blocked_locked ?? 0) > 0 ? `blocked locks ${family.blocked_locked}` : null,
+        (family.parser_cache_hits ?? 0) || (family.parser_cache_misses ?? 0) ? `parser ${family.parser_cache_hits ?? 0} hit / ${family.parser_cache_misses ?? 0} miss` : null,
+        (family.manifest_skipped_unchanged ?? 0) > 0 ? `${family.manifest_skipped_unchanged} manifest skips` : null
+      ].filter(Boolean);
+      return [
+        family.family ?? "general",
+        `cap ${family.running ?? 0}/${family.configured_cap ?? 0}`,
+        parts.join("; ") || "no backpressure"
+      ] as [string, string, string];
+    });
+  const benchmarkRows = benchmarkHistory.slice(0, 5).map((run) => {
+    const delta = run.previous_elapsed_delta_ms;
+    const deltaText = delta == null ? "no prior run" : `${delta >= 0 ? "+" : ""}${delta}ms delta`;
+    return [
+      run.fixture ?? "fixture",
+      `${run.file_count ?? 0} files`,
+      `${Math.round(run.throughput_files_per_second ?? 0)} files/s; ${deltaText}`
+    ] as [string, string, string];
+  });
   return (
     <Panel title="Acceleration">
       <div className="status-grid">
@@ -1796,8 +1857,25 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
           <span>{cache.root ?? "not configured"}</span>
           <em>{cache.source ?? "default"}</em>
         </div>
+        <div className="settings-row">
+          <strong>Watcher Policy</strong>
+          <span>{watcherBackend?.selected_backend ?? watcherBackend?.provider ?? "unknown"}</span>
+          <em>{[watcherBackend?.policy, watcherBackend?.fallback_reason].filter(Boolean).join(" / ") || (watcherBackend?.native ? "native" : "fallback")}</em>
+        </div>
       </div>
       {familyRows.length > 0 ? <MiniTable rows={familyRows} /> : <p className="muted">No worker-family telemetry yet.</p>}
+      {backpressureRows.length > 0 && (
+        <div className="settings-list">
+          <div className="settings-row"><strong>Family Backpressure</strong><span>{backpressureRows.length} families reporting pressure or parser/manifest telemetry</span><em>debug</em></div>
+          <MiniTable rows={backpressureRows} />
+        </div>
+      )}
+      {benchmarkRows.length > 0 && (
+        <div className="settings-list">
+          <div className="settings-row"><strong>Benchmark History</strong><span>{benchmarkRows.length} recent synthetic runs</span><em>metadata only</em></div>
+          <MiniTable rows={benchmarkRows} />
+        </div>
+      )}
     </Panel>
   );
 }
@@ -1805,6 +1883,7 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
 function accelerationCapabilityMessage(capability?: AccelerationCapability): string {
   if (!capability) return "unknown";
   if (capability.message) return capability.message;
+  if (capability.selected_backend) return `${capability.selected_backend}${capability.fallback_reason ? ` (${capability.fallback_reason})` : ""}`;
   if (capability.gpus?.length) return capability.gpus.map((gpu) => gpu.name).filter(Boolean).join(", ");
   if (capability.providers?.length) return capability.providers.join(", ");
   if (capability.state) return capability.state;
@@ -3273,10 +3352,18 @@ function prettyStreamName(value: string): string {
 
 function JobsTab({ state, onRefresh }: { state: LoadState; onRefresh: () => void }) {
   const jobs = state.jobs.jobs ?? [];
+  const familyRows = (state.health.acceleration?.worker_families ?? []).slice(0, 8).map((family) => [
+    family.family ?? "general",
+    `${family.pending ?? 0} pending / ${family.running ?? 0} running`,
+    family.backpressure ? humanizeIdentifier(family.backpressure) : `${family.blocked ?? 0} blocked / ${family.failed ?? 0} failed`
+  ] as [string, string, string]);
   return (
     <section className="tab-grid">
       <Panel title="Job Queue" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
         <JobQueueTable jobs={jobs} />
+      </Panel>
+      <Panel title="Worker Family Status">
+        {familyRows.length > 0 ? <MiniTable rows={familyRows} /> : <p className="muted">No worker-family status yet.</p>}
       </Panel>
       <BacklogPanel health={state.health} blockedJobs={state.health.jobs?.blocked ?? 0} />
     </section>

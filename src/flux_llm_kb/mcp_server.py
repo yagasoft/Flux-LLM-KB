@@ -169,6 +169,26 @@ def create_server():
 
         return collect_acceleration_status()
 
+    @mcp.tool(name="kb.watch_probe")
+    def watch_probe(timeout_seconds: float = 2.0):
+        """Probe watcher backend behavior in a temporary directory without touching watched roots."""
+        return service.watch_probe(timeout_seconds=timeout_seconds)
+
+    @mcp.tool(name="kb.worker_status")
+    def worker_status(family: str = "all"):
+        """Return worker-family queue, cap, backpressure, retry, and slow-job status."""
+        return service.worker_status(family=family)
+
+    @mcp.tool(name="kb.benchmark_run")
+    def benchmark_run(fixture: str = "all", files: int = 10):
+        """Run deterministic synthetic indexing benchmarks and record metadata-only history."""
+        return service.run_benchmark(fixture=fixture, files=files)
+
+    @mcp.tool(name="kb.benchmark_history")
+    def benchmark_history(fixture: str | None = None, limit: int = 20):
+        """List metadata-only synthetic benchmark run history and previous-run deltas."""
+        return service.benchmark_history(fixture=fixture, limit=limit)
+
     @mcp.tool(name="kb.embeddings_status")
     def embeddings_status(root_name: str | None = None):
         """Return embedding vector coverage and missing/stale metadata counts."""

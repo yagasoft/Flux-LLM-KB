@@ -208,6 +208,53 @@ def test_cli_acceleration_status_uses_status_collector(monkeypatch, capsys):
     assert payload["worker_families"][0]["ocr_cache_misses"] == 1
 
 
+def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def watch_probe(self, **kwargs):
+            calls.append(("watch_probe", kwargs))
+            return {"probe": kwargs, "path_scope": "temporary"}
+
+        def worker_status(self, **kwargs):
+            calls.append(("worker_status", kwargs))
+            return {"families": [{"family": kwargs["family"], "backpressure": "cap_reached"}]}
+
+        def run_benchmark(self, **kwargs):
+            calls.append(("benchmark_run", kwargs))
+            return {"fixture": kwargs["fixture"], "files": kwargs["files"], "runs": []}
+
+        def benchmark_history(self, **kwargs):
+            calls.append(("benchmark_history", kwargs))
+            return {"fixture": kwargs["fixture"], "runs": [{"id": "run-1"}]}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["crawl", "watch", "probe", "--timeout", "1.5"]) == 0
+    probe_payload = json.loads(capsys.readouterr().out)
+    assert probe_payload["path_scope"] == "temporary"
+
+    assert cli.main(["crawl", "worker", "status", "--family", "media"]) == 0
+    worker_payload = json.loads(capsys.readouterr().out)
+    assert worker_payload["families"][0]["family"] == "media"
+
+    assert cli.main(["acceleration", "benchmark", "run", "--fixture", "image-heavy", "--files", "4"]) == 0
+    run_payload = json.loads(capsys.readouterr().out)
+    assert run_payload["fixture"] == "image-heavy"
+
+    assert cli.main(["acceleration", "benchmark", "history", "--fixture", "image-heavy", "--limit", "3"]) == 0
+    history_payload = json.loads(capsys.readouterr().out)
+    assert history_payload["runs"] == [{"id": "run-1"}]
+    assert calls == [
+        ("watch_probe", {"timeout_seconds": 1.5}),
+        ("worker_status", {"family": "media"}),
+        ("benchmark_run", {"fixture": "image-heavy", "files": 4}),
+        ("benchmark_history", {"fixture": "image-heavy", "limit": 3}),
+    ]
+
+
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     from flux_llm_kb import service
 

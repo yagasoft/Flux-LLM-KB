@@ -9,7 +9,7 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
             {
                 "id": "job-1",
                 "job_type": "corpus_extract_video",
@@ -64,7 +64,7 @@ def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
             {
                 "id": "job-ocr",
                 "job_type": "corpus_extract_image",
@@ -144,6 +144,54 @@ def test_process_corpus_job_merges_asr_telemetry(monkeypatch, tmp_path):
     assert result.status == "indexed"
     assert result.telemetry == {"asr_cache_hits": 2, "asr_cache_misses": 1, "asr_segments": 4}
     assert applied[0]["root_name"] == "media"
+
+
+def test_process_corpus_job_merges_parser_and_media_diagnostics(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "media"
+    root.mkdir()
+    (root / "clip.mp4").write_bytes(b"fake media")
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "media",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+        },
+    )
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda *_args: SimpleNamespace(
+            status="indexed",
+            message=None,
+            metadata={
+                "parser_cache": {"hits": 3, "misses": 1},
+                "asr": {"segments": 4, "duration_seconds": 12.5, "sidecar_used": True, "source": "sidecar"},
+                "frame_sampling": {"frame_count": 2, "timestamps": [0.0, 5.0]},
+                "blocked_dependency_reason": "ffprobe_missing",
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "media", "path": "clip.mp4"}})
+
+    assert result.telemetry["parser_cache_hits"] == 3
+    assert result.telemetry["parser_cache_misses"] == 1
+    assert result.telemetry["asr_segments"] == 4
+    assert result.telemetry["asr_duration_seconds"] == 12
+    assert result.telemetry["asr_sidecar_used"] is True
+    assert result.telemetry["asr_source"] == "sidecar"
+    assert result.telemetry["frame_sample_count"] == 2
+    assert result.telemetry["frame_sample_timestamps"] == [0.0, 5.0]
+    assert result.telemetry["blocked_dependency_reason"] == "ffprobe_missing"
 
 
 def test_process_corpus_job_merges_visual_enrichment_telemetry(monkeypatch, tmp_path):
@@ -308,6 +356,7 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
         return SimpleNamespace(assets=[], deferred_jobs=[], errors=[], root_path=root)
 
     monkeypatch.setattr(service_module, "scan_path", fake_scan)
+    monkeypatch.setattr(database, "lookup_scan_manifest", lambda **_kwargs: None)
     monkeypatch.setattr(database, "persist_crawl_plan", lambda **kwargs: {"root_name": kwargs["root_name"]})
 
     result = KnowledgeService().sync_corpus(root_name="docs")
@@ -317,6 +366,42 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
     assert captured["policy"].container_max_members == 19
     assert captured["policy"].container_max_total_bytes == 8192
     assert captured["policy"].container_max_member_bytes == 1024
+    assert callable(captured["policy"].manifest_lookup)
+
+
+def test_backfill_passes_configured_worker_family_caps(monkeypatch):
+    claim_calls = []
+    monkeypatch.setenv("FLUX_KB_WORKER_CAP_MEDIA", "3")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+
+    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None):
+        claim_calls.append({"family_caps": family_caps, "job_families": job_families})
+        return []
+
+    monkeypatch.setattr(database, "claim_corpus_jobs", fake_claim_corpus_jobs)
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **_kwargs: {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **_kwargs: {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    result = KnowledgeService().run_corpus_backfill(kind="media", limit=2, workers=1)
+
+    assert result["claimed"] == 0
+    assert claim_calls[0]["job_families"] == ["media"]
+    assert claim_calls[0]["family_caps"]["media"] == 3
+
+
+def test_benchmark_run_uses_synthetic_fixtures_and_records_history(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-1", "fixture": kwargs["fixture"]})
+
+    result = KnowledgeService().run_benchmark(fixture="text-heavy", files=3)
+
+    assert result["fixture"] == "text-heavy"
+    assert result["runs"][0]["fixture"] == "text-heavy"
+    assert recorded[0]["fixture"] == "text-heavy"
+    assert recorded[0]["file_count"] == 3
+    assert "root_path" not in recorded[0]["metadata"]
 
 
 def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):
@@ -324,7 +409,7 @@ def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
             {
                 "id": "job-1",
                 "job_type": "corpus_extract_document",
@@ -361,7 +446,7 @@ def test_backfill_blocks_persistently_locked_jobs(monkeypatch):
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
             {
                 "id": "job-1",
                 "job_type": "corpus_extract_document",
@@ -395,13 +480,14 @@ def test_backfill_diagrams_kind_processes_only_diagram_jobs(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "processed": [], "repaired": [], "cleared_errors": []}
     claim_calls = []
 
-    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None):
+    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None):
         claim_calls.append(
             {
                 "limit": limit,
                 "worker_id": worker_id,
                 "root_name": root_name,
                 "job_families": job_families,
+                "family_caps": family_caps,
                 "host_agent_roots": host_agent_roots,
             }
         )
@@ -450,8 +536,8 @@ def test_backfill_archive_kinds_process_archive_and_container_jobs(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "processed": [], "repaired": [], "cleared_errors": []}
     claim_calls = []
 
-    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None):
-        claim_calls.append({"job_families": job_families, "limit": limit})
+    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None):
+        claim_calls.append({"job_families": job_families, "family_caps": family_caps, "limit": limit})
         return [
             {
                 "id": "job-archive",
@@ -505,7 +591,7 @@ def test_backfill_embedding_jobs_uses_embedding_processor(monkeypatch):
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
             {
                 "id": "job-embed",
                 "job_type": "corpus_embed",

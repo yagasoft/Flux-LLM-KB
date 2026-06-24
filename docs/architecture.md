@@ -23,8 +23,13 @@ system rather than a large prompt-injected memory file.
   and duplicate/canonical tracking.
 - `asset_chunks`: extracted text/code/document snippets for retrieval without turning
   every file into an interaction episode.
-- `crawl_runs` and `watcher_state`: crawler statistics, watcher heartbeat, event, and
-  error state for dashboard monitoring.
+- `crawl_runs`, `crawl_path_manifests`, `watcher_state`, and `watcher_events`:
+  crawler statistics, per-root/path scan fingerprints, watcher heartbeat,
+  event counters, sanitized event rows, and error state for dashboard
+  monitoring.
+- `acceleration_benchmark_runs`: metadata-only synthetic benchmark history for
+  fixture names, file counts, timings, throughput, cache counters, warm/cold
+  state, worker-family breakdowns, and previous-run deltas.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -152,13 +157,18 @@ Corpus jobs are classified into fixed worker families (`text`, `office`,
 `image`, `diagram`, `archive`, `media`, `embedding`, `preview`, and `general`)
 with resource class, priority, and time budget metadata. Worker/backfill
 commands translate existing `--kind` options into these families before claiming
-jobs, so family-specific workers do not lock unrelated work. `corpus_embed` jobs
-route to vector refresh instead of file extraction and support owner class,
-optional root scoping, stale-only refresh, and bounded limits. Completion,
-retry, and blocked transitions record last duration and sanitized telemetry for
-queue observability, including OCR/ASR cache counters, embedding vector/cache
-counters, and recursive container member, parsed-child, skipped-child, and
-blocked-dependency counts.
+jobs, so family-specific workers do not lock unrelated work. Claiming can apply
+the configured `acceleration.worker_cap.*` map to cap concurrent running jobs per
+family and expose worker-family backpressure, oldest pending age, retrying
+locked counts, blocked locked counts, sanitized slow-job rows, parser cache
+hits/misses, and manifest skip counters. `corpus_embed` jobs route to vector
+refresh instead of file extraction and support owner class, optional root
+scoping, stale-only refresh, and bounded limits. Completion, retry, and blocked
+transitions record last duration and sanitized telemetry for queue
+observability, including OCR/ASR cache counters, embedding vector/cache
+counters, recursive container member, parsed-child, skipped-child, and
+blocked-dependency counts, ASR segment totals, frame sample counts/timestamps,
+thumbnail cache counters, stale-lock evidence, and blocked dependency reasons.
 Files observed before their size/mtime fingerprint stabilizes are recorded as
 `pending_stable` instead of failing the root crawl. Jobs are not completed merely
 because they were claimed. Duplicate content is suppressed by content hash while
@@ -189,6 +199,26 @@ snapshot with persisted `source_assets` hashes, marks deleted files as deleted,
 queues changed deferred files, and treats empty folders as a clean no-op. Watch
 events continue to use targeted sync with reason `watch_event`.
 
+Watcher backend selection is explicit. `watcher.backend` accepts `auto`,
+`watchdog`, or `polling`, and the `FLUX_KB_WATCHER_BACKEND` environment
+override follows the normal settings precedence. `auto` chooses the native
+watchdog backend when importable and records a polling fallback reason when it
+is not. Explicit `watchdog` fails visibly if watchdog is unavailable; explicit
+`polling` records `policy_polling`. The synthetic watcher probe creates,
+updates, and deletes files only in a temporary directory. Probe payloads report
+backend policy, selected backend, native/fallback state, fallback reason,
+observed event counts, normalized actions, and latency without touching private
+watched roots.
+
+Incremental scan manifests are performance metadata, not a source of truth.
+`crawl_path_manifests` stores root/path size, mtime, quick hash, content hash,
+and sanitized metadata. When size, mtime, and quick hash match, the crawler
+reuses the prior content hash, skips expensive content hashing and inline
+extraction, and records `manifest_skipped_unchanged`; reconciliation still
+persists the observed asset row and verifies deletions/changes. Bounded hash
+parallelism is controlled by `crawler.hash_parallelism` and defaults to serial
+hashing.
+
 VSS is a host-agent controlled future fallback for Windows local NTFS roots, not
 a Docker/API desktop action. The setting is disabled by default; the host agent
 reports disabled or unavailable capability, size and timeout limits, and locked
@@ -205,12 +235,20 @@ Outlook-host run as Windows Scheduled Tasks in the logged-in user session.
 
 The V2.8 acceleration status model is read-only. It detects CPU count, Windows
 memory when available, cache-root disk space, NVIDIA/CUDA through `nvidia-smi`,
-optional ONNX Runtime providers, watchdog availability, and optional local model
-servers. Local model probing is disabled by default and accepts only loopback
-HTTP(S) URLs. The permanent cache layout is resolved from
+optional ONNX Runtime providers, selected watcher backend policy/native state,
+and optional local model servers. Local model probing is disabled by default
+and accepts only loopback HTTP(S) URLs. The permanent cache layout is resolved from
 `acceleration.cache_root`, `FLUX_KB_CACHE_ROOT`, `FLUX_KB_INSTALL_ROOT`, or the
 user cache, and exposes named directories for models, OCR, ASR, vision,
 thumbnails, parser output, embeddings, and temp files.
+
+Synthetic benchmark history is durable and public-safe. Runs are generated from
+temporary fixture trees (`text-heavy`, `office-pdf-heavy`,
+`archive-container-heavy`, `image-heavy`, and `audio-video-heavy`) and stored in
+`acceleration_benchmark_runs`. Stored records contain fixture names, counts,
+timings, p50/p95/max, throughput, warm/cold state, cache hit/miss counters,
+worker-family breakdowns, and sanitized summaries only. They never store raw
+text, mail contents, credentials, embeddings, or private watched roots.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,

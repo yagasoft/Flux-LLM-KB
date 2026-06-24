@@ -86,6 +86,12 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         return {}
     telemetry: dict[str, Any] = {}
+    parser_cache = metadata.get("parser_cache")
+    if isinstance(parser_cache, dict):
+        if "hits" in parser_cache:
+            telemetry["parser_cache_hits"] = int(parser_cache.get("hits") or 0)
+        if "misses" in parser_cache:
+            telemetry["parser_cache_misses"] = int(parser_cache.get("misses") or 0)
     ocr = metadata.get("ocr")
     if isinstance(ocr, dict):
         if "cache_hits" in ocr:
@@ -102,6 +108,12 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             telemetry["asr_cache_misses"] = int(asr.get("cache_misses") or 0)
         if "segments" in asr:
             telemetry["asr_segments"] = int(asr.get("segments") or 0)
+        if "duration_seconds" in asr:
+            telemetry["asr_duration_seconds"] = int(float(asr.get("duration_seconds") or 0))
+        if "sidecar_used" in asr:
+            telemetry["asr_sidecar_used"] = bool(asr.get("sidecar_used"))
+        if "source" in asr:
+            telemetry["asr_source"] = str(asr.get("source") or "")[:80]
     decorative = metadata.get("decorative")
     if isinstance(decorative, dict) and decorative.get("status") == "skipped":
         telemetry["decorative_image_skips"] = 1
@@ -123,6 +135,10 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             telemetry["thumbnail_cache_hits"] = int(frame_sampling.get("thumbnail_cache_hits") or 0)
         if "thumbnail_cache_misses" in frame_sampling:
             telemetry["thumbnail_cache_misses"] = int(frame_sampling.get("thumbnail_cache_misses") or 0)
+        if isinstance(frame_sampling.get("timestamps"), list):
+            telemetry["frame_sample_timestamps"] = [float(value) for value in frame_sampling.get("timestamps", [])[:20]]
+    if metadata.get("blocked_dependency_reason"):
+        telemetry["blocked_dependency_reason"] = str(metadata.get("blocked_dependency_reason"))[:120]
     if metadata.get("extractor") == "container":
         for source_key, telemetry_key in {
             "member_count": "container_member_count",
