@@ -465,6 +465,11 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
         "frame_sample_count": int(row.get("frame_sample_count") or 0),
         "thumbnail_cache_hits": int(row.get("thumbnail_cache_hits") or 0),
         "thumbnail_cache_misses": int(row.get("thumbnail_cache_misses") or 0),
+        "embedding_vectors": int(row.get("embedding_vectors") or 0),
+        "embedding_skipped_unchanged": int(row.get("embedding_skipped_unchanged") or 0),
+        "embedding_batches": int(row.get("embedding_batches") or 0),
+        "embedding_cache_hits": int(row.get("embedding_cache_hits") or 0),
+        "embedding_cache_misses": int(row.get("embedding_cache_misses") or 0),
     }
 
 

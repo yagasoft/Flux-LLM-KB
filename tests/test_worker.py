@@ -500,6 +500,69 @@ def test_backfill_archive_kinds_process_archive_and_container_jobs(monkeypatch):
     assert calls["retried"] == []
 
 
+def test_backfill_embedding_jobs_uses_embedding_processor(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
+            {
+                "id": "job-embed",
+                "job_type": "corpus_embed",
+                "job_family": "embedding",
+                "resource_class": "gpu",
+                "payload": {"owner_class": "corpus", "root_name": "docs", "stale_only": True, "limit": 25},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda _job: (_ for _ in ()).throw(AssertionError("embedding jobs must not use file extraction")),
+    )
+    monkeypatch.setattr(
+        worker,
+        "process_embedding_job",
+        lambda job: worker.JobProcessResult(
+            status="indexed",
+            telemetry={
+                "embedding_vectors": 3,
+                "embedding_skipped_unchanged": 2,
+                "embedding_batches": 1,
+                "embedding_cache_hits": 2,
+                "embedding_cache_misses": 3,
+                "embedding_provider": "hash",
+                "embedding_model": "flux-hash-v1",
+                "embedding_dimensions": 1536,
+            },
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="embeddings", limit=1, workers=1)
+
+    assert result["completed"] == 1
+    telemetry = calls["completed"][0]["telemetry"]
+    assert telemetry["job_family"] == "embedding"
+    assert telemetry["resource_class"] == "gpu"
+    assert telemetry["embedding_vectors"] == 3
+    assert telemetry["embedding_skipped_unchanged"] == 2
+    assert telemetry["embedding_batches"] == 1
+    assert telemetry["embedding_cache_hits"] == 2
+    assert telemetry["embedding_cache_misses"] == 3
+    assert telemetry["embedding_provider"] == "hash"
+
+
 def test_process_corpus_job_reports_locked_file(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 

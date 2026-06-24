@@ -52,6 +52,11 @@ Corpus chunks use the same `embeddings` table as episodes with
 `owner_table = 'asset_chunks'`. Corpus retrieval fuses PostgreSQL full-text,
 trigram fuzzy matching, pgvector similarity, source trust rank, and freshness.
 Deleted assets and non-canonical duplicate assets are suppressed from retrieval.
+Embedding rows carry redacted provider metadata such as model, dimensions,
+source hash, and cache key, but not raw source text. Existing synchronous writes
+still create vectors for new episodes, claims, and chunks, while `corpus_embed`
+jobs can batch-refresh missing or stale vectors for corpus chunks, episodes, and
+claims through the same local deterministic provider boundary.
 Semantic near-duplicate clusters are stored as advisory metadata in
 `semantic_duplicate_clusters` and `semantic_duplicate_members` for corpus
 chunks, episodes, and claims. Refreshes retire prior active clusters and create
@@ -139,10 +144,13 @@ Corpus jobs are classified into fixed worker families (`text`, `office`,
 `image`, `diagram`, `archive`, `media`, `embedding`, `preview`, and `general`)
 with resource class, priority, and time budget metadata. Worker/backfill
 commands translate existing `--kind` options into these families before claiming
-jobs, so family-specific workers do not lock unrelated work. Completion,
+jobs, so family-specific workers do not lock unrelated work. `corpus_embed` jobs
+route to vector refresh instead of file extraction and support owner class,
+optional root scoping, stale-only refresh, and bounded limits. Completion,
 retry, and blocked transitions record last duration and sanitized telemetry for
-queue observability, including OCR/ASR cache counters and recursive container
-member, parsed-child, skipped-child, and blocked-dependency counts.
+queue observability, including OCR/ASR cache counters, embedding vector/cache
+counters, and recursive container member, parsed-child, skipped-child, and
+blocked-dependency counts.
 Files observed before their size/mtime fingerprint stabilizes are recorded as
 `pending_stable` instead of failing the root crawl. Jobs are not completed merely
 because they were claimed. Duplicate content is suppressed by content hash while

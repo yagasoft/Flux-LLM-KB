@@ -328,6 +328,56 @@ def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
     }
 
 
+def test_embedding_endpoints_status_enqueue_and_backfill(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = {}
+
+    class FakeService:
+        def embedding_status(self, **kwargs):
+            calls["status"] = kwargs
+            return {"status": kwargs}
+
+        def enqueue_embedding_jobs(self, **kwargs):
+            calls["enqueue"] = kwargs
+            return {"enqueue": kwargs}
+
+        def refresh_embeddings(self, **kwargs):
+            calls["backfill"] = kwargs
+            return {"backfill": kwargs}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    status_response = client.get("/api/embeddings/status?root_name=docs")
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == {"root_name": "docs"}
+
+    enqueue_response = client.post(
+        "/api/embeddings/enqueue",
+        json={"owner_class": "corpus", "root_name": "docs", "stale_only": True, "limit": 25},
+    )
+    assert enqueue_response.status_code == 200
+    assert enqueue_response.json()["enqueue"] == {
+        "owner_class": "corpus",
+        "root_name": "docs",
+        "stale_only": True,
+        "limit": 25,
+    }
+
+    backfill_response = client.post(
+        "/api/embeddings/backfill",
+        json={"owner_class": "all", "root_name": "docs", "stale_only": True, "limit": 20},
+    )
+    assert backfill_response.status_code == 200
+    assert backfill_response.json()["backfill"] == {
+        "owner_class": "all",
+        "root_name": "docs",
+        "stale_only": True,
+        "limit": 20,
+    }
+
+
 def test_post_body_models_are_bound_from_json(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

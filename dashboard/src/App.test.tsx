@@ -38,7 +38,7 @@ const health = {
       }
     },
     worker_families: [
-      { family: "media", resource_class: "gpu", configured_cap: 1, pending: 2, running: 1, blocked: 1, failed: 0, avg_duration_ms: 24, p95_duration_ms: 95, ocr_cache_hits: 6, ocr_cache_misses: 2, asr_cache_hits: 4, asr_cache_misses: 1, asr_segments: 9, vision_cache_hits: 5, vision_cache_misses: 2, vision_descriptions: 3, vision_blocked_dependency_count: 1, decorative_image_skips: 4, frame_sample_count: 6, thumbnail_cache_hits: 7, thumbnail_cache_misses: 8 },
+      { family: "media", resource_class: "gpu", configured_cap: 1, pending: 2, running: 1, blocked: 1, failed: 0, avg_duration_ms: 24, p95_duration_ms: 95, ocr_cache_hits: 6, ocr_cache_misses: 2, asr_cache_hits: 4, asr_cache_misses: 1, asr_segments: 9, vision_cache_hits: 5, vision_cache_misses: 2, vision_descriptions: 3, vision_blocked_dependency_count: 1, decorative_image_skips: 4, frame_sample_count: 6, thumbnail_cache_hits: 7, thumbnail_cache_misses: 8, embedding_vectors: 10, embedding_skipped_unchanged: 2, embedding_batches: 1, embedding_cache_hits: 3, embedding_cache_misses: 4 },
       { family: "office", resource_class: "cpu", configured_cap: 2, pending: 3, running: 0, blocked: 0, failed: 1, avg_duration_ms: 12, p95_duration_ms: 40 }
     ]
   },
@@ -654,7 +654,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("disabled")).toBeInTheDocument();
     expect(screen.getByText("D:/FluxLLMKB/private/cache")).toBeInTheDocument();
     expect(screen.getByText("media")).toBeInTheDocument();
-    expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss; ASR 4 hit / 1 miss; 9 segments; Vision 5 hit / 2 miss; 3 descriptions; 1 blocked; 4 decorative skips; Frames 6 sampled; thumbnails 7 hit / 8 miss")).toBeInTheDocument();
+    expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss; ASR 4 hit / 1 miss; 9 segments; Vision 5 hit / 2 miss; 3 descriptions; 1 blocked; 4 decorative skips; Frames 6 sampled; thumbnails 7 hit / 8 miss; Embeddings 10 vectors; 2 skipped; 1 batches; cache 3 hit / 4 miss")).toBeInTheDocument();
     expect(screen.getByText("office")).toBeInTheDocument();
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });

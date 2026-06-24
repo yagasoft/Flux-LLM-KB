@@ -18,7 +18,11 @@ from .crawler import CrawlPlan
 from .embeddings import (
     DEFAULT_EMBEDDING_DIMENSIONS,
     DEFAULT_EMBEDDING_MODEL,
+    EmbeddingInput,
+    EmbeddingResult,
+    HashEmbeddingProvider,
     embed_text,
+    embedding_source_hash,
     to_pgvector_literal,
 )
 from .migrations import load_migrations
@@ -129,6 +133,37 @@ def check_database(url: str | None = None) -> DatabaseStatus:
         return DatabaseStatus(ok=False, message=str(exc))
 
 
+def _embedding_result_for_text(*, owner_table: str, owner_id: str, text: str) -> EmbeddingResult:
+    return HashEmbeddingProvider().embed_batch(
+        [
+            EmbeddingInput(
+                owner_table=owner_table,
+                owner_id=owner_id,
+                text=text,
+                model=DEFAULT_EMBEDDING_MODEL,
+                dimensions=DEFAULT_EMBEDDING_DIMENSIONS,
+            )
+        ]
+    )[0]
+
+
+def _insert_embedding_result(cur: Any, result: EmbeddingResult) -> None:
+    cur.execute(
+        """
+        INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding, metadata, updated_at)
+        VALUES (%s, %s, %s, %s, %s::vector, %s::jsonb, now())
+        """,
+        (
+            result.owner_table,
+            result.owner_id,
+            result.model,
+            result.dimensions,
+            to_pgvector_literal(result.vector),
+            _json(result.metadata),
+        ),
+    )
+
+
 def insert_episode(
     *,
     title: str,
@@ -138,7 +173,6 @@ def insert_episode(
     url: str | None = None,
 ) -> str:
     psycopg = _load_psycopg()
-    vector = to_pgvector_literal(embed_text(f"{title}\n{summary}"))
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -150,16 +184,12 @@ def insert_episode(
                 (title, summary, source_kind, _json(metadata or {})),
             )
             episode_id = cur.fetchone()[0]
-            cur.execute(
-                """
-                INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding)
-                VALUES ('episodes', %s, %s, %s, %s::vector)
-                """,
-                (
-                    episode_id,
-                    DEFAULT_EMBEDDING_MODEL,
-                    DEFAULT_EMBEDDING_DIMENSIONS,
-                    vector,
+            _insert_embedding_result(
+                cur,
+                _embedding_result_for_text(
+                    owner_table="episodes",
+                    owner_id=episode_id,
+                    text=f"{title}\n{summary}",
                 ),
             )
             cur.execute(
@@ -956,16 +986,12 @@ def upsert_claim(
                 """,
                 (claim["id"], DEFAULT_EMBEDDING_MODEL),
             )
-            cur.execute(
-                """
-                INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding)
-                VALUES ('claims', %s, %s, %s, %s::vector)
-                """,
-                (
-                    claim["id"],
-                    DEFAULT_EMBEDDING_MODEL,
-                    DEFAULT_EMBEDDING_DIMENSIONS,
-                    to_pgvector_literal(embed_text(f"{subject_name}\n{predicate}\n{object_text}")),
+            _insert_embedding_result(
+                cur,
+                _embedding_result_for_text(
+                    owner_table="claims",
+                    owner_id=claim["id"],
+                    text=f"{subject_name}\n{predicate}\n{object_text}",
                 ),
             )
             cur.execute(
@@ -2870,7 +2896,12 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                        COALESCE(sum((telemetry->>'decorative_image_skips')::integer), 0)::integer AS decorative_image_skips,
                        COALESCE(sum((telemetry->>'frame_sample_count')::integer), 0)::integer AS frame_sample_count,
                        COALESCE(sum((telemetry->>'thumbnail_cache_hits')::integer), 0)::integer AS thumbnail_cache_hits,
-                       COALESCE(sum((telemetry->>'thumbnail_cache_misses')::integer), 0)::integer AS thumbnail_cache_misses
+                       COALESCE(sum((telemetry->>'thumbnail_cache_misses')::integer), 0)::integer AS thumbnail_cache_misses,
+                       COALESCE(sum((telemetry->>'embedding_vectors')::integer), 0)::integer AS embedding_vectors,
+                       COALESCE(sum((telemetry->>'embedding_skipped_unchanged')::integer), 0)::integer AS embedding_skipped_unchanged,
+                       COALESCE(sum((telemetry->>'embedding_batches')::integer), 0)::integer AS embedding_batches,
+                       COALESCE(sum((telemetry->>'embedding_cache_hits')::integer), 0)::integer AS embedding_cache_hits,
+                       COALESCE(sum((telemetry->>'embedding_cache_misses')::integer), 0)::integer AS embedding_cache_misses
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 GROUP BY job_family, resource_class
@@ -2905,6 +2936,11 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                     "frame_sample_count": row[23],
                     "thumbnail_cache_hits": row[24],
                     "thumbnail_cache_misses": row[25],
+                    "embedding_vectors": row[26],
+                    "embedding_skipped_unchanged": row[27],
+                    "embedding_batches": row[28],
+                    "embedding_cache_hits": row[29],
+                    "embedding_cache_misses": row[30],
                 }
                 for row in cur.fetchall()
             ]
@@ -5484,16 +5520,12 @@ def _backfill_claim_embeddings(cur: Any, *, limit: int) -> int:
     rows = cur.fetchall()
     for claim_id, subject_name, predicate, object_text in rows:
         text = f"{subject_name or ''}\n{predicate or ''}\n{object_text or ''}"
-        cur.execute(
-            """
-            INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding)
-            VALUES ('claims', %s, %s, %s, %s::vector)
-            """,
-            (
-                claim_id,
-                DEFAULT_EMBEDDING_MODEL,
-                DEFAULT_EMBEDDING_DIMENSIONS,
-                to_pgvector_literal(embed_text(text)),
+        _insert_embedding_result(
+            cur,
+            _embedding_result_for_text(
+                owner_table="claims",
+                owner_id=claim_id,
+                text=text,
             ),
         )
     return len(rows)
@@ -6641,16 +6673,12 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
             ),
         )
         chunk_id = cur.fetchone()[0]
-        cur.execute(
-            """
-            INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding)
-            VALUES ('asset_chunks', %s, %s, %s, %s::vector)
-            """,
-            (
-                chunk_id,
-                DEFAULT_EMBEDDING_MODEL,
-                DEFAULT_EMBEDDING_DIMENSIONS,
-                to_pgvector_literal(embed_text(f"{chunk.title}\n{chunk.body}")),
+        _insert_embedding_result(
+            cur,
+            _embedding_result_for_text(
+                owner_table="asset_chunks",
+                owner_id=chunk_id,
+                text=f"{chunk.title}\n{chunk.body}",
             ),
         )
         inserted += 1
@@ -6665,6 +6693,314 @@ def _job_schedule_metadata(job_type: str) -> dict[str, Any]:
         "priority": default_priority_for_family(family),
         "time_budget_seconds": time_budget_for_family(family),
     }
+
+
+def _normalize_embedding_owner_class(owner_class: str | None) -> str:
+    normalized = str(owner_class or "all").strip().lower()
+    aliases = {
+        "asset_chunks": "corpus",
+        "chunk": "corpus",
+        "chunks": "corpus",
+        "episode": "episodes",
+        "claim": "claims",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"all", "corpus", "episodes", "claims"}:
+        raise ValueError("owner_class must be all, corpus, episodes, or claims")
+    return normalized
+
+
+def enqueue_embedding_jobs(
+    *,
+    owner_class: str = "all",
+    root_name: str | None = None,
+    stale_only: bool = True,
+    limit: int = 100,
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_class = _normalize_embedding_owner_class(owner_class)
+    row_limit = max(1, min(int(limit or 100), 5000))
+    payload = {
+        "owner_class": normalized_class,
+        "root_name": root_name,
+        "stale_only": bool(stale_only),
+        "limit": row_limit,
+    }
+    schedule = _job_schedule_metadata("corpus_embed")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO capture_jobs (
+                    job_type, payload, job_family, resource_class, priority, time_budget_seconds
+                )
+                VALUES (%s, %s::jsonb, %s, %s, %s, %s)
+                RETURNING id::text
+                """,
+                (
+                    "corpus_embed",
+                    _json(payload),
+                    schedule["job_family"],
+                    schedule["resource_class"],
+                    schedule["priority"],
+                    schedule["time_budget_seconds"],
+                ),
+            )
+            job_id = cur.fetchone()[0]
+    return {
+        "queued": 1,
+        "job_id": job_id,
+        **payload,
+    }
+
+
+def refresh_embeddings(
+    *,
+    owner_class: str = "all",
+    root_name: str | None = None,
+    stale_only: bool = True,
+    limit: int = 100,
+    provider: HashEmbeddingProvider | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_class = _normalize_embedding_owner_class(owner_class)
+    row_limit = max(1, min(int(limit or 100), 5000))
+    embedding_provider = provider or HashEmbeddingProvider()
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            inputs = _fetch_embedding_inputs(
+                cur,
+                owner_class=normalized_class,
+                root_name=root_name,
+                stale_only=bool(stale_only),
+                limit=row_limit,
+            )
+            results = embedding_provider.embed_batch(inputs)
+            replaced = _replace_embeddings(cur, results)
+    cache_keys = [str(item.metadata.get("cache_key") or "") for item in results]
+    unique_cache_keys = {item for item in cache_keys if item}
+    cache_hits = max(0, len(cache_keys) - len(unique_cache_keys))
+    cache_misses = len(unique_cache_keys)
+    dimensions = results[0].dimensions if results else DEFAULT_EMBEDDING_DIMENSIONS
+    model = results[0].model if results else DEFAULT_EMBEDDING_MODEL
+    return {
+        "owner_class": normalized_class,
+        "root_name": root_name,
+        "stale_only": bool(stale_only),
+        "limit": row_limit,
+        "requested": len(inputs),
+        "vectors": replaced,
+        "skipped_unchanged": 0,
+        "batches": 1 if inputs else 0,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "provider": embedding_provider.name,
+        "model": model,
+        "dimensions": dimensions,
+    }
+
+
+def embedding_status(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            corpus_filter = "AND r.name = %s" if root_name else ""
+            corpus_params: tuple[Any, ...] = (root_name,) if root_name else ()
+            cur.execute(
+                f"""
+                SELECT count(*)::integer,
+                       count(*) FILTER (WHERE emb.id IS NULL)::integer,
+                       count(*) FILTER (WHERE emb.id IS NOT NULL AND NOT (emb.metadata ? 'source_hash'))::integer
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                LEFT JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
+                                        AND emb.owner_id = c.id
+                                        AND emb.model = %s
+                WHERE a.deleted_at IS NULL
+                  AND a.canonical_asset_id IS NULL
+                  {corpus_filter}
+                """,
+                (DEFAULT_EMBEDDING_MODEL, *corpus_params),
+            )
+            corpus = cur.fetchone()
+            memory_root_filter = "AND item.metadata->>'root_name' = %s" if root_name else ""
+            memory_params: tuple[Any, ...] = (root_name,) if root_name else ()
+            cur.execute(
+                f"""
+                SELECT count(*)::integer,
+                       count(*) FILTER (WHERE emb.id IS NULL)::integer,
+                       count(*) FILTER (WHERE emb.id IS NOT NULL AND NOT (emb.metadata ? 'source_hash'))::integer
+                FROM episodes item
+                LEFT JOIN embeddings emb ON emb.owner_table = 'episodes'
+                                        AND emb.owner_id = item.id
+                                        AND emb.model = %s
+                WHERE item.superseded_by IS NULL
+                  {memory_root_filter}
+                """,
+                (DEFAULT_EMBEDDING_MODEL, *memory_params),
+            )
+            episodes = cur.fetchone()
+            cur.execute(
+                f"""
+                SELECT count(*)::integer,
+                       count(*) FILTER (WHERE emb.id IS NULL)::integer,
+                       count(*) FILTER (WHERE emb.id IS NOT NULL AND NOT (emb.metadata ? 'source_hash'))::integer
+                FROM claims item
+                LEFT JOIN embeddings emb ON emb.owner_table = 'claims'
+                                        AND emb.owner_id = item.id
+                                        AND emb.model = %s
+                WHERE item.retention_action = 'keep'
+                  {memory_root_filter}
+                """,
+                (DEFAULT_EMBEDDING_MODEL, *memory_params),
+            )
+            claims = cur.fetchone()
+    rows = {
+        "corpus": {"total": int(corpus[0] or 0), "missing": int(corpus[1] or 0), "metadata_missing": int(corpus[2] or 0)},
+        "episodes": {"total": int(episodes[0] or 0), "missing": int(episodes[1] or 0), "metadata_missing": int(episodes[2] or 0)},
+        "claims": {"total": int(claims[0] or 0), "missing": int(claims[1] or 0), "metadata_missing": int(claims[2] or 0)},
+    }
+    return {
+        "root_name": root_name,
+        "model": DEFAULT_EMBEDDING_MODEL,
+        "dimensions": DEFAULT_EMBEDDING_DIMENSIONS,
+        "owners": rows,
+        "totals": {
+            "total": sum(item["total"] for item in rows.values()),
+            "missing": sum(item["missing"] for item in rows.values()),
+            "metadata_missing": sum(item["metadata_missing"] for item in rows.values()),
+        },
+    }
+
+
+def _fetch_embedding_inputs(
+    cur: Any,
+    *,
+    owner_class: str,
+    root_name: str | None,
+    stale_only: bool,
+    limit: int,
+) -> list[EmbeddingInput]:
+    remaining = max(1, min(int(limit or 100), 5000))
+    classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
+    items: list[EmbeddingInput] = []
+    for item_class in classes:
+        if remaining <= 0:
+            break
+        if item_class == "corpus":
+            rows = _fetch_corpus_embedding_rows(cur, root_name=root_name, limit=remaining)
+            owner_table = "asset_chunks"
+        elif item_class == "episodes":
+            rows = _fetch_episode_embedding_rows(cur, root_name=root_name, limit=remaining)
+            owner_table = "episodes"
+        else:
+            rows = _fetch_claim_embedding_rows(cur, root_name=root_name, limit=remaining)
+            owner_table = "claims"
+        for owner_id, text, existing_source_hash in rows:
+            source_hash = embedding_source_hash(str(text or ""))
+            if stale_only and existing_source_hash == source_hash:
+                continue
+            items.append(
+                EmbeddingInput(
+                    owner_table=owner_table,
+                    owner_id=str(owner_id),
+                    text=str(text or ""),
+                    model=DEFAULT_EMBEDDING_MODEL,
+                    dimensions=DEFAULT_EMBEDDING_DIMENSIONS,
+                    existing_source_hash=existing_source_hash,
+                )
+            )
+            remaining -= 1
+            if remaining <= 0:
+                break
+    return items
+
+
+def _fetch_corpus_embedding_rows(cur: Any, *, root_name: str | None, limit: int) -> list[tuple[Any, Any, Any]]:
+    root_sql = "AND r.name = %s" if root_name else ""
+    params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
+    cur.execute(
+        f"""
+        SELECT c.id::text, concat_ws(E'\n', c.title, c.body) AS text,
+               emb.metadata->>'source_hash' AS existing_source_hash
+        FROM asset_chunks c
+        JOIN source_assets a ON a.id = c.asset_id
+        JOIN monitored_roots r ON r.id = a.root_id
+        LEFT JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
+                                AND emb.owner_id = c.id
+                                AND emb.model = %s
+        WHERE a.deleted_at IS NULL
+          AND a.canonical_asset_id IS NULL
+          {root_sql}
+        ORDER BY c.updated_at DESC, c.id
+        LIMIT %s
+        """,
+        (DEFAULT_EMBEDDING_MODEL, *params),
+    )
+    return list(cur.fetchall())
+
+
+def _fetch_episode_embedding_rows(cur: Any, *, root_name: str | None, limit: int) -> list[tuple[Any, Any, Any]]:
+    root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
+    params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
+    cur.execute(
+        f"""
+        SELECT e.id::text, concat_ws(E'\n', e.title, e.summary) AS text,
+               emb.metadata->>'source_hash' AS existing_source_hash
+        FROM episodes e
+        LEFT JOIN embeddings emb ON emb.owner_table = 'episodes'
+                                AND emb.owner_id = e.id
+                                AND emb.model = %s
+        WHERE e.superseded_by IS NULL
+          {root_sql}
+        ORDER BY e.updated_at DESC, e.id
+        LIMIT %s
+        """,
+        (DEFAULT_EMBEDDING_MODEL, *params),
+    )
+    return list(cur.fetchall())
+
+
+def _fetch_claim_embedding_rows(cur: Any, *, root_name: str | None, limit: int) -> list[tuple[Any, Any, Any]]:
+    root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
+    params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
+    cur.execute(
+        f"""
+        SELECT c.id::text, concat_ws(' ', e.name, c.predicate, c.object_text) AS text,
+               emb.metadata->>'source_hash' AS existing_source_hash
+        FROM claims c
+        LEFT JOIN entities e ON e.id = c.subject_entity_id
+        LEFT JOIN embeddings emb ON emb.owner_table = 'claims'
+                                AND emb.owner_id = c.id
+                                AND emb.model = %s
+        WHERE c.retention_action = 'keep'
+          {root_sql}
+        ORDER BY c.updated_at DESC, c.id
+        LIMIT %s
+        """,
+        (DEFAULT_EMBEDDING_MODEL, *params),
+    )
+    return list(cur.fetchall())
+
+
+def _replace_embeddings(cur: Any, results: list[EmbeddingResult] | tuple[EmbeddingResult, ...]) -> int:
+    replaced = 0
+    for result in results:
+        cur.execute(
+            """
+            DELETE FROM embeddings
+            WHERE owner_table = %s
+              AND owner_id = %s
+              AND model = %s
+            """,
+            (result.owner_table, result.owner_id, result.model),
+        )
+        _insert_embedding_result(cur, result)
+        replaced += 1
+    return replaced
 
 
 def _cancel_duplicate_corpus_job_for_asset(cur: Any, *, root_name: str, relative_path: str) -> None:

@@ -108,6 +108,11 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
                 "frame_sample_count": 5,
                 "thumbnail_cache_hits": 6,
                 "thumbnail_cache_misses": 7,
+                "embedding_vectors": 9,
+                "embedding_skipped_unchanged": 4,
+                "embedding_batches": 2,
+                "embedding_cache_hits": 4,
+                "embedding_cache_misses": 5,
             }
         ],
         benchmark_stats=lambda: [
@@ -143,6 +148,11 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
     assert payload["worker_families"][0]["frame_sample_count"] == 5
     assert payload["worker_families"][0]["thumbnail_cache_hits"] == 6
     assert payload["worker_families"][0]["thumbnail_cache_misses"] == 7
+    assert payload["worker_families"][0]["embedding_vectors"] == 9
+    assert payload["worker_families"][0]["embedding_skipped_unchanged"] == 4
+    assert payload["worker_families"][0]["embedding_batches"] == 2
+    assert payload["worker_families"][0]["embedding_cache_hits"] == 4
+    assert payload["worker_families"][0]["embedding_cache_misses"] == 5
     fixtures_by_name = {fixture["name"]: fixture for fixture in payload["benchmarks"]["fixtures"]}
     assert fixtures_by_name["archive-container-heavy"] == {
         "name": "archive-container-heavy",

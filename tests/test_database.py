@@ -8,6 +8,7 @@ import pytest
 from flux_llm_kb import database
 from flux_llm_kb.crawler import AssetChunk
 from flux_llm_kb.database import forget_episode
+from flux_llm_kb.embeddings import EmbeddingInput
 
 
 def test_forget_episode_rejects_invalid_uuid_without_database():
@@ -245,7 +246,41 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             executed.append((sql, params))
 
         def fetchall(self):
-            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120, 5, 2, 3, 1, 7, 9, 4, 5, 2, 6, 7, 8, 9, 10, 11, 12, 13)]
+            return [
+                (
+                    "media",
+                    "gpu",
+                    2,
+                    1,
+                    1,
+                    0,
+                    24,
+                    95,
+                    120,
+                    5,
+                    2,
+                    3,
+                    1,
+                    7,
+                    9,
+                    4,
+                    5,
+                    2,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                )
+            ]
 
     class FakeConnection:
         def __enter__(self):
@@ -285,6 +320,11 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
     assert "frame_sample_count" in sql
     assert "thumbnail_cache_hits" in sql
     assert "thumbnail_cache_misses" in sql
+    assert "embedding_vectors" in sql
+    assert "embedding_skipped_unchanged" in sql
+    assert "embedding_batches" in sql
+    assert "embedding_cache_hits" in sql
+    assert "embedding_cache_misses" in sql
     assert rows == [
         {
             "family": "media",
@@ -313,6 +353,11 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             "frame_sample_count": 11,
             "thumbnail_cache_hits": 12,
             "thumbnail_cache_misses": 13,
+            "embedding_vectors": 14,
+            "embedding_skipped_unchanged": 15,
+            "embedding_batches": 16,
+            "embedding_cache_hits": 17,
+            "embedding_cache_misses": 18,
         }
     ]
 
@@ -474,9 +519,111 @@ def test_upsert_claim_records_claim_embedding_for_semantic_duplicate_refresh():
     source = Path(database.__file__).read_text(encoding="utf-8")
     function = source.split("def upsert_claim", 1)[1].split("\ndef ", 1)[0]
 
-    assert "owner_table, owner_id, model, dimensions, embedding" in function
-    assert "VALUES ('claims'" in function
-    assert 'embed_text(f"{subject_name}\\n{predicate}\\n{object_text}")' in function
+    assert "_embedding_result_for_text" in function
+    assert 'owner_table="claims"' in function
+    assert 'text=f"{subject_name}\\n{predicate}\\n{object_text}"' in function
+
+
+def test_enqueue_embedding_jobs_creates_corpus_embed_job(monkeypatch):
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("job-embed",)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_embedding_jobs(owner_class="corpus", root_name="docs", stale_only=True, limit=25)
+
+    sql, params = executed[0]
+    payload = json.loads(params[1])
+    assert "INSERT INTO capture_jobs" in sql
+    assert "corpus_embed" in params
+    assert payload == {"owner_class": "corpus", "root_name": "docs", "stale_only": True, "limit": 25}
+    assert params[2:6] == ("embedding", "gpu", 35, 300)
+    assert result == {
+        "queued": 1,
+        "job_id": "job-embed",
+        "owner_class": "corpus",
+        "root_name": "docs",
+        "stale_only": True,
+        "limit": 25,
+    }
+
+
+def test_refresh_embeddings_batches_candidates_and_replaces_vectors(monkeypatch):
+    replaced = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(
+        database,
+        "_fetch_embedding_inputs",
+        lambda _cur, *, owner_class, root_name, stale_only, limit: [
+            EmbeddingInput("asset_chunks", "chunk-1", "Chunk One\nbody", "flux-hash-v1", 1536),
+            EmbeddingInput("claims", "claim-1", "subject predicate object", "flux-hash-v1", 1536),
+        ],
+    )
+    monkeypatch.setattr(database, "_replace_embeddings", lambda _cur, results: replaced.extend(results) or len(results))
+
+    result = database.refresh_embeddings(owner_class="all", root_name="docs", stale_only=True, limit=20)
+
+    assert result["owner_class"] == "all"
+    assert result["root_name"] == "docs"
+    assert result["stale_only"] is True
+    assert result["requested"] == 2
+    assert result["vectors"] == 2
+    assert result["skipped_unchanged"] == 0
+    assert result["batches"] == 1
+    assert result["cache_misses"] == 2
+    assert result["cache_hits"] == 0
+    assert result["provider"] == "hash"
+    assert result["model"] == "flux-hash-v1"
+    assert result["dimensions"] == 1536
+    assert [item.owner_id for item in replaced] == ["chunk-1", "claim-1"]
 
 
 def test_codex_hook_capture_exists_checks_session_and_turn_metadata(monkeypatch):

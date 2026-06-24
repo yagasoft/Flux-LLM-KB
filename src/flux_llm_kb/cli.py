@@ -122,6 +122,23 @@ def main(argv: list[str] | None = None) -> int:
     semantic_list.add_argument("--root-name")
     semantic_list.add_argument("--limit", type=int, default=50)
 
+    embeddings_parser = subparsers.add_parser("embeddings", help="Manage embedding vector refresh jobs")
+    embeddings_subparsers = embeddings_parser.add_subparsers(dest="embeddings_command", required=True)
+    embeddings_status = embeddings_subparsers.add_parser("status", help="Show embedding vector coverage")
+    embeddings_status.add_argument("--root", dest="root_name")
+    embeddings_enqueue = embeddings_subparsers.add_parser("enqueue", help="Queue an embedding refresh job")
+    embeddings_enqueue.add_argument("--owner-class", choices=["all", "corpus", "episodes", "claims"], default="all")
+    embeddings_enqueue.add_argument("--root", dest="root_name")
+    embeddings_enqueue.add_argument("--limit", type=int, default=100)
+    embeddings_enqueue.add_argument("--all", action="store_false", dest="stale_only", help="Refresh all vectors, not only missing or stale vectors")
+    embeddings_enqueue.set_defaults(stale_only=True)
+    embeddings_backfill = embeddings_subparsers.add_parser("backfill", help="Refresh embeddings immediately")
+    embeddings_backfill.add_argument("--owner-class", choices=["all", "corpus", "episodes", "claims"], default="all")
+    embeddings_backfill.add_argument("--root", dest="root_name")
+    embeddings_backfill.add_argument("--limit", type=int, default=100)
+    embeddings_backfill.add_argument("--all", action="store_false", dest="stale_only", help="Refresh all vectors, not only missing or stale vectors")
+    embeddings_backfill.set_defaults(stale_only=True)
+
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
     forget_parser.add_argument("--reason", default="user_request")
@@ -338,6 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         "capture": _capture,
         "retention": _retention,
         "semantic-duplicates": _semantic_duplicates,
+        "embeddings": _embeddings,
         "forget": _forget,
         "audit": _audit,
         "backfill-codex": _backfill_codex,
@@ -583,6 +601,32 @@ def _semantic_duplicates(args: argparse.Namespace) -> int:
         )
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.semantic_duplicates_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _embeddings(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.embeddings_command == "status":
+        payload = service.embedding_status(root_name=args.root_name)
+    elif args.embeddings_command == "enqueue":
+        payload = service.enqueue_embedding_jobs(
+            owner_class=args.owner_class,
+            root_name=args.root_name,
+            stale_only=args.stale_only,
+            limit=args.limit,
+        )
+    elif args.embeddings_command == "backfill":
+        payload = service.refresh_embeddings(
+            owner_class=args.owner_class,
+            root_name=args.root_name,
+            stale_only=args.stale_only,
+            limit=args.limit,
+        )
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.embeddings_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

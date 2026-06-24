@@ -134,6 +134,10 @@ flux-kb crawl watch run
 flux-kb host-agent status
 flux-kb host-agent run
 flux-kb crawl backfill --kind all --limit 20
+flux-kb crawl backfill --kind embeddings --limit 20
+flux-kb embeddings status
+flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
+flux-kb embeddings backfill --owner-class all --limit 100
 flux-kb crawl doctor
 flux-kb settings list
 flux-kb settings set retrieval.token_budget 1600
@@ -193,6 +197,13 @@ Recursive archive/container extraction is controlled by
 The acceleration status also includes deterministic benchmark fixture summaries
 for text-heavy, Office/PDF-heavy, archive/container-heavy, image-heavy, and
 audio/video-heavy roots.
+Embedding refresh uses the local deterministic `flux-hash-v1` provider by
+default. New vectors keep source hashes and cache keys in embedding metadata
+without raw source text. Use `flux-kb embeddings status` to inspect coverage,
+`flux-kb embeddings enqueue` to queue `corpus_embed` jobs, or `flux-kb
+embeddings backfill` for an immediate bounded refresh. The same counters appear
+in the dashboard Health acceleration panel as vectors processed, unchanged
+items skipped, batches, and cache hits/misses.
 
 ## Host Filesystem Agent
 

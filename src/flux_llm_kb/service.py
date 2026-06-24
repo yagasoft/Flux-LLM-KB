@@ -380,6 +380,39 @@ class KnowledgeService:
             limit=limit,
         )
 
+    def embedding_status(self, *, root_name: str | None = None) -> dict[str, Any]:
+        return database.embedding_status(root_name=root_name)
+
+    def enqueue_embedding_jobs(
+        self,
+        *,
+        owner_class: str = "all",
+        root_name: str | None = None,
+        stale_only: bool = True,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return database.enqueue_embedding_jobs(
+            owner_class=owner_class,
+            root_name=root_name,
+            stale_only=stale_only,
+            limit=limit,
+        )
+
+    def refresh_embeddings(
+        self,
+        *,
+        owner_class: str = "all",
+        root_name: str | None = None,
+        stale_only: bool = True,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return database.refresh_embeddings(
+            owner_class=owner_class,
+            root_name=root_name,
+            stale_only=stale_only,
+            limit=limit,
+        )
+
     def list_capture_review_jobs(self, *, limit: int = 50) -> dict[str, Any]:
         return {"jobs": database.list_capture_review_jobs(limit=limit)}
 
@@ -635,7 +668,10 @@ class KnowledgeService:
         retried = 0
         for job in claimed:
             started = time.perf_counter()
-            process_result = worker.process_corpus_job(job)
+            if job.get("job_type") == "corpus_embed":
+                process_result = worker.process_embedding_job(job)
+            else:
+                process_result = worker.process_corpus_job(job)
             duration_ms = max(0, int((time.perf_counter() - started) * 1000))
             telemetry = {
                 "job_family": job.get("job_family"),

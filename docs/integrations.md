@@ -31,6 +31,9 @@ Tools:
 | `kb.semantic_duplicates_refresh` | Refresh advisory semantic duplicate clusters for corpus chunks, episodes, or claims. |
 | `kb.semantic_duplicates_list` | List active semantic duplicate clusters without raw suppressed content. |
 | `kb.acceleration_status` | Return local capability, cache layout, and worker-family queue telemetry. |
+| `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
+| `kb.embeddings_enqueue` | Queue a local `corpus_embed` job for missing or stale vectors. |
+| `kb.embeddings_backfill` | Refresh missing or stale vectors immediately with the local deterministic provider. |
 | `kb.audit` | List recent audit events. |
 | `kb.forget` | Forget a memory item by id with an audit reason. |
 | `kb.status` | Return Flux health and runtime status. |
@@ -97,6 +100,9 @@ Endpoints:
 - `POST /api/capture/review/{job_id}/decision`
 - `POST /api/semantic-duplicates/refresh`
 - `GET /api/semantic-duplicates?memory_class=<corpus|episode|claim>&root_name=<name>&limit=<n>`
+- `GET /api/embeddings/status`
+- `POST /api/embeddings/enqueue`
+- `POST /api/embeddings/backfill`
 - `GET /api/corpus/assets`
 - `GET /api/corpus/assets/{asset_id}`
 - `GET /api/corpus/chunks/{chunk_id}`
@@ -211,6 +217,9 @@ flux-kb settings set retrieval.token_budget 1600
 flux-kb settings set embedding.model flux-hash-v2 --confirm
 flux-kb settings reset retrieval.token_budget
 flux-kb settings apply --component watcher
+flux-kb embeddings status --root projects
+flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
+flux-kb embeddings backfill --owner-class all --limit 100
 ```
 
 Crawler glob settings are global defaults. Monitored roots can inherit, extend,
@@ -222,9 +231,13 @@ inference probing is disabled by default and rejects non-loopback URLs. The
 read-only acceleration status is available through `flux-kb acceleration
 status`, `GET /api/acceleration/status`, `kb.acceleration_status`, and the
 dashboard Health tab. The payload includes worker-family OCR/ASR/container
-telemetry plus deterministic benchmark fixture summaries for text-heavy,
+and embedding telemetry plus deterministic benchmark fixture summaries for text-heavy,
 Office/PDF-heavy, archive/container-heavy, image-heavy, and audio/video-heavy
 roots.
+Embedding status, enqueue, and immediate backfill are also exposed through
+`GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
+`POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,
+`kb.embeddings_enqueue`, and `kb.embeddings_backfill`.
 
 ## Host Filesystem Agent
 

@@ -135,6 +135,11 @@ type AccelerationWorkerFamily = {
   frame_sample_count?: number;
   thumbnail_cache_hits?: number;
   thumbnail_cache_misses?: number;
+  embedding_vectors?: number;
+  embedding_skipped_unchanged?: number;
+  embedding_batches?: number;
+  embedding_cache_hits?: number;
+  embedding_cache_misses?: number;
 };
 
 type ErrorDiagnostic = {
@@ -1751,11 +1756,17 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
     const frameSamples = family.frame_sample_count ?? 0;
     const thumbnailHits = family.thumbnail_cache_hits ?? 0;
     const thumbnailMisses = family.thumbnail_cache_misses ?? 0;
+    const embeddingVectors = family.embedding_vectors ?? 0;
+    const embeddingSkipped = family.embedding_skipped_unchanged ?? 0;
+    const embeddingBatches = family.embedding_batches ?? 0;
+    const embeddingHits = family.embedding_cache_hits ?? 0;
+    const embeddingMisses = family.embedding_cache_misses ?? 0;
     const hasOcrTelemetry = ocrHits > 0 || ocrMisses > 0;
     const hasAsrTelemetry = asrHits > 0 || asrMisses > 0 || asrSegments > 0;
     const hasVisionTelemetry = visionHits > 0 || visionMisses > 0 || visionDescriptions > 0 || visionBlocked > 0;
     const hasDecorativeTelemetry = decorativeSkips > 0;
     const hasFrameTelemetry = frameSamples > 0 || thumbnailHits > 0 || thumbnailMisses > 0;
+    const hasEmbeddingTelemetry = embeddingVectors > 0 || embeddingSkipped > 0 || embeddingBatches > 0 || embeddingHits > 0 || embeddingMisses > 0;
     const duration = p95 == null ? `${family.running ?? 0} running` : `p95 ${p95}ms`;
     const parts = [duration];
     if (hasOcrTelemetry) parts.push(`OCR ${ocrHits} hit / ${ocrMisses} miss`);
@@ -1763,6 +1774,7 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
     if (hasVisionTelemetry) parts.push(`Vision ${visionHits} hit / ${visionMisses} miss; ${visionDescriptions} descriptions; ${visionBlocked} blocked`);
     if (hasDecorativeTelemetry) parts.push(`${decorativeSkips} decorative skips`);
     if (hasFrameTelemetry) parts.push(`Frames ${frameSamples} sampled; thumbnails ${thumbnailHits} hit / ${thumbnailMisses} miss`);
+    if (hasEmbeddingTelemetry) parts.push(`Embeddings ${embeddingVectors} vectors; ${embeddingSkipped} skipped; ${embeddingBatches} batches; cache ${embeddingHits} hit / ${embeddingMisses} miss`);
     const status = parts.join("; ");
     return [
       name,

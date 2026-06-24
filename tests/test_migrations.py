@@ -71,6 +71,12 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "idx_capture_jobs_family_status" in acceleration_migration.sql
     assert "corpus_extract_video" in acceleration_migration.sql
     assert "media" in acceleration_migration.sql
+    embedding_migration = next(item for item in migrations if item.name == "0015_embedding_vectorization")
+    assert "ALTER TABLE embeddings" in embedding_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS metadata" in embedding_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS updated_at" in embedding_migration.sql
+    assert "idx_embeddings_owner_model" in embedding_migration.sql
+    assert "idx_embeddings_metadata" in embedding_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

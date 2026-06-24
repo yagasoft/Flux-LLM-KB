@@ -412,6 +412,49 @@ def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, cap
     assert worker_payload["worker"]["limit"] == 4
 
 
+def test_cli_embeddings_status_enqueue_and_backfill_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = {}
+
+    class FakeService:
+        def embedding_status(self, **kwargs):
+            calls["status"] = kwargs
+            return {"status": kwargs}
+
+        def enqueue_embedding_jobs(self, **kwargs):
+            calls["enqueue"] = kwargs
+            return {"enqueue": kwargs}
+
+        def refresh_embeddings(self, **kwargs):
+            calls["backfill"] = kwargs
+            return {"backfill": kwargs}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["embeddings", "status", "--root", "docs"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["status"] == {"root_name": "docs"}
+
+    assert cli.main(["embeddings", "enqueue", "--owner-class", "corpus", "--root", "docs", "--limit", "25"]) == 0
+    enqueue_payload = json.loads(capsys.readouterr().out)
+    assert enqueue_payload["enqueue"] == {
+        "owner_class": "corpus",
+        "root_name": "docs",
+        "stale_only": True,
+        "limit": 25,
+    }
+
+    assert cli.main(["embeddings", "backfill", "--owner-class", "all", "--root", "docs", "--limit", "20"]) == 0
+    backfill_payload = json.loads(capsys.readouterr().out)
+    assert backfill_payload["backfill"] == {
+        "owner_class": "all",
+        "root_name": "docs",
+        "stale_only": True,
+        "limit": 20,
+    }
+
+
 def test_cli_claim_upsert_and_transition_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 
