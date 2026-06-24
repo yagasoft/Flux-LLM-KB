@@ -68,6 +68,14 @@ def test_v28_docs_describe_indexer_reliability_and_benchmark_history():
     assert "watcher_events" in architecture
     assert "worker-family backpressure" in combined
     assert "manifest_skipped_unchanged" in combined
+    assert "hash parallelism" in combined
+    assert "scan" in combined
+    assert "soak" in combined
+    assert "watcher" in combined
+    assert "--passes" in combined
+    assert "--compare-label" in combined
+    assert "compare_label" in combined
+    assert "settings_mutated: false" in combined
     assert "metadata only" in combined
     assert "raw text" in combined
     assert "private watched roots" in combined

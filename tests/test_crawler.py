@@ -1,5 +1,7 @@
 import base64
 from pathlib import Path
+import threading
+import time
 
 from flux_llm_kb import crawler
 from flux_llm_kb.crawler import CorpusPolicy, classify_file, scan_path
@@ -330,3 +332,43 @@ def test_scan_path_reuses_manifest_hash_for_unchanged_file(monkeypatch, tmp_path
 
     assert plan.assets[0].content_hash == "previous-content-hash"
     assert plan.assets[0].metadata["manifest_skipped_unchanged"] is True
+
+
+def test_scan_path_hashes_files_concurrently_without_reordering(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name in ("b.bin", "a.bin", "c.bin"):
+        (root / name).write_bytes(f"payload-{name}".encode("utf-8"))
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+    release = threading.Event()
+    entered = threading.Event()
+    hashes: list[str] = []
+
+    def fake_hash(path):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            if active >= 2:
+                entered.set()
+        if not release.is_set():
+            entered.wait(timeout=1)
+            release.set()
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        digest = f"hash:{path.name}"
+        hashes.append(digest)
+        return digest
+
+    monkeypatch.setattr(crawler, "_sha256_file", fake_hash)
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, hash_parallelism=2))
+
+    assert [asset.relative_path for asset in plan.assets] == ["a.bin", "b.bin", "c.bin"]
+    assert [asset.content_hash for asset in plan.assets] == ["hash:a.bin", "hash:b.bin", "hash:c.bin"]
+    assert sorted(hashes) == ["hash:a.bin", "hash:b.bin", "hash:c.bin"]
+    assert max_active >= 2

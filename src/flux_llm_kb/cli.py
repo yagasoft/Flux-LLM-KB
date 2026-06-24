@@ -273,8 +273,17 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_run = benchmark_subparsers.add_parser("run", help="Run synthetic indexing benchmarks")
     benchmark_run.add_argument("--fixture", default="all")
     benchmark_run.add_argument("--files", type=int, default=10)
+    benchmark_run.add_argument("--mode", choices=["scan", "soak", "watcher", "all"], default="scan")
+    benchmark_run.add_argument("--passes", type=int, default=1)
+    benchmark_run.add_argument("--label")
+    benchmark_run.add_argument("--compare-label")
+    benchmark_run.add_argument("--workers", type=int, default=1)
+    benchmark_run.add_argument("--family", default="all")
     benchmark_history = benchmark_subparsers.add_parser("history", help="List benchmark run history")
     benchmark_history.add_argument("--fixture", required=True)
+    benchmark_history.add_argument("--mode")
+    benchmark_history.add_argument("--label")
+    benchmark_history.add_argument("--warm-state")
     benchmark_history.add_argument("--limit", type=int, default=20)
 
     mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
@@ -828,9 +837,24 @@ def _acceleration(args: argparse.Namespace) -> int:
         from .service import KnowledgeService
 
         if args.benchmark_command == "run":
-            payload = KnowledgeService().run_benchmark(fixture=args.fixture, files=args.files)
+            payload = KnowledgeService().run_benchmark(
+                fixture=args.fixture,
+                files=args.files,
+                mode=args.mode,
+                passes=args.passes,
+                label=args.label,
+                compare_label=args.compare_label,
+                workers=args.workers,
+                family=args.family,
+            )
         elif args.benchmark_command == "history":
-            payload = KnowledgeService().benchmark_history(fixture=args.fixture, limit=args.limit)
+            payload = KnowledgeService().benchmark_history(
+                fixture=args.fixture,
+                mode=args.mode,
+                label=args.label,
+                warm_state=args.warm_state,
+                limit=args.limit,
+            )
         else:  # pragma: no cover - argparse prevents this
             raise ValueError(args.benchmark_command)
     else:  # pragma: no cover - argparse prevents this

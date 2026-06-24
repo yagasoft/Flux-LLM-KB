@@ -194,6 +194,12 @@ def create_app():
     class BenchmarkRunRequest(BaseModel):
         fixture: str = "all"
         files: int = 10
+        mode: str = "scan"
+        passes: int = 1
+        label: str | None = None
+        compare_label: str | None = None
+        workers: int = 1
+        family: str = "all"
 
     class SettingUpdateRequest(BaseModel):
         value: object
@@ -282,11 +288,26 @@ def create_app():
 
     @app.post("/api/acceleration/benchmarks/run")
     def acceleration_benchmark_run(request: BenchmarkRunRequest = Body(...)):
-        return service.run_benchmark(fixture=request.fixture, files=request.files)
+        return service.run_benchmark(
+            fixture=request.fixture,
+            files=request.files,
+            mode=request.mode,
+            passes=request.passes,
+            label=request.label,
+            compare_label=request.compare_label,
+            workers=request.workers,
+            family=request.family,
+        )
 
     @app.get("/api/acceleration/benchmarks")
-    def acceleration_benchmark_history(fixture: str | None = None, limit: int = 20):
-        return service.benchmark_history(fixture=fixture, limit=limit)
+    def acceleration_benchmark_history(
+        fixture: str | None = None,
+        mode: str | None = None,
+        label: str | None = None,
+        warm_state: str | None = None,
+        limit: int = 20,
+    ):
+        return service.benchmark_history(fixture=fixture, mode=mode, label=label, warm_state=warm_state, limit=limit)
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():

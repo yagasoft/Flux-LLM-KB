@@ -180,14 +180,23 @@ def create_server():
         return service.worker_status(family=family)
 
     @mcp.tool(name="kb.benchmark_run")
-    def benchmark_run(fixture: str = "all", files: int = 10):
+    def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all"):
         """Run deterministic synthetic indexing benchmarks and record metadata-only history."""
-        return service.run_benchmark(fixture=fixture, files=files)
+        return service.run_benchmark(
+            fixture=fixture,
+            files=files,
+            mode=mode,
+            passes=passes,
+            label=label,
+            compare_label=compare_label,
+            workers=workers,
+            family=family,
+        )
 
     @mcp.tool(name="kb.benchmark_history")
-    def benchmark_history(fixture: str | None = None, limit: int = 20):
+    def benchmark_history(fixture: str | None = None, mode: str | None = None, label: str | None = None, warm_state: str | None = None, limit: int = 20):
         """List metadata-only synthetic benchmark run history and previous-run deltas."""
-        return service.benchmark_history(fixture=fixture, limit=limit)
+        return service.benchmark_history(fixture=fixture, mode=mode, label=label, warm_state=warm_state, limit=limit)
 
     @mcp.tool(name="kb.embeddings_status")
     def embeddings_status(root_name: str | None = None):

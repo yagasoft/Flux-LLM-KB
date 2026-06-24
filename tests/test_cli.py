@@ -240,18 +240,74 @@ def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch,
     worker_payload = json.loads(capsys.readouterr().out)
     assert worker_payload["families"][0]["family"] == "media"
 
-    assert cli.main(["acceleration", "benchmark", "run", "--fixture", "image-heavy", "--files", "4"]) == 0
+    assert (
+        cli.main(
+            [
+                "acceleration",
+                "benchmark",
+                "run",
+                "--fixture",
+                "image-heavy",
+                "--files",
+                "4",
+                "--mode",
+                "soak",
+                "--passes",
+                "2",
+                "--label",
+                "after-deploy",
+                "--compare-label",
+                "before-deploy",
+                "--workers",
+                "3",
+                "--family",
+                "media",
+            ]
+        )
+        == 0
+    )
     run_payload = json.loads(capsys.readouterr().out)
     assert run_payload["fixture"] == "image-heavy"
 
-    assert cli.main(["acceleration", "benchmark", "history", "--fixture", "image-heavy", "--limit", "3"]) == 0
+    assert (
+        cli.main(
+            [
+                "acceleration",
+                "benchmark",
+                "history",
+                "--fixture",
+                "image-heavy",
+                "--limit",
+                "3",
+                "--mode",
+                "soak",
+                "--label",
+                "after-deploy",
+                "--warm-state",
+                "warm",
+            ]
+        )
+        == 0
+    )
     history_payload = json.loads(capsys.readouterr().out)
     assert history_payload["runs"] == [{"id": "run-1"}]
     assert calls == [
         ("watch_probe", {"timeout_seconds": 1.5}),
         ("worker_status", {"family": "media"}),
-        ("benchmark_run", {"fixture": "image-heavy", "files": 4}),
-        ("benchmark_history", {"fixture": "image-heavy", "limit": 3}),
+        (
+            "benchmark_run",
+            {
+                "fixture": "image-heavy",
+                "files": 4,
+                "mode": "soak",
+                "passes": 2,
+                "label": "after-deploy",
+                "compare_label": "before-deploy",
+                "workers": 3,
+                "family": "media",
+            },
+        ),
+        ("benchmark_history", {"fixture": "image-heavy", "mode": "soak", "label": "after-deploy", "warm_state": "warm", "limit": 3}),
     ]
 
 

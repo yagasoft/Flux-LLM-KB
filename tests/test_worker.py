@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from flux_llm_kb import database
+import pytest
+
+from flux_llm_kb import database, service as service_module
 from flux_llm_kb.service import KnowledgeService
 
 
@@ -402,6 +404,80 @@ def test_benchmark_run_uses_synthetic_fixtures_and_records_history(monkeypatch):
     assert recorded[0]["fixture"] == "text-heavy"
     assert recorded[0]["file_count"] == 3
     assert "root_path" not in recorded[0]["metadata"]
+
+
+def test_benchmark_scan_mode_records_cold_and_warm_passes(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(service_module, "_configured_hash_parallelism", lambda: 3)
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": f"run-{len(recorded)}", "fixture": kwargs["fixture"]})
+
+    result = KnowledgeService().run_benchmark(fixture="text-heavy", files=2, mode="scan", passes=2, label="nightly", compare_label="baseline")
+
+    assert result["mode"] == "scan"
+    assert result["recommendations"]["settings_mutated"] is False
+    assert [run["warm_state"] for run in result["runs"]] == ["cold", "warm"]
+    assert [run["pass_index"] for run in result["runs"]] == [1, 2]
+    assert recorded[0]["mode"] == "scan"
+    assert recorded[0]["label"] == "nightly"
+    assert recorded[0]["compare_label"] == "baseline"
+    assert recorded[0]["hash_parallelism"] == 3
+    assert recorded[1]["warm_state"] == "warm"
+    assert recorded[1]["manifest_skipped_unchanged"] == 2
+    assert recorded[1]["cache_hits"] == 2
+
+
+def test_benchmark_soak_mode_claims_worker_family_jobs_and_purges(monkeypatch):
+    calls = {"created": [], "claimed": [], "completed": [], "blocked": [], "purged": []}
+    monkeypatch.setattr(service_module, "_configured_worker_caps", lambda: {"media": 1, "office": 2})
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: {"id": "run-soak", "fixture": kwargs["fixture"]})
+    monkeypatch.setattr(database, "create_benchmark_soak_jobs", lambda **kwargs: calls["created"].append(kwargs) or {"tag": kwargs["tag"], "created": kwargs["file_count"]})
+
+    def fake_claim(**kwargs):
+        calls["claimed"].append(kwargs)
+        return [
+            {"id": "job-1", "job_family": "media", "resource_class": "gpu", "payload": {"benchmark_outcome": "completed"}, "attempts": 0},
+            {"id": "job-2", "job_family": "media", "resource_class": "gpu", "payload": {"benchmark_outcome": "blocked"}, "attempts": 0},
+        ]
+
+    monkeypatch.setattr(database, "claim_corpus_jobs", fake_claim)
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "purge_benchmark_soak_jobs", lambda **kwargs: calls["purged"].append(kwargs) or {"purged": 2})
+
+    result = KnowledgeService().run_benchmark(fixture="image-heavy", files=4, mode="soak", workers=2, family="media", label="soak")
+
+    assert result["mode"] == "soak"
+    assert result["runs"][0]["jobs_queued"] == 4
+    assert result["runs"][0]["jobs_completed"] == 1
+    assert result["runs"][0]["jobs_blocked"] == 1
+    assert calls["created"][0]["family"] == "media"
+    assert calls["claimed"][0]["job_families"] == ["media"]
+    assert calls["claimed"][0]["family_caps"] == {"media": 1, "office": 2}
+    assert calls["completed"][0]["telemetry"]["benchmark_mode"] == "soak"
+    assert calls["blocked"][0]["status"] == "blocked_benchmark"
+    assert calls["purged"][0]["tag"] == calls["created"][0]["tag"]
+
+
+def test_benchmark_soak_mode_rejects_unknown_worker_family():
+    with pytest.raises(ValueError, match="benchmark family"):
+        KnowledgeService().run_benchmark(fixture="image-heavy", files=4, mode="soak", family="unknown")
+
+
+def test_benchmark_watcher_and_all_modes_record_metadata(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": f"run-{len(recorded)}", "fixture": kwargs["fixture"]})
+    monkeypatch.setattr(service_module, "probe_watcher_backend", lambda **kwargs: {"backend": {"policy": "polling", "selected_backend": "polling"}, "events": {"created": 1, "modified": 1}, "latency_ms": 12})
+    monkeypatch.setattr(database, "create_benchmark_soak_jobs", lambda **kwargs: {"tag": kwargs["tag"], "created": kwargs["file_count"]})
+    monkeypatch.setattr(database, "claim_corpus_jobs", lambda **kwargs: [])
+    monkeypatch.setattr(database, "purge_benchmark_soak_jobs", lambda **kwargs: {"purged": 0})
+
+    watcher = KnowledgeService().run_benchmark(fixture="text-heavy", mode="watcher", files=1)
+    all_modes = KnowledgeService().run_benchmark(fixture="text-heavy", mode="all", files=1)
+
+    assert watcher["runs"][0]["mode"] == "watcher"
+    assert watcher["runs"][0]["metadata"]["watcher_backend"]["selected_backend"] == "polling"
+    assert {run["mode"] for run in all_modes["runs"]} == {"scan", "soak", "watcher"}
+    assert {row["mode"] for row in recorded} >= {"scan", "soak", "watcher"}
 
 
 def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):

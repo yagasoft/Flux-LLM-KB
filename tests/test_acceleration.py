@@ -205,12 +205,19 @@ def test_collect_status_adds_watcher_policy_backpressure_and_benchmark_history()
             {
                 "id": "run-2",
                 "fixture": "image-heavy",
+                "mode": "scan",
+                "label": "after-deploy",
                 "status": "completed",
                 "file_count": 10,
                 "elapsed_ms": 1000,
                 "throughput_files_per_second": 10.0,
                 "previous_elapsed_delta_ms": -250,
+                "previous_throughput_delta": 2.0,
                 "warm_state": "warm",
+                "pass_index": 2,
+                "hash_parallelism": 4,
+                "worker_count": 3,
+                "manifest_skipped_unchanged": 8,
                 "cache_hits": 7,
                 "cache_misses": 3,
             }
@@ -229,7 +236,11 @@ def test_collect_status_adds_watcher_policy_backpressure_and_benchmark_history()
     assert media["retrying_locked"] == 2
     assert media["blocked_locked"] == 1
     assert payload["benchmarks"]["history"][0]["fixture"] == "image-heavy"
+    assert payload["benchmarks"]["history"][0]["mode"] == "scan"
+    assert payload["benchmarks"]["history"][0]["label"] == "after-deploy"
     assert payload["benchmarks"]["history"][0]["previous_elapsed_delta_ms"] == -250
+    assert payload["benchmarks"]["history"][0]["previous_throughput_delta"] == 2.0
+    assert payload["benchmarks"]["history"][0]["manifest_skipped_unchanged"] == 8
 
 
 def test_collect_status_reports_empty_deterministic_benchmark_fixtures():

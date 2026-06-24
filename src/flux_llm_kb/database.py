@@ -9,6 +9,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 from .acceleration import (
+    JOB_FAMILIES,
     default_priority_for_family,
     job_family_for_type,
     resource_class_for_family,
@@ -3125,14 +3126,87 @@ def benchmark_fixture_stats(*, url: str | None = None) -> list[dict[str, Any]]:
             ]
 
 
+def create_benchmark_soak_jobs(
+    *,
+    tag: str,
+    fixture: str,
+    file_count: int,
+    family: str = "all",
+    label: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_family = str(family or "all").lower()
+    if normalized_family != "all" and normalized_family not in JOB_FAMILIES:
+        raise ValueError(f"unknown benchmark worker family: {normalized_family}")
+    families = list(JOB_FAMILIES) if normalized_family == "all" else [normalized_family]
+    row_count = max(1, min(int(file_count or 1), 500))
+    psycopg = _load_psycopg()
+    inserted = 0
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            for index in range(row_count):
+                job_family = families[index % len(families)]
+                job_type = "corpus_embed" if job_family == "embedding" else f"corpus_extract_{job_family}"
+                payload = {
+                    "benchmark": True,
+                    "benchmark_tag": tag,
+                    "benchmark_fixture": fixture,
+                    "benchmark_label": label,
+                    "benchmark_outcome": "blocked" if index % 7 == 6 else "completed",
+                    "path": f"synthetic/{fixture}/{job_family}-{index:04d}",
+                    "root_name": "__benchmark__",
+                }
+                cur.execute(
+                    """
+                    INSERT INTO capture_jobs (
+                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
+                    )
+                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        job_type,
+                        _json(payload),
+                        job_family,
+                        resource_class_for_family(job_family),
+                        default_priority_for_family(job_family),
+                        time_budget_for_family(job_family),
+                        _json({"benchmark_tag": tag, "benchmark_fixture": fixture, "benchmark_file_count": row_count}),
+                    ),
+                )
+                inserted += 1
+    return {"tag": tag, "created": inserted, "family": normalized_family}
+
+
+def purge_benchmark_soak_jobs(*, tag: str, url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM capture_jobs
+                WHERE payload->>'benchmark_tag' = %s
+                   OR telemetry->>'benchmark_tag' = %s
+                """,
+                (tag, tag),
+            )
+            return {"tag": tag, "purged": int(cur.rowcount or 0)}
+
+
 def record_benchmark_run(
     *,
     fixture: str,
     file_count: int,
     elapsed_ms: int,
     timings_ms: list[int] | tuple[int, ...] | None = None,
+    mode: str = "scan",
+    label: str | None = None,
+    compare_label: str | None = None,
     status: str = "completed",
     warm_state: str = "cold",
+    pass_index: int = 1,
+    hash_parallelism: int = 1,
+    worker_count: int = 1,
+    manifest_skipped_unchanged: int = 0,
     cache_hits: int = 0,
     cache_misses: int = 0,
     jobs_queued: int | None = None,
@@ -3155,15 +3229,19 @@ def record_benchmark_run(
             cur.execute(
                 """
                 INSERT INTO acceleration_benchmark_runs (
-                    fixture, status, file_count, elapsed_ms, throughput_files_per_second,
+                    fixture, mode, label, compare_label, status, file_count, elapsed_ms, throughput_files_per_second,
                     p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
-                    jobs_queued, jobs_completed, jobs_blocked, worker_family_breakdown, metadata
+                    jobs_queued, jobs_completed, jobs_blocked, pass_index, hash_parallelism,
+                    worker_count, manifest_skipped_unchanged, worker_family_breakdown, metadata
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                 RETURNING id::text, created_at
                 """,
                 (
                     fixture,
+                    _normalize_benchmark_mode(mode),
+                    _blank_to_none(label),
+                    _blank_to_none(compare_label),
                     status,
                     safe_file_count,
                     safe_elapsed_ms,
@@ -3177,6 +3255,10 @@ def record_benchmark_run(
                     max(0, int(jobs_queued if jobs_queued is not None else safe_file_count)),
                     max(0, int(jobs_completed if jobs_completed is not None else safe_file_count)),
                     max(0, int(jobs_blocked)),
+                    max(1, int(pass_index or 1)),
+                    max(1, int(hash_parallelism or 1)),
+                    max(1, int(worker_count or 1)),
+                    max(0, int(manifest_skipped_unchanged or 0)),
                     _json(worker_family_breakdown or {}),
                     _json(_sanitize_operational_metadata(metadata or {})),
                 ),
@@ -3185,6 +3267,9 @@ def record_benchmark_run(
             return {
                 "id": row[0],
                 "fixture": fixture,
+                "mode": _normalize_benchmark_mode(mode),
+                "label": _blank_to_none(label),
+                "compare_label": _blank_to_none(compare_label),
                 "status": status,
                 "file_count": safe_file_count,
                 "elapsed_ms": safe_elapsed_ms,
@@ -3200,33 +3285,80 @@ def latest_benchmark_runs(*, limit: int = 10, url: str | None = None) -> list[di
 def list_benchmark_runs(
     *,
     fixture: str | None = None,
+    mode: str | None = None,
+    label: str | None = None,
+    warm_state: str | None = None,
     limit: int = 20,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
-    fixture_filter = "WHERE fixture = %s" if fixture else ""
+    filters: list[str] = []
     params: list[Any] = []
     if fixture:
+        filters.append("fixture = %s")
         params.append(fixture)
+    if mode:
+        filters.append("mode = %s")
+        params.append(_normalize_benchmark_mode(mode))
+    if label:
+        filters.append("label = %s")
+        params.append(label)
+    if warm_state:
+        filters.append("warm_state = %s")
+        params.append(warm_state)
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
     params.append(max(1, min(limit, 200)))
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 WITH ordered AS (
-                    SELECT id::text, fixture, status, file_count, elapsed_ms, throughput_files_per_second,
-                           p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
-                           jobs_queued, jobs_completed, jobs_blocked, worker_family_breakdown,
-                           metadata, created_at,
-                           lead(elapsed_ms) OVER (PARTITION BY fixture ORDER BY created_at DESC) AS previous_elapsed_ms
-                    FROM acceleration_benchmark_runs
-                    {fixture_filter}
+                    SELECT current_run.id::text, current_run.fixture, current_run.mode, current_run.label,
+                           current_run.compare_label, current_run.status, current_run.file_count,
+                           current_run.elapsed_ms, current_run.throughput_files_per_second,
+                           current_run.p50_ms, current_run.p95_ms, current_run.max_ms, current_run.warm_state,
+                           current_run.cache_hits, current_run.cache_misses, current_run.jobs_queued,
+                           current_run.jobs_completed, current_run.jobs_blocked, current_run.pass_index,
+                           current_run.hash_parallelism, current_run.worker_count,
+                           current_run.manifest_skipped_unchanged, current_run.worker_family_breakdown,
+                           current_run.metadata, current_run.created_at,
+                           COALESCE(
+                               label_baseline.elapsed_ms,
+                               lead(current_run.elapsed_ms) OVER (
+                                   PARTITION BY current_run.fixture, current_run.mode, current_run.file_count, current_run.warm_state
+                                   ORDER BY current_run.created_at DESC
+                               )
+                           ) AS previous_elapsed_ms,
+                           COALESCE(
+                               label_baseline.throughput_files_per_second,
+                               lead(current_run.throughput_files_per_second) OVER (
+                                   PARTITION BY current_run.fixture, current_run.mode, current_run.file_count, current_run.warm_state
+                                   ORDER BY current_run.created_at DESC
+                               )
+                           ) AS previous_throughput_files_per_second
+                    FROM acceleration_benchmark_runs current_run
+                    LEFT JOIN LATERAL (
+                        SELECT prior.elapsed_ms, prior.throughput_files_per_second
+                        FROM acceleration_benchmark_runs prior
+                        WHERE current_run.compare_label IS NOT NULL
+                          AND prior.fixture = current_run.fixture
+                          AND prior.mode = current_run.mode
+                          AND prior.file_count = current_run.file_count
+                          AND prior.warm_state = current_run.warm_state
+                          AND prior.label = current_run.compare_label
+                          AND prior.created_at < current_run.created_at
+                        ORDER BY prior.created_at DESC
+                        LIMIT 1
+                    ) label_baseline ON TRUE
                 )
-                SELECT id, fixture, status, file_count, elapsed_ms, throughput_files_per_second,
+                SELECT id, fixture, mode, label, compare_label, status,
+                       file_count, elapsed_ms, throughput_files_per_second,
                        p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
-                       jobs_queued, jobs_completed, jobs_blocked, worker_family_breakdown,
-                       metadata, created_at, previous_elapsed_ms
+                       jobs_queued, jobs_completed, jobs_blocked, pass_index,
+                       hash_parallelism, worker_count, manifest_skipped_unchanged, worker_family_breakdown,
+                       metadata, created_at, previous_elapsed_ms, previous_throughput_files_per_second
                 FROM ordered
+                {where_clause}
                 ORDER BY created_at DESC
                 LIMIT %s
                 """,
@@ -7481,29 +7613,40 @@ def _root_id_for_name(cur: Any, root_name: str) -> str:
 
 
 def _benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
-    previous_elapsed_ms = row[18]
-    elapsed_ms = int(row[4] or 0)
+    previous_elapsed_ms = row[25]
+    previous_throughput = row[26]
+    elapsed_ms = int(row[7] or 0)
+    throughput = float(row[8] or 0.0)
     previous_delta = None if previous_elapsed_ms is None else elapsed_ms - int(previous_elapsed_ms or 0)
+    throughput_delta = None if previous_throughput is None else throughput - float(previous_throughput or 0.0)
     return {
         "id": row[0],
         "fixture": row[1],
-        "status": row[2],
-        "file_count": row[3],
+        "mode": row[2],
+        "label": row[3],
+        "compare_label": row[4],
+        "status": row[5],
+        "file_count": row[6],
         "elapsed_ms": elapsed_ms,
-        "throughput_files_per_second": float(row[5] or 0.0),
-        "p50_ms": row[6],
-        "p95_ms": row[7],
-        "max_ms": row[8],
-        "warm_state": row[9],
-        "cache_hits": row[10],
-        "cache_misses": row[11],
-        "jobs_queued": row[12],
-        "jobs_completed": row[13],
-        "jobs_blocked": row[14],
-        "worker_family_breakdown": row[15] or {},
-        "metadata": _sanitize_operational_metadata(row[16] or {}),
-        "created_at": row[17].isoformat() if row[17] else None,
+        "throughput_files_per_second": throughput,
+        "p50_ms": row[9],
+        "p95_ms": row[10],
+        "max_ms": row[11],
+        "warm_state": row[12],
+        "cache_hits": row[13],
+        "cache_misses": row[14],
+        "jobs_queued": row[15],
+        "jobs_completed": row[16],
+        "jobs_blocked": row[17],
+        "pass_index": row[18],
+        "hash_parallelism": row[19],
+        "worker_count": row[20],
+        "manifest_skipped_unchanged": row[21],
+        "worker_family_breakdown": row[22] or {},
+        "metadata": _sanitize_operational_metadata(row[23] or {}),
+        "created_at": row[24].isoformat() if row[24] else None,
         "previous_elapsed_delta_ms": previous_delta,
+        "previous_throughput_delta": throughput_delta,
     }
 
 
@@ -7512,6 +7655,18 @@ def _percentile_disc(values: list[int], percentile: float) -> int | None:
         return None
     index = max(0, min(len(values) - 1, int((len(values) - 1) * percentile)))
     return values[index]
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _normalize_benchmark_mode(value: str | None) -> str:
+    normalized = str(value or "scan").strip().lower()
+    if normalized not in {"scan", "soak", "watcher"}:
+        raise ValueError("benchmark mode must be scan, soak, or watcher")
+    return normalized
 
 
 def _slow_jobs_from_db(value: Any) -> list[dict[str, Any]]:

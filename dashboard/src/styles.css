@@ -1030,7 +1030,18 @@ kbd {
 
 .mini-table div {
   grid-template-columns: 1fr 1fr auto;
+  gap: 10px;
   font-size: 13px;
+}
+
+.mini-table.wide div {
+  grid-template-columns: minmax(90px, 0.8fr) minmax(120px, 1fr) minmax(130px, 1fr) minmax(150px, 1.2fr);
+}
+
+.mini-table span,
+.mini-table strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .mini-table strong {

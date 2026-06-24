@@ -77,6 +77,16 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "ADD COLUMN IF NOT EXISTS updated_at" in embedding_migration.sql
     assert "idx_embeddings_owner_model" in embedding_migration.sql
     assert "idx_embeddings_metadata" in embedding_migration.sql
+    benchmark_migration = next(item for item in migrations if item.name == "0017_benchmark_harness")
+    assert "ALTER TABLE acceleration_benchmark_runs" in benchmark_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS mode" in benchmark_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS label" in benchmark_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS compare_label" in benchmark_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS pass_index" in benchmark_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS hash_parallelism" in benchmark_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS worker_count" in benchmark_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS manifest_skipped_unchanged" in benchmark_migration.sql
+    assert "idx_acceleration_benchmark_runs_compare" in benchmark_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

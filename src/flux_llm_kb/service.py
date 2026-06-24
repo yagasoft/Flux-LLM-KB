@@ -14,6 +14,7 @@ from typing import Any
 from .acceleration import (
     BENCHMARK_FIXTURES,
     FAMILY_DEFAULT_CAPS,
+    JOB_FAMILIES,
     collect_acceleration_status,
     job_family_for_type,
     kind_to_job_families,
@@ -577,61 +578,354 @@ class KnowledgeService:
     def watch_events(self, *, limit: int = 50) -> dict[str, Any]:
         return {"events": database.list_watch_events(limit=limit)}
 
-    def benchmark_history(self, *, fixture: str | None = None, limit: int = 20) -> dict[str, Any]:
+    def benchmark_history(
+        self,
+        *,
+        fixture: str | None = None,
+        mode: str | None = None,
+        label: str | None = None,
+        warm_state: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
         normalized = None if fixture in {None, "", "all"} else str(fixture)
-        return {"fixture": normalized or "all", "runs": database.list_benchmark_runs(fixture=normalized, limit=limit)}
+        normalized_mode = None if mode in {None, "", "all"} else str(mode)
+        return {
+            "fixture": normalized or "all",
+            "mode": normalized_mode or "all",
+            "runs": database.list_benchmark_runs(
+                fixture=normalized,
+                mode=normalized_mode,
+                label=label or None,
+                warm_state=warm_state or None,
+                limit=limit,
+            ),
+        }
 
-    def run_benchmark(self, *, fixture: str = "all", files: int = 10) -> dict[str, Any]:
+    def run_benchmark(
+        self,
+        *,
+        fixture: str = "all",
+        files: int = 10,
+        mode: str = "scan",
+        passes: int = 1,
+        label: str | None = None,
+        compare_label: str | None = None,
+        workers: int = 1,
+        family: str = "all",
+    ) -> dict[str, Any]:
         fixture_names = [item["name"] for item in BENCHMARK_FIXTURES]
         requested = str(fixture or "all")
         names = fixture_names if requested == "all" else [requested]
         unknown = [name for name in names if name not in fixture_names]
         if unknown:
             raise ValueError(f"unknown benchmark fixture: {unknown[0]}")
+        normalized_mode = _normalize_benchmark_mode(mode, allow_all=True)
+        modes = ["scan", "soak", "watcher"] if normalized_mode == "all" else [normalized_mode]
+        normalized_family = _normalize_benchmark_family(family)
         file_count = max(1, min(int(files or 10), 500))
-        runs = [self._run_single_benchmark(name, file_count) for name in names]
+        pass_count = max(1, min(int(passes or 1), 10))
+        worker_count = max(1, min(int(workers or 1), 32))
+        runs: list[dict[str, Any]] = []
+        for name in names:
+            for selected_mode in modes:
+                if selected_mode == "scan":
+                    runs.extend(
+                        self._run_scan_benchmark(
+                            name,
+                            file_count,
+                            passes=pass_count,
+                            label=label,
+                            compare_label=compare_label,
+                            worker_count=worker_count,
+                        )
+                    )
+                elif selected_mode == "soak":
+                    runs.append(
+                        self._run_soak_benchmark(
+                            name,
+                            file_count,
+                            label=label,
+                            compare_label=compare_label,
+                            worker_count=worker_count,
+                            family=normalized_family,
+                        )
+                    )
+                elif selected_mode == "watcher":
+                    runs.append(
+                        self._run_watcher_benchmark(
+                            name,
+                            file_count,
+                            label=label,
+                            compare_label=compare_label,
+                            worker_count=worker_count,
+                        )
+                    )
         return {
             "fixture": requested if requested != "all" else "all",
+            "mode": normalized_mode,
             "files": file_count,
             "runs": runs,
+            "recommendations": _benchmark_recommendations(runs),
         }
 
-    def _run_single_benchmark(self, fixture: str, files: int) -> dict[str, Any]:
+    def _run_scan_benchmark(
+        self,
+        fixture: str,
+        files: int,
+        *,
+        passes: int,
+        label: str | None,
+        compare_label: str | None,
+        worker_count: int,
+    ) -> list[dict[str, Any]]:
+        runs: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(prefix="flux-kb-benchmark-") as temp_dir:
             root = Path(temp_dir)
             _write_benchmark_fixture(root, fixture, files)
-            started = time.perf_counter()
-            plan = scan_path(root, CorpusPolicy(root_path=root))
-            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
-        per_file_ms = max(0, int(elapsed_ms / max(1, len(plan.assets))))
-        family_breakdown = _benchmark_family_breakdown(plan)
+            manifest: dict[str, dict[str, Any]] = {}
+            hash_parallelism = _configured_hash_parallelism()
+            for pass_index in range(1, passes + 1):
+                started = time.perf_counter()
+                plan = scan_path(
+                    root,
+                    CorpusPolicy(
+                        root_path=root,
+                        hash_parallelism=hash_parallelism,
+                        manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
+                    ),
+                )
+                elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+                for asset in plan.assets:
+                    manifest[asset.relative_path] = {
+                        "path": asset.relative_path,
+                        "size_bytes": asset.size_bytes,
+                        "mtime_ns": asset.mtime_ns,
+                        "quick_hash": asset.quick_hash,
+                        "content_hash": asset.content_hash,
+                    }
+                manifest_skipped = sum(1 for asset in plan.assets if asset.metadata.get("manifest_skipped_unchanged"))
+                per_file_ms = max(0, int(elapsed_ms / max(1, len(plan.assets))))
+                family_breakdown = _benchmark_family_breakdown(plan)
+                warm_state = "cold" if pass_index == 1 else "warm"
+                metadata = {
+                    "provider": "synthetic",
+                    "path_scope": "temporary",
+                    "watcher_backend": _configured_watcher_backend(),
+                    "hash_parallelism": hash_parallelism,
+                }
+                recorded = database.record_benchmark_run(
+                    fixture=fixture,
+                    mode="scan",
+                    label=label,
+                    compare_label=compare_label,
+                    file_count=len(plan.assets),
+                    elapsed_ms=elapsed_ms,
+                    timings_ms=[per_file_ms for _asset in plan.assets],
+                    warm_state=warm_state,
+                    pass_index=pass_index,
+                    hash_parallelism=hash_parallelism,
+                    worker_count=worker_count,
+                    manifest_skipped_unchanged=manifest_skipped,
+                    cache_hits=manifest_skipped,
+                    cache_misses=max(0, len(plan.assets) - manifest_skipped),
+                    jobs_queued=len(plan.deferred_jobs),
+                    jobs_completed=len(plan.assets) - len(plan.deferred_jobs),
+                    jobs_blocked=len(plan.errors),
+                    worker_family_breakdown=family_breakdown,
+                    metadata=metadata,
+                )
+                runs.append(
+                    _benchmark_run_payload(
+                        recorded=recorded,
+                        fixture=fixture,
+                        mode="scan",
+                        file_count=len(plan.assets),
+                        elapsed_ms=elapsed_ms,
+                        jobs_queued=len(plan.deferred_jobs),
+                        jobs_completed=len(plan.assets) - len(plan.deferred_jobs),
+                        jobs_blocked=len(plan.errors),
+                        worker_family_breakdown=family_breakdown,
+                        warm_state=warm_state,
+                        pass_index=pass_index,
+                        hash_parallelism=hash_parallelism,
+                        worker_count=worker_count,
+                        manifest_skipped_unchanged=manifest_skipped,
+                        cache_hits=manifest_skipped,
+                        cache_misses=max(0, len(plan.assets) - manifest_skipped),
+                        metadata=metadata,
+                    )
+                )
+        return runs
+
+    def _run_soak_benchmark(
+        self,
+        fixture: str,
+        files: int,
+        *,
+        label: str | None,
+        compare_label: str | None,
+        worker_count: int,
+        family: str,
+    ) -> dict[str, Any]:
+        tag = hashlib.sha256(f"{fixture}:{label or ''}:{time.time_ns()}".encode("utf-8")).hexdigest()[:16]
+        family_caps = _configured_worker_caps()
+        normalized_family = str(family or "all").lower()
+        family_filter = None if normalized_family == "all" else [normalized_family]
+        created = database.create_benchmark_soak_jobs(
+            tag=tag,
+            fixture=fixture,
+            file_count=files,
+            family=normalized_family,
+            label=label,
+        )
+        completed = 0
+        blocked = 0
+        timings: list[int] = []
+        family_breakdown: dict[str, dict[str, int]] = {}
+        started = time.perf_counter()
+        try:
+            claimed = database.claim_corpus_jobs(
+                limit=files,
+                worker_id=f"flux-kb-benchmark-{tag}",
+                job_families=family_filter,
+                family_caps=family_caps,
+            )
+            for index, job in enumerate(claimed):
+                duration_ms = max(1, index + 1)
+                timings.append(duration_ms)
+                job_family = str(job.get("job_family") or "general")
+                row = family_breakdown.setdefault(job_family, {"claimed": 0, "completed": 0, "blocked": 0})
+                row["claimed"] += 1
+                telemetry = {
+                    "benchmark_mode": "soak",
+                    "benchmark_tag": tag,
+                    "benchmark_fixture": fixture,
+                    "benchmark_file_count": files,
+                    "job_family": job_family,
+                    "resource_class": job.get("resource_class"),
+                }
+                payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+                if payload.get("benchmark_outcome") == "blocked":
+                    database.block_corpus_job(
+                        job_id=job["id"],
+                        error="benchmark synthetic blocked",
+                        status="blocked_benchmark",
+                        duration_ms=duration_ms,
+                        telemetry=telemetry,
+                    )
+                    row["blocked"] += 1
+                    blocked += 1
+                else:
+                    database.complete_corpus_job(job_id=job["id"], duration_ms=duration_ms, telemetry=telemetry)
+                    row["completed"] += 1
+                    completed += 1
+        finally:
+            purged = database.purge_benchmark_soak_jobs(tag=tag)
+        elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        metadata = {
+            "provider": "synthetic",
+            "path_scope": "temporary",
+            "benchmark_tag": tag,
+            "family": normalized_family,
+            "worker_caps": family_caps,
+            "purged": purged.get("purged"),
+        }
         recorded = database.record_benchmark_run(
             fixture=fixture,
-            file_count=len(plan.assets),
+            mode="soak",
+            label=label,
+            compare_label=compare_label,
+            file_count=int(created.get("created") or files),
             elapsed_ms=elapsed_ms,
-            timings_ms=[per_file_ms for _asset in plan.assets],
-            warm_state="cold",
+            timings_ms=timings,
+            warm_state="warm",
+            pass_index=1,
+            hash_parallelism=_configured_hash_parallelism(),
+            worker_count=worker_count,
             cache_hits=0,
-            cache_misses=len(plan.assets),
-            jobs_queued=len(plan.deferred_jobs),
-            jobs_completed=len(plan.assets) - len(plan.deferred_jobs),
-            jobs_blocked=len(plan.errors),
+            cache_misses=int(created.get("created") or files),
+            jobs_queued=int(created.get("created") or files),
+            jobs_completed=completed,
+            jobs_blocked=blocked,
             worker_family_breakdown=family_breakdown,
-            metadata={
-                "provider": "synthetic",
-                "path_scope": "temporary",
-                "watcher_backend": _configured_watcher_backend(),
-            },
+            metadata=metadata,
         )
-        return {
-            "id": recorded.get("id"),
-            "fixture": fixture,
-            "file_count": len(plan.assets),
-            "elapsed_ms": elapsed_ms,
-            "throughput_files_per_second": (len(plan.assets) / (elapsed_ms / 1000.0)) if elapsed_ms else 0.0,
-            "jobs_queued": len(plan.deferred_jobs),
-            "worker_family_breakdown": family_breakdown,
+        return _benchmark_run_payload(
+            recorded=recorded,
+            fixture=fixture,
+            mode="soak",
+            file_count=int(created.get("created") or files),
+            elapsed_ms=elapsed_ms,
+            jobs_queued=int(created.get("created") or files),
+            jobs_completed=completed,
+            jobs_blocked=blocked,
+            worker_family_breakdown=family_breakdown,
+            warm_state="warm",
+            pass_index=1,
+            hash_parallelism=_configured_hash_parallelism(),
+            worker_count=worker_count,
+            cache_hits=0,
+            cache_misses=int(created.get("created") or files),
+            metadata=metadata,
+        )
+
+    def _run_watcher_benchmark(
+        self,
+        fixture: str,
+        files: int,
+        *,
+        label: str | None,
+        compare_label: str | None,
+        worker_count: int,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        probe = probe_watcher_backend(backend_policy=_configured_watcher_backend(), timeout_seconds=2.0)
+        elapsed_ms = int(probe.get("latency_ms") or max(0, int((time.perf_counter() - started) * 1000)))
+        metadata = {
+            "provider": "synthetic",
+            "path_scope": "temporary",
+            "watcher_backend": probe.get("backend") or {},
+            "watcher_events": probe.get("events") or {},
+            "latency_ms": elapsed_ms,
         }
+        recorded = database.record_benchmark_run(
+            fixture=fixture,
+            mode="watcher",
+            label=label,
+            compare_label=compare_label,
+            file_count=files,
+            elapsed_ms=elapsed_ms,
+            timings_ms=[elapsed_ms],
+            warm_state="warm",
+            pass_index=1,
+            hash_parallelism=_configured_hash_parallelism(),
+            worker_count=worker_count,
+            cache_hits=0,
+            cache_misses=0,
+            jobs_queued=0,
+            jobs_completed=0,
+            jobs_blocked=0,
+            worker_family_breakdown={},
+            metadata=metadata,
+        )
+        return _benchmark_run_payload(
+            recorded=recorded,
+            fixture=fixture,
+            mode="watcher",
+            file_count=files,
+            elapsed_ms=elapsed_ms,
+            jobs_queued=0,
+            jobs_completed=0,
+            jobs_blocked=0,
+            worker_family_breakdown={},
+            warm_state="warm",
+            pass_index=1,
+            hash_parallelism=_configured_hash_parallelism(),
+            worker_count=worker_count,
+            cache_hits=0,
+            cache_misses=0,
+            metadata=metadata,
+        )
 
     def backfill_episode_workspace_scope(
         self,
@@ -1627,6 +1921,82 @@ def _benchmark_family_breakdown(plan: Any) -> dict[str, dict[str, int]]:
         else:
             row["metadata_only"] += 1
     return breakdown
+
+
+def _benchmark_run_payload(
+    *,
+    recorded: dict[str, Any],
+    fixture: str,
+    mode: str,
+    file_count: int,
+    elapsed_ms: int,
+    jobs_queued: int,
+    jobs_completed: int,
+    jobs_blocked: int,
+    worker_family_breakdown: dict[str, Any],
+    warm_state: str,
+    pass_index: int,
+    hash_parallelism: int,
+    worker_count: int,
+    manifest_skipped_unchanged: int = 0,
+    cache_hits: int,
+    cache_misses: int,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "id": recorded.get("id"),
+        "fixture": fixture,
+        "mode": mode,
+        "file_count": file_count,
+        "elapsed_ms": elapsed_ms,
+        "throughput_files_per_second": (file_count / (elapsed_ms / 1000.0)) if elapsed_ms else 0.0,
+        "jobs_queued": jobs_queued,
+        "jobs_completed": jobs_completed,
+        "jobs_blocked": jobs_blocked,
+        "worker_family_breakdown": worker_family_breakdown,
+        "warm_state": warm_state,
+        "pass_index": pass_index,
+        "hash_parallelism": hash_parallelism,
+        "worker_count": worker_count,
+        "manifest_skipped_unchanged": manifest_skipped_unchanged,
+        "cache_hits": cache_hits,
+        "cache_misses": cache_misses,
+        "metadata": metadata,
+    }
+
+
+def _benchmark_recommendations(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    best_scan = max(
+        (run for run in runs if run.get("mode") == "scan"),
+        key=lambda run: float(run.get("throughput_files_per_second") or 0.0),
+        default=None,
+    )
+    best_soak = max(
+        (run for run in runs if run.get("mode") == "soak"),
+        key=lambda run: int(run.get("jobs_completed") or 0),
+        default=None,
+    )
+    return {
+        "settings_mutated": False,
+        "observed_hash_parallelism": best_scan.get("hash_parallelism") if best_scan else None,
+        "observed_worker_count": best_soak.get("worker_count") if best_soak else None,
+        "basis": "diagnostic_observation_only",
+    }
+
+
+def _normalize_benchmark_mode(value: str | None, *, allow_all: bool = False) -> str:
+    normalized = str(value or "scan").strip().lower()
+    allowed = {"scan", "soak", "watcher"} | ({"all"} if allow_all else set())
+    if normalized not in allowed:
+        raise ValueError("benchmark mode must be scan, soak, watcher, or all")
+    return normalized
+
+
+def _normalize_benchmark_family(value: str | None) -> str:
+    normalized = str(value or "all").strip().lower()
+    if normalized != "all" and normalized not in JOB_FAMILIES:
+        raise ValueError(f"benchmark family must be all or one of: {', '.join(JOB_FAMILIES)}")
+    return normalized
 
 
 def _write_benchmark_fixture(root: Path, fixture: str, files: int) -> None:

@@ -163,12 +163,20 @@ type AccelerationWorkerFamily = {
 type AccelerationBenchmarkRun = {
   id?: string;
   fixture?: string;
+  mode?: string;
+  label?: string;
+  compare_label?: string;
   status?: string;
   file_count?: number;
   elapsed_ms?: number;
   throughput_files_per_second?: number;
   previous_elapsed_delta_ms?: number | null;
+  previous_throughput_delta?: number | null;
   warm_state?: string;
+  pass_index?: number;
+  hash_parallelism?: number;
+  worker_count?: number;
+  manifest_skipped_unchanged?: number;
   cache_hits?: number;
   cache_misses?: number;
   created_at?: string | null;
@@ -1768,6 +1776,8 @@ function HealthTab({
 }
 
 function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus }) {
+  const [benchmarkStatus, setBenchmarkStatus] = useState("");
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const capabilities = acceleration?.capabilities ?? {};
   const cache = acceleration?.cache ?? {};
   const families = acceleration?.worker_families ?? [];
@@ -1835,14 +1845,36 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
       ] as [string, string, string];
     });
   const benchmarkRows = benchmarkHistory.slice(0, 5).map((run) => {
-    const delta = run.previous_elapsed_delta_ms;
-    const deltaText = delta == null ? "no prior run" : `${delta >= 0 ? "+" : ""}${delta}ms delta`;
+    const elapsedDelta = run.previous_elapsed_delta_ms;
+    const throughputDelta = run.previous_throughput_delta;
+    const elapsedText = elapsedDelta == null ? "no prior" : `${elapsedDelta >= 0 ? "+" : ""}${elapsedDelta}ms`;
+    const throughputText = throughputDelta == null ? "" : `; ${throughputDelta >= 0 ? "+" : ""}${Math.round(throughputDelta)} files/s`;
+    const modeText = `${humanizeIdentifier(run.mode ?? "scan")} / ${run.warm_state ?? "cold"} / pass ${run.pass_index ?? 1}`;
+    const metadata = [
+      run.label,
+      run.hash_parallelism != null ? `hash ${run.hash_parallelism}` : null,
+      run.worker_count != null ? `workers ${run.worker_count}` : null,
+      (run.manifest_skipped_unchanged ?? 0) > 0 ? `${run.manifest_skipped_unchanged} manifest skips` : null
+    ].filter(Boolean).join("; ") || "metadata only";
     return [
       run.fixture ?? "fixture",
-      `${run.file_count ?? 0} files`,
-      `${Math.round(run.throughput_files_per_second ?? 0)} files/s; ${deltaText}`
-    ] as [string, string, string];
+      modeText,
+      `${Math.round(run.throughput_files_per_second ?? 0)} files/s; ${elapsedText}${throughputText}`,
+      metadata
+    ] as [string, string, string, string];
   });
+  async function runScanBenchmark() {
+    try {
+      setBenchmarkRunning(true);
+      setBenchmarkStatus("Benchmark queued...");
+      await sendJson("/api/acceleration/benchmarks/run", "POST", { fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all" });
+      setBenchmarkStatus("Benchmark run recorded.");
+    } catch (error) {
+      setBenchmarkStatus(`Benchmark failed: ${errorMessage(error)}`);
+    } finally {
+      setBenchmarkRunning(false);
+    }
+  }
   return (
     <Panel title="Acceleration">
       <div className="status-grid">
@@ -1870,12 +1902,17 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
           <MiniTable rows={backpressureRows} />
         </div>
       )}
-      {benchmarkRows.length > 0 && (
-        <div className="settings-list">
-          <div className="settings-row"><strong>Benchmark History</strong><span>{benchmarkRows.length} recent synthetic runs</span><em>metadata only</em></div>
-          <MiniTable rows={benchmarkRows} />
+      <div className="settings-list">
+        <div className="settings-row">
+          <strong>Benchmark History</strong>
+          <span>{benchmarkRows.length} recent synthetic runs</span>
+          <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={runScanBenchmark}>
+            <Play size={15} /> Run scan benchmark
+          </button>
         </div>
-      )}
+        {benchmarkRows.length > 0 ? <MiniTable rows={benchmarkRows} /> : <p className="panel-note">No synthetic benchmark history yet.</p>}
+        {benchmarkStatus && <p className="panel-note">{benchmarkStatus}</p>}
+      </div>
     </Panel>
   );
 }
@@ -4248,14 +4285,15 @@ function Stat({ label, value }: { label: string; value: string }) {
   return <div className="stat"><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function MiniTable({ rows }: { rows: Array<[string, string, string]> }) {
+type MiniTableRow = [string, string, string] | [string, string, string, string];
+
+function MiniTable({ rows }: { rows: MiniTableRow[] }) {
+  const wide = rows.some((row) => row.length > 3);
   return (
-    <div className="mini-table">
-      {rows.map(([kind, source, status]) => (
-        <div key={`${kind}-${source}`}>
-          <span>{kind}</span>
-          <span>{source}</span>
-          <strong>{status}</strong>
+    <div className={`mini-table${wide ? " wide" : ""}`}>
+      {rows.map((row) => (
+        <div key={row.join("-")}>
+          {row.map((cell, index) => index === row.length - 1 ? <strong key={`${cell}-${index}`}>{cell}</strong> : <span key={`${cell}-${index}`}>{cell}</span>)}
         </div>
       ))}
     </div>

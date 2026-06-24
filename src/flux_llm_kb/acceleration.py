@@ -603,6 +603,9 @@ def _benchmark_history_row(row: dict[str, Any]) -> dict[str, Any]:
     normalized: dict[str, Any] = {
         "id": str(payload.get("id") or ""),
         "fixture": str(payload.get("fixture") or payload.get("name") or ""),
+        "mode": str(payload.get("mode") or "scan"),
+        "label": payload.get("label"),
+        "compare_label": payload.get("compare_label"),
         "status": str(payload.get("status") or "completed"),
         "file_count": int(payload.get("file_count") or 0),
         "elapsed_ms": int(payload.get("elapsed_ms") or 0),
@@ -617,10 +620,22 @@ def _benchmark_history_row(row: dict[str, Any]) -> dict[str, Any]:
         "jobs_completed": int(payload.get("jobs_completed") or 0),
         "jobs_blocked": int(payload.get("jobs_blocked") or 0),
         "previous_elapsed_delta_ms": _int_or_none(payload.get("previous_elapsed_delta_ms")),
+        "previous_throughput_delta": _float_or_none(payload.get("previous_throughput_delta")),
+        "pass_index": _int_or_none(payload.get("pass_index")),
+        "hash_parallelism": _int_or_none(payload.get("hash_parallelism")),
+        "worker_count": _int_or_none(payload.get("worker_count")),
+        "manifest_skipped_unchanged": int(payload.get("manifest_skipped_unchanged") or 0),
         "worker_family_breakdown": payload.get("worker_family_breakdown") if isinstance(payload.get("worker_family_breakdown"), dict) else {},
         "created_at": payload.get("created_at"),
     }
     return {key: value for key, value in normalized.items() if value is not None and value != ""}
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _int_or_none(value: Any) -> int | None:

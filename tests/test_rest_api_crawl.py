@@ -215,8 +215,23 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
     probe = client.post("/api/crawl/watch/probe", json={"timeout_seconds": 1.5})
     workers = client.get("/api/crawl/workers", params={"family": "media"})
     events = client.get("/api/crawl/watch/events", params={"limit": 5})
-    run = client.post("/api/acceleration/benchmarks/run", json={"fixture": "image-heavy", "files": 4})
-    history = client.get("/api/acceleration/benchmarks", params={"fixture": "image-heavy", "limit": 3})
+    run = client.post(
+        "/api/acceleration/benchmarks/run",
+        json={
+            "fixture": "image-heavy",
+            "files": 4,
+            "mode": "soak",
+            "passes": 2,
+            "label": "after-deploy",
+            "compare_label": "before-deploy",
+            "workers": 3,
+            "family": "media",
+        },
+    )
+    history = client.get(
+        "/api/acceleration/benchmarks",
+        params={"fixture": "image-heavy", "mode": "soak", "label": "after-deploy", "warm_state": "warm", "limit": 3},
+    )
 
     assert probe.status_code == 200
     assert probe.json()["path_scope"] == "temporary"
@@ -232,8 +247,20 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
         ("watch_probe", {"timeout_seconds": 1.5}),
         ("worker_status", {"family": "media"}),
         ("watch_events", {"limit": 5}),
-        ("benchmark_run", {"fixture": "image-heavy", "files": 4}),
-        ("benchmark_history", {"fixture": "image-heavy", "limit": 3}),
+        (
+            "benchmark_run",
+            {
+                "fixture": "image-heavy",
+                "files": 4,
+                "mode": "soak",
+                "passes": 2,
+                "label": "after-deploy",
+                "compare_label": "before-deploy",
+                "workers": 3,
+                "family": "media",
+            },
+        ),
+        ("benchmark_history", {"fixture": "image-heavy", "mode": "soak", "label": "after-deploy", "warm_state": "warm", "limit": 3}),
     ]
 
 

@@ -137,8 +137,10 @@ flux-kb host-agent run
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl backfill --kind embeddings --limit 20
 flux-kb crawl worker status --family all
-flux-kb acceleration benchmark run --fixture all --files 10
-flux-kb acceleration benchmark history --fixture text-heavy --limit 10
+flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
+flux-kb acceleration benchmark run --fixture image-heavy --files 20 --mode soak --workers 2 --family media
+flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
+flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
 flux-kb embeddings backfill --owner-class all --limit 100
@@ -206,16 +208,28 @@ watch probe --timeout <seconds>` to run a temporary-directory create/update/dele
 probe. The probe does not touch private watched roots.
 `crawler.hash_parallelism` defaults to conservative serial hashing. Incremental
 scan manifests record path fingerprints and expose `manifest_skipped_unchanged`
-counters when unchanged files skip expensive hashing/extraction.
+counters when unchanged files skip expensive hashing/extraction. Raising hash
+parallelism enables bounded concurrent content hashing for changed files while
+preserving deterministic scan ordering, manifest skip behavior, lock fallback,
+and serial local parser extraction.
 The acceleration status also includes deterministic benchmark fixture summaries
 and durable benchmark history for text-heavy, Office/PDF-heavy,
 archive/container-heavy, image-heavy, and audio/video-heavy synthetic roots.
-Run `flux-kb acceleration benchmark run --fixture <name|all> --files <n>` and
+Run `flux-kb acceleration benchmark run --fixture <name|all> --files <n>
+--mode <scan|soak|watcher|all>` and
 inspect prior metadata-only runs with `flux-kb acceleration benchmark history
---fixture <name> --limit <n>`. Benchmark storage records fixture names, counts,
-timings, cache counters, backend/provider metadata, and sanitized summaries
-only; it does not store raw text, mail contents, private watched roots,
-credentials, or embeddings.
+--fixture <name> --mode <scan|soak|watcher> --label <label> --warm-state
+<cold|warm> --limit <n>`. Scan mode supports `--passes`; pass 1 is cold and
+later passes reuse an in-memory manifest as warm scans. Soak mode supports
+`--workers` and `--family`, creates benchmark-tagged synthetic jobs through the
+normal worker cap logic, and purges them after the run. Watcher mode runs the
+temporary watcher probe and records backend policy, selected backend, fallback
+reason, event counts, and latency. Labels and `--compare-label` support
+before/after comparisons without changing runtime settings. Benchmark storage
+records fixture names, mode, labels, counts, timings, cache counters,
+hash-parallelism, worker-count, manifest-skip, backend/provider metadata, and
+sanitized summaries only; it does not store raw text, mail contents, private
+watched roots, credentials, or embeddings.
 Worker-family status is available with `flux-kb crawl worker status --family
 <name|all>` and reports configured caps, cap pressure, worker-family
 backpressure, oldest pending age, slow recent jobs, retry/lock transitions,

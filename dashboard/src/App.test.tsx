@@ -43,7 +43,25 @@ const health = {
     ],
     benchmarks: {
       history: [
-        { id: "run-2", fixture: "image-heavy", status: "completed", file_count: 10, elapsed_ms: 1000, throughput_files_per_second: 10, previous_elapsed_delta_ms: -250, warm_state: "warm", cache_hits: 7, cache_misses: 3 }
+        {
+          id: "run-2",
+          fixture: "image-heavy",
+          mode: "scan",
+          label: "after-deploy",
+          status: "completed",
+          file_count: 10,
+          elapsed_ms: 1000,
+          throughput_files_per_second: 10,
+          previous_elapsed_delta_ms: -250,
+          previous_throughput_delta: 2,
+          warm_state: "warm",
+          pass_index: 2,
+          hash_parallelism: 4,
+          worker_count: 3,
+          manifest_skipped_unchanged: 8,
+          cache_hits: 7,
+          cache_misses: 3
+        }
       ]
     }
   },
@@ -310,6 +328,7 @@ let postProcessDryRunPayload: unknown;
 let retentionPoliciesPayload: unknown;
 let retentionQualityPayload: unknown;
 let retentionPolicyUpdatePayload: unknown;
+let benchmarkRunPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -476,6 +495,7 @@ describe("Flux dashboard", () => {
       ]
     };
     retentionPolicyUpdatePayload = undefined;
+    benchmarkRunPayload = undefined;
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -508,6 +528,10 @@ describe("Flux dashboard", () => {
       }
       if (url.startsWith("/api/settings/") && url.endsWith("/reset")) return json({ status: "reset" });
       if (url === "/api/settings/apply") return json({ acknowledged: 1 });
+      if (url === "/api/acceleration/benchmarks/run" && init?.method === "POST") {
+        benchmarkRunPayload = JSON.parse(String(init.body));
+        return json({ fixture: "all", mode: "scan", runs: [] });
+      }
       if (url === "/api/mail/profiles" && init?.method === "POST") return json({ ...JSON.parse(String(init.body)), enabled: true });
       if (url.startsWith("/api/mail/profiles/") && url.endsWith("/oauth-client-config") && init?.method === "PUT") {
         return json({
@@ -649,6 +673,7 @@ describe("Flux dashboard", () => {
   });
 
   test("health shows acceleration capabilities, cache layout, and family telemetry", async () => {
+    const user = userEvent.setup();
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
@@ -668,7 +693,11 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Cap Reached; oldest 120s; retry 2; blocked locks 1; parser 3 hit / 1 miss; 5 manifest skips")).toBeInTheDocument();
     expect(screen.getByText("Benchmark History")).toBeInTheDocument();
     expect(screen.getByText("image-heavy")).toBeInTheDocument();
-    expect(screen.getByText("10 files/s; -250ms delta")).toBeInTheDocument();
+    expect(screen.getByText("Scan / warm / pass 2")).toBeInTheDocument();
+    expect(screen.getByText("10 files/s; -250ms; +2 files/s")).toBeInTheDocument();
+    expect(screen.getByText("after-deploy; hash 4; workers 3; 8 manifest skips")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
+    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all" });
     expect(screen.getByText("office")).toBeInTheDocument();
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });

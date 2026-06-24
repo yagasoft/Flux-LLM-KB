@@ -28,8 +28,10 @@ system rather than a large prompt-injected memory file.
   event counters, sanitized event rows, and error state for dashboard
   monitoring.
 - `acceleration_benchmark_runs`: metadata-only synthetic benchmark history for
-  fixture names, file counts, timings, throughput, cache counters, warm/cold
-  state, worker-family breakdowns, and previous-run deltas.
+  fixture names, benchmark modes, labels, comparison labels, pass indexes,
+  hash parallelism, worker counts, manifest skip counts, timings, throughput,
+  cache counters, warm/cold state, worker-family breakdowns, watcher probe
+  summaries, and previous-run deltas.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -217,7 +219,10 @@ reuses the prior content hash, skips expensive content hashing and inline
 extraction, and records `manifest_skipped_unchanged`; reconciliation still
 persists the observed asset row and verifies deletions/changes. Bounded hash
 parallelism is controlled by `crawler.hash_parallelism` and defaults to serial
-hashing.
+hashing. When raised above one, the scanner precomputes changed-file content
+hashes with bounded concurrency while keeping deterministic asset ordering,
+manifest reuse, stability gating, lock fallback behavior, and local parser
+extraction serial.
 
 VSS is a host-agent controlled future fallback for Windows local NTFS roots, not
 a Docker/API desktop action. The setting is disabled by default; the host agent
@@ -246,9 +251,22 @@ Synthetic benchmark history is durable and public-safe. Runs are generated from
 temporary fixture trees (`text-heavy`, `office-pdf-heavy`,
 `archive-container-heavy`, `image-heavy`, and `audio-video-heavy`) and stored in
 `acceleration_benchmark_runs`. Stored records contain fixture names, counts,
-timings, p50/p95/max, throughput, warm/cold state, cache hit/miss counters,
-worker-family breakdowns, and sanitized summaries only. They never store raw
-text, mail contents, credentials, embeddings, or private watched roots.
+mode, label, compare label, pass index, timings, p50/p95/max, throughput,
+warm/cold state, cache hit/miss counters, hash parallelism, worker count,
+manifest skip counts, worker-family breakdowns, comparable elapsed and
+throughput deltas, and sanitized summaries only. `scan` mode creates temporary
+fixtures and can run multiple passes; pass 1 is recorded as `cold`, later passes
+reuse an in-memory manifest and are recorded as `warm`. `soak` mode creates
+benchmark-tagged synthetic corpus jobs by worker family, claims them through the
+same cap/backpressure logic as normal workers, completes or blocks them
+deterministically, and purges the tagged jobs in cleanup. `watcher` mode runs
+the temporary watcher probe and stores backend policy, selected backend,
+fallback reason, event counts, and latency metadata. `all` mode runs scan, soak,
+and watcher modes for the selected fixtures. Benchmark responses can include
+diagnostic recommendation candidates such as observed hash parallelism or worker
+counts with `settings_mutated: false`; they never call settings mutation APIs.
+They never store raw text, mail contents, credentials, embeddings, or private
+watched roots.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,

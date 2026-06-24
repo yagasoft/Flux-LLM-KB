@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
@@ -214,16 +215,47 @@ def scan_path(
     target = Path(target_path).expanduser().resolve() if target_path else None
     scope_relative_path = _scope_relative_path(root, target) if target else None
     scope_is_file = bool(target and target.is_file())
+    entries: list[tuple[str, Path | DiscoveredAsset]] = []
+    paths = sorted(
+        _iter_files(root, recursive=active_policy.recursive, target=target),
+        key=lambda item: item.relative_to(root).as_posix().lower(),
+    )
 
-    for path in _iter_files(root, recursive=active_policy.recursive, target=target):
+    for path in paths:
         try:
             relative_path = path.relative_to(root).as_posix()
             if not _is_included(relative_path, active_policy, marker_patterns):
                 continue
             if _should_wait_for_stability(path, root, active_policy):
-                assets.append(_status_asset(path, root, "pending_stable", "mtime_not_stable", active_policy))
+                entries.append(("asset", _status_asset(path, root, "pending_stable", "mtime_not_stable", active_policy)))
                 continue
-            asset = discover_asset(path, root, active_policy)
+            entries.append(("path", path))
+        except Exception as exc:
+            if _is_locked_error(exc):
+                entries.append(("asset", _status_asset(path, root, "retrying_locked", "file_locked", active_policy, error=str(exc))))
+                continue
+            errors.append({"path": str(path), "error": str(exc)})
+
+    stable_paths = [entry[1] for entry in entries if entry[0] == "path"]
+    precomputed_hashes = _precompute_content_hashes(stable_paths, root, active_policy)
+
+    for entry_type, entry in entries:
+        try:
+            if entry_type == "asset":
+                assets.append(entry)  # type: ignore[arg-type]
+                continue
+            path = entry  # type: ignore[assignment]
+            hash_precomputed = path in precomputed_hashes
+            if hash_precomputed:
+                asset = discover_asset(
+                    path,
+                    root,
+                    active_policy,
+                    content_hash_override=precomputed_hashes.get(path),
+                    content_hash_precomputed=True,
+                )
+            else:
+                asset = discover_asset(path, root, active_policy)
             assets.append(asset)
             if asset.extraction_tier == "deferred":
                 deferred_jobs.append(
@@ -249,7 +281,14 @@ def scan_path(
     )
 
 
-def discover_asset(path: Path, root: Path, policy: CorpusPolicy) -> DiscoveredAsset:
+def discover_asset(
+    path: Path,
+    root: Path,
+    policy: CorpusPolicy,
+    *,
+    content_hash_override: str | None = None,
+    content_hash_precomputed: bool = False,
+) -> DiscoveredAsset:
     resolved = path.resolve()
     stat = resolved.stat()
     classification = classify_file(resolved, policy)
@@ -261,6 +300,8 @@ def discover_asset(path: Path, root: Path, policy: CorpusPolicy) -> DiscoveredAs
     if manifest_unchanged:
         content_hash = str(manifest.get("content_hash") or "") or None
         metadata["manifest_skipped_unchanged"] = True
+    elif content_hash_precomputed:
+        content_hash = content_hash_override
     else:
         content_hash = _sha256_file(resolved) if stat.st_size <= policy.hash_max_bytes else None
     chunks: tuple[AssetChunk, ...] = ()
@@ -311,6 +352,44 @@ def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
     if ext in DOCUMENT_EXTENSIONS:
         return FileClassification(file_kind=file_kind, extraction_tier="deferred", mime_type=mime_type)
     return FileClassification(file_kind=file_kind, extraction_tier="metadata_only", mime_type=mime_type)
+
+
+def _precompute_content_hashes(paths: list[Path], root: Path, policy: CorpusPolicy) -> dict[Path, str | None]:
+    parallelism = max(1, int(policy.hash_parallelism or 1))
+    if parallelism <= 1 or len(paths) <= 1:
+        return {}
+
+    targets: list[Path] = []
+    hashes: dict[Path, str | None] = {}
+    for path in paths:
+        try:
+            resolved = path.resolve()
+            stat = resolved.stat()
+            relative_path = resolved.relative_to(root.resolve()).as_posix()
+            quick_hash = _quick_hash(resolved, stat.st_size, stat.st_mtime_ns)
+            manifest = policy.manifest_lookup(relative_path) if policy.manifest_lookup else None
+            manifest_unchanged = _manifest_matches(
+                manifest,
+                size_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                quick_hash=quick_hash,
+            )
+            if manifest_unchanged:
+                hashes[path] = str(manifest.get("content_hash") or "") or None
+            elif stat.st_size <= policy.hash_max_bytes:
+                targets.append(path)
+            else:
+                hashes[path] = None
+        except OSError:
+            continue
+
+    if not targets:
+        return hashes
+
+    with ThreadPoolExecutor(max_workers=min(parallelism, len(targets))) as executor:
+        for path, content_hash in zip(targets, executor.map(lambda item: _sha256_file(item.resolve()), targets)):
+            hashes[path] = content_hash
+    return hashes
 
 
 def _iter_files(root: Path, *, recursive: bool, target: Path | None = None) -> Iterable[Path]:

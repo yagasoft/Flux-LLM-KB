@@ -443,6 +443,9 @@ def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
                 (
                     "run-2",
                     "image-heavy",
+                    "scan",
+                    "nightly",
+                    "baseline",
                     "completed",
                     10,
                     1000,
@@ -456,10 +459,15 @@ def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
                     10,
                     10,
                     0,
+                    2,
+                    4,
+                    3,
+                    9,
                     {"image": {"completed": 10}},
-                    {"provider": "synthetic"},
+                    {"provider": "synthetic", "private_path": "E:/secret/root"},
                     timestamp,
                     1250,
+                    8.0,
                 )
             ]
 
@@ -484,21 +492,47 @@ def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
         file_count=10,
         elapsed_ms=1000,
         timings_ms=[50, 75, 120, 180],
+        mode="scan",
+        label="nightly",
+        compare_label="baseline",
         warm_state="warm",
+        pass_index=2,
+        hash_parallelism=4,
+        worker_count=3,
+        manifest_skipped_unchanged=9,
         cache_hits=7,
         cache_misses=3,
         worker_family_breakdown={"image": {"completed": 10}},
         metadata={"private_path": "E:/secret/root", "provider": "synthetic", "raw_text": "do not store"},
     )
-    rows = database.list_benchmark_runs(fixture="image-heavy", limit=5)
+    rows = database.list_benchmark_runs(fixture="image-heavy", mode="scan", label="nightly", warm_state="warm", limit=5)
 
     insert_sql, insert_params = executed[0]
     assert "INSERT INTO acceleration_benchmark_runs" in insert_sql
-    assert insert_params[0] == "image-heavy"
+    assert "mode" in insert_sql
+    assert "label" in insert_sql
+    assert "manifest_skipped_unchanged" in insert_sql
+    assert insert_params[0:5] == ("image-heavy", "scan", "nightly", "baseline", "completed")
     assert json.loads(insert_params[-2]) == {"image": {"completed": 10}}
     assert json.loads(insert_params[-1]) == {"provider": "synthetic"}
+    list_sql, list_params = executed[1]
+    assert "mode = %s" in list_sql
+    assert "label = %s" in list_sql
+    assert "warm_state = %s" in list_sql
+    assert "LEFT JOIN LATERAL" in list_sql
+    assert "prior.label = current_run.compare_label" in list_sql
+    assert list_params[:4] == ("image-heavy", "scan", "nightly", "warm")
     assert inserted["id"] == "run-2"
+    assert inserted["mode"] == "scan"
     assert rows[0]["previous_elapsed_delta_ms"] == -250
+    assert rows[0]["previous_throughput_delta"] == 2.0
+    assert rows[0]["mode"] == "scan"
+    assert rows[0]["label"] == "nightly"
+    assert rows[0]["compare_label"] == "baseline"
+    assert rows[0]["pass_index"] == 2
+    assert rows[0]["hash_parallelism"] == 4
+    assert rows[0]["worker_count"] == 3
+    assert rows[0]["manifest_skipped_unchanged"] == 9
     assert "private_path" not in json.dumps(rows)
     assert "raw_text" not in json.dumps(rows)
 

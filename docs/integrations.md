@@ -33,8 +33,8 @@ Tools:
 | `kb.acceleration_status` | Return local capability, cache layout, and worker-family queue telemetry. |
 | `kb.watch_probe` | Run a temp-directory watcher backend probe without touching private watched roots. |
 | `kb.worker_status` | Return worker-family cap usage, backpressure, retry/lock, and slow-job status. |
-| `kb.benchmark_run` | Run deterministic synthetic indexing benchmarks and store metadata-only history. |
-| `kb.benchmark_history` | List metadata-only synthetic benchmark history with previous-run deltas. |
+| `kb.benchmark_run` | Run deterministic synthetic scan, soak, watcher, or all-mode benchmarks and store metadata-only history. |
+| `kb.benchmark_history` | List metadata-only synthetic benchmark history with mode, label, warm-state, and previous-run delta filters. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
 | `kb.embeddings_enqueue` | Queue a local `corpus_embed` job for missing or stale vectors. |
 | `kb.embeddings_backfill` | Refresh missing or stale vectors immediately with the local deterministic provider. |
@@ -69,8 +69,8 @@ Endpoints:
 
 - `GET /api/health`
 - `GET /api/acceleration/status`
-- `POST /api/acceleration/benchmarks/run`
-- `GET /api/acceleration/benchmarks?fixture=<name>&limit=<n>`
+- `POST /api/acceleration/benchmarks/run` with optional `fixture`, `files`, `mode`, `passes`, `label`, `compare_label`, `workers`, and `family`
+- `GET /api/acceleration/benchmarks?fixture=<name>&mode=<scan|soak|watcher>&label=<label>&warm_state=<cold|warm>&limit=<n>`
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -181,8 +181,10 @@ flux-kb semantic-duplicates list --memory-class corpus --limit 50
 flux-kb acceleration status
 flux-kb crawl watch probe --timeout 2
 flux-kb crawl worker status --family all
-flux-kb acceleration benchmark run --fixture all --files 10
-flux-kb acceleration benchmark history --fixture text-heavy --limit 10
+flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
+flux-kb acceleration benchmark run --fixture image-heavy --files 20 --mode soak --workers 2 --family media
+flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
+flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
 ```
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
@@ -258,9 +260,17 @@ roots.
 Watcher probes and benchmark runs are metadata-only operational checks. They
 use temporary synthetic files and must not touch private watched roots or store
 raw text, mail contents, private paths, credentials, or embeddings. Benchmark
-history is metadata only and is exposed through CLI, REST, and MCP as fixture names, counts, timings,
+history is metadata only and is exposed through CLI, REST, and MCP as fixture
+names, modes, labels, compare labels, pass indexes, counts, timings,
 p50/p95/max, throughput, warm/cold state, cache hit/miss counters,
-worker-family breakdowns, and sanitized summaries.
+hash-parallelism, worker-count, manifest-skip fields, worker-family breakdowns,
+watcher backend summaries, comparable elapsed and throughput deltas, and
+sanitized summaries. Benchmark `scan` mode supports cold/warm passes, `soak`
+mode exercises benchmark-tagged synthetic worker-family jobs through existing
+cap/backpressure logic and purges them, `watcher` mode stores temporary probe
+metadata, and `all` mode runs all three. Recommendation payloads are diagnostic
+only and report `settings_mutated: false`; callers must change settings
+explicitly through the normal settings APIs.
 Embedding status, enqueue, and immediate backfill are also exposed through
 `GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
 `POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,
