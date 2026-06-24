@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     search_parser = subparsers.add_parser("search", help="Search stored episodes")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=5)
+    _add_retrieval_filter_args(search_parser)
 
     explain_parser = subparsers.add_parser("explain", help="Search with snippets, ranking signals, and brief packing rationale")
     explain_parser.add_argument("query")
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     explain_parser.add_argument("--cwd")
     explain_parser.add_argument("--root-name")
     explain_parser.add_argument("--scope-mode", default="local_first")
+    _add_retrieval_filter_args(explain_parser)
 
     remember_parser = subparsers.add_parser("remember", help="Store a manual memory")
     remember_parser.add_argument("title")
@@ -373,27 +375,56 @@ def _status(_: argparse.Namespace) -> int:
 def _search(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
-    print(json.dumps(KnowledgeService().search(args.query, limit=args.limit), indent=2))
+    filters = _retrieval_filters_from_args(args)
+    if filters is None:
+        payload = KnowledgeService().search(args.query, limit=args.limit)
+    else:
+        payload = KnowledgeService().search(args.query, limit=args.limit, filters=filters)
+    print(json.dumps(payload, indent=2))
     return 0
 
 
 def _explain(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
+    filters = _retrieval_filters_from_args(args)
+    kwargs = {
+        "limit": args.limit,
+        "token_budget": args.token_budget,
+        "cwd": args.cwd,
+        "root_name": args.root_name,
+        "scope_mode": args.scope_mode,
+    }
+    if filters is not None:
+        kwargs["filters"] = filters
     print(
         json.dumps(
-            KnowledgeService().explain(
-                args.query,
-                limit=args.limit,
-                token_budget=args.token_budget,
-                cwd=args.cwd,
-                root_name=args.root_name,
-                scope_mode=args.scope_mode,
-            ),
+            KnowledgeService().explain(args.query, **kwargs),
             indent=2,
         )
     )
     return 0
+
+
+def _add_retrieval_filter_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--kind", action="append", choices=["episode", "file", "mail"], dest="logical_kinds")
+    parser.add_argument("--current-only", action="store_true")
+    parser.add_argument("--lifecycle-state", action="append", dest="lifecycle_states")
+    parser.add_argument("--include-suppressed", action="store_true")
+
+
+def _retrieval_filters_from_args(args: argparse.Namespace) -> dict | None:
+    filters = {
+        "logical_kinds": getattr(args, "logical_kinds", None) or [],
+        "current_only": bool(getattr(args, "current_only", False)),
+        "lifecycle_states": getattr(args, "lifecycle_states", None) or [],
+        "include_suppressed": bool(getattr(args, "include_suppressed", False)),
+    }
+    if not any(filters.values()):
+        return None
+    from .service import normalize_retrieval_filters
+
+    return normalize_retrieval_filters(filters)
 
 
 def _remember(args: argparse.Namespace) -> int:

@@ -71,3 +71,60 @@ def test_explain_search_result_uses_existing_retrieval_signals():
         "related_evidence_count": 0,
     }
     assert explanation["adjustments"] == {"base_score": 0.3, "scope_score_boost": 1.15}
+
+
+def test_explain_search_result_surfaces_filters_and_suppression_metadata():
+    item = {
+        "kind": "corpus_chunk",
+        "logical_kind": "file",
+        "id": "chunk-current",
+        "title": "RFP Response",
+        "summary": "Current response",
+        "score": 0.7,
+        "streams": ["corpus_lexical"],
+        "raw_scores": {"corpus_lexical": 0.9},
+        "source_path": "client/RFP Response v2 final.docx",
+        "duplicate_count": 2,
+        "version_family": {
+            "key": "rfp response",
+            "canonical_source_path": "client/RFP Response v2 final.docx",
+            "suppressed_count": 1,
+            "suppressed_source_paths": ["client/RFP Response v1.docx"],
+        },
+        "retrieval_filters": {
+            "logical_kinds": ["file"],
+            "current_only": True,
+            "lifecycle_states": [],
+            "include_suppressed": True,
+        },
+        "lifecycle": {
+            "state": "active",
+            "score": 0.88,
+            "current": True,
+            "explanation": {"penalties": {"state": 1.0, "retention": 1.0}},
+        },
+    }
+
+    explanation = explain_search_result("rfp response", item)
+
+    assert explanation["filters"]["active"] == {
+        "logical_kinds": ["file"],
+        "current_only": True,
+        "lifecycle_states": [],
+        "include_suppressed": True,
+    }
+    assert explanation["suppression"] == {
+        "exact_duplicates": {
+            "suppressed_count": 2,
+            "canonical_source_path": "client/RFP Response v2 final.docx",
+            "reason": "exact_content_duplicate",
+        },
+        "version_family": {
+            "key": "rfp response",
+            "canonical_source_path": "client/RFP Response v2 final.docx",
+            "suppressed_count": 1,
+            "suppressed_source_paths": ["client/RFP Response v1.docx"],
+            "reason": "same_document_version_family",
+        },
+    }
+    assert explanation["lifecycle"]["explanation"]["penalties"]["retention"] == 1.0

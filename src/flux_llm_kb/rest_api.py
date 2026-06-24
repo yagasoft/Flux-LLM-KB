@@ -1,6 +1,7 @@
 from html import escape
 from json import JSONDecodeError
 from pathlib import Path
+from typing import Any
 
 from .host_agent import (
     path_requires_host_agent,
@@ -26,7 +27,40 @@ from .health import (
     collect_retrieval_payload,
     doctor_payload,
 )
-from .service import KnowledgeService
+from .service import KnowledgeService, normalize_retrieval_filters
+
+
+def _filters_from_body(filters: dict | None) -> dict[str, Any] | None:
+    if filters is None:
+        return None
+    return normalize_retrieval_filters(filters)
+
+
+def _filters_from_query(
+    *,
+    kind: list[str] | None,
+    current_only: bool | None,
+    lifecycle_state: list[str] | None,
+    include_suppressed: bool | None,
+) -> dict[str, Any] | None:
+    if not kind and current_only is None and not lifecycle_state and include_suppressed is None:
+        return None
+    return normalize_retrieval_filters(
+        {
+            "logical_kinds": kind or [],
+            "current_only": bool(current_only),
+            "lifecycle_states": lifecycle_state or [],
+            "include_suppressed": bool(include_suppressed),
+        }
+    )
+
+
+def _service_retrieval_kwargs(**kwargs: Any) -> dict[str, Any]:
+    filters = kwargs.pop("filters", None)
+    result = dict(kwargs)
+    if filters is not None:
+        result["filters"] = filters
+    return result
 
 
 def create_app():
@@ -51,6 +85,7 @@ def create_app():
         cwd: str | None = None
         root_name: str | None = None
         scope_mode: str = "local_first"
+        filters: dict | None = None
 
     class BriefRequest(BaseModel):
         query: str
@@ -58,6 +93,7 @@ def create_app():
         cwd: str | None = None
         root_name: str | None = None
         scope_mode: str = "local_first"
+        filters: dict | None = None
 
     class ExplainRequest(BaseModel):
         query: str
@@ -66,6 +102,7 @@ def create_app():
         cwd: str | None = None
         root_name: str | None = None
         scope_mode: str = "local_first"
+        filters: dict | None = None
 
     class ClaimRequest(BaseModel):
         subject_type: str
@@ -240,13 +277,14 @@ def create_app():
 
     @app.post("/api/search")
     def search(request: SearchRequest = Body(...)):
-        return service.search(
-            request.query,
+        kwargs = _service_retrieval_kwargs(
             limit=request.limit,
             cwd=request.cwd,
             root_name=request.root_name,
             scope_mode=request.scope_mode,
+            filters=_filters_from_body(request.filters),
         )
+        return service.search(request.query, **kwargs)
 
     @app.get("/api/search")
     def search_get(
@@ -255,20 +293,30 @@ def create_app():
         cwd: str | None = None,
         root_name: str | None = None,
         scope_mode: str = "local_first",
+        kind: list[str] | None = Query(None),
+        current_only: bool | None = None,
+        lifecycle_state: list[str] | None = Query(None),
+        include_suppressed: bool | None = None,
     ):
-        return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
+        filters = _filters_from_query(
+            kind=kind,
+            current_only=current_only,
+            lifecycle_state=lifecycle_state,
+            include_suppressed=include_suppressed,
+        )
+        kwargs = _service_retrieval_kwargs(limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
+        return service.search(query, **kwargs)
 
     @app.post("/api/brief")
     def brief(request: BriefRequest = Body(...)):
-        return {
-            "brief": service.brief(
-                request.query,
-                token_budget=request.token_budget,
-                cwd=request.cwd,
-                root_name=request.root_name,
-                scope_mode=request.scope_mode,
-            )
-        }
+        kwargs = _service_retrieval_kwargs(
+            token_budget=request.token_budget,
+            cwd=request.cwd,
+            root_name=request.root_name,
+            scope_mode=request.scope_mode,
+            filters=_filters_from_body(request.filters),
+        )
+        return {"brief": service.brief(request.query, **kwargs)}
 
     @app.get("/api/brief")
     def brief_get(
@@ -277,27 +325,31 @@ def create_app():
         cwd: str | None = None,
         root_name: str | None = None,
         scope_mode: str = "local_first",
+        kind: list[str] | None = Query(None),
+        current_only: bool | None = None,
+        lifecycle_state: list[str] | None = Query(None),
+        include_suppressed: bool | None = None,
     ):
-        return {
-            "brief": service.brief(
-                query,
-                token_budget=token_budget,
-                cwd=cwd,
-                root_name=root_name,
-                scope_mode=scope_mode,
-            )
-        }
+        filters = _filters_from_query(
+            kind=kind,
+            current_only=current_only,
+            lifecycle_state=lifecycle_state,
+            include_suppressed=include_suppressed,
+        )
+        kwargs = _service_retrieval_kwargs(token_budget=token_budget, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
+        return {"brief": service.brief(query, **kwargs)}
 
     @app.post("/api/explain")
     def explain(request: ExplainRequest = Body(...)):
-        return service.explain(
-            request.query,
+        kwargs = _service_retrieval_kwargs(
             limit=request.limit,
             token_budget=request.token_budget,
             cwd=request.cwd,
             root_name=request.root_name,
             scope_mode=request.scope_mode,
+            filters=_filters_from_body(request.filters),
         )
+        return service.explain(request.query, **kwargs)
 
     @app.get("/api/explain")
     def explain_get(
@@ -307,15 +359,26 @@ def create_app():
         cwd: str | None = None,
         root_name: str | None = None,
         scope_mode: str = "local_first",
+        kind: list[str] | None = Query(None),
+        current_only: bool | None = None,
+        lifecycle_state: list[str] | None = Query(None),
+        include_suppressed: bool | None = None,
     ):
-        return service.explain(
-            query,
+        filters = _filters_from_query(
+            kind=kind,
+            current_only=current_only,
+            lifecycle_state=lifecycle_state,
+            include_suppressed=include_suppressed,
+        )
+        kwargs = _service_retrieval_kwargs(
             limit=limit,
             token_budget=token_budget,
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,
+            filters=filters,
         )
+        return service.explain(query, **kwargs)
 
     @app.post("/api/claims")
     def claim_upsert(request: ClaimRequest = Body(...)):

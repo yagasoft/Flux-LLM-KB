@@ -102,6 +102,44 @@ def test_cli_explain_uses_service_explain(monkeypatch, capsys):
     }
 
 
+def test_cli_search_and_explain_forward_retrieval_filters(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def search(self, query, limit=5, filters=None):
+            calls.append(("search", query, limit, filters))
+            return [{"query": query, "filters": filters}]
+
+        def explain(self, query, limit=5, token_budget=None, cwd=None, root_name=None, scope_mode="local_first", filters=None):
+            calls.append(("explain", query, limit, token_budget, cwd, root_name, scope_mode, filters))
+            return {"query": query, "filters": filters}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["search", "rfp", "--kind", "mail", "--current-only", "--include-suppressed"]) == 0
+    search_payload = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["explain", "rfp", "--kind", "file", "--lifecycle-state", "active"]) == 0
+    explain_payload = json.loads(capsys.readouterr().out)
+
+    assert search_payload[0]["filters"] == {
+        "logical_kinds": ["mail"],
+        "current_only": True,
+        "lifecycle_states": [],
+        "include_suppressed": True,
+    }
+    assert explain_payload["filters"] == {
+        "logical_kinds": ["file"],
+        "current_only": False,
+        "lifecycle_states": ["active"],
+        "include_suppressed": False,
+    }
+    assert calls[0][0] == "search"
+    assert calls[1][0] == "explain"
+
+
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     from flux_llm_kb import service
 

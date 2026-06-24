@@ -259,6 +259,8 @@ const settings = [
 
 let mailSyncPayload: unknown;
 let searchPayload: unknown;
+let explainPayload: unknown;
+let explainRequestPayload: unknown;
 let resultDetailPayload: unknown;
 let fileActionPayload: unknown;
 let healthPayload: unknown;
@@ -322,10 +324,17 @@ describe("Flux dashboard", () => {
           streams: ["corpus_lexical", "corpus_vector"],
           raw_scores: { corpus_lexical: 0.7, corpus_vector: 0.3 },
           scope: { label: "local", root_name: "docs" },
-          corpus: { source_path: "docs/operations.md", root_name: "docs", trust_rank: 450, duplicate_count: 0, related_evidence_count: 0 }
+          corpus: { source_path: "docs/operations.md", root_name: "docs", trust_rank: 450, duplicate_count: 2, related_evidence_count: 0 },
+          lifecycle: { state: "active", score: 0.88, explanation: { penalties: { state: 1, retention: 0.6 } } },
+          suppression: {
+            exact_duplicates: { suppressed_count: 2, reason: "exact_content_duplicate", canonical_source_path: "docs/operations.md" },
+            version_family: { suppressed_count: 1, reason: "same_document_version_family", canonical_source_path: "docs/operations.md" }
+          }
         }
       }
     ];
+    explainPayload = undefined;
+    explainRequestPayload = undefined;
     reviewPayload = {
       counts: {
         total: 2,
@@ -484,6 +493,18 @@ describe("Flux dashboard", () => {
       if (url === "/api/mail/sync") return json(mailSyncPayload);
       if (url === "/api/mail/oauth/gmail/start") return json({ status: "pending_user_authorization", authorization_url: "https://accounts.google.com/o/oauth2/v2/auth?state=test" });
       if (url === "/api/search") return json(searchPayload);
+      if (url === "/api/explain") {
+        explainRequestPayload = JSON.parse(String(init?.body ?? "{}"));
+        return json(
+          explainPayload ?? {
+            query: explainRequestPayload.query,
+            results: searchPayload,
+            brief: { text: "", token_budget: 0, packed: [], excluded: [] },
+            filter_trace: { excluded: [] },
+            suppression: {}
+          }
+        );
+      }
       if (url.startsWith("/api/results/")) return json(resultDetailPayload);
       if (url.startsWith("/api/corpus/assets/") && url.endsWith("/actions")) return json(fileActionPayload);
       if (url.startsWith("/api/claims/") && url.endsWith("/transitions")) return json(claimTransitionPayload);
@@ -1332,9 +1353,65 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByText("Why this result"));
     expect(screen.getByText("Corpus Lexical, Corpus Vector")).toBeInTheDocument();
     expect(screen.getByText("local")).toBeInTheDocument();
+    expect(screen.getByText("Lifecycle penalties")).toBeInTheDocument();
+    expect(screen.getByText("state 1.000, retention 0.600")).toBeInTheDocument();
+    expect(screen.getByText("Exact duplicates")).toBeInTheDocument();
+    expect(screen.getByText("2 suppressed")).toBeInTheDocument();
+    expect(screen.getByText("Same document versions")).toBeInTheDocument();
+    expect(screen.getByText("1 suppressed")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "View error ffprobe command not found" }));
     expect(screen.getByRole("dialog", { name: "Error detail" })).toHaveTextContent("ffprobe command not found");
+  });
+
+  test("retrieval filters use explain endpoint and render exclusion trace", async () => {
+    explainPayload = {
+      query: "customer rfp",
+      results: [],
+      brief: { text: "", token_budget: 0, packed: [], excluded: [] },
+      filters: {
+        logical_kinds: ["mail"],
+        current_only: true,
+        lifecycle_states: [],
+        include_suppressed: true
+      },
+      filter_trace: {
+        excluded: [
+          { id: "chunk-file", title: "File result", kind: "file", reason: "logical_kind", score: 0.8 },
+          { id: "episode-old", title: "Old decision", kind: "episode", reason: "current_only", score: 0.7, lifecycle_state: "retired" }
+        ]
+      },
+      suppression: {
+        exact_duplicates: [{ title: "RFP", suppressed_count: 3, reason: "exact_content_duplicate" }],
+        version_families: [{ title: "Proposal", suppressed_count: 1, reason: "same_document_version_family" }]
+      }
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Retrieval" }));
+    await user.selectOptions(screen.getByLabelText("Evidence kind"), "mail");
+    await user.click(screen.getByLabelText("Current evidence only"));
+    await user.click(screen.getByLabelText("Show suppressed diagnostics"));
+    await user.type(screen.getByLabelText("Dashboard search"), "customer rfp{enter}");
+
+    await screen.findByText("Filtered out 2 candidates");
+    expect(screen.getByText("File result - logical kind")).toBeInTheDocument();
+    expect(screen.getByText("Old decision - current only")).toBeInTheDocument();
+    expect(screen.getByText("Suppressed evidence")).toBeInTheDocument();
+    expect(screen.getByText("Exact duplicates: 3")).toBeInTheDocument();
+    expect(screen.getByText("Version families: 1")).toBeInTheDocument();
+    expect(explainRequestPayload).toEqual({
+      query: "customer rfp",
+      limit: 8,
+      filters: {
+        logical_kinds: ["mail"],
+        current_only: true,
+        lifecycle_states: [],
+        include_suppressed: true
+      }
+    });
   });
 
   test("health renders structured diagnostics with details, copy, and target navigation", async () => {

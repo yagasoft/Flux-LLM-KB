@@ -5,6 +5,24 @@ from flux_llm_kb import service
 from flux_llm_kb.service import KnowledgeService
 
 
+def test_normalize_retrieval_filters_canonicalizes_contract():
+    filters = service.normalize_retrieval_filters(
+        {
+            "logical_kinds": ["mail", "file", "mail"],
+            "current_only": True,
+            "lifecycle_states": ["active", "stale", "active"],
+            "include_suppressed": True,
+        }
+    )
+
+    assert filters == {
+        "logical_kinds": ["file", "mail"],
+        "current_only": True,
+        "lifecycle_states": ["active", "stale"],
+        "include_suppressed": True,
+    }
+
+
 def test_service_search_includes_corpus_chunks(monkeypatch):
     monkeypatch.setattr(
         database,
@@ -294,3 +312,127 @@ def test_service_search_preserves_lifecycle_and_graph_metadata(monkeypatch):
     assert result["lifecycle"]["state"] == "active"
     assert result["graph"]["matched_claim_ids"] == ["claim-1"]
     assert result["streams"] == ["claim_lifecycle", "graph"]
+
+
+def test_service_search_applies_logical_kind_and_current_filters(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "search_episodes",
+        lambda query, limit=5, **_kwargs: [
+            {
+                "id": "old-episode",
+                "title": "Old Decision",
+                "summary": "Use the old path.",
+                "score": 0.95,
+                "streams": ["lexical"],
+                "raw_scores": {"lexical": 0.8},
+                "lifecycle": {"state": "superseded", "current": False, "audit_visible": True},
+            },
+            {
+                "id": "current-episode",
+                "title": "Current Decision",
+                "summary": "Use the current path.",
+                "score": 0.80,
+                "streams": ["lexical"],
+                "raw_scores": {"lexical": 0.7},
+                "lifecycle": {"state": "active", "current": True, "audit_visible": False},
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks",
+        lambda query, limit=20, **_kwargs: [
+            {
+                "id": "chunk-1",
+                "asset_id": "asset-1",
+                "title": "RFP",
+                "summary": "A matching file.",
+                "score": 0.70,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 1.0},
+                "source_path": "docs/rfp.md",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+            }
+        ],
+    )
+
+    results = KnowledgeService().search(
+        "current path",
+        filters={"logical_kinds": ["episode"], "current_only": True},
+    )
+
+    assert [result["id"] for result in results] == ["current-episode"]
+    assert results[0]["retrieval_explanation"]["filters"]["active"]["logical_kinds"] == ["episode"]
+    assert results[0]["retrieval_explanation"]["filters"]["active"]["current_only"] is True
+
+
+def test_service_explain_returns_filter_trace_and_suppression_metadata(monkeypatch):
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks",
+        lambda query, limit=20, **_kwargs: [
+            {
+                "id": "chunk-v1",
+                "asset_id": "asset-v1",
+                "title": "RFP Response",
+                "summary": "older response body should not appear in suppression trace",
+                "score": 0.91,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.9},
+                "source_path": "client/RFP Response v1.docx",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+            },
+            {
+                "id": "chunk-v2",
+                "asset_id": "asset-v2",
+                "title": "RFP Response",
+                "summary": "newer response",
+                "score": 0.89,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.8},
+                "source_path": "client/RFP Response v2 final.docx",
+                "root_name": "docs",
+                "duplicate_count": 3,
+                "trust_rank": 900,
+            },
+            {
+                "id": "chunk-not-mail",
+                "asset_id": "asset-file",
+                "title": "Delivery Plan",
+                "summary": "file-only result",
+                "score": 0.75,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.7},
+                "source_path": "client/Delivery Plan.docx",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+            },
+        ],
+    )
+
+    payload = KnowledgeService().explain(
+        "rfp response",
+        limit=5,
+        token_budget=100,
+        filters={"logical_kinds": ["mail"], "include_suppressed": True},
+    )
+
+    assert payload["results"] == []
+    assert payload["filters"] == {
+        "logical_kinds": ["mail"],
+        "current_only": False,
+        "lifecycle_states": [],
+        "include_suppressed": True,
+    }
+    assert {item["reason"] for item in payload["filter_trace"]["excluded"]} == {"logical_kind"}
+    assert all("summary" not in item for item in payload["filter_trace"]["excluded"])
+    assert "older response body should not appear" not in str(payload["filter_trace"])
+    assert payload["suppression"]["version_families"][0]["suppressed_count"] == 1
+    assert payload["suppression"]["exact_duplicates"][0]["suppressed_count"] == 3

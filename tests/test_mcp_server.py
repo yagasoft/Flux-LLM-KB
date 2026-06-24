@@ -38,9 +38,9 @@ def _mcp_tool_names(source: str) -> list[str]:
 def test_mcp_exposes_claim_and_graph_tools():
     source = Path(mcp_server.__file__).read_text(encoding="utf-8")
 
-    assert "def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = \"local_first\")" in source
-    assert "def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = \"local_first\")" in source
-    assert "def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = \"local_first\")" in source
+    assert "def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = \"local_first\", filters: dict | None = None)" in source
+    assert "def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = \"local_first\", filters: dict | None = None)" in source
+    assert "def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = \"local_first\", filters: dict | None = None)" in source
     assert "def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None)" in source
     assert "def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None)" in source
     assert "Finalize the current agent turn by storing a redacted durable summary." in source
@@ -50,6 +50,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "avoid duplicating every prior kb.remember item" in source
     assert "service.remember(title, summary, metadata={\"source\": \"finalize_turn\"}, cwd=cwd, root_name=root_name)" in source
     assert "scope_mode=scope_mode" in source
+    assert "filters=filters" in source
     assert "workspace_boosted" in source
     assert "query mid-turn" in source
     assert "expanded kb.search" in source

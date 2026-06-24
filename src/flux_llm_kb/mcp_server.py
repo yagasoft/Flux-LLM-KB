@@ -30,12 +30,12 @@ def create_server():
     )
 
     @mcp.tool(name="kb.search")
-    def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+    def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Search Flux memory. Use scope_mode="workspace_boosted" for explicit expanded mid-turn discovery when local context is insufficient."""
-        return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
+        return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
 
     @mcp.tool(name="kb.explain")
-    def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+    def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Search Flux memory and return query snippets, ranking signals, and brief-packing rationale."""
         return service.explain(
             query,
@@ -44,10 +44,11 @@ def create_server():
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,
+            filters=filters,
         )
 
     @mcp.tool(name="kb.brief")
-    def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+    def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Build a compact brief. Default local_first keeps automatic context workspace scoped."""
         return service.brief(
             query,
@@ -55,6 +56,7 @@ def create_server():
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,
+            filters=filters,
         )
 
     @mcp.tool(name="kb.remember")

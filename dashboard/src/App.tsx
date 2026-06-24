@@ -250,6 +250,8 @@ type SearchResult = {
     graph?: Record<string, unknown>;
     corpus?: Record<string, unknown>;
     adjustments?: Record<string, unknown>;
+    filters?: Record<string, unknown>;
+    suppression?: Record<string, unknown>;
   };
   score?: number;
   id?: string;
@@ -261,6 +263,41 @@ type SearchResult = {
   source_path?: string;
   streams?: string[];
   raw_scores?: Record<string, number>;
+};
+
+type RetrievalFilters = {
+  logical_kinds: string[];
+  current_only: boolean;
+  lifecycle_states: string[];
+  include_suppressed: boolean;
+};
+
+type RetrievalFilterExcluded = {
+  id?: string;
+  title?: string;
+  kind?: string;
+  reason?: string;
+  score?: number;
+  lifecycle_state?: string;
+  source_path?: string;
+};
+
+type RetrievalFilterTrace = {
+  excluded?: RetrievalFilterExcluded[];
+};
+
+type RetrievalSuppression = {
+  exact_duplicates?: Array<Record<string, unknown>>;
+  version_families?: Array<Record<string, unknown>>;
+};
+
+type ExplainPayload = {
+  query?: string;
+  results?: SearchResult[];
+  brief?: Record<string, unknown>;
+  filters?: RetrievalFilters;
+  filter_trace?: RetrievalFilterTrace;
+  suppression?: RetrievalSuppression;
 };
 
 type ResultAction = {
@@ -570,6 +607,11 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchKind, setSearchKind] = useState("all");
+  const [searchCurrentOnly, setSearchCurrentOnly] = useState(false);
+  const [searchIncludeSuppressed, setSearchIncludeSuppressed] = useState(false);
+  const [searchFilterTrace, setSearchFilterTrace] = useState<RetrievalFilterTrace>({});
+  const [searchSuppression, setSearchSuppression] = useState<RetrievalSuppression>({});
   const [resultDetail, setResultDetail] = useState<ResultDetail | null>(null);
   const [resultDetailLoading, setResultDetailLoading] = useState(false);
   const [reviewFilter, setReviewFilter] = useState<ClaimReviewFilter>("needs_review");
@@ -1008,8 +1050,11 @@ export default function App() {
       setToast("Enter a search query first.");
       return;
     }
-    const results = await sendJson<SearchResult[]>("/api/search", "POST", { query, limit: 8 });
-    setSearchResults(Array.isArray(results) ? results : []);
+    const filters = buildDashboardRetrievalFilters(searchKind, searchCurrentOnly, searchIncludeSuppressed);
+    const payload = await sendJson<ExplainPayload>("/api/explain", "POST", { query, limit: 8, filters });
+    setSearchResults(Array.isArray(payload.results) ? payload.results : []);
+    setSearchFilterTrace(payload.filter_trace ?? {});
+    setSearchSuppression(payload.suppression ?? {});
     setSearchOpen(true);
     setActiveTab("retrieval");
   }
@@ -1253,8 +1298,16 @@ export default function App() {
             state={state}
             searchOpen={searchOpen}
             searchResults={searchResults}
+            searchKind={searchKind}
+            searchCurrentOnly={searchCurrentOnly}
+            searchIncludeSuppressed={searchIncludeSuppressed}
+            filterTrace={searchFilterTrace}
+            suppression={searchSuppression}
             query={searchQuery}
-            onClear={() => { setSearchOpen(false); setSearchResults([]); }}
+            onClear={() => { setSearchOpen(false); setSearchResults([]); setSearchFilterTrace({}); setSearchSuppression({}); }}
+            onSearchKind={setSearchKind}
+            onSearchCurrentOnly={setSearchCurrentOnly}
+            onSearchIncludeSuppressed={setSearchIncludeSuppressed}
             onErrorDetail={setErrorDetail}
             onOpenResult={(result) => void openSearchResult(result)}
           />
@@ -2166,16 +2219,32 @@ function RetrievalTab({
   state,
   searchOpen,
   searchResults,
+  searchKind,
+  searchCurrentOnly,
+  searchIncludeSuppressed,
+  filterTrace,
+  suppression,
   query,
   onClear,
+  onSearchKind,
+  onSearchCurrentOnly,
+  onSearchIncludeSuppressed,
   onErrorDetail,
   onOpenResult
 }: {
   state: LoadState;
   searchOpen: boolean;
   searchResults: SearchResult[];
+  searchKind: string;
+  searchCurrentOnly: boolean;
+  searchIncludeSuppressed: boolean;
+  filterTrace: RetrievalFilterTrace;
+  suppression: RetrievalSuppression;
   query: string;
   onClear: () => void;
+  onSearchKind: (value: string) => void;
+  onSearchCurrentOnly: (value: boolean) => void;
+  onSearchIncludeSuppressed: (value: boolean) => void;
   onErrorDetail: (error: string) => void;
   onOpenResult: (result: SearchResult) => void;
 }) {
@@ -2190,8 +2259,28 @@ function RetrievalTab({
           ["Embeddings", "pgvector", String(retrieval.embeddings ?? 0)],
           ["Duplicates", "suppressed", String(state.retrieval.duplicate_assets ?? state.retrieval.duplicate_count ?? 0)]
         ]} />
+        <div className="retrieval-filter-grid">
+          <label>
+            <span>Evidence kind</span>
+            <select value={searchKind} onChange={(event) => onSearchKind(event.target.value)}>
+              <option value="all">All</option>
+              <option value="episode">Episodes</option>
+              <option value="file">Files</option>
+              <option value="mail">Mail</option>
+            </select>
+          </label>
+          <label className="checkbox-field">
+            <input type="checkbox" checked={searchCurrentOnly} onChange={(event) => onSearchCurrentOnly(event.target.checked)} />
+            <span>Current evidence only</span>
+          </label>
+          <label className="checkbox-field">
+            <input type="checkbox" checked={searchIncludeSuppressed} onChange={(event) => onSearchIncludeSuppressed(event.target.checked)} />
+            <span>Show suppressed diagnostics</span>
+          </label>
+        </div>
       </Panel>
       <Panel title={searchOpen ? `Search Results: ${query}` : "Search Results"}>
+        <RetrievalDebugTrace trace={filterTrace} suppression={suppression} />
         {searchResults.length > 0 ? (
           <div className="search-results">
             {searchResults.map((result, index) => (
@@ -2238,6 +2327,10 @@ function SearchResultExplanation({ result }: { result: SearchResult }) {
   const rawScores = explanation.raw_scores ?? result.raw_scores ?? {};
   const scopeLabel = stringFromUnknown(explanation.scope?.label) ?? "unknown";
   const corpusPath = stringFromUnknown(explanation.corpus?.source_path) ?? result.source_path;
+  const lifecyclePenalties = lifecyclePenaltyText(explanation.lifecycle);
+  const suppression = explanation.suppression ?? {};
+  const exactDuplicateCount = suppressionObjectCount(suppression, "exact_duplicates");
+  const versionFamilyCount = suppressionObjectCount(suppression, "version_family");
   return (
     <details className="result-explanation">
       <summary>Why this result</summary>
@@ -2254,6 +2347,24 @@ function SearchResultExplanation({ result }: { result: SearchResult }) {
             <code title={corpusPath}>{corpusPath}</code>
           </>
         )}
+        {lifecyclePenalties && (
+          <>
+            <span>Lifecycle penalties</span>
+            <strong>{lifecyclePenalties}</strong>
+          </>
+        )}
+        {exactDuplicateCount > 0 && (
+          <>
+            <span>Exact duplicates</span>
+            <strong>{exactDuplicateCount} suppressed</strong>
+          </>
+        )}
+        {versionFamilyCount > 0 && (
+          <>
+            <span>Same document versions</span>
+            <strong>{versionFamilyCount} suppressed</strong>
+          </>
+        )}
       </div>
       {Object.keys(rawScores).length > 0 && (
         <div className="raw-score-row">
@@ -2263,6 +2374,36 @@ function SearchResultExplanation({ result }: { result: SearchResult }) {
         </div>
       )}
     </details>
+  );
+}
+
+function RetrievalDebugTrace({ trace, suppression }: { trace: RetrievalFilterTrace; suppression: RetrievalSuppression }) {
+  const excluded = trace.excluded ?? [];
+  const exactDuplicateCount = suppressionCount(suppression.exact_duplicates);
+  const versionFamilyCount = suppressionCount(suppression.version_families);
+  if (excluded.length === 0 && exactDuplicateCount === 0 && versionFamilyCount === 0) return null;
+  return (
+    <div className="retrieval-debug-trace">
+      {excluded.length > 0 && (
+        <section>
+          <strong>Filtered out {excluded.length} candidates</strong>
+          <ul>
+            {excluded.slice(0, 5).map((item, index) => (
+              <li key={`${item.id ?? item.title ?? "excluded"}-${index}`}>
+                {item.title ?? item.id ?? "Untitled"} - {formatRetrievalReason(item.reason)}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+      {(exactDuplicateCount > 0 || versionFamilyCount > 0) && (
+        <section>
+          <strong>Suppressed evidence</strong>
+          {exactDuplicateCount > 0 && <span>Exact duplicates: {exactDuplicateCount}</span>}
+          {versionFamilyCount > 0 && <span>Version families: {versionFamilyCount}</span>}
+        </section>
+      )}
+    </div>
   );
 }
 
@@ -2954,6 +3095,44 @@ function searchResultMeta(result: SearchResult): string {
 
 function searchResultKey(result: SearchResult, index: number): string {
   return result.detail_ref?.id ?? result.id ?? result.asset_id ?? result.mail_message_id ?? `${result.title ?? "result"}-${index}`;
+}
+
+function buildDashboardRetrievalFilters(kind: string, currentOnly: boolean, includeSuppressed: boolean): RetrievalFilters {
+  return {
+    logical_kinds: kind === "all" ? [] : [kind],
+    current_only: currentOnly,
+    lifecycle_states: [],
+    include_suppressed: includeSuppressed
+  };
+}
+
+function lifecyclePenaltyText(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const explanation = (value as Record<string, unknown>).explanation;
+  if (!explanation || typeof explanation !== "object") return "";
+  const penalties = (explanation as Record<string, unknown>).penalties;
+  if (!penalties || typeof penalties !== "object") return "";
+  return Object.entries(penalties as Record<string, unknown>)
+    .map(([key, penalty]) => {
+      const number = numberFromUnknown(penalty);
+      return number === undefined ? "" : `${key} ${number.toFixed(3)}`;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+function suppressionObjectCount(suppression: Record<string, unknown>, key: string): number {
+  const item = suppression[key];
+  if (!item || typeof item !== "object" || Array.isArray(item)) return 0;
+  return numberFromUnknown((item as Record<string, unknown>).suppressed_count) ?? 0;
+}
+
+function suppressionCount(items?: Array<Record<string, unknown>>): number {
+  return (items ?? []).reduce((total, item) => total + (numberFromUnknown(item.suppressed_count) ?? 0), 0);
+}
+
+function formatRetrievalReason(value?: string): string {
+  return String(value || "filtered").replace(/[_-]+/g, " ");
 }
 
 function prettyStreamName(value: string): string {

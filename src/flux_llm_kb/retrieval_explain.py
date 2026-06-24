@@ -71,6 +71,12 @@ def explain_search_result(query: str, item: dict[str, Any]) -> dict[str, Any]:
     adjustments = _adjustments(item)
     if adjustments:
         explanation["adjustments"] = adjustments
+    filters = _filter_explanation(item)
+    if filters:
+        explanation["filters"] = filters
+    suppression = _suppression_explanation(item)
+    if suppression:
+        explanation["suppression"] = suppression
     return explanation
 
 
@@ -163,3 +169,51 @@ def _adjustments(item: dict[str, Any]) -> dict[str, Any]:
         if key in item and item.get(key) is not None:
             adjustments[key] = item.get(key)
     return adjustments
+
+
+def _filter_explanation(item: dict[str, Any]) -> dict[str, Any]:
+    filters = item.get("retrieval_filters")
+    if not isinstance(filters, dict):
+        return {}
+    return {"active": filters}
+
+
+def _suppression_explanation(item: dict[str, Any]) -> dict[str, Any]:
+    filters = item.get("retrieval_filters")
+    if not isinstance(filters, dict) or not filters.get("include_suppressed"):
+        return {}
+
+    suppression: dict[str, Any] = {}
+    duplicate_count = _positive_int(item.get("duplicate_count"))
+    if duplicate_count:
+        exact_duplicates: dict[str, Any] = {
+            "suppressed_count": duplicate_count,
+            "reason": "exact_content_duplicate",
+        }
+        source_path = item.get("source_path")
+        if source_path:
+            exact_duplicates["canonical_source_path"] = source_path
+        asset_id = item.get("asset_id")
+        if asset_id:
+            exact_duplicates["canonical_asset_id"] = asset_id
+        suppression["exact_duplicates"] = exact_duplicates
+
+    version_family = item.get("version_family")
+    if isinstance(version_family, dict) and _positive_int(version_family.get("suppressed_count")):
+        family: dict[str, Any] = {
+            "suppressed_count": _positive_int(version_family.get("suppressed_count")),
+            "reason": "same_document_version_family",
+        }
+        for key in ("key", "canonical_source_path", "suppressed_source_paths"):
+            if key in version_family and version_family.get(key) is not None:
+                family[key] = version_family.get(key)
+        suppression["version_family"] = family
+    return suppression
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)

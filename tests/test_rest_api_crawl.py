@@ -326,23 +326,25 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
     calls = {}
 
     class FakeService:
-        def search(self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first"):
+        def search(self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first", filters=None):
             calls["search"] = {
                 "query": query,
                 "limit": limit,
                 "cwd": cwd,
                 "root_name": root_name,
                 "scope_mode": scope_mode,
+                "filters": filters,
             }
             return [{"kind": "corpus_chunk", "query": query, "limit": limit}]
 
-        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first", filters=None):
             calls["brief"] = {
                 "query": query,
                 "token_budget": token_budget,
                 "cwd": cwd,
                 "root_name": root_name,
                 "scope_mode": scope_mode,
+                "filters": filters,
             }
             return f"{query}:{token_budget}"
 
@@ -357,6 +359,9 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
             "cwd": "E:/Repo",
             "root_name": "repo",
             "scope_mode": "local_only",
+            "kind": ["mail", "file"],
+            "current_only": "true",
+            "include_suppressed": "true",
         },
     )
     brief = client.get(
@@ -367,6 +372,7 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
             "cwd": "E:/Repo",
             "root_name": "repo",
             "scope_mode": "local_only",
+            "lifecycle_state": "active",
         },
     )
 
@@ -380,6 +386,12 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
         "cwd": "E:/Repo",
         "root_name": "repo",
         "scope_mode": "local_only",
+        "filters": {
+            "logical_kinds": ["file", "mail"],
+            "current_only": True,
+            "lifecycle_states": [],
+            "include_suppressed": True,
+        },
     }
     assert calls["brief"] == {
         "query": "RFP",
@@ -387,6 +399,12 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
         "cwd": "E:/Repo",
         "root_name": "repo",
         "scope_mode": "local_only",
+        "filters": {
+            "logical_kinds": [],
+            "current_only": False,
+            "lifecycle_states": ["active"],
+            "include_suppressed": False,
+        },
     }
 
 
@@ -396,7 +414,7 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
     calls = []
 
     class FakeService:
-        def explain(self, query, limit=5, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+        def explain(self, query, limit=5, token_budget=None, cwd=None, root_name=None, scope_mode="local_first", filters=None):
             calls.append(
                 {
                     "query": query,
@@ -405,6 +423,7 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
                     "cwd": cwd,
                     "root_name": root_name,
                     "scope_mode": scope_mode,
+                    "filters": filters,
                 }
             )
             return {
@@ -425,11 +444,19 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
             "cwd": "E:/Repo",
             "root_name": "repo",
             "scope_mode": "local_only",
+            "kind": "mail",
+            "current_only": "true",
         },
     )
     post_response = client.post(
         "/api/explain",
-        json={"query": "Roadmap", "limit": 2, "token_budget": 700, "scope_mode": "workspace_boosted"},
+        json={
+            "query": "Roadmap",
+            "limit": 2,
+            "token_budget": 700,
+            "scope_mode": "workspace_boosted",
+            "filters": {"logical_kinds": ["file"], "include_suppressed": True},
+        },
     )
 
     assert get_response.status_code == 200
@@ -444,6 +471,12 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
             "cwd": "E:/Repo",
             "root_name": "repo",
             "scope_mode": "local_only",
+            "filters": {
+                "logical_kinds": ["mail"],
+                "current_only": True,
+                "lifecycle_states": [],
+                "include_suppressed": False,
+            },
         },
         {
             "query": "Roadmap",
@@ -452,6 +485,12 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
             "cwd": None,
             "root_name": None,
             "scope_mode": "workspace_boosted",
+            "filters": {
+                "logical_kinds": ["file"],
+                "current_only": False,
+                "lifecycle_states": [],
+                "include_suppressed": True,
+            },
         },
     ]
 

@@ -16,8 +16,8 @@ Tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `kb.search` | Search Flux memory and corpus evidence, optionally scoped by workspace/root. |
-| `kb.explain` | Search with query-aware snippets, ranking signals, and brief-packing rationale. |
+| `kb.search` | Search Flux memory and corpus evidence, optionally scoped and filtered by workspace/root, evidence kind, lifecycle, or current-state policy. |
+| `kb.explain` | Search with query-aware snippets, ranking signals, filters, suppression metadata, and brief-packing rationale. |
 | `kb.brief` | Build a compact task brief for non-trivial work. |
 | `kb.remember` | Store a concise redacted durable atomic save with optional workspace provenance. |
 | `kb.finalize_turn` | Store a redacted end-of-turn summary for meaningful agent work. |
@@ -106,7 +106,7 @@ External consumers should use one of three read paths:
   `GET /api/search?query=customer%20RFP&limit=5` or
   `GET /api/brief?query=customer%20RFP&token_budget=1200`. Use
   `GET /api/explain?query=customer%20RFP&limit=5` when a consumer needs snippets,
-  ranking signals, and the brief-packing trace.
+  ranking signals, filters, suppression metadata, and the brief-packing trace.
 - MCP for agent runtimes: `kb.search`/`kb.explain`/`kb.brief` in raw MCP clients, or Codex
   wrapper names such as `mcp__flux_llm_kb.kb_search` and
   `mcp__flux_llm_kb.kb_explain` and `mcp__flux_llm_kb.kb_brief`.
@@ -114,7 +114,14 @@ External consumers should use one of three read paths:
   `flux-kb explain "customer RFP" --limit 5`.
 
 Search, explain, and brief reads accept optional `cwd`, `root_name`, and `scope_mode`
-parameters. `scope_mode=local_first` is the default: Flux searches matching
+parameters. They also accept per-query retrieval filters without changing global
+settings: `logical_kinds` (`episode`, `file`, `mail`), `current_only`,
+`lifecycle_states`, and `include_suppressed`. REST POST bodies use a `filters`
+object; REST GET accepts `kind`, `current_only`, `lifecycle_state`, and
+`include_suppressed` query parameters; MCP tools accept an optional `filters`
+object; CLI search/explain use `--kind`, `--current-only`,
+`--lifecycle-state`, and `--include-suppressed`.
+`scope_mode=local_first` is the default: Flux searches matching
 workspace/root evidence first, then falls back to global memory only when local
 results have no lexical or fuzzy evidence. Use `local_only` to forbid global
 fallback, or `global` for deliberate cross-workspace retrieval. Explicit
@@ -148,7 +155,9 @@ flux-kb capture review decide <job-id> --decision approve --rationale "Verified 
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
 stale, and retired claims remain available for review but normal brief packing
-prefers current evidence.
+prefers current evidence. `include_suppressed` returns sanitized counts, paths,
+canonical identifiers, and reasons for exact duplicate and same-document version
+suppression; it does not return raw suppressed content.
 
 The dashboard Review tab uses `GET /api/claims` and `GET /api/graph/traverse`
 to browse lifecycle review work and selected-entity graph edges. The

@@ -23,6 +23,7 @@ from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
 
 LOCAL_SCOPE_SCORE_BOOST = 1.15
 STRONG_VECTOR_MIN_SCORE = 0.35
+ALLOWED_RETRIEVAL_LOGICAL_KINDS = {"episode", "file", "mail"}
 
 
 @dataclass(frozen=True)
@@ -72,28 +73,37 @@ class KnowledgeService:
         cwd: str | None = None,
         root_name: str | None = None,
         scope_mode: str = "local_first",
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
+        raw_results = self._search_raw(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
+        filtered_results, _excluded = _apply_retrieval_filters(raw_results, normalized_filters)
+        return _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
+
+    def _search_raw(
+        self,
+        query: str,
+        *,
+        limit: int,
+        cwd: str | None,
+        root_name: str | None,
+        scope_mode: str,
     ) -> list[dict[str, Any]]:
         scope = _resolve_retrieval_scope(cwd=cwd, root_name=root_name, scope_mode=scope_mode)
         if scope.mode == "global" or not scope.is_scoped:
-            return _enrich_search_results(
-                query,
-                self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global"),
-            )
+            return self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global")
         if scope.mode == "workspace_boosted":
             return self._search_workspace_boosted(query, limit=limit, scope=scope)
 
         scoped_results = self._search_once(query, limit=limit, scope=scope, label="local")
         if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
-            return _enrich_search_results(query, scoped_results)
+            return scoped_results
 
-        return _enrich_search_results(
+        return self._search_once(
             query,
-            self._search_once(
-                query,
-                limit=limit,
-                scope=RetrievalScope(mode="global"),
-                label="global_fallback",
-            ),
+            limit=limit,
+            scope=RetrievalScope(mode="global"),
+            label="global_fallback",
         )
 
     def _search_workspace_boosted(self, query: str, *, limit: int, scope: RetrievalScope) -> list[dict[str, Any]]:
@@ -120,12 +130,9 @@ class KnowledgeService:
         combined = _dedupe_search_results(
             [_with_scope_score_boost(item, LOCAL_SCOPE_SCORE_BOOST) for item in local_results] + cross_results
         )
-        return _enrich_search_results(
-            query,
-            collapse_version_families(
-                sorted(combined, key=lambda item: float(item.get("score") or 0.0), reverse=True),
-                limit=limit,
-            ),
+        return collapse_version_families(
+            sorted(combined, key=lambda item: float(item.get("score") or 0.0), reverse=True),
+            limit=limit,
         )
 
     def _search_once(
@@ -185,16 +192,19 @@ class KnowledgeService:
         cwd: str | None = None,
         root_name: str | None = None,
         scope_mode: str = "local_first",
+        filters: dict[str, Any] | None = None,
     ) -> str:
         if token_budget is None:
             token_budget = _configured_token_budget()
-        search_results = self.search(
-            query,
-            limit=10,
-            cwd=cwd,
-            root_name=root_name,
-            scope_mode=scope_mode,
-        )
+        search_kwargs: dict[str, Any] = {
+            "limit": 10,
+            "cwd": cwd,
+            "root_name": root_name,
+            "scope_mode": scope_mode,
+        }
+        if filters is not None:
+            search_kwargs["filters"] = filters
+        search_results = self.search(query, **search_kwargs)
         current_results = [item for item in search_results if _is_current_evidence(item)]
         if current_results:
             search_results = current_results
@@ -217,22 +227,45 @@ class KnowledgeService:
         cwd: str | None = None,
         root_name: str | None = None,
         scope_mode: str = "local_first",
+        filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if token_budget is None:
             token_budget = _configured_token_budget()
         result_limit = max(1, min(int(limit or 5), 50))
-        search_results = self.search(
+        if filters is None:
+            search_results = self.search(
+                query,
+                limit=max(result_limit, 10),
+                cwd=cwd,
+                root_name=root_name,
+                scope_mode=scope_mode,
+            )
+            return {
+                "query": query,
+                "results": search_results[:result_limit],
+                "brief": _brief_selection_trace(search_results, token_budget=token_budget),
+            }
+        normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
+        raw_results = self._search_raw(
             query,
             limit=max(result_limit, 10),
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,
         )
-        return {
+        filtered_results, excluded = _apply_retrieval_filters(raw_results, normalized_filters)
+        search_results = _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
+        payload = {
             "query": query,
             "results": search_results[:result_limit],
             "brief": _brief_selection_trace(search_results, token_budget=token_budget),
         }
+        if normalized_filters is not None:
+            payload["filters"] = normalized_filters
+            payload["filter_trace"] = {"excluded": excluded}
+            if normalized_filters.get("include_suppressed"):
+                payload["suppression"] = _suppression_trace(raw_results)
+        return payload
 
     def audit(self, limit: int = 50) -> list[dict[str, Any]]:
         return database.list_audit_events(limit=limit)
@@ -753,8 +786,150 @@ def _format_corpus_search_item(item: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _enrich_search_results(query: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [enrich_search_result(query, item) for item in results]
+def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[str, Any]:
+    filters = filters or {}
+    logical_kinds = _normalize_filter_values(filters.get("logical_kinds") or filters.get("kind"))
+    invalid_kinds = [kind for kind in logical_kinds if kind not in ALLOWED_RETRIEVAL_LOGICAL_KINDS]
+    if invalid_kinds:
+        raise ValueError("logical_kinds must contain only: episode, file, mail")
+    return {
+        "logical_kinds": logical_kinds,
+        "current_only": bool(filters.get("current_only", False)),
+        "lifecycle_states": _normalize_filter_values(filters.get("lifecycle_states") or filters.get("lifecycle_state")),
+        "include_suppressed": bool(filters.get("include_suppressed", False)),
+    }
+
+
+def _normalize_filter_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, list) else [value]
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        text = str(item or "").strip().lower().replace("-", "_")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return sorted(normalized)
+
+
+def _apply_retrieval_filters(
+    results: list[dict[str, Any]],
+    filters: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if filters is None:
+        return results, []
+    included: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for item in results:
+        reason = _retrieval_filter_exclusion_reason(item, filters)
+        if reason:
+            excluded.append(_filter_excluded_item(item, reason=reason))
+        else:
+            included.append(item)
+    return included, excluded
+
+
+def _retrieval_filter_exclusion_reason(item: dict[str, Any], filters: dict[str, Any]) -> str | None:
+    logical_kinds = set(filters.get("logical_kinds") or [])
+    item_kind = str(item.get("logical_kind") or item.get("kind") or "").lower()
+    if logical_kinds and item_kind not in logical_kinds:
+        return "logical_kind"
+
+    lifecycle_state = _item_lifecycle_state(item)
+    lifecycle_states = set(filters.get("lifecycle_states") or [])
+    if lifecycle_states and lifecycle_state not in lifecycle_states:
+        return "lifecycle_state"
+
+    if filters.get("current_only") and not _is_current_evidence(item):
+        return "current_only"
+    return None
+
+
+def _item_lifecycle_state(item: dict[str, Any]) -> str:
+    lifecycle = item.get("lifecycle") if isinstance(item.get("lifecycle"), dict) else {}
+    return str(lifecycle.get("state") or item.get("lifecycle_state") or "active").lower().replace("-", "_")
+
+
+def _filter_excluded_item(item: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    lifecycle = item.get("lifecycle") if isinstance(item.get("lifecycle"), dict) else {}
+    excluded = {
+        "id": str(item.get("id") or ""),
+        "title": str(item.get("title") or item.get("id") or "Untitled"),
+        "kind": str(item.get("logical_kind") or item.get("kind") or ""),
+        "score": float(item.get("score") or 0.0),
+        "reason": reason,
+        "lifecycle_state": str(lifecycle.get("state") or item.get("lifecycle_state") or ""),
+    }
+    if item.get("source_path"):
+        excluded["source_path"] = str(item.get("source_path"))
+    return excluded
+
+
+def _enrich_search_results(
+    query: str,
+    results: list[dict[str, Any]],
+    *,
+    retrieval_filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    return [enrich_search_result(query, _with_retrieval_filters(item, retrieval_filters)) for item in results]
+
+
+def _with_retrieval_filters(item: dict[str, Any], filters: dict[str, Any] | None) -> dict[str, Any]:
+    if filters is None:
+        return item
+    result = dict(item)
+    result["retrieval_filters"] = filters
+    return result
+
+
+def _suppression_trace(results: list[dict[str, Any]]) -> dict[str, Any]:
+    exact_duplicates: list[dict[str, Any]] = []
+    version_families: list[dict[str, Any]] = []
+    for item in results:
+        duplicate_count = _positive_int(item.get("duplicate_count"))
+        if duplicate_count:
+            exact = {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or item.get("id") or "Untitled"),
+                "suppressed_count": duplicate_count,
+                "reason": "exact_content_duplicate",
+            }
+            if item.get("source_path"):
+                exact["canonical_source_path"] = str(item.get("source_path"))
+            if item.get("asset_id"):
+                exact["canonical_asset_id"] = str(item.get("asset_id"))
+            exact_duplicates.append(exact)
+
+        version_family = item.get("version_family")
+        if isinstance(version_family, dict) and _positive_int(version_family.get("suppressed_count")):
+            family = {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or item.get("id") or "Untitled"),
+                "suppressed_count": _positive_int(version_family.get("suppressed_count")),
+                "reason": "same_document_version_family",
+            }
+            for key in ("key", "canonical_source_path", "suppressed_source_paths"):
+                if version_family.get(key) is not None:
+                    family[key] = version_family.get(key)
+            version_families.append(family)
+
+    trace: dict[str, Any] = {}
+    if exact_duplicates:
+        trace["exact_duplicates"] = exact_duplicates
+    if version_families:
+        trace["version_families"] = version_families
+    return trace
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
 
 
 def _brief_selection_trace(search_results: list[dict[str, Any]], *, token_budget: int) -> dict[str, Any]:
