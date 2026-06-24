@@ -261,6 +261,12 @@ def create_app():
     def health():
         return doctor_payload()
 
+    @app.get("/api/acceleration/status")
+    def acceleration_status():
+        from . import acceleration
+
+        return acceleration.collect_acceleration_status()
+
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
         return build_dashboard_html()

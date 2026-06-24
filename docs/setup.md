@@ -172,6 +172,14 @@ Global crawler include/exclude globs are also settings. Per-root glob policy can
 inherit those defaults, extend them with root-specific lines, or override them
 entirely. The Corpus dashboard shows the effective policy for each root.
 
+V2.8 acceleration foundation settings are also catalog-backed. The default cache
+root resolves under the production install root when `FLUX_KB_INSTALL_ROOT` is
+set, otherwise under the local user cache. `flux-kb acceleration status` and the
+dashboard Health tab show CPU/disk hints, optional NVIDIA and ONNX Runtime
+availability, local model-server state, cache directories, and worker-family
+queue counts. Local model probing is disabled by default and accepts only
+loopback HTTP(S) URLs such as `http://127.0.0.1:11434`.
+
 ## Host Filesystem Agent
 
 When Flux services run in Docker, Windows paths such as `E:\Projects` are not

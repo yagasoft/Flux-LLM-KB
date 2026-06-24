@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ipaddress
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .database import DEFAULT_DATABASE_URL
 from .embeddings import DEFAULT_EMBEDDING_DIMENSIONS, DEFAULT_EMBEDDING_MODEL
@@ -97,6 +99,24 @@ def _choice(*choices: str) -> Callable[[Any], Any]:
         return parsed
 
     return validate
+
+
+def _loopback_http_url(value: Any) -> str:
+    parsed_value = str(value).strip()
+    parsed = urlparse(parsed_value)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("value must use http or https")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("value must include a host")
+    if hostname.lower() == "localhost":
+        return parsed_value.rstrip("/")
+    try:
+        if ipaddress.ip_address(hostname).is_loopback:
+            return parsed_value.rstrip("/")
+    except ValueError:
+        pass
+    raise ValueError("value must use a loopback host")
 
 
 SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
@@ -334,6 +354,158 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         apply_mode=APPLY_REINDEX_REQUIRED,
         affected_components=("retrieval", "worker", "database"),
         validator=_min_int(64),
+    ),
+    SettingDefinition(
+        key="acceleration.cache_root",
+        category="acceleration",
+        default="",
+        value_type="str",
+        description="Optional permanent cache root for models, parser output, OCR, ASR, vision, thumbnails, embeddings, and temp artifacts.",
+        env_var="FLUX_KB_CACHE_ROOT",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
+        key="acceleration.local_inference.enabled",
+        category="acceleration",
+        default=False,
+        value_type="bool",
+        description="Enable localhost-only probing for optional local model servers.",
+        env_var="FLUX_KB_LOCAL_INFERENCE_ENABLED",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
+        key="acceleration.local_inference.provider",
+        category="acceleration",
+        default="ollama",
+        value_type="str",
+        description="Local model server provider identifier.",
+        env_var="FLUX_KB_LOCAL_INFERENCE_PROVIDER",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_choice("ollama", "llama_cpp", "openai_compatible"),
+    ),
+    SettingDefinition(
+        key="acceleration.local_inference.base_url",
+        category="acceleration",
+        default="http://127.0.0.1:11434",
+        value_type="str",
+        description="Loopback-only local model server base URL.",
+        env_var="FLUX_KB_LOCAL_INFERENCE_BASE_URL",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_loopback_http_url,
+    ),
+    SettingDefinition(
+        key="acceleration.local_inference.probe_timeout_seconds",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Timeout for optional localhost model-server capability probes.",
+        env_var="FLUX_KB_LOCAL_INFERENCE_PROBE_TIMEOUT_SECONDS",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.text",
+        category="acceleration",
+        default=2,
+        value_type="int",
+        description="Maximum text-family extraction workers.",
+        env_var="FLUX_KB_WORKER_CAP_TEXT",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.office",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum Office/PDF-family extraction workers.",
+        env_var="FLUX_KB_WORKER_CAP_OFFICE",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.image",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum image-family extraction workers.",
+        env_var="FLUX_KB_WORKER_CAP_IMAGE",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.diagram",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum diagram-family extraction workers.",
+        env_var="FLUX_KB_WORKER_CAP_DIAGRAM",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.archive",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum archive/container-family extraction workers.",
+        env_var="FLUX_KB_WORKER_CAP_ARCHIVE",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.media",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum media-family extraction workers.",
+        env_var="FLUX_KB_WORKER_CAP_MEDIA",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.embedding",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum embedding-family workers.",
+        env_var="FLUX_KB_WORKER_CAP_EMBEDDING",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.preview",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum preview-generation workers.",
+        env_var="FLUX_KB_WORKER_CAP_PREVIEW",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.worker_cap.general",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Maximum general fallback workers.",
+        env_var="FLUX_KB_WORKER_CAP_GENERAL",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
     ),
     SettingDefinition(
         key="crawler.max_inline_bytes",

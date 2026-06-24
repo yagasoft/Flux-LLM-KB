@@ -186,6 +186,26 @@ def test_cli_semantic_duplicates_refresh_and_list_use_service(monkeypatch, capsy
     ]
 
 
+def test_cli_acceleration_status_uses_status_collector(monkeypatch, capsys):
+    from flux_llm_kb import acceleration
+
+    monkeypatch.setattr(
+        acceleration,
+        "collect_acceleration_status",
+        lambda: {
+            "capabilities": {"local_model": {"state": "disabled"}},
+            "cache": {"root": "D:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
+            "worker_families": [{"family": "media", "pending": 2}],
+        },
+    )
+
+    assert cli.main(["acceleration", "status"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["cache"]["root"] == "D:/FluxLLMKB/private/cache"
+    assert payload["worker_families"][0]["family"] == "media"
+
+
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     from flux_llm_kb import service
 

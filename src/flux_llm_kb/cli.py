@@ -244,6 +244,10 @@ def main(argv: list[str] | None = None) -> int:
     settings_apply = settings_subparsers.add_parser("apply", help="Acknowledge pending runtime control requests")
     settings_apply.add_argument("--component")
 
+    acceleration_parser = subparsers.add_parser("acceleration", help="Inspect V2.8 acceleration capability and queue status")
+    acceleration_subparsers = acceleration_parser.add_subparsers(dest="acceleration_command", required=True)
+    acceleration_subparsers.add_parser("status", help="Show local capability, cache, and worker-family status")
+
     mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
     mail_subparsers = mail_parser.add_subparsers(dest="mail_command", required=True)
     mail_profile = mail_subparsers.add_parser("profile", help="Manage mail profiles")
@@ -343,6 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         "hook": _hook,
         "codex": _codex,
         "settings": _settings,
+        "acceleration": _acceleration,
         "mail": _mail,
         "outlook-host": _outlook_host,
         "host-agent": _host_agent,
@@ -748,6 +753,15 @@ def _settings(args: argparse.Namespace) -> int:
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.settings_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _acceleration(args: argparse.Namespace) -> int:
+    if args.acceleration_command != "status":  # pragma: no cover - argparse prevents this
+        raise ValueError(args.acceleration_command)
+    from .acceleration import collect_acceleration_status
+
+    print(json.dumps(collect_acceleration_status(), indent=2, sort_keys=True))
     return 0
 
 

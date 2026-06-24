@@ -85,10 +85,15 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
                 (
                     "job-1",
                     "corpus_extract_video",
+                    "media",
+                    "gpu",
+                    50,
+                    900,
                     "running",
                     {"path": "clip.mp4"},
                     1,
                     None,
+                    {},
                 )
             ]
 
@@ -112,6 +117,170 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
 
     assert jobs[0]["id"] == "job-1"
     assert any("FOR UPDATE SKIP LOCKED" in sql for sql in executed_sql)
+
+
+def test_claim_corpus_jobs_filters_by_family_and_orders_by_priority(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "job-1",
+                    "corpus_extract_video",
+                    "media",
+                    "gpu",
+                    50,
+                    900,
+                    "running",
+                    {"path": "clip.mp4"},
+                    1,
+                    None,
+                    {},
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    jobs = database.claim_corpus_jobs(
+        limit=2,
+        worker_id="worker-a",
+        job_families=["media", "archive"],
+        host_agent_roots=False,
+    )
+
+    sql, params = executed[0]
+    assert "job_family = ANY(%s)" in sql
+    assert "ORDER BY priority DESC, created_at" in sql
+    assert params[1] == ["media", "archive"]
+    assert jobs == [
+        {
+            "id": "job-1",
+            "job_type": "corpus_extract_video",
+            "job_family": "media",
+            "resource_class": "gpu",
+            "priority": 50,
+            "time_budget_seconds": 900,
+            "status": "running",
+            "payload": {"path": "clip.mp4"},
+            "attempts": 1,
+            "last_error": None,
+            "telemetry": {},
+        }
+    ]
+
+
+def test_complete_corpus_job_records_duration_and_telemetry(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.complete_corpus_job(job_id="job-1", duration_ms=42, telemetry={"family": "media"})
+
+    sql, params = executed[0]
+    assert "completed_at = now()" in sql
+    assert "last_duration_ms = %s" in sql
+    assert "telemetry = telemetry || %s::jsonb" in sql
+    assert params == (42, json.dumps({"family": "media"}, sort_keys=True), "job-1")
+
+
+def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120)]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    rows = database.worker_family_stats()
+
+    sql = executed[0][0]
+    assert "FILTER (WHERE status = 'pending')" in sql
+    assert "percentile_disc(0.95)" in sql
+    assert rows == [
+        {
+            "family": "media",
+            "resource_class": "gpu",
+            "pending": 2,
+            "running": 1,
+            "blocked": 1,
+            "failed": 0,
+            "avg_duration_ms": 24,
+            "p95_duration_ms": 95,
+            "max_duration_ms": 120,
+        }
+    ]
 
 
 def test_search_corpus_chunks_includes_freshness_stream():

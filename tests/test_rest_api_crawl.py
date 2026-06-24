@@ -159,6 +159,28 @@ def test_host_routes_are_exposed(monkeypatch):
     assert "status" in response.json()
 
 
+def test_acceleration_status_route_is_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr(
+        "flux_llm_kb.acceleration.collect_acceleration_status",
+        lambda: {
+            "capabilities": {"nvidia": {"ok": False, "state": "missing"}},
+            "cache": {"root": "D:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
+            "worker_families": [{"family": "media", "pending": 2, "p95_duration_ms": 95}],
+        },
+    )
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.get("/api/acceleration/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cache"]["root"] == "D:/FluxLLMKB/private/cache"
+    assert payload["worker_families"][0]["family"] == "media"
+
+
 def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_path):
     from flux_llm_kb.rest_api import create_app
 

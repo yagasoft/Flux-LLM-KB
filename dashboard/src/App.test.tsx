@@ -14,6 +14,34 @@ const health = {
   watcher: { active_roots: 1, disabled_roots: 2, stale_count: 0 },
   jobs: { pending: 4, failed: 1, blocked: 2 },
   retrieval: { episodes: 9, asset_chunks: 12, embeddings: 40 },
+  acceleration: {
+    capabilities: {
+      nvidia: { ok: false, state: "missing", message: "nvidia-smi not found" },
+      onnxruntime: { ok: true, providers: ["CPUExecutionProvider"] },
+      local_model: { ok: false, state: "disabled", provider: "ollama" },
+      watcher_backend: { ok: true, state: "available", provider: "watchdog" },
+      cpu: { ok: true, count: 16 },
+      memory: { ok: true, total_bytes: 34359738368 }
+    },
+    cache: {
+      root: "D:/FluxLLMKB/private/cache",
+      source: "install_root",
+      directories: {
+        models: "D:/FluxLLMKB/private/cache/models",
+        ocr: "D:/FluxLLMKB/private/cache/ocr",
+        asr: "D:/FluxLLMKB/private/cache/asr",
+        vision: "D:/FluxLLMKB/private/cache/vision",
+        thumbnails: "D:/FluxLLMKB/private/cache/thumbnails",
+        parser: "D:/FluxLLMKB/private/cache/parser",
+        embeddings: "D:/FluxLLMKB/private/cache/embeddings",
+        temp: "D:/FluxLLMKB/private/cache/temp"
+      }
+    },
+    worker_families: [
+      { family: "media", resource_class: "gpu", configured_cap: 1, pending: 2, running: 1, blocked: 1, failed: 0, avg_duration_ms: 24, p95_duration_ms: 95 },
+      { family: "office", resource_class: "cpu", configured_cap: 2, pending: 3, running: 0, blocked: 0, failed: 1, avg_duration_ms: 12, p95_duration_ms: 40 }
+    ]
+  },
   workers: {
     active: 1,
     components: [
@@ -613,6 +641,22 @@ describe("Flux dashboard", () => {
       expect(screen.getAllByText("codex.hooks.enabled").length).toBeGreaterThan(0);
     });
     expect(screen.getByText("Enable Flux Codex hook policy evaluation.")).toBeInTheDocument();
+  });
+
+  test("health shows acceleration capabilities, cache layout, and family telemetry", async () => {
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Acceleration" })).toBeInTheDocument();
+    expect(screen.getByText("NVIDIA")).toBeInTheDocument();
+    expect(screen.getByText("nvidia-smi not found")).toBeInTheDocument();
+    expect(screen.getByText("Local Model")).toBeInTheDocument();
+    expect(screen.getByText("disabled")).toBeInTheDocument();
+    expect(screen.getByText("D:/FluxLLMKB/private/cache")).toBeInTheDocument();
+    expect(screen.getByText("media")).toBeInTheDocument();
+    expect(screen.getByText("p95 95ms")).toBeInTheDocument();
+    expect(screen.getByText("office")).toBeInTheDocument();
+    expect(screen.getByText("3 pending")).toBeInTheDocument();
   });
 
   test("restores the last tab and selected root after refresh", async () => {

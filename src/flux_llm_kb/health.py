@@ -9,6 +9,7 @@ import sys
 from typing import Any
 
 from . import database
+from .acceleration import collect_acceleration_status
 from .codex_integration import codex_status
 from .error_diagnostics import coerce_error_detail, error_envelope
 from .extractors import extractor_availability
@@ -109,6 +110,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
         extractors=extractors,
         mail=mail_payload,
     )
+    acceleration = _safe(collect_acceleration_status, {"capabilities": {}, "cache": {}, "worker_families": []})
     return {
         "database": {"ok": db_status.ok, "message": db_status.message},
         "runtime": runtime_checks,
@@ -126,6 +128,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
         },
         "retrieval": retrieval,
         "extractors": extractors,
+        "acceleration": acceleration,
         "host_agent": host_agent_status,
         "codex": codex,
         "workers": {

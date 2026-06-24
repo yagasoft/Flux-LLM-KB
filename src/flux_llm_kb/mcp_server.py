@@ -162,6 +162,13 @@ def create_server():
             limit=limit,
         )
 
+    @mcp.tool(name="kb.acceleration_status")
+    def acceleration_status():
+        """Return local acceleration capability, cache layout, and worker-family queue telemetry."""
+        from .acceleration import collect_acceleration_status
+
+        return collect_acceleration_status()
+
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
         """Finalize the current agent turn by storing a redacted durable summary. Finalize with kb.finalize_turn at turn end; avoid duplicating every prior kb.remember item."""

@@ -7,10 +7,11 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
             {
                 "id": "job-1",
                 "job_type": "corpus_extract_video",
+                "job_family": "media",
                 "payload": {"path": "clip.mp4", "root_name": "media"},
                 "attempts": 1,
             }
@@ -58,10 +59,11 @@ def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, host_agent_roots=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
             {
                 "id": "job-1",
                 "job_type": "corpus_extract_document",
+                "job_family": "office",
                 "payload": {"path": "open.docx", "root_name": "docs"},
                 "attempts": 1,
             }
@@ -94,10 +96,11 @@ def test_backfill_blocks_persistently_locked_jobs(monkeypatch):
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, host_agent_roots=None: [
+        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
             {
                 "id": "job-1",
                 "job_type": "corpus_extract_document",
+                "job_family": "office",
                 "payload": {"path": "open.docx", "root_name": "docs"},
                 "attempts": 5,
             }
@@ -125,23 +128,32 @@ def test_backfill_blocks_persistently_locked_jobs(monkeypatch):
 
 def test_backfill_diagrams_kind_processes_only_diagram_jobs(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "processed": [], "repaired": [], "cleared_errors": []}
-    monkeypatch.setattr(
-        database,
-        "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, host_agent_roots=None: [
+    claim_calls = []
+
+    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None):
+        claim_calls.append(
+            {
+                "limit": limit,
+                "worker_id": worker_id,
+                "root_name": root_name,
+                "job_families": job_families,
+                "host_agent_roots": host_agent_roots,
+            }
+        )
+        return [
             {
                 "id": "job-diagram",
                 "job_type": "corpus_extract_diagram",
+                "job_family": "diagram",
                 "payload": {"path": "flow.drawio", "root_name": "docs"},
                 "attempts": 1,
-            },
-            {
-                "id": "job-video",
-                "job_type": "corpus_extract_video",
-                "payload": {"path": "clip.mp4", "root_name": "docs"},
-                "attempts": 1,
-            },
-        ],
+            }
+        ]
+
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        fake_claim_corpus_jobs,
     )
     monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
     monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
@@ -162,37 +174,40 @@ def test_backfill_diagrams_kind_processes_only_diagram_jobs(monkeypatch):
     result = KnowledgeService().run_corpus_backfill(kind="diagrams", limit=2, workers=1)
 
     assert result["completed"] == 1
+    assert claim_calls[0]["job_families"] == ["diagram"]
     assert calls["processed"] == ["job-diagram"]
-    assert calls["completed"] == [{"job_id": "job-diagram"}]
-    assert calls["retried"][0]["job_id"] == "job-video"
-    assert "diagrams backfill filter" in calls["retried"][0]["error"]
+    assert calls["completed"][0]["job_id"] == "job-diagram"
+    assert calls["completed"][0]["telemetry"]["job_family"] == "diagram"
+    assert calls["retried"] == []
 
 
 def test_backfill_archive_kinds_process_archive_and_container_jobs(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "processed": [], "repaired": [], "cleared_errors": []}
-    monkeypatch.setattr(
-        database,
-        "claim_corpus_jobs",
-        lambda *, limit, worker_id, root_name=None, host_agent_roots=None: [
+    claim_calls = []
+
+    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None):
+        claim_calls.append({"job_families": job_families, "limit": limit})
+        return [
             {
                 "id": "job-archive",
                 "job_type": "corpus_extract_archive",
+                "job_family": "archive",
                 "payload": {"path": "bundle.zip", "root_name": "docs"},
                 "attempts": 1,
             },
             {
                 "id": "job-container",
                 "job_type": "corpus_extract_container",
+                "job_family": "archive",
                 "payload": {"path": "package.whl", "root_name": "docs"},
                 "attempts": 1,
             },
-            {
-                "id": "job-document",
-                "job_type": "corpus_extract_document",
-                "payload": {"path": "report.docx", "root_name": "docs"},
-                "attempts": 1,
-            },
-        ],
+        ]
+
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        fake_claim_corpus_jobs,
     )
     monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
     monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
@@ -213,10 +228,11 @@ def test_backfill_archive_kinds_process_archive_and_container_jobs(monkeypatch):
     result = KnowledgeService().run_corpus_backfill(kind="archives", limit=3, workers=1)
 
     assert result["completed"] == 2
+    assert claim_calls[0]["job_families"] == ["archive"]
     assert calls["processed"] == ["job-archive", "job-container"]
-    assert calls["completed"] == [{"job_id": "job-archive"}, {"job_id": "job-container"}]
-    assert calls["retried"][0]["job_id"] == "job-document"
-    assert "archives backfill filter" in calls["retried"][0]["error"]
+    assert [item["job_id"] for item in calls["completed"]] == ["job-archive", "job-container"]
+    assert [item["telemetry"]["job_family"] for item in calls["completed"]] == ["archive", "archive"]
+    assert calls["retried"] == []
 
 
 def test_process_corpus_job_reports_locked_file(monkeypatch, tmp_path):

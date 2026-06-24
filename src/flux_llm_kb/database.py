@@ -8,6 +8,12 @@ from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
+from .acceleration import (
+    default_priority_for_family,
+    job_family_for_type,
+    resource_class_for_family,
+    time_budget_for_family,
+)
 from .crawler import CrawlPlan
 from .embeddings import (
     DEFAULT_EMBEDDING_DIMENSIONS,
@@ -2116,27 +2122,44 @@ def persist_crawl_plan(
                 if changed_asset or legacy_metadata_requeue:
                     chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id else asset.chunks)
                     if asset.extraction_tier == "deferred" and not canonical_id:
+                        job_type = f"corpus_extract_{asset.file_kind}"
+                        schedule = _job_schedule_metadata(job_type)
                         cur.execute(
                             """
-                            INSERT INTO capture_jobs (job_type, payload)
-                            VALUES (%s, %s::jsonb)
+                            INSERT INTO capture_jobs (
+                                job_type, payload, job_family, resource_class, priority, time_budget_seconds
+                            )
+                            VALUES (%s, %s::jsonb, %s, %s, %s, %s)
                             """,
                             (
-                                f"corpus_extract_{asset.file_kind}",
+                                job_type,
                                 _json({"root_name": root_name, "path": asset.relative_path}),
+                                schedule["job_family"],
+                                schedule["resource_class"],
+                                schedule["priority"],
+                                schedule["time_budget_seconds"],
                             ),
                         )
                         jobs_queued += 1
                     elif asset.extraction_status == "retrying_locked" and not canonical_id:
+                        job_type = f"corpus_extract_{asset.file_kind}"
+                        schedule = _job_schedule_metadata(job_type)
                         cur.execute(
                             """
-                            INSERT INTO capture_jobs (job_type, payload, status, last_error, next_attempt_at)
-                            VALUES (%s, %s::jsonb, 'retrying_locked', %s, now() + make_interval(secs => 300))
+                            INSERT INTO capture_jobs (
+                                job_type, payload, status, last_error, next_attempt_at,
+                                job_family, resource_class, priority, time_budget_seconds
+                            )
+                            VALUES (%s, %s::jsonb, 'retrying_locked', %s, now() + make_interval(secs => 300), %s, %s, %s, %s)
                             """,
                             (
-                                f"corpus_extract_{asset.file_kind}",
+                                job_type,
                                 _json({"root_name": root_name, "path": asset.relative_path}),
                                 str(asset.metadata.get("error") or "file locked"),
+                                schedule["job_family"],
+                                schedule["resource_class"],
+                                schedule["priority"],
+                                schedule["time_budget_seconds"],
                             ),
                         )
                         jobs_queued += 1
@@ -2312,7 +2335,9 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
+                SELECT id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
+                       status, payload, attempts, last_error, created_at, updated_at,
+                       started_at, completed_at, last_duration_ms, telemetry
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 ORDER BY updated_at DESC
@@ -2324,12 +2349,20 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
                 {
                     "id": row[0],
                     "job_type": row[1],
-                    "status": row[2],
-                    "payload": row[3],
-                    "attempts": row[4],
-                    "last_error": row[5],
-                    "created_at": row[6].isoformat(),
-                    "updated_at": row[7].isoformat(),
+                    "job_family": row[2],
+                    "resource_class": row[3],
+                    "priority": row[4],
+                    "time_budget_seconds": row[5],
+                    "status": row[6],
+                    "payload": row[7],
+                    "attempts": row[8],
+                    "last_error": row[9],
+                    "created_at": row[10].isoformat(),
+                    "updated_at": row[11].isoformat(),
+                    "started_at": row[12].isoformat() if row[12] else None,
+                    "completed_at": row[13].isoformat() if row[13] else None,
+                    "last_duration_ms": row[14],
+                    "telemetry": row[15] or {},
                 }
                 for row in cur.fetchall()
             ]
@@ -2513,11 +2546,13 @@ def claim_corpus_jobs(
     limit: int = 1,
     worker_id: str = "flux-kb-worker",
     root_name: str | None = None,
+    job_families: list[str] | tuple[str, ...] | None = None,
     host_agent_roots: bool | None = None,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     root_filter = "AND payload->>'root_name' = %s" if root_name else ""
+    family_filter = "AND job_family = ANY(%s)" if job_families else ""
     host_root_filter = ""
     if host_agent_roots is True:
         host_root_filter = """
@@ -2537,11 +2572,13 @@ def claim_corpus_jobs(
                             AND r.metadata->>'host_access' = 'host_agent'
                       )
         """
-    params: tuple[Any, ...]
+    params_list: list[Any] = [worker_id]
+    if job_families:
+        params_list.append(list(job_families))
     if root_name:
-        params = (worker_id, root_name, max(1, min(limit, 100)))
-    else:
-        params = (worker_id, max(1, min(limit, 100)))
+        params_list.append(root_name)
+    params_list.append(max(1, min(limit, 100)))
+    params = tuple(params_list)
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -2549,6 +2586,8 @@ def claim_corpus_jobs(
                 UPDATE capture_jobs
                 SET status = 'running',
                     attempts = attempts + 1,
+                    started_at = now(),
+                    completed_at = NULL,
                     locked_at = now(),
                     locked_by = %s,
                     updated_at = now()
@@ -2558,13 +2597,15 @@ def claim_corpus_jobs(
                     WHERE job_type LIKE 'corpus_%%'
                       AND status IN ('pending', 'retrying_locked')
                       AND next_attempt_at <= now()
+                      {family_filter}
                       {root_filter}
                       {host_root_filter}
-                    ORDER BY created_at
+                    ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING id::text, job_type, status, payload, attempts, last_error
+                RETURNING id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
+                          status, payload, attempts, last_error, telemetry
                 """,
                 params,
             )
@@ -2572,10 +2613,15 @@ def claim_corpus_jobs(
                 {
                     "id": row[0],
                     "job_type": row[1],
-                    "status": row[2],
-                    "payload": row[3],
-                    "attempts": row[4],
-                    "last_error": row[5],
+                    "job_family": row[2],
+                    "resource_class": row[3],
+                    "priority": row[4],
+                    "time_budget_seconds": row[5],
+                    "status": row[6],
+                    "payload": row[7],
+                    "attempts": row[8],
+                    "last_error": row[9],
+                    "telemetry": row[10] or {},
                 }
                 for row in cur.fetchall()
             ]
@@ -2643,7 +2689,13 @@ def list_runtime_components(*, url: str | None = None) -> list[dict[str, Any]]:
             ]
 
 
-def complete_corpus_job(*, job_id: str, url: str | None = None) -> None:
+def complete_corpus_job(
+    *,
+    job_id: str,
+    duration_ms: int | None = None,
+    telemetry: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> None:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -2652,13 +2704,16 @@ def complete_corpus_job(*, job_id: str, url: str | None = None) -> None:
                 UPDATE capture_jobs
                 SET status = 'completed',
                     last_error = NULL,
+                    completed_at = now(),
+                    last_duration_ms = %s,
+                    telemetry = telemetry || %s::jsonb,
                     locked_at = NULL,
                     locked_by = NULL,
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
                 """,
-                (job_id,),
+                (duration_ms, _json(telemetry or {}), job_id),
             )
 
 
@@ -2695,6 +2750,8 @@ def retry_corpus_job(
     error: str,
     cooldown_seconds: int = 300,
     status: str = "pending",
+    duration_ms: int | None = None,
+    telemetry: dict[str, Any] | None = None,
     url: str | None = None,
 ) -> None:
     psycopg = _load_psycopg()
@@ -2706,18 +2763,26 @@ def retry_corpus_job(
                 SET status = %s,
                     last_error = %s,
                     next_attempt_at = now() + make_interval(secs => %s),
+                    last_duration_ms = %s,
+                    telemetry = telemetry || %s::jsonb,
                     locked_at = NULL,
                     locked_by = NULL,
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
                 """,
-                (status, error, max(1, cooldown_seconds), job_id),
+                (status, error, max(1, cooldown_seconds), duration_ms, _json(telemetry or {}), job_id),
             )
 
 
 def block_corpus_job(
-    *, job_id: str, error: str, status: str = "blocked_missing_dependency", url: str | None = None
+    *,
+    job_id: str,
+    error: str,
+    status: str = "blocked_missing_dependency",
+    duration_ms: int | None = None,
+    telemetry: dict[str, Any] | None = None,
+    url: str | None = None,
 ) -> None:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -2727,13 +2792,16 @@ def block_corpus_job(
                 UPDATE capture_jobs
                 SET status = %s,
                     last_error = %s,
+                    completed_at = now(),
+                    last_duration_ms = %s,
+                    telemetry = telemetry || %s::jsonb,
                     locked_at = NULL,
                     locked_by = NULL,
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
                 """,
-                (status, error, job_id),
+                (status, error, duration_ms, _json(telemetry or {}), job_id),
             )
 
 
@@ -2769,6 +2837,43 @@ def repair_extracted_corpus_asset_statuses(
                 params,
             )
             return {"root_name": root_name, "repaired": int(cur.fetchone()[0] or 0)}
+
+
+def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT job_family,
+                       resource_class,
+                       count(*) FILTER (WHERE status = 'pending')::integer AS pending,
+                       count(*) FILTER (WHERE status = 'running')::integer AS running,
+                       count(*) FILTER (WHERE status LIKE 'blocked_%')::integer AS blocked,
+                       count(*) FILTER (WHERE status = 'failed')::integer AS failed,
+                       avg(last_duration_ms)::integer AS avg_duration_ms,
+                       percentile_disc(0.95) WITHIN GROUP (ORDER BY last_duration_ms)::integer AS p95_duration_ms,
+                       max(last_duration_ms)::integer AS max_duration_ms
+                FROM capture_jobs
+                WHERE job_type LIKE 'corpus_%%'
+                GROUP BY job_family, resource_class
+                ORDER BY job_family
+                """
+            )
+            return [
+                {
+                    "family": row[0],
+                    "resource_class": row[1],
+                    "pending": row[2],
+                    "running": row[3],
+                    "blocked": row[4],
+                    "failed": row[5],
+                    "avg_duration_ms": row[6],
+                    "p95_duration_ms": row[7],
+                    "max_duration_ms": row[8],
+                }
+                for row in cur.fetchall()
+            ]
 
 
 def apply_extraction_result(
@@ -6480,6 +6585,16 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
         )
         inserted += 1
     return inserted
+
+
+def _job_schedule_metadata(job_type: str) -> dict[str, Any]:
+    family = job_family_for_type(job_type)
+    return {
+        "job_family": family,
+        "resource_class": resource_class_for_family(family),
+        "priority": default_priority_for_family(family),
+        "time_budget_seconds": time_budget_for_family(family),
+    }
 
 
 def _cancel_duplicate_corpus_job_for_asset(cur: Any, *, root_name: str, relative_path: str) -> None:

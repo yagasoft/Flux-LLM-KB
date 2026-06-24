@@ -43,6 +43,7 @@ type HealthPayload = {
   watcher?: { active_roots?: number; disabled_roots?: number; stale_count?: number; roots?: unknown[] };
   jobs?: { pending?: number; failed?: number; blocked?: number };
   retrieval?: { episodes?: number; sources?: number; source_assets?: number; asset_chunks?: number; embeddings?: number };
+  acceleration?: AccelerationStatus;
   workers?: {
     active?: number;
     components?: Array<{ name?: string; status?: string; heartbeat_age_seconds?: number | null; metadata?: Record<string, unknown> }>;
@@ -87,6 +88,40 @@ type HealthPayload = {
       recent_events?: Array<{ event_type?: string; created_at?: string; details?: Record<string, unknown> }>;
     };
   };
+};
+
+type AccelerationStatus = {
+  capabilities?: Record<string, AccelerationCapability>;
+  cache?: {
+    root?: string;
+    source?: string;
+    directories?: Record<string, string>;
+  };
+  worker_families?: AccelerationWorkerFamily[];
+};
+
+type AccelerationCapability = {
+  ok?: boolean;
+  state?: string;
+  message?: string;
+  provider?: string;
+  providers?: string[];
+  count?: number;
+  total_bytes?: number | null;
+  gpus?: Array<{ name?: string; memory_total_mb?: number; driver_version?: string }>;
+};
+
+type AccelerationWorkerFamily = {
+  family?: string;
+  resource_class?: string;
+  configured_cap?: number;
+  pending?: number;
+  running?: number;
+  blocked?: number;
+  failed?: number;
+  avg_duration_ms?: number | null;
+  p95_duration_ms?: number | null;
+  max_duration_ms?: number | null;
 };
 
 type ErrorDiagnostic = {
@@ -1654,6 +1689,7 @@ function HealthTab({
         </div>
       </Panel>
       <CodexHooksPanel codex={codex} />
+      <AccelerationPanel acceleration={state.health.acceleration} />
       <Panel title="Deployment">
         <div className="status-grid">
           <StatusTile
@@ -1679,6 +1715,51 @@ function HealthTab({
       </Panel>
     </section>
   );
+}
+
+function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus }) {
+  const capabilities = acceleration?.capabilities ?? {};
+  const cache = acceleration?.cache ?? {};
+  const families = acceleration?.worker_families ?? [];
+  const familyRows = families.slice(0, 8).map((family) => {
+    const name = family.family ?? "general";
+    const pending = family.pending ?? 0;
+    const p95 = family.p95_duration_ms;
+    return [
+      name,
+      `${pending} pending`,
+      p95 == null ? `${family.running ?? 0} running` : `p95 ${p95}ms`
+    ] as [string, string, string];
+  });
+  return (
+    <Panel title="Acceleration">
+      <div className="status-grid">
+        <StatusTile label="NVIDIA" ok={capabilities.nvidia?.ok} message={accelerationCapabilityMessage(capabilities.nvidia)} />
+        <StatusTile label="ONNX Runtime" ok={capabilities.onnxruntime?.ok} message={accelerationCapabilityMessage(capabilities.onnxruntime)} />
+        <StatusTile label="Local Model" ok={capabilities.local_model?.ok} message={accelerationCapabilityMessage(capabilities.local_model)} />
+        <StatusTile label="Watcher Backend" ok={capabilities.watcher_backend?.ok} message={accelerationCapabilityMessage(capabilities.watcher_backend)} />
+      </div>
+      <div className="settings-list">
+        <div className="settings-row">
+          <strong>Cache Root</strong>
+          <span>{cache.root ?? "not configured"}</span>
+          <em>{cache.source ?? "default"}</em>
+        </div>
+      </div>
+      {familyRows.length > 0 ? <MiniTable rows={familyRows} /> : <p className="muted">No worker-family telemetry yet.</p>}
+    </Panel>
+  );
+}
+
+function accelerationCapabilityMessage(capability?: AccelerationCapability): string {
+  if (!capability) return "unknown";
+  if (capability.message) return capability.message;
+  if (capability.gpus?.length) return capability.gpus.map((gpu) => gpu.name).filter(Boolean).join(", ");
+  if (capability.providers?.length) return capability.providers.join(", ");
+  if (capability.state) return capability.state;
+  if (capability.provider) return capability.provider;
+  if (capability.count != null) return `${capability.count}`;
+  return capability.ok ? "available" : "unavailable";
 }
 
 function ActionableDiagnostics({

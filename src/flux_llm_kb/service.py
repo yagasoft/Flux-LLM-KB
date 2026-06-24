@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any
 
+from .acceleration import kind_to_job_families
 from .crawler import CorpusPolicy, scan_path
 from . import database
 from .glob_policy import effective_glob_policy
@@ -617,39 +618,38 @@ class KnowledgeService:
         from . import worker
 
         cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
+        job_families = kind_to_job_families(kind)
         claim_kwargs: dict[str, Any] = {
             "limit": limit,
             "worker_id": f"flux-kb-backfill-{workers}",
             "root_name": root_name,
         }
+        if job_families is not None:
+            claim_kwargs["job_families"] = list(job_families)
         if host_agent_roots is not None:
             claim_kwargs["host_agent_roots"] = host_agent_roots
         claimed = database.claim_corpus_jobs(**claim_kwargs)
-        filtered = [
-            job
-            for job in claimed
-            if kind == "all" or _job_matches_kind(job["job_type"], kind)
-        ]
-        filtered_ids = {job["id"] for job in filtered}
-        for job in claimed:
-            if job["id"] not in filtered_ids:
-                database.retry_corpus_job(
-                    job_id=job["id"],
-                    error=f"released by {kind} backfill filter",
-                    cooldown_seconds=30,
-                )
         completed = 0
         blocked = 0
         retried = 0
-        for job in filtered:
+        for job in claimed:
+            started = time.perf_counter()
             process_result = worker.process_corpus_job(job)
+            duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+            telemetry = {
+                "job_family": job.get("job_family"),
+                "resource_class": job.get("resource_class"),
+                "result_status": process_result.status,
+            }
             if process_result.status in {"indexed", "metadata_only"}:
-                database.complete_corpus_job(job_id=job["id"])
+                database.complete_corpus_job(job_id=job["id"], duration_ms=duration_ms, telemetry=telemetry)
                 completed += 1
             elif process_result.status == "blocked_missing_dependency":
                 database.block_corpus_job(
                     job_id=job["id"],
                     error=process_result.message or "blocked_missing_dependency",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
                 )
                 blocked += 1
             elif process_result.status == "retrying_locked":
@@ -658,6 +658,8 @@ class KnowledgeService:
                         job_id=job["id"],
                         error=process_result.message or "blocked_locked",
                         status="blocked_locked",
+                        duration_ms=duration_ms,
+                        telemetry=telemetry,
                     )
                     blocked += 1
                 else:
@@ -666,6 +668,8 @@ class KnowledgeService:
                         error=process_result.message or "retrying_locked",
                         cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
                         status="retrying_locked",
+                        duration_ms=duration_ms,
+                        telemetry=telemetry,
                     )
                     retried += 1
             else:
@@ -673,6 +677,8 @@ class KnowledgeService:
                     job_id=job["id"],
                     error=process_result.message or process_result.status,
                     cooldown_seconds=300,
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
                 )
                 retried += 1
         repaired = database.repair_extracted_corpus_asset_statuses(root_name=root_name)
@@ -681,6 +687,7 @@ class KnowledgeService:
             event_type="corpus.backfill",
             details={
                 "kind": kind,
+                "job_families": list(job_families) if job_families else None,
                 "root_name": root_name,
                 "host_agent_roots": host_agent_roots,
                 "claimed": len(claimed),
@@ -695,6 +702,7 @@ class KnowledgeService:
         )
         return {
             "kind": kind,
+            "job_families": list(job_families) if job_families else None,
             "root_name": root_name,
             "host_agent_roots": host_agent_roots,
             "claimed": len(claimed),
@@ -704,7 +712,7 @@ class KnowledgeService:
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],
             "cleared_completed_errors": cleared_errors["cleared"],
-            "jobs": filtered,
+            "jobs": claimed,
         }
 
     def run_corpus_worker(

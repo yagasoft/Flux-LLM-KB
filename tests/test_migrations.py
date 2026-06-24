@@ -58,6 +58,19 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "status IN ('active', 'retired')" in semantic_duplicate_migration.sql
     assert "idx_semantic_duplicate_clusters_scope" in semantic_duplicate_migration.sql
     assert "idx_semantic_duplicate_members_owner" in semantic_duplicate_migration.sql
+    acceleration_migration = next(item for item in migrations if item.name == "0014_acceleration_foundation")
+    assert "ADD COLUMN IF NOT EXISTS job_family" in acceleration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS resource_class" in acceleration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS priority" in acceleration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS time_budget_seconds" in acceleration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS started_at" in acceleration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS completed_at" in acceleration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS last_duration_ms" in acceleration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS telemetry" in acceleration_migration.sql
+    assert "idx_capture_jobs_family_claim" in acceleration_migration.sql
+    assert "idx_capture_jobs_family_status" in acceleration_migration.sql
+    assert "corpus_extract_video" in acceleration_migration.sql
+    assert "media" in acceleration_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

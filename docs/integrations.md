@@ -30,6 +30,7 @@ Tools:
 | `kb.retention_quality` | Report retention and memory-quality candidates without raw content. |
 | `kb.semantic_duplicates_refresh` | Refresh advisory semantic duplicate clusters for corpus chunks, episodes, or claims. |
 | `kb.semantic_duplicates_list` | List active semantic duplicate clusters without raw suppressed content. |
+| `kb.acceleration_status` | Return local capability, cache layout, and worker-family queue telemetry. |
 | `kb.audit` | List recent audit events. |
 | `kb.forget` | Forget a memory item by id with an audit reason. |
 | `kb.status` | Return Flux health and runtime status. |
@@ -60,6 +61,7 @@ uvicorn flux_llm_kb.rest_api:create_app --factory --host 127.0.0.1 --port 8765
 Endpoints:
 
 - `GET /api/health`
+- `GET /api/acceleration/status`
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -157,6 +159,7 @@ flux-kb capture review list --limit 50
 flux-kb capture review decide <job-id> --decision approve --rationale "Verified metadata and source."
 flux-kb semantic-duplicates refresh --memory-class all --limit 1000
 flux-kb semantic-duplicates list --memory-class corpus --limit 50
+flux-kb acceleration status
 ```
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
@@ -212,6 +215,12 @@ flux-kb settings apply --component watcher
 
 Crawler glob settings are global defaults. Monitored roots can inherit, extend,
 or override them; effective globs are returned in dashboard crawl payloads.
+
+Acceleration settings define the permanent cache root, localhost-only local
+model probing, and per-family worker caps. Local inference probing is disabled
+by default and rejects non-loopback URLs. The read-only acceleration status is
+available through `flux-kb acceleration status`, `GET /api/acceleration/status`,
+`kb.acceleration_status`, and the dashboard Health tab.
 
 ## Host Filesystem Agent
 

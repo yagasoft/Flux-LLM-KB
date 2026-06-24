@@ -13,7 +13,9 @@ system rather than a large prompt-injected memory file.
   caused, fixed, and mentions.
 - `embeddings`: vector representations for semantic retrieval.
 - `audit_events`: append-only record of memory writes, deletes, redactions, and queries.
-- `capture_jobs`: asynchronous ingestion and consolidation jobs.
+- `capture_jobs`: asynchronous ingestion and consolidation jobs, including
+  corpus worker-family metadata, resource class, priority, time budget, and
+  duration telemetry.
 - `workspace_scopes`: workspace/project identity and visibility boundaries.
 - `retention_policies`: decay and forgetting configuration by memory class.
 - `monitored_roots`: opt-in local paths for recursive corpus crawling and watch mode.
@@ -110,6 +112,13 @@ state in `capture_jobs`, and do not call cloud providers by default. Jobs move t
 explicit terminal states such as `completed`, `metadata_only`, or
 `blocked_missing_dependency`; locked reads move through `retrying_locked` with
 `next_attempt_at` cooldown and then `blocked_locked` after configured attempts.
+Corpus jobs are classified into fixed worker families (`text`, `office`,
+`image`, `diagram`, `archive`, `media`, `embedding`, `preview`, and `general`)
+with resource class, priority, and time budget metadata. Worker/backfill
+commands translate existing `--kind` options into these families before claiming
+jobs, so family-specific workers do not lock unrelated work. Completion,
+retry, and blocked transitions record last duration and sanitized telemetry for
+queue observability.
 Files observed before their size/mtime fingerprint stabilizes are recorded as
 `pending_stable` instead of failing the root crawl. Jobs are not completed merely
 because they were claimed. Duplicate content is suppressed by content hash while
@@ -153,6 +162,15 @@ runtime/config/spool data under `private`, PostgreSQL bind-mounted data under
 `data`, and logs under `logs`. Docker runs PostgreSQL/API/dashboard/worker from
 prebuilt local images and bind-mounts only deployed runtime paths. Host-agent and
 Outlook-host run as Windows Scheduled Tasks in the logged-in user session.
+
+The V2.8 acceleration status model is read-only. It detects CPU count, Windows
+memory when available, cache-root disk space, NVIDIA/CUDA through `nvidia-smi`,
+optional ONNX Runtime providers, watchdog availability, and optional local model
+servers. Local model probing is disabled by default and accepts only loopback
+HTTP(S) URLs. The permanent cache layout is resolved from
+`acceleration.cache_root`, `FLUX_KB_CACHE_ROOT`, `FLUX_KB_INSTALL_ROOT`, or the
+user cache, and exposes named directories for models, OCR, ASR, vision,
+thumbnails, parser output, embeddings, and temp files.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,

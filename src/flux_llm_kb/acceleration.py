@@ -1,0 +1,449 @@
+from __future__ import annotations
+
+import importlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+from typing import Any, Callable
+from urllib.parse import urlparse
+from urllib.request import urlopen as _urlopen
+
+
+JOB_FAMILIES: tuple[str, ...] = (
+    "text",
+    "office",
+    "image",
+    "diagram",
+    "archive",
+    "media",
+    "embedding",
+    "preview",
+    "general",
+)
+
+FAMILY_RESOURCE_CLASS: dict[str, str] = {
+    "text": "cpu",
+    "office": "cpu",
+    "image": "gpu",
+    "diagram": "cpu",
+    "archive": "io",
+    "media": "gpu",
+    "embedding": "gpu",
+    "preview": "cpu",
+    "general": "cpu",
+}
+
+FAMILY_DEFAULT_PRIORITY: dict[str, int] = {
+    "text": 80,
+    "office": 70,
+    "diagram": 65,
+    "archive": 55,
+    "image": 45,
+    "media": 40,
+    "embedding": 35,
+    "preview": 25,
+    "general": 10,
+}
+
+FAMILY_DEFAULT_TIME_BUDGET_SECONDS: dict[str, int] = {
+    "text": 120,
+    "office": 300,
+    "diagram": 180,
+    "archive": 300,
+    "image": 600,
+    "media": 900,
+    "embedding": 300,
+    "preview": 180,
+    "general": 180,
+}
+
+FAMILY_DEFAULT_CAPS: dict[str, int] = {
+    "text": 2,
+    "office": 1,
+    "image": 1,
+    "diagram": 1,
+    "archive": 1,
+    "media": 1,
+    "embedding": 1,
+    "preview": 1,
+    "general": 1,
+}
+
+
+def job_family_for_type(job_type: str | None) -> str:
+    normalized = str(job_type or "").lower()
+    if normalized in {"corpus_extract_text", "corpus_extract_code"}:
+        return "text"
+    if normalized in {
+        "corpus_extract_document",
+        "corpus_extract_pdf",
+        "corpus_extract_spreadsheet",
+        "corpus_extract_presentation",
+    }:
+        return "office"
+    if normalized == "corpus_extract_image":
+        return "image"
+    if normalized == "corpus_extract_diagram":
+        return "diagram"
+    if normalized in {"corpus_extract_archive", "corpus_extract_container"}:
+        return "archive"
+    if normalized in {"corpus_extract_audio", "corpus_extract_video"}:
+        return "media"
+    if normalized == "corpus_embed":
+        return "embedding"
+    if normalized == "corpus_preview":
+        return "preview"
+    return "general"
+
+
+def kind_to_job_families(kind: str | None) -> tuple[str, ...] | None:
+    normalized = str(kind or "all").lower()
+    if normalized == "all":
+        return None
+    if normalized == "images":
+        return ("image",)
+    if normalized == "diagrams":
+        return ("diagram",)
+    if normalized in {"archives", "containers"}:
+        return ("archive",)
+    if normalized == "media":
+        return ("media",)
+    if normalized == "text":
+        return ("text", "office")
+    if normalized == "embeddings":
+        return ("embedding",)
+    return None
+
+
+def resource_class_for_family(family: str | None) -> str:
+    return FAMILY_RESOURCE_CLASS.get(str(family or "general"), "cpu")
+
+
+def default_priority_for_family(family: str | None) -> int:
+    return FAMILY_DEFAULT_PRIORITY.get(str(family or "general"), FAMILY_DEFAULT_PRIORITY["general"])
+
+
+def time_budget_for_family(family: str | None) -> int:
+    return FAMILY_DEFAULT_TIME_BUDGET_SECONDS.get(
+        str(family or "general"),
+        FAMILY_DEFAULT_TIME_BUDGET_SECONDS["general"],
+    )
+
+
+def validate_local_model_base_url(value: str) -> str:
+    parsed = urlparse(str(value).strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("local model base URL must use http or https")
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError("local model base URL requires a host")
+    if hostname.lower() == "localhost":
+        return str(value).strip().rstrip("/")
+    try:
+        if ipaddress.ip_address(hostname).is_loopback:
+            return str(value).strip().rstrip("/")
+    except ValueError:
+        pass
+    raise ValueError("local model base URL must use a loopback host")
+
+
+def resolve_cache_layout(cache_root: str | None = None) -> dict[str, Any]:
+    explicit = str(cache_root or "").strip()
+    if explicit:
+        root = Path(explicit).expanduser()
+        source = "setting"
+    elif os.environ.get("FLUX_KB_CACHE_ROOT"):
+        root = Path(os.environ["FLUX_KB_CACHE_ROOT"]).expanduser()
+        source = "env"
+    elif os.environ.get("FLUX_KB_INSTALL_ROOT"):
+        root = Path(os.environ["FLUX_KB_INSTALL_ROOT"]) / "private" / "cache"
+        source = "install_root"
+    elif os.environ.get("FLUX_KB_PRIVATE_DIR"):
+        root = Path(os.environ["FLUX_KB_PRIVATE_DIR"]) / "cache"
+        source = "private_dir"
+    else:
+        root = Path.home() / ".flux-llm-kb" / "cache"
+        source = "user_cache"
+    names = ("models", "ocr", "asr", "vision", "thumbnails", "parser", "embeddings", "temp")
+    return {
+        "root": str(root),
+        "source": source,
+        "directories": {name: str(root / name) for name in names},
+    }
+
+
+def collect_acceleration_status(
+    *,
+    settings: dict[str, Any] | None = None,
+    command_runner: Callable[..., Any] | None = None,
+    module_importer: Callable[[str], Any] | None = None,
+    urlopen: Callable[..., Any] | None = None,
+    worker_family_stats: Callable[[], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    resolved = _resolved_settings(settings)
+    runner = command_runner or _run_command
+    importer = module_importer or importlib.import_module
+    opener = urlopen or _urlopen
+    cache = resolve_cache_layout(str(resolved.get("acceleration.cache_root") or ""))
+    family_stats = _worker_family_status_rows(resolved, worker_family_stats)
+    return {
+        "capabilities": {
+            "cpu": _cpu_status(),
+            "memory": _memory_status(),
+            "disk": _disk_status(cache["root"]),
+            "nvidia": _nvidia_status(runner),
+            "onnxruntime": _onnxruntime_status(importer),
+            "local_model": _local_model_status(resolved, opener),
+            "watcher_backend": _watcher_backend_status(importer),
+        },
+        "cache": cache,
+        "worker_families": family_stats,
+    }
+
+
+def _resolved_settings(overrides: dict[str, Any] | None) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "acceleration.cache_root": "",
+        "acceleration.local_inference.enabled": False,
+        "acceleration.local_inference.provider": "ollama",
+        "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+        "acceleration.local_inference.probe_timeout_seconds": 1,
+    }
+    for family, cap in FAMILY_DEFAULT_CAPS.items():
+        defaults[f"acceleration.worker_cap.{family}"] = cap
+    if overrides is not None:
+        return {**defaults, **overrides}
+    try:
+        from .settings import SettingsService
+
+        service = SettingsService()
+        for key in list(defaults):
+            defaults[key] = service.resolve(key).raw_value
+    except Exception:
+        pass
+    return defaults
+
+
+def _run_command(command: list[str], **kwargs: Any) -> Any:
+    from .processes import run_no_window
+
+    return run_no_window(command, text=True, capture_output=True, **kwargs)
+
+
+def _cpu_status() -> dict[str, Any]:
+    count = os.cpu_count() or 1
+    return {
+        "ok": True,
+        "count": count,
+        "architecture": platform.machine(),
+        "platform": platform.platform(),
+    }
+
+
+def _memory_status() -> dict[str, Any]:
+    total_bytes = _windows_total_memory_bytes()
+    return {
+        "ok": total_bytes is not None,
+        "total_bytes": total_bytes,
+        "message": "available" if total_bytes is not None else "memory total unavailable from stdlib",
+    }
+
+
+def _windows_total_memory_bytes() -> int | None:
+    if platform.system().lower() != "windows":
+        return None
+    try:
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        status = MemoryStatus()
+        status.dwLength = ctypes.sizeof(MemoryStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return int(status.ullTotalPhys)
+    except Exception:
+        return None
+    return None
+
+
+def _disk_status(cache_root: str) -> dict[str, Any]:
+    path = Path(cache_root)
+    probe = path if path.exists() else path.parent
+    try:
+        usage = shutil.disk_usage(probe)
+    except Exception as exc:
+        return {"ok": False, "path": str(path), "message": str(exc)}
+    return {
+        "ok": True,
+        "path": str(path),
+        "total_bytes": usage.total,
+        "free_bytes": usage.free,
+    }
+
+
+def _nvidia_status(command_runner: Callable[..., Any]) -> dict[str, Any]:
+    command = [
+        "nvidia-smi",
+        "--query-gpu=name,memory.total,driver_version",
+        "--format=csv,noheader,nounits",
+    ]
+    try:
+        result = command_runner(command, timeout=2)
+    except FileNotFoundError:
+        return {"ok": False, "state": "missing", "message": "nvidia-smi not found", "gpus": []}
+    except Exception as exc:
+        return {"ok": False, "state": "unavailable", "message": str(exc), "gpus": []}
+    if getattr(result, "returncode", 1) != 0:
+        message = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "nvidia-smi unavailable").strip()
+        return {"ok": False, "state": "unavailable", "message": message, "gpus": []}
+    gpus = []
+    for line in str(getattr(result, "stdout", "")).splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) >= 3:
+            gpus.append({"name": parts[0], "memory_total_mb": _int_or_none(parts[1]), "driver_version": parts[2]})
+    return {
+        "ok": bool(gpus),
+        "state": "available" if gpus else "unavailable",
+        "message": f"{len(gpus)} NVIDIA GPU(s) detected" if gpus else "nvidia-smi returned no GPUs",
+        "gpus": gpus,
+    }
+
+
+def _onnxruntime_status(module_importer: Callable[[str], Any]) -> dict[str, Any]:
+    try:
+        module = module_importer("onnxruntime")
+    except ModuleNotFoundError:
+        return {"ok": False, "state": "missing", "providers": [], "message": "onnxruntime not installed"}
+    try:
+        providers = list(module.get_available_providers())
+    except Exception as exc:
+        return {"ok": False, "state": "unavailable", "providers": [], "message": str(exc)}
+    return {
+        "ok": bool(providers),
+        "state": "available" if providers else "unavailable",
+        "providers": providers,
+        "message": ", ".join(providers) if providers else "no providers reported",
+    }
+
+
+def _watcher_backend_status(module_importer: Callable[[str], Any]) -> dict[str, Any]:
+    try:
+        module_importer("watchdog.observers")
+    except ModuleNotFoundError:
+        return {"ok": False, "state": "missing", "provider": "watchdog", "message": "watchdog not installed"}
+    except Exception as exc:
+        return {"ok": False, "state": "unavailable", "provider": "watchdog", "message": str(exc)}
+    return {"ok": True, "state": "available", "provider": "watchdog", "message": "watchdog available"}
+
+
+def _local_model_status(settings: dict[str, Any], opener: Callable[..., Any]) -> dict[str, Any]:
+    provider = str(settings.get("acceleration.local_inference.provider") or "ollama")
+    enabled = bool(settings.get("acceleration.local_inference.enabled"))
+    base_url = str(settings.get("acceleration.local_inference.base_url") or "")
+    timeout = int(settings.get("acceleration.local_inference.probe_timeout_seconds") or 1)
+    if not enabled:
+        return {"ok": False, "state": "disabled", "provider": provider, "base_url": base_url}
+    try:
+        base_url = validate_local_model_base_url(base_url)
+    except ValueError as exc:
+        return {"ok": False, "state": "blocked_config", "provider": provider, "base_url": base_url, "message": str(exc)}
+    probe_url = f"{base_url}/api/tags" if provider == "ollama" else base_url
+    try:
+        response = opener(probe_url, timeout=max(1, timeout))
+        raw = response.read(2048).decode("utf-8", errors="replace")
+        models = _model_names(raw)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "state": "unavailable",
+            "provider": provider,
+            "base_url": base_url,
+            "message": str(exc),
+        }
+    return {
+        "ok": True,
+        "state": "available",
+        "provider": provider,
+        "base_url": base_url,
+        "models": models,
+    }
+
+
+def _model_names(raw: str) -> list[str]:
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    models = payload.get("models") if isinstance(payload, dict) else []
+    if not isinstance(models, list):
+        return []
+    names = []
+    for item in models:
+        if isinstance(item, dict) and item.get("name"):
+            names.append(str(item["name"]))
+    return names[:20]
+
+
+def _worker_family_status_rows(
+    settings: dict[str, Any],
+    stats_loader: Callable[[], list[dict[str, Any]]] | None,
+) -> list[dict[str, Any]]:
+    if stats_loader is None:
+        try:
+            from . import database
+
+            stats_loader = database.worker_family_stats
+        except Exception:
+            stats_loader = lambda: []
+    try:
+        rows = [dict(row) for row in stats_loader()]
+    except Exception:
+        rows = []
+    seen: set[str] = set()
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        family = str(row.get("family") or "general")
+        seen.add(family)
+        enriched.append(_family_row(settings, family, row))
+    for family in JOB_FAMILIES:
+        if family not in seen:
+            enriched.append(_family_row(settings, family, {}))
+    return enriched
+
+
+def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "family": family,
+        "resource_class": row.get("resource_class") or resource_class_for_family(family),
+        "configured_cap": int(settings.get(f"acceleration.worker_cap.{family}") or FAMILY_DEFAULT_CAPS.get(family, 1)),
+        "pending": int(row.get("pending") or 0),
+        "running": int(row.get("running") or 0),
+        "blocked": int(row.get("blocked") or 0),
+        "failed": int(row.get("failed") or 0),
+        "avg_duration_ms": _int_or_none(row.get("avg_duration_ms")),
+        "p95_duration_ms": _int_or_none(row.get("p95_duration_ms")),
+        "max_duration_ms": _int_or_none(row.get("max_duration_ms")),
+    }
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
