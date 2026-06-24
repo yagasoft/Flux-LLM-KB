@@ -2855,7 +2855,10 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                        percentile_disc(0.95) WITHIN GROUP (ORDER BY last_duration_ms)::integer AS p95_duration_ms,
                        max(last_duration_ms)::integer AS max_duration_ms,
                        COALESCE(sum((telemetry->>'ocr_cache_hits')::integer), 0)::integer AS ocr_cache_hits,
-                       COALESCE(sum((telemetry->>'ocr_cache_misses')::integer), 0)::integer AS ocr_cache_misses
+                       COALESCE(sum((telemetry->>'ocr_cache_misses')::integer), 0)::integer AS ocr_cache_misses,
+                       COALESCE(sum((telemetry->>'asr_cache_hits')::integer), 0)::integer AS asr_cache_hits,
+                       COALESCE(sum((telemetry->>'asr_cache_misses')::integer), 0)::integer AS asr_cache_misses,
+                       COALESCE(sum((telemetry->>'asr_segments')::integer), 0)::integer AS asr_segments
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 GROUP BY job_family, resource_class
@@ -2875,6 +2878,9 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                     "max_duration_ms": row[8],
                     "ocr_cache_hits": row[9],
                     "ocr_cache_misses": row[10],
+                    "asr_cache_hits": row[11],
+                    "asr_cache_misses": row[12],
+                    "asr_segments": row[13],
                 }
                 for row in cur.fetchall()
             ]

@@ -38,7 +38,7 @@ const health = {
       }
     },
     worker_families: [
-      { family: "media", resource_class: "gpu", configured_cap: 1, pending: 2, running: 1, blocked: 1, failed: 0, avg_duration_ms: 24, p95_duration_ms: 95, ocr_cache_hits: 6, ocr_cache_misses: 2 },
+      { family: "media", resource_class: "gpu", configured_cap: 1, pending: 2, running: 1, blocked: 1, failed: 0, avg_duration_ms: 24, p95_duration_ms: 95, ocr_cache_hits: 6, ocr_cache_misses: 2, asr_cache_hits: 4, asr_cache_misses: 1, asr_segments: 9 },
       { family: "office", resource_class: "cpu", configured_cap: 2, pending: 3, running: 0, blocked: 0, failed: 1, avg_duration_ms: 12, p95_duration_ms: 40 }
     ]
   },
@@ -654,7 +654,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("disabled")).toBeInTheDocument();
     expect(screen.getByText("D:/FluxLLMKB/private/cache")).toBeInTheDocument();
     expect(screen.getByText("media")).toBeInTheDocument();
-    expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss")).toBeInTheDocument();
+    expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss; ASR 4 hit / 1 miss; 9 segments")).toBeInTheDocument();
     expect(screen.getByText("office")).toBeInTheDocument();
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });

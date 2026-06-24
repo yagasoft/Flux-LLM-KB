@@ -124,6 +124,9 @@ type AccelerationWorkerFamily = {
   max_duration_ms?: number | null;
   ocr_cache_hits?: number;
   ocr_cache_misses?: number;
+  asr_cache_hits?: number;
+  asr_cache_misses?: number;
+  asr_segments?: number;
 };
 
 type ErrorDiagnostic = {
@@ -1729,11 +1732,16 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
     const p95 = family.p95_duration_ms;
     const ocrHits = family.ocr_cache_hits ?? 0;
     const ocrMisses = family.ocr_cache_misses ?? 0;
+    const asrHits = family.asr_cache_hits ?? 0;
+    const asrMisses = family.asr_cache_misses ?? 0;
+    const asrSegments = family.asr_segments ?? 0;
     const hasOcrTelemetry = ocrHits > 0 || ocrMisses > 0;
+    const hasAsrTelemetry = asrHits > 0 || asrMisses > 0 || asrSegments > 0;
     const duration = p95 == null ? `${family.running ?? 0} running` : `p95 ${p95}ms`;
-    const status = hasOcrTelemetry
-      ? `${duration}; OCR ${ocrHits} hit / ${ocrMisses} miss`
-      : duration;
+    const parts = [duration];
+    if (hasOcrTelemetry) parts.push(`OCR ${ocrHits} hit / ${ocrMisses} miss`);
+    if (hasAsrTelemetry) parts.push(`ASR ${asrHits} hit / ${asrMisses} miss; ${asrSegments} segments`);
+    const status = parts.join("; ");
     return [
       name,
       `${pending} pending`,

@@ -59,9 +59,12 @@ PPTX_PACKAGE_EXTENSIONS = {".pptx", ".pptm", ".potm", ".potx", ".ppsm", ".ppsx"}
 LEGACY_PRESENTATION_EXTENSIONS = {".ppt", ".pot", ".pps"}
 OPENDOCUMENT_PRESENTATION_EXTENSIONS = {".odp", ".otp"}
 OCR_CACHE_SCHEMA = "flux-ocr-cache-v1"
+ASR_CACHE_SCHEMA = "flux-asr-cache-v1"
 OCR_MAX_PDF_PAGES = 25
 OCR_PDF_DPI = 200
 OCR_TIMEOUT_SECONDS = 30
+ASR_AUDIO_SAMPLE_RATE = 16000
+ASR_FFMPEG_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,14 @@ class ExtractionResult:
 
 @dataclass(frozen=True)
 class OcrResult:
+    status: str
+    text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class AsrResult:
     status: str
     text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -1547,7 +1558,236 @@ def _extract_media(path: Path, file_kind: str) -> ExtractionResult:
     except json.JSONDecodeError:
         probed = {}
     metadata["ffprobe"] = probed
-    return ExtractionResult(status="metadata_only", metadata=metadata)
+    asr = _asr_media(path, probed)
+    metadata["asr"] = asr.metadata
+    if asr.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=asr.message)
+    if asr.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=asr.message)
+    chunks = _chunks_from_text(asr.text, path.name, modality="transcript")
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata=metadata,
+        message=asr.message,
+    )
+
+
+def _asr_media(path: Path, probed: dict[str, Any]) -> AsrResult:
+    settings = _asr_settings()
+    duration = _media_duration_seconds(probed)
+    metadata = _asr_metadata(
+        status="pending",
+        duration_seconds=duration,
+        max_duration_seconds=settings["max_duration_seconds"],
+    )
+    if not settings["enabled"]:
+        return AsrResult(status="completed", metadata={**metadata, "status": "disabled"})
+    if duration is not None and duration > settings["max_duration_seconds"]:
+        return AsrResult(status="completed", metadata={**metadata, "status": "skipped_duration_cap"})
+    configured_model = str(settings["model_path"] or "").strip()
+    if not configured_model:
+        return AsrResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "status": "blocked_missing_dependency"},
+            message="ASR model path is not configured",
+        )
+    model_path = Path(configured_model).expanduser()
+    if not model_path.exists():
+        return AsrResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "status": "blocked_missing_dependency"},
+            message="ASR model path not found",
+        )
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return AsrResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "status": "blocked_missing_dependency"},
+            message="ffmpeg command not found",
+        )
+    if importlib.util.find_spec("faster_whisper") is None:
+        return AsrResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "status": "blocked_missing_dependency"},
+            message="faster_whisper not installed",
+        )
+    cached = _read_asr_cache(path, model_path)
+    if cached is not None:
+        text, segments = cached
+        return AsrResult(
+            status="completed",
+            text=text,
+            metadata={**metadata, "status": "cache_hit", "cache_hits": 1, "cache_misses": 0, "segments": segments},
+        )
+    return _asr_with_faster_whisper(path, ffmpeg=ffmpeg, model_path=model_path, metadata=metadata)
+
+
+def _asr_settings() -> dict[str, Any]:
+    defaults = {"enabled": True, "model_path": "", "max_duration_seconds": 3600}
+    try:
+        from .settings import SettingsService
+
+        service = SettingsService()
+        return {
+            "enabled": bool(service.resolve("acceleration.asr.enabled").raw_value),
+            "model_path": str(service.resolve("acceleration.asr.model_path").raw_value or ""),
+            "max_duration_seconds": int(service.resolve("acceleration.asr.max_duration_seconds").raw_value or 3600),
+        }
+    except Exception:
+        return defaults
+
+
+def _asr_with_faster_whisper(path: Path, *, ffmpeg: str, model_path: Path, metadata: dict[str, Any]) -> AsrResult:
+    with tempfile.TemporaryDirectory(prefix="flux-kb-asr-") as temp_dir:
+        audio_path = Path(temp_dir) / "audio.wav"
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(ASR_AUDIO_SAMPLE_RATE),
+            "-f",
+            "wav",
+            str(audio_path),
+        ]
+        try:
+            extract = run_no_window(
+                command,
+                text=True,
+                capture_output=True,
+                timeout=ASR_FFMPEG_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except Exception as exc:  # pragma: no cover - environment-specific
+            return AsrResult(status="failed", metadata={**metadata, "status": "failed"}, message=str(exc))
+        if extract.returncode != 0:
+            return AsrResult(
+                status="failed",
+                metadata={**metadata, "status": "failed"},
+                message=extract.stderr.strip() or "ffmpeg failed",
+            )
+        try:
+            faster_whisper = importlib.import_module("faster_whisper")
+            model = faster_whisper.WhisperModel(str(model_path), local_files_only=True)
+            segments_iter, info = model.transcribe(str(audio_path))
+            parts: list[str] = []
+            segment_count = 0
+            for segment in segments_iter:
+                text = str(getattr(segment, "text", "") or "").strip()
+                if text:
+                    parts.append(text)
+                segment_count += 1
+            redacted, _ = redact_text("\n".join(parts).strip())
+            text = redacted.strip()
+            _write_asr_cache(path, model_path, text, segment_count)
+            result_metadata = {
+                **metadata,
+                "status": "completed",
+                "cache_hits": 0,
+                "cache_misses": 1,
+                "segments": segment_count,
+            }
+            language = getattr(info, "language", None)
+            if language:
+                result_metadata["language"] = language
+            return AsrResult(status="completed", text=text, metadata=result_metadata)
+        except Exception as exc:
+            return AsrResult(status="failed", metadata={**metadata, "status": "failed"}, message=str(exc))
+
+
+def _asr_metadata(
+    *,
+    status: str,
+    duration_seconds: float | None,
+    max_duration_seconds: int,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "engine": "faster_whisper",
+        "status": status,
+        "max_duration_seconds": max_duration_seconds,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "segments": 0,
+    }
+    if duration_seconds is not None:
+        metadata["duration_seconds"] = duration_seconds
+    return metadata
+
+
+def _media_duration_seconds(probed: dict[str, Any]) -> float | None:
+    candidates: list[Any] = []
+    if isinstance(probed.get("format"), dict):
+        candidates.append(probed["format"].get("duration"))
+    streams = probed.get("streams")
+    if isinstance(streams, list):
+        candidates.extend(stream.get("duration") for stream in streams if isinstance(stream, dict))
+    for value in candidates:
+        try:
+            parsed = float(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            return parsed
+    return None
+
+
+def _read_asr_cache(path: Path, model_path: Path) -> tuple[str, int] | None:
+    try:
+        cache_file = _asr_cache_file(path, model_path)
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if payload.get("schema") != ASR_CACHE_SCHEMA:
+        return None
+    if payload.get("source_hash") != _sha256_file(path):
+        return None
+    if payload.get("model_key") != _asr_model_key(model_path):
+        return None
+    text = payload.get("text")
+    segments = payload.get("segments")
+    if not isinstance(text, str):
+        return None
+    try:
+        segment_count = int(segments or 0)
+    except (TypeError, ValueError):
+        segment_count = 0
+    return text, segment_count
+
+
+def _write_asr_cache(path: Path, model_path: Path, text: str, segments: int) -> None:
+    try:
+        cache_file = _asr_cache_file(path, model_path)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": ASR_CACHE_SCHEMA,
+            "source_hash": _sha256_file(path),
+            "model_key": _asr_model_key(model_path),
+            "engine": "faster_whisper",
+            "segments": int(segments),
+            "text": text,
+        }
+        cache_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _asr_cache_file(path: Path, model_path: Path) -> Path:
+    source_hash = _sha256_file(path)
+    model_key = _asr_model_key(model_path)
+    key = hashlib.sha256(f"{ASR_CACHE_SCHEMA}:faster_whisper:{model_key}:{source_hash}".encode("utf-8")).hexdigest()
+    return Path(resolve_cache_layout()["directories"]["asr"]) / f"{key}.json"
+
+
+def _asr_model_key(model_path: Path) -> str:
+    try:
+        return str(model_path.resolve())
+    except Exception:
+        return str(model_path)
 
 
 def _chunks_from_text(text: str, title: str, *, modality: str = "text") -> tuple[AssetChunk, ...]:

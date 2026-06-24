@@ -59,14 +59,21 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
     metadata = getattr(result, "metadata", None)
     if not isinstance(metadata, dict):
         return {}
-    ocr = metadata.get("ocr")
-    if not isinstance(ocr, dict):
-        return {}
     telemetry: dict[str, Any] = {}
-    if "cache_hits" in ocr:
-        telemetry["ocr_cache_hits"] = int(ocr.get("cache_hits") or 0)
-    if "cache_misses" in ocr:
-        telemetry["ocr_cache_misses"] = int(ocr.get("cache_misses") or 0)
-    if "pages_attempted" in ocr:
-        telemetry["ocr_pages_attempted"] = int(ocr.get("pages_attempted") or 0)
+    ocr = metadata.get("ocr")
+    if isinstance(ocr, dict):
+        if "cache_hits" in ocr:
+            telemetry["ocr_cache_hits"] = int(ocr.get("cache_hits") or 0)
+        if "cache_misses" in ocr:
+            telemetry["ocr_cache_misses"] = int(ocr.get("cache_misses") or 0)
+        if "pages_attempted" in ocr:
+            telemetry["ocr_pages_attempted"] = int(ocr.get("pages_attempted") or 0)
+    asr = metadata.get("asr")
+    if isinstance(asr, dict):
+        if "cache_hits" in asr:
+            telemetry["asr_cache_hits"] = int(asr.get("cache_hits") or 0)
+        if "cache_misses" in asr:
+            telemetry["asr_cache_misses"] = int(asr.get("cache_misses") or 0)
+        if "segments" in asr:
+            telemetry["asr_segments"] = int(asr.get("segments") or 0)
     return telemetry

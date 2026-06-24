@@ -101,6 +101,10 @@ python -m pip install -e .[mail]
 External tools are detected at runtime and reported by `flux-kb crawl doctor`.
 `ffprobe`/`ffmpeg`, `tesseract`, and local transcription runtimes are never
 called through cloud services by default.
+Deferred ASR uses local faster-whisper only when `acceleration.asr.model_path`
+points at an existing local model. Flux passes `local_files_only=True`, so it
+does not perform a remote model download; missing `ffmpeg`, `faster-whisper`, or
+model path leaves the related media job in `blocked_missing_dependency`.
 
 ## Useful Commands
 
@@ -179,6 +183,10 @@ dashboard Health tab show CPU/disk hints, optional NVIDIA and ONNX Runtime
 availability, local model-server state, cache directories, and worker-family
 queue counts. Local model probing is disabled by default and accepts only
 loopback HTTP(S) URLs such as `http://127.0.0.1:11434`.
+Media ASR is controlled by `acceleration.asr.enabled`,
+`acceleration.asr.model_path`, and `acceleration.asr.max_duration_seconds`.
+Redacted ASR cache entries live under the configured ASR cache directory and
+worker-family telemetry reports ASR cache hits, misses, and segment counts.
 
 ## Host Filesystem Agent
 

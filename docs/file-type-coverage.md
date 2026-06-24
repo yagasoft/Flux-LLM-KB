@@ -44,6 +44,13 @@ parser or local tool exists.
   `blocked_missing_dependency`, and redacted OCR cache entries stay under the
   private OCR cache root with hit/miss telemetry exposed through worker-family
   status.
+- ASR is local and cache-backed when available. Deferred audio/video jobs prefer
+  transcript sidecars, then use `ffprobe`, `ffmpeg`, and faster-whisper only
+  when `acceleration.asr.model_path` points at an existing local model. Flux
+  sets `local_files_only=True` and does not perform a remote model download.
+  Missing ASR tools or model paths report `blocked_missing_dependency`; redacted
+  ASR cache entries stay under the private ASR cache root with hit/miss and
+  segment telemetry exposed through worker-family status.
 
 ## Coverage Matrix
 
@@ -98,6 +105,12 @@ parser or local tool exists.
   chunking and before cache writes. Cache hit/miss counts are stored as sanitized
   job telemetry; raw OCR text is not written to public docs or dashboard
   metadata.
+- Audio/video ASR uses local tools only. Sidecar transcripts remain preferred;
+  otherwise bounded media jobs extract temporary mono 16 kHz audio with `ffmpeg`
+  and transcribe with faster-whisper using `acceleration.asr.model_path`.
+  ASR output is redacted before chunking and before ASR cache writes. Cloud
+  transcription stays off by default, and raw transcript text is not written to
+  public docs or dashboard metadata.
 - `drawio`, `drawio.svg`, and `drawio.png` parse embedded XML when present and
   index page names, shapes, labels, connectors, and links.
 - `vsdx` and related modern Visio files are ZIP/XML containers and are parsed

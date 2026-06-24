@@ -1,5 +1,7 @@
 import base64
 import gzip
+import importlib.machinery
+import importlib.util
 import sys
 import tarfile
 from io import BytesIO
@@ -53,7 +55,249 @@ def test_extractor_availability_reports_optional_tools():
     assert "word_com" in availability
     assert "pdftoppm" in availability
     assert "ffprobe" in availability
+    assert "ffmpeg" in availability
+    assert "faster_whisper" in availability
     assert all("ok" in item and "message" in item for item in availability.values())
+
+
+def test_extract_media_prefers_sidecar_transcript_before_probe_or_asr(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    path.with_suffix(".mp4.txt").write_text("Prepared transcript from sidecar", encoding="utf-8")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("sidecar should bypass tools")),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda _command: (_ for _ in ()).throw(AssertionError("sidecar should bypass tool lookup")),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].modality == "transcript"
+    assert result.chunks[0].body == "Prepared transcript from sidecar"
+    assert result.metadata["transcript_source"] == "sidecar"
+    assert "asr" not in result.metadata
+
+
+def test_extract_media_blocks_when_ffprobe_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "ffprobe command not found"
+    assert result.metadata["extractor"] == "video"
+
+
+def test_extract_media_skips_asr_when_disabled(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "false")
+    monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", "3600")
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    calls = []
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+
+    def fake_run(command, **_kwargs):
+        calls.append(command[0])
+        assert command[0].endswith("ffprobe.exe")
+        return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["ffprobe"]["format"]["duration"] == "12"
+    assert result.metadata["asr"]["status"] == "disabled"
+    assert result.metadata["asr"]["cache_hits"] == 0
+    assert result.metadata["asr"]["cache_misses"] == 0
+    assert calls == ["C:/tools/ffprobe.exe"]
+
+
+def test_extract_media_blocks_when_asr_model_path_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr(monkeypatch, tmp_path, model_path="")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda command, **_kwargs: SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr=""),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "ASR model path is not configured"
+    assert result.metadata["asr"]["status"] == "blocked_missing_dependency"
+    assert result.metadata["asr"]["cache_hits"] == 0
+    assert result.metadata["asr"]["cache_misses"] == 0
+
+
+def test_extract_media_blocks_when_ffmpeg_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr(monkeypatch, tmp_path)
+
+    def fake_which(command):
+        if command == "ffmpeg":
+            return None
+        return f"C:/tools/{command}.exe"
+
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", fake_which)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda command, **_kwargs: SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr=""),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "ffmpeg command not found"
+    assert result.metadata["asr"]["status"] == "blocked_missing_dependency"
+
+
+def test_extract_media_blocks_when_faster_whisper_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.importlib.util.find_spec",
+        lambda name: None if name == "faster_whisper" else importlib.util.find_spec(name),
+    )
+    run_calls = []
+
+    def fake_run(command, **_kwargs):
+        run_calls.append(command[0])
+        assert command[0].endswith("ffprobe.exe")
+        return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "faster_whisper not installed"
+    assert result.metadata["asr"]["status"] == "blocked_missing_dependency"
+    assert run_calls == ["C:/tools/ffprobe.exe"]
+
+
+def test_extract_media_skips_asr_when_duration_exceeds_cap(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr(monkeypatch, tmp_path, max_duration=10)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command[0])
+        assert command[0].endswith("ffprobe.exe")
+        return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=75), stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["asr"]["status"] == "skipped_duration_cap"
+    assert result.metadata["asr"]["duration_seconds"] == 75.0
+    assert result.metadata["asr"]["max_duration_seconds"] == 10
+    assert calls == ["C:/tools/ffprobe.exe"]
+
+
+def test_extract_media_runs_local_asr_and_reuses_redacted_cache(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    model_path = _configure_asr(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    fake_spec = importlib.machinery.ModuleSpec("faster_whisper", loader=None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.importlib.util.find_spec",
+        lambda name: fake_spec if name == "faster_whisper" else importlib.util.find_spec(name),
+    )
+    calls = {"ffprobe": 0, "ffmpeg": 0, "model": 0}
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            calls["ffprobe"] += 1
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            calls["ffmpeg"] += 1
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    class FakeWhisperModel:
+        def __init__(self, model_size_or_path, **kwargs):
+            calls["model"] += 1
+            assert model_size_or_path == str(model_path)
+            assert kwargs["local_files_only"] is True
+
+        def transcribe(self, audio_path, **_kwargs):
+            assert Path(audio_path).exists()
+            return (
+                [
+                    SimpleNamespace(
+                        start=0.0,
+                        end=1.25,
+                        text="Project recap mentions sk-12345678901234567890",
+                    )
+                ],
+                SimpleNamespace(language="en"),
+            )
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisperModel, __spec__=fake_spec))
+
+    first = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert first.status == "indexed"
+    assert first.chunks[0].modality == "transcript"
+    assert first.chunks[0].body == "Project recap mentions [REDACTED:openai_api_key]"
+    assert first.metadata["asr"]["status"] == "completed"
+    assert first.metadata["asr"]["engine"] == "faster_whisper"
+    assert first.metadata["asr"]["cache_hits"] == 0
+    assert first.metadata["asr"]["cache_misses"] == 1
+    assert first.metadata["asr"]["segments"] == 1
+
+    second = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert second.status == "indexed"
+    assert second.chunks[0].body == first.chunks[0].body
+    assert second.metadata["asr"]["status"] == "cache_hit"
+    assert second.metadata["asr"]["cache_hits"] == 1
+    assert second.metadata["asr"]["cache_misses"] == 0
+    assert second.metadata["asr"]["segments"] == 1
+    assert calls == {"ffprobe": 2, "ffmpeg": 1, "model": 1}
+
+
+def _configure_asr(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    model_path: str | None = None,
+    max_duration: int = 3600,
+) -> Path:
+    model_dir = tmp_path / "models" / "faster-whisper-tiny"
+    if model_path is None:
+        model_dir.mkdir(parents=True)
+        model_path = str(model_dir)
+    monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv("FLUX_KB_ASR_MODEL_PATH", model_path)
+    monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", str(max_duration))
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    return model_dir
+
+
+def _media_probe_json(*, duration: int | float) -> str:
+    return f'{{"format":{{"duration":"{duration}"}},"streams":[{{"codec_type":"audio","codec_name":"aac"}}]}}'
 
 
 def test_extract_image_blocks_when_tesseract_is_missing(monkeypatch, tmp_path):

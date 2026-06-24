@@ -37,6 +37,9 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "codex.hooks.min_prompt_chars" in keys
     assert "codex.hooks.capture_min_chars" in keys
     assert "codex.hooks.capture_max_chars" in keys
+    assert "acceleration.asr.enabled" in keys
+    assert "acceleration.asr.model_path" in keys
+    assert "acceleration.asr.max_duration_seconds" in keys
 
 
 def test_codex_hook_settings_are_enabled_by_default(monkeypatch):
@@ -71,6 +74,24 @@ def test_lock_tolerant_indexing_settings_defaults(monkeypatch):
     assert service.resolve("host_agent.vss_enabled").raw_value is False
     assert service.resolve("host_agent.vss_max_file_bytes").raw_value == 512 * 1024 * 1024
     assert service.resolve("host_agent.vss_timeout_seconds").raw_value == 30
+
+
+def test_asr_settings_defaults_and_env_overrides(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("acceleration.asr.enabled").raw_value is True
+    assert service.resolve("acceleration.asr.model_path").raw_value == ""
+    assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 3600
+
+    model_dir = tmp_path / "models" / "faster-whisper"
+    monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "false")
+    monkeypatch.setenv("FLUX_KB_ASR_MODEL_PATH", str(model_dir))
+    monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", "42")
+
+    assert service.resolve("acceleration.asr.enabled").raw_value is False
+    assert service.resolve("acceleration.asr.model_path").raw_value == str(model_dir)
+    assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 42
 
 
 def test_settings_service_uses_env_over_database_and_masks_secret(monkeypatch):

@@ -67,11 +67,12 @@ Configured roots are crawled recursively according to root policy, `.gitignore`,
 for every supported file type. Sync can target a full root, a subtree, or a
 single file. Small text-like files are extracted and chunked locally; heavy
 documents, images, audio, and video are queued for local deferred processing.
-Images are dimensioned locally, media uses sidecar transcripts and `ffprobe`
-when available, Draw.io and modern VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are
-parsed structurally, bounded archive/container enumeration records related
-child assets without recursive extraction, and unknown binaries remain
-metadata-only.
+Images are dimensioned locally, media uses sidecar transcripts, `ffprobe`
+metadata, and optional local faster-whisper ASR when `acceleration.asr.model_path`
+points at an existing local model. Draw.io and modern
+VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are parsed structurally, bounded
+archive/container enumeration records related child assets without recursive
+extraction, and unknown binaries remain metadata-only.
 
 File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
@@ -101,11 +102,16 @@ both root-local globs and the effective policy used by crawl/watch.
 
 The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
-and modern Visio structure, sidecar transcripts, and decorative-image skips. Optional richer
-stages can then run as bounded jobs: Tesseract or PaddleOCR OCR, local
-Ollama/ONNX image descriptions, frame sampling, and faster-whisper audio/video
-transcription. Semantic media embeddings are a separate backfill phase so large
-media files do not slow normal crawl/watch loops.
+and modern Visio structure, sidecar transcripts, and decorative-image skips.
+Optional richer stages can then run as bounded jobs: Tesseract or PaddleOCR OCR,
+local Ollama/ONNX image descriptions, frame sampling, and faster-whisper
+audio/video transcription. ASR requires `ffmpeg`, the `faster-whisper` Python
+module, and `acceleration.asr.model_path`; Flux passes `local_files_only=True`
+and never performs a remote model download. Redacted ASR cache entries live
+under the ASR cache directory and expose cache hit/miss plus segment telemetry.
+Cloud transcription remains off by default. Semantic media embeddings are a
+separate backfill phase so large media files do not slow normal crawl/watch
+loops.
 
 Deferred workers claim jobs with `FOR UPDATE SKIP LOCKED`, use retry/cooldown
 state in `capture_jobs`, and do not call cloud providers by default. Jobs move to

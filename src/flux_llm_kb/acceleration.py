@@ -439,6 +439,9 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
         "max_duration_ms": _int_or_none(row.get("max_duration_ms")),
         "ocr_cache_hits": int(row.get("ocr_cache_hits") or 0),
         "ocr_cache_misses": int(row.get("ocr_cache_misses") or 0),
+        "asr_cache_hits": int(row.get("asr_cache_hits") or 0),
+        "asr_cache_misses": int(row.get("asr_cache_misses") or 0),
+        "asr_segments": int(row.get("asr_segments") or 0),
     }
 
 

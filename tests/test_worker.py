@@ -102,6 +102,48 @@ def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
     assert telemetry["ocr_cache_misses"] == 0
 
 
+def test_process_corpus_job_merges_asr_telemetry(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "media"
+    root.mkdir()
+    (root / "clip.mp4").write_bytes(b"fake media")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "media",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+        },
+    )
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda *_args: type(
+            "Extraction",
+            (),
+            {
+                "status": "indexed",
+                "message": None,
+                "metadata": {"asr": {"cache_hits": 2, "cache_misses": 1, "segments": 4}},
+            },
+        )(),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "media", "path": "clip.mp4"}})
+
+    assert result.status == "indexed"
+    assert result.telemetry == {"asr_cache_hits": 2, "asr_cache_misses": 1, "asr_segments": 4}
+    assert applied[0]["root_name"] == "media"
+
+
 def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(
