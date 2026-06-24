@@ -110,6 +110,18 @@ def main(argv: list[str] | None = None) -> int:
     retention_quality = retention_subparsers.add_parser("quality", help="Show memory quality report")
     retention_quality.add_argument("--limit", type=int, default=25)
 
+    semantic_parser = subparsers.add_parser("semantic-duplicates", help="Refresh or inspect semantic duplicate clusters")
+    semantic_subparsers = semantic_parser.add_subparsers(dest="semantic_duplicates_command", required=True)
+    semantic_refresh = semantic_subparsers.add_parser("refresh", help="Refresh advisory semantic duplicate clusters")
+    semantic_refresh.add_argument("--memory-class", choices=["all", "corpus", "episode", "claim"], default="all")
+    semantic_refresh.add_argument("--root-name")
+    semantic_refresh.add_argument("--threshold", type=float)
+    semantic_refresh.add_argument("--limit", type=int, default=1000)
+    semantic_list = semantic_subparsers.add_parser("list", help="List active semantic duplicate clusters")
+    semantic_list.add_argument("--memory-class", choices=["corpus", "episode", "claim"])
+    semantic_list.add_argument("--root-name")
+    semantic_list.add_argument("--limit", type=int, default=50)
+
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
     forget_parser.add_argument("--reason", default="user_request")
@@ -321,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
         "graph": _graph,
         "capture": _capture,
         "retention": _retention,
+        "semantic-duplicates": _semantic_duplicates,
         "forget": _forget,
         "audit": _audit,
         "backfill-codex": _backfill_codex,
@@ -542,6 +555,29 @@ def _retention(args: argparse.Namespace) -> int:
         payload = service.retention_quality_report(limit=args.limit)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.retention_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _semantic_duplicates(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.semantic_duplicates_command == "refresh":
+        payload = service.refresh_semantic_duplicate_clusters(
+            memory_class=args.memory_class,
+            root_name=args.root_name,
+            threshold=args.threshold,
+            limit=args.limit,
+        )
+    elif args.semantic_duplicates_command == "list":
+        payload = service.list_semantic_duplicate_clusters(
+            memory_class=args.memory_class,
+            root_name=args.root_name,
+            limit=args.limit,
+        )
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.semantic_duplicates_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

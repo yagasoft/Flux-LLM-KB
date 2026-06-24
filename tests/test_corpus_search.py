@@ -93,6 +93,101 @@ def test_service_search_adds_query_snippet_and_retrieval_explanation(monkeypatch
     assert result["retrieval_explanation"]["corpus"]["duplicate_count"] == 1
 
 
+def test_service_explain_surfaces_semantic_duplicate_suppression_without_raw_duplicate_content(monkeypatch):
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks",
+        lambda query, limit=20, **_kwargs: [
+            {
+                "id": "chunk-canonical",
+                "asset_id": "asset-canonical",
+                "title": "Architecture",
+                "summary": "Flux retrieval architecture uses pgvector and local ranking.",
+                "score": 0.9,
+                "streams": ["corpus_lexical", "corpus_vector"],
+                "raw_scores": {"corpus_lexical": 1.0, "corpus_vector": 0.8},
+                "source_path": "docs/architecture.md",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 900,
+                "semantic_duplicate_cluster": {
+                    "cluster_id": "cluster-1",
+                    "canonical_owner_id": "chunk-canonical",
+                    "suppressed_count": 1,
+                    "reason": "semantic_near_duplicate",
+                    "threshold": 0.9,
+                    "max_similarity": 0.94,
+                    "suppressed": [
+                        {
+                            "owner_id": "chunk-copy",
+                            "owner_table": "asset_chunks",
+                            "similarity": 0.94,
+                            "label": "Architecture Copy",
+                            "source_path": "docs/archive/architecture-copy.md",
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+
+    payload = KnowledgeService().explain(
+        "pgvector architecture",
+        limit=5,
+        token_budget=100,
+        filters={"include_suppressed": True},
+    )
+
+    assert payload["results"][0]["retrieval_explanation"]["suppression"]["semantic_duplicates"] == {
+        "cluster_id": "cluster-1",
+        "suppressed_count": 1,
+        "reason": "semantic_near_duplicate",
+        "threshold": 0.9,
+        "max_similarity": 0.94,
+        "suppressed": [
+            {
+                "owner_id": "chunk-copy",
+                "owner_table": "asset_chunks",
+                "similarity": 0.94,
+                "label": "Architecture Copy",
+                "source_path": "docs/archive/architecture-copy.md",
+            }
+        ],
+    }
+    assert payload["suppression"]["semantic_duplicates"][0]["suppressed_count"] == 1
+    assert "Flux retrieval architecture uses pgvector" in payload["results"][0]["summary"]
+    assert "raw duplicate" not in json.dumps(payload).lower()
+
+
+def test_service_semantic_duplicate_methods_forward_to_database(monkeypatch):
+    calls = {}
+
+    def fake_refresh(**kwargs):
+        calls["refresh"] = kwargs
+        return {"created_clusters": 1}
+
+    def fake_list(**kwargs):
+        calls["list"] = kwargs
+        return {"clusters": []}
+
+    monkeypatch.setattr(database, "refresh_semantic_duplicate_clusters", fake_refresh)
+    monkeypatch.setattr(database, "list_semantic_duplicate_clusters", fake_list)
+
+    refresh = KnowledgeService().refresh_semantic_duplicate_clusters(
+        memory_class="corpus",
+        root_name="docs",
+        threshold=0.91,
+        limit=25,
+    )
+    listed = KnowledgeService().list_semantic_duplicate_clusters(memory_class="claim", root_name=None, limit=7)
+
+    assert refresh == {"created_clusters": 1}
+    assert listed == {"clusters": []}
+    assert calls["refresh"] == {"memory_class": "corpus", "root_name": "docs", "threshold": 0.91, "limit": 25}
+    assert calls["list"] == {"memory_class": "claim", "root_name": None, "limit": 7}
+
+
 def test_service_search_formats_mail_manifest_results(monkeypatch):
     manifest = {
         "subject": "YsTrader alert: shared market data unavailable",

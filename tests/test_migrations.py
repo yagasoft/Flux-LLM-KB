@@ -49,6 +49,15 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "VALUES ('episode'" in retention_quality_migration.sql
     assert "VALUES ('claim'" in retention_quality_migration.sql
     assert "VALUES ('corpus'" in retention_quality_migration.sql
+    semantic_duplicate_migration = next(item for item in migrations if item.name == "0013_semantic_duplicate_clusters")
+    assert "CREATE TABLE IF NOT EXISTS semantic_duplicate_clusters" in semantic_duplicate_migration.sql
+    assert "CREATE TABLE IF NOT EXISTS semantic_duplicate_members" in semantic_duplicate_migration.sql
+    assert "memory_class IN ('corpus', 'episode', 'claim')" in semantic_duplicate_migration.sql
+    assert "owner_table IN ('asset_chunks', 'episodes', 'claims')" in semantic_duplicate_migration.sql
+    assert "member_role IN ('canonical', 'duplicate')" in semantic_duplicate_migration.sql
+    assert "status IN ('active', 'retired')" in semantic_duplicate_migration.sql
+    assert "idx_semantic_duplicate_clusters_scope" in semantic_duplicate_migration.sql
+    assert "idx_semantic_duplicate_members_owner" in semantic_duplicate_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

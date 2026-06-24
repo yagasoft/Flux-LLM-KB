@@ -23,6 +23,14 @@ DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
 _MIGRATION_ADVISORY_LOCK_ID = 570_221_876_500_815
 _RETENTION_MEMORY_CLASSES = {"episode", "claim", "corpus"}
 _RETENTION_ACTIONS = {"review", "deprioritize", "retire"}
+_SEMANTIC_DUPLICATE_MEMORY_CLASSES = {"corpus", "episode", "claim"}
+_SEMANTIC_DUPLICATE_OWNER_TABLES = {
+    "corpus": "asset_chunks",
+    "episode": "episodes",
+    "claim": "claims",
+}
+_SEMANTIC_DUPLICATE_DEFAULT_THRESHOLD = 0.86
+_SEMANTIC_DUPLICATE_ALGORITHM = f"{DEFAULT_EMBEDDING_MODEL}:cosine"
 REQUEUE_DOCUMENT_EXTENSIONS = {
     ".doc",
     ".docm",
@@ -199,6 +207,15 @@ def search_episodes(
                 FROM episodes
                 WHERE search_vector @@ plainto_tsquery('english', %s)
                   {scope_sql}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'episodes'
+                        AND sm.owner_id = episodes.id
+                        AND sm.member_role = 'duplicate'
+                  )
                 ORDER BY score DESC, updated_at DESC
                 LIMIT %s
                 """,
@@ -214,6 +231,15 @@ def search_episodes(
                 FROM episodes
                 WHERE (similarity(title, %s) > 0.10 OR similarity(summary, %s) > 0.05)
                   {scope_sql}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'episodes'
+                        AND sm.owner_id = episodes.id
+                        AND sm.member_role = 'duplicate'
+                  )
                 ORDER BY score DESC, updated_at DESC
                 LIMIT %s
                 """,
@@ -232,6 +258,15 @@ def search_episodes(
                  AND emb.owner_id = e.id
                 WHERE emb.model = %s
                   {aliased_scope_sql}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'episodes'
+                        AND sm.owner_id = e.id
+                        AND sm.member_role = 'duplicate'
+                  )
                 ORDER BY emb.embedding <=> %s::vector
                 LIMIT %s
                 """,
@@ -259,6 +294,15 @@ def search_episodes(
                 JOIN episodes e ON e.id = c.episode_id
                 WHERE c.search_vector @@ plainto_tsquery('english', %s)
                   {aliased_scope_sql}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'episodes'
+                        AND sm.owner_id = e.id
+                        AND sm.member_role = 'duplicate'
+                  )
                 GROUP BY e.id, e.title, e.summary
                 ORDER BY score DESC, max(c.updated_at) DESC
                 LIMIT %s
@@ -300,6 +344,15 @@ def search_episodes(
                 JOIN episodes e ON e.id = c.episode_id
                 WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
                   {aliased_scope_sql}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'episodes'
+                        AND sm.owner_id = e.id
+                        AND sm.member_role = 'duplicate'
+                  )
                 GROUP BY e.id, e.title, e.summary
                 ORDER BY score DESC, max(c.updated_at) DESC
                 LIMIT %s
@@ -321,6 +374,7 @@ def search_episodes(
                     (list(details.keys()),),
                 )
                 _add_episode_lifecycle_rows(cur.fetchall(), details)
+                _add_semantic_duplicate_metadata(cur, owner_table="episodes", details=details)
 
     fused = reciprocal_rank_fusion(streams)
     results: list[dict[str, Any]] = []
@@ -343,6 +397,8 @@ def search_episodes(
             payload["graph"] = result["graph"]
         if "metadata" in result:
             payload["metadata"] = result["metadata"]
+        if "semantic_duplicate_cluster" in result:
+            payload["semantic_duplicate_cluster"] = result["semantic_duplicate_cluster"]
         results.append(payload)
     return sorted(results, key=lambda row: (-float(row["score"]), row["title"], row["id"]))[:limit]
 
@@ -384,6 +440,15 @@ def search_corpus_chunks(
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
                   AND c.search_vector @@ plainto_tsquery('english', %s)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'asset_chunks'
+                        AND sm.owner_id = c.id
+                        AND sm.member_role = 'duplicate'
+                  )
                   {root_name_sql}
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
@@ -410,6 +475,15 @@ def search_corpus_chunks(
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
                   AND (similarity(c.title, %s) > 0.10 OR similarity(c.body, %s) > 0.15)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'asset_chunks'
+                        AND sm.owner_id = c.id
+                        AND sm.member_role = 'duplicate'
+                  )
                   {root_name_sql}
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
@@ -440,6 +514,15 @@ def search_corpus_chunks(
                   AND a.canonical_asset_id IS NULL
                   AND emb.model = %s
                   AND 1 - (emb.embedding <=> %s::vector) > 0.25
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'asset_chunks'
+                        AND sm.owner_id = c.id
+                        AND sm.member_role = 'duplicate'
+                  )
                   {root_name_sql}
                 ORDER BY emb.embedding <=> %s::vector
                 LIMIT %s
@@ -504,6 +587,7 @@ def search_corpus_chunks(
                     (list(details.keys()), *root_name_params),
                 )
                 _add_ranked_corpus_rows("corpus_freshness", cur.fetchall(), streams, details)
+                _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=details)
 
     fused = reciprocal_rank_fusion(streams)
     results: list[dict[str, Any]] = []
@@ -524,7 +608,141 @@ def search_corpus_chunks(
                 "trust_rank": result["trust_rank"],
             }
         )
+        if "semantic_duplicate_cluster" in result:
+            results[-1]["semantic_duplicate_cluster"] = result["semantic_duplicate_cluster"]
     return results
+
+
+def refresh_semantic_duplicate_clusters(
+    *,
+    memory_class: str = "all",
+    root_name: str | None = None,
+    threshold: float | None = None,
+    limit: int = 1000,
+    url: str | None = None,
+) -> dict[str, Any]:
+    classes = _semantic_duplicate_classes(memory_class)
+    normalized_threshold = _semantic_duplicate_threshold(threshold)
+    row_limit = max(2, min(int(limit or 1000), 5000))
+    payload: dict[str, Any] = {
+        "memory_class": memory_class,
+        "root_name": root_name,
+        "threshold": normalized_threshold,
+        "retired_clusters": 0,
+        "created_clusters": 0,
+        "created_members": 0,
+        "clusters": [],
+    }
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            for item_class in classes:
+                if item_class == "claim":
+                    payload["claim_embeddings_backfilled"] = payload.get("claim_embeddings_backfilled", 0) + _backfill_claim_embeddings(
+                        cur,
+                        limit=row_limit,
+                    )
+                payload["retired_clusters"] += _retire_semantic_duplicate_clusters(
+                    cur,
+                    memory_class=item_class,
+                    root_name=root_name,
+                )
+                candidates = _fetch_semantic_duplicate_candidates(
+                    cur,
+                    memory_class=item_class,
+                    root_name=root_name,
+                    limit=row_limit,
+                )
+                if len(candidates) < 2:
+                    continue
+                pairs = _fetch_semantic_duplicate_pairs(
+                    cur,
+                    memory_class=item_class,
+                    root_name=root_name,
+                    threshold=normalized_threshold,
+                    limit=row_limit,
+                )
+                clusters = _build_semantic_duplicate_clusters(
+                    candidates,
+                    pairs,
+                    memory_class=item_class,
+                    threshold=normalized_threshold,
+                )
+                for cluster in clusters:
+                    inserted = _insert_semantic_duplicate_cluster(cur, cluster)
+                    payload["created_clusters"] += 1
+                    payload["created_members"] += inserted["member_count"]
+                    payload["clusters"].append(inserted["cluster"])
+    return payload
+
+
+def list_semantic_duplicate_clusters(
+    *,
+    memory_class: str | None = None,
+    root_name: str | None = None,
+    limit: int = 50,
+    url: str | None = None,
+) -> dict[str, Any]:
+    row_limit = max(1, min(int(limit or 50), 200))
+    filters = ["c.status = 'active'"]
+    params: list[Any] = []
+    if memory_class:
+        normalized_class = _validate_semantic_duplicate_memory_class(memory_class)
+        filters.append("c.memory_class = %s")
+        params.append(normalized_class)
+    if root_name:
+        filters.append("c.root_name = %s")
+        params.append(root_name)
+    params.append(row_limit)
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT c.id::text, c.memory_class, c.status, c.algorithm,
+                       c.threshold, c.workspace_key, c.root_name,
+                       c.canonical_owner_table, c.canonical_owner_id::text,
+                       c.metadata, c.created_at, c.updated_at,
+                       COALESCE(
+                         jsonb_agg(
+                           jsonb_build_object(
+                             'owner_table', m.owner_table,
+                             'owner_id', m.owner_id::text,
+                             'member_role', m.member_role,
+                             'similarity', m.similarity,
+                             'label', m.evidence->>'label',
+                             'source_path', m.evidence->>'source_path'
+                           )
+                           ORDER BY CASE WHEN m.member_role = 'canonical' THEN 0 ELSE 1 END,
+                                    m.similarity DESC,
+                                    m.owner_id::text
+                         ) FILTER (WHERE m.id IS NOT NULL),
+                         '[]'::jsonb
+                       ) AS members
+                FROM semantic_duplicate_clusters c
+                LEFT JOIN semantic_duplicate_members m ON m.cluster_id = c.id
+                WHERE {" AND ".join(filters)}
+                GROUP BY c.id
+                ORDER BY c.updated_at DESC, c.id
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            clusters = [_semantic_duplicate_cluster_row(row) for row in cur.fetchall()]
+    by_class: dict[str, int] = {}
+    suppressed_count = 0
+    for cluster in clusters:
+        item_class = str(cluster.get("memory_class") or "unknown")
+        by_class[item_class] = by_class.get(item_class, 0) + 1
+        suppressed_count += int(cluster.get("suppressed_count") or 0)
+    return {
+        "summary": {
+            "total": len(clusters),
+            "by_class": by_class,
+            "suppressed_count": suppressed_count,
+        },
+        "clusters": clusters,
+    }
 
 
 def list_audit_events(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
@@ -723,6 +941,27 @@ def upsert_claim(
                 ),
             )
             claim = _claim_row(cur.fetchone(), subject=_entity_row(entity))
+            cur.execute(
+                """
+                DELETE FROM embeddings
+                WHERE owner_table = 'claims'
+                  AND owner_id = %s
+                  AND model = %s
+                """,
+                (claim["id"], DEFAULT_EMBEDDING_MODEL),
+            )
+            cur.execute(
+                """
+                INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding)
+                VALUES ('claims', %s, %s, %s, %s::vector)
+                """,
+                (
+                    claim["id"],
+                    DEFAULT_EMBEDDING_MODEL,
+                    DEFAULT_EMBEDDING_DIMENSIONS,
+                    to_pgvector_literal(embed_text(f"{subject_name}\n{predicate}\n{object_text}")),
+                ),
+            )
             cur.execute(
                 """
                 INSERT INTO claim_lifecycle_events (
@@ -1000,6 +1239,20 @@ def retention_quality_report(*, limit: int = 25, url: str | None = None) -> dict
                 (row_limit,),
             )
             candidates.extend(_corpus_quality_candidate(row, policies.get("corpus")) for row in cur.fetchall())
+            cur.execute(
+                """
+                SELECT c.id::text, c.memory_class,
+                       COALESCE(c.metadata->>'canonical_label', c.canonical_owner_id::text) AS label,
+                       COALESCE((c.metadata->>'suppressed_count')::integer, 0) AS suppressed_count,
+                       c.root_name, c.updated_at
+                FROM semantic_duplicate_clusters c
+                WHERE c.status = 'active'
+                ORDER BY c.updated_at DESC, c.id
+                LIMIT %s
+                """,
+                (row_limit,),
+            )
+            candidates.extend(_semantic_duplicate_quality_candidate(row) for row in cur.fetchall())
 
     bounded = candidates[:row_limit]
     summary = _retention_quality_summary(bounded)
@@ -4566,6 +4819,612 @@ def _add_ranked_corpus_rows(
         detail["raw_scores"][stream] = float(row[8] or 0.0)
 
 
+def _validate_semantic_duplicate_memory_class(memory_class: str) -> str:
+    normalized = str(memory_class or "").strip().lower()
+    if normalized not in _SEMANTIC_DUPLICATE_MEMORY_CLASSES:
+        raise ValueError("memory_class must be one of: corpus, episode, claim")
+    return normalized
+
+
+def _semantic_duplicate_classes(memory_class: str) -> list[str]:
+    normalized = str(memory_class or "all").strip().lower()
+    if normalized == "all":
+        return ["corpus", "episode", "claim"]
+    return [_validate_semantic_duplicate_memory_class(normalized)]
+
+
+def _semantic_duplicate_threshold(threshold: float | None) -> float:
+    value = _SEMANTIC_DUPLICATE_DEFAULT_THRESHOLD if threshold is None else float(threshold)
+    if value < 0.0 or value > 1.0:
+        raise ValueError("threshold must be between 0.0 and 1.0")
+    return value
+
+
+def _retire_semantic_duplicate_clusters(cur: Any, *, memory_class: str, root_name: str | None) -> int:
+    filters = ["memory_class = %s", "status = 'active'"]
+    params: list[Any] = [memory_class]
+    if root_name:
+        filters.append("root_name = %s")
+        params.append(root_name)
+    cur.execute(
+        f"""
+        UPDATE semantic_duplicate_clusters
+        SET status = 'retired', updated_at = now()
+        WHERE {" AND ".join(filters)}
+        """,
+        tuple(params),
+    )
+    return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def _fetch_semantic_duplicate_candidates(
+    cur: Any,
+    *,
+    memory_class: str,
+    root_name: str | None,
+    limit: int,
+) -> dict[str, dict[str, Any]]:
+    if memory_class == "corpus":
+        root_sql = "AND r.name = %s" if root_name else ""
+        params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
+        cur.execute(
+            f"""
+            SELECT c.id::text, 'asset_chunks' AS owner_table, c.title AS label,
+                   a.path AS source_path, r.name AS root_name,
+                   'root:' || r.name AS workspace_key,
+                   r.trust_rank, length(c.body) AS text_length,
+                   NULL::double precision AS confidence,
+                   0 AS usage_count, 0 AS reinforcement_count,
+                   NULL::timestamptz AS last_confirmed_at,
+                   c.updated_at
+            FROM asset_chunks c
+            JOIN source_assets a ON a.id = c.asset_id
+            JOIN monitored_roots r ON r.id = a.root_id
+            JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
+                               AND emb.owner_id = c.id
+                               AND emb.model = %s
+            WHERE r.enabled
+              AND a.deleted_at IS NULL
+              AND a.canonical_asset_id IS NULL
+              {root_sql}
+            ORDER BY r.name, c.updated_at DESC, c.id
+            LIMIT %s
+            """,
+            (DEFAULT_EMBEDDING_MODEL, *params),
+        )
+    elif memory_class == "episode":
+        root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
+        params = ((root_name,) if root_name else ()) + (limit,)
+        cur.execute(
+            f"""
+            SELECT e.id::text, 'episodes' AS owner_table, e.title AS label,
+                   NULL::text AS source_path,
+                   NULLIF(e.metadata->>'root_name', '') AS root_name,
+                   COALESCE(
+                     NULLIF(e.metadata->>'workspace_key', ''),
+                     CASE
+                       WHEN NULLIF(e.metadata->>'root_name', '') IS NOT NULL
+                       THEN 'root:' || e.metadata->>'root_name'
+                       ELSE ''
+                     END
+                   ) AS workspace_key,
+                   NULL::integer AS trust_rank, length(e.summary) AS text_length,
+                   e.confidence, e.usage_count, 0 AS reinforcement_count,
+                   NULL::timestamptz AS last_confirmed_at,
+                   e.updated_at
+            FROM episodes e
+            JOIN embeddings emb ON emb.owner_table = 'episodes'
+                               AND emb.owner_id = e.id
+                               AND emb.model = %s
+            WHERE e.superseded_by IS NULL
+              {root_sql}
+            ORDER BY workspace_key, e.updated_at DESC, e.id
+            LIMIT %s
+            """,
+            (DEFAULT_EMBEDDING_MODEL, *params),
+        )
+    else:
+        root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
+        params = ((root_name,) if root_name else ()) + (limit,)
+        cur.execute(
+            f"""
+            SELECT c.id::text, 'claims' AS owner_table,
+                   concat_ws(' ', e.name, c.predicate, c.object_text) AS label,
+                   NULL::text AS source_path,
+                   NULLIF(c.metadata->>'root_name', '') AS root_name,
+                   COALESCE(
+                     NULLIF(c.metadata->>'workspace_key', ''),
+                     CASE
+                       WHEN NULLIF(c.metadata->>'root_name', '') IS NOT NULL
+                       THEN 'root:' || c.metadata->>'root_name'
+                       ELSE ''
+                     END
+                   ) AS workspace_key,
+                   NULL::integer AS trust_rank,
+                   length(concat_ws(' ', e.name, c.predicate, c.object_text)) AS text_length,
+                   c.confidence, c.usage_count, c.reinforcement_count,
+                   c.last_confirmed_at,
+                   c.updated_at
+            FROM claims c
+            LEFT JOIN entities e ON e.id = c.subject_entity_id
+            JOIN embeddings emb ON emb.owner_table = 'claims'
+                               AND emb.owner_id = c.id
+                               AND emb.model = %s
+            WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
+              AND c.retention_action = 'keep'
+              {root_sql}
+            ORDER BY workspace_key, c.updated_at DESC, c.id
+            LIMIT %s
+            """,
+            (DEFAULT_EMBEDDING_MODEL, *params),
+        )
+    rows = cur.fetchall()
+    return {
+        str(row[0]): {
+            "owner_id": str(row[0]),
+            "owner_table": row[1],
+            "memory_class": memory_class,
+            "label": row[2],
+            "source_path": row[3],
+            "root_name": row[4],
+            "workspace_key": row[5] or "",
+            "trust_rank": row[6],
+            "text_length": row[7],
+            "confidence": row[8],
+            "usage_count": row[9],
+            "reinforcement_count": row[10],
+            "last_confirmed_at": row[11],
+            "updated_at": row[12],
+        }
+        for row in rows
+    }
+
+
+def _fetch_semantic_duplicate_pairs(
+    cur: Any,
+    *,
+    memory_class: str,
+    root_name: str | None,
+    threshold: float,
+    limit: int,
+) -> list[tuple[str, str, float]]:
+    cte_sql, params = _semantic_duplicate_candidate_cte(memory_class=memory_class, root_name=root_name, limit=limit)
+    cur.execute(
+        f"""
+        WITH candidates AS (
+            {cte_sql}
+        )
+        SELECT a.owner_id::text, b.owner_id::text,
+               1 - (a.embedding <=> b.embedding) AS similarity
+        FROM candidates a
+        JOIN candidates b
+          ON a.workspace_key = b.workspace_key
+         AND a.owner_id < b.owner_id
+        WHERE 1 - (a.embedding <=> b.embedding) >= %s
+        ORDER BY similarity DESC, a.owner_id::text, b.owner_id::text
+        """,
+        (*params, threshold),
+    )
+    return [(str(row[0]), str(row[1]), float(row[2] or 0.0)) for row in cur.fetchall()]
+
+
+def _semantic_duplicate_candidate_cte(
+    *,
+    memory_class: str,
+    root_name: str | None,
+    limit: int,
+) -> tuple[str, tuple[Any, ...]]:
+    if memory_class == "corpus":
+        root_sql = "AND r.name = %s" if root_name else ""
+        params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
+        return (
+            f"""
+            SELECT c.id AS owner_id, 'root:' || r.name AS workspace_key, emb.embedding
+            FROM asset_chunks c
+            JOIN source_assets a ON a.id = c.asset_id
+            JOIN monitored_roots r ON r.id = a.root_id
+            JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
+                               AND emb.owner_id = c.id
+                               AND emb.model = %s
+            WHERE r.enabled
+              AND a.deleted_at IS NULL
+              AND a.canonical_asset_id IS NULL
+              {root_sql}
+            ORDER BY r.name, c.updated_at DESC, c.id
+            LIMIT %s
+            """,
+            (DEFAULT_EMBEDDING_MODEL, *params),
+        )
+    if memory_class == "episode":
+        root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
+        params = ((root_name,) if root_name else ()) + (limit,)
+        return (
+            f"""
+            SELECT e.id AS owner_id,
+                   COALESCE(
+                     NULLIF(e.metadata->>'workspace_key', ''),
+                     CASE
+                       WHEN NULLIF(e.metadata->>'root_name', '') IS NOT NULL
+                       THEN 'root:' || e.metadata->>'root_name'
+                       ELSE ''
+                     END
+                   ) AS workspace_key,
+                   emb.embedding
+            FROM episodes e
+            JOIN embeddings emb ON emb.owner_table = 'episodes'
+                               AND emb.owner_id = e.id
+                               AND emb.model = %s
+            WHERE e.superseded_by IS NULL
+              {root_sql}
+            ORDER BY workspace_key, e.updated_at DESC, e.id
+            LIMIT %s
+            """,
+            (DEFAULT_EMBEDDING_MODEL, *params),
+        )
+    root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
+    params = ((root_name,) if root_name else ()) + (limit,)
+    return (
+        f"""
+        SELECT c.id AS owner_id,
+               COALESCE(
+                 NULLIF(c.metadata->>'workspace_key', ''),
+                 CASE
+                   WHEN NULLIF(c.metadata->>'root_name', '') IS NOT NULL
+                   THEN 'root:' || c.metadata->>'root_name'
+                   ELSE ''
+                 END
+               ) AS workspace_key,
+               emb.embedding
+        FROM claims c
+        JOIN embeddings emb ON emb.owner_table = 'claims'
+                           AND emb.owner_id = c.id
+                           AND emb.model = %s
+        WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
+          AND c.retention_action = 'keep'
+          {root_sql}
+        ORDER BY workspace_key, c.updated_at DESC, c.id
+        LIMIT %s
+        """,
+        (DEFAULT_EMBEDDING_MODEL, *params),
+    )
+
+
+def _build_semantic_duplicate_clusters(
+    candidates: dict[str, dict[str, Any]],
+    pairs: list[tuple[str, str, float]],
+    *,
+    memory_class: str,
+    threshold: float,
+) -> list[dict[str, Any]]:
+    parent: dict[str, str] = {}
+
+    def find(item_id: str) -> str:
+        parent.setdefault(item_id, item_id)
+        while parent[item_id] != item_id:
+            parent[item_id] = parent[parent[item_id]]
+            item_id = parent[item_id]
+        return item_id
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    pair_similarity: dict[tuple[str, str], float] = {}
+    for left, right, similarity in pairs:
+        if left not in candidates or right not in candidates:
+            continue
+        union(left, right)
+        pair_similarity[tuple(sorted((left, right)))] = float(similarity)
+
+    grouped: dict[str, list[str]] = {}
+    for item_id in parent:
+        grouped.setdefault(find(item_id), []).append(item_id)
+
+    clusters: list[dict[str, Any]] = []
+    for member_ids in grouped.values():
+        if len(member_ids) < 2:
+            continue
+        member_id_set = set(member_ids)
+        cluster_similarities = [
+            similarity
+            for (left, right), similarity in pair_similarity.items()
+            if left in member_id_set and right in member_id_set
+        ]
+        cluster_max_similarity = max(cluster_similarities, default=1.0)
+        members = [candidates[item_id] for item_id in member_ids]
+        canonical = sorted(members, key=_semantic_canonical_sort_key)[0]
+        cluster_members = []
+        for member in sorted(members, key=lambda item: (item["owner_id"] != canonical["owner_id"], str(item.get("label") or ""), item["owner_id"])):
+            member_id = member["owner_id"]
+            similarity = (
+                1.0
+                if member_id == canonical["owner_id"]
+                else _semantic_member_similarity(
+                    member_id=member_id,
+                    canonical_id=canonical["owner_id"],
+                    member_ids=member_id_set,
+                    pair_similarity=pair_similarity,
+                    fallback=cluster_max_similarity,
+                )
+            )
+            cluster_members.append(
+                {
+                    "owner_table": member["owner_table"],
+                    "owner_id": member_id,
+                    "member_role": "canonical" if member_id == canonical["owner_id"] else "duplicate",
+                    "similarity": float(similarity or 0.0),
+                    "evidence": _semantic_member_evidence(member),
+                }
+            )
+        clusters.append(
+            {
+                "memory_class": memory_class,
+                "algorithm": _SEMANTIC_DUPLICATE_ALGORITHM,
+                "threshold": threshold,
+                "workspace_key": str(canonical.get("workspace_key") or ""),
+                "root_name": canonical.get("root_name"),
+                "canonical_owner_table": canonical["owner_table"],
+                "canonical_owner_id": canonical["owner_id"],
+                "suppressed_count": len(cluster_members) - 1,
+                "max_similarity": float(cluster_max_similarity or 0.0),
+                "metadata": {
+                    "canonical_label": canonical.get("label"),
+                    "canonical_source_path": canonical.get("source_path"),
+                    "suppressed_count": len(cluster_members) - 1,
+                    "max_similarity": float(cluster_max_similarity or 0.0),
+                },
+                "members": cluster_members,
+            }
+        )
+    return sorted(clusters, key=lambda item: (item["memory_class"], item["workspace_key"], str(item["canonical_owner_id"])))
+
+
+def _semantic_member_similarity(
+    *,
+    member_id: str,
+    canonical_id: str,
+    member_ids: set[str],
+    pair_similarity: dict[tuple[str, str], float],
+    fallback: float,
+) -> float:
+    direct = pair_similarity.get(tuple(sorted((canonical_id, member_id))))
+    if direct is not None:
+        return float(direct)
+    incident = [
+        similarity
+        for (left, right), similarity in pair_similarity.items()
+        if member_id in {left, right} and left in member_ids and right in member_ids
+    ]
+    return float(max(incident, default=fallback))
+
+
+def _semantic_canonical_sort_key(item: dict[str, Any]) -> tuple[float, float, float, float, str]:
+    trust_rank = float(item.get("trust_rank") or 0.0)
+    confidence = float(item.get("confidence") or 0.0)
+    reinforcement = float(item.get("reinforcement_count") or item.get("usage_count") or 0.0)
+    text_length = float(item.get("text_length") or 0.0)
+    updated = item.get("last_confirmed_at") or item.get("updated_at")
+    updated_score = updated.timestamp() if hasattr(updated, "timestamp") else 0.0
+    stable = str(item.get("source_path") or item.get("label") or item.get("owner_id") or "")
+    return (-trust_rank, -confidence, -reinforcement, -text_length, -updated_score, stable.lower())
+
+
+def _semantic_member_evidence(member: dict[str, Any]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for key in ("label", "source_path", "root_name", "workspace_key"):
+        value = member.get(key)
+        if value:
+            evidence[key] = value
+    return evidence
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
+
+
+def _insert_semantic_duplicate_cluster(cur: Any, cluster: dict[str, Any]) -> dict[str, Any]:
+    cur.execute(
+        """
+        INSERT INTO semantic_duplicate_clusters (
+            memory_class, status, algorithm, threshold, workspace_key, root_name,
+            canonical_owner_table, canonical_owner_id, metadata
+        )
+        VALUES (%s, 'active', %s, %s, %s, %s, %s, %s, %s::jsonb)
+        RETURNING id::text, created_at, updated_at
+        """,
+        (
+            cluster["memory_class"],
+            cluster["algorithm"],
+            cluster["threshold"],
+            cluster["workspace_key"],
+            cluster.get("root_name"),
+            cluster["canonical_owner_table"],
+            cluster["canonical_owner_id"],
+            _json(cluster.get("metadata") or {}),
+        ),
+    )
+    cluster_id, created_at, updated_at = cur.fetchone()
+    member_count = 0
+    for member in cluster["members"]:
+        cur.execute(
+            """
+            INSERT INTO semantic_duplicate_members (
+                cluster_id, memory_class, owner_table, owner_id, member_role,
+                similarity, evidence
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                cluster_id,
+                cluster["memory_class"],
+                member["owner_table"],
+                member["owner_id"],
+                member["member_role"],
+                member["similarity"],
+                _json(member.get("evidence") or {}),
+            ),
+        )
+        member_count += 1
+    inserted = {
+        "id": cluster_id,
+        "memory_class": cluster["memory_class"],
+        "status": "active",
+        "algorithm": cluster["algorithm"],
+        "threshold": cluster["threshold"],
+        "workspace_key": cluster["workspace_key"],
+        "root_name": cluster.get("root_name"),
+        "canonical_owner_table": cluster["canonical_owner_table"],
+        "canonical_owner_id": cluster["canonical_owner_id"],
+        "suppressed_count": cluster["suppressed_count"],
+        "created_at": created_at.isoformat() if created_at else None,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+    }
+    return {"cluster": inserted, "member_count": member_count}
+
+
+def _backfill_claim_embeddings(cur: Any, *, limit: int) -> int:
+    cur.execute(
+        """
+        SELECT c.id::text, e.name, c.predicate, c.object_text
+        FROM claims c
+        LEFT JOIN entities e ON e.id = c.subject_entity_id
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM embeddings emb
+            WHERE emb.owner_table = 'claims'
+              AND emb.owner_id = c.id
+              AND emb.model = %s
+        )
+        ORDER BY c.updated_at DESC, c.id
+        LIMIT %s
+        """,
+        (DEFAULT_EMBEDDING_MODEL, limit),
+    )
+    rows = cur.fetchall()
+    for claim_id, subject_name, predicate, object_text in rows:
+        text = f"{subject_name or ''}\n{predicate or ''}\n{object_text or ''}"
+        cur.execute(
+            """
+            INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding)
+            VALUES ('claims', %s, %s, %s, %s::vector)
+            """,
+            (
+                claim_id,
+                DEFAULT_EMBEDDING_MODEL,
+                DEFAULT_EMBEDDING_DIMENSIONS,
+                to_pgvector_literal(embed_text(text)),
+            ),
+        )
+    return len(rows)
+
+
+def _semantic_duplicate_cluster_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    members = [_semantic_member_row(item) for item in (row[12] or [])]
+    canonical = next((member for member in members if member.get("member_role") == "canonical"), None) or {
+        "owner_table": row[7],
+        "owner_id": row[8],
+    }
+    metadata = row[9] or {}
+    suppressed_count = _positive_int(metadata.get("suppressed_count")) or sum(1 for member in members if member.get("member_role") == "duplicate")
+    return {
+        "id": row[0],
+        "memory_class": row[1],
+        "status": row[2],
+        "algorithm": row[3],
+        "threshold": float(row[4] or 0.0),
+        "workspace_key": row[5],
+        "root_name": row[6],
+        "canonical_owner_table": row[7],
+        "canonical_owner_id": row[8],
+        "canonical": canonical,
+        "suppressed_count": suppressed_count,
+        "members": members,
+        "created_at": row[10].isoformat() if row[10] else None,
+        "updated_at": row[11].isoformat() if row[11] else None,
+    }
+
+
+def _semantic_member_row(value: Any) -> dict[str, Any]:
+    item = value if isinstance(value, dict) else {}
+    result: dict[str, Any] = {
+        "owner_table": item.get("owner_table"),
+        "owner_id": item.get("owner_id"),
+        "member_role": item.get("member_role"),
+        "similarity": float(item.get("similarity") or 0.0),
+    }
+    for key in ("label", "source_path"):
+        if item.get(key):
+            result[key] = item.get(key)
+    return result
+
+
+def _add_semantic_duplicate_metadata(
+    cur: Any,
+    *,
+    owner_table: str,
+    details: dict[str, dict[str, Any]],
+) -> None:
+    if not details:
+        return
+    cur.execute(
+        """
+        SELECT c.id::text, c.canonical_owner_id::text, c.threshold, c.metadata,
+               COALESCE(
+                 jsonb_agg(
+                   jsonb_build_object(
+                     'owner_table', m.owner_table,
+                     'owner_id', m.owner_id::text,
+                     'similarity', m.similarity,
+                     'label', m.evidence->>'label',
+                     'source_path', m.evidence->>'source_path'
+                   )
+                   ORDER BY m.similarity DESC, m.owner_id::text
+                 ) FILTER (WHERE m.member_role = 'duplicate'),
+                 '[]'::jsonb
+               ) AS suppressed
+        FROM semantic_duplicate_clusters c
+        LEFT JOIN semantic_duplicate_members m ON m.cluster_id = c.id
+        WHERE c.status = 'active'
+          AND c.canonical_owner_table = %s
+          AND c.canonical_owner_id = ANY(%s::uuid[])
+        GROUP BY c.id
+        """,
+        (owner_table, list(details.keys())),
+    )
+    for row in cur.fetchall():
+        cluster_id, canonical_owner_id, threshold, metadata, suppressed = row
+        metadata = metadata or {}
+        suppressed_items = [_semantic_suppressed_item(item) for item in (suppressed or [])]
+        details[str(canonical_owner_id)]["semantic_duplicate_cluster"] = {
+            "cluster_id": cluster_id,
+            "canonical_owner_id": str(canonical_owner_id),
+            "suppressed_count": _positive_int(metadata.get("suppressed_count")) or len(suppressed_items),
+            "reason": "semantic_near_duplicate",
+            "threshold": float(threshold or 0.0),
+            "max_similarity": float(metadata.get("max_similarity") or 0.0),
+            "suppressed": suppressed_items,
+        }
+
+
+def _semantic_suppressed_item(item: Any) -> dict[str, Any]:
+    value = item if isinstance(item, dict) else {}
+    result: dict[str, Any] = {
+        "owner_id": value.get("owner_id"),
+        "owner_table": value.get("owner_table"),
+        "similarity": float(value.get("similarity") or 0.0),
+    }
+    for key in ("label", "source_path"):
+        if value.get(key):
+            result[key] = value.get(key)
+    return result
+
+
 def _entity_row(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
         "id": row[0],
@@ -4729,6 +5588,22 @@ def _corpus_quality_candidate(row: tuple[Any, ...], policy: dict[str, Any] | Non
         "extraction_status": status,
         "retention_action": None,
         "updated_at": row[8].isoformat() if row[8] else None,
+    }
+
+
+def _semantic_duplicate_quality_candidate(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "memory_class": row[1],
+        "label": f"Semantic duplicates: {_safe_label(row[2])}",
+        "reason": "semantic_near_duplicate",
+        "quality_bucket": "deprioritize",
+        "confidence": 1.0,
+        "updated_at": row[5].isoformat() if row[5] else None,
+        "metadata": {
+            "root_name": row[4],
+            "suppressed_count": int(row[3] or 0),
+        },
     }
 
 

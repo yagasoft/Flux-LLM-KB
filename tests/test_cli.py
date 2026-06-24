@@ -140,6 +140,52 @@ def test_cli_search_and_explain_forward_retrieval_filters(monkeypatch, capsys):
     assert calls[1][0] == "explain"
 
 
+def test_cli_semantic_duplicates_refresh_and_list_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def refresh_semantic_duplicate_clusters(self, memory_class="all", root_name=None, threshold=None, limit=1000):
+            calls.append(("refresh", memory_class, root_name, threshold, limit))
+            return {"created_clusters": 2, "memory_class": memory_class}
+
+        def list_semantic_duplicate_clusters(self, memory_class=None, root_name=None, limit=50):
+            calls.append(("list", memory_class, root_name, limit))
+            return {"clusters": [{"id": "cluster-1", "memory_class": memory_class}]}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "semantic-duplicates",
+                "refresh",
+                "--memory-class",
+                "corpus",
+                "--root-name",
+                "docs",
+                "--threshold",
+                "0.91",
+                "--limit",
+                "25",
+            ]
+        )
+        == 0
+    )
+    refresh_payload = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["semantic-duplicates", "list", "--memory-class", "claim", "--limit", "7"]) == 0
+    list_payload = json.loads(capsys.readouterr().out)
+
+    assert refresh_payload == {"created_clusters": 2, "memory_class": "corpus"}
+    assert list_payload == {"clusters": [{"id": "cluster-1", "memory_class": "claim"}]}
+    assert calls == [
+        ("refresh", "corpus", "docs", 0.91, 25),
+        ("list", "claim", None, 7),
+    ]
+
+
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     from flux_llm_kb import service
 

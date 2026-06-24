@@ -143,6 +143,25 @@ def create_server():
         """Report retention and memory quality candidates without raw content."""
         return service.retention_quality_report(limit=limit)
 
+    @mcp.tool(name="kb.semantic_duplicates_refresh")
+    def semantic_duplicates_refresh(memory_class: str = "all", root_name: str | None = None, threshold: float | None = None, limit: int = 1000):
+        """Refresh advisory semantic duplicate clusters for corpus chunks, episodes, or claims."""
+        return service.refresh_semantic_duplicate_clusters(
+            memory_class=memory_class,
+            root_name=root_name,
+            threshold=threshold,
+            limit=limit,
+        )
+
+    @mcp.tool(name="kb.semantic_duplicates_list")
+    def semantic_duplicates_list(memory_class: str | None = None, root_name: str | None = None, limit: int = 50):
+        """List active semantic duplicate clusters without raw suppressed content."""
+        return service.list_semantic_duplicate_clusters(
+            memory_class=memory_class,
+            root_name=root_name,
+            limit=limit,
+        )
+
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
         """Finalize the current agent turn by storing a redacted durable summary. Finalize with kb.finalize_turn at turn end; avoid duplicating every prior kb.remember item."""

@@ -85,7 +85,7 @@ scripts:
 | Audio, video, and subtitles | Sidecar transcript indexing, optional local ASR, media metadata, stale lock recovery, and semantic media backfill. | planned | Media sidecars and metadata are first-class targets; transcription/frame sampling remains deferred. | Add local ASR/transcript worker design with cache keys, progress, and bounded temp extraction. |
 | Archives and containers | Bounded archive/container expansion with depth, size, and file-count caps. | in progress | ZIP-family, TAR-family, gzip/bzip2/xz streams, and supported package containers are enumerated through bounded local adapters; optional-tool formats report explicit dependency states when local tools are missing; inline-safe text/code members become related child assets. Recursive extraction and rich parsing of embedded documents/media remain future work. | Add recursive extraction policy, richer embedded-member parsing, and broader optional-tool validation after worker-family scheduling and observability mature. |
 | Worker claiming and retry | Low-priority bounded workers with `FOR UPDATE SKIP LOCKED`, retry/cooldown tracking, and no cloud/provider calls by default. | shipped | Deferred workers claim jobs, track retries/cooldowns, and use explicit terminal states. | Extend queue families for heavy extractor stages in V2.8. |
-| Duplicate and version suppression | Duplicate suppression by content hash and conservative same-document/version-family suppression in retrieval. | in progress | Exact duplicate suppression and conservative path/title version-family suppression exist. Semantic near-duplicate grouping remains future work. | Add semantic near-duplicate grouping for corpus chunks and derived memories, with automatic canonical cluster selection and retrieval suppression before any deletion. |
+| Duplicate and version suppression | Duplicate suppression by content hash, conservative same-document/version-family suppression, and semantic near-duplicate grouping in retrieval. | in progress | Exact duplicate suppression, conservative path/title version-family suppression, and advisory semantic duplicate clusters for corpus chunks, episodes, and claims exist. Semantic clusters choose canonical members, suppress noncanonical retrieval siblings, and expose sanitized counts without automatic deletion. | Calibrate semantic thresholds from live review feedback, then feed clusters into V3 evaluation and automation-first librarian workers. |
 | Corpus retrieval | Full-text, fuzzy, pgvector chunk embeddings, trust rank, freshness, deletion state, and canonical duplicate filtering. | shipped | Corpus retrieval combines these signals, including freshness reranking, and suppresses deleted/non-canonical duplicate assets. | Improve query-aware snippets and retrieval explainability in V2.7. |
 
 ## V2.6: Mail Capture And Runtime Configuration
@@ -114,7 +114,7 @@ scripts:
 | Logical related evidence | Archive members, mail attachments, embedded objects, and sidecars should appear under parent logical results. | in progress | Mail spool siblings and known child assets are grouped as related evidence. Archive and embedded-object grouping needs broader extractor support. | Extend related-evidence grouping as archive/container and embedded media extraction lands. |
 | Lock-tolerant indexing and cloud-sync coexistence | Read-only/shared access, temporary extraction snapshots, no exclusive file ownership, cloud-sync edge handling, optional VSS, and compatibility tests. | in progress | Watcher stability gating, `pending_stable`, `retrying_locked`, `blocked_locked`, retry/cooldown, VSS settings/capability reporting, and fallback to retry/cooldown exist. Actual VSS snapshot extraction and broad cloud-sync compatibility proof remain. | Validate OneDrive/SharePoint/Dropbox, open Office files, large writes, and editor save/rename patterns; then implement opt-in VSS extraction. |
 | Mail post-process hardening | Provider/profile-specific mailbox actions, explanatory dashboard copy, dry-run/audit records, and retry-safe handling. | shipped | Explicit policies now cover no-op, Gmail remove label, Gmail move label, Gmail trash, generic IMAP move, and confirmation-gated delete/expunge. Sync records post-process events, surfaces failures, preserves exported spool data, and avoids advancing the cursor past failed UIDs. | Continue live-provider validation and keep raw mail content out of audit views. |
-| Retrieval snippets and explainability | Query-aware snippets, highlighted terms, retrieval streams, raw ranks, source trust, freshness, duplicate/version suppression, lifecycle penalties, and configurable filters. | in progress | Query-aware snippets, highlight ranges, search-result explanation metadata, per-query retrieval filters, filter-exclusion traces, sanitized suppression metadata, and brief-packing traces are exposed through REST, MCP, CLI, and the dashboard. Deeper score/confidence separation and automated-action rationale remain planned. | Add deeper explanation for semantic suppression, deprioritization, escalation, and automated lifecycle actions after semantic duplicate foundations land. |
+| Retrieval snippets and explainability | Query-aware snippets, highlighted terms, retrieval streams, raw ranks, source trust, freshness, duplicate/version suppression, lifecycle penalties, and configurable filters. | in progress | Query-aware snippets, highlight ranges, search-result explanation metadata, per-query retrieval filters, filter-exclusion traces, sanitized exact/version/semantic suppression metadata, and brief-packing traces are exposed through REST, MCP, CLI, and the dashboard. Deeper score/confidence separation and automated-action rationale remain planned. | Add deeper explanation for deprioritization, escalation, and automated lifecycle actions after V3 evaluation foundations land. |
 | Scheduled sync and worker reliability | First-class IMAP scheduler state machine with claimed/running/completed/failed runs, drift, retry cooldown, auth blocks, ownership, missed-run reconciliation, and tests. | shipped | Claimable IMAP scheduled sync runs, lifecycle state, run history, drift/missed-run fields, owner/attempt metadata, health diagnostics, and dashboard scheduler counts are visible. | Continue live-provider validation for tight intervals across Gmail and standards-compliant IMAP providers. |
 | Error diagnostics and operator UX | Standard API error envelopes and dashboard alerts with code, severity, component, target metadata, retryability, user action, technical detail, and links. | in progress | Structured API error envelopes, dashboard actionable diagnostics, expandable details, copyable JSON, and navigation targets exist. Deeper operator debug views remain. | Add debug views for mail sync runs, retrieval explanations, watcher events, worker heartbeats, and post-process outcomes. |
 
@@ -156,23 +156,20 @@ scripts:
 
 ## Queued Work In Roadmap Order
 
-1. Add semantic duplicate foundations for corpus chunks and derived memories:
-   near-duplicate clusters, canonical selection, explainable retrieval
-   suppression, and no automatic deletion.
-2. Design and implement the V2.8 acceleration foundation: hardware and local
+1. Design and implement the V2.8 acceleration foundation: hardware and local
    model-server capability detection, permanent cache layout, worker-family
    queues, resource caps, vector batching, native watcher evaluation, and
    throughput telemetry.
-3. Build heavy extractor expansion on top of the V2.8 foundation: OCR/vision,
+2. Build heavy extractor expansion on top of the V2.8 foundation: OCR/vision,
    ASR, embedded-media parsing, recursive containers, and remaining specialized
    local-tool stages.
-4. Add V3 retrieval benchmarks and governance evaluation: query sets, quality
+3. Add V3 retrieval benchmarks and governance evaluation: query sets, quality
    metrics, shadow-mode librarian evaluation, and thresholds for automated
    lifecycle actions.
-5. Add automation-first librarian workers for reversible low-risk stale tagging,
+4. Add automation-first librarian workers for reversible low-risk stale tagging,
    deprioritization, duplicate suppression, canonical cluster presentation,
    audit recovery, and operator digests.
-6. Defer V4 collaboration/shared-vault design until single-user governance,
+5. Defer V4 collaboration/shared-vault design until single-user governance,
    evaluation, and recovery flows are stable.
 
 ## Update Rules

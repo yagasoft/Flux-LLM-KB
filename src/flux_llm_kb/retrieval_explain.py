@@ -208,6 +208,17 @@ def _suppression_explanation(item: dict[str, Any]) -> dict[str, Any]:
             if key in version_family and version_family.get(key) is not None:
                 family[key] = version_family.get(key)
         suppression["version_family"] = family
+    semantic_cluster = item.get("semantic_duplicate_cluster")
+    if isinstance(semantic_cluster, dict) and _positive_int(semantic_cluster.get("suppressed_count")):
+        semantic: dict[str, Any] = {
+            "cluster_id": semantic_cluster.get("cluster_id"),
+            "suppressed_count": _positive_int(semantic_cluster.get("suppressed_count")),
+            "reason": "semantic_near_duplicate",
+        }
+        for key in ("threshold", "max_similarity", "suppressed"):
+            if semantic_cluster.get(key) is not None:
+                semantic[key] = semantic_cluster.get(key)
+        suppression["semantic_duplicates"] = semantic
     return suppression
 
 

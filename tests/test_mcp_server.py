@@ -62,8 +62,12 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.capture_review_decide")' in source
     assert '@mcp.tool(name="kb.retention_policies")' in source
     assert '@mcp.tool(name="kb.retention_quality")' in source
+    assert '@mcp.tool(name="kb.semantic_duplicates_refresh")' in source
+    assert '@mcp.tool(name="kb.semantic_duplicates_list")' in source
     assert "def capture_review_decide(job_id: str, decision: str, rationale: str)" in source
     assert "def retention_quality(limit: int = 25)" in source
+    assert 'def semantic_duplicates_refresh(memory_class: str = "all", root_name: str | None = None, threshold: float | None = None, limit: int = 1000)' in source
+    assert "def semantic_duplicates_list(memory_class: str | None = None, root_name: str | None = None, limit: int = 50)" in source
     assert "review_capture_job(" in source
 
 

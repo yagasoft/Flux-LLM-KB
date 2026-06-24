@@ -495,6 +495,42 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
     ]
 
 
+def test_semantic_duplicate_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def refresh_semantic_duplicate_clusters(self, memory_class="all", root_name=None, threshold=None, limit=1000):
+            calls.append(("refresh", memory_class, root_name, threshold, limit))
+            return {"created_clusters": 2, "retired_clusters": 1, "memory_class": memory_class}
+
+        def list_semantic_duplicate_clusters(self, memory_class=None, root_name=None, limit=50):
+            calls.append(("list", memory_class, root_name, limit))
+            return {"clusters": [{"id": "cluster-1", "memory_class": memory_class, "root_name": root_name}]}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    refresh = client.post(
+        "/api/semantic-duplicates/refresh",
+        json={"memory_class": "corpus", "root_name": "docs", "threshold": 0.91, "limit": 25},
+    )
+    listed = client.get(
+        "/api/semantic-duplicates",
+        params={"memory_class": "claim", "root_name": "docs", "limit": 7},
+    )
+
+    assert refresh.status_code == 200
+    assert refresh.json()["created_clusters"] == 2
+    assert listed.status_code == 200
+    assert listed.json()["clusters"][0] == {"id": "cluster-1", "memory_class": "claim", "root_name": "docs"}
+    assert calls == [
+        ("refresh", "corpus", "docs", 0.91, 25),
+        ("list", "claim", "docs", 7),
+    ]
+
+
 def test_post_search_and_brief_accept_scope_fields(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

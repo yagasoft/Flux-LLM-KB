@@ -151,6 +151,73 @@ def test_postgres_corpus_search_includes_vector_stream(tmp_path, monkeypatch):
                 cur.execute("DELETE FROM monitored_roots WHERE name = %s", (name,))
 
 
+def test_postgres_semantic_duplicate_refresh_suppresses_corpus_and_episode_results(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUX_KB_DATABASE_URL", TEST_DATABASE_URL)
+    run_migrations(TEST_DATABASE_URL)
+    marker = f"semantic-dupe-{uuid4()}"
+    root = tmp_path / "semantic-dupes"
+    root.mkdir()
+    (root / "alpha.md").write_text(
+        f"{marker} semantic duplicate architecture pgvector retrieval local ranking canonical",
+        encoding="utf-8",
+    )
+    (root / "bravo.md").write_text(
+        f"{marker} semantic duplicate architecture pgvector retrieval local ranking duplicate extra",
+        encoding="utf-8",
+    )
+    name = f"semantic-dupes-{uuid4()}"
+    database.add_monitored_root(name=name, root_path=root, trust_rank=900, url=TEST_DATABASE_URL)
+    episode_a = insert_episode(
+        title=f"{marker} operating decision alpha",
+        summary="Semantic duplicate memories should be clustered and retrieved once.",
+        metadata={"root_name": name, "workspace_key": f"root:{name}"},
+        url=TEST_DATABASE_URL,
+    )
+    episode_b = insert_episode(
+        title=f"{marker} operating decision bravo",
+        summary="Semantic duplicate memories should be clustered and retrieved once with extra words.",
+        metadata={"root_name": name, "workspace_key": f"root:{name}"},
+        url=TEST_DATABASE_URL,
+    )
+
+    try:
+        service = KnowledgeService()
+        service.sync_corpus(root_name=name)
+        refresh = database.refresh_semantic_duplicate_clusters(
+            memory_class="all",
+            root_name=name,
+            threshold=0.7,
+            url=TEST_DATABASE_URL,
+        )
+        corpus_results = database.search_corpus_chunks(marker, limit=10, root_name=name, url=TEST_DATABASE_URL)
+        episode_results = search_episodes(
+            marker,
+            limit=10,
+            workspace_key=f"root:{name}",
+            url=TEST_DATABASE_URL,
+        )
+        explain = service.explain(
+            marker,
+            root_name=name,
+            filters={"include_suppressed": True},
+        )
+
+        assert refresh["created_clusters"] >= 2
+        assert len(corpus_results) == 1
+        assert corpus_results[0]["semantic_duplicate_cluster"]["suppressed_count"] == 1
+        assert len(episode_results) == 1
+        assert episode_results[0]["semantic_duplicate_cluster"]["suppressed_count"] == 1
+        assert explain["suppression"]["semantic_duplicates"]
+    finally:
+        forget_episode(episode_a, url=TEST_DATABASE_URL)
+        forget_episode(episode_b, url=TEST_DATABASE_URL)
+        psycopg = database._load_psycopg()
+        with psycopg.connect(TEST_DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM monitored_roots WHERE name = %s", (name,))
+                cur.execute("DELETE FROM semantic_duplicate_clusters WHERE root_name = %s", (name,))
+
+
 def test_postgres_claim_lifecycle_and_graph_traversal_are_migration_backed():
     run_migrations(TEST_DATABASE_URL)
     marker = f"graph-lifecycle-{uuid4()}"

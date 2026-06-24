@@ -50,6 +50,13 @@ Corpus chunks use the same `embeddings` table as episodes with
 `owner_table = 'asset_chunks'`. Corpus retrieval fuses PostgreSQL full-text,
 trigram fuzzy matching, pgvector similarity, source trust rank, and freshness.
 Deleted assets and non-canonical duplicate assets are suppressed from retrieval.
+Semantic near-duplicate clusters are stored as advisory metadata in
+`semantic_duplicate_clusters` and `semantic_duplicate_members` for corpus
+chunks, episodes, and claims. Refreshes retire prior active clusters and create
+new active metadata clusters from local embeddings; they do not delete or modify
+the underlying memories. Retrieval suppresses only noncanonical members of
+active semantic clusters and exposes sanitized cluster counts, paths, and
+canonical identifiers when callers request suppressed metadata.
 
 ## Corpus Monitoring
 
@@ -111,6 +118,12 @@ conservative same-document/version-family collapse for common filename variants 
 `v1`, `v2`, `final`, dated copies, and copy suffixes. It suppresses sibling
 versions only in result presentation and exposes the canonical path plus
 suppressed sibling count.
+On-demand semantic duplicate refresh extends this with embedding-similar
+near-duplicate clusters across corpus chunks, episodes, and claims. The
+canonical member is selected deterministically from local metadata such as trust,
+confidence, reinforcement/usage, text size, recency, and stable identifiers.
+This foundation is intentionally advisory; later librarian workers may propose
+automated lifecycle actions, but this layer performs no hard deletion.
 
 The watcher runtime reloads enabled roots while running, so `watch enable` and
 `watch disable` take effect without a restart. It applies a stable-candidate

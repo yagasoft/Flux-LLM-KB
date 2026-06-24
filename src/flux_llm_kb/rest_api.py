@@ -129,6 +129,12 @@ def create_app():
         action: str
         reason: str
 
+    class SemanticDuplicateRefreshRequest(BaseModel):
+        memory_class: str = "all"
+        root_name: str | None = None
+        threshold: float | None = None
+        limit: int = 1000
+
     class ForgetRequest(BaseModel):
         memory_id: str
         reason: str = "user_request"
@@ -548,6 +554,49 @@ def create_app():
     @app.get("/api/retention/quality")
     def retention_quality(limit: int = 25):
         return service.retention_quality_report(limit=limit)
+
+    @app.post("/api/semantic-duplicates/refresh")
+    def semantic_duplicates_refresh(request: SemanticDuplicateRefreshRequest = Body(...)):
+        try:
+            return service.refresh_semantic_duplicate_clusters(
+                memory_class=request.memory_class,
+                root_name=request.root_name,
+                threshold=request.threshold,
+                limit=request.limit,
+            )
+        except ValueError as exc:
+            raise FluxApiError(
+                code="semantic_duplicates.invalid_request",
+                message=str(exc),
+                status_code=400,
+                component="retrieval",
+                retryable=False,
+                user_action="Use memory_class all, corpus, episode, or claim and a threshold between 0.0 and 1.0.",
+                target={"type": "semantic_duplicates", "id": request.memory_class},
+            ) from exc
+
+    @app.get("/api/semantic-duplicates")
+    def semantic_duplicates_list(
+        memory_class: str | None = None,
+        root_name: str | None = None,
+        limit: int = 50,
+    ):
+        try:
+            return service.list_semantic_duplicate_clusters(
+                memory_class=memory_class,
+                root_name=root_name,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise FluxApiError(
+                code="semantic_duplicates.invalid_request",
+                message=str(exc),
+                status_code=400,
+                component="retrieval",
+                retryable=False,
+                user_action="Use memory_class corpus, episode, or claim.",
+                target={"type": "semantic_duplicates", "id": memory_class or "all"},
+            ) from exc
 
     @app.get("/api/corpus/assets")
     def corpus_assets(root_name: str | None = None, path: str | None = None, limit: int = 50):

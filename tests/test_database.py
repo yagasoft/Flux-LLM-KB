@@ -126,6 +126,156 @@ def test_search_corpus_chunks_includes_freshness_stream():
     assert "EXTRACT(EPOCH FROM (now() - c.updated_at))" in function
 
 
+def test_semantic_duplicate_cluster_builder_selects_canonical_without_deleting_members():
+    candidates = {
+        "chunk-a": {
+            "owner_table": "asset_chunks",
+            "owner_id": "chunk-a",
+            "memory_class": "corpus",
+            "label": "RFP response draft",
+            "source_path": "client/RFP Response v1.docx",
+            "root_name": "docs",
+            "workspace_key": "root:docs",
+            "trust_rank": 500,
+            "text_length": 200,
+            "updated_at": datetime(2026, 6, 20, tzinfo=timezone.utc),
+        },
+        "chunk-b": {
+            "owner_table": "asset_chunks",
+            "owner_id": "chunk-b",
+            "memory_class": "corpus",
+            "label": "RFP response final",
+            "source_path": "client/RFP Response final.docx",
+            "root_name": "docs",
+            "workspace_key": "root:docs",
+            "trust_rank": 900,
+            "text_length": 180,
+            "updated_at": datetime(2026, 6, 21, tzinfo=timezone.utc),
+        },
+        "chunk-c": {
+            "owner_table": "asset_chunks",
+            "owner_id": "chunk-c",
+            "memory_class": "corpus",
+            "label": "RFP response copy",
+            "source_path": "client/RFP Response copy.docx",
+            "root_name": "docs",
+            "workspace_key": "root:docs",
+            "trust_rank": 500,
+            "text_length": 240,
+            "updated_at": datetime(2026, 6, 22, tzinfo=timezone.utc),
+        },
+    }
+
+    clusters = database._build_semantic_duplicate_clusters(
+        candidates,
+        [("chunk-a", "chunk-b", 0.94), ("chunk-a", "chunk-c", 0.91)],
+        memory_class="corpus",
+        threshold=0.9,
+    )
+
+    assert len(clusters) == 1
+    cluster = clusters[0]
+    assert cluster["canonical_owner_id"] == "chunk-b"
+    assert cluster["workspace_key"] == "root:docs"
+    assert cluster["root_name"] == "docs"
+    assert cluster["suppressed_count"] == 2
+    assert cluster["max_similarity"] == 0.94
+    assert {member["owner_id"] for member in cluster["members"]} == {"chunk-a", "chunk-b", "chunk-c"}
+    assert [member for member in cluster["members"] if member["member_role"] == "canonical"][0]["owner_id"] == "chunk-b"
+    assert {member["owner_id"]: member["similarity"] for member in cluster["members"] if member["member_role"] == "duplicate"} == {
+        "chunk-a": 0.94,
+        "chunk-c": 0.91,
+    }
+    assert all(member["member_role"] in {"canonical", "duplicate"} for member in cluster["members"])
+
+
+def test_list_semantic_duplicate_clusters_returns_sanitized_members(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "cluster-1",
+                    "corpus",
+                    "active",
+                    "flux-hash-v1:cosine",
+                    0.9,
+                    "root:docs",
+                    "docs",
+                    "asset_chunks",
+                    "chunk-canonical",
+                    {"suppressed_count": 1},
+                    timestamp,
+                    timestamp,
+                    [
+                        {
+                            "owner_table": "asset_chunks",
+                            "owner_id": "chunk-canonical",
+                            "member_role": "canonical",
+                            "similarity": 1.0,
+                            "label": "Architecture",
+                            "source_path": "docs/architecture.md",
+                        },
+                        {
+                            "owner_table": "asset_chunks",
+                            "owner_id": "chunk-copy",
+                            "member_role": "duplicate",
+                            "similarity": 0.93,
+                            "label": "Architecture Copy",
+                            "source_path": "docs/architecture copy.md",
+                        },
+                    ],
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    payload = database.list_semantic_duplicate_clusters(memory_class="corpus", root_name="docs", limit=10)
+
+    assert payload["summary"] == {"total": 1, "by_class": {"corpus": 1}, "suppressed_count": 1}
+    assert payload["clusters"][0]["canonical"]["owner_id"] == "chunk-canonical"
+    assert payload["clusters"][0]["members"][1]["source_path"] == "docs/architecture copy.md"
+    assert "body" not in json.dumps(payload).lower()
+    sql, params = executed[0]
+    assert "semantic_duplicate_clusters" in sql
+    assert "semantic_duplicate_members" in sql
+    assert params[-1] == 10
+
+
+def test_upsert_claim_records_claim_embedding_for_semantic_duplicate_refresh():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    function = source.split("def upsert_claim", 1)[1].split("\ndef ", 1)[0]
+
+    assert "owner_table, owner_id, model, dimensions, embedding" in function
+    assert "VALUES ('claims'" in function
+    assert 'embed_text(f"{subject_name}\\n{predicate}\\n{object_text}")' in function
+
+
 def test_codex_hook_capture_exists_checks_session_and_turn_metadata(monkeypatch):
     executed = []
 
@@ -1129,6 +1279,17 @@ def test_retention_quality_report_aggregates_sanitized_candidates(monkeypatch):
                         timestamp,
                     )
                 ]
+            if "FROM semantic_duplicate_clusters" in sql:
+                return [
+                    (
+                        "cluster-1",
+                        "corpus",
+                        "Architecture",
+                        2,
+                        "docs",
+                        timestamp,
+                    )
+                ]
             return []
 
     class FakeConnection:
@@ -1149,17 +1310,20 @@ def test_retention_quality_report_aggregates_sanitized_candidates(monkeypatch):
 
     report = database.retention_quality_report(limit=10)
 
-    assert report["summary"]["total"] == 3
-    assert report["summary"]["needs_review"] == 3
-    assert report["summary"]["by_class"] == {"claim": 1, "episode": 1, "corpus": 1}
+    assert report["summary"]["total"] == 4
+    assert report["summary"]["needs_review"] == 4
+    assert report["summary"]["by_class"] == {"claim": 1, "episode": 1, "corpus": 2}
     assert report["summary"]["by_bucket"]["review"] == 1
-    assert report["summary"]["by_bucket"]["deprioritize"] == 2
+    assert report["summary"]["by_bucket"]["deprioritize"] == 3
     assert report["candidates"][0]["memory_class"] == "claim"
     assert report["candidates"][0]["label"] == "Flux uses PostgreSQL"
     assert report["candidates"][1]["label"] == "Roadmap session"
     assert "summary" not in report["candidates"][1]
     assert "body" not in json.dumps(report)
     assert report["candidates"][2]["reason"] == "blocked_missing_dependency"
+    semantic_candidates = [item for item in report["candidates"] if item["reason"] == "semantic_near_duplicate"]
+    assert semantic_candidates[0]["label"] == "Semantic duplicates: Architecture"
+    assert semantic_candidates[0]["metadata"] == {"root_name": "docs", "suppressed_count": 2}
 
 
 def test_list_capture_review_jobs_returns_pending_review_metadata_only(monkeypatch):

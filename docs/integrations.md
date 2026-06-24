@@ -28,6 +28,8 @@ Tools:
 | `kb.capture_review_decide` | Approve or reject a capture-review job with rationale. |
 | `kb.retention_policies` | List retention policies for claims, episodes, and corpus assets. |
 | `kb.retention_quality` | Report retention and memory-quality candidates without raw content. |
+| `kb.semantic_duplicates_refresh` | Refresh advisory semantic duplicate clusters for corpus chunks, episodes, or claims. |
+| `kb.semantic_duplicates_list` | List active semantic duplicate clusters without raw suppressed content. |
 | `kb.audit` | List recent audit events. |
 | `kb.forget` | Forget a memory item by id with an audit reason. |
 | `kb.status` | Return Flux health and runtime status. |
@@ -91,6 +93,8 @@ Endpoints:
 - `GET /api/graph/traverse?entity_id=<id>&relation_type=<type>&max_depth=<n>`
 - `GET /api/capture/review?limit=<n>`
 - `POST /api/capture/review/{job_id}/decision`
+- `POST /api/semantic-duplicates/refresh`
+- `GET /api/semantic-duplicates?memory_class=<corpus|episode|claim>&root_name=<name>&limit=<n>`
 - `GET /api/corpus/assets`
 - `GET /api/corpus/assets/{asset_id}`
 - `GET /api/corpus/chunks/{chunk_id}`
@@ -151,13 +155,17 @@ flux-kb claim transition <claim-id> confirm --reason "verified"
 flux-kb graph traverse <entity-id> --relation-type depends_on --max-depth 2
 flux-kb capture review list --limit 50
 flux-kb capture review decide <job-id> --decision approve --rationale "Verified metadata and source."
+flux-kb semantic-duplicates refresh --memory-class all --limit 1000
+flux-kb semantic-duplicates list --memory-class corpus --limit 50
 ```
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
 stale, and retired claims remain available for review but normal brief packing
 prefers current evidence. `include_suppressed` returns sanitized counts, paths,
-canonical identifiers, and reasons for exact duplicate and same-document version
-suppression; it does not return raw suppressed content.
+canonical identifiers, and reasons for exact duplicate, same-document version,
+and semantic near-duplicate suppression; it does not return raw suppressed
+content. Semantic duplicate clusters are advisory metadata only and do not delete
+or rewrite source assets, episodes, or claims.
 
 The dashboard Review tab uses `GET /api/claims` and `GET /api/graph/traverse`
 to browse lifecycle review work and selected-entity graph edges. The

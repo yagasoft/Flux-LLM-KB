@@ -351,6 +351,34 @@ class KnowledgeService:
     def retention_quality_report(self, *, limit: int = 25) -> dict[str, Any]:
         return database.retention_quality_report(limit=limit)
 
+    def refresh_semantic_duplicate_clusters(
+        self,
+        *,
+        memory_class: str = "all",
+        root_name: str | None = None,
+        threshold: float | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
+        return database.refresh_semantic_duplicate_clusters(
+            memory_class=memory_class,
+            root_name=root_name,
+            threshold=threshold,
+            limit=limit,
+        )
+
+    def list_semantic_duplicate_clusters(
+        self,
+        *,
+        memory_class: str | None = None,
+        root_name: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return database.list_semantic_duplicate_clusters(
+            memory_class=memory_class,
+            root_name=root_name,
+            limit=limit,
+        )
+
     def list_capture_review_jobs(self, *, limit: int = 50) -> dict[str, Any]:
         return {"jobs": database.list_capture_review_jobs(limit=limit)}
 
@@ -888,6 +916,7 @@ def _with_retrieval_filters(item: dict[str, Any], filters: dict[str, Any] | None
 def _suppression_trace(results: list[dict[str, Any]]) -> dict[str, Any]:
     exact_duplicates: list[dict[str, Any]] = []
     version_families: list[dict[str, Any]] = []
+    semantic_duplicates: list[dict[str, Any]] = []
     for item in results:
         duplicate_count = _positive_int(item.get("duplicate_count"))
         if duplicate_count:
@@ -916,11 +945,27 @@ def _suppression_trace(results: list[dict[str, Any]]) -> dict[str, Any]:
                     family[key] = version_family.get(key)
             version_families.append(family)
 
+        semantic_cluster = item.get("semantic_duplicate_cluster")
+        if isinstance(semantic_cluster, dict) and _positive_int(semantic_cluster.get("suppressed_count")):
+            semantic = {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or item.get("id") or "Untitled"),
+                "cluster_id": str(semantic_cluster.get("cluster_id") or ""),
+                "suppressed_count": _positive_int(semantic_cluster.get("suppressed_count")),
+                "reason": "semantic_near_duplicate",
+            }
+            for key in ("threshold", "max_similarity", "suppressed"):
+                if semantic_cluster.get(key) is not None:
+                    semantic[key] = semantic_cluster.get(key)
+            semantic_duplicates.append(semantic)
+
     trace: dict[str, Any] = {}
     if exact_duplicates:
         trace["exact_duplicates"] = exact_duplicates
     if version_families:
         trace["version_families"] = version_families
+    if semantic_duplicates:
+        trace["semantic_duplicates"] = semantic_duplicates
     return trace
 
 
