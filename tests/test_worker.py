@@ -146,6 +146,68 @@ def test_process_corpus_job_merges_asr_telemetry(monkeypatch, tmp_path):
     assert applied[0]["root_name"] == "media"
 
 
+def test_process_corpus_job_merges_visual_enrichment_telemetry(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "media"
+    root.mkdir()
+    (root / "clip.mp4").write_bytes(b"fake media")
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "media",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+        },
+    )
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda *_args: type(
+            "Extraction",
+            (),
+            {
+                "status": "indexed",
+                "message": None,
+                "metadata": {
+                    "decorative": {"status": "skipped"},
+                    "vision": {
+                        "cache_hits": 1,
+                        "cache_misses": 2,
+                        "descriptions": 3,
+                        "blocked_dependency_count": 1,
+                    },
+                    "frame_sampling": {
+                        "frame_count": 2,
+                        "thumbnail_cache_hits": 4,
+                        "thumbnail_cache_misses": 5,
+                    },
+                },
+            },
+        )(),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "media", "path": "clip.mp4"}})
+
+    assert result.status == "indexed"
+    assert result.telemetry == {
+        "decorative_image_skips": 1,
+        "vision_cache_hits": 1,
+        "vision_cache_misses": 2,
+        "vision_descriptions": 3,
+        "vision_blocked_dependency_count": 1,
+        "frame_sample_count": 2,
+        "thumbnail_cache_hits": 4,
+        "thumbnail_cache_misses": 5,
+    }
+
+
 def test_process_corpus_job_uses_container_policy_and_merges_container_telemetry(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 

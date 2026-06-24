@@ -51,6 +51,17 @@ parser or local tool exists.
   Missing ASR tools or model paths report `blocked_missing_dependency`; redacted
   ASR cache entries stay under the private ASR cache root with hit/miss and
   segment telemetry exposed through worker-family status.
+- Optional local vision is cache-backed and loopback-only. Image and sampled
+  video-frame descriptions run only when `acceleration.vision.enabled` is true,
+  `acceleration.vision.model` is configured, and `acceleration.local_inference.*`
+  points at a local Ollama endpoint. Redacted captions stay under the private
+  vision cache, sampled frames stay under the private thumbnail cache, and
+  decorative-image spacers are skipped before OCR or vision.
+- Video frame sampling is scene-transition based, not fixed-position sampling.
+  Deferred video jobs use local `ffmpeg` scene detection with
+  `acceleration.video.scene_threshold`, sample up to
+  `acceleration.video.frame_sample_count` transition frames, and use one midpoint
+  fallback frame only when no transition is detected.
 
 ## Coverage Matrix
 
@@ -100,14 +111,16 @@ parser or local tool exists.
   conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy
   binary formats when available.
 - Image and scanned-PDF OCR uses local tools only. Image files can be OCRed with
-  Tesseract in deferred image jobs; image-only PDFs use `pdftoppm` page rendering
-  plus Tesseract up to the configured page cap. OCR output is redacted before
-  chunking and before cache writes. Cache hit/miss counts are stored as sanitized
-  job telemetry; raw OCR text is not written to public docs or dashboard
-  metadata.
+  Tesseract in deferred image jobs after decorative-image skip checks;
+  image-only PDFs use `pdftoppm` page rendering plus Tesseract up to the
+  configured page cap. OCR output is redacted before chunking and before cache
+  writes. Cache hit/miss counts are stored as sanitized job telemetry; raw OCR
+  text is not written to public docs or dashboard metadata.
 - Audio/video ASR uses local tools only. Sidecar transcripts remain preferred;
-  otherwise bounded media jobs extract temporary mono 16 kHz audio with `ffmpeg`
-  and transcribe with faster-whisper using `acceleration.asr.model_path`.
+  otherwise bounded media jobs can sample scene-transition video frames into the
+  thumbnail cache, run optional loopback local vision captions into the vision
+  cache, extract temporary mono 16 kHz audio with `ffmpeg`, and transcribe with
+  faster-whisper using `acceleration.asr.model_path`.
   ASR output is redacted before chunking and before ASR cache writes. Cloud
   transcription stays off by default, and raw transcript text is not written to
   public docs or dashboard metadata.

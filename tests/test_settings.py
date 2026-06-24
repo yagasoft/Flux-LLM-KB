@@ -44,6 +44,13 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "acceleration.asr.enabled" in keys
     assert "acceleration.asr.model_path" in keys
     assert "acceleration.asr.max_duration_seconds" in keys
+    assert "acceleration.vision.enabled" in keys
+    assert "acceleration.vision.model" in keys
+    assert "acceleration.vision.max_image_pixels" in keys
+    assert "acceleration.video.frame_sampling.enabled" in keys
+    assert "acceleration.video.frame_sample_count" in keys
+    assert "acceleration.video.scene_threshold" in keys
+    assert "acceleration.video.frame_max_duration_seconds" in keys
 
 
 def test_codex_hook_settings_are_enabled_by_default(monkeypatch):
@@ -96,6 +103,35 @@ def test_asr_settings_defaults_and_env_overrides(monkeypatch, tmp_path):
     assert service.resolve("acceleration.asr.enabled").raw_value is False
     assert service.resolve("acceleration.asr.model_path").raw_value == str(model_dir)
     assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 42
+
+
+def test_vision_and_video_settings_defaults_and_env_overrides(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("acceleration.vision.enabled").raw_value is False
+    assert service.resolve("acceleration.vision.model").raw_value == ""
+    assert service.resolve("acceleration.vision.max_image_pixels").raw_value == 4_096_000
+    assert service.resolve("acceleration.video.frame_sampling.enabled").raw_value is False
+    assert service.resolve("acceleration.video.frame_sample_count").raw_value == 3
+    assert service.resolve("acceleration.video.scene_threshold").raw_value == 0.35
+    assert service.resolve("acceleration.video.frame_max_duration_seconds").raw_value == 1800
+
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "true")
+    monkeypatch.setenv("FLUX_KB_VISION_MODEL", "llava:latest")
+    monkeypatch.setenv("FLUX_KB_VISION_MAX_IMAGE_PIXELS", "1024")
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLING_ENABLED", "true")
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLE_COUNT", "2")
+    monkeypatch.setenv("FLUX_KB_VIDEO_SCENE_THRESHOLD", "0.42")
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_MAX_DURATION_SECONDS", "60")
+
+    assert service.resolve("acceleration.vision.enabled").raw_value is True
+    assert service.resolve("acceleration.vision.model").raw_value == "llava:latest"
+    assert service.resolve("acceleration.vision.max_image_pixels").raw_value == 1024
+    assert service.resolve("acceleration.video.frame_sampling.enabled").raw_value is True
+    assert service.resolve("acceleration.video.frame_sample_count").raw_value == 2
+    assert service.resolve("acceleration.video.scene_threshold").raw_value == 0.42
+    assert service.resolve("acceleration.video.frame_max_duration_seconds").raw_value == 60
 
 
 def test_container_cap_settings_defaults_and_env_overrides(monkeypatch):

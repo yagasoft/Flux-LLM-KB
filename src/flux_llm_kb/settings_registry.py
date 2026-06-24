@@ -91,6 +91,16 @@ def _range_int(minimum: int, maximum: int) -> Callable[[Any], Any]:
     return validate
 
 
+def _range_float(minimum: float, maximum: float) -> Callable[[Any], Any]:
+    def validate(value: Any) -> float:
+        parsed = float(value)
+        if parsed < minimum or parsed > maximum:
+            raise ValueError(f"value must be between {minimum} and {maximum}")
+        return parsed
+
+    return validate
+
+
 def _choice(*choices: str) -> Callable[[Any], Any]:
     def validate(value: Any) -> str:
         parsed = str(value)
@@ -392,6 +402,80 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         value_type="int",
         description="Maximum media duration eligible for deferred local ASR.",
         env_var="FLUX_KB_ASR_MAX_DURATION_SECONDS",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.vision.enabled",
+        category="acceleration",
+        default=False,
+        value_type="bool",
+        description="Enable optional local loopback vision captions for image and sampled video-frame jobs.",
+        env_var="FLUX_KB_VISION_ENABLED",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
+        key="acceleration.vision.model",
+        category="acceleration",
+        default="",
+        value_type="str",
+        description="Local vision model name for loopback Ollama image descriptions.",
+        env_var="FLUX_KB_VISION_MODEL",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
+        key="acceleration.vision.max_image_pixels",
+        category="acceleration",
+        default=4_096_000,
+        value_type="int",
+        description="Maximum image pixel count eligible for optional local vision captions.",
+        env_var="FLUX_KB_VISION_MAX_IMAGE_PIXELS",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="acceleration.video.frame_sampling.enabled",
+        category="acceleration",
+        default=False,
+        value_type="bool",
+        description="Enable bounded transition-aware local frame sampling for video jobs.",
+        env_var="FLUX_KB_VIDEO_FRAME_SAMPLING_ENABLED",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
+        key="acceleration.video.frame_sample_count",
+        category="acceleration",
+        default=3,
+        value_type="int",
+        description="Maximum scene-transition frames to sample from one video.",
+        env_var="FLUX_KB_VIDEO_FRAME_SAMPLE_COUNT",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_range_int(1, 10),
+    ),
+    SettingDefinition(
+        key="acceleration.video.scene_threshold",
+        category="acceleration",
+        default=0.35,
+        value_type="float",
+        description="ffmpeg scene-change threshold used for transition-aware video frame sampling.",
+        env_var="FLUX_KB_VIDEO_SCENE_THRESHOLD",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_range_float(0.0, 1.0),
+    ),
+    SettingDefinition(
+        key="acceleration.video.frame_max_duration_seconds",
+        category="acceleration",
+        default=1800,
+        value_type="int",
+        description="Maximum video duration eligible for transition-aware frame sampling.",
+        env_var="FLUX_KB_VIDEO_FRAME_MAX_DURATION_SECONDS",
         apply_mode=APPLY_RELOAD,
         affected_components=("worker", "dashboard"),
         validator=_min_int(1),

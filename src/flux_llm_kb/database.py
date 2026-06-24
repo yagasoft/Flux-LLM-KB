@@ -2862,7 +2862,15 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                        COALESCE(sum((telemetry->>'container_member_count')::integer), 0)::integer AS container_member_count,
                        COALESCE(sum((telemetry->>'container_parsed_child_count')::integer), 0)::integer AS container_parsed_child_count,
                        COALESCE(sum((telemetry->>'container_skipped_child_count')::integer), 0)::integer AS container_skipped_child_count,
-                       COALESCE(sum((telemetry->>'container_blocked_dependency_count')::integer), 0)::integer AS container_blocked_dependency_count
+                       COALESCE(sum((telemetry->>'container_blocked_dependency_count')::integer), 0)::integer AS container_blocked_dependency_count,
+                       COALESCE(sum((telemetry->>'vision_cache_hits')::integer), 0)::integer AS vision_cache_hits,
+                       COALESCE(sum((telemetry->>'vision_cache_misses')::integer), 0)::integer AS vision_cache_misses,
+                       COALESCE(sum((telemetry->>'vision_descriptions')::integer), 0)::integer AS vision_descriptions,
+                       COALESCE(sum((telemetry->>'vision_blocked_dependency_count')::integer), 0)::integer AS vision_blocked_dependency_count,
+                       COALESCE(sum((telemetry->>'decorative_image_skips')::integer), 0)::integer AS decorative_image_skips,
+                       COALESCE(sum((telemetry->>'frame_sample_count')::integer), 0)::integer AS frame_sample_count,
+                       COALESCE(sum((telemetry->>'thumbnail_cache_hits')::integer), 0)::integer AS thumbnail_cache_hits,
+                       COALESCE(sum((telemetry->>'thumbnail_cache_misses')::integer), 0)::integer AS thumbnail_cache_misses
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 GROUP BY job_family, resource_class
@@ -2889,6 +2897,14 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                     "container_parsed_child_count": row[15],
                     "container_skipped_child_count": row[16],
                     "container_blocked_dependency_count": row[17],
+                    "vision_cache_hits": row[18],
+                    "vision_cache_misses": row[19],
+                    "vision_descriptions": row[20],
+                    "vision_blocked_dependency_count": row[21],
+                    "decorative_image_skips": row[22],
+                    "frame_sample_count": row[23],
+                    "thumbnail_cache_hits": row[24],
+                    "thumbnail_cache_misses": row[25],
                 }
                 for row in cur.fetchall()
             ]

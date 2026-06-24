@@ -67,9 +67,12 @@ Configured roots are crawled recursively according to root policy, `.gitignore`,
 for every supported file type. Sync can target a full root, a subtree, or a
 single file. Small text-like files are extracted and chunked locally; heavy
 documents, images, audio, and video are queued for local deferred processing.
-Images are dimensioned locally, media uses sidecar transcripts, `ffprobe`
-metadata, and optional local faster-whisper ASR when `acceleration.asr.model_path`
-points at an existing local model. Draw.io and modern
+Images are dimensioned locally, decorative-image spacers are skipped before
+heavy enrichment, and optional local loopback vision descriptions run only when
+`acceleration.vision.enabled` and a local model are configured. Media uses
+sidecar transcripts, `ffprobe` metadata, scene-transition video frame sampling
+with thumbnail cache reuse, and optional local faster-whisper ASR when
+`acceleration.asr.model_path` points at an existing local model. Draw.io and modern
 VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are parsed structurally. Bounded
 archive/container extraction records related child assets, recursively expands
 safe nested containers up to the configured depth, and routes embedded
@@ -110,11 +113,16 @@ The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
 and modern Visio structure, sidecar transcripts, and decorative-image skips.
 Optional richer stages can then run as bounded jobs: Tesseract or PaddleOCR OCR,
-local Ollama/ONNX image descriptions, frame sampling, and faster-whisper
-audio/video transcription. ASR requires `ffmpeg`, the `faster-whisper` Python
+local Ollama image descriptions through loopback-only inference,
+scene-transition frame sampling with thumbnail cache reuse, and faster-whisper
+audio/video transcription. Vision requires `acceleration.vision.enabled`, a
+local model name, and `acceleration.local_inference.*` pointing at a loopback
+Ollama server. ASR requires `ffmpeg`, the `faster-whisper` Python
 module, and `acceleration.asr.model_path`; Flux passes `local_files_only=True`
 and never performs a remote model download. Redacted ASR cache entries live
 under the ASR cache directory and expose cache hit/miss plus segment telemetry.
+Redacted vision cache entries live under the vision cache directory, and sampled
+frame images live under the thumbnail cache directory.
 Cloud transcription remains off by default. Semantic media embeddings are a
 separate backfill phase so large media files do not slow normal crawl/watch
 loops.

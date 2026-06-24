@@ -457,6 +457,14 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
         "container_parsed_child_count": int(row.get("container_parsed_child_count") or 0),
         "container_skipped_child_count": int(row.get("container_skipped_child_count") or 0),
         "container_blocked_dependency_count": int(row.get("container_blocked_dependency_count") or 0),
+        "vision_cache_hits": int(row.get("vision_cache_hits") or 0),
+        "vision_cache_misses": int(row.get("vision_cache_misses") or 0),
+        "vision_descriptions": int(row.get("vision_descriptions") or 0),
+        "vision_blocked_dependency_count": int(row.get("vision_blocked_dependency_count") or 0),
+        "decorative_image_skips": int(row.get("decorative_image_skips") or 0),
+        "frame_sample_count": int(row.get("frame_sample_count") or 0),
+        "thumbnail_cache_hits": int(row.get("thumbnail_cache_hits") or 0),
+        "thumbnail_cache_misses": int(row.get("thumbnail_cache_misses") or 0),
     }
 
 

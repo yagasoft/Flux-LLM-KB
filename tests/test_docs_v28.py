@@ -17,3 +17,17 @@ def test_v28_docs_describe_local_asr_model_path_and_cache_policy():
     assert "asr cache" in combined
     assert "remote model download" in combined
     assert "cloud transcription" in combined
+
+
+def test_v28_docs_describe_local_visual_media_enrichment_policy():
+    roadmap = (ROOT / "docs" / "roadmap.md").read_text(encoding="utf-8").lower()
+    architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8").lower()
+    coverage = (ROOT / "docs" / "file-type-coverage.md").read_text(encoding="utf-8").lower()
+    combined = "\n".join([roadmap, architecture, coverage])
+
+    assert "acceleration.vision.enabled" in combined
+    assert "vision cache" in combined
+    assert "decorative-image" in combined
+    assert "scene-transition" in combined
+    assert "thumbnail cache" in combined
+    assert "loopback" in combined

@@ -21,11 +21,12 @@ import tarfile
 import tempfile
 from typing import Any, Callable
 from urllib.parse import quote, unquote
+from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 import zlib
 
-from .acceleration import resolve_cache_layout
+from .acceleration import resolve_cache_layout, validate_local_model_base_url
 from .crawler import (
     ARCHIVE_COMPOUND_SUFFIXES,
     ARCHIVE_EXTENSIONS,
@@ -60,11 +61,16 @@ LEGACY_PRESENTATION_EXTENSIONS = {".ppt", ".pot", ".pps"}
 OPENDOCUMENT_PRESENTATION_EXTENSIONS = {".odp", ".otp"}
 OCR_CACHE_SCHEMA = "flux-ocr-cache-v1"
 ASR_CACHE_SCHEMA = "flux-asr-cache-v1"
+VISION_CACHE_SCHEMA = "flux-vision-cache-v1"
+THUMBNAIL_CACHE_SCHEMA = "flux-thumbnail-cache-v1"
+VISION_PROMPT_SCHEMA = "flux-vision-caption-v1"
 OCR_MAX_PDF_PAGES = 25
 OCR_PDF_DPI = 200
 OCR_TIMEOUT_SECONDS = 30
 ASR_AUDIO_SAMPLE_RATE = 16000
 ASR_FFMPEG_TIMEOUT_SECONDS = 300
+VISION_TIMEOUT_SECONDS = 60
+FRAME_SAMPLING_TIMEOUT_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -103,6 +109,22 @@ class OcrResult:
 class AsrResult:
     status: str
     text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class VisionResult:
+    status: str
+    text: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class FrameSamplingResult:
+    status: str
+    chunks: tuple[AssetChunk, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     message: str | None = None
 
@@ -1299,6 +1321,11 @@ def _container_child_with_result(
         metadata["warnings"] = list(warnings)
     if result.message:
         metadata["embedded_message"] = result.message
+    if isinstance(result.metadata, dict):
+        for key in ("decorative", "vision", "frame_sampling"):
+            summary = _embedded_visual_summary(result.metadata.get(key))
+            if summary:
+                metadata[f"embedded_{key}"] = summary
     if child.file_kind in {"archive", "container"}:
         metadata["nested_member_count"] = int(result.metadata.get("member_count") or 0)
         metadata["nested_parsed_child_count"] = int(result.metadata.get("parsed_child_count") or 0)
@@ -1313,6 +1340,28 @@ def _container_child_with_result(
         chunks=tuple(result.chunks or ()),
         metadata=metadata,
     )
+
+
+def _embedded_visual_summary(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    allowed = {
+        "status",
+        "reason",
+        "provider",
+        "model",
+        "cache_hits",
+        "cache_misses",
+        "descriptions",
+        "blocked_dependency_count",
+        "frame_count",
+        "thumbnail_cache_hits",
+        "thumbnail_cache_misses",
+        "timestamps",
+        "scene_scores",
+    }
+    summary = {key: value[key] for key in allowed if key in value}
+    return summary or None
 
 
 def _member_file_kind(member_path: str) -> str:
@@ -1387,7 +1436,37 @@ def _final_container_result(
     metadata["skipped_child_count"] = sum(
         1 for child in children if child.extraction_status not in {"indexed", "blocked_missing_dependency"}
     )
+    metadata.update(_container_visual_telemetry(children))
     return ExtractionResult(status="metadata_only", child_assets=tuple(children), metadata=metadata)
+
+
+def _container_visual_telemetry(children: list[ContainerChildAsset]) -> dict[str, int]:
+    telemetry = {
+        "vision_cache_hits": 0,
+        "vision_cache_misses": 0,
+        "vision_descriptions": 0,
+        "vision_blocked_dependency_count": 0,
+        "decorative_image_skips": 0,
+        "frame_sample_count": 0,
+        "thumbnail_cache_hits": 0,
+        "thumbnail_cache_misses": 0,
+    }
+    for child in children:
+        decorative = child.metadata.get("embedded_decorative")
+        if isinstance(decorative, dict) and decorative.get("status") == "skipped":
+            telemetry["decorative_image_skips"] += 1
+        vision = child.metadata.get("embedded_vision")
+        if isinstance(vision, dict):
+            telemetry["vision_cache_hits"] += int(vision.get("cache_hits") or 0)
+            telemetry["vision_cache_misses"] += int(vision.get("cache_misses") or 0)
+            telemetry["vision_descriptions"] += int(vision.get("descriptions") or 0)
+            telemetry["vision_blocked_dependency_count"] += int(vision.get("blocked_dependency_count") or 0)
+        frame_sampling = child.metadata.get("embedded_frame_sampling")
+        if isinstance(frame_sampling, dict):
+            telemetry["frame_sample_count"] += int(frame_sampling.get("frame_count") or 0)
+            telemetry["thumbnail_cache_hits"] += int(frame_sampling.get("thumbnail_cache_hits") or 0)
+            telemetry["thumbnail_cache_misses"] += int(frame_sampling.get("thumbnail_cache_misses") or 0)
+    return telemetry
 
 
 def _join_container_member_path(prefix: str, member_path: str) -> str:
@@ -1735,14 +1814,32 @@ def _local_name(tag: str) -> str:
 
 def _extract_image(path: Path) -> ExtractionResult:
     metadata = image_metadata(path)
+    decorative = _decorative_image_metadata(metadata)
+    if decorative is not None:
+        metadata["decorative"] = decorative
+        return ExtractionResult(status="metadata_only", metadata=metadata)
     ocr = _ocr_image(path)
     metadata["ocr"] = ocr.metadata
-    if ocr.status == "blocked_missing_dependency":
-        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
+    vision = _vision_image(path, source_label=path.name)
+    if vision.status != "disabled":
+        metadata["vision"] = vision.metadata
+    chunks = tuple(
+        list(_chunks_from_text(ocr.text, path.name, modality="ocr"))
+        + list(_chunks_from_text(vision.text, path.name, modality="vision"))
+    )
+    if chunks:
+        return ExtractionResult(status="indexed", chunks=chunks, metadata=metadata)
     if ocr.status == "failed":
         return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
-    chunks = _chunks_from_text(ocr.text, path.name, modality="ocr")
-    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
+    if ocr.status == "blocked_missing_dependency":
+        if vision.status in {"blocked_config", "blocked_missing_dependency"}:
+            return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=vision.message)
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
+    if vision.status in {"blocked_config", "blocked_missing_dependency"}:
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=vision.message)
+    if vision.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=vision.message)
+    return ExtractionResult(status="metadata_only", metadata=metadata)
 
 
 def _extract_media(path: Path, file_kind: str) -> ExtractionResult:
@@ -1780,18 +1877,31 @@ def _extract_media(path: Path, file_kind: str) -> ExtractionResult:
     except json.JSONDecodeError:
         probed = {}
     metadata["ffprobe"] = probed
+    frame_sampling = _sample_video_frames(path, probed) if file_kind == "video" else None
+    frame_chunks: tuple[AssetChunk, ...] = ()
+    if frame_sampling is not None and frame_sampling.status != "disabled":
+        metadata["frame_sampling"] = frame_sampling.metadata
+        frame_chunks = frame_sampling.chunks
+        vision_summary = _vision_summary_from_frame_sampling(frame_sampling)
+        if vision_summary is not None:
+            metadata["vision"] = vision_summary
     asr = _asr_media(path, probed)
     metadata["asr"] = asr.metadata
+    chunks = tuple(list(_chunks_from_text(asr.text, path.name, modality="transcript")) + list(frame_chunks))
+    if chunks:
+        return ExtractionResult(status="indexed", chunks=chunks, metadata=metadata, message=asr.message or frame_sampling.message if frame_sampling else asr.message)
     if asr.status == "blocked_missing_dependency":
         return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=asr.message)
     if asr.status == "failed":
         return ExtractionResult(status="failed", metadata=metadata, message=asr.message)
-    chunks = _chunks_from_text(asr.text, path.name, modality="transcript")
+    if frame_sampling is not None and frame_sampling.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=frame_sampling.message)
+    if frame_sampling is not None and frame_sampling.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=frame_sampling.message)
     return ExtractionResult(
-        status="indexed" if chunks else "metadata_only",
-        chunks=chunks,
+        status="metadata_only",
         metadata=metadata,
-        message=asr.message,
+        message=asr.message or frame_sampling.message if frame_sampling else asr.message,
     )
 
 
@@ -1958,6 +2068,239 @@ def _media_duration_seconds(probed: dict[str, Any]) -> float | None:
     return None
 
 
+def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingResult:
+    settings = _frame_sampling_settings()
+    duration = _media_duration_seconds(probed)
+    metadata = _frame_sampling_metadata(
+        status="pending",
+        duration_seconds=duration,
+        max_duration_seconds=settings["max_duration_seconds"],
+        frame_sample_count=settings["frame_sample_count"],
+        scene_threshold=settings["scene_threshold"],
+    )
+    if not settings["enabled"]:
+        return FrameSamplingResult(status="disabled", metadata={**metadata, "status": "disabled"})
+    if duration is not None and duration > settings["max_duration_seconds"]:
+        return FrameSamplingResult(status="completed", metadata={**metadata, "status": "skipped_duration_cap"})
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return FrameSamplingResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "status": "blocked_missing_dependency"},
+            message="ffmpeg command not found",
+        )
+    transitions = _detect_scene_transitions(path, ffmpeg=ffmpeg, threshold=settings["scene_threshold"])
+    if transitions is None:
+        return FrameSamplingResult(status="failed", metadata={**metadata, "status": "failed"}, message="ffmpeg scene detection failed")
+    selected = _selected_transition_frames(transitions, settings["frame_sample_count"])
+    status = "completed"
+    if not selected:
+        if duration is None:
+            return FrameSamplingResult(status="completed", metadata={**metadata, "status": "skipped_no_duration"})
+        selected = [(round(duration / 2, 3), None)]
+        status = "fallback_no_transition"
+    chunks: list[AssetChunk] = []
+    timestamps: list[float] = []
+    scene_scores: list[float] = []
+    thumbnail_hits = 0
+    thumbnail_misses = 0
+    vision_summary = {
+        "engine": "local_vision",
+        "provider": _vision_settings()["provider"],
+        "model": _vision_settings()["model"],
+        "prompt_schema": VISION_PROMPT_SCHEMA,
+        "status": "disabled",
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "descriptions": 0,
+        "blocked_dependency_count": 0,
+    }
+    for timestamp, score in selected:
+        thumbnail = _thumbnail_for_frame(path, ffmpeg=ffmpeg, timestamp=timestamp)
+        if thumbnail["status"] == "failed":
+            return FrameSamplingResult(
+                status="failed",
+                metadata={**metadata, "status": "failed", "frame_count": len(timestamps)},
+                message=str(thumbnail.get("message") or "thumbnail extraction failed"),
+            )
+        if thumbnail["cache_hit"]:
+            thumbnail_hits += 1
+        else:
+            thumbnail_misses += 1
+        timestamps.append(round(timestamp, 3))
+        if score is not None:
+            scene_scores.append(round(score, 6))
+        vision = _vision_image(Path(thumbnail["path"]), source_label=f"{path.name}@{timestamp:.3f}s")
+        if vision.status != "disabled":
+            vision_summary["status"] = "completed" if vision.status == "completed" else str(vision.metadata.get("status") or vision.status)
+            vision_summary["cache_hits"] += int(vision.metadata.get("cache_hits") or 0)
+            vision_summary["cache_misses"] += int(vision.metadata.get("cache_misses") or 0)
+            vision_summary["descriptions"] += int(vision.metadata.get("descriptions") or 0)
+            vision_summary["blocked_dependency_count"] += int(vision.metadata.get("blocked_dependency_count") or 0)
+        if vision.text:
+            chunks.extend(_chunks_from_text(vision.text, f"{path.name} frame {timestamp:.3f}s", modality="vision"))
+    final_metadata = {
+        **metadata,
+        "status": status,
+        "timestamps": timestamps,
+        "scene_scores": scene_scores,
+        "frame_count": len(timestamps),
+        "thumbnail_cache_hits": thumbnail_hits,
+        "thumbnail_cache_misses": thumbnail_misses,
+    }
+    if vision_summary["status"] != "disabled":
+        final_metadata["vision"] = vision_summary
+    return FrameSamplingResult(status="completed", chunks=tuple(chunks), metadata=final_metadata)
+
+
+def _frame_sampling_settings() -> dict[str, Any]:
+    defaults = {
+        "enabled": False,
+        "frame_sample_count": 3,
+        "scene_threshold": 0.35,
+        "max_duration_seconds": 1800,
+    }
+    try:
+        from .settings import SettingsService
+
+        service = SettingsService()
+        return {
+            "enabled": bool(service.resolve("acceleration.video.frame_sampling.enabled").raw_value),
+            "frame_sample_count": int(service.resolve("acceleration.video.frame_sample_count").raw_value or 3),
+            "scene_threshold": float(service.resolve("acceleration.video.scene_threshold").raw_value or 0.35),
+            "max_duration_seconds": int(service.resolve("acceleration.video.frame_max_duration_seconds").raw_value or 1800),
+        }
+    except Exception:
+        return defaults
+
+
+def _frame_sampling_metadata(
+    *,
+    status: str,
+    duration_seconds: float | None,
+    max_duration_seconds: int,
+    frame_sample_count: int,
+    scene_threshold: float,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "engine": "ffmpeg",
+        "status": status,
+        "max_duration_seconds": max_duration_seconds,
+        "frame_sample_count": frame_sample_count,
+        "scene_threshold": scene_threshold,
+        "frame_count": 0,
+        "thumbnail_cache_hits": 0,
+        "thumbnail_cache_misses": 0,
+    }
+    if duration_seconds is not None:
+        metadata["duration_seconds"] = duration_seconds
+    return metadata
+
+
+def _detect_scene_transitions(path: Path, *, ffmpeg: str, threshold: float) -> list[tuple[float, float]] | None:
+    threshold_text = f"{threshold:g}"
+    try:
+        result = run_no_window(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-i",
+                str(path),
+                "-vf",
+                f"select='gt(scene,{threshold_text})',metadata=print",
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=FRAME_SAMPLING_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_scene_transitions("\n".join([str(result.stdout or ""), str(result.stderr or "")]))
+
+
+def _parse_scene_transitions(text: str) -> list[tuple[float, float]]:
+    transitions: list[tuple[float, float]] = []
+    pending_timestamp: float | None = None
+    for line in text.splitlines():
+        timestamp_match = re.search(r"pts_time[:=]\s*([0-9]+(?:\.[0-9]+)?)", line)
+        score_match = re.search(r"(?:lavfi\.)?scene_score[=:]\s*([0-9]+(?:\.[0-9]+)?)", line)
+        try:
+            timestamp = float(timestamp_match.group(1)) if timestamp_match else pending_timestamp
+            if timestamp_match:
+                pending_timestamp = timestamp
+            score = float(score_match.group(1)) if score_match else None
+        except ValueError:
+            continue
+        if timestamp is None or score is None:
+            continue
+        transitions.append((timestamp, score))
+        pending_timestamp = None
+    return transitions
+
+
+def _selected_transition_frames(transitions: list[tuple[float, float]], limit: int) -> list[tuple[float, float]]:
+    strongest = sorted(transitions, key=lambda item: (-item[1], item[0]))[: max(1, limit)]
+    return sorted(strongest, key=lambda item: item[0])
+
+
+def _thumbnail_for_frame(path: Path, *, ffmpeg: str, timestamp: float) -> dict[str, Any]:
+    cache_file = _thumbnail_cache_file(path, timestamp=timestamp)
+    if cache_file.exists():
+        return {"status": "completed", "path": str(cache_file), "cache_hit": True}
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        result = run_no_window(
+            [
+                ffmpeg,
+                "-y",
+                "-ss",
+                f"{timestamp:.3f}",
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-f",
+                "image2",
+                str(cache_file),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=FRAME_SAMPLING_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except Exception as exc:
+        return {"status": "failed", "path": str(cache_file), "cache_hit": False, "message": str(exc)}
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "path": str(cache_file),
+            "cache_hit": False,
+            "message": result.stderr.strip() or "ffmpeg thumbnail extraction failed",
+        }
+    if not cache_file.exists():
+        return {"status": "failed", "path": str(cache_file), "cache_hit": False, "message": "thumbnail file was not created"}
+    return {"status": "completed", "path": str(cache_file), "cache_hit": False}
+
+
+def _thumbnail_cache_file(path: Path, *, timestamp: float) -> Path:
+    source_hash = _sha256_file(path)
+    timestamp_key = f"{timestamp:.3f}"
+    key = hashlib.sha256(f"{THUMBNAIL_CACHE_SCHEMA}:{source_hash}:{timestamp_key}".encode("utf-8")).hexdigest()
+    return Path(resolve_cache_layout()["directories"]["thumbnails"]) / f"{key}.png"
+
+
+def _vision_summary_from_frame_sampling(frame_sampling: FrameSamplingResult) -> dict[str, Any] | None:
+    vision = frame_sampling.metadata.get("vision") if isinstance(frame_sampling.metadata, dict) else None
+    return dict(vision) if isinstance(vision, dict) else None
+
+
 def _read_asr_cache(path: Path, model_path: Path) -> tuple[str, int] | None:
     try:
         cache_file = _asr_cache_file(path, model_path)
@@ -2032,6 +2375,232 @@ def _chunks_from_text(text: str, title: str, *, modality: str = "text") -> tuple
                 )
             )
     return tuple(chunks)
+
+
+def _decorative_image_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    width = _int_or_none(metadata.get("width"))
+    height = _int_or_none(metadata.get("height"))
+    if width is not None and height is not None and (width <= 1 or height <= 1):
+        return {"status": "skipped", "reason": "tiny_spacer"}
+    return None
+
+
+def _vision_image(path: Path, *, source_label: str) -> VisionResult:
+    settings = _vision_settings()
+    metadata = _vision_metadata(
+        status="pending",
+        provider=settings["provider"],
+        model=settings["model"],
+    )
+    if not settings["enabled"]:
+        return VisionResult(status="disabled", metadata={**metadata, "status": "disabled"})
+    dimensions = _image_dimensions(path)
+    if dimensions:
+        pixels = dimensions[0] * dimensions[1]
+        metadata["width"] = dimensions[0]
+        metadata["height"] = dimensions[1]
+        metadata["pixels"] = pixels
+        if pixels > settings["max_image_pixels"]:
+            return VisionResult(status="completed", metadata={**metadata, "status": "skipped_pixel_cap"})
+    if not settings["local_inference_enabled"]:
+        return VisionResult(
+            status="blocked_config",
+            metadata={**metadata, "status": "blocked_config", "blocked_dependency_count": 1},
+            message="local inference is disabled",
+        )
+    if settings["provider"] != "ollama":
+        return VisionResult(
+            status="blocked_config",
+            metadata={**metadata, "status": "blocked_config", "blocked_dependency_count": 1},
+            message=f"vision provider {settings['provider']} is not supported",
+        )
+    if not settings["model"]:
+        return VisionResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "status": "blocked_missing_dependency", "blocked_dependency_count": 1},
+            message="vision model is not configured",
+        )
+    try:
+        base_url = validate_local_model_base_url(settings["base_url"])
+    except ValueError as exc:
+        return VisionResult(
+            status="blocked_config",
+            metadata={**metadata, "status": "blocked_config", "blocked_dependency_count": 1},
+            message=str(exc),
+        )
+    cached = _read_vision_cache(path, provider=settings["provider"], model=settings["model"])
+    if cached is not None:
+        return VisionResult(
+            status="completed",
+            text=cached,
+            metadata={**metadata, "status": "cache_hit", "cache_hits": 1, "cache_misses": 0, "descriptions": 1 if cached else 0},
+        )
+    return _vision_with_ollama(
+        path,
+        source_label=source_label,
+        base_url=base_url,
+        model=settings["model"],
+        timeout_seconds=settings["timeout_seconds"],
+        metadata=metadata,
+    )
+
+
+def _vision_settings() -> dict[str, Any]:
+    defaults = {
+        "enabled": False,
+        "model": "",
+        "max_image_pixels": 4_096_000,
+        "local_inference_enabled": False,
+        "provider": "ollama",
+        "base_url": "http://127.0.0.1:11434",
+        "timeout_seconds": 1,
+    }
+    try:
+        from .settings import SettingsService
+
+        service = SettingsService()
+        return {
+            "enabled": bool(service.resolve("acceleration.vision.enabled").raw_value),
+            "model": str(service.resolve("acceleration.vision.model").raw_value or ""),
+            "max_image_pixels": int(service.resolve("acceleration.vision.max_image_pixels").raw_value or 4_096_000),
+            "local_inference_enabled": bool(service.resolve("acceleration.local_inference.enabled").raw_value),
+            "provider": str(service.resolve("acceleration.local_inference.provider").raw_value or "ollama"),
+            "base_url": str(service.resolve("acceleration.local_inference.base_url").raw_value or "http://127.0.0.1:11434"),
+            "timeout_seconds": int(service.resolve("acceleration.local_inference.probe_timeout_seconds").raw_value or 1),
+        }
+    except Exception:
+        return defaults
+
+
+def _vision_metadata(*, status: str, provider: str, model: str) -> dict[str, Any]:
+    return {
+        "engine": "local_vision",
+        "provider": provider,
+        "model": model,
+        "prompt_schema": VISION_PROMPT_SCHEMA,
+        "status": status,
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "descriptions": 0,
+        "blocked_dependency_count": 0,
+    }
+
+
+def _vision_with_ollama(
+    path: Path,
+    *,
+    source_label: str,
+    base_url: str,
+    model: str,
+    timeout_seconds: int,
+    metadata: dict[str, Any],
+) -> VisionResult:
+    try:
+        image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        payload = {
+            "model": model,
+            "stream": False,
+            "prompt": (
+                "Describe this image for a private local knowledge index. "
+                "Be concise and factual. Do not infer private identities."
+            ),
+            "images": [image_b64],
+        }
+        request = Request(
+            f"{base_url}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
+        raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+        decoded = json.loads(raw or "{}")
+        text = _vision_response_text(decoded)
+        redacted, _ = redact_text(text)
+        clean = redacted.strip()
+        _write_vision_cache(path, provider="ollama", model=model, text=clean)
+        return VisionResult(
+            status="completed",
+            text=clean,
+            metadata={
+                **metadata,
+                "status": "completed",
+                "cache_hits": 0,
+                "cache_misses": 1,
+                "descriptions": 1 if clean else 0,
+                "source_label": source_label,
+            },
+        )
+    except Exception as exc:
+        return VisionResult(status="failed", metadata={**metadata, "status": "failed"}, message=str(exc))
+
+
+def _vision_response_text(payload: Any) -> str:
+    if isinstance(payload, dict):
+        response = payload.get("response")
+        if isinstance(response, str):
+            return response
+        message = payload.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return message["content"]
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, dict):
+                if isinstance(first.get("text"), str):
+                    return first["text"]
+                nested = first.get("message")
+                if isinstance(nested, dict) and isinstance(nested.get("content"), str):
+                    return nested["content"]
+    return ""
+
+
+def _read_vision_cache(path: Path, *, provider: str, model: str) -> str | None:
+    try:
+        cache_file = _vision_cache_file(path, provider=provider, model=model)
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if payload.get("schema") != VISION_CACHE_SCHEMA:
+        return None
+    if payload.get("source_hash") != _sha256_file(path):
+        return None
+    if payload.get("provider") != provider or payload.get("model") != model:
+        return None
+    if payload.get("prompt_schema") != VISION_PROMPT_SCHEMA:
+        return None
+    text = payload.get("text")
+    return text if isinstance(text, str) else None
+
+
+def _write_vision_cache(path: Path, *, provider: str, model: str, text: str) -> None:
+    try:
+        cache_file = _vision_cache_file(path, provider=provider, model=model)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": VISION_CACHE_SCHEMA,
+            "source_hash": _sha256_file(path),
+            "provider": provider,
+            "model": model,
+            "prompt_schema": VISION_PROMPT_SCHEMA,
+            "text": text,
+        }
+        cache_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _vision_cache_file(path: Path, *, provider: str, model: str) -> Path:
+    source_hash = _sha256_file(path)
+    key = hashlib.sha256(f"{VISION_CACHE_SCHEMA}:{provider}:{model}:{VISION_PROMPT_SCHEMA}:{source_hash}".encode("utf-8")).hexdigest()
+    return Path(resolve_cache_layout()["directories"]["vision"]) / f"{key}.json"
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _image_dimensions(path: Path) -> tuple[int, int] | None:

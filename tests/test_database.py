@@ -245,7 +245,7 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             executed.append((sql, params))
 
         def fetchall(self):
-            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120, 5, 2, 3, 1, 7, 9, 4, 5, 2)]
+            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120, 5, 2, 3, 1, 7, 9, 4, 5, 2, 6, 7, 8, 9, 10, 11, 12, 13)]
 
     class FakeConnection:
         def __enter__(self):
@@ -277,6 +277,14 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
     assert "container_parsed_child_count" in sql
     assert "container_skipped_child_count" in sql
     assert "container_blocked_dependency_count" in sql
+    assert "vision_cache_hits" in sql
+    assert "vision_cache_misses" in sql
+    assert "vision_descriptions" in sql
+    assert "vision_blocked_dependency_count" in sql
+    assert "decorative_image_skips" in sql
+    assert "frame_sample_count" in sql
+    assert "thumbnail_cache_hits" in sql
+    assert "thumbnail_cache_misses" in sql
     assert rows == [
         {
             "family": "media",
@@ -297,6 +305,14 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             "container_parsed_child_count": 4,
             "container_skipped_child_count": 5,
             "container_blocked_dependency_count": 2,
+            "vision_cache_hits": 6,
+            "vision_cache_misses": 7,
+            "vision_descriptions": 8,
+            "vision_blocked_dependency_count": 9,
+            "decorative_image_skips": 10,
+            "frame_sample_count": 11,
+            "thumbnail_cache_hits": 12,
+            "thumbnail_cache_misses": 13,
         }
     ]
 

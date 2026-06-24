@@ -78,6 +78,27 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             telemetry["asr_cache_misses"] = int(asr.get("cache_misses") or 0)
         if "segments" in asr:
             telemetry["asr_segments"] = int(asr.get("segments") or 0)
+    decorative = metadata.get("decorative")
+    if isinstance(decorative, dict) and decorative.get("status") == "skipped":
+        telemetry["decorative_image_skips"] = 1
+    vision = metadata.get("vision")
+    if isinstance(vision, dict):
+        if "cache_hits" in vision:
+            telemetry["vision_cache_hits"] = int(vision.get("cache_hits") or 0)
+        if "cache_misses" in vision:
+            telemetry["vision_cache_misses"] = int(vision.get("cache_misses") or 0)
+        if "descriptions" in vision:
+            telemetry["vision_descriptions"] = int(vision.get("descriptions") or 0)
+        if "blocked_dependency_count" in vision:
+            telemetry["vision_blocked_dependency_count"] = int(vision.get("blocked_dependency_count") or 0)
+    frame_sampling = metadata.get("frame_sampling")
+    if isinstance(frame_sampling, dict):
+        if "frame_count" in frame_sampling:
+            telemetry["frame_sample_count"] = int(frame_sampling.get("frame_count") or 0)
+        if "thumbnail_cache_hits" in frame_sampling:
+            telemetry["thumbnail_cache_hits"] = int(frame_sampling.get("thumbnail_cache_hits") or 0)
+        if "thumbnail_cache_misses" in frame_sampling:
+            telemetry["thumbnail_cache_misses"] = int(frame_sampling.get("thumbnail_cache_misses") or 0)
     if metadata.get("extractor") == "container":
         for source_key, telemetry_key in {
             "member_count": "container_member_count",
@@ -85,6 +106,14 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             "skipped_child_count": "container_skipped_child_count",
             "blocked_dependency_count": "container_blocked_dependency_count",
             "max_depth": "container_max_depth",
+            "vision_cache_hits": "vision_cache_hits",
+            "vision_cache_misses": "vision_cache_misses",
+            "vision_descriptions": "vision_descriptions",
+            "vision_blocked_dependency_count": "vision_blocked_dependency_count",
+            "decorative_image_skips": "decorative_image_skips",
+            "frame_sample_count": "frame_sample_count",
+            "thumbnail_cache_hits": "thumbnail_cache_hits",
+            "thumbnail_cache_misses": "thumbnail_cache_misses",
         }.items():
             if source_key in metadata:
                 telemetry[telemetry_key] = int(metadata.get(source_key) or 0)

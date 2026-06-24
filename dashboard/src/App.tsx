@@ -127,6 +127,14 @@ type AccelerationWorkerFamily = {
   asr_cache_hits?: number;
   asr_cache_misses?: number;
   asr_segments?: number;
+  vision_cache_hits?: number;
+  vision_cache_misses?: number;
+  vision_descriptions?: number;
+  vision_blocked_dependency_count?: number;
+  decorative_image_skips?: number;
+  frame_sample_count?: number;
+  thumbnail_cache_hits?: number;
+  thumbnail_cache_misses?: number;
 };
 
 type ErrorDiagnostic = {
@@ -1735,12 +1743,26 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
     const asrHits = family.asr_cache_hits ?? 0;
     const asrMisses = family.asr_cache_misses ?? 0;
     const asrSegments = family.asr_segments ?? 0;
+    const visionHits = family.vision_cache_hits ?? 0;
+    const visionMisses = family.vision_cache_misses ?? 0;
+    const visionDescriptions = family.vision_descriptions ?? 0;
+    const visionBlocked = family.vision_blocked_dependency_count ?? 0;
+    const decorativeSkips = family.decorative_image_skips ?? 0;
+    const frameSamples = family.frame_sample_count ?? 0;
+    const thumbnailHits = family.thumbnail_cache_hits ?? 0;
+    const thumbnailMisses = family.thumbnail_cache_misses ?? 0;
     const hasOcrTelemetry = ocrHits > 0 || ocrMisses > 0;
     const hasAsrTelemetry = asrHits > 0 || asrMisses > 0 || asrSegments > 0;
+    const hasVisionTelemetry = visionHits > 0 || visionMisses > 0 || visionDescriptions > 0 || visionBlocked > 0;
+    const hasDecorativeTelemetry = decorativeSkips > 0;
+    const hasFrameTelemetry = frameSamples > 0 || thumbnailHits > 0 || thumbnailMisses > 0;
     const duration = p95 == null ? `${family.running ?? 0} running` : `p95 ${p95}ms`;
     const parts = [duration];
     if (hasOcrTelemetry) parts.push(`OCR ${ocrHits} hit / ${ocrMisses} miss`);
     if (hasAsrTelemetry) parts.push(`ASR ${asrHits} hit / ${asrMisses} miss; ${asrSegments} segments`);
+    if (hasVisionTelemetry) parts.push(`Vision ${visionHits} hit / ${visionMisses} miss; ${visionDescriptions} descriptions; ${visionBlocked} blocked`);
+    if (hasDecorativeTelemetry) parts.push(`${decorativeSkips} decorative skips`);
+    if (hasFrameTelemetry) parts.push(`Frames ${frameSamples} sampled; thumbnails ${thumbnailHits} hit / ${thumbnailMisses} miss`);
     const status = parts.join("; ");
     return [
       name,

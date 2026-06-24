@@ -100,6 +100,14 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
                 "container_parsed_child_count": 0,
                 "container_skipped_child_count": 0,
                 "container_blocked_dependency_count": 0,
+                "vision_cache_hits": 8,
+                "vision_cache_misses": 2,
+                "vision_descriptions": 3,
+                "vision_blocked_dependency_count": 1,
+                "decorative_image_skips": 4,
+                "frame_sample_count": 5,
+                "thumbnail_cache_hits": 6,
+                "thumbnail_cache_misses": 7,
             }
         ],
         benchmark_stats=lambda: [
@@ -127,6 +135,14 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
     assert payload["worker_families"][0]["asr_cache_hits"] == 3
     assert payload["worker_families"][0]["asr_cache_misses"] == 1
     assert payload["worker_families"][0]["asr_segments"] == 7
+    assert payload["worker_families"][0]["vision_cache_hits"] == 8
+    assert payload["worker_families"][0]["vision_cache_misses"] == 2
+    assert payload["worker_families"][0]["vision_descriptions"] == 3
+    assert payload["worker_families"][0]["vision_blocked_dependency_count"] == 1
+    assert payload["worker_families"][0]["decorative_image_skips"] == 4
+    assert payload["worker_families"][0]["frame_sample_count"] == 5
+    assert payload["worker_families"][0]["thumbnail_cache_hits"] == 6
+    assert payload["worker_families"][0]["thumbnail_cache_misses"] == 7
     fixtures_by_name = {fixture["name"]: fixture for fixture in payload["benchmarks"]["fixtures"]}
     assert fixtures_by_name["archive-container-heavy"] == {
         "name": "archive-container-heavy",

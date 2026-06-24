@@ -19,6 +19,9 @@ PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAADZrBkAAAAAD0lEQVR4nGP8z8AARLJAgAEACPwD"
     "Aaz3RyoAAAAASUVORK5CYII="
 )
+ONE_PIXEL_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/axjfkUAAAAASUVORK5CYII="
+)
 
 
 def _zip_payload(entries: dict[str, str | bytes]) -> bytes:
@@ -304,6 +307,42 @@ def _configure_asr(
     return model_dir
 
 
+def _configure_vision(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    model: str = "llava:latest",
+    provider: str = "ollama",
+    max_pixels: int = 4_096_000,
+) -> None:
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv("FLUX_KB_VISION_MODEL", model)
+    monkeypatch.setenv("FLUX_KB_VISION_MAX_IMAGE_PIXELS", str(max_pixels))
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_ENABLED", "true")
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_PROVIDER", provider)
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_PROBE_TIMEOUT_SECONDS", "1")
+
+
+def _configure_frame_sampling(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    count: int = 3,
+    threshold: float = 0.35,
+    max_duration: int = 1800,
+) -> None:
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "false")
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLING_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLE_COUNT", str(count))
+    monkeypatch.setenv("FLUX_KB_VIDEO_SCENE_THRESHOLD", str(threshold))
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_MAX_DURATION_SECONDS", str(max_duration))
+
+
 def _media_probe_json(*, duration: int | float) -> str:
     return f'{{"format":{{"duration":"{duration}"}},"streams":[{{"codec_type":"audio","codec_name":"aac"}}]}}'
 
@@ -320,6 +359,96 @@ def test_extract_image_blocks_when_tesseract_is_missing(monkeypatch, tmp_path):
     assert result.metadata["ocr"]["status"] == "blocked_missing_dependency"
     assert result.metadata["ocr"]["cache_hits"] == 0
     assert result.metadata["ocr"]["cache_misses"] == 0
+
+
+def test_extract_image_skips_decorative_one_pixel_assets_before_ocr_or_vision(monkeypatch, tmp_path):
+    path = tmp_path / "spacer.png"
+    path.write_bytes(ONE_PIXEL_PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda _command: (_ for _ in ()).throw(AssertionError("decorative image should not probe OCR tools")),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("decorative image should not run tools")),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("decorative image should not call vision")),
+        raising=False,
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.chunks == ()
+    assert result.metadata["decorative"] == {"status": "skipped", "reason": "tiny_spacer"}
+    assert "ocr" not in result.metadata
+    assert "vision" not in result.metadata
+
+
+def test_extract_image_uses_local_vision_when_ocr_is_missing_and_reuses_cache(monkeypatch, tmp_path):
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    calls = {"vision": 0}
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"response":"Diagram mentions sk-12345678901234567890 and system context"}'
+
+    def fake_urlopen(request, **_kwargs):
+        calls["vision"] += 1
+        assert request.full_url == "http://127.0.0.1:11434/api/generate"
+        return FakeResponse()
+
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    first = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert first.status == "indexed"
+    assert first.chunks[0].modality == "vision"
+    assert first.chunks[0].body == "Diagram mentions [REDACTED:openai_api_key] and system context"
+    assert first.metadata["ocr"]["status"] == "blocked_missing_dependency"
+    assert first.metadata["vision"]["status"] == "completed"
+    assert first.metadata["vision"]["cache_hits"] == 0
+    assert first.metadata["vision"]["cache_misses"] == 1
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("second extraction should use vision cache")),
+        raising=False,
+    )
+
+    second = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert second.status == "indexed"
+    assert second.chunks[0].body == first.chunks[0].body
+    assert second.metadata["vision"]["status"] == "cache_hit"
+    assert second.metadata["vision"]["cache_hits"] == 1
+    assert second.metadata["vision"]["cache_misses"] == 0
+    assert calls == {"vision": 1}
+
+
+def test_extract_image_blocks_unsupported_vision_provider_without_remote_call(monkeypatch, tmp_path):
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path, provider="openai_compatible")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsupported provider must not call network")),
+        raising=False,
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.metadata["vision"]["status"] == "blocked_config"
+    assert result.metadata["vision"]["provider"] == "openai_compatible"
+    assert result.message == "vision provider openai_compatible is not supported"
 
 
 def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_path):
@@ -358,6 +487,87 @@ def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_pat
     assert second.chunks[0].body == "Scanned image text"
     assert second.metadata["ocr"]["cache_hits"] == 1
     assert second.metadata["ocr"]["cache_misses"] == 0
+
+
+def test_extract_video_samples_transition_frames_and_reuses_thumbnail_cache(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_frame_sampling(monkeypatch, tmp_path, count=2, threshold=0.35)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    calls: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        joined = " ".join(str(part) for part in command)
+        if command[0].endswith("ffprobe.exe"):
+            calls.append("ffprobe")
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=60), stderr="")
+        if "select='gt(scene,0.35)'" in joined:
+            calls.append("scene")
+            return SimpleNamespace(
+                returncode=0,
+                stdout="",
+                stderr=(
+                    "frame:1 pts_time:12.0\n"
+                    "lavfi.scene_score=0.82\n"
+                    "frame:2 pts_time:4.0\n"
+                    "lavfi.scene_score=0.95\n"
+                    "frame:3 pts_time:24.0 lavfi.scene_score=0.40\n"
+                ),
+            )
+        if "-frames:v" in command:
+            calls.append(f"thumb:{command[command.index('-ss') + 1]}")
+            Path(command[-1]).write_bytes(PNG_BYTES)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    first = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert first.status == "metadata_only"
+    assert first.metadata["frame_sampling"]["status"] == "completed"
+    assert first.metadata["frame_sampling"]["timestamps"] == [4.0, 12.0]
+    assert first.metadata["frame_sampling"]["scene_scores"] == [0.95, 0.82]
+    assert first.metadata["frame_sampling"]["thumbnail_cache_hits"] == 0
+    assert first.metadata["frame_sampling"]["thumbnail_cache_misses"] == 2
+    assert calls == ["ffprobe", "scene", "thumb:4.000", "thumb:12.000"]
+
+    calls.clear()
+    second = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert second.metadata["frame_sampling"]["status"] == "completed"
+    assert second.metadata["frame_sampling"]["thumbnail_cache_hits"] == 2
+    assert second.metadata["frame_sampling"]["thumbnail_cache_misses"] == 0
+    assert calls == ["ffprobe", "scene"]
+
+
+def test_extract_video_uses_midpoint_frame_when_no_transition_is_detected(monkeypatch, tmp_path):
+    path = tmp_path / "static.mp4"
+    path.write_bytes(b"fake media")
+    _configure_frame_sampling(monkeypatch, tmp_path, count=3, threshold=0.35)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+
+    def fake_run(command, **_kwargs):
+        joined = " ".join(str(part) for part in command)
+        if command[0].endswith("ffprobe.exe"):
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=80), stderr="")
+        if "select='gt(scene,0.35)'" in joined:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "-frames:v" in command:
+            assert command[command.index("-ss") + 1] == "40.000"
+            Path(command[-1]).write_bytes(PNG_BYTES)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["frame_sampling"]["status"] == "fallback_no_transition"
+    assert result.metadata["frame_sampling"]["timestamps"] == [40.0]
+    assert result.metadata["frame_sampling"]["scene_scores"] == []
+    assert result.metadata["frame_sampling"]["frame_count"] == 1
 
 
 def test_extract_pdf_with_embedded_text_skips_ocr(monkeypatch, tmp_path):
