@@ -65,7 +65,8 @@ function Invoke-FeatureStep {
     try {
         $previousErrorActionPreference = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
-        powershell -NoProfile -ExecutionPolicy Bypass -Command $Command *> $logPath
+        $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Command))
+        powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand *> $logPath
         $ErrorActionPreference = $previousErrorActionPreference
         $record.exit_code = $LASTEXITCODE
         if ($LASTEXITCODE -ne 0) {
