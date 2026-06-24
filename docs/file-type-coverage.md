@@ -50,7 +50,8 @@ parser or local tool exists.
   sets `local_files_only=True` and does not perform a remote model download.
   Missing ASR tools or model paths report `blocked_missing_dependency`; redacted
   ASR cache entries stay under the private ASR cache root with hit/miss and
-  segment telemetry exposed through worker-family status.
+  segment telemetry exposed through worker-family status. Embedded media
+  sidecar transcripts inside archives are used before probing or ASR tools.
 - Optional local vision is cache-backed and uses configured loopback local
   inference. Image and sampled video-frame descriptions run only when
   `acceleration.vision.enabled` is true, `acceleration.vision.model` is
@@ -77,7 +78,7 @@ parser or local tool exists.
 | Config and manifests | `json`, `jsonc`, `json5`, `yaml`, `yml`, `toml`, `ini`, `cfg`, `conf`, `properties`, `env.example`, `xml`, `plist`, `editorconfig`, `gitignore`, `dockerignore`, `npmrc`, `prettierrc`, `eslintrc`, `babelrc`, `browserslistrc` | inline |
 | Developer specs | `openapi.json`, `openapi.yaml`, `swagger.json`, `graphql`, `gql`, `proto`, `thrift`, `avsc`, `raml`, `wsdl`, `xsd`, `dtd`, `patch`, `diff`, `rej` | inline/local_parser |
 | Documents | `pdf`, `doc`, `dot`, `docx`, `docm`, `dotx`, `dotm`, `rtf`, `odt`, `ott`, `fodt`, `sxw`, `abw`, `wpd`, `wps`, `pages`, `xps`, `oxps`, `djvu`, `ps`, `eps`, `chm` | local_parser/local_tool |
-| Publications and ebooks | `epub`, `mobi`, `azw`, `azw3`, `fb2`, `lit`, `cbz`, `cbr`, `cb7`, `cbt` | local_parser/local_tool |
+| Publications and ebooks | `epub`, `mobi`, `azw`, `azw3`, `fb2`, `lit`, `cbz`, `cbr`, `cb7`, `cbt` | local_parser/local_tool/container |
 | Scanned documents | image-only `pdf`, scanned `tiff`, scanned `png/jpg`, mixed text/OCR PDFs | local_parser plus enriched OCR |
 | Spreadsheets | `csv`, `tsv`, `psv`, `ssv`, `xlsx`, `xlsm`, `xltx`, `xltm`, `xls`, `xlt`, `xlsb`, `ods`, `ots`, `fods`, `numbers`, `dif`, `slk`, `gnumeric` | inline/local_parser/local_tool |
 | Presentations | `pptx`, `pptm`, `potx`, `potm`, `ppsx`, `ppsm`, `ppt`, `pot`, `pps`, `odp`, `otp`, `fodp`, `key` | local_parser/local_tool |
@@ -114,6 +115,11 @@ parser or local tool exists.
   Cross-platform extraction prefers bundled Python parsers or LibreOffice
   conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy
   binary formats when available.
+- Publication files stay local. EPUB and FB2 are parsed with bounded local
+  readers; MOBI, AZW/AZW3, and LIT require Calibre `ebook-convert` when local
+  conversion is available and otherwise report `blocked_missing_dependency`.
+  Comic archive formats reuse bounded container extraction and preserve
+  `comic_archive` metadata.
 - Image and scanned-PDF OCR uses local tools only. Image files can be OCRed with
   Tesseract in deferred image jobs after decorative-image skip checks;
   image-only PDFs use `pdftoppm` page rendering plus Tesseract up to the
@@ -144,7 +150,10 @@ parser or local tool exists.
   archive. Inline-safe text/code members are chunked. Nested containers are
   recursively expanded up to `crawler.container_max_depth`, and embedded
   documents, diagrams, images, audio, and video are routed through local
-  extractors from temporary private files. Child metadata records sanitized
-  depth, parent-member, parser status, skipped, and blocked-dependency details.
+  extractors from temporary private files. Embedded media sidecar transcript
+  files such as `clip.mp4.srt` or `clip.mp4.txt` are used before probing or ASR
+  tools while remaining visible as their own child assets. Child metadata
+  records sanitized depth, parent-member, parser status, skipped, and
+  blocked-dependency details.
 - Secret-bearing formats should never have raw content indexed by default.
   They may produce redacted metadata and audit entries only.

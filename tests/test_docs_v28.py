@@ -37,3 +37,16 @@ def test_v28_docs_describe_local_visual_media_enrichment_policy():
     assert "loopback ollama" not in combined
     assert "ollama only" not in combined
     assert "only through loopback ollama" not in combined
+
+
+def test_v28_docs_describe_publication_and_embedded_sidecar_extraction():
+    roadmap = (ROOT / "docs" / "roadmap.md").read_text(encoding="utf-8").lower()
+    architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8").lower()
+    coverage = (ROOT / "docs" / "file-type-coverage.md").read_text(encoding="utf-8").lower()
+    combined = "\n".join([roadmap, architecture, coverage])
+
+    assert "epub" in combined
+    assert "fb2" in combined
+    assert "ebook-convert" in combined
+    assert "comic archive" in combined
+    assert "embedded media sidecar" in combined

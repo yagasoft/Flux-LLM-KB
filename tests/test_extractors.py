@@ -68,7 +68,166 @@ def test_extractor_availability_reports_optional_tools():
     assert "ffprobe" in availability
     assert "ffmpeg" in availability
     assert "faster_whisper" in availability
+    assert "ebook_convert" in availability
     assert all("ok" in item and "message" in item for item in availability.values())
+
+
+def test_extract_epub_indexes_xhtml_content_and_metadata(tmp_path):
+    path = tmp_path / "guide.epub"
+    path.write_bytes(
+        _zip_payload(
+            {
+                "OEBPS/content.opf": """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <metadata>
+    <dc:title>Slow Knowledge</dc:title>
+    <dc:creator>Ada Architect</dc:creator>
+  </metadata>
+  <manifest>
+    <item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml" />
+  </manifest>
+</package>""",
+                "OEBPS/chapter.xhtml": """<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <body>
+    <h1>Chapter One</h1>
+    <p>Owl roadmap decisions stay local and reviewable.</p>
+  </body>
+</html>""",
+            }
+        )
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "publication"
+    assert result.metadata["publication_type"] == "ebook"
+    assert result.metadata["publication_format"] == "epub"
+    assert result.metadata["publication_title"] == "Slow Knowledge"
+    assert result.metadata["publication_author"] == "Ada Architect"
+    assert result.metadata["content_file_count"] == 1
+    assert "Chapter One" in result.chunks[0].body
+    assert "Owl roadmap decisions stay local and reviewable." in result.chunks[0].body
+
+
+def test_extract_fb2_indexes_body_content_and_metadata(tmp_path):
+    path = tmp_path / "brief.fb2"
+    path.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
+  <description>
+    <title-info>
+      <author><first-name>Ada</first-name><last-name>Architect</last-name></author>
+      <book-title>Flux Field Notes</book-title>
+    </title-info>
+  </description>
+  <body>
+    <section>
+      <title><p>Extractor Notes</p></title>
+      <p>FB2 paragraphs become searchable local chunks.</p>
+      <p>Metadata stays sanitized and bounded.</p>
+    </section>
+  </body>
+</FictionBook>""",
+        encoding="utf-8",
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "publication"
+    assert result.metadata["publication_type"] == "ebook"
+    assert result.metadata["publication_format"] == "fb2"
+    assert result.metadata["publication_title"] == "Flux Field Notes"
+    assert result.metadata["publication_author"] == "Ada Architect"
+    assert result.metadata["paragraph_count"] == 3
+    assert "Extractor Notes" in result.chunks[0].body
+    assert "FB2 paragraphs become searchable local chunks." in result.chunks[0].body
+
+
+def test_extract_mobi_blocks_when_ebook_convert_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "legacy.mobi"
+    path.write_bytes(b"mobi placeholder")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "MOBI/AZW/LIT extraction requires Calibre ebook-convert."
+    assert result.metadata["extractor"] == "publication"
+    assert result.metadata["publication_format"] == "mobi"
+    assert result.metadata["attempted"] == ["ebook-convert"]
+
+
+def test_extract_azw3_uses_calibre_conversion(monkeypatch, tmp_path):
+    path = tmp_path / "manual.azw3"
+    path.write_bytes(b"azw3 placeholder")
+    commands = []
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/ebook-convert.exe" if command == "ebook-convert" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        Path(command[2]).write_text("Converted chapter text from Calibre.", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].body == "Converted chapter text from Calibre."
+    assert result.metadata["extractor"] == "ebook_convert"
+    assert result.metadata["publication_type"] == "ebook"
+    assert result.metadata["publication_format"] == "azw3"
+    assert result.metadata["source_extension"] == ".azw3"
+    assert result.metadata["converted_extension"] == ".txt"
+    assert commands and commands[0][0].endswith("ebook-convert.exe")
+
+
+def test_extract_cbz_reuses_container_extraction_with_publication_metadata(tmp_path):
+    path = tmp_path / "comic.cbz"
+    path.write_bytes(_zip_payload({"page-notes.txt": "Panel text from a comic archive."}))
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["extractor"] == "container"
+    assert result.metadata["publication_type"] == "comic_archive"
+    assert result.metadata["publication_format"] == "cbz"
+    assert result.metadata["member_count"] == 1
+    assert result.metadata["parsed_child_count"] == 1
+    assert result.child_assets[0].member_path == "page-notes.txt"
+    assert result.child_assets[0].chunks[0].body == "Panel text from a comic archive."
+
+
+def test_extract_archive_uses_embedded_media_sidecar_without_asr_tools(monkeypatch, tmp_path):
+    path = tmp_path / "media-bundle.zip"
+    path.write_bytes(
+        _zip_payload(
+            {
+                "clip.mp4": b"fake media bytes",
+                "clip.mp4.srt": "1\n00:00:00,000 --> 00:00:01,000\nPrepared archive transcript",
+            }
+        )
+    )
+    tool_lookups = []
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: tool_lookups.append(command) or None)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    video_child = next(child for child in result.child_assets if child.member_path == "clip.mp4")
+    sidecar_child = next(child for child in result.child_assets if child.member_path == "clip.mp4.srt")
+    assert video_child.extraction_status == "indexed"
+    assert video_child.chunks[0].modality == "transcript"
+    assert "Prepared archive transcript" in video_child.chunks[0].body
+    assert video_child.metadata["transcript_source"] == "embedded_sidecar"
+    assert video_child.metadata["embedded_sidecar_path"] == "clip.mp4.srt"
+    assert sidecar_child.member_path == "clip.mp4.srt"
+    assert "ffprobe" not in tool_lookups
 
 
 def test_extract_media_prefers_sidecar_transcript_before_probe_or_asr(monkeypatch, tmp_path):

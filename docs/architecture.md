@@ -77,25 +77,32 @@ heavy enrichment, and optional local loopback vision descriptions run only when
 `acceleration.vision.enabled` and a local model are configured. Media uses
 sidecar transcripts, `ffprobe` metadata, scene-transition video frame sampling
 with thumbnail cache reuse, and optional local faster-whisper ASR when
-`acceleration.asr.model_path` points at an existing local model. Draw.io and modern
+`acceleration.asr.model_path` points at an existing local model. EPUB and FB2
+publications are parsed locally, MOBI/AZW/LIT use local Calibre `ebook-convert`
+when available, and comic archive formats reuse bounded container extraction.
+Draw.io and modern
 VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are parsed structurally. Bounded
 archive/container extraction records related child assets, recursively expands
 safe nested containers up to the configured depth, and routes embedded
 documents, diagrams, images, audio, and video through the same local extractor
-chain from temporary private files. Unknown binaries remain metadata-only.
+chain from temporary private files. Embedded media sidecar transcripts inside
+archives are used before media probing or ASR. Unknown binaries remain
+metadata-only.
 
 File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
 source root, trust rank, and provenance. Extraction then escalates only when a
 safe local path exists: inline UTF/code parsing; local document/data libraries;
-optional local tools such as LibreOffice, Tesseract, ffprobe/ffmpeg, or
-faster-whisper; bounded archive/container expansion; and finally metadata-only
+optional local tools such as LibreOffice, Calibre `ebook-convert`, Tesseract,
+ffprobe/ffmpeg, or faster-whisper; bounded archive/container expansion; and
+finally metadata-only
 terminal states for unsafe, encrypted, proprietary, or unsupported binaries.
 The detailed target matrix lives in [file-type-coverage.md](file-type-coverage.md)
 and explicitly includes common legacy and diagram formats such as `doc`, `xls`,
-`ppt`, Draw.io, and Visio `vsdx`. This lets Flux cover common text, code,
-office, PDF, spreadsheet, presentation, mail, calendar/contact, image, diagram,
-audio, video, subtitle, archive, database/export, notebook, CAD/BIM/GIS/design,
+`ppt`, Draw.io, Visio `vsdx`, EPUB, FB2, and comic archive formats. This lets
+Flux cover common text, code, office, PDF, spreadsheet, presentation,
+publication, mail, calendar/contact, image, diagram, audio, video, subtitle,
+archive, database/export, notebook, CAD/BIM/GIS/design,
 security scan, operations log, and unknown-binary families without requiring
 cloud services or blocking normal watch/crawl loops.
 
@@ -116,7 +123,8 @@ deferred worker extraction.
 
 The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
-and modern Visio structure, sidecar transcripts, and decorative-image skips.
+and modern Visio structure, sidecar transcripts including embedded media
+sidecar files from archives, and decorative-image skips.
 Optional richer stages can then run as bounded jobs: Tesseract or PaddleOCR OCR,
 configured loopback local inference for image descriptions, scene-transition
 frame sampling with thumbnail cache reuse, and faster-whisper audio/video

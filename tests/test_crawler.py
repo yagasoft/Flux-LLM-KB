@@ -175,6 +175,41 @@ def test_classify_business_document_extensions_as_deferred_documents(tmp_path):
         assert classification.extraction_tier == "deferred", extension
 
 
+def test_classify_publication_extensions_as_deferred_documents(tmp_path):
+    extensions = {".epub", ".fb2", ".mobi", ".azw", ".azw3", ".lit"}
+
+    for extension in sorted(extensions):
+        path = tmp_path / f"sample{extension}"
+        path.write_bytes(b"publication placeholder")
+
+        classification = classify_file(path, CorpusPolicy(root_path=tmp_path))
+
+        assert classification.file_kind == "document", extension
+        assert classification.extraction_tier == "deferred", extension
+
+
+def test_scan_path_queues_comic_archives_as_deferred_archives(tmp_path):
+    root = tmp_path / "publications"
+    root.mkdir()
+    for name in ("comic.cbz", "comic.cbr", "comic.cb7", "comic.cbt"):
+        (root / name).write_bytes(b"comic archive placeholder")
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert {asset.relative_path: asset.file_kind for asset in plan.assets} == {
+        "comic.cb7": "archive",
+        "comic.cbr": "archive",
+        "comic.cbt": "archive",
+        "comic.cbz": "archive",
+    }
+    assert {(job["job_type"], job["relative_path"], job["reason"]) for job in plan.deferred_jobs} == {
+        ("corpus_extract_archive", "comic.cb7", "deferred_extractor"),
+        ("corpus_extract_archive", "comic.cbr", "deferred_extractor"),
+        ("corpus_extract_archive", "comic.cbt", "deferred_extractor"),
+        ("corpus_extract_archive", "comic.cbz", "deferred_extractor"),
+    }
+
+
 def test_scan_path_classifies_structured_diagrams_as_deferred(tmp_path):
     root = tmp_path / "diagrams"
     root.mkdir()

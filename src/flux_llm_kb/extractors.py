@@ -19,7 +19,7 @@ import shutil
 import struct
 import tarfile
 import tempfile
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from urllib.parse import quote, unquote
 from urllib.request import Request, urlopen
 from xml.etree import ElementTree
@@ -59,6 +59,10 @@ OPENDOCUMENT_SPREADSHEET_EXTENSIONS = {".ods", ".ots"}
 PPTX_PACKAGE_EXTENSIONS = {".pptx", ".pptm", ".potm", ".potx", ".ppsm", ".ppsx"}
 LEGACY_PRESENTATION_EXTENSIONS = {".ppt", ".pot", ".pps"}
 OPENDOCUMENT_PRESENTATION_EXTENSIONS = {".odp", ".otp"}
+LOCAL_PUBLICATION_EXTENSIONS = {".epub", ".fb2"}
+CALIBRE_PUBLICATION_EXTENSIONS = {".mobi", ".azw", ".azw3", ".lit"}
+COMIC_ARCHIVE_EXTENSIONS = {".cbz", ".cbr", ".cb7", ".cbt"}
+MEDIA_TRANSCRIPT_SIDECAR_SUFFIXES = (".txt", ".md", ".vtt", ".srt")
 OCR_CACHE_SCHEMA = "flux-ocr-cache-v1"
 ASR_CACHE_SCHEMA = "flux-asr-cache-v1"
 VISION_CACHE_SCHEMA = "flux-vision-cache-v1"
@@ -178,6 +182,7 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "ffmpeg": _tool_check("ffmpeg"),
         "tesseract": _tool_check("tesseract"),
         "faster_whisper": _module_check("faster_whisper"),
+        "ebook_convert": _tool_check("ebook-convert"),
     }
 
 
@@ -205,6 +210,12 @@ def _extract_document(path: Path, policy: CorpusPolicy) -> ExtractionResult:
     ext = path.suffix.lower()
     if ext == ".pdf":
         return _extract_pdf(path)
+    if ext == ".epub":
+        return _extract_epub(path, policy)
+    if ext == ".fb2":
+        return _extract_fb2(path, policy)
+    if ext in CALIBRE_PUBLICATION_EXTENSIONS:
+        return _extract_calibre_publication(path)
     if ext == ".docx":
         return _extract_docx(path)
     if ext in LEGACY_WORD_EXTENSIONS:
@@ -259,6 +270,181 @@ def _extract_pdf(path: Path) -> ExtractionResult:
         return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
     chunks = _chunks_from_text(ocr.text, path.name, modality="ocr")
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata, message=ocr.message)
+
+
+def _extract_epub(path: Path, policy: CorpusPolicy) -> ExtractionResult:
+    metadata = _publication_metadata(path, "epub")
+    try:
+        with ZipFile(path) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+            total_bytes = 0
+            parts: list[str] = []
+            content_file_count = 0
+            for index, info in enumerate(infos):
+                member_path = _safe_container_member_name(info.filename)
+                if member_path is None:
+                    return ExtractionResult(status="failed", metadata=metadata, message=f"unsafe EPUB member: {info.filename}")
+                if info.flag_bits & 0x1:
+                    return ExtractionResult(status="failed", metadata=metadata, message=f"encrypted EPUB member is not supported: {member_path}")
+                size = int(info.file_size or 0)
+                cap_message = _container_cap_message(policy, member_count=index + 1, member_size=size, total_bytes=total_bytes + size)
+                if cap_message:
+                    return ExtractionResult(status="metadata_only", metadata={**metadata, "warnings": [cap_message]}, message=cap_message)
+                data = archive.read(info)
+                total_bytes += len(data)
+                lower_member = member_path.lower()
+                if lower_member.endswith(".opf"):
+                    metadata.update(_epub_package_metadata(data))
+                elif lower_member.endswith((".xhtml", ".html", ".htm")):
+                    text = _text_from_markup_bytes(data)
+                    if text:
+                        parts.append(text)
+                        content_file_count += 1
+    except BadZipFile as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=f"EPUB parse failed: {exc}")
+    except ValueError as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=str(exc))
+
+    metadata["content_file_count"] = content_file_count
+    chunks = _chunks_from_text("\n\n".join(parts), path.name)
+    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
+
+
+def _extract_fb2(path: Path, policy: CorpusPolicy) -> ExtractionResult:
+    metadata = _publication_metadata(path, "fb2")
+    size = path.stat().st_size
+    if size > policy.container_max_member_bytes:
+        message = "FB2 file exceeds publication extraction size limit"
+        return ExtractionResult(status="metadata_only", metadata={**metadata, "warnings": [message]}, message=message)
+    try:
+        root = ElementTree.fromstring(path.read_bytes())
+    except ElementTree.ParseError as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=f"FB2 parse failed: {exc}")
+
+    title = _first_local_text(root, "book-title")
+    author = _fb2_author(root)
+    if title:
+        metadata["publication_title"] = title
+    if author:
+        metadata["publication_author"] = author
+    body = _first_local_element(root, "body")
+    paragraphs = [_normalized_text(paragraph.itertext()) for paragraph in (body.iter() if body is not None else ()) if _xml_local_name(paragraph.tag) == "p"]
+    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+    metadata["paragraph_count"] = len(paragraphs)
+    metadata["content_file_count"] = 1 if paragraphs else 0
+    chunks = _chunks_from_text("\n\n".join(paragraphs), path.name)
+    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
+
+
+def _extract_calibre_publication(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    metadata = _publication_metadata(path, ext.lstrip("."))
+    command = shutil.which("ebook-convert")
+    if command is None:
+        return ExtractionResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "attempted": ["ebook-convert"]},
+            message="MOBI/AZW/LIT extraction requires Calibre ebook-convert.",
+        )
+    with tempfile.TemporaryDirectory(prefix="flux-kb-ebook-") as temp_dir:
+        output_path = Path(temp_dir) / f"{path.stem}.txt"
+        try:
+            result = run_no_window(
+                [command, str(path), str(output_path)],
+                text=True,
+                capture_output=True,
+                timeout=180,
+                check=False,
+            )
+        except Exception as exc:  # pragma: no cover - environment-specific
+            return ExtractionResult(status="failed", metadata={**metadata, "attempted": ["ebook-convert"]}, message=str(exc))
+        if result.returncode != 0:
+            message = result.stderr.strip() if isinstance(result.stderr, str) else str(result.stderr or "ebook-convert failed")
+            return ExtractionResult(status="failed", metadata={**metadata, "attempted": ["ebook-convert"]}, message=message)
+        text = output_path.read_text(encoding="utf-8", errors="replace").strip() if output_path.exists() else ""
+    chunks = _chunks_from_text(text, path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            **metadata,
+            "extractor": "ebook_convert",
+            "source_extension": ext,
+            "converted_extension": ".txt",
+        },
+    )
+
+
+def _publication_metadata(path: Path, publication_format: str) -> dict[str, Any]:
+    return {
+        "extractor": "publication",
+        "publication_type": "ebook",
+        "publication_format": publication_format,
+        "source_extension": path.suffix.lower(),
+    }
+
+
+def _epub_package_metadata(data: bytes) -> dict[str, Any]:
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return {}
+    metadata: dict[str, Any] = {}
+    title = _first_local_text(root, "title")
+    creator = _first_local_text(root, "creator")
+    if title:
+        metadata["publication_title"] = title
+    if creator:
+        metadata["publication_author"] = creator
+    return metadata
+
+
+def _fb2_author(root: ElementTree.Element) -> str | None:
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "author":
+            continue
+        parts = [
+            _normalized_text(child.itertext())
+            for child in element
+            if _xml_local_name(child.tag) in {"first-name", "middle-name", "last-name", "nickname"}
+        ]
+        author = " ".join(part for part in parts if part)
+        if author:
+            return author
+    return None
+
+
+def _text_from_markup_bytes(data: bytes) -> str:
+    raw = data.decode("utf-8", errors="replace")
+    try:
+        root = ElementTree.fromstring(raw)
+    except ElementTree.ParseError:
+        stripped = re.sub(r"<[^>]+>", " ", raw)
+        return _normalized_text([unescape(stripped)])
+    return _normalized_text(root.itertext())
+
+
+def _first_local_element(root: ElementTree.Element, local_name: str) -> ElementTree.Element | None:
+    for element in root.iter():
+        if _xml_local_name(element.tag) == local_name:
+            return element
+    return None
+
+
+def _first_local_text(root: ElementTree.Element, local_name: str) -> str | None:
+    element = _first_local_element(root, local_name)
+    if element is None:
+        return None
+    text = _normalized_text(element.itertext())
+    return text or None
+
+
+def _normalized_text(parts: Iterable[str]) -> str:
+    return re.sub(r"\s+", " ", " ".join(str(part) for part in parts)).strip()
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
 def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
@@ -773,6 +959,7 @@ def _com_table_rows(value: Any, *, max_rows: int, max_cols: int) -> list[list[st
 
 ZIP_CONTAINER_EXTENSIONS = {
     ".apk",
+    ".cbz",
     ".ear",
     ".egg",
     ".ipa",
@@ -784,10 +971,12 @@ ZIP_CONTAINER_EXTENSIONS = {
     ".xpi",
     ".zip",
 }
-TAR_CONTAINER_EXTENSIONS = {".crate", ".gem", ".tar", ".tgz"}
+TAR_CONTAINER_EXTENSIONS = {".cbt", ".crate", ".gem", ".tar", ".tgz"}
 STREAM_CONTAINER_FORMATS = {".bz2": "bzip2", ".gz": "gzip", ".xz": "xz"}
 OPTIONAL_CONTAINER_TOOLS = {
     "7z": ("7z", "7zz", "bsdtar", "unar"),
+    "cb7": ("7z", "7zz", "bsdtar", "unar"),
+    "cbr": ("unrar", "7z", "7zz", "bsdtar", "unar"),
     "rar": ("unrar", "7z", "7zz", "bsdtar", "unar"),
     "cab": ("7z", "7zz", "bsdtar", "unar"),
     "iso": ("7z", "7zz", "bsdtar", "unar"),
@@ -801,7 +990,7 @@ OPTIONAL_CONTAINER_TOOLS = {
     "crx": ("7z", "7zz", "bsdtar", "unar"),
 }
 TEXT_MEMBER_NAMES = {"changelog", "copying", "license", "metadata", "notice", "readme"}
-TEXT_MEMBER_EXTENSIONS = TEXT_EXTENSIONS | {".err", ".log", ".out", ".trace"}
+TEXT_MEMBER_EXTENSIONS = TEXT_EXTENSIONS | {".err", ".log", ".out", ".srt", ".trace", ".vtt"}
 EMBEDDED_PARSE_MEMBER_KINDS = {"document", "diagram", "image", "audio", "video"}
 
 
@@ -815,11 +1004,20 @@ def _extract_container(
 ) -> ExtractionResult:
     format_name = _container_format(path)
     if format_name == "zip":
-        return _extract_zip_container(path, policy, container_kind=container_kind, depth=depth, member_prefix=member_prefix)
+        return _with_comic_archive_metadata(
+            _extract_zip_container(path, policy, container_kind=container_kind, depth=depth, member_prefix=member_prefix),
+            path,
+        )
     if format_name == "tar":
-        return _extract_tar_container(path, policy, container_kind=container_kind, depth=depth, member_prefix=member_prefix)
+        return _with_comic_archive_metadata(
+            _extract_tar_container(path, policy, container_kind=container_kind, depth=depth, member_prefix=member_prefix),
+            path,
+        )
     if format_name in STREAM_CONTAINER_FORMATS.values():
-        return _extract_stream_container(path, policy, container_kind=container_kind, format_name=format_name, depth=depth, member_prefix=member_prefix)
+        return _with_comic_archive_metadata(
+            _extract_stream_container(path, policy, container_kind=container_kind, format_name=format_name, depth=depth, member_prefix=member_prefix),
+            path,
+        )
     if format_name in {"zst", "lz4"}:
         stream_result = _extract_tool_stream_container(
             path,
@@ -830,7 +1028,7 @@ def _extract_container(
             member_prefix=member_prefix,
         )
         if stream_result is not None:
-            return stream_result
+            return _with_comic_archive_metadata(stream_result, path)
     optional_result = _extract_optional_tool_container(
         path,
         policy,
@@ -840,12 +1038,15 @@ def _extract_container(
         member_prefix=member_prefix,
     )
     if optional_result is not None:
-        return optional_result
+        return _with_comic_archive_metadata(optional_result, path)
     attempted = list(OPTIONAL_CONTAINER_TOOLS.get(format_name, ()))
-    return ExtractionResult(
-        status="blocked_missing_dependency",
-        metadata=_container_metadata(format_name, container_kind, policy=policy, depth=depth, member_prefix=member_prefix, attempted=attempted),
-        message=f"{format_name} extraction requires a local tool: {', '.join(attempted) or format_name}.",
+    return _with_comic_archive_metadata(
+        ExtractionResult(
+            status="blocked_missing_dependency",
+            metadata=_container_metadata(format_name, container_kind, policy=policy, depth=depth, member_prefix=member_prefix, attempted=attempted),
+            message=f"{format_name} extraction requires a local tool: {', '.join(attempted) or format_name}.",
+        ),
+        path,
     )
 
 
@@ -863,6 +1064,20 @@ def _container_format(path: Path) -> str:
     return ext.lstrip(".") or "unknown"
 
 
+def _with_comic_archive_metadata(result: ExtractionResult, path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    if ext not in COMIC_ARCHIVE_EXTENSIONS:
+        return result
+    return replace(
+        result,
+        metadata={
+            **result.metadata,
+            "publication_type": "comic_archive",
+            "publication_format": ext.lstrip("."),
+        },
+    )
+
+
 def _extract_zip_container(
     path: Path,
     policy: CorpusPolicy,
@@ -876,7 +1091,7 @@ def _extract_zip_container(
     try:
         with ZipFile(path) as archive:
             infos = [info for info in archive.infolist() if not info.is_dir()]
-            children: list[ContainerChildAsset] = []
+            member_payloads: list[dict[str, Any]] = []
             total_bytes = 0
             for index, info in enumerate(infos):
                 member_path = _safe_container_member_name(info.filename)
@@ -891,17 +1106,31 @@ def _extract_zip_container(
                     return _metadata_only_container_result(metadata, cap_message)
                 total_bytes += size
                 data = archive.read(info)
+                member_payloads.append(
+                    {
+                        "member_path": _join_container_member_path(member_prefix, member_path),
+                        "data": data,
+                        "member_index": index,
+                        "compressed_size": int(info.compress_size or 0),
+                        "member_depth": depth + 1,
+                        "parent_member_path": member_prefix or None,
+                    }
+                )
+            sidecars = _embedded_media_sidecars(member_payloads)
+            children: list[ContainerChildAsset] = []
+            for member in member_payloads:
                 children.extend(
                     _container_child_assets_from_bytes(
-                        _join_container_member_path(member_prefix, member_path),
-                        data,
+                        member["member_path"],
+                        member["data"],
                         policy,
                         container_format=format_name,
                         container_kind=container_kind,
-                        member_index=index,
-                        compressed_size=int(info.compress_size or 0),
-                        member_depth=depth + 1,
-                        parent_member_path=member_prefix or None,
+                        member_index=member["member_index"],
+                        compressed_size=member["compressed_size"],
+                        member_depth=member["member_depth"],
+                        parent_member_path=member["parent_member_path"],
+                        embedded_sidecars=sidecars,
                     )
                 )
     except BadZipFile as exc:
@@ -925,7 +1154,7 @@ def _extract_tar_container(
     try:
         with tarfile.open(path) as archive:
             members = [member for member in archive.getmembers() if not member.isdir()]
-            children: list[ContainerChildAsset] = []
+            member_payloads: list[dict[str, Any]] = []
             total_bytes = 0
             for index, member in enumerate(members):
                 member_path = _safe_container_member_name(member.name)
@@ -941,17 +1170,31 @@ def _extract_tar_container(
                 extracted = archive.extractfile(member)
                 data = extracted.read() if extracted is not None else b""
                 total_bytes += len(data)
+                member_payloads.append(
+                    {
+                        "member_path": _join_container_member_path(member_prefix, member_path),
+                        "data": data,
+                        "member_index": index,
+                        "compressed_size": None,
+                        "member_depth": depth + 1,
+                        "parent_member_path": member_prefix or None,
+                    }
+                )
+            sidecars = _embedded_media_sidecars(member_payloads)
+            children: list[ContainerChildAsset] = []
+            for member in member_payloads:
                 children.extend(
                     _container_child_assets_from_bytes(
-                        _join_container_member_path(member_prefix, member_path),
-                        data,
+                        member["member_path"],
+                        member["data"],
                         policy,
                         container_format=format_name,
                         container_kind=container_kind,
-                        member_index=index,
-                        compressed_size=None,
-                        member_depth=depth + 1,
-                        parent_member_path=member_prefix or None,
+                        member_index=member["member_index"],
+                        compressed_size=member["compressed_size"],
+                        member_depth=member["member_depth"],
+                        parent_member_path=member["parent_member_path"],
+                        embedded_sidecars=sidecars,
                     )
                 )
     except tarfile.TarError as exc:
@@ -1132,6 +1375,7 @@ def _children_from_extracted_directory(
     member_prefix: str,
 ) -> ExtractionResult:
     children: list[ContainerChildAsset] = []
+    member_payloads: list[dict[str, Any]] = []
     total_bytes = 0
     files = [path for path in temp_path.rglob("*") if path.is_file() and not path.is_symlink()]
     for index, member in enumerate(files):
@@ -1144,17 +1388,30 @@ def _children_from_extracted_directory(
             metadata["member_count"] = len(files)
             return _metadata_only_container_result(metadata, cap_message)
         total_bytes += len(data)
+        member_payloads.append(
+            {
+                "member_path": _join_container_member_path(member_prefix, member_path),
+                "data": data,
+                "member_index": index,
+                "compressed_size": None,
+                "member_depth": depth + 1,
+                "parent_member_path": member_prefix or None,
+            }
+        )
+    sidecars = _embedded_media_sidecars(member_payloads)
+    for member in member_payloads:
         children.extend(
             _container_child_assets_from_bytes(
-                _join_container_member_path(member_prefix, member_path),
-                data,
+                member["member_path"],
+                member["data"],
                 policy,
                 container_format=format_name,
                 container_kind=container_kind,
-                member_index=index,
-                compressed_size=None,
-                member_depth=depth + 1,
-                parent_member_path=member_prefix or None,
+                member_index=member["member_index"],
+                compressed_size=member["compressed_size"],
+                member_depth=member["member_depth"],
+                parent_member_path=member["parent_member_path"],
+                embedded_sidecars=sidecars,
             )
         )
     return _final_container_result(metadata, children, direct_member_count=len(files), total_uncompressed_bytes=total_bytes)
@@ -1227,6 +1484,7 @@ def _container_child_assets_from_bytes(
     compressed_size: int | None,
     member_depth: int,
     parent_member_path: str | None,
+    embedded_sidecars: dict[str, tuple[str, str]] | None = None,
 ) -> tuple[ContainerChildAsset, ...]:
     child = _container_child_from_bytes(
         member_path,
@@ -1253,9 +1511,32 @@ def _container_child_assets_from_bytes(
         children[0] = _container_child_with_result(child, result, embedded=False)
         children.extend(result.child_assets)
     elif child.file_kind in EMBEDDED_PARSE_MEMBER_KINDS and member_depth <= policy.container_max_depth:
-        result = _extract_embedded_member(member_path, data, policy, child.file_kind)
+        result = _extract_embedded_member(
+            member_path,
+            data,
+            policy,
+            child.file_kind,
+            sidecar=(embedded_sidecars or {}).get(member_path),
+        )
         children[0] = _container_child_with_result(child, result, embedded=True)
     return tuple(children)
+
+
+def _embedded_media_sidecars(member_payloads: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+    sidecars: dict[str, tuple[str, str]] = {}
+    for member in member_payloads:
+        sidecar_path = str(member["member_path"])
+        lower_sidecar_path = sidecar_path.lower()
+        for suffix in MEDIA_TRANSCRIPT_SIDECAR_SUFFIXES:
+            if not lower_sidecar_path.endswith(suffix):
+                continue
+            media_member_path = sidecar_path[: -len(suffix)]
+            if _member_file_kind(media_member_path) not in {"audio", "video"}:
+                continue
+            text = bytes(member["data"]).decode("utf-8", errors="replace").strip()
+            if text:
+                sidecars.setdefault(media_member_path, (sidecar_path, text))
+    return sidecars
 
 
 def _extract_embedded_container_member(
@@ -1277,7 +1558,14 @@ def _extract_embedded_container_member(
         )
 
 
-def _extract_embedded_member(member_path: str, data: bytes, policy: CorpusPolicy, file_kind: str) -> ExtractionResult:
+def _extract_embedded_member(
+    member_path: str,
+    data: bytes,
+    policy: CorpusPolicy,
+    file_kind: str,
+    *,
+    sidecar: tuple[str, str] | None = None,
+) -> ExtractionResult:
     try:
         with tempfile.TemporaryDirectory(prefix="flux-kb-member-") as temp_dir:
             temp_path = _materialize_member(Path(temp_dir), member_path, data)
@@ -1288,7 +1576,7 @@ def _extract_embedded_member(member_path: str, data: bytes, policy: CorpusPolicy
             if file_kind == "image":
                 return _extract_image(temp_path)
             if file_kind in {"audio", "video"}:
-                return _extract_media(temp_path, file_kind)
+                return _extract_media(temp_path, file_kind, embedded_sidecar=sidecar)
     except Exception as exc:
         return ExtractionResult(
             status="failed",
@@ -1322,6 +1610,10 @@ def _container_child_with_result(
     if result.message:
         metadata["embedded_message"] = result.message
     if isinstance(result.metadata, dict):
+        for key in ("transcript_source", "embedded_sidecar_path"):
+            value = result.metadata.get(key)
+            if value:
+                metadata[key] = value
         for key in ("decorative", "vision", "frame_sampling"):
             summary = _embedded_visual_summary(result.metadata.get(key))
             if summary:
@@ -1842,8 +2134,20 @@ def _extract_image(path: Path) -> ExtractionResult:
     return ExtractionResult(status="metadata_only", metadata=metadata)
 
 
-def _extract_media(path: Path, file_kind: str) -> ExtractionResult:
+def _extract_media(path: Path, file_kind: str, *, embedded_sidecar: tuple[str, str] | None = None) -> ExtractionResult:
     metadata: dict[str, Any] = {"extractor": file_kind}
+    if embedded_sidecar is not None:
+        sidecar_path, sidecar_text = embedded_sidecar
+        chunks = _chunks_from_text(sidecar_text, path.name, modality="transcript")
+        return ExtractionResult(
+            status="indexed" if chunks else "metadata_only",
+            chunks=chunks,
+            metadata={
+                **metadata,
+                "transcript_source": "embedded_sidecar",
+                "embedded_sidecar_path": sidecar_path,
+            },
+        )
     sidecar = _read_sidecar_transcript(path)
     if sidecar:
         chunks = _chunks_from_text(sidecar, path.name, modality="transcript")
