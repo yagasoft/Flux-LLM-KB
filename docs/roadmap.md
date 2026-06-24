@@ -35,7 +35,7 @@ scripts:
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, provider-specific post-processing, and consumer access exist; broader live-provider validation should continue. |
 | V2.7 Mail And Retrieval Production Hardening | in progress | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, provider-specific mail post-processing, lock-tolerant indexing/watch states, query-aware snippets, retrieval/brief explainability, configurable retrieval filters, and suppression/lifecycle diagnostics exist; automated-action rationale remains planned. |
 | V2.8 Indexer Acceleration And Local Inference Optimization | in progress | Dedicated acceleration lane foundations exist for local capability status, explicit watcher backend policy/probe, cache layout visibility, worker-family queues and caps, backpressure/debug status, incremental scan manifest skips, throughput telemetry, cache-backed local OCR for image/image-only PDF jobs, cache-backed local ASR for audio/video jobs, recursive container telemetry, local vision cache telemetry, scene-transition video frame sampling, thumbnail cache reuse, embedding vector refresh jobs, and durable deterministic benchmark history. |
-| V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. |
+| V3 Scale And Evaluation | planned | Code-aware corpus indexing, historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. |
 | V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
 
 ## V0: Foundation
@@ -137,6 +137,7 @@ scripts:
 
 | Piece | Roadmap Intent | Status | Current Evidence / Remaining Gap | Queued Next |
 | --- | --- | --- | --- | --- |
+| Code-aware corpus indexing | Parser-backed code intelligence over opted-in repositories so Codex can find files, symbols, definitions, references, tests, routes, handlers, and implementation locations without treating code only as generic text. | planned | Today Flux indexes supported code-like files as text chunks in `asset_chunks`, searchable through `kb.search`, REST search, CLI search, and MCP wrappers. This is useful but not code-aware: there is no durable symbol index, function/class boundary chunking, AST/tree-sitter parser layer, definition/reference graph, or code-specific retrieval surface. | Build a future code-intelligence slice on top of V2.8 watcher, scheduling, manifest, parser-cache, and benchmark foundations. Preserve generic search compatibility while adding code-specific schema, ranking, diagnostics, and synthetic fixture repos. |
 | Historical Codex backfill | Historical Codex backfill with redaction. | planned | Codex capture exists, but historical backfill is not production-ready. | Design redaction-first backfill after V1 lifecycle and V2 review workflows are stronger. |
 | Retrieval benchmarks | Retrieval benchmark suite. | planned | Benchmarks are planned; V2.8 indexing benchmarks should land first for corpus throughput. | Define query sets and quality metrics for retrieval precision, recall loss, contradiction reduction, brief dilution, and librarian-worker shadow-mode evaluation after retrieval explainability work starts. |
 | Optional search backend | Optional ParadeDB/BM25 path. | planned | Not started. | Evaluate only after baseline retrieval benchmarks exist. |
@@ -144,6 +145,134 @@ scripts:
 | Automated memory governance | Policy-gated automation for routine memory lifecycle optimization. | planned | Retention quality reporting and lifecycle primitives exist, but automatic mutation is not implemented. | Automatically apply low-risk reversible actions such as duplicate suppression, retrieval deprioritization, stale tagging, canonical cluster presentation, and lifecycle updates after evaluation thresholds are met. |
 | Local consolidation and escalation | Local-only consolidation with rare human escalation. | planned | Canonical semantic/procedural consolidation and escalation policy are not implemented. | Use local model-assisted consolidation only when evidence is high-confidence and provenance is preserved; escalate only for hard deletion, privacy/security findings, high-authority contradictions, destructive policy changes, protected memories, low-confidence high-impact decisions, or failed evaluation thresholds. |
 | Operator digests | Periodic reporting for automated memory governance. | planned | Review UI exists, but automation digests are not implemented. | Provide periodic digests and recovery/audit views for operator awareness instead of per-item approval. |
+
+### Future Slice: Code-Aware Corpus Indexing
+
+Status: `planned`. This is a future cohesive implementation slice, separate
+from V2.8 indexer reliability and benchmark history. It should use the V2.8
+watcher backend policy, worker-family scheduling, crawl manifests, parser cache
+telemetry, and synthetic benchmark history as foundations, but it should not
+implement VSS extraction, provider-specific embedding backends, runtime tracing,
+or V3 retrieval/governance benchmarks as part of the same slice.
+
+Current behavior is intentionally generic: small supported code-like files are
+recognized by extension, extracted as text, stored as `source_assets` plus
+`asset_chunks`, embedded like other corpus chunks, and retrievable through
+`kb.search`, REST search, CLI search, and MCP wrappers. The future requirement is
+to make opted-in repositories code-aware while preserving that generic baseline.
+
+Planned scope:
+
+- Broaden code and developer-artifact coverage beyond the current extension
+  set, including common source languages, notebooks, build scripts, package
+  manifests, infrastructure/config files, API schemas, SQL files, migrations,
+  tests, generated-code markers, and patch/diff artifacts.
+- Add parser-backed chunking that prefers stable semantic boundaries over fixed
+  text windows: module, class, function, method, interface/type, route or
+  handler, config block, SQL object/query, migration step, notebook cell, and
+  test case where reliably detectable.
+- Store durable symbol metadata such as symbol name, kind, language, file path,
+  line and byte ranges, parent symbol, exported/public flag where detectable,
+  signature when safe, and docstring/comment summary when safe.
+- Introduce optional AST/tree-sitter or language-specific parser adapters behind
+  a parser abstraction. Unsupported languages and parser failures must fall back
+  to inline text chunking with explicit sanitized fallback metadata.
+- Add a future durable storage concept such as `code_symbols` and
+  `code_references`, or an equivalent schema, tied back to `source_assets` and
+  `asset_chunks` so code results can still participate in normal corpus
+  retrieval and provenance flows.
+- Capture definition, reference, call, import, route, test-to-target, and
+  config-to-implementation relationships where the parser can produce reliable
+  evidence. The roadmap must not imply perfect static analysis across all
+  languages or dynamic frameworks.
+- Scope results by repository, workspace, monitored root, language, and path so
+  Codex can ask targeted questions such as "Find the implementation of X",
+  "Where is this CLI command registered?", "Show route handlers for Y", "Find
+  tests for this function", "Find callers/references of this symbol", and
+  "Summarize the public API of this module".
+
+Codex-facing retrieval surfaces:
+
+- Keep existing `kb.search`, REST search, CLI search, and corpus asset/chunk
+  lookup backward compatible.
+- Add future generic search filters such as `logical_kinds=["file"]`,
+  `file_kind="code"`, `language`, `symbol_kind`, `path_glob`, `repo`, `root`,
+  `relationship`, and definition/reference/test/config/example facets if those
+  fit the existing search contract cleanly.
+- Consider dedicated MCP/CLI/REST surfaces such as `kb.code_search`,
+  `kb.code_symbol_lookup`, or equivalent if code navigation becomes clearer as a
+  separate contract than overloading generic search.
+- Return enough structured metadata for Codex to cite the defining file, line
+  range, symbol kind, relationship type, parser/fallback status, and associated
+  chunk without exposing raw private code outside the normal private corpus
+  retrieval path.
+
+Ranking requirements:
+
+- Exact symbol and path matches should beat semantic guesses.
+- Local workspace, selected root, and repository evidence should outrank
+  unrelated corpus matches.
+- Definitions should be distinguishable from references, callers, imports,
+  tests, examples, and configuration.
+- Tests, examples, migrations, generated files, and config should remain
+  discoverable, but should not be mixed indistinguishably with implementation
+  results unless requested.
+- Parser-confidence, fallback status, symbol kind, path proximity, import/call
+  relationships, file recency, duplicate/version suppression, and existing
+  retrieval explanations should be visible enough to debug surprising results.
+
+Privacy and safety constraints:
+
+- Indexing remains opt-in through monitored roots and workspace scopes.
+- Public repository docs, fixtures, and tests must not contain raw private code,
+  private paths, generated private wiki exports, credentials, embeddings, or
+  local runtime database values.
+- Stored operational telemetry for parser failures, worker history, benchmark
+  runs, and dashboard diagnostics must avoid raw code content unless that
+  content is already part of private corpus storage.
+- Public tests must use synthetic fixture repositories only, with small invented
+  symbols, routes, configs, tests, and references.
+
+Out of scope for this slice:
+
+- Full IDE replacement.
+- Perfect cross-language static analysis.
+- Runtime tracing or profiling.
+- Provider-specific accelerated embedding backends.
+- VSS snapshot extraction.
+- V3 retrieval benchmark design, librarian workers, or automated governance.
+
+Possible implementation breakdown:
+
+1. Code coverage and classification expansion for source, tests, configs,
+   manifests, API schemas, SQL, infrastructure files, and generated artifacts.
+2. Parser abstraction with AST/tree-sitter or language-specific adapters plus
+   deterministic fallback text chunking.
+3. Symbol, chunk, reference, and relationship schema/migrations tied to
+   `source_assets` and `asset_chunks`.
+4. Repository-scoped code search, filters, ranking, and result explanations.
+5. Codex-facing MCP, CLI, and REST query surfaces for code search and symbol
+   lookup while preserving `kb.search` compatibility.
+6. Dashboard/debug views for code index coverage, parser failures, fallback
+   rates, slow files, and per-language status.
+7. Synthetic fixture repositories and tests covering definitions, references,
+   tests, config/examples, fallback languages, parser errors, and privacy
+   constraints.
+
+Acceptance criteria:
+
+- Codex can query the index for a known symbol in a synthetic repository and get
+  the defining file/chunk before generic text matches.
+- Codex can distinguish definitions, references, tests, configuration, examples,
+  imports, and callers in results.
+- Existing `kb.search`, REST search, CLI search, and corpus asset/chunk lookup
+  remain backward compatible.
+- Unsupported languages still index as text with clear fallback metadata.
+- Parser failures are visible as sanitized diagnostics in worker/status/debug
+  surfaces.
+- No private paths, raw private code, credentials, embeddings, or private corpus
+  content appear in public fixtures, docs, tests, telemetry summaries, or
+  benchmark records.
 
 ## V4: Collaboration And Transfer
 
@@ -160,13 +289,17 @@ scripts:
    watcher compatibility, hash-parallelism tuning, and worker cap defaults.
 2. Extend V2.8 throughput benchmarks with model warm/cold telemetry and
    before/after comparisons across deployment updates.
-3. Add V3 retrieval benchmarks and governance evaluation: query sets, quality
+3. Add the planned code-aware corpus indexing slice so Codex can retrieve
+   opted-in repository files, symbols, definitions, references, tests,
+   route/handler implementations, and public APIs with code-specific ranking
+   while preserving generic search compatibility.
+4. Add V3 retrieval benchmarks and governance evaluation: query sets, quality
    metrics, shadow-mode librarian evaluation, and thresholds for automated
    lifecycle actions.
-4. Add automation-first librarian workers for reversible low-risk stale tagging,
+5. Add automation-first librarian workers for reversible low-risk stale tagging,
    deprioritization, duplicate suppression, canonical cluster presentation,
    audit recovery, and operator digests.
-5. Defer V4 collaboration/shared-vault design until single-user governance,
+6. Defer V4 collaboration/shared-vault design until single-user governance,
    evaluation, and recovery flows are stable.
 
 ## Update Rules
