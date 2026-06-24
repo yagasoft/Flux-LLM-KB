@@ -124,8 +124,10 @@ parser or local tool exists.
   uncompressed bytes, member count, member size, path traversal protection,
   encrypted-entry rejection, and unsafe link/device rejection.
 - Container members are stored as related child assets linked to the parent
-  archive. Inline-safe text/code members are chunked; nested containers and
-  embedded documents/media are recorded as child metadata until later worker
-  stages perform recursive or rich embedded extraction.
+  archive. Inline-safe text/code members are chunked. Nested containers are
+  recursively expanded up to `crawler.container_max_depth`, and embedded
+  documents, diagrams, images, audio, and video are routed through local
+  extractors from temporary private files. Child metadata records sanitized
+  depth, parent-member, parser status, skipped, and blocked-dependency details.
 - Secret-bearing formats should never have raw content indexed by default.
   They may produce redacted metadata and audit entries only.

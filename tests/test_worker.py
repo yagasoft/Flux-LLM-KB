@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from flux_llm_kb import database
 from flux_llm_kb.service import KnowledgeService
 
@@ -142,6 +144,117 @@ def test_process_corpus_job_merges_asr_telemetry(monkeypatch, tmp_path):
     assert result.status == "indexed"
     assert result.telemetry == {"asr_cache_hits": 2, "asr_cache_misses": 1, "asr_segments": 4}
     assert applied[0]["root_name"] == "media"
+
+
+def test_process_corpus_job_uses_container_policy_and_merges_container_telemetry(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "bundle.zip").write_bytes(b"fake archive")
+    captured = {}
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+        },
+    )
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_DEPTH", "4")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_MEMBERS", "17")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_TOTAL_BYTES", "4096")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_MEMBER_BYTES", "512")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+
+    def fake_extract(path, policy):
+        captured["path"] = path
+        captured["policy"] = policy
+        return SimpleNamespace(
+            status="metadata_only",
+            message=None,
+            chunks=(),
+            child_assets=(),
+            metadata={
+                "extractor": "container",
+                "member_count": 5,
+                "parsed_child_count": 2,
+                "skipped_child_count": 3,
+                "blocked_dependency_count": 1,
+                "max_depth": 4,
+            },
+        )
+
+    monkeypatch.setattr(worker, "extract_file", fake_extract)
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "bundle.zip"}})
+
+    assert captured["path"] == root / "bundle.zip"
+    assert captured["policy"].container_max_depth == 4
+    assert captured["policy"].container_max_members == 17
+    assert captured["policy"].container_max_total_bytes == 4096
+    assert captured["policy"].container_max_member_bytes == 512
+    assert result.status == "metadata_only"
+    assert result.telemetry == {
+        "container_member_count": 5,
+        "container_parsed_child_count": 2,
+        "container_skipped_child_count": 3,
+        "container_blocked_dependency_count": 1,
+        "container_max_depth": 4,
+    }
+    assert applied[0]["relative_path"] == "bundle.zip"
+
+
+def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
+    from flux_llm_kb import service as service_module
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    captured = {}
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_DEPTH", "3")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_MEMBERS", "19")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_TOTAL_BYTES", "8192")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_MEMBER_BYTES", "1024")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {
+                "name": "docs",
+                "root_path": str(root),
+                "recursive": True,
+                "include_globs": [],
+                "exclude_globs": [],
+                "glob_mode": "extend",
+                "max_inline_bytes": 1024,
+                "heavy_threshold_bytes": 2048,
+            }
+        ],
+    )
+
+    def fake_scan(_root_path, policy, target_path=None):
+        captured["policy"] = policy
+        captured["target_path"] = target_path
+        return SimpleNamespace(assets=[], deferred_jobs=[], errors=[], root_path=root)
+
+    monkeypatch.setattr(service_module, "scan_path", fake_scan)
+    monkeypatch.setattr(database, "persist_crawl_plan", lambda **kwargs: {"root_name": kwargs["root_name"]})
+
+    result = KnowledgeService().sync_corpus(root_name="docs")
+
+    assert result == {"root_name": "docs"}
+    assert captured["policy"].container_max_depth == 3
+    assert captured["policy"].container_max_members == 19
+    assert captured["policy"].container_max_total_bytes == 8192
+    assert captured["policy"].container_max_member_bytes == 1024
 
 
 def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):

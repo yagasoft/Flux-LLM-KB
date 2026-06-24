@@ -187,6 +187,12 @@ Media ASR is controlled by `acceleration.asr.enabled`,
 `acceleration.asr.model_path`, and `acceleration.asr.max_duration_seconds`.
 Redacted ASR cache entries live under the configured ASR cache directory and
 worker-family telemetry reports ASR cache hits, misses, and segment counts.
+Recursive archive/container extraction is controlled by
+`crawler.container_max_depth`, `crawler.container_max_members`,
+`crawler.container_max_total_bytes`, and `crawler.container_max_member_bytes`.
+The acceleration status also includes deterministic benchmark fixture summaries
+for text-heavy, Office/PDF-heavy, archive/container-heavy, image-heavy, and
+audio/video-heavy roots.
 
 ## Host Filesystem Agent
 

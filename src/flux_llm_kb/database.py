@@ -2858,7 +2858,11 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                        COALESCE(sum((telemetry->>'ocr_cache_misses')::integer), 0)::integer AS ocr_cache_misses,
                        COALESCE(sum((telemetry->>'asr_cache_hits')::integer), 0)::integer AS asr_cache_hits,
                        COALESCE(sum((telemetry->>'asr_cache_misses')::integer), 0)::integer AS asr_cache_misses,
-                       COALESCE(sum((telemetry->>'asr_segments')::integer), 0)::integer AS asr_segments
+                       COALESCE(sum((telemetry->>'asr_segments')::integer), 0)::integer AS asr_segments,
+                       COALESCE(sum((telemetry->>'container_member_count')::integer), 0)::integer AS container_member_count,
+                       COALESCE(sum((telemetry->>'container_parsed_child_count')::integer), 0)::integer AS container_parsed_child_count,
+                       COALESCE(sum((telemetry->>'container_skipped_child_count')::integer), 0)::integer AS container_skipped_child_count,
+                       COALESCE(sum((telemetry->>'container_blocked_dependency_count')::integer), 0)::integer AS container_blocked_dependency_count
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 GROUP BY job_family, resource_class
@@ -2881,6 +2885,46 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                     "asr_cache_hits": row[11],
                     "asr_cache_misses": row[12],
                     "asr_segments": row[13],
+                    "container_member_count": row[14],
+                    "container_parsed_child_count": row[15],
+                    "container_skipped_child_count": row[16],
+                    "container_blocked_dependency_count": row[17],
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def benchmark_fixture_stats(*, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telemetry->>'benchmark_fixture' AS name,
+                       COALESCE(sum((telemetry->>'benchmark_file_count')::integer), 0)::integer AS file_count,
+                       COALESCE(sum(last_duration_ms), 0)::integer AS elapsed_ms,
+                       count(*)::integer AS jobs_queued,
+                       count(*) FILTER (WHERE status = 'completed')::integer AS jobs_completed,
+                       count(*) FILTER (WHERE status LIKE 'blocked_%')::integer AS jobs_blocked,
+                       COALESCE(sum((telemetry->>'benchmark_cache_hits')::integer), 0)::integer AS cache_hits,
+                       COALESCE(sum((telemetry->>'benchmark_cache_misses')::integer), 0)::integer AS cache_misses
+                FROM capture_jobs
+                WHERE job_type LIKE 'corpus_%%'
+                  AND telemetry ? 'benchmark_fixture'
+                GROUP BY telemetry->>'benchmark_fixture'
+                ORDER BY telemetry->>'benchmark_fixture'
+                """
+            )
+            return [
+                {
+                    "name": row[0],
+                    "file_count": row[1],
+                    "elapsed_ms": row[2],
+                    "jobs_queued": row[3],
+                    "jobs_completed": row[4],
+                    "jobs_blocked": row[5],
+                    "cache_hits": row[6],
+                    "cache_misses": row[7],
                 }
                 for row in cur.fetchall()
             ]

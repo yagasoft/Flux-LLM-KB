@@ -96,6 +96,22 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
                 "asr_cache_hits": 3,
                 "asr_cache_misses": 1,
                 "asr_segments": 7,
+                "container_member_count": 0,
+                "container_parsed_child_count": 0,
+                "container_skipped_child_count": 0,
+                "container_blocked_dependency_count": 0,
+            }
+        ],
+        benchmark_stats=lambda: [
+            {
+                "name": "archive-container-heavy",
+                "file_count": 8,
+                "elapsed_ms": 42,
+                "jobs_queued": 3,
+                "jobs_completed": 2,
+                "jobs_blocked": 1,
+                "cache_hits": 4,
+                "cache_misses": 2,
             }
         ],
     )
@@ -111,6 +127,53 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
     assert payload["worker_families"][0]["asr_cache_hits"] == 3
     assert payload["worker_families"][0]["asr_cache_misses"] == 1
     assert payload["worker_families"][0]["asr_segments"] == 7
+    fixtures_by_name = {fixture["name"]: fixture for fixture in payload["benchmarks"]["fixtures"]}
+    assert fixtures_by_name["archive-container-heavy"] == {
+        "name": "archive-container-heavy",
+        "description": "Nested archives, packages, and embedded documents",
+        "file_count": 8,
+        "elapsed_ms": 42,
+        "jobs_queued": 3,
+        "jobs_completed": 2,
+        "jobs_blocked": 1,
+        "cache_hits": 4,
+        "cache_misses": 2,
+    }
+    assert payload["benchmarks"]["totals"] == {
+        "file_count": 8,
+        "elapsed_ms": 42,
+        "jobs_queued": 3,
+        "jobs_completed": 2,
+        "jobs_blocked": 1,
+        "cache_hits": 4,
+        "cache_misses": 2,
+    }
+
+
+def test_collect_status_reports_empty_deterministic_benchmark_fixtures():
+    payload = collect_acceleration_status(
+        settings={
+            "acceleration.cache_root": "",
+            "acceleration.local_inference.enabled": False,
+            "acceleration.local_inference.provider": "ollama",
+            "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+            "acceleration.local_inference.probe_timeout_seconds": 1,
+        },
+        command_runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="missing"),
+        module_importer=lambda _name: (_ for _ in ()).throw(ModuleNotFoundError("missing")),
+        worker_family_stats=lambda: [],
+        benchmark_stats=lambda: [],
+    )
+
+    names = [fixture["name"] for fixture in payload["benchmarks"]["fixtures"]]
+    assert names == [
+        "text-heavy",
+        "office-pdf-heavy",
+        "archive-container-heavy",
+        "image-heavy",
+        "audio-video-heavy",
+    ]
+    assert all(fixture["file_count"] == 0 for fixture in payload["benchmarks"]["fixtures"])
 
 
 def test_job_family_mapping_keeps_existing_kind_compatibility():

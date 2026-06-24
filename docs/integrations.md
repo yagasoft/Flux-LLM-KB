@@ -217,10 +217,14 @@ Crawler glob settings are global defaults. Monitored roots can inherit, extend,
 or override them; effective globs are returned in dashboard crawl payloads.
 
 Acceleration settings define the permanent cache root, localhost-only local
-model probing, and per-family worker caps. Local inference probing is disabled
-by default and rejects non-loopback URLs. The read-only acceleration status is
-available through `flux-kb acceleration status`, `GET /api/acceleration/status`,
-`kb.acceleration_status`, and the dashboard Health tab.
+model probing, per-family worker caps, and recursive container caps. Local
+inference probing is disabled by default and rejects non-loopback URLs. The
+read-only acceleration status is available through `flux-kb acceleration
+status`, `GET /api/acceleration/status`, `kb.acceleration_status`, and the
+dashboard Health tab. The payload includes worker-family OCR/ASR/container
+telemetry plus deterministic benchmark fixture summaries for text-heavy,
+Office/PDF-heavy, archive/container-heavy, image-heavy, and audio/video-heavy
+roots.
 
 ## Host Filesystem Agent
 

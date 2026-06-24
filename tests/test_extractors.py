@@ -11,7 +11,7 @@ from urllib.parse import quote
 from zipfile import ZipFile
 import zlib
 
-from flux_llm_kb.crawler import CorpusPolicy
+from flux_llm_kb.crawler import AssetChunk, CorpusPolicy
 from flux_llm_kb.extractors import extract_file, extractor_availability
 
 
@@ -19,6 +19,14 @@ PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAADZrBkAAAAAD0lEQVR4nGP8z8AARLJAgAEACPwD"
     "Aaz3RyoAAAAASUVORK5CYII="
 )
+
+
+def _zip_payload(entries: dict[str, str | bytes]) -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, "w") as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
 
 
 def test_extract_file_reads_text_chunks(tmp_path):
@@ -515,6 +523,126 @@ def test_extract_zip_archive_indexes_inline_child_assets(tmp_path):
     assert nested.file_kind == "archive"
     assert nested.extraction_status == "metadata_only"
     assert nested.chunks == ()
+
+
+def test_extract_zip_archive_recursively_indexes_nested_container_members(tmp_path):
+    path = tmp_path / "bundle.zip"
+    inner_zip = _zip_payload({"notes/decision.md": "# Nested\nUse recursive extraction"})
+    with ZipFile(path, "w") as archive:
+        archive.writestr("nested/inner.zip", inner_zip)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_depth=2))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["max_depth"] == 2
+    assert result.metadata["member_count"] == 1
+    assert result.metadata["parsed_child_count"] == 1
+    assert result.metadata["skipped_child_count"] == 1
+    assert result.metadata["blocked_dependency_count"] == 0
+    assert [child.member_path for child in result.child_assets] == [
+        "nested/inner.zip",
+        "nested/inner.zip/notes/decision.md",
+    ]
+    nested_container, nested_note = result.child_assets
+    assert nested_container.file_kind == "archive"
+    assert nested_container.extraction_status == "metadata_only"
+    assert nested_container.metadata["nested_container"] is True
+    assert nested_container.metadata["container_depth"] == 1
+    assert nested_note.file_kind == "text"
+    assert nested_note.extraction_status == "indexed"
+    assert nested_note.metadata["container_depth"] == 2
+    assert nested_note.metadata["container_parent_path"] == "nested/inner.zip"
+    assert nested_note.chunks[0].body == "# Nested\nUse recursive extraction"
+
+
+def test_extract_zip_archive_respects_nested_depth_cap(tmp_path):
+    path = tmp_path / "bundle.zip"
+    inner_zip = _zip_payload({"notes/decision.md": "# Nested\nShould stay deferred"})
+    with ZipFile(path, "w") as archive:
+        archive.writestr("nested/inner.zip", inner_zip)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_depth=1))
+
+    assert [child.member_path for child in result.child_assets] == ["nested/inner.zip"]
+    assert result.child_assets[0].metadata["recursive_skipped_reason"] == "max_depth"
+    assert result.metadata["parsed_child_count"] == 0
+    assert result.metadata["skipped_child_count"] == 1
+
+
+def test_extract_zip_archive_records_nested_parse_failure_without_losing_parent(tmp_path):
+    path = tmp_path / "bundle.zip"
+    inner_zip = _zip_payload({"../evil.txt": "escape"})
+    with ZipFile(path, "w") as archive:
+        archive.writestr("nested/inner.zip", inner_zip)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_depth=2))
+
+    assert result.status == "metadata_only"
+    assert [child.member_path for child in result.child_assets] == ["nested/inner.zip"]
+    nested_container = result.child_assets[0]
+    assert nested_container.extraction_status == "failed"
+    assert "unsafe" in " ".join(nested_container.metadata["warnings"]).lower()
+    assert result.metadata["parsed_child_count"] == 0
+    assert result.metadata["skipped_child_count"] == 1
+
+
+def test_extract_archive_parses_embedded_document_member(monkeypatch, tmp_path):
+    path = tmp_path / "bundle.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr("docs/report.docx", b"docx placeholder")
+
+    def fake_extract_document(member_path, _policy):
+        assert member_path.exists()
+        assert member_path.suffix == ".docx"
+        assert member_path.read_bytes() == b"docx placeholder"
+        return SimpleNamespace(
+            status="indexed",
+            chunks=(
+                AssetChunk(
+                    chunk_index=0,
+                    title="report.docx",
+                    body="Embedded document body",
+                    token_estimate=3,
+                ),
+            ),
+            metadata={"extractor": "docx"},
+            message=None,
+        )
+
+    monkeypatch.setattr("flux_llm_kb.extractors._extract_document", fake_extract_document)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_depth=2))
+
+    assert result.child_assets[0].member_path == "docs/report.docx"
+    assert result.child_assets[0].file_kind == "document"
+    assert result.child_assets[0].extraction_status == "indexed"
+    assert result.child_assets[0].metadata["embedded_extractor"] == "docx"
+    assert result.child_assets[0].chunks[0].body == "Embedded document body"
+
+
+def test_extract_archive_parses_embedded_diagram_member(tmp_path):
+    path = tmp_path / "bundle.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr(
+            "diagrams/flow.drawio",
+            """
+            <mxfile>
+              <diagram name="Embedded">
+                <mxGraphModel>
+                  <root><mxCell id="shape" value="Embedded Diagram Label" /></root>
+                </mxGraphModel>
+              </diagram>
+            </mxfile>
+            """,
+        )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_depth=2))
+
+    assert result.child_assets[0].member_path == "diagrams/flow.drawio"
+    assert result.child_assets[0].file_kind == "diagram"
+    assert result.child_assets[0].extraction_status == "indexed"
+    assert result.child_assets[0].metadata["embedded_extractor"] == "diagram"
+    assert "Embedded Diagram Label" in result.child_assets[0].chunks[0].body
 
 
 def test_extract_tgz_archive_indexes_text_member(tmp_path):

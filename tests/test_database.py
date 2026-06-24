@@ -245,7 +245,7 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             executed.append((sql, params))
 
         def fetchall(self):
-            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120, 5, 2, 3, 1, 7)]
+            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120, 5, 2, 3, 1, 7, 9, 4, 5, 2)]
 
     class FakeConnection:
         def __enter__(self):
@@ -273,6 +273,10 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
     assert "asr_cache_hits" in sql
     assert "asr_cache_misses" in sql
     assert "asr_segments" in sql
+    assert "container_member_count" in sql
+    assert "container_parsed_child_count" in sql
+    assert "container_skipped_child_count" in sql
+    assert "container_blocked_dependency_count" in sql
     assert rows == [
         {
             "family": "media",
@@ -289,6 +293,10 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             "asr_cache_hits": 3,
             "asr_cache_misses": 1,
             "asr_segments": 7,
+            "container_member_count": 9,
+            "container_parsed_child_count": 4,
+            "container_skipped_child_count": 5,
+            "container_blocked_dependency_count": 2,
         }
     ]
 
@@ -843,6 +851,90 @@ def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
     assert "parent_asset_id" in params_json
     assert "container_member_path" in params_json
     assert "INSERT INTO asset_chunks" in sql
+
+
+def test_apply_extraction_result_persists_nested_container_child_metadata(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql and "a.root_id::text" in sql:
+                return ("asset-parent", None, "root-1", "file:///docs/bundle.zip", 123)
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
+                return ("asset-parent", None)
+            if "SELECT id::text FROM source_assets" in sql:
+                return None
+            if "INSERT INTO source_assets" in sql:
+                return ("child-1",)
+            if "INSERT INTO asset_chunks" in sql:
+                return ("chunk-1",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    child = SimpleNamespace(
+        member_path="nested/inner.zip/docs/readme.md",
+        file_kind="text",
+        mime_type="text/markdown",
+        extension=".md",
+        size_bytes=20,
+        quick_hash="quick-child",
+        content_hash="hash-child",
+        extraction_tier="inline",
+        extraction_status="indexed",
+        chunks=(
+            AssetChunk(
+                chunk_index=0,
+                title="docs/readme.md",
+                body="Nested archive child body",
+                modality="text",
+                locator="char:0-25",
+                token_estimate=4,
+            ),
+        ),
+        metadata={
+            "container_member_path": "nested/inner.zip/docs/readme.md",
+            "container_parent_path": "nested/inner.zip",
+            "container_depth": 2,
+            "embedded_extractor": "text",
+        },
+    )
+    result = SimpleNamespace(status="metadata_only", metadata={"extractor": "container"}, chunks=(), child_assets=(child,))
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
+
+    database.apply_extraction_result(root_name="docs", relative_path="bundle.zip", result=result)
+
+    params_json = "\n".join(str(params) for _statement, params in executed)
+    assert "bundle.zip/nested/inner.zip/docs/readme.md" in params_json
+    assert "container_parent_path" in params_json
+    assert "container_depth" in params_json
+    assert "embedded_extractor" in params_json
 
 
 def test_clear_completed_corpus_job_errors_clears_legacy_errors(monkeypatch):

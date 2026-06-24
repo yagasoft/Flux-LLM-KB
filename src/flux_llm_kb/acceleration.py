@@ -72,6 +72,14 @@ FAMILY_DEFAULT_CAPS: dict[str, int] = {
     "general": 1,
 }
 
+BENCHMARK_FIXTURES: tuple[dict[str, str], ...] = (
+    {"name": "text-heavy", "description": "Markdown, code, and plain text files"},
+    {"name": "office-pdf-heavy", "description": "Office documents, spreadsheets, presentations, and PDFs"},
+    {"name": "archive-container-heavy", "description": "Nested archives, packages, and embedded documents"},
+    {"name": "image-heavy", "description": "Images, diagrams, and scanned PDFs"},
+    {"name": "audio-video-heavy", "description": "Audio, video, and sidecar transcripts"},
+)
+
 
 def job_family_for_type(job_type: str | None) -> str:
     normalized = str(job_type or "").lower()
@@ -182,6 +190,7 @@ def collect_acceleration_status(
     module_importer: Callable[[str], Any] | None = None,
     urlopen: Callable[..., Any] | None = None,
     worker_family_stats: Callable[[], list[dict[str, Any]]] | None = None,
+    benchmark_stats: Callable[[], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     resolved = _resolved_settings(settings)
     runner = command_runner or _run_command
@@ -189,6 +198,7 @@ def collect_acceleration_status(
     opener = urlopen or _urlopen
     cache = resolve_cache_layout(str(resolved.get("acceleration.cache_root") or ""))
     family_stats = _worker_family_status_rows(resolved, worker_family_stats)
+    benchmarks = _benchmark_status_rows(benchmark_stats)
     return {
         "capabilities": {
             "cpu": _cpu_status(),
@@ -201,6 +211,7 @@ def collect_acceleration_status(
         },
         "cache": cache,
         "worker_families": family_stats,
+        "benchmarks": benchmarks,
     }
 
 
@@ -442,7 +453,52 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
         "asr_cache_hits": int(row.get("asr_cache_hits") or 0),
         "asr_cache_misses": int(row.get("asr_cache_misses") or 0),
         "asr_segments": int(row.get("asr_segments") or 0),
+        "container_member_count": int(row.get("container_member_count") or 0),
+        "container_parsed_child_count": int(row.get("container_parsed_child_count") or 0),
+        "container_skipped_child_count": int(row.get("container_skipped_child_count") or 0),
+        "container_blocked_dependency_count": int(row.get("container_blocked_dependency_count") or 0),
     }
+
+
+def _benchmark_status_rows(stats_loader: Callable[[], list[dict[str, Any]]] | None) -> dict[str, Any]:
+    if stats_loader is None:
+        try:
+            from . import database
+
+            stats_loader = database.benchmark_fixture_stats
+        except Exception:
+            stats_loader = lambda: []
+    try:
+        raw_rows = {str(row.get("name") or ""): dict(row) for row in stats_loader()}
+    except Exception:
+        raw_rows = {}
+    fixtures: list[dict[str, Any]] = []
+    totals = {
+        "file_count": 0,
+        "elapsed_ms": 0,
+        "jobs_queued": 0,
+        "jobs_completed": 0,
+        "jobs_blocked": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+    }
+    for fixture in BENCHMARK_FIXTURES:
+        row = raw_rows.get(fixture["name"], {})
+        item = {
+            "name": fixture["name"],
+            "description": fixture["description"],
+            "file_count": int(row.get("file_count") or 0),
+            "elapsed_ms": int(row.get("elapsed_ms") or 0),
+            "jobs_queued": int(row.get("jobs_queued") or 0),
+            "jobs_completed": int(row.get("jobs_completed") or 0),
+            "jobs_blocked": int(row.get("jobs_blocked") or 0),
+            "cache_hits": int(row.get("cache_hits") or 0),
+            "cache_misses": int(row.get("cache_misses") or 0),
+        }
+        for key in totals:
+            totals[key] += int(item[key])
+        fixtures.append(item)
+    return {"fixtures": fixtures, "totals": totals}
 
 
 def _int_or_none(value: Any) -> int | None:

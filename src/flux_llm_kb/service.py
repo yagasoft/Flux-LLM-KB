@@ -510,6 +510,7 @@ class KnowledgeService:
             exclude_globs=tuple(glob_policy["exclude_globs"]),
             max_inline_bytes=root["max_inline_bytes"],
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
+            **_configured_container_limits(),
             stability_quiet_seconds=_configured_stability_quiet_seconds() if reason == "watch_event" else 0.0,
             large_file_stability_quiet_seconds=_configured_large_file_stability_quiet_seconds() if reason == "watch_event" else 0.0,
         )
@@ -1427,6 +1428,24 @@ def _configured_lock_max_attempts() -> int:
         return int(SettingsService().resolve("worker.lock_max_attempts").raw_value)
     except Exception:
         return 3
+
+
+def _configured_container_limits() -> dict[str, int]:
+    settings = SettingsService()
+    defaults = CorpusPolicy(root_path=Path("."))
+    keys = {
+        "container_max_depth": "crawler.container_max_depth",
+        "container_max_members": "crawler.container_max_members",
+        "container_max_total_bytes": "crawler.container_max_total_bytes",
+        "container_max_member_bytes": "crawler.container_max_member_bytes",
+    }
+    resolved: dict[str, int] = {}
+    for field_name, setting_key in keys.items():
+        try:
+            resolved[field_name] = int(settings.resolve(setting_key).raw_value)
+        except Exception:
+            resolved[field_name] = int(getattr(defaults, field_name))
+    return resolved
 
 
 def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:

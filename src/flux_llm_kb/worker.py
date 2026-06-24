@@ -7,6 +7,7 @@ from typing import Any
 from . import database
 from .crawler import CorpusPolicy
 from .extractors import extract_file
+from .settings import SettingsService
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         exclude_globs=tuple(root["exclude_globs"]),
         max_inline_bytes=root["max_inline_bytes"],
         heavy_threshold_bytes=root["heavy_threshold_bytes"],
+        **_configured_container_limits(),
     )
     try:
         result = extract_file(path, policy)
@@ -76,4 +78,32 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             telemetry["asr_cache_misses"] = int(asr.get("cache_misses") or 0)
         if "segments" in asr:
             telemetry["asr_segments"] = int(asr.get("segments") or 0)
+    if metadata.get("extractor") == "container":
+        for source_key, telemetry_key in {
+            "member_count": "container_member_count",
+            "parsed_child_count": "container_parsed_child_count",
+            "skipped_child_count": "container_skipped_child_count",
+            "blocked_dependency_count": "container_blocked_dependency_count",
+            "max_depth": "container_max_depth",
+        }.items():
+            if source_key in metadata:
+                telemetry[telemetry_key] = int(metadata.get(source_key) or 0)
     return telemetry
+
+
+def _configured_container_limits() -> dict[str, int]:
+    settings = SettingsService()
+    defaults = CorpusPolicy(root_path=Path("."))
+    keys = {
+        "container_max_depth": "crawler.container_max_depth",
+        "container_max_members": "crawler.container_max_members",
+        "container_max_total_bytes": "crawler.container_max_total_bytes",
+        "container_max_member_bytes": "crawler.container_max_member_bytes",
+    }
+    resolved: dict[str, int] = {}
+    for field_name, setting_key in keys.items():
+        try:
+            resolved[field_name] = int(settings.resolve(setting_key).raw_value)
+        except Exception:
+            resolved[field_name] = int(getattr(defaults, field_name))
+    return resolved

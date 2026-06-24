@@ -70,9 +70,11 @@ documents, images, audio, and video are queued for local deferred processing.
 Images are dimensioned locally, media uses sidecar transcripts, `ffprobe`
 metadata, and optional local faster-whisper ASR when `acceleration.asr.model_path`
 points at an existing local model. Draw.io and modern
-VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are parsed structurally, bounded
-archive/container enumeration records related child assets without recursive
-extraction, and unknown binaries remain metadata-only.
+VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are parsed structurally. Bounded
+archive/container extraction records related child assets, recursively expands
+safe nested containers up to the configured depth, and routes embedded
+documents, diagrams, images, audio, and video through the same local extractor
+chain from temporary private files. Unknown binaries remain metadata-only.
 
 File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
@@ -99,6 +101,10 @@ as `E:\Projects` with Linux path rules.
 Global crawler include/exclude globs live in the settings catalog. Each
 monitored root chooses `inherit`, `extend`, or `override`; the dashboard shows
 both root-local globs and the effective policy used by crawl/watch.
+Container caps are also catalog settings. `crawler.container_max_depth`,
+`crawler.container_max_members`, `crawler.container_max_total_bytes`, and
+`crawler.container_max_member_bytes` apply consistently to foreground sync and
+deferred worker extraction.
 
 The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
@@ -124,7 +130,8 @@ with resource class, priority, and time budget metadata. Worker/backfill
 commands translate existing `--kind` options into these families before claiming
 jobs, so family-specific workers do not lock unrelated work. Completion,
 retry, and blocked transitions record last duration and sanitized telemetry for
-queue observability.
+queue observability, including OCR/ASR cache counters and recursive container
+member, parsed-child, skipped-child, and blocked-dependency counts.
 Files observed before their size/mtime fingerprint stabilizes are recorded as
 `pending_stable` instead of failing the root crawl. Jobs are not completed merely
 because they were claimed. Duplicate content is suppressed by content hash while

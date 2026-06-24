@@ -12,6 +12,10 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
 
     assert "retrieval.token_budget" in keys
     assert "crawler.max_inline_bytes" in keys
+    assert "crawler.container_max_depth" in keys
+    assert "crawler.container_max_members" in keys
+    assert "crawler.container_max_total_bytes" in keys
+    assert "crawler.container_max_member_bytes" in keys
     assert "watcher.interval_seconds" in keys
     assert "watcher.stability_quiet_seconds" in keys
     assert "watcher.large_file_stability_quiet_seconds" in keys
@@ -92,6 +96,26 @@ def test_asr_settings_defaults_and_env_overrides(monkeypatch, tmp_path):
     assert service.resolve("acceleration.asr.enabled").raw_value is False
     assert service.resolve("acceleration.asr.model_path").raw_value == str(model_dir)
     assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 42
+
+
+def test_container_cap_settings_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("crawler.container_max_depth").raw_value == 2
+    assert service.resolve("crawler.container_max_members").raw_value == 200
+    assert service.resolve("crawler.container_max_total_bytes").raw_value == 50 * 1024 * 1024
+    assert service.resolve("crawler.container_max_member_bytes").raw_value == 10 * 1024 * 1024
+
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_DEPTH", "4")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_MEMBERS", "17")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_TOTAL_BYTES", "4096")
+    monkeypatch.setenv("FLUX_KB_CRAWLER_CONTAINER_MAX_MEMBER_BYTES", "512")
+
+    assert service.resolve("crawler.container_max_depth").raw_value == 4
+    assert service.resolve("crawler.container_max_members").raw_value == 17
+    assert service.resolve("crawler.container_max_total_bytes").raw_value == 4096
+    assert service.resolve("crawler.container_max_member_bytes").raw_value == 512
 
 
 def test_settings_service_uses_env_over_database_and_masks_secret(monkeypatch):
