@@ -319,6 +319,117 @@ def test_codex_status_reports_discovery_cache_and_restart_need(tmp_path, monkeyp
     assert result["restart_required"] is True
 
 
+def test_codex_status_reports_stale_discovery_cache(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    installed = codex_home / "plugins" / "flux-llm-kb"
+    repo_root = tmp_path / "repo"
+    _write_test_marketplace(repo_root)
+    _write_test_plugin(repo_root, skill_text="fresh guidance with kb_search kb_remember kb_finalize_turn")
+    installed.mkdir(parents=True)
+    _write_cached_plugin(
+        codex_home,
+        skill_text="old guidance with kb.brief only",
+        manifest_description="old cached manifest",
+    )
+    (codex_home / "config.toml").write_text(
+        f'[marketplaces.flux-llm-kb-local]\nsource_type = "local"\nsource = {json.dumps(str(repo_root))}\n'
+        '[plugins."flux-llm-kb@flux-llm-kb-local"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = codex_status(repo_root=repo_root)
+
+    assert result["discoverable"] is False
+    assert result["restart_required"] is True
+    assert result["status"] == "ready_restart_required"
+    assert result["discovery_cache"]["state"] == "stale"
+    assert result["discovery_cache"]["fresh"] is False
+    assert any(path.endswith("SKILL.md") for path in result["discovery_cache"]["stale_files"])
+    assert "stale" in result["message"]
+
+
+def test_codex_status_reports_fresh_discovery_cache(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    installed = codex_home / "plugins" / "flux-llm-kb"
+    repo_root = tmp_path / "repo"
+    skill_text = "fresh guidance with kb_search kb_remember kb_finalize_turn workspace_boosted"
+    _write_test_marketplace(repo_root)
+    _write_test_plugin(repo_root, skill_text=skill_text)
+    installed.mkdir(parents=True)
+    _write_cached_plugin(codex_home, skill_text=skill_text)
+    (codex_home / "config.toml").write_text(
+        f'[marketplaces.flux-llm-kb-local]\nsource_type = "local"\nsource = {json.dumps(str(repo_root))}\n'
+        '[plugins."flux-llm-kb@flux-llm-kb-local"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = codex_status(repo_root=repo_root)
+
+    assert result["discoverable"] is True
+    assert result["restart_required"] is False
+    assert result["status"] == "ready"
+    assert result["discovery_cache"]["state"] == "fresh"
+    assert result["discovery_cache"]["fresh"] is True
+    assert result["discovery_cache"]["stale_paths"] == []
+
+
+def test_codex_status_checks_cache_against_configured_marketplace_source(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    dev_root = tmp_path / "dev"
+    app_root = tmp_path / "FluxLLMKB" / "app"
+    skill_text = "deployed guidance with kb_search kb_remember kb_finalize_turn"
+    _write_test_marketplace(app_root)
+    _write_test_plugin(app_root, skill_text=skill_text)
+    _write_test_plugin(dev_root, skill_text="different dev checkout guidance")
+    (codex_home / "plugins" / "flux-llm-kb").mkdir(parents=True)
+    _write_cached_plugin(codex_home, skill_text=skill_text)
+    (codex_home / "config.toml").write_text(
+        f'[marketplaces.flux-llm-kb-local]\nsource_type = "local"\nsource = {json.dumps(str(app_root))}\n'
+        '[plugins."flux-llm-kb@flux-llm-kb-local"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = codex_status(repo_root=dev_root)
+
+    assert result["discoverable"] is True
+    assert result["discovery_cache"]["state"] == "fresh"
+    assert result["plugin_source_path"] == str(app_root / "plugins" / "flux-llm-kb")
+    assert result["repo_plugin_path"] == str(dev_root / "plugins" / "flux-llm-kb")
+
+
+def test_codex_install_plugin_invalidates_stale_discovery_cache_only(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    repo_root = tmp_path / "repo"
+    stale_cache = _write_cached_plugin(
+        codex_home,
+        skill_text="old guidance with kb.brief only",
+        manifest_description="old cached manifest",
+    )
+    unrelated_cache = codex_home / "plugins" / "cache" / "other-marketplace" / "other-plugin" / "1.0.0"
+    (unrelated_cache / ".codex-plugin").mkdir(parents=True)
+    (unrelated_cache / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"other-plugin","version":"1.0.0","interface":{"displayName":"Other"}}',
+        encoding="utf-8",
+    )
+    _write_test_plugin(repo_root, skill_text="fresh guidance with kb_search kb_remember kb_finalize_turn")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = install_plugin(repo_root=repo_root)
+
+    assert not stale_cache.exists()
+    assert unrelated_cache.exists()
+    assert result["discoverable"] is False
+    assert result["restart_required"] is True
+    assert result["discovery_cache"]["state"] == "missing"
+
+
 def test_codex_status_reports_misconfigured_marketplace_root(tmp_path, monkeypatch):
     codex_home = tmp_path / ".codex"
     plugin_dir = codex_home / "plugins" / "flux-llm-kb"
@@ -382,3 +493,49 @@ def _write_test_marketplace(root: Path) -> None:
         json.dumps({"name": "flux-llm-kb-local", "plugins": [{"name": "flux-llm-kb"}]}),
         encoding="utf-8",
     )
+
+
+def _write_test_plugin(root: Path, *, skill_text: str) -> Path:
+    plugin = root / "plugins" / "flux-llm-kb"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "flux-llm-kb",
+                "version": "0.1.0",
+                "description": "test plugin",
+                "skills": "./skills/",
+                "hooks": "./hooks/hooks.json",
+                "interface": {"displayName": "Flux LLM-KB"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin / "skills" / "flux-memory").mkdir(parents=True)
+    (plugin / "skills" / "flux-memory" / "SKILL.md").write_text(skill_text, encoding="utf-8")
+    (plugin / "hooks").mkdir()
+    (plugin / "hooks" / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+    return plugin
+
+
+def _write_cached_plugin(codex_home: Path, *, skill_text: str, manifest_description: str = "test plugin") -> Path:
+    cache = codex_home / "plugins" / "cache" / "flux-llm-kb-local" / "flux-llm-kb" / "0.1.0"
+    (cache / ".codex-plugin").mkdir(parents=True)
+    (cache / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "flux-llm-kb",
+                "version": "0.1.0",
+                "description": manifest_description,
+                "skills": "./skills/",
+                "hooks": "./hooks/hooks.json",
+                "interface": {"displayName": "Flux LLM-KB"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (cache / "skills" / "flux-memory").mkdir(parents=True)
+    (cache / "skills" / "flux-memory" / "SKILL.md").write_text(skill_text, encoding="utf-8")
+    (cache / "hooks").mkdir()
+    (cache / "hooks" / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+    return cache

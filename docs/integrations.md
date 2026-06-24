@@ -331,6 +331,15 @@ environment when available, then the active Python. `flux-kb codex status` and
 dashboard health report whether this MCP block is configured, enabled, and able
 to import the optional MCP dependency.
 
+`flux-kb codex status` also checks the Codex plugin discovery cache under
+`~/.codex/plugins/cache`. A cache entry is considered discoverable only when the
+cached Flux manifest, skills, hooks, and scripts match the installed plugin
+source. If the cache is stale, status reports `ready_restart_required` with a
+stale-cache message instead of `ready`. Running `flux-kb codex install-plugin`
+safely invalidates stale Flux-owned cache directories and leaves unrelated
+plugin caches untouched; restart Codex Desktop afterward so it rebuilds the
+cache from the current plugin source.
+
 For an end-to-end Codex smoke test, verify that at least the status, brief, and
 finalize tools are callable through either naming form. A successful test should
 call `kb.status`/`mcp__flux_llm_kb.kb_status`, call

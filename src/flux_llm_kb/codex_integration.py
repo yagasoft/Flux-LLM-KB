@@ -16,6 +16,7 @@ PLUGIN_NAME = "flux-llm-kb"
 MARKETPLACE_NAME = "flux-llm-kb-local"
 PLUGIN_CONFIG_NAME = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
 MCP_SERVER_NAME = "flux_llm_kb"
+DISCOVERY_CACHE_DIRS = (".codex-plugin", "skills", "hooks", "scripts")
 
 
 def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
@@ -24,8 +25,6 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
     config_path = codex_home / "config.toml"
     installed_path = codex_home / "plugins" / PLUGIN_NAME
     repo_plugin = root / "plugins" / PLUGIN_NAME
-    hooks_json = repo_plugin / "hooks" / "hooks.json"
-    manifest_path = repo_plugin / ".codex-plugin" / "plugin.json"
 
     config = ""
     configured = False
@@ -39,12 +38,18 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
         if marketplace_source:
             marketplace_path = _marketplace_file(marketplace_source)
             marketplace_valid = _marketplace_contains_plugin(marketplace_path)
+    plugin_source = repo_plugin
+    if marketplace_source and marketplace_valid:
+        plugin_source = marketplace_source / "plugins" / PLUGIN_NAME
+    hooks_json = plugin_source / "hooks" / "hooks.json"
+    manifest_path = plugin_source / ".codex-plugin" / "plugin.json"
     mcp = _flux_mcp_status(config)
     installed = installed_path.exists()
     hooks_available = hooks_json.exists()
     manifest = _read_manifest(manifest_path)
     manifest_valid = manifest.get("name") == PLUGIN_NAME and bool(manifest.get("interface", {}).get("displayName"))
-    discoverable = _discovery_cache_contains(codex_home)
+    discovery_cache = _discovery_cache_status(codex_home, plugin_source)
+    discoverable = bool(discovery_cache["fresh"])
     restart_required = installed and configured and marketplace_valid and hooks_available and not discoverable
     if installed and configured and not marketplace_valid:
         status = "marketplace_misconfigured"
@@ -70,14 +75,16 @@ def codex_status(*, repo_root: str | Path | None = None) -> dict[str, Any]:
         "marketplace_path": str(marketplace_path) if marketplace_path else None,
         "marketplace_valid": marketplace_valid,
         "discoverable": discoverable,
+        "discovery_cache": discovery_cache,
         "restart_required": restart_required,
         "codex_home": str(codex_home),
         "config_path": str(config_path),
         "installed_path": str(installed_path),
         "repo_plugin_path": str(repo_plugin),
+        "plugin_source_path": str(plugin_source),
         "manifest_path": str(manifest_path),
         "mcp": mcp,
-        "message": _status_message(status, restart_required=restart_required),
+        "message": _status_message(status, restart_required=restart_required, discovery_cache=discovery_cache),
     }
 
 
@@ -100,6 +107,7 @@ def install_plugin(*, repo_root: str | Path | None = None) -> dict[str, Any]:
     _write_local_marketplace(root)
     _write_local_marketplace_config(codex_home / "config.toml", root)
     _write_flux_mcp_server_config(codex_home / "config.toml", root)
+    invalidated_cache_paths = _invalidate_stale_discovery_cache(codex_home, plugin_source)
 
     status = codex_status(repo_root=root)
     return {
@@ -107,6 +115,7 @@ def install_plugin(*, repo_root: str | Path | None = None) -> dict[str, Any]:
         "installed": installed_path.exists(),
         "configured": True,
         "restart_required": True if not status.get("discoverable") else False,
+        "invalidated_discovery_cache_paths": invalidated_cache_paths,
         "action": "installed",
     }
 
@@ -359,16 +368,100 @@ def _read_manifest(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _discovery_cache_contains(codex_home: Path) -> bool:
+def _discovery_cache_status(codex_home: Path, plugin_source: Path) -> dict[str, Any]:
+    cache_roots = _flux_discovery_cache_roots(codex_home)
+    if not cache_roots:
+        return {
+            "state": "missing",
+            "fresh": False,
+            "paths": [],
+            "fresh_paths": [],
+            "stale_paths": [],
+            "stale_files": [],
+        }
+
+    fresh_paths: list[str] = []
+    stale_paths: list[str] = []
+    stale_files: list[str] = []
+    for cache_root in cache_roots:
+        mismatches = _discovery_cache_mismatches(plugin_source, cache_root)
+        if mismatches:
+            stale_paths.append(str(cache_root))
+            stale_files.extend(mismatches)
+        else:
+            fresh_paths.append(str(cache_root))
+
+    fresh = bool(fresh_paths) and not stale_paths
+    return {
+        "state": "fresh" if fresh else "stale",
+        "fresh": fresh,
+        "paths": [str(path) for path in cache_roots],
+        "fresh_paths": fresh_paths,
+        "stale_paths": stale_paths,
+        "stale_files": stale_files,
+    }
+
+
+def _invalidate_stale_discovery_cache(codex_home: Path, plugin_source: Path) -> list[str]:
+    cache_roots = _flux_discovery_cache_roots(codex_home)
+    if not cache_roots:
+        return []
+    invalidated: list[str] = []
+    for cache_root in cache_roots:
+        if not _discovery_cache_mismatches(plugin_source, cache_root):
+            continue
+        _remove_discovery_cache_root(codex_home, cache_root)
+        invalidated.append(str(cache_root))
+    return invalidated
+
+
+def _flux_discovery_cache_roots(codex_home: Path) -> list[Path]:
     cache = codex_home / "plugins" / "cache"
     if not cache.exists():
-        return False
+        return []
+    roots: list[Path] = []
     for manifest_path in cache.rglob("plugin.json"):
         if manifest_path.parent.name != ".codex-plugin":
             continue
         if _read_manifest(manifest_path).get("name") == PLUGIN_NAME:
-            return True
-    return False
+            roots.append(manifest_path.parent.parent)
+    return sorted(roots, key=lambda path: str(path))
+
+
+def _discovery_cache_mismatches(plugin_source: Path, cache_root: Path) -> list[str]:
+    mismatches: list[str] = []
+    for relative_path in _plugin_discovery_files(plugin_source):
+        source_path = plugin_source / relative_path
+        cache_path = cache_root / relative_path
+        if not cache_path.is_file():
+            mismatches.append(str(cache_path))
+            continue
+        try:
+            if source_path.read_bytes() != cache_path.read_bytes():
+                mismatches.append(str(cache_path))
+        except OSError:
+            mismatches.append(str(cache_path))
+    return mismatches
+
+
+def _plugin_discovery_files(plugin_source: Path) -> list[Path]:
+    files: list[Path] = []
+    for directory_name in DISCOVERY_CACHE_DIRS:
+        directory = plugin_source / directory_name
+        if not directory.exists():
+            continue
+        for path in directory.rglob("*"):
+            if path.is_file():
+                files.append(path.relative_to(plugin_source))
+    return sorted(files, key=lambda path: path.as_posix())
+
+
+def _remove_discovery_cache_root(codex_home: Path, cache_root: Path) -> None:
+    cache_base = (codex_home / "plugins" / "cache").resolve()
+    resolved_cache_root = cache_root.resolve()
+    if resolved_cache_root == cache_base or cache_base not in resolved_cache_root.parents:
+        raise ValueError(f"refusing to remove cache path outside Codex plugin cache: {cache_root}")
+    shutil.rmtree(resolved_cache_root)
 
 
 def _marketplace_contains_plugin(path: Path | None) -> bool:
@@ -381,9 +474,11 @@ def _marketplace_contains_plugin(path: Path | None) -> bool:
     return any(plugin.get("name") == PLUGIN_NAME for plugin in marketplace.get("plugins", []))
 
 
-def _status_message(status: str, *, restart_required: bool) -> str:
+def _status_message(status: str, *, restart_required: bool, discovery_cache: dict[str, Any] | None = None) -> str:
     if status == "marketplace_misconfigured":
         return "Codex marketplace config is missing or points to the wrong root; run flux-kb codex install-plugin."
+    if discovery_cache and discovery_cache.get("state") == "stale":
+        return "Codex plugin discovery cache is stale; run flux-kb codex install-plugin to invalidate it, then restart Codex Desktop."
     if restart_required:
         return "Codex plugin is installed/configured; restart Codex Desktop if the Plugins UI has not indexed it yet."
     return status.replace("_", " ")
