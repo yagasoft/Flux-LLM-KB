@@ -245,7 +245,7 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             executed.append((sql, params))
 
         def fetchall(self):
-            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120)]
+            return [("media", "gpu", 2, 1, 1, 0, 24, 95, 120, 5, 2)]
 
     class FakeConnection:
         def __enter__(self):
@@ -268,6 +268,8 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
     sql = executed[0][0]
     assert "FILTER (WHERE status = 'pending')" in sql
     assert "percentile_disc(0.95)" in sql
+    assert "ocr_cache_hits" in sql
+    assert "ocr_cache_misses" in sql
     assert rows == [
         {
             "family": "media",
@@ -279,6 +281,8 @@ def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):
             "avg_duration_ms": 24,
             "p95_duration_ms": 95,
             "max_duration_ms": 120,
+            "ocr_cache_hits": 5,
+            "ocr_cache_misses": 2,
         }
     ]
 

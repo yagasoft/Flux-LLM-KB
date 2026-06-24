@@ -25,6 +25,7 @@ from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 import zlib
 
+from .acceleration import resolve_cache_layout
 from .crawler import (
     ARCHIVE_COMPOUND_SUFFIXES,
     ARCHIVE_EXTENSIONS,
@@ -57,6 +58,10 @@ OPENDOCUMENT_SPREADSHEET_EXTENSIONS = {".ods", ".ots"}
 PPTX_PACKAGE_EXTENSIONS = {".pptx", ".pptm", ".potm", ".potx", ".ppsm", ".ppsx"}
 LEGACY_PRESENTATION_EXTENSIONS = {".ppt", ".pot", ".pps"}
 OPENDOCUMENT_PRESENTATION_EXTENSIONS = {".odp", ".otp"}
+OCR_CACHE_SCHEMA = "flux-ocr-cache-v1"
+OCR_MAX_PDF_PAGES = 25
+OCR_PDF_DPI = 200
+OCR_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -79,6 +84,14 @@ class ExtractionResult:
     status: str
     chunks: tuple[AssetChunk, ...] = ()
     child_assets: tuple[ContainerChildAsset, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class OcrResult:
+    status: str
+    text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     message: str | None = None
 
@@ -119,6 +132,7 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "word_com": _word_com_check(),
         "excel_com": _excel_com_check(),
         "powerpoint_com": _powerpoint_com_check(),
+        "pdftoppm": _tool_check("pdftoppm"),
         "seven_zip": _first_tool_check("7-Zip", ("7z", "7zz")),
         "bsdtar": _tool_check("bsdtar"),
         "unar": _tool_check("unar"),
@@ -185,13 +199,33 @@ def _extract_pdf(path: Path) -> ExtractionResult:
     except ImportError:
         return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pdf"}, message="pypdf not installed")
     reader = PdfReader(str(path))
+    page_count = len(reader.pages)
     text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
     chunks = _chunks_from_text(text, path.name)
-    return ExtractionResult(
-        status="indexed" if chunks else "metadata_only",
-        chunks=chunks,
-        metadata={"extractor": "pdf", "page_count": len(reader.pages)},
-    )
+    if chunks:
+        return ExtractionResult(
+            status="indexed",
+            chunks=chunks,
+            metadata={
+                "extractor": "pdf",
+                "page_count": page_count,
+                "ocr": {
+                    "status": "skipped_embedded_text",
+                    "page_count": page_count,
+                    "pages_attempted": 0,
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                },
+            },
+        )
+    ocr = _ocr_pdf(path, page_count=page_count)
+    metadata = {"extractor": "pdf", "page_count": page_count, "ocr": ocr.metadata}
+    if ocr.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
+    if ocr.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
+    chunks = _chunks_from_text(ocr.text, path.name, modality="ocr")
+    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata, message=ocr.message)
 
 
 def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
@@ -1468,8 +1502,13 @@ def _local_name(tag: str) -> str:
 
 def _extract_image(path: Path) -> ExtractionResult:
     metadata = image_metadata(path)
-    text = _ocr_image(path)
-    chunks = _chunks_from_text(text or "", path.name, modality="ocr")
+    ocr = _ocr_image(path)
+    metadata["ocr"] = ocr.metadata
+    if ocr.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
+    if ocr.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
+    chunks = _chunks_from_text(ocr.text, path.name, modality="ocr")
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
 
 
@@ -1554,23 +1593,214 @@ def _png_dimensions(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def _ocr_image(path: Path) -> str | None:
+def _ocr_image(path: Path) -> OcrResult:
+    cached = _read_ocr_cache(path)
+    if cached is not None:
+        return OcrResult(
+            status="completed",
+            text=cached,
+            metadata={
+                "engine": "tesseract",
+                "status": "cache_hit",
+                "cache_hits": 1,
+                "cache_misses": 0,
+            },
+        )
     tesseract = shutil.which("tesseract")
     if tesseract is None:
-        return None
+        return OcrResult(
+            status="blocked_missing_dependency",
+            metadata={
+                "engine": "tesseract",
+                "status": "blocked_missing_dependency",
+                "cache_hits": 0,
+                "cache_misses": 0,
+            },
+            message="tesseract command not found",
+        )
+    return _ocr_image_with_tesseract(path, tesseract)
+
+
+def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
+    base_metadata: dict[str, Any] = {
+        "engine": "tesseract",
+        "renderer": "pdftoppm",
+        "page_count": page_count,
+        "pages_attempted": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+    }
+    if page_count > OCR_MAX_PDF_PAGES:
+        return OcrResult(
+            status="completed",
+            metadata={**base_metadata, "status": "skipped_page_cap"},
+            message=f"PDF has {page_count} pages; OCR cap is {OCR_MAX_PDF_PAGES}",
+        )
+    renderer = shutil.which("pdftoppm")
+    if renderer is None:
+        return OcrResult(
+            status="blocked_missing_dependency",
+            metadata={**base_metadata, "status": "blocked_missing_dependency"},
+            message="pdftoppm command not found",
+        )
+    tesseract = shutil.which("tesseract")
+    if tesseract is None:
+        return OcrResult(
+            status="blocked_missing_dependency",
+            metadata={**base_metadata, "status": "blocked_missing_dependency"},
+            message="tesseract command not found",
+        )
+    parts: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="flux-kb-pdf-ocr-") as temp_dir:
+        temp_root = Path(temp_dir)
+        for page_number in range(1, page_count + 1):
+            output_prefix = temp_root / "page"
+            try:
+                render = run_no_window(
+                    [
+                        renderer,
+                        "-r",
+                        str(OCR_PDF_DPI),
+                        "-png",
+                        "-f",
+                        str(page_number),
+                        "-l",
+                        str(page_number),
+                        str(path),
+                        str(output_prefix),
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=OCR_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except Exception as exc:  # pragma: no cover - environment-specific
+                return OcrResult(
+                    status="failed",
+                    metadata={**base_metadata, "pages_attempted": page_number - 1, "status": "failed"},
+                    message=str(exc),
+                )
+            if render.returncode != 0:
+                return OcrResult(
+                    status="failed",
+                    metadata={**base_metadata, "pages_attempted": page_number - 1, "status": "failed"},
+                    message=render.stderr.strip() or "pdftoppm failed",
+                )
+            rendered_path = output_prefix.with_name(f"{output_prefix.name}-{page_number}.png")
+            page_ocr = _ocr_image_with_tesseract(rendered_path, tesseract)
+            base_metadata["pages_attempted"] = page_number
+            base_metadata["cache_hits"] += int(page_ocr.metadata.get("cache_hits") or 0)
+            base_metadata["cache_misses"] += int(page_ocr.metadata.get("cache_misses") or 0)
+            if page_ocr.status == "failed":
+                return OcrResult(
+                    status="failed",
+                    metadata={**base_metadata, "status": "failed"},
+                    message=page_ocr.message,
+                )
+            if page_ocr.text:
+                parts.append(page_ocr.text)
+    return OcrResult(status="completed", text="\n".join(parts), metadata={**base_metadata, "status": "completed"})
+
+
+def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
+    cached = _read_ocr_cache(path)
+    if cached is not None:
+        return OcrResult(
+            status="completed",
+            text=cached,
+            metadata={
+                "engine": "tesseract",
+                "status": "cache_hit",
+                "cache_hits": 1,
+                "cache_misses": 0,
+            },
+        )
     try:
         result = run_no_window(
             [tesseract, str(path), "stdout"],
             text=True,
             capture_output=True,
-            timeout=30,
+            timeout=OCR_TIMEOUT_SECONDS,
             check=False,
         )
+    except Exception as exc:
+        return OcrResult(
+            status="failed",
+            metadata={
+                "engine": "tesseract",
+                "status": "failed",
+                "cache_hits": 0,
+                "cache_misses": 1,
+            },
+            message=str(exc),
+        )
+    if result.returncode != 0:
+        return OcrResult(
+            status="completed",
+            metadata={
+                "engine": "tesseract",
+                "status": "failed",
+                "cache_hits": 0,
+                "cache_misses": 1,
+            },
+            message=result.stderr.strip() or "tesseract failed",
+        )
+    redacted, _ = redact_text(result.stdout.strip())
+    text = redacted.strip()
+    _write_ocr_cache(path, text)
+    return OcrResult(
+        status="completed",
+        text=text,
+        metadata={
+            "engine": "tesseract",
+            "status": "completed",
+            "cache_hits": 0,
+            "cache_misses": 1,
+        },
+    )
+
+
+def _read_ocr_cache(path: Path) -> str | None:
+    try:
+        cache_file = _ocr_cache_file(path)
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
     except Exception:
         return None
-    if result.returncode != 0:
+    if payload.get("schema") != OCR_CACHE_SCHEMA:
         return None
-    return result.stdout.strip() or None
+    if payload.get("source_hash") != _sha256_file(path):
+        return None
+    text = payload.get("text")
+    return text if isinstance(text, str) else None
+
+
+def _write_ocr_cache(path: Path, text: str) -> None:
+    try:
+        cache_file = _ocr_cache_file(path)
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": OCR_CACHE_SCHEMA,
+            "source_hash": _sha256_file(path),
+            "engine": "tesseract",
+            "text": text,
+        }
+        cache_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _ocr_cache_file(path: Path) -> Path:
+    source_hash = _sha256_file(path)
+    key = hashlib.sha256(f"{OCR_CACHE_SCHEMA}:tesseract:{source_hash}".encode("utf-8")).hexdigest()
+    return Path(resolve_cache_layout()["directories"]["ocr"]) / f"{key}.json"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _read_sidecar_transcript(path: Path) -> str | None:

@@ -86,7 +86,7 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
         },
         command_runner=fake_run,
         module_importer=fake_import,
-        worker_family_stats=lambda: [{"family": "media", "pending": 2, "p95_duration_ms": 95}],
+        worker_family_stats=lambda: [{"family": "media", "pending": 2, "p95_duration_ms": 95, "ocr_cache_hits": 5, "ocr_cache_misses": 2}],
     )
 
     assert payload["capabilities"]["nvidia"]["ok"] is True
@@ -95,6 +95,8 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
     assert payload["capabilities"]["watcher_backend"]["ok"] is True
     assert payload["worker_families"][0]["family"] == "media"
     assert payload["worker_families"][0]["p95_duration_ms"] == 95
+    assert payload["worker_families"][0]["ocr_cache_hits"] == 5
+    assert payload["worker_families"][0]["ocr_cache_misses"] == 2
 
 
 def test_job_family_mapping_keeps_existing_kind_compatibility():

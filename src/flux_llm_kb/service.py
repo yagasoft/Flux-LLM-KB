@@ -641,6 +641,7 @@ class KnowledgeService:
                 "resource_class": job.get("resource_class"),
                 "result_status": process_result.status,
             }
+            telemetry.update(process_result.telemetry or {})
             if process_result.status in {"indexed", "metadata_only"}:
                 database.complete_corpus_job(job_id=job["id"], duration_ms=duration_ms, telemetry=telemetry)
                 completed += 1

@@ -85,6 +85,15 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
         },
         raising=False,
     )
+    monkeypatch.setattr(
+        health,
+        "collect_acceleration_status",
+        lambda: {
+            "capabilities": {},
+            "cache": {"root": "D:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
+            "worker_families": [{"family": "image", "pending": 1, "ocr_cache_hits": 4, "ocr_cache_misses": 2}],
+        },
+    )
 
     payload = collect_dashboard_payload()
 
@@ -107,6 +116,8 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["deployment"]["install_root"] == "D:\\FluxLLMKB"
     assert payload["deployment"]["image_tag"] == "abc123"
     assert "repo_coupled" in payload["deployment"]
+    assert payload["acceleration"]["worker_families"][0]["ocr_cache_hits"] == 4
+    assert payload["acceleration"]["worker_families"][0]["ocr_cache_misses"] == 2
 
 
 def test_dashboard_health_includes_actionable_error_details(monkeypatch):

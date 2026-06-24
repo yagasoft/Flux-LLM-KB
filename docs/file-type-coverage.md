@@ -38,6 +38,12 @@ parser or local tool exists.
 - Proprietary or unsafe formats still get metadata, hashes, duplicate/version
   grouping, and optional sidecar extraction.
 - Cloud OCR, cloud transcription, and provider LLM calls are off by default.
+- OCR is local and cache-backed when available. Deferred image jobs use
+  Tesseract; image-only PDFs first try embedded PDF text, then render bounded
+  pages with `pdftoppm` and run Tesseract. Missing OCR tools report
+  `blocked_missing_dependency`, and redacted OCR cache entries stay under the
+  private OCR cache root with hit/miss telemetry exposed through worker-family
+  status.
 
 ## Coverage Matrix
 
@@ -86,6 +92,12 @@ parser or local tool exists.
   Cross-platform extraction prefers bundled Python parsers or LibreOffice
   conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy
   binary formats when available.
+- Image and scanned-PDF OCR uses local tools only. Image files can be OCRed with
+  Tesseract in deferred image jobs; image-only PDFs use `pdftoppm` page rendering
+  plus Tesseract up to the configured page cap. OCR output is redacted before
+  chunking and before cache writes. Cache hit/miss counts are stored as sanitized
+  job telemetry; raw OCR text is not written to public docs or dashboard
+  metadata.
 - `drawio`, `drawio.svg`, and `drawio.png` parse embedded XML when present and
   index page names, shapes, labels, connectors, and links.
 - `vsdx` and related modern Visio files are ZIP/XML containers and are parsed

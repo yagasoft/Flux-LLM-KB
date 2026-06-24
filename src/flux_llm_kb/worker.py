@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import database
 from .crawler import CorpusPolicy
@@ -12,6 +13,7 @@ from .extractors import extract_file
 class JobProcessResult:
     status: str
     message: str | None = None
+    telemetry: dict[str, Any] | None = None
 
 
 def process_corpus_job(job: dict) -> JobProcessResult:
@@ -45,9 +47,26 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         raise
     if result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
         database.apply_extraction_result(root_name=root_name, relative_path=relative_path, result=result)
-    return JobProcessResult(status=result.status, message=result.message)
+    return JobProcessResult(status=result.status, message=result.message, telemetry=_telemetry_from_extraction_result(result))
 
 
 def _is_locked_error(exc: OSError) -> bool:
     text = str(exc).lower()
     return isinstance(exc, PermissionError) or "locked" in text or "being used by another process" in text
+
+
+def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
+    metadata = getattr(result, "metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    ocr = metadata.get("ocr")
+    if not isinstance(ocr, dict):
+        return {}
+    telemetry: dict[str, Any] = {}
+    if "cache_hits" in ocr:
+        telemetry["ocr_cache_hits"] = int(ocr.get("cache_hits") or 0)
+    if "cache_misses" in ocr:
+        telemetry["ocr_cache_misses"] = int(ocr.get("cache_misses") or 0)
+    if "pages_attempted" in ocr:
+        telemetry["ocr_pages_attempted"] = int(ocr.get("pages_attempted") or 0)
+    return telemetry

@@ -2853,7 +2853,9 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                        count(*) FILTER (WHERE status = 'failed')::integer AS failed,
                        avg(last_duration_ms)::integer AS avg_duration_ms,
                        percentile_disc(0.95) WITHIN GROUP (ORDER BY last_duration_ms)::integer AS p95_duration_ms,
-                       max(last_duration_ms)::integer AS max_duration_ms
+                       max(last_duration_ms)::integer AS max_duration_ms,
+                       COALESCE(sum((telemetry->>'ocr_cache_hits')::integer), 0)::integer AS ocr_cache_hits,
+                       COALESCE(sum((telemetry->>'ocr_cache_misses')::integer), 0)::integer AS ocr_cache_misses
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 GROUP BY job_family, resource_class
@@ -2871,6 +2873,8 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                     "avg_duration_ms": row[6],
                     "p95_duration_ms": row[7],
                     "max_duration_ms": row[8],
+                    "ocr_cache_hits": row[9],
+                    "ocr_cache_misses": row[10],
                 }
                 for row in cur.fetchall()
             ]

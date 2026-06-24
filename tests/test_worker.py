@@ -41,6 +41,7 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
         lambda job: worker.JobProcessResult(
             status="blocked_missing_dependency",
             message="ffprobe command not found",
+            telemetry={"ocr_cache_hits": 0, "ocr_cache_misses": 0},
         ),
     )
 
@@ -50,8 +51,55 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     assert calls["completed"] == []
     assert calls["retried"] == []
     assert calls["blocked"][0]["job_id"] == "job-1"
+    assert calls["blocked"][0]["telemetry"]["ocr_cache_hits"] == 0
+    assert calls["blocked"][0]["telemetry"]["ocr_cache_misses"] == 0
     assert calls["repaired"] == [{"root_name": None}]
     assert calls["cleared_errors"] == [{"root_name": None}]
+
+
+def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, host_agent_roots=None: [
+            {
+                "id": "job-ocr",
+                "job_type": "corpus_extract_image",
+                "job_family": "image",
+                "resource_class": "gpu",
+                "payload": {"path": "scan.png", "root_name": "images"},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda job: worker.JobProcessResult(
+            status="indexed",
+            telemetry={"ocr_cache_hits": 1, "ocr_cache_misses": 0},
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="images", limit=1, workers=1)
+
+    assert result["completed"] == 1
+    telemetry = calls["completed"][0]["telemetry"]
+    assert telemetry["job_family"] == "image"
+    assert telemetry["resource_class"] == "gpu"
+    assert telemetry["ocr_cache_hits"] == 1
+    assert telemetry["ocr_cache_misses"] == 0
 
 
 def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):

@@ -195,7 +195,7 @@ def test_cli_acceleration_status_uses_status_collector(monkeypatch, capsys):
         lambda: {
             "capabilities": {"local_model": {"state": "disabled"}},
             "cache": {"root": "D:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
-            "worker_families": [{"family": "media", "pending": 2}],
+            "worker_families": [{"family": "media", "pending": 2, "ocr_cache_hits": 3, "ocr_cache_misses": 1}],
         },
     )
 
@@ -204,6 +204,8 @@ def test_cli_acceleration_status_uses_status_collector(monkeypatch, capsys):
 
     assert payload["cache"]["root"] == "D:/FluxLLMKB/private/cache"
     assert payload["worker_families"][0]["family"] == "media"
+    assert payload["worker_families"][0]["ocr_cache_hits"] == 3
+    assert payload["worker_families"][0]["ocr_cache_misses"] == 1
 
 
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):

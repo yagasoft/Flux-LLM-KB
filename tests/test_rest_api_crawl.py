@@ -168,7 +168,7 @@ def test_acceleration_status_route_is_exposed(monkeypatch):
         lambda: {
             "capabilities": {"nvidia": {"ok": False, "state": "missing"}},
             "cache": {"root": "D:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
-            "worker_families": [{"family": "media", "pending": 2, "p95_duration_ms": 95}],
+            "worker_families": [{"family": "media", "pending": 2, "p95_duration_ms": 95, "ocr_cache_hits": 3, "ocr_cache_misses": 1}],
         },
     )
 
@@ -179,6 +179,8 @@ def test_acceleration_status_route_is_exposed(monkeypatch):
     payload = response.json()
     assert payload["cache"]["root"] == "D:/FluxLLMKB/private/cache"
     assert payload["worker_families"][0]["family"] == "media"
+    assert payload["worker_families"][0]["ocr_cache_hits"] == 3
+    assert payload["worker_families"][0]["ocr_cache_misses"] == 1
 
 
 def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_path):

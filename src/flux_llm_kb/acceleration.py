@@ -437,6 +437,8 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
         "avg_duration_ms": _int_or_none(row.get("avg_duration_ms")),
         "p95_duration_ms": _int_or_none(row.get("p95_duration_ms")),
         "max_duration_ms": _int_or_none(row.get("max_duration_ms")),
+        "ocr_cache_hits": int(row.get("ocr_cache_hits") or 0),
+        "ocr_cache_misses": int(row.get("ocr_cache_misses") or 0),
     }
 
 

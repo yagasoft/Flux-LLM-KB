@@ -122,6 +122,8 @@ type AccelerationWorkerFamily = {
   avg_duration_ms?: number | null;
   p95_duration_ms?: number | null;
   max_duration_ms?: number | null;
+  ocr_cache_hits?: number;
+  ocr_cache_misses?: number;
 };
 
 type ErrorDiagnostic = {
@@ -1725,10 +1727,17 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
     const name = family.family ?? "general";
     const pending = family.pending ?? 0;
     const p95 = family.p95_duration_ms;
+    const ocrHits = family.ocr_cache_hits ?? 0;
+    const ocrMisses = family.ocr_cache_misses ?? 0;
+    const hasOcrTelemetry = ocrHits > 0 || ocrMisses > 0;
+    const duration = p95 == null ? `${family.running ?? 0} running` : `p95 ${p95}ms`;
+    const status = hasOcrTelemetry
+      ? `${duration}; OCR ${ocrHits} hit / ${ocrMisses} miss`
+      : duration;
     return [
       name,
       `${pending} pending`,
-      p95 == null ? `${family.running ?? 0} running` : `p95 ${p95}ms`
+      status
     ] as [string, string, string];
   });
   return (

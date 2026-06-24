@@ -13,6 +13,12 @@ from flux_llm_kb.crawler import CorpusPolicy
 from flux_llm_kb.extractors import extract_file, extractor_availability
 
 
+PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAADZrBkAAAAAD0lEQVR4nGP8z8AARLJAgAEACPwD"
+    "Aaz3RyoAAAAASUVORK5CYII="
+)
+
+
 def test_extract_file_reads_text_chunks(tmp_path):
     path = tmp_path / "decision.md"
     path.write_text("# Decision\nUse the unified dashboard for watcher health.", encoding="utf-8")
@@ -26,12 +32,7 @@ def test_extract_file_reads_text_chunks(tmp_path):
 
 def test_extract_file_records_png_dimensions_without_cloud_calls(tmp_path):
     path = tmp_path / "pixel.png"
-    path.write_bytes(
-        base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAIAAADZrBkAAAAAD0lEQVR4nGP8z8AARLJAgAEACPwD"
-            "Aaz3RyoAAAAASUVORK5CYII="
-        )
-    )
+    path.write_bytes(PNG_BYTES)
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -50,8 +51,190 @@ def test_extractor_availability_reports_optional_tools():
     assert "catdoc" in availability
     assert "wvText" in availability
     assert "word_com" in availability
+    assert "pdftoppm" in availability
     assert "ffprobe" in availability
     assert all("ok" in item and "message" in item for item in availability.values())
+
+
+def test_extract_image_blocks_when_tesseract_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "scan.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "tesseract command not found"
+    assert result.metadata["ocr"]["status"] == "blocked_missing_dependency"
+    assert result.metadata["ocr"]["cache_hits"] == 0
+    assert result.metadata["ocr"]["cache_misses"] == 0
+
+
+def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_path):
+    path = tmp_path / "scan.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        assert command[0] == "C:/tools/tesseract.exe"
+        return SimpleNamespace(returncode=0, stdout="Scanned image text", stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    first = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert first.status == "indexed"
+    assert first.chunks[0].body == "Scanned image text"
+    assert first.metadata["ocr"]["cache_hits"] == 0
+    assert first.metadata["ocr"]["cache_misses"] == 1
+    assert len(calls) == 1
+
+    def fail_run(_command, **_kwargs):
+        raise AssertionError("second extraction should use the OCR cache")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fail_run)
+
+    second = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert second.status == "indexed"
+    assert second.chunks[0].body == "Scanned image text"
+    assert second.metadata["ocr"]["cache_hits"] == 1
+    assert second.metadata["ocr"]["cache_misses"] == 0
+
+
+def test_extract_pdf_with_embedded_text_skips_ocr(monkeypatch, tmp_path):
+    path = tmp_path / "embedded.pdf"
+    path.write_bytes(b"%PDF embedded")
+
+    class FakePage:
+        def extract_text(self):
+            return "Embedded PDF text"
+
+    class FakePdfReader:
+        def __init__(self, _path):
+            self.pages = [FakePage()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("OCR tools must not run")),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].body == "Embedded PDF text"
+    assert result.metadata["ocr"]["status"] == "skipped_embedded_text"
+    assert result.metadata["ocr"]["pages_attempted"] == 0
+
+
+def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_path):
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(b"%PDF scanned")
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+
+    class EmptyPage:
+        def extract_text(self):
+            return ""
+
+    class FakePdfReader:
+        def __init__(self, _path):
+            self.pages = [EmptyPage(), EmptyPage()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: {
+            "pdftoppm": "C:/tools/pdftoppm.exe",
+            "tesseract": "C:/tools/tesseract.exe",
+        }.get(command),
+    )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        if command[0] == "C:/tools/pdftoppm.exe":
+            page = command[command.index("-f") + 1]
+            output_prefix = Path(command[-1])
+            output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[0] == "C:/tools/tesseract.exe":
+            page_name = Path(command[1]).stem
+            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert "OCR text from page-1" in result.chunks[0].body
+    assert "OCR text from page-2" in result.chunks[0].body
+    assert result.metadata["ocr"]["renderer"] == "pdftoppm"
+    assert result.metadata["ocr"]["page_count"] == 2
+    assert result.metadata["ocr"]["pages_attempted"] == 2
+    assert result.metadata["ocr"]["cache_hits"] == 0
+    assert result.metadata["ocr"]["cache_misses"] == 2
+    assert [Path(command[0]).name for command in calls].count("pdftoppm.exe") == 2
+    assert [Path(command[0]).name for command in calls].count("tesseract.exe") == 2
+
+
+def test_extract_image_only_pdf_blocks_when_renderer_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(b"%PDF scanned")
+
+    class EmptyPage:
+        def extract_text(self):
+            return ""
+
+    class FakePdfReader:
+        def __init__(self, _path):
+            self.pages = [EmptyPage()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "pdftoppm command not found"
+    assert result.metadata["ocr"]["status"] == "blocked_missing_dependency"
+    assert result.metadata["ocr"]["pages_attempted"] == 0
+
+
+def test_extract_large_scanned_pdf_skips_ocr_by_page_cap(monkeypatch, tmp_path):
+    path = tmp_path / "large-scan.pdf"
+    path.write_bytes(b"%PDF large")
+
+    class EmptyPage:
+        def extract_text(self):
+            return ""
+
+    class FakePdfReader:
+        def __init__(self, _path):
+            self.pages = [EmptyPage() for _ in range(26)]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("page-capped PDF should not render OCR pages")),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["ocr"]["status"] == "skipped_page_cap"
+    assert result.metadata["ocr"]["page_count"] == 26
+    assert result.metadata["ocr"]["pages_attempted"] == 0
 
 
 def test_extractor_availability_reports_container_tools():
