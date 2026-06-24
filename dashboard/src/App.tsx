@@ -234,6 +234,23 @@ type SearchResult = {
   title?: string;
   excerpt?: string;
   summary?: string;
+  snippet?: {
+    text?: string;
+    matched_terms?: string[];
+    highlights?: Array<{ term?: string; start?: number; end?: number }>;
+    source?: string;
+    source_path?: string;
+  };
+  retrieval_explanation?: {
+    score?: number;
+    streams?: string[];
+    raw_scores?: Record<string, number>;
+    scope?: Record<string, unknown>;
+    lifecycle?: Record<string, unknown>;
+    graph?: Record<string, unknown>;
+    corpus?: Record<string, unknown>;
+    adjustments?: Record<string, unknown>;
+  };
   score?: number;
   id?: string;
   asset_id?: string;
@@ -2178,15 +2195,18 @@ function RetrievalTab({
         {searchResults.length > 0 ? (
           <div className="search-results">
             {searchResults.map((result, index) => (
-              <button className="search-result-card" key={searchResultKey(result, index)} type="button" onClick={() => onOpenResult(result)}>
-                <span>{searchResultMeta(result)}</span>
-                <strong>{result.title ?? result.id ?? "Untitled result"}</strong>
-                <p>{result.excerpt ?? result.summary ?? "No excerpt available."}</p>
-                {result.source_path && <code className="result-path" title={result.source_path}>{result.source_path}</code>}
-                {Boolean(result.related_evidence_count) && (
-                  <em>{result.related_evidence_count} related evidence item{result.related_evidence_count === 1 ? "" : "s"}</em>
-                )}
-              </button>
+              <div className="search-result-card" key={searchResultKey(result, index)}>
+                <button className="search-result-open" type="button" onClick={() => onOpenResult(result)}>
+                  <span>{searchResultMeta(result)}</span>
+                  <strong>{result.title ?? result.id ?? "Untitled result"}</strong>
+                  <p>{result.snippet?.text ?? result.excerpt ?? result.summary ?? "No excerpt available."}</p>
+                  {result.source_path && <code className="result-path" title={result.source_path}>{result.source_path}</code>}
+                  {Boolean(result.related_evidence_count) && (
+                    <em>{result.related_evidence_count} related evidence item{result.related_evidence_count === 1 ? "" : "s"}</em>
+                  )}
+                </button>
+                <SearchResultExplanation result={result} />
+              </div>
             ))}
           </div>
         ) : (
@@ -2198,13 +2218,51 @@ function RetrievalTab({
         <div className="consumer-grid">
           <code>GET /api/search?query=customer%20RFP&amp;limit=5</code>
           <code>GET /api/brief?query=customer%20RFP&amp;token_budget=1200</code>
+          <code>GET /api/explain?query=customer%20RFP&amp;limit=5</code>
           <code>{'kb.search({"query":"customer RFP","limit":5})'}</code>
+          <code>{'kb.explain({"query":"customer RFP","limit":5})'}</code>
           <code>{'kb.brief({"query":"customer RFP","token_budget":1200})'}</code>
           <code>flux-kb search "customer RFP" --limit 5</code>
+          <code>flux-kb explain "customer RFP" --limit 5</code>
         </div>
       </Panel>
       <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
     </section>
+  );
+}
+
+function SearchResultExplanation({ result }: { result: SearchResult }) {
+  const explanation = result.retrieval_explanation;
+  if (!explanation) return null;
+  const streams = explanation.streams ?? result.streams ?? [];
+  const rawScores = explanation.raw_scores ?? result.raw_scores ?? {};
+  const scopeLabel = stringFromUnknown(explanation.scope?.label) ?? "unknown";
+  const corpusPath = stringFromUnknown(explanation.corpus?.source_path) ?? result.source_path;
+  return (
+    <details className="result-explanation">
+      <summary>Why this result</summary>
+      <div className="result-explanation-grid">
+        <span>Streams</span>
+        <strong>{streams.length ? streams.map(prettyStreamName).join(", ") : "-"}</strong>
+        <span>Scope</span>
+        <strong>{scopeLabel}</strong>
+        <span>Score</span>
+        <strong>{typeof explanation.score === "number" ? explanation.score.toFixed(3) : typeof result.score === "number" ? result.score.toFixed(3) : "-"}</strong>
+        {corpusPath && (
+          <>
+            <span>Source</span>
+            <code title={corpusPath}>{corpusPath}</code>
+          </>
+        )}
+      </div>
+      {Object.keys(rawScores).length > 0 && (
+        <div className="raw-score-row">
+          {Object.entries(rawScores).map(([stream, score]) => (
+            <span key={stream}>{prettyStreamName(stream)} {Number(score).toFixed(3)}</span>
+          ))}
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -2899,7 +2957,7 @@ function searchResultKey(result: SearchResult, index: number): string {
 }
 
 function prettyStreamName(value: string): string {
-  return value.replace(/^corpus_/, "").replace(/_/g, " ");
+  return titleCase(value.replace(/^corpus_/, "corpus ").replace(/_/g, " "));
 }
 
 function JobsTab({ state, onRefresh }: { state: LoadState; onRefresh: () => void }) {

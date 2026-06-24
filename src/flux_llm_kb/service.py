@@ -13,8 +13,9 @@ from . import database
 from .glob_policy import effective_glob_policy
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
+from .retrieval_explain import enrich_search_result
 from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
-from .scoring import ContextCandidate, pack_context
+from .scoring import ContextCandidate, pack_context, pack_context_with_trace
 from .settings import SettingsService
 from .versioning import collapse_version_families
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
@@ -74,19 +75,25 @@ class KnowledgeService:
     ) -> list[dict[str, Any]]:
         scope = _resolve_retrieval_scope(cwd=cwd, root_name=root_name, scope_mode=scope_mode)
         if scope.mode == "global" or not scope.is_scoped:
-            return self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global")
+            return _enrich_search_results(
+                query,
+                self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global"),
+            )
         if scope.mode == "workspace_boosted":
             return self._search_workspace_boosted(query, limit=limit, scope=scope)
 
         scoped_results = self._search_once(query, limit=limit, scope=scope, label="local")
         if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
-            return scoped_results
+            return _enrich_search_results(query, scoped_results)
 
-        return self._search_once(
+        return _enrich_search_results(
             query,
-            limit=limit,
-            scope=RetrievalScope(mode="global"),
-            label="global_fallback",
+            self._search_once(
+                query,
+                limit=limit,
+                scope=RetrievalScope(mode="global"),
+                label="global_fallback",
+            ),
         )
 
     def _search_workspace_boosted(self, query: str, *, limit: int, scope: RetrievalScope) -> list[dict[str, Any]]:
@@ -113,9 +120,12 @@ class KnowledgeService:
         combined = _dedupe_search_results(
             [_with_scope_score_boost(item, LOCAL_SCOPE_SCORE_BOOST) for item in local_results] + cross_results
         )
-        return collapse_version_families(
-            sorted(combined, key=lambda item: float(item.get("score") or 0.0), reverse=True),
-            limit=limit,
+        return _enrich_search_results(
+            query,
+            collapse_version_families(
+                sorted(combined, key=lambda item: float(item.get("score") or 0.0), reverse=True),
+                limit=limit,
+            ),
         )
 
     def _search_once(
@@ -198,6 +208,31 @@ class KnowledgeService:
             for item in search_results
         ]
         return pack_context(candidates, token_budget=token_budget)
+
+    def explain(
+        self,
+        query: str,
+        limit: int = 5,
+        token_budget: int | None = None,
+        cwd: str | None = None,
+        root_name: str | None = None,
+        scope_mode: str = "local_first",
+    ) -> dict[str, Any]:
+        if token_budget is None:
+            token_budget = _configured_token_budget()
+        result_limit = max(1, min(int(limit or 5), 50))
+        search_results = self.search(
+            query,
+            limit=max(result_limit, 10),
+            cwd=cwd,
+            root_name=root_name,
+            scope_mode=scope_mode,
+        )
+        return {
+            "query": query,
+            "results": search_results[:result_limit],
+            "brief": _brief_selection_trace(search_results, token_budget=token_budget),
+        }
 
     def audit(self, limit: int = 50) -> list[dict[str, Any]]:
         return database.list_audit_events(limit=limit)
@@ -716,6 +751,46 @@ def _format_corpus_search_item(item: dict[str, Any]) -> dict[str, Any]:
                 result["summary"] = summary
                 result["excerpt"] = summary
     return result
+
+
+def _enrich_search_results(query: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [enrich_search_result(query, item) for item in results]
+
+
+def _brief_selection_trace(search_results: list[dict[str, Any]], *, token_budget: int) -> dict[str, Any]:
+    current_results = [item for item in search_results if _is_current_evidence(item)]
+    excluded: list[dict[str, Any]] = []
+    packing_results = search_results
+    if current_results:
+        packing_results = current_results
+        excluded.extend(_brief_excluded_item(item, reason="non_current") for item in search_results if item not in current_results)
+    candidates = [
+        ContextCandidate(
+            id=str(item.get("id") or ""),
+            title=str(item.get("title") or item.get("id") or "Untitled"),
+            body=str(item.get("summary") or ""),
+            score=float(item.get("score") or 0.0),
+        )
+        for item in packing_results
+    ]
+    packed = pack_context_with_trace(candidates, token_budget=token_budget)
+    return {
+        "text": packed.text,
+        "token_budget": token_budget,
+        "packed": list(packed.packed),
+        "excluded": excluded + list(packed.excluded),
+    }
+
+
+def _brief_excluded_item(item: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    lifecycle = item.get("lifecycle") if isinstance(item.get("lifecycle"), dict) else {}
+    return {
+        "id": str(item.get("id") or ""),
+        "title": str(item.get("title") or item.get("id") or "Untitled"),
+        "score": float(item.get("score") or 0.0),
+        "reason": reason,
+        "lifecycle_state": str(lifecycle.get("state") or item.get("lifecycle_state") or ""),
+    }
 
 
 def _parse_json_object(value: Any) -> dict[str, Any]:

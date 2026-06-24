@@ -42,6 +42,39 @@ def test_service_search_includes_corpus_chunks(monkeypatch):
     assert results[0]["source_path"] == "docs/architecture.md"
 
 
+def test_service_search_adds_query_snippet_and_retrieval_explanation(monkeypatch):
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks",
+        lambda query, limit=20, **_kwargs: [
+            {
+                "id": "chunk-1",
+                "asset_id": "asset-1",
+                "title": "architecture.md",
+                "summary": "Dashboard retrieval uses pgvector, lifecycle scoring, and snippets.",
+                "score": 0.9,
+                "streams": ["corpus_lexical", "corpus_vector"],
+                "raw_scores": {"corpus_lexical": 1.0, "corpus_vector": 0.5},
+                "source_path": "docs/architecture.md",
+                "root_name": "docs",
+                "duplicate_count": 1,
+                "trust_rank": 450,
+            }
+        ],
+    )
+
+    result = KnowledgeService().search("pgvector dashboard", limit=5)[0]
+
+    assert result["excerpt"] == result["snippet"]["text"]
+    assert result["snippet"]["matched_terms"] == ["dashboard", "pgvector"]
+    assert result["snippet"]["source_path"] == "docs/architecture.md"
+    assert result["retrieval_explanation"]["streams"] == ["corpus_lexical", "corpus_vector"]
+    assert result["retrieval_explanation"]["scope"] == {"label": "global"}
+    assert result["retrieval_explanation"]["corpus"]["source_path"] == "docs/architecture.md"
+    assert result["retrieval_explanation"]["corpus"]["duplicate_count"] == 1
+
+
 def test_service_search_formats_mail_manifest_results(monkeypatch):
     manifest = {
         "subject": "YsTrader alert: shared market data unavailable",
@@ -193,6 +226,48 @@ def test_service_brief_prefers_current_lifecycle_evidence(monkeypatch):
 
     assert "Current Decision" in brief
     assert "Old Decision" not in brief
+
+
+def test_service_explain_returns_results_and_brief_selection_trace(monkeypatch):
+    def fake_search(_self, _query, limit=10, **_kwargs):
+        return [
+            {
+                "kind": "episode",
+                "id": "old",
+                "title": "Old Decision",
+                "summary": "Use the retired path.",
+                "score": 0.99,
+                "streams": ["lexical"],
+                "raw_scores": {"lexical": 0.8},
+                "snippet": {"text": "Use the retired path.", "matched_terms": [], "highlights": [], "source": "summary"},
+                "retrieval_explanation": {"score": 0.99, "streams": ["lexical"], "raw_scores": {"lexical": 0.8}, "scope": {"label": "global"}},
+                "lifecycle": {"state": "superseded", "current": False, "audit_visible": True},
+            },
+            {
+                "kind": "episode",
+                "id": "new",
+                "title": "Current Decision",
+                "summary": "Use the current retrieval path.",
+                "score": 0.5,
+                "streams": ["lexical"],
+                "raw_scores": {"lexical": 0.4},
+                "snippet": {"text": "Use the current retrieval path.", "matched_terms": ["retrieval"], "highlights": [], "source": "summary"},
+                "retrieval_explanation": {"score": 0.5, "streams": ["lexical"], "raw_scores": {"lexical": 0.4}, "scope": {"label": "global"}},
+                "lifecycle": {"state": "active", "current": True, "audit_visible": False},
+            },
+        ][:limit]
+
+    monkeypatch.setattr(KnowledgeService, "search", fake_search)
+
+    payload = KnowledgeService().explain("retrieval decision", limit=2, token_budget=30)
+
+    assert payload["query"] == "retrieval decision"
+    assert [result["id"] for result in payload["results"]] == ["old", "new"]
+    assert "Current Decision" in payload["brief"]["text"]
+    assert "Old Decision" not in payload["brief"]["text"]
+    assert [item["id"] for item in payload["brief"]["packed"]] == ["new"]
+    assert payload["brief"]["excluded"][0]["id"] == "old"
+    assert payload["brief"]["excluded"][0]["reason"] == "non_current"
 
 
 def test_service_search_preserves_lifecycle_and_graph_metadata(monkeypatch):

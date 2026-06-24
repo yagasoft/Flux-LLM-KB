@@ -33,7 +33,7 @@ scripts:
 | V2 Review And Visualization | in progress | React dashboard is the unified operational UI; graph browsing, claim lifecycle review, capture-review visibility, approval/rejection decisions, audit-visible rationales, retention policy tuning, and memory quality reporting exist. |
 | V2.5 Autonomous Corpus Expansion | in progress | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, broad file-type roadmap, structured diagram extraction, business document extractor expansion, and bounded archive/container member enumeration exist; deeper media parsing remains planned. |
 | V2.6 Mail Capture And Runtime Configuration | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, provider-specific post-processing, and consumer access exist; broader live-provider validation should continue. |
-| V2.7 Mail And Retrieval Production Hardening | in progress | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, provider-specific mail post-processing, and lock-tolerant indexing/watch states exist; retrieval explainability remains. |
+| V2.7 Mail And Retrieval Production Hardening | in progress | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, provider-specific mail post-processing, lock-tolerant indexing/watch states, query-aware snippets, and retrieval/brief explainability exist; configurable retrieval filters remain planned. |
 | V2.8 Indexer Acceleration And Local Inference Optimization | planned | Dedicated acceleration lane for GPU/local inference routing, local model-server routing, caches, bounded workers, OCR/ASR/vision batching, native watchers, vectorization throughput, and indexing benchmarks. |
 | V3 Scale And Evaluation | planned | Historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. |
 | V4 Collaboration And Transfer | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
@@ -114,7 +114,7 @@ scripts:
 | Logical related evidence | Archive members, mail attachments, embedded objects, and sidecars should appear under parent logical results. | in progress | Mail spool siblings and known child assets are grouped as related evidence. Archive and embedded-object grouping needs broader extractor support. | Extend related-evidence grouping as archive/container and embedded media extraction lands. |
 | Lock-tolerant indexing and cloud-sync coexistence | Read-only/shared access, temporary extraction snapshots, no exclusive file ownership, cloud-sync edge handling, optional VSS, and compatibility tests. | in progress | Watcher stability gating, `pending_stable`, `retrying_locked`, `blocked_locked`, retry/cooldown, VSS settings/capability reporting, and fallback to retry/cooldown exist. Actual VSS snapshot extraction and broad cloud-sync compatibility proof remain. | Validate OneDrive/SharePoint/Dropbox, open Office files, large writes, and editor save/rename patterns; then implement opt-in VSS extraction. |
 | Mail post-process hardening | Provider/profile-specific mailbox actions, explanatory dashboard copy, dry-run/audit records, and retry-safe handling. | shipped | Explicit policies now cover no-op, Gmail remove label, Gmail move label, Gmail trash, generic IMAP move, and confirmation-gated delete/expunge. Sync records post-process events, surfaces failures, preserves exported spool data, and avoids advancing the cursor past failed UIDs. | Continue live-provider validation and keep raw mail content out of audit views. |
-| Retrieval snippets and explainability | Query-aware snippets, highlighted terms, retrieval streams, raw ranks, source trust, freshness, duplicate/version suppression, lifecycle penalties, and configurable filters. | planned | Logical mail grouping exists, but query-aware snippets, highlighted terms, score/confidence separation, brief-packing rationale, automated-action rationale, and full explainability remain planned. | Add query-aware snippets and explainability for why evidence was packed, suppressed, deprioritized, escalated, or excluded after mail post-process hardening, unless V1 graph/lifecycle work blocks explanation quality. |
+| Retrieval snippets and explainability | Query-aware snippets, highlighted terms, retrieval streams, raw ranks, source trust, freshness, duplicate/version suppression, lifecycle penalties, and configurable filters. | in progress | Query-aware snippets, highlight ranges, search-result explanation metadata, and brief-packing traces are exposed through REST, MCP, CLI, and the dashboard. Configurable retrieval filters, deeper score/confidence separation, and automated-action rationale remain planned. | Add configurable filters and deeper explanation for suppression, deprioritization, escalation, and automated lifecycle actions after semantic duplicate foundations land. |
 | Scheduled sync and worker reliability | First-class IMAP scheduler state machine with claimed/running/completed/failed runs, drift, retry cooldown, auth blocks, ownership, missed-run reconciliation, and tests. | shipped | Claimable IMAP scheduled sync runs, lifecycle state, run history, drift/missed-run fields, owner/attempt metadata, health diagnostics, and dashboard scheduler counts are visible. | Continue live-provider validation for tight intervals across Gmail and standards-compliant IMAP providers. |
 | Error diagnostics and operator UX | Standard API error envelopes and dashboard alerts with code, severity, component, target metadata, retryability, user action, technical detail, and links. | in progress | Structured API error envelopes, dashboard actionable diagnostics, expandable details, copyable JSON, and navigation targets exist. Deeper operator debug views remain. | Add debug views for mail sync runs, retrieval explanations, watcher events, worker heartbeats, and post-process outcomes. |
 
@@ -156,17 +156,27 @@ scripts:
 
 ## Queued Work In Roadmap Order
 
-1. Continue V2.5 extractor expansion for OCR,
-   vision, ASR, embedded-media, recursive containers, and remaining specialized local-tool stages while adding semantic
-   near-duplicate foundations for corpus and derived memory clusters.
-2. Add V2.7 query-aware retrieval snippets, explainability, filters, and deeper
-   operator debug views, including lifecycle transparency for automated memory actions.
-3. Design and implement V2.8 acceleration: hardware detection, local inference
-   routing, local model-server support, permanent caches, bounded media/OCR/ASR workers, vector batching,
-   native watcher evaluation, and throughput telemetry.
-4. Add V3 retrieval benchmarks, shadow-mode librarian evaluation, automated
-   memory governance, local-only librarian workers, and exception-oriented
-   human escalation.
+1. Finish V2.7 retrieval explainability with configurable filters, deeper
+   operator debug views, and lifecycle transparency for suppressed,
+   deprioritized, escalated, or excluded evidence.
+2. Add semantic duplicate foundations for corpus chunks and derived memories:
+   near-duplicate clusters, canonical selection, explainable retrieval
+   suppression, and no automatic deletion.
+3. Design and implement the V2.8 acceleration foundation: hardware and local
+   model-server capability detection, permanent cache layout, worker-family
+   queues, resource caps, vector batching, native watcher evaluation, and
+   throughput telemetry.
+4. Build heavy extractor expansion on top of the V2.8 foundation: OCR/vision,
+   ASR, embedded-media parsing, recursive containers, and remaining specialized
+   local-tool stages.
+5. Add V3 retrieval benchmarks and governance evaluation: query sets, quality
+   metrics, shadow-mode librarian evaluation, and thresholds for automated
+   lifecycle actions.
+6. Add automation-first librarian workers for reversible low-risk stale tagging,
+   deprioritization, duplicate suppression, canonical cluster presentation,
+   audit recovery, and operator digests.
+7. Defer V4 collaboration/shared-vault design until single-user governance,
+   evaluation, and recovery flows are stable.
 
 ## Update Rules
 

@@ -34,6 +34,18 @@ def create_server():
         """Search Flux memory. Use scope_mode="workspace_boosted" for explicit expanded mid-turn discovery when local context is insufficient."""
         return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
 
+    @mcp.tool(name="kb.explain")
+    def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
+        """Search Flux memory and return query snippets, ranking signals, and brief-packing rationale."""
+        return service.explain(
+            query,
+            limit=limit,
+            token_budget=token_budget,
+            cwd=cwd,
+            root_name=root_name,
+            scope_mode=scope_mode,
+        )
+
     @mcp.tool(name="kb.brief")
     def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first"):
         """Build a compact brief. Default local_first keeps automatic context workspace scoped."""

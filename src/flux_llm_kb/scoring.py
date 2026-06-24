@@ -21,6 +21,13 @@ class ContextCandidate:
 
 
 @dataclass(frozen=True)
+class PackedContextResult:
+    text: str
+    packed: tuple[dict[str, float | int | str], ...]
+    excluded: tuple[dict[str, float | int | str], ...]
+
+
+@dataclass(frozen=True)
 class LifecycleScoreInput:
     confidence: float
     age_days: float
@@ -98,24 +105,46 @@ def lifecycle_score(signal: LifecycleScoreInput) -> LifecycleScoreResult:
 
 
 def pack_context(candidates: Iterable[ContextCandidate], token_budget: int) -> str:
+    return pack_context_with_trace(candidates, token_budget).text
+
+
+def pack_context_with_trace(candidates: Iterable[ContextCandidate], token_budget: int) -> PackedContextResult:
     if token_budget <= 0:
-        return ""
+        return PackedContextResult(text="", packed=(), excluded=())
 
     packed: list[str] = []
+    packed_trace: list[dict[str, float | int | str]] = []
+    excluded_trace: list[dict[str, float | int | str]] = []
     used = 0
     for candidate in sorted(candidates, key=lambda item: (-item.score, item.title, item.id)):
         block = f"### {candidate.title}\n{candidate.body.strip()}"
         cost = _estimate_tokens(block)
         if used + cost > token_budget:
+            excluded_trace.append(_candidate_trace(candidate, token_estimate=cost, reason="over_budget"))
             continue
         packed.append(block)
+        packed_trace.append(_candidate_trace(candidate, token_estimate=cost, reason="packed"))
         used += cost
 
-    return "\n\n".join(packed)
+    return PackedContextResult(
+        text="\n\n".join(packed),
+        packed=tuple(packed_trace),
+        excluded=tuple(excluded_trace),
+    )
 
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text.split()))
+
+
+def _candidate_trace(candidate: ContextCandidate, *, token_estimate: int, reason: str) -> dict[str, float | int | str]:
+    return {
+        "id": candidate.id,
+        "title": candidate.title,
+        "score": candidate.score,
+        "token_estimate": token_estimate,
+        "reason": reason,
+    }
 
 
 def _clamp(value: float) -> float:

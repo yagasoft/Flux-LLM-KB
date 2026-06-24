@@ -301,7 +301,31 @@ describe("Flux dashboard", () => {
     };
     crawlSyncErrorPayload = undefined;
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
-    searchPayload = [{ kind: "corpus_chunk", title: "Dashboard Operations", excerpt: "dashboard search result", score: 0.91 }];
+    searchPayload = [
+      {
+        kind: "corpus_chunk",
+        title: "Dashboard Operations",
+        excerpt: "dashboard search result",
+        score: 0.91,
+        snippet: {
+          text: "Dashboard search result with highlighted operations.",
+          matched_terms: ["dashboard", "operations"],
+          highlights: [
+            { term: "dashboard", start: 0, end: 9 },
+            { term: "operations", start: 41, end: 51 }
+          ],
+          source: "summary",
+          source_path: "docs/operations.md"
+        },
+        retrieval_explanation: {
+          score: 0.91,
+          streams: ["corpus_lexical", "corpus_vector"],
+          raw_scores: { corpus_lexical: 0.7, corpus_vector: 0.3 },
+          scope: { label: "local", root_name: "docs" },
+          corpus: { source_path: "docs/operations.md", root_name: "docs", trust_rank: 450, duplicate_count: 0, related_evidence_count: 0 }
+        }
+      }
+    ];
     reviewPayload = {
       counts: {
         total: 2,
@@ -1304,6 +1328,10 @@ describe("Flux dashboard", () => {
 
     await user.type(screen.getByLabelText("Dashboard search"), "dashboard{enter}");
     expect(await screen.findByText("Dashboard Operations")).toBeInTheDocument();
+    expect(screen.getByText("Dashboard search result with highlighted operations.")).toBeInTheDocument();
+    await user.click(screen.getByText("Why this result"));
+    expect(screen.getByText("Corpus Lexical, Corpus Vector")).toBeInTheDocument();
+    expect(screen.getByText("local")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "View error ffprobe command not found" }));
     expect(screen.getByRole("dialog", { name: "Error detail" })).toHaveTextContent("ffprobe command not found");

@@ -59,6 +59,14 @@ def create_app():
         root_name: str | None = None
         scope_mode: str = "local_first"
 
+    class ExplainRequest(BaseModel):
+        query: str
+        limit: int = 5
+        token_budget: int | None = None
+        cwd: str | None = None
+        root_name: str | None = None
+        scope_mode: str = "local_first"
+
     class ClaimRequest(BaseModel):
         subject_type: str
         subject: str
@@ -279,6 +287,35 @@ def create_app():
                 scope_mode=scope_mode,
             )
         }
+
+    @app.post("/api/explain")
+    def explain(request: ExplainRequest = Body(...)):
+        return service.explain(
+            request.query,
+            limit=request.limit,
+            token_budget=request.token_budget,
+            cwd=request.cwd,
+            root_name=request.root_name,
+            scope_mode=request.scope_mode,
+        )
+
+    @app.get("/api/explain")
+    def explain_get(
+        query: str,
+        limit: int = 5,
+        token_budget: int | None = None,
+        cwd: str | None = None,
+        root_name: str | None = None,
+        scope_mode: str = "local_first",
+    ):
+        return service.explain(
+            query,
+            limit=limit,
+            token_budget=token_budget,
+            cwd=cwd,
+            root_name=root_name,
+            scope_mode=scope_mode,
+        )
 
     @app.post("/api/claims")
     def claim_upsert(request: ClaimRequest = Body(...)):

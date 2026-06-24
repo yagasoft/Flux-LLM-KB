@@ -30,6 +30,14 @@ def main(argv: list[str] | None = None) -> int:
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=5)
 
+    explain_parser = subparsers.add_parser("explain", help="Search with snippets, ranking signals, and brief packing rationale")
+    explain_parser.add_argument("query")
+    explain_parser.add_argument("--limit", type=int, default=5)
+    explain_parser.add_argument("--token-budget", type=int)
+    explain_parser.add_argument("--cwd")
+    explain_parser.add_argument("--root-name")
+    explain_parser.add_argument("--scope-mode", default="local_first")
+
     remember_parser = subparsers.add_parser("remember", help="Store a manual memory")
     remember_parser.add_argument("title")
     remember_parser.add_argument("body")
@@ -304,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
         "migrate": _migrate,
         "status": _status,
         "search": _search,
+        "explain": _explain,
         "remember": _remember,
         "episodes": _episodes,
         "claim": _claim,
@@ -365,6 +374,25 @@ def _search(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
     print(json.dumps(KnowledgeService().search(args.query, limit=args.limit), indent=2))
+    return 0
+
+
+def _explain(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    print(
+        json.dumps(
+            KnowledgeService().explain(
+                args.query,
+                limit=args.limit,
+                token_budget=args.token_budget,
+                cwd=args.cwd,
+                root_name=args.root_name,
+                scope_mode=args.scope_mode,
+            ),
+            indent=2,
+        )
+    )
     return 0
 
 

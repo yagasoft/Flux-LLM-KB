@@ -55,6 +55,53 @@ def test_cli_search_uses_service_search(monkeypatch, capsys):
     assert payload == [{"kind": "corpus_chunk", "title": "dashboard", "limit": 2}]
 
 
+def test_cli_explain_uses_service_explain(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    class FakeService:
+        def explain(self, query, limit=5, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+            return {
+                "query": query,
+                "limit": limit,
+                "token_budget": token_budget,
+                "cwd": cwd,
+                "root_name": root_name,
+                "scope_mode": scope_mode,
+            }
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "explain",
+                "dashboard",
+                "--limit",
+                "2",
+                "--token-budget",
+                "900",
+                "--cwd",
+                "E:/Repo",
+                "--root-name",
+                "repo",
+                "--scope-mode",
+                "local_only",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload == {
+        "query": "dashboard",
+        "limit": 2,
+        "token_budget": 900,
+        "cwd": "E:/Repo",
+        "root_name": "repo",
+        "scope_mode": "local_only",
+    }
+
+
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     from flux_llm_kb import service
 

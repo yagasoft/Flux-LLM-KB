@@ -5,6 +5,7 @@ from flux_llm_kb.scoring import (
     LifecycleScoreInput,
     lifecycle_score,
     pack_context,
+    pack_context_with_trace,
     reciprocal_rank_fusion,
 )
 
@@ -115,3 +116,18 @@ def test_pack_context_respects_budget_and_orders_by_score():
     assert "High" in packed
     assert packed.index("High") < packed.index("Mid")
     assert "Low" not in packed
+
+
+def test_pack_context_with_trace_records_packed_and_over_budget_items():
+    candidates = [
+        ContextCandidate(id="low", title="Low", body="one two three", score=0.1),
+        ContextCandidate(id="high", title="High", body="alpha beta gamma", score=0.9),
+        ContextCandidate(id="long", title="Long", body=" ".join(["word"] * 30), score=0.8),
+    ]
+
+    result = pack_context_with_trace(candidates, token_budget=9)
+
+    assert "High" in result.text
+    assert [item["id"] for item in result.packed] == ["high"]
+    assert result.excluded[0]["id"] == "long"
+    assert result.excluded[0]["reason"] == "over_budget"

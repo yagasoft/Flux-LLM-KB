@@ -17,6 +17,7 @@ Tools:
 | Tool | Purpose |
 | --- | --- |
 | `kb.search` | Search Flux memory and corpus evidence, optionally scoped by workspace/root. |
+| `kb.explain` | Search with query-aware snippets, ranking signals, and brief-packing rationale. |
 | `kb.brief` | Build a compact task brief for non-trivial work. |
 | `kb.remember` | Store a concise redacted durable atomic save with optional workspace provenance. |
 | `kb.finalize_turn` | Store a redacted end-of-turn summary for meaningful agent work. |
@@ -81,6 +82,8 @@ Endpoints:
 - `GET /api/search?query=<q>&limit=<n>`
 - `POST /api/brief`
 - `GET /api/brief?query=<q>&token_budget=<n>`
+- `POST /api/explain`
+- `GET /api/explain?query=<q>&limit=<n>&token_budget=<n>`
 - `GET /api/claims?review=<all|needs_review|current>&state=<state>&q=<q>&limit=<n>`
 - `POST /api/claims`
 - `GET /api/claims/{claim_id}`
@@ -101,13 +104,16 @@ External consumers should use one of three read paths:
 
 - REST for simple tools and scripts:
   `GET /api/search?query=customer%20RFP&limit=5` or
-  `GET /api/brief?query=customer%20RFP&token_budget=1200`.
-- MCP for agent runtimes: `kb.search`/`kb.brief` in raw MCP clients, or Codex
+  `GET /api/brief?query=customer%20RFP&token_budget=1200`. Use
+  `GET /api/explain?query=customer%20RFP&limit=5` when a consumer needs snippets,
+  ranking signals, and the brief-packing trace.
+- MCP for agent runtimes: `kb.search`/`kb.explain`/`kb.brief` in raw MCP clients, or Codex
   wrapper names such as `mcp__flux_llm_kb.kb_search` and
-  `mcp__flux_llm_kb.kb_brief`.
-- CLI for local shell automation: `flux-kb search "customer RFP" --limit 5`.
+  `mcp__flux_llm_kb.kb_explain` and `mcp__flux_llm_kb.kb_brief`.
+- CLI for local shell automation: `flux-kb search "customer RFP" --limit 5` or
+  `flux-kb explain "customer RFP" --limit 5`.
 
-Search and brief reads accept optional `cwd`, `root_name`, and `scope_mode`
+Search, explain, and brief reads accept optional `cwd`, `root_name`, and `scope_mode`
 parameters. `scope_mode=local_first` is the default: Flux searches matching
 workspace/root evidence first, then falls back to global memory only when local
 results have no lexical or fuzzy evidence. Use `local_only` to forbid global

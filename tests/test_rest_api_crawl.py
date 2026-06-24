@@ -390,6 +390,72 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
     }
 
 
+def test_get_and_post_explain_support_external_consumers(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def explain(self, query, limit=5, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+            calls.append(
+                {
+                    "query": query,
+                    "limit": limit,
+                    "token_budget": token_budget,
+                    "cwd": cwd,
+                    "root_name": root_name,
+                    "scope_mode": scope_mode,
+                }
+            )
+            return {
+                "query": query,
+                "results": [{"kind": "corpus_chunk", "query": query, "limit": limit}],
+                "brief": {"text": f"{query}:{token_budget}", "token_budget": token_budget, "packed": [], "excluded": []},
+            }
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    get_response = client.get(
+        "/api/explain",
+        params={
+            "query": "RFP",
+            "limit": 3,
+            "token_budget": 900,
+            "cwd": "E:/Repo",
+            "root_name": "repo",
+            "scope_mode": "local_only",
+        },
+    )
+    post_response = client.post(
+        "/api/explain",
+        json={"query": "Roadmap", "limit": 2, "token_budget": 700, "scope_mode": "workspace_boosted"},
+    )
+
+    assert get_response.status_code == 200
+    assert get_response.json()["brief"]["text"] == "RFP:900"
+    assert post_response.status_code == 200
+    assert post_response.json()["results"][0] == {"kind": "corpus_chunk", "query": "Roadmap", "limit": 2}
+    assert calls == [
+        {
+            "query": "RFP",
+            "limit": 3,
+            "token_budget": 900,
+            "cwd": "E:/Repo",
+            "root_name": "repo",
+            "scope_mode": "local_only",
+        },
+        {
+            "query": "Roadmap",
+            "limit": 2,
+            "token_budget": 700,
+            "cwd": None,
+            "root_name": None,
+            "scope_mode": "workspace_boosted",
+        },
+    ]
+
+
 def test_post_search_and_brief_accept_scope_fields(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
