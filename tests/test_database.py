@@ -1484,6 +1484,51 @@ def test_complete_corpus_job_clears_previous_error(monkeypatch):
     assert "last_error = NULL" in sql
 
 
+def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("job-1", "pending", 0)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.requeue_corpus_job(job_id="job-1", reason="operator retry")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"job_id": "job-1", "status": "pending", "attempts": 0}
+    assert "status = 'pending'" in sql
+    assert "attempts = 0" in sql
+    assert "next_attempt_at = now()" in sql
+    assert "last_error = NULL" in sql
+    assert "locked_at = NULL" in sql
+    assert "status IN ('failed', 'blocked_missing_dependency', 'blocked_locked', 'retrying_locked')" in sql
+    assert executed[0][1] == ("operator retry", "job-1")
+
+
 def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
     executed = []
 

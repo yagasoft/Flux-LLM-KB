@@ -394,6 +394,81 @@ def test_backfill_passes_configured_worker_family_caps(monkeypatch):
     assert claim_calls[0]["family_caps"]["media"] == 3
 
 
+def test_backfill_accepts_exact_worker_family(monkeypatch):
+    claim_calls = []
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: claim_calls.append(
+            {"root_name": root_name, "job_families": job_families}
+        )
+        or [],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **_kwargs: {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **_kwargs: {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    result = KnowledgeService().run_corpus_backfill(kind="office", limit=2, workers=1, root_name="docs")
+
+    assert result["root_name"] == "docs"
+    assert result["job_families"] == ["office"]
+    assert claim_calls == [{"root_name": "docs", "job_families": ["office"]}]
+
+
+def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
+    calls = []
+    monkeypatch.setattr(database, "requeue_corpus_job", lambda **kwargs: calls.append(("retry", kwargs)) or {"job_id": kwargs["job_id"], "status": "pending"})
+    monkeypatch.setattr(database, "record_audit_event", lambda **kwargs: calls.append(("audit", kwargs)) or {"id": "audit-1"})
+
+    retry = KnowledgeService().remediate_diagnostic(
+        action="retry_corpus_job",
+        target_type="job",
+        target_id="job-1",
+        root_name="docs",
+        family="office",
+        reason="operator retry",
+        actor="cli",
+    )
+
+    assert retry["settings_mutated"] is False
+    assert retry["action"] == "retry_corpus_job"
+    assert retry["result"] == {"job_id": "job-1", "status": "pending"}
+    assert calls[0] == (
+        "retry",
+        {"job_id": "job-1", "reason": "operator retry"},
+    )
+    assert calls[1][0] == "audit"
+    assert calls[1][1]["event_type"] == "diagnostics.remediation"
+    assert calls[1][1]["details"]["action"] == "retry_corpus_job"
+
+    monkeypatch.setattr(KnowledgeService, "run_corpus_backfill", lambda self, **kwargs: {"backfill": kwargs})
+    backfill = KnowledgeService().remediate_diagnostic(
+        action="run_backfill",
+        target_type="family",
+        target_id="office",
+        root_name="docs",
+        family="office",
+        reason="operator backfill",
+    )
+
+    assert backfill["result"] == {"backfill": {"kind": "office", "limit": 10, "workers": 1, "root_name": "docs"}}
+
+
+def test_service_remediate_diagnostic_requires_scoped_backfill_and_cleanup():
+    with pytest.raises(ValueError, match="root_name and exact worker family"):
+        KnowledgeService().remediate_diagnostic(
+            action="run_backfill",
+            target_type="family",
+            target_id="office",
+            family="office",
+        )
+
+    with pytest.raises(ValueError, match="requires root_name"):
+        KnowledgeService().remediate_diagnostic(action="repair_asset_statuses", target_type="root")
+
+
 def test_benchmark_run_uses_synthetic_fixtures_and_records_history(monkeypatch):
     recorded = []
     monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-1", "fixture": kwargs["fixture"]})

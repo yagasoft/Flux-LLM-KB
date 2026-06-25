@@ -43,6 +43,7 @@ class BackfillRequest(BaseModel):
     limit: int = 10
     workers: int = 1
     root_name: str | None = None
+    family: str | None = None
 
 
 class BenchmarkRequest(BaseModel):
@@ -397,12 +398,15 @@ def create_app(*, start_watcher: bool = False):
 
     @app.post("/crawl/backfill")
     def crawl_backfill(req: BackfillRequest = Body(...)):
-        return _service().run_corpus_backfill(
-            kind=req.kind,
-            limit=req.limit,
-            workers=req.workers,
-            root_name=req.root_name,
-        )
+        kwargs: dict[str, Any] = {
+            "kind": req.kind,
+            "limit": req.limit,
+            "workers": req.workers,
+            "root_name": req.root_name,
+        }
+        if req.family is not None:
+            kwargs["family"] = req.family
+        return _service().run_corpus_backfill(**kwargs)
 
     @app.post("/acceleration/benchmarks/run")
     def benchmark_run(req: BenchmarkRequest = Body(...)):
@@ -508,13 +512,17 @@ def remote_backfill(
     limit: int = 10,
     workers: int = 1,
     root_name: str | None = None,
+    family: str | None = None,
     agent_url: str | None = None,
 ) -> dict[str, Any]:
+    payload: dict[str, Any] = {"kind": kind, "limit": limit, "workers": workers, "root_name": root_name}
+    if family is not None:
+        payload["family"] = family
     try:
         return _request_json(
             "POST",
             f"{_agent_url(agent_url)}/crawl/backfill",
-            {"kind": kind, "limit": limit, "workers": workers, "root_name": root_name},
+            payload,
             timeout=HOST_AGENT_BACKFILL_TIMEOUT_SECONDS,
         )
     except HostAgentClientError as exc:

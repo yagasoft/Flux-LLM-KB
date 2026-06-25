@@ -220,6 +220,7 @@ def create_app():
         limit: int = 10
         workers: int = 1
         root_name: str | None = None
+        family: str | None = None
 
     class BenchmarkRunRequest(BaseModel):
         fixture: str = "all"
@@ -260,6 +261,14 @@ def create_app():
         expected_symbol: str | None = None
         path: str | None = None
         metadata: dict | None = None
+
+    class DiagnosticsActionRequest(BaseModel):
+        action: str
+        target_type: str
+        target_id: str | None = None
+        root_name: str | None = None
+        family: str | None = None
+        reason: str = "operator diagnostic remediation"
 
     class SettingUpdateRequest(BaseModel):
         value: object
@@ -534,6 +543,18 @@ def create_app():
     @app.get("/api/code/feedback/summary")
     def code_feedback_summary(root_name: str | None = None, limit: int = 20):
         return service.code_feedback_summary(root_name=root_name, limit=limit)
+
+    @app.post("/api/diagnostics/actions")
+    def diagnostics_action(request: DiagnosticsActionRequest = Body(...)):
+        return service.remediate_diagnostic(
+            action=request.action,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            root_name=request.root_name,
+            family=request.family,
+            reason=request.reason,
+            actor="api",
+        )
 
     @app.get("/api/diagnostics/{section}")
     def operational_diagnostics(
@@ -1177,6 +1198,8 @@ def create_app():
     @app.post("/api/crawl/backfill")
     def crawl_backfill(request: CrawlBackfillRequest = Body(...)):
         kwargs: dict[str, object] = {"kind": request.kind, "limit": request.limit, "workers": request.workers}
+        if request.family is not None:
+            kwargs["family"] = request.family
         if request.root_name is not None:
             kwargs["root_name"] = request.root_name
             if _should_proxy_host_root(request.root_name):
@@ -1427,8 +1450,9 @@ def host_agent_backfill(
     limit: int = 10,
     workers: int = 1,
     root_name: str | None = None,
+    family: str | None = None,
 ) -> dict:
-    return remote_backfill(kind=kind, limit=limit, workers=workers, root_name=root_name)
+    return remote_backfill(kind=kind, limit=limit, workers=workers, root_name=root_name, family=family)
 
 
 def host_agent_benchmark(

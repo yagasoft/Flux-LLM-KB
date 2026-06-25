@@ -165,9 +165,12 @@ Large structured files use sample-first indexing before any full-file backfill.
 For CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbook files, oversized
 inputs produce a bounded schema/profile/sample chunk plus metadata such as
 columns, row-count estimate, sample row count, parse status, source format,
-sheet count where applicable, and truncation state. The sample-first path avoids
-returning full tail rows or raw private dumps while still making large data
-assets discoverable and diagnosable.
+sheet count where applicable, and truncation state. Legacy Excel and
+OpenDocument spreadsheet adapters that convert through LibreOffice preserve the
+source and converted extensions, then use the same sample-first workbook
+profiling when the converted workbook is oversized. The sample-first path
+avoids returning full tail rows or raw private dumps while still making large
+data assets discoverable and diagnosable.
 
 When the API/dashboard is Docker-hosted, arbitrary Windows/macOS/Linux host
 paths are accessed through a separate local host agent (`flux-kb host-agent run`).
@@ -363,15 +366,20 @@ retrieval feedback records only hashed/sanitized miss evidence and appears in
 `code status` as `feedback_summary`, `gaps[]`, and retrieval benchmark summary
 metadata when available.
 
-Operational diagnostics are also read-only. They aggregate retrieval explain
-traces, watcher events, worker heartbeat/history, slow jobs, blocked
-dependencies, mail sync runs, and mail post-process events into bounded
-dashboard/API evidence summaries rather than raw log dumps. Diagnostic payloads
-support `root_name`, `status`, `family`, `since_hours`, and `include_details`
-filters and include standardized read-only items with section, severity, status,
-root name, summary, bounded evidence, follow-up command, and dashboard target
-metadata. Raw mail bodies, private paths, credentials, embeddings, and runtime
-dumps remain out of public-safe surfaces.
+Operational diagnostics aggregate retrieval explain traces, watcher events,
+worker heartbeat/history, slow jobs, blocked dependencies, mail sync runs, and
+mail post-process events into bounded dashboard/API evidence summaries rather
+than raw log dumps. Diagnostic payloads support `root_name`, `status`, `family`,
+`since_hours`, and `include_details` filters and include standardized evidence
+items with section, severity, status, root name, summary, bounded evidence,
+follow-up command, dashboard target metadata, and optional sanitized
+`remediation_actions[]`. Remediation actions are confirmation-gated public
+contracts for retrying eligible corpus jobs, running scoped root/family
+backfill, repairing root-scoped asset statuses, or clearing stale completed-job
+errors. They execute through REST, CLI, or MCP, append audit events, and always
+report `settings_mutated: false`; they do not mutate runtime settings or expose
+raw host paths. Raw mail bodies, private paths, credentials, embeddings, and
+runtime dumps remain out of public-safe surfaces.
 
 `scan` mode creates temporary fixtures or aggregate real-root dry-runs and can
 run multiple passes; pass 1 is recorded as `cold`, later passes reuse an
@@ -404,6 +412,8 @@ flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
 flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
+flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
+flux-kb crawl backfill --root docs --family office --limit 20
 ```
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
@@ -413,8 +423,9 @@ bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
 The Health tab includes the operator evidence gate panel, acceleration all-root
 reliability matrix, code diagnostics with feedback capture, and filtered
-operational diagnostics panels so operators can inspect evidence without
-reading raw logs.
+operational diagnostics panels. Diagnostic rows expose bounded evidence,
+follow-up commands, and confirmation-gated remediation buttons where the service
+has a safe scoped recovery action.
 
 REST errors preserve a readable `detail`/`message` string for existing clients
 and also include a structured `error` envelope for operators. Envelopes carry a

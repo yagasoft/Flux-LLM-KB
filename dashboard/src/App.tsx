@@ -283,7 +283,7 @@ type OperationalDiagnostics = {
   section?: string;
   settings_mutated?: boolean;
   counts?: Record<string, number>;
-  items?: Array<{ section?: string; severity?: string; status?: string; root_name?: string; summary?: string; follow_up_command?: string }>;
+  items?: DiagnosticItem[];
   sections?: {
     retrieval?: { recent_explains?: Array<Record<string, unknown>> };
     watcher?: { events?: Array<Record<string, unknown>> };
@@ -291,6 +291,30 @@ type OperationalDiagnostics = {
     jobs?: { jobs?: Array<Record<string, unknown>> };
     mail?: { sync_runs?: Array<Record<string, unknown>>; post_process_events?: Array<Record<string, unknown>> };
   };
+};
+
+type DiagnosticAction = {
+  id?: string;
+  label?: string;
+  target?: { type?: string; id?: string };
+  method?: string;
+  endpoint?: string;
+  payload?: Record<string, unknown>;
+  requires_confirmation?: boolean;
+  destructive?: boolean;
+  settings_mutated?: boolean;
+};
+
+type DiagnosticItem = {
+  section?: string;
+  severity?: string;
+  status?: string;
+  family?: string;
+  root_name?: string;
+  summary?: string;
+  evidence?: Record<string, unknown>;
+  follow_up_command?: string;
+  remediation_actions?: DiagnosticAction[];
 };
 
 type RetrievalBenchmarkCaseResult = {
@@ -2086,6 +2110,7 @@ function OperationalDiagnosticsPanel() {
   const [statusFilter, setStatusFilter] = useState("blocked_missing_dependency");
   const [familyFilter, setFamilyFilter] = useState("office");
   const [includeDetails, setIncludeDetails] = useState(true);
+  const [actionStatus, setActionStatus] = useState("");
   const loadDiagnostics = useCallback(() => {
     const params = new URLSearchParams();
     if (rootFilter) params.set("root_name", rootFilter);
@@ -2097,6 +2122,17 @@ function OperationalDiagnosticsPanel() {
       setDiagnostics(payload);
     });
   }, [familyFilter, includeDetails, rootFilter, statusFilter]);
+  const runDiagnosticAction = useCallback(async (action: DiagnosticAction) => {
+    if (action.requires_confirmation && !window.confirm(`Run ${action.label ?? action.id ?? "diagnostic action"}?`)) return;
+    setActionStatus("Running diagnostic action...");
+    try {
+      await sendJson<Record<string, unknown>>(action.endpoint ?? "/api/diagnostics/actions", action.method ?? "POST", action.payload ?? {});
+      setActionStatus(`${action.label ?? action.id ?? "Diagnostic action"} finished.`);
+      await loadDiagnostics();
+    } catch (error) {
+      setActionStatus(`Diagnostic action failed: ${errorMessage(error)}`);
+    }
+  }, [loadDiagnostics]);
   useEffect(() => {
     let cancelled = false;
     getJson<OperationalDiagnostics>("/api/diagnostics/all", { section: "all", counts: {}, sections: {}, items: [] }).then((payload) => {
@@ -2108,11 +2144,7 @@ function OperationalDiagnosticsPanel() {
   }, []);
   const counts = diagnostics?.counts ?? {};
   const workerFamilies = diagnostics?.sections?.workers?.families ?? [];
-  const itemRows = (diagnostics?.items ?? []).slice(0, 5).map((item) => [
-    item.section ?? "section",
-    humanizeIdentifier(item.severity ?? "info"),
-    item.summary ?? item.follow_up_command ?? "diagnostic"
-  ] as [string, string, string]);
+  const diagnosticItems = (diagnostics?.items ?? []).slice(0, 8);
   const rows: MiniTableRow[] = [
     ["Watcher events", "recent", String(counts.watcher_events ?? 0)],
     ["Worker families", "status", String(counts.worker_families ?? 0)],
@@ -2138,7 +2170,41 @@ function OperationalDiagnosticsPanel() {
         <button className="ghost-action compact" type="button" onClick={() => void loadDiagnostics()}>Apply diagnostic filters</button>
       </div>
       <MiniTable rows={rows} />
-      {itemRows.length > 0 && <MiniTable rows={itemRows} />}
+      {diagnosticItems.length > 0 && (
+        <div className="diagnostics-list">
+          {diagnosticItems.map((item, index) => (
+            <div className="diagnostic-card" key={`${item.section ?? "item"}-${item.status ?? "status"}-${index}`}>
+              <div className="diagnostic-head">
+                <span className={`severity ${item.severity ?? "info"}`}>{humanizeIdentifier(item.severity ?? "info")}</span>
+                <strong>{item.summary ?? item.follow_up_command ?? "Diagnostic item"}</strong>
+              </div>
+              <div className="diagnostic-meta">
+                <span>{item.section ?? "section"}</span>
+                <span>{item.status ?? "status"}</span>
+                {item.root_name && <span>{item.root_name}</span>}
+                {item.family && <span>{item.family}</span>}
+              </div>
+              {includeDetails && item.evidence && <code>{JSON.stringify(item.evidence)}</code>}
+              {item.follow_up_command && <p className="muted">{item.follow_up_command}</p>}
+              {(item.remediation_actions ?? []).length > 0 && (
+                <div className="row-actions">
+                  {(item.remediation_actions ?? []).map((action) => (
+                    <button
+                      className="ghost-action compact"
+                      key={action.id ?? action.label}
+                      type="button"
+                      onClick={() => void runDiagnosticAction(action)}
+                    >
+                      {action.label ?? humanizeIdentifier(action.id ?? "action")}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {actionStatus && <p className="muted">{actionStatus}</p>}
       {workerRows.length > 0 ? <MiniTable rows={workerRows} /> : <p className="muted">No worker diagnostic rows yet.</p>}
     </Panel>
   );

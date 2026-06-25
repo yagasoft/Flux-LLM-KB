@@ -67,6 +67,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.acceleration_status")' in source
     assert '@mcp.tool(name="kb.watch_probe")' in source
     assert '@mcp.tool(name="kb.worker_status")' in source
+    assert '@mcp.tool(name="kb.crawl_backfill")' in source
     assert '@mcp.tool(name="kb.benchmark_run")' in source
     assert '@mcp.tool(name="kb.benchmark_history")' in source
     assert '@mcp.tool(name="kb.indexer_reliability_status")' in source
@@ -80,6 +81,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.code_feedback_record")' in source
     assert '@mcp.tool(name="kb.code_feedback_summary")' in source
     assert '@mcp.tool(name="kb.operational_diagnostics")' in source
+    assert '@mcp.tool(name="kb.diagnostics_remediate")' in source
     assert '@mcp.tool(name="kb.retrieval_benchmark_run")' in source
     assert '@mcp.tool(name="kb.retrieval_benchmark_history")' in source
     assert '@mcp.tool(name="kb.embeddings_status")' in source
@@ -92,6 +94,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def acceleration_status()" in source
     assert "def watch_probe(timeout_seconds: float = 2.0)" in source
     assert "def worker_status(family: str = \"all\")" in source
+    assert "def crawl_backfill(kind: str = \"all\", limit: int = 10, workers: int = 1, root_name: str | None = None, family: str | None = None)" in source
     assert 'def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all", scope: str = "synthetic", root_name: str | None = None, path: str | None = None, max_files: int | None = None, deployment_label: str | None = None, scenario: str = "standard", include_model_probe: bool = False)' in source
     assert "def benchmark_history(fixture: str | None = None, mode: str | None = None, label: str | None = None, warm_state: str | None = None, scope_type: str | None = None, deployment_label: str | None = None, scenario: str | None = None, scope_hash: str | None = None, freshness_hours: int | None = None, limit: int = 20)" in source
     assert "def indexer_reliability_status(root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, compare_label: str | None = None, freshness_hours: int = 336, limit: int = 100)" in source
@@ -105,6 +108,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def code_feedback_record(query: str, root_name: str | None = None, result_count: int = 0, surface: str = \"mcp\", miss_category: str = \"other\", expected_symbol: str | None = None, path: str | None = None)" in source
     assert "def code_feedback_summary(root_name: str | None = None, limit: int = 20)" in source
     assert "def operational_diagnostics(section: str = \"all\", limit: int = 25, root_name: str | None = None, status: str | None = None, family: str | None = None, since_hours: int | None = None, include_details: bool = False)" in source
+    assert "def diagnostics_remediate(action: str, target_type: str, target_id: str | None = None, root_name: str | None = None, family: str | None = None, reason: str = \"operator diagnostic remediation\")" in source
     assert 'def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True)' in source
     assert 'def retrieval_benchmark_history(suite: str | None = None, label: str | None = None, limit: int = 20)' in source
     assert "confidence bands, calibration candidates, and metric deltas" in source

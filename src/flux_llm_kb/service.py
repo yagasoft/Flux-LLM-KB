@@ -2032,11 +2032,13 @@ class KnowledgeService:
         workers: int = 1,
         root_name: str | None = None,
         host_agent_roots: bool | None = None,
+        family: str | None = None,
     ) -> dict[str, Any]:
         from . import worker
 
         cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
-        job_families = kind_to_job_families(kind)
+        effective_kind = family or kind
+        job_families = kind_to_job_families(effective_kind)
         claim_kwargs: dict[str, Any] = {
             "limit": limit,
             "worker_id": f"flux-kb-backfill-{workers}",
@@ -2109,7 +2111,7 @@ class KnowledgeService:
         database.record_audit_event(
             event_type="corpus.backfill",
             details={
-                "kind": kind,
+                "kind": effective_kind,
                 "job_families": list(job_families) if job_families else None,
                 "root_name": root_name,
                 "host_agent_roots": host_agent_roots,
@@ -2124,7 +2126,7 @@ class KnowledgeService:
             },
         )
         return {
-            "kind": kind,
+            "kind": effective_kind,
             "job_families": list(job_families) if job_families else None,
             "root_name": root_name,
             "host_agent_roots": host_agent_roots,
@@ -2136,6 +2138,64 @@ class KnowledgeService:
             "repaired_assets": repaired["repaired"],
             "cleared_completed_errors": cleared_errors["cleared"],
             "jobs": claimed,
+        }
+
+    def remediate_diagnostic(
+        self,
+        *,
+        action: str,
+        target_type: str,
+        target_id: str | None = None,
+        root_name: str | None = None,
+        family: str | None = None,
+        reason: str = "operator diagnostic remediation",
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        normalized_action = str(action or "").strip().lower()
+        normalized_target_type = str(target_type or "").strip().lower()
+        clean_reason = str(reason or "operator diagnostic remediation").strip() or "operator diagnostic remediation"
+        if normalized_action == "retry_corpus_job":
+            if normalized_target_type != "job" or not target_id:
+                raise ValueError("retry_corpus_job requires target_type=job and target_id")
+            result = database.requeue_corpus_job(job_id=target_id, reason=clean_reason)
+        elif normalized_action == "run_backfill":
+            effective_family = family or (target_id if normalized_target_type == "family" else None)
+            if not root_name or not effective_family:
+                raise ValueError("run_backfill requires root_name and exact worker family")
+            result = self.run_corpus_backfill(kind=effective_family, limit=10, workers=1, root_name=root_name)
+        elif normalized_action == "repair_asset_statuses":
+            if not root_name:
+                raise ValueError("repair_asset_statuses requires root_name")
+            result = database.repair_extracted_corpus_asset_statuses(root_name=root_name)
+        elif normalized_action == "clear_completed_errors":
+            if not root_name:
+                raise ValueError("clear_completed_errors requires root_name")
+            result = database.clear_completed_corpus_job_errors(root_name=root_name)
+        else:
+            raise ValueError("diagnostic remediation action must be retry_corpus_job, run_backfill, repair_asset_statuses, or clear_completed_errors")
+        audit_event = database.record_audit_event(
+            event_type="diagnostics.remediation",
+            target_table=normalized_target_type or None,
+            target_id=target_id,
+            details={
+                "action": normalized_action,
+                "actor": actor,
+                "target_type": normalized_target_type,
+                "target_id": target_id,
+                "root_name": root_name,
+                "family": family,
+                "reason": clean_reason,
+                "settings_mutated": False,
+            },
+        )
+        return {
+            "settings_mutated": False,
+            "action": normalized_action,
+            "target": {"type": normalized_target_type, "id": target_id},
+            "root_name": root_name,
+            "family": family,
+            "result": result,
+            "audit_event": audit_event,
         }
 
     def run_corpus_worker(

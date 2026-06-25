@@ -339,6 +339,7 @@ let reliabilityRunPayload: unknown;
 let codeFeedbackPayload: unknown;
 let retrievalBenchmarkRunPayload: unknown;
 let retrievalBenchmarkHistoryPayload: unknown;
+let diagnosticsActionPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -510,6 +511,7 @@ describe("Flux dashboard", () => {
     reliabilityRunPayload = undefined;
     codeFeedbackPayload = undefined;
     retrievalBenchmarkRunPayload = undefined;
+    diagnosticsActionPayload = undefined;
     retrievalBenchmarkHistoryPayload = {
       suite: "standard",
       runs: [
@@ -733,8 +735,43 @@ describe("Flux dashboard", () => {
           settings_mutated: false,
           counts: { watcher_events: 2, worker_families: 1, blocked_jobs: 1, mail_sync_runs: 3 },
           sections: { workers: { families: [{ family: "office", pending: 2, blocked_locked: 1 }] } },
-          items: [{ section: "jobs", severity: "warning", status: "blocked_missing_dependency", root_name: "docs", summary: "Job job-1 is blocked.", follow_up_command: "flux-kb crawl worker status --family office" }]
+          items: [
+            {
+              section: "jobs",
+              severity: "warning",
+              status: "blocked_missing_dependency",
+              root_name: "docs",
+              family: "office",
+              summary: "Job job-1 is blocked.",
+              follow_up_command: "flux-kb crawl worker status --family office",
+              evidence: { status: "blocked_missing_dependency" },
+              remediation_actions: [
+                {
+                  id: "retry_corpus_job",
+                  label: "Retry corpus job",
+                  target: { type: "job", id: "job-1" },
+                  method: "POST",
+                  endpoint: "/api/diagnostics/actions",
+                  payload: {
+                    action: "retry_corpus_job",
+                    target_type: "job",
+                    target_id: "job-1",
+                    root_name: "docs",
+                    family: "office",
+                    reason: "operator diagnostic remediation"
+                  },
+                  requires_confirmation: true,
+                  destructive: false,
+                  settings_mutated: false
+                }
+              ]
+            }
+          ]
         });
+      }
+      if (url === "/api/diagnostics/actions" && init?.method === "POST") {
+        diagnosticsActionPayload = JSON.parse(String(init.body));
+        return json({ settings_mutated: false, action: "retry_corpus_job", result: { status: "pending" } });
       }
       if (url === "/api/retrieval/benchmarks") return json(retrievalBenchmarkHistoryPayload);
       if (url === "/api/retrieval/benchmarks/run" && init?.method === "POST") {
@@ -977,6 +1014,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Blocked jobs")).toBeInTheDocument();
     expect(screen.getByText("1 blocked locks")).toBeInTheDocument();
     expect(screen.getByText("Job job-1 is blocked.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry corpus job" })).toBeInTheDocument();
     expect(screen.getAllByText("Partial").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Synthetic reliability evidence is current.")).toBeInTheDocument();
     expect(screen.getByText("Run scoped host/cloud calibration for the selected root.")).toBeInTheDocument();
@@ -997,6 +1035,16 @@ describe("Flux dashboard", () => {
     expect(codeFeedbackPayload).toMatchObject({ surface: "dashboard", miss_category: "missing_symbol" });
     await user.click(screen.getByRole("button", { name: "Apply diagnostic filters" }));
     expect(fetch).toHaveBeenCalledWith("/api/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    await user.click(screen.getByRole("button", { name: "Retry corpus job" }));
+    expect(diagnosticsActionPayload).toEqual({
+      action: "retry_corpus_job",
+      target_type: "job",
+      target_id: "job-1",
+      root_name: "docs",
+      family: "office",
+      reason: "operator diagnostic remediation"
+    });
     await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
     expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "standard" });
     await user.click(screen.getByRole("button", { name: "Run tuning diagnostics" }));

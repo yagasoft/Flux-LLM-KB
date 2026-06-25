@@ -159,6 +159,13 @@ def _item(
         "evidence": evidence,
         "follow_up_command": _follow_up_command(section, row),
         "target": {"type": "job" if section == "jobs" else section.rstrip("s"), "id": target_id},
+        "remediation_actions": _remediation_actions(
+            section=section,
+            status=status,
+            family=family,
+            root_name=root_name if isinstance(root_name, str) else None,
+            target_id=str(target_id) if target_id is not None else None,
+        ),
     }
 
 
@@ -186,6 +193,92 @@ def _follow_up_command(section: str, row: dict[str, Any]) -> str:
     if section == "mail":
         return "flux-kb mail status"
     return "flux-kb diagnostics all"
+
+
+def _remediation_actions(
+    *,
+    section: str,
+    status: str,
+    family: str | None,
+    root_name: str | None,
+    target_id: str | None,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    normalized_family = family or None
+    if section == "jobs" and target_id and status in {"failed", "blocked_missing_dependency", "blocked_locked", "retrying_locked"}:
+        actions.append(
+            _action(
+                action_id="retry_corpus_job",
+                label="Retry corpus job",
+                target_type="job",
+                target_id=target_id,
+                root_name=root_name,
+                family=normalized_family,
+            )
+        )
+    if section in {"jobs", "workers"} and root_name and normalized_family:
+        actions.append(
+            _action(
+                action_id="run_backfill",
+                label="Run scoped backfill",
+                target_type="family",
+                target_id=normalized_family,
+                root_name=root_name,
+                family=normalized_family,
+            )
+        )
+    if root_name:
+        actions.append(
+            _action(
+                action_id="repair_asset_statuses",
+                label="Repair asset statuses",
+                target_type="root",
+                target_id=root_name,
+                root_name=root_name,
+                family=normalized_family,
+            )
+        )
+        actions.append(
+            _action(
+                action_id="clear_completed_errors",
+                label="Clear completed errors",
+                target_type="root",
+                target_id=root_name,
+                root_name=root_name,
+                family=normalized_family,
+            )
+        )
+    return actions
+
+
+def _action(
+    *,
+    action_id: str,
+    label: str,
+    target_type: str,
+    target_id: str | None,
+    root_name: str | None,
+    family: str | None,
+) -> dict[str, Any]:
+    payload = {
+        "action": action_id,
+        "target_type": target_type,
+        "target_id": target_id,
+        "root_name": root_name,
+        "family": family,
+        "reason": "operator diagnostic remediation",
+    }
+    return {
+        "id": action_id,
+        "label": label,
+        "target": {"type": target_type, "id": target_id},
+        "method": "POST",
+        "endpoint": "/api/diagnostics/actions",
+        "payload": payload,
+        "requires_confirmation": True,
+        "destructive": False,
+        "settings_mutated": False,
+    }
 
 
 def _matches_filters(row: dict[str, Any], filters: dict[str, Any]) -> bool:

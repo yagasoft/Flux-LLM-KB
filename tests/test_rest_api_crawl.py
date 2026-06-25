@@ -293,6 +293,46 @@ def test_code_feedback_and_diagnostics_filter_routes_forward_to_service(monkeypa
     )
 
 
+def test_diagnostics_action_route_forwards_to_service(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def remediate_diagnostic(self, **kwargs):
+            calls.append(kwargs)
+            return {"settings_mutated": False, "action": kwargs["action"], "result": {"status": "pending"}}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post(
+        "/api/diagnostics/actions",
+        json={
+            "action": "retry_corpus_job",
+            "target_type": "job",
+            "target_id": "job-1",
+            "root_name": "docs",
+            "family": "office",
+            "reason": "operator retry",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["settings_mutated"] is False
+    assert calls == [
+        {
+            "action": "retry_corpus_job",
+            "target_type": "job",
+            "target_id": "job-1",
+            "root_name": "docs",
+            "family": "office",
+            "reason": "operator retry",
+            "actor": "api",
+        }
+    ]
+
+
 def test_code_and_operational_diagnostic_routes_forward_to_service(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

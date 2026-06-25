@@ -2990,6 +2990,41 @@ def retry_corpus_job(
             )
 
 
+def requeue_corpus_job(
+    *,
+    job_id: str,
+    reason: str = "operator diagnostic remediation",
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = 'pending',
+                    attempts = 0,
+                    last_error = NULL,
+                    started_at = NULL,
+                    completed_at = NULL,
+                    next_attempt_at = now(),
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    telemetry = telemetry || jsonb_build_object('remediation_reason', %s),
+                    updated_at = now()
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND status IN ('failed', 'blocked_missing_dependency', 'blocked_locked', 'retrying_locked')
+                RETURNING id::text, status, attempts
+                """,
+                (reason, job_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"retryable corpus job not found: {job_id}")
+            return {"job_id": row[0], "status": row[1], "attempts": int(row[2] or 0)}
+
+
 def block_corpus_job(
     *,
     job_id: str,

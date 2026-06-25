@@ -479,9 +479,9 @@ def _extract_document(path: Path, policy: CorpusPolicy) -> ExtractionResult:
     if ext in OPENPYXL_EXTENSIONS:
         return _extract_xlsx(path, extractor=ext.lstrip("."))
     if ext in LEGACY_SPREADSHEET_EXTENSIONS:
-        return _extract_legacy_spreadsheet(path)
+        return _extract_legacy_spreadsheet(path, policy)
     if ext in OPENDOCUMENT_SPREADSHEET_EXTENSIONS:
-        return _extract_opendocument_spreadsheet(path)
+        return _extract_opendocument_spreadsheet(path, policy)
     if ext in PPTX_PACKAGE_EXTENSIONS:
         return _extract_pptx(path, extractor=ext.lstrip("."))
     if ext in LEGACY_PRESENTATION_EXTENSIONS:
@@ -769,13 +769,13 @@ def _extract_converted_word_document(path: Path) -> ExtractionResult:
     )
 
 
-def _extract_legacy_spreadsheet(path: Path) -> ExtractionResult:
+def _extract_legacy_spreadsheet(path: Path, policy: CorpusPolicy) -> ExtractionResult:
     ext = path.suffix.lower()
     result = _extract_via_libreoffice_conversion(
         path,
         target_format="xlsx",
         target_suffix=".xlsx",
-        read_converted=lambda converted_path: _extract_xlsx(converted_path),
+        read_converted=lambda converted_path: _extract_converted_spreadsheet_workbook(converted_path, policy),
     )
     if result is not None and result.status != "blocked_missing_dependency":
         return result
@@ -796,13 +796,13 @@ def _extract_legacy_spreadsheet(path: Path) -> ExtractionResult:
     )
 
 
-def _extract_opendocument_spreadsheet(path: Path) -> ExtractionResult:
+def _extract_opendocument_spreadsheet(path: Path, policy: CorpusPolicy) -> ExtractionResult:
     ext = path.suffix.lower()
     result = _extract_via_libreoffice_conversion(
         path,
         target_format="xlsx",
         target_suffix=".xlsx",
-        read_converted=lambda converted_path: _extract_xlsx(converted_path),
+        read_converted=lambda converted_path: _extract_converted_spreadsheet_workbook(converted_path, policy),
     )
     if result is not None:
         return result
@@ -811,6 +811,12 @@ def _extract_opendocument_spreadsheet(path: Path) -> ExtractionResult:
         metadata={"extractor": "opendocument_spreadsheet", "extension": ext, "attempted": ["libreoffice"]},
         message="OpenDocument spreadsheet extraction requires LibreOffice.",
     )
+
+
+def _extract_converted_spreadsheet_workbook(path: Path, policy: CorpusPolicy) -> ExtractionResult:
+    if path.stat().st_size > policy.max_inline_bytes:
+        return _extract_sample_first_workbook(path, extractor="sample_first_workbook")
+    return _extract_xlsx(path)
 
 
 def _extract_legacy_presentation(path: Path) -> ExtractionResult:

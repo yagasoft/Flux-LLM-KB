@@ -81,3 +81,47 @@ def test_operational_diagnostics_filters_and_standardizes_drilldown_items():
     serialized = json.dumps(report).lower()
     assert "e:/private" not in serialized
     assert "clip.mp4" not in serialized
+
+
+def test_operational_diagnostics_items_include_safe_remediation_actions():
+    report = summarize_operational_diagnostics(
+        jobs={
+            "jobs": [
+                {
+                    "id": "job-1",
+                    "job_family": "office",
+                    "status": "blocked_missing_dependency",
+                    "root_name": "docs",
+                    "payload": {"path": "E:/private/docs/budget.xls", "root_name": "docs"},
+                    "last_error": "LibreOffice missing",
+                }
+            ]
+        },
+        root_name="docs",
+        status="blocked_missing_dependency",
+        family="office",
+        include_details=True,
+    )
+
+    item = report["items"][0]
+    action_ids = {action["id"] for action in item["remediation_actions"]}
+
+    assert {"retry_corpus_job", "run_backfill", "repair_asset_statuses", "clear_completed_errors"} <= action_ids
+    retry_action = next(action for action in item["remediation_actions"] if action["id"] == "retry_corpus_job")
+    assert retry_action["method"] == "POST"
+    assert retry_action["endpoint"] == "/api/diagnostics/actions"
+    assert retry_action["target"] == {"type": "job", "id": "job-1"}
+    assert retry_action["payload"] == {
+        "action": "retry_corpus_job",
+        "target_type": "job",
+        "target_id": "job-1",
+        "root_name": "docs",
+        "family": "office",
+        "reason": "operator diagnostic remediation",
+    }
+    assert retry_action["requires_confirmation"] is True
+    assert retry_action["destructive"] is False
+    assert retry_action["settings_mutated"] is False
+    serialized = json.dumps(report).lower()
+    assert "e:/private" not in serialized
+    assert "budget.xls" in serialized

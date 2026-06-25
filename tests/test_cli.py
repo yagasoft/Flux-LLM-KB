@@ -337,6 +337,14 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
             calls.append(("code_feedback_summary", kwargs))
             return {"settings_mutated": False, "rows": [{"miss_category": "missing_symbol"}]}
 
+        def remediate_diagnostic(self, **kwargs):
+            calls.append(("diagnostics_remediate", kwargs))
+            return {"settings_mutated": False, "action": kwargs["action"]}
+
+        def run_corpus_backfill(self, **kwargs):
+            calls.append(("crawl_backfill", kwargs))
+            return {"settings_mutated": False, "backfill": kwargs}
+
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
     assert cli.main(["code", "status", "--root", "app"]) == 0
@@ -351,6 +359,10 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
     feedback_summary_payload = json.loads(capsys.readouterr().out)
     assert cli.main(["diagnostics", "workers", "--limit", "5", "--root", "app", "--status", "blocked_missing_dependency", "--family", "office", "--since-hours", "24", "--include-details"]) == 0
     diagnostics_payload = json.loads(capsys.readouterr().out)
+    assert cli.main(["diagnostics", "remediate", "retry_corpus_job", "--target-type", "job", "--target-id", "job-1", "--root", "app", "--family", "office", "--reason", "operator retry"]) == 0
+    remediation_payload = json.loads(capsys.readouterr().out)
+    assert cli.main(["crawl", "backfill", "--root", "app", "--family", "office", "--limit", "4"]) == 0
+    backfill_payload = json.loads(capsys.readouterr().out)
 
     assert status_payload["totals"]["symbol_count"] == 2
     assert search_payload["results"][0]["symbol"] == "OrderService"
@@ -358,6 +370,8 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
     assert feedback_payload["id"] == "feedback-1"
     assert feedback_summary_payload["rows"][0]["miss_category"] == "missing_symbol"
     assert diagnostics_payload["settings_mutated"] is False
+    assert remediation_payload["action"] == "retry_corpus_job"
+    assert backfill_payload["backfill"] == {"kind": "office", "limit": 4, "workers": 1, "root_name": "app"}
     assert calls == [
         ("code_status", {"root_name": "app"}),
         ("code_search", {"query": "OrderService", "root_name": None, "language": "python", "symbol_kind": None, "relationship": None, "limit": 20}),
@@ -388,6 +402,19 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
                 "include_details": True,
             },
         ),
+        (
+            "diagnostics_remediate",
+            {
+                "action": "retry_corpus_job",
+                "target_type": "job",
+                "target_id": "job-1",
+                "root_name": "app",
+                "family": "office",
+                "reason": "operator retry",
+                "actor": "cli",
+            },
+        ),
+        ("crawl_backfill", {"kind": "office", "limit": 4, "workers": 1, "root_name": "app"}),
     ]
 
 

@@ -1224,6 +1224,47 @@ def test_extract_legacy_xls_uses_libreoffice_conversion(monkeypatch, tmp_path):
     assert "Q1 | 1200" in result.chunks[0].body
 
 
+def test_extract_large_legacy_xls_uses_converted_sample_first(monkeypatch, tmp_path):
+    path = tmp_path / "large-budget.xls"
+    path.write_bytes(b"legacy spreadsheet placeholder large enough")
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/soffice.exe" if command == "soffice" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        out_dir = Path(command[command.index("--outdir") + 1])
+        (out_dir / f"{path.stem}.xlsx").write_bytes(b"converted spreadsheet large enough")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeWorksheet:
+        title = "Budget"
+
+        def iter_rows(self, max_row=None, max_col=None, values_only=True):
+            rows = [("id", "name", "amount")]
+            rows.extend((index, f"Line {index}", index * 100) for index in range(18))
+            return iter(rows)
+
+    fake_openpyxl = SimpleNamespace(
+        load_workbook=lambda _path, read_only, data_only: SimpleNamespace(worksheets=[FakeWorksheet()])
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "openpyxl", fake_openpyxl)
+    monkeypatch.setattr("flux_llm_kb.extractors._extract_with_excel_com", lambda _path: None, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=8))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "libreoffice"
+    assert result.metadata["source_extension"] == ".xls"
+    assert result.metadata["converted_extension"] == ".xlsx"
+    assert result.metadata["sample_first"]["source_extension"] == ".xlsx"
+    assert result.metadata["sample_first"]["truncated"] is True
+    assert result.chunks[0].metadata["sample_first"] is True
+    assert "Line 17" not in result.chunks[0].body
+
+
 def test_extract_legacy_xls_uses_excel_com_fallback(monkeypatch, tmp_path):
     path = tmp_path / "forecast.xls"
     path.write_bytes(b"legacy spreadsheet placeholder")
@@ -1447,6 +1488,45 @@ def test_extract_opendocument_spreadsheet_uses_libreoffice_conversion(monkeypatc
     assert result.metadata["source_extension"] == ".ods"
     assert result.metadata["converted_extension"] == ".xlsx"
     assert "Travel | 500" in result.chunks[0].body
+
+
+def test_extract_large_opendocument_spreadsheet_uses_converted_sample_first(monkeypatch, tmp_path):
+    path = tmp_path / "large-budget.ods"
+    path.write_bytes(b"opendocument spreadsheet placeholder large enough")
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/soffice.exe" if command == "soffice" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        out_dir = Path(command[command.index("--outdir") + 1])
+        (out_dir / f"{path.stem}.xlsx").write_bytes(b"converted spreadsheet large enough")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeWorksheet:
+        title = "ODS Budget"
+
+        def iter_rows(self, max_row=None, max_col=None, values_only=True):
+            rows = [("id", "name", "amount")]
+            rows.extend((index, f"ODS Line {index}", index * 100) for index in range(16))
+            return iter(rows)
+
+    fake_openpyxl = SimpleNamespace(
+        load_workbook=lambda _path, read_only, data_only: SimpleNamespace(worksheets=[FakeWorksheet()])
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "openpyxl", fake_openpyxl)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=8))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "libreoffice"
+    assert result.metadata["source_extension"] == ".ods"
+    assert result.metadata["converted_extension"] == ".xlsx"
+    assert result.metadata["sample_first"]["truncated"] is True
+    assert result.chunks[0].metadata["sample_first"] is True
+    assert "ODS Line 15" not in result.chunks[0].body
 
 
 def test_extractor_availability_reports_office_com_extractors():

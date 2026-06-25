@@ -122,7 +122,10 @@ parser or local tool exists.
   reliable. CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbooks store a
   bounded schema/profile/sample chunk with columns, row-count estimate, sample
   row count, parse status, truncation state, and sheet metadata where relevant;
-  they do not full-index tail rows by default.
+  they do not full-index tail rows by default. Legacy Excel and OpenDocument
+  spreadsheets converted locally through LibreOffice use the same sample-first
+  workbook profiling when the converted workbook exceeds the inline extraction
+  limit, preserving source/converted extension metadata.
 - Office and OpenDocument business files should use local adapters only.
   Cross-platform extraction prefers bundled Python parsers or LibreOffice
   conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy

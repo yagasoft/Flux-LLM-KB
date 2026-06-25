@@ -179,6 +179,16 @@ def create_server():
         """Return worker-family queue, cap, backpressure, retry, and slow-job status."""
         return service.worker_status(family=family)
 
+    @mcp.tool(name="kb.crawl_backfill")
+    def crawl_backfill(kind: str = "all", limit: int = 10, workers: int = 1, root_name: str | None = None, family: str | None = None):
+        """Run a bounded corpus backfill by kind or exact worker family, optionally scoped to a root."""
+        return service.run_corpus_backfill(
+            kind=family or kind,
+            limit=limit,
+            workers=workers,
+            root_name=root_name,
+        )
+
     @mcp.tool(name="kb.benchmark_run")
     def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all", scope: str = "synthetic", root_name: str | None = None, path: str | None = None, max_files: int | None = None, deployment_label: str | None = None, scenario: str = "standard", include_model_probe: bool = False):
         """Run deterministic synthetic or aggregate-only scoped benchmarks and record metadata-only history."""
@@ -329,6 +339,19 @@ def create_server():
             family=family,
             since_hours=since_hours,
             include_details=include_details,
+        )
+
+    @mcp.tool(name="kb.diagnostics_remediate")
+    def diagnostics_remediate(action: str, target_type: str, target_id: str | None = None, root_name: str | None = None, family: str | None = None, reason: str = "operator diagnostic remediation"):
+        """Run a confirmation-gated diagnostic remediation action; never mutates runtime settings."""
+        return service.remediate_diagnostic(
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            root_name=root_name,
+            family=family,
+            reason=reason,
+            actor="mcp",
         )
 
     @mcp.tool(name="kb.retrieval_benchmark_run")

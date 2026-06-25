@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, database
+from .acceleration import JOB_FAMILIES
 from .health import doctor_payload
 from .migrations import load_migrations
 from .settings import SettingsService
@@ -199,6 +200,13 @@ def main(argv: list[str] | None = None) -> int:
         diagnostics_command.add_argument("--family")
         diagnostics_command.add_argument("--since-hours", type=int)
         diagnostics_command.add_argument("--include-details", action="store_true")
+    diagnostics_remediate = diagnostics_subparsers.add_parser("remediate", help="Run a confirmation-gated diagnostic remediation action")
+    diagnostics_remediate.add_argument("action", choices=["retry_corpus_job", "run_backfill", "repair_asset_statuses", "clear_completed_errors"])
+    diagnostics_remediate.add_argument("--target-type", required=True)
+    diagnostics_remediate.add_argument("--target-id")
+    diagnostics_remediate.add_argument("--root", dest="root_name")
+    diagnostics_remediate.add_argument("--family", choices=JOB_FAMILIES)
+    diagnostics_remediate.add_argument("--reason", default="operator diagnostic remediation")
 
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
@@ -260,6 +268,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     crawl_backfill.add_argument("--limit", type=int, default=10)
     crawl_backfill.add_argument("--workers", type=int, default=1)
+    crawl_backfill.add_argument("--root", dest="root_name")
+    crawl_backfill.add_argument("--family", choices=JOB_FAMILIES)
 
     crawl_worker = crawl_subparsers.add_parser("worker", help="Run the corpus extraction worker")
     crawl_worker_subparsers = crawl_worker.add_subparsers(dest="worker_command", required=True)
@@ -824,15 +834,27 @@ def _code(args: argparse.Namespace) -> int:
 def _diagnostics(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
-    payload = KnowledgeService().operational_diagnostics(
-        section=args.diagnostics_command,
-        limit=args.limit,
-        root_name=args.root_name,
-        status=args.status,
-        family=args.family,
-        since_hours=args.since_hours,
-        include_details=args.include_details,
-    )
+    service = KnowledgeService()
+    if args.diagnostics_command == "remediate":
+        payload = service.remediate_diagnostic(
+            action=args.action,
+            target_type=args.target_type,
+            target_id=args.target_id,
+            root_name=args.root_name,
+            family=args.family,
+            reason=args.reason,
+            actor="cli",
+        )
+    else:
+        payload = service.operational_diagnostics(
+            section=args.diagnostics_command,
+            limit=args.limit,
+            root_name=args.root_name,
+            status=args.status,
+            family=args.family,
+            since_hours=args.since_hours,
+            include_details=args.include_details,
+        )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
@@ -890,7 +912,10 @@ def _crawl(args: argparse.Namespace) -> int:
     elif args.crawl_command == "backfill":
         from .service import KnowledgeService
 
-        payload = KnowledgeService().run_corpus_backfill(kind=args.kind, limit=args.limit, workers=args.workers)
+        kwargs = {"kind": args.family or args.kind, "limit": args.limit, "workers": args.workers}
+        if args.root_name:
+            kwargs["root_name"] = args.root_name
+        payload = KnowledgeService().run_corpus_backfill(**kwargs)
     elif args.crawl_command == "worker":
         from .service import KnowledgeService
 

@@ -939,6 +939,50 @@ kbd {
   background: #f2fbff;
 }
 
+.diagnostic-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.diagnostic-head,
+.diagnostic-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.diagnostic-head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-meta span,
+.severity {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--muted-panel);
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.severity.warning {
+  color: var(--orange);
+}
+
+.severity.error {
+  color: var(--red);
+}
+
+.diagnostic-card code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .diagnostic-main {
   min-width: 0;
 }

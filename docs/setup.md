@@ -136,6 +136,7 @@ flux-kb host-agent status
 flux-kb host-agent run
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl backfill --kind embeddings --limit 20
+flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb crawl worker status --family all
 flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
 flux-kb acceleration benchmark run --fixture image-heavy --files 20 --mode soak --workers 2 --family media
@@ -152,6 +153,9 @@ flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
 flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
+flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
+flux-kb diagnostics remediate repair_asset_statuses --target-type root --root docs --reason "operator cleanup"
+flux-kb diagnostics remediate clear_completed_errors --target-type root --root docs --reason "operator cleanup"
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
 flux-kb embeddings backfill --owner-class all --limit 100
@@ -271,15 +275,23 @@ search`, and `flux-kb code symbol`; privacy-safe miss feedback is available with
 `flux-kb code feedback add|summary`. Operational evidence summaries are
 available with `flux-kb diagnostics retrieval|watcher|workers|jobs|mail|all`,
 optionally filtered by `--root`, `--status`, `--family`, `--since-hours`, and
-`--include-details`.
+`--include-details`. Diagnostic rows can include confirmation-gated remediation
+actions. Use `flux-kb diagnostics remediate retry_corpus_job` for retryable
+failed or dependency-blocked corpus jobs, `run_backfill` for scoped root/family
+backfill, and `repair_asset_statuses` or `clear_completed_errors` for
+root-scoped cleanup. These actions append audit events and do not mutate runtime
+settings.
 Worker-family status is available with `flux-kb crawl worker status --family
 <name|all>` and reports configured caps, cap pressure, worker-family
 backpressure, oldest pending age, slow recent jobs, retry/lock transitions,
 parser cache counters, and manifest skip counters.
 Large CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbook files use
-sample-first extraction when they exceed the inline extraction limit. The stored
-chunk contains a bounded schema/profile/sample with row estimates and truncation
-metadata rather than a full-file dump.
+sample-first extraction when they exceed the inline extraction limit. Legacy
+Excel and OpenDocument spreadsheets converted locally through LibreOffice use
+the same sample-first workbook profiling when the converted workbook is still
+too large for inline extraction. The stored chunk contains a bounded
+schema/profile/sample with row estimates and truncation metadata rather than a
+full-file dump.
 Embedding refresh uses the local deterministic `flux-hash-v1` provider by
 default. New vectors keep source hashes and cache keys in embedding metadata
 without raw source text. Use `flux-kb embeddings status` to inspect coverage,

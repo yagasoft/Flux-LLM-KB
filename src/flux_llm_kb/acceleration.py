@@ -114,6 +114,10 @@ def kind_to_job_families(kind: str | None) -> tuple[str, ...] | None:
     normalized = str(kind or "all").lower()
     if normalized == "all":
         return None
+    if normalized == "text":
+        return ("text", "office")
+    if normalized in JOB_FAMILIES:
+        return (normalized,)
     if normalized == "images":
         return ("image",)
     if normalized == "diagrams":
@@ -122,8 +126,6 @@ def kind_to_job_families(kind: str | None) -> tuple[str, ...] | None:
         return ("archive",)
     if normalized == "media":
         return ("media",)
-    if normalized == "text":
-        return ("text", "office")
     if normalized == "embeddings":
         return ("embedding",)
     return None

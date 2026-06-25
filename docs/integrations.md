@@ -33,6 +33,7 @@ Tools:
 | `kb.acceleration_status` | Return local capability, cache layout, and worker-family queue telemetry. |
 | `kb.watch_probe` | Run a temp-directory watcher backend probe without touching private watched roots. |
 | `kb.worker_status` | Return worker-family cap usage, backpressure, retry/lock, and slow-job status. |
+| `kb.crawl_backfill` | Run a bounded corpus backfill by kind or exact worker family, optionally scoped to one monitored root. |
 | `kb.benchmark_run` | Run deterministic synthetic scan, soak, watcher, or all-mode benchmarks and store metadata-only history. |
 | `kb.benchmark_history` | List metadata-only synthetic benchmark history with mode, label, warm-state, and previous-run delta filters. |
 | `kb.indexer_reliability_status` | Report metadata-only indexer reliability readiness from benchmark history and sanitized worker/watcher evidence. |
@@ -46,6 +47,7 @@ Tools:
 | `kb.code_feedback_record` | Record hashed/sanitized code retrieval miss feedback without raw query, code, or path persistence. |
 | `kb.code_feedback_summary` | Summarize code retrieval feedback by category and root. |
 | `kb.operational_diagnostics` | Return read-only retrieval, watcher, worker, job, and mail diagnostics with optional filters. |
+| `kb.diagnostics_remediate` | Run a confirmation-worthy diagnostic remediation action such as retrying a corpus job, scoped backfill, or root cleanup; responses always report `settings_mutated: false`. |
 | `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history with metric deltas, calibration summaries, and advisory candidates. |
 | `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, deltas, calibration summaries, and case-failure evidence. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
@@ -95,6 +97,7 @@ Endpoints:
 - `POST /api/code/feedback` with `query`, optional `root_name`, `result_count`, `surface`, `miss_category`, optional `expected_symbol`, optional `path`, and optional metadata; only hashes/safe leaves are persisted
 - `GET /api/code/feedback/summary?root_name=<name>&limit=<n>`
 - `GET /api/diagnostics/{section}` where `section` is `all`, `retrieval`, `watcher`, `workers`, `jobs`, or `mail`, with optional `root_name`, `status`, `family`, `since_hours`, and `include_details`
+- `POST /api/diagnostics/actions` with `action`, `target_type`, optional `target_id`, `root_name`, `family`, and `reason`; supported actions are confirmation-gated and never mutate settings
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -227,6 +230,8 @@ flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
 flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
+flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
+flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
 flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
 ```
@@ -356,7 +361,13 @@ Operational diagnostics are available through `flux-kb diagnostics <section>`,
 `GET /api/diagnostics/{section}`, and `kb.operational_diagnostics`; they
 aggregate retrieval traces, watcher events, worker state, slow/blocked jobs,
 mail sync runs, and mail post-process events as bounded evidence instead of raw
-log dumps, with optional root/status/family/time/detail filters.
+log dumps, with optional root/status/family/time/detail filters. Diagnostic
+items may include sanitized `remediation_actions[]` for retrying retryable
+corpus jobs, running scoped backfill, repairing root-scoped asset statuses, or
+clearing stale completed-job errors. Those actions run through `flux-kb
+diagnostics remediate`, `POST /api/diagnostics/actions`, or
+`kb.diagnostics_remediate`, append audit events, and always return
+`settings_mutated: false`.
 Retrieval benchmarks are separate from acceleration benchmarks. They seed
 temporary public-safe synthetic retrieval cases, call the same search, explain,
 and brief paths used by consumers, and persist metadata-only quality evidence:
