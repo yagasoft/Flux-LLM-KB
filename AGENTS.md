@@ -30,3 +30,6 @@
 - Use MCP, CLI, and REST as first-class integration surfaces.
 - Use tests for behavior changes and run focused verification before reporting completion.
 - Treat `docs/roadmap.md` and `docs/architecture.md` as durable project intent.
+- After each roadmap-significant session or turn, update `docs/roadmap.md`
+  `Progress %` and `Remaining Work` entries for affected roadmap items before
+  closeout.

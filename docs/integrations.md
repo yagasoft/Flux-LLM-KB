@@ -38,6 +38,11 @@ Tools:
 | `kb.indexer_reliability_status` | Report metadata-only indexer reliability readiness from benchmark history and sanitized worker/watcher evidence. |
 | `kb.indexer_reliability_run` | Run the indexer reliability validation suite without mutating settings. |
 | `kb.indexer_root_reliability` | Show a monitored-root reliability card with sanitized counts and latest scoped benchmark evidence. |
+| `kb.indexer_reliability_roots` | Show sanitized multi-root reliability readiness for enabled monitored roots. |
+| `kb.code_status` | Return privacy-safe code index coverage, parser/fallback, generated-file, and slow-row summaries. |
+| `kb.code_search` | Search indexed code symbols and references without returning raw code content. |
+| `kb.code_symbol_lookup` | Look up definitions and references for a code symbol. |
+| `kb.operational_diagnostics` | Return read-only retrieval, watcher, worker, job, and mail diagnostics. |
 | `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history with metric deltas, calibration summaries, and advisory candidates. |
 | `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, deltas, calibration summaries, and case-failure evidence. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
@@ -79,6 +84,11 @@ Endpoints:
 - `GET /api/acceleration/reliability?root_name=<name>&path=<path>&label=<label>&deployment_label=<label>&freshness_hours=<n>&limit=<n>`
 - `POST /api/acceleration/reliability/run` with optional `scope`, `root_name`, `path`, `label`, `deployment_label`, `max_files`, `passes`, `include_cache_readiness`, and `include_tuning`
 - `GET /api/acceleration/reliability/root/{root_name}`
+- `GET /api/acceleration/reliability/roots`
+- `GET /api/code/status?root_name=<name>`
+- `GET /api/code/search?query=<q>&root_name=<name>&language=<language>&limit=<n>`
+- `GET /api/code/symbols?symbol=<name>&root_name=<name>&language=<language>&include_references=<true|false>`
+- `GET /api/diagnostics/{section}` where `section` is `all`, `retrieval`, `watcher`, `workers`, `jobs`, or `mail`
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -202,6 +212,12 @@ flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
 flux-kb acceleration benchmark run --scope root --root docs --max-files 1000 --mode scan --deployment-label after-update
 flux-kb acceleration benchmark run --fixture image-heavy --mode model --passes 2 --deployment-label after-update
 flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
+flux-kb acceleration reliability roots
+flux-kb acceleration reliability run --scope all-roots
+flux-kb code status --root docs
+flux-kb code search build_invoice --root app --language python
+flux-kb code symbol OrderService.build_invoice
+flux-kb diagnostics all
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
 flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
 ```
@@ -306,6 +322,23 @@ keeping `settings_mutated: false`; `root-status`, `root/{root_name}`, and
 `kb.indexer_root_reliability` expose a per-root readiness card. VSS extraction,
 provider-specific acceleration, and automatic settings changes remain outside
 this gate.
+`flux-kb acceleration reliability roots`,
+`GET /api/acceleration/reliability/roots`, and
+`kb.indexer_reliability_roots` summarize enabled monitored roots as sanitized
+readiness cards with stale/missing scoped evidence, blocked job/asset counts,
+latest benchmark references, and manual tuning candidates. `--scope all-roots`
+on the reliability run executes the read-only evidence workflow across enabled
+roots without mutating settings.
+Code diagnostics use the existing `source_assets`, `asset_chunks`,
+`code_symbols`, and `code_references` tables. `flux-kb code status|search|symbol`,
+`GET /api/code/status`, `GET /api/code/search`, `GET /api/code/symbols`, and the
+matching MCP tools expose coverage summaries, parser/fallback rates, generated
+counts, symbol/reference lookup, and sanitized file labels without raw code
+content. Operational diagnostics are available through
+`flux-kb diagnostics <section>`, `GET /api/diagnostics/{section}`, and
+`kb.operational_diagnostics`; they aggregate retrieval traces, watcher events,
+worker state, slow/blocked jobs, mail sync runs, and mail post-process events as
+bounded evidence instead of raw log dumps.
 Retrieval benchmarks are separate from acceleration benchmarks. They seed
 temporary public-safe synthetic retrieval cases, call the same search, explain,
 and brief paths used by consumers, and persist metadata-only quality evidence:

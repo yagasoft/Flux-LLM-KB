@@ -6,6 +6,7 @@ import json
 from flux_llm_kb.indexer_reliability import (
     build_indexer_reliability_report,
     build_root_reliability_card,
+    build_roots_reliability_report,
 )
 
 
@@ -194,3 +195,44 @@ def test_root_reliability_card_combines_counts_and_latest_scoped_run():
     assert card["blockers"]["pending_jobs"] == 3
     assert card["latest_benchmark"]["id"] == "root-run"
     assert "root_path" not in card
+
+
+def test_roots_reliability_report_summarizes_readiness_and_remaining_actions():
+    roots = [
+        {
+            "root_name": "docs",
+            "enabled": True,
+            "readiness": "ready",
+            "scope_hash": "sha256:docs",
+            "blockers": {"blocked_assets": 0, "failed_jobs": 0, "pending_jobs": 0},
+            "latest_benchmark": {"id": "bench-docs", "created_at": "2026-06-25T10:00:00+00:00"},
+        },
+        {
+            "root_name": "cloud",
+            "enabled": True,
+            "readiness": "partial",
+            "scope_hash": "sha256:cloud",
+            "blockers": {"blocked_assets": 1, "failed_jobs": 0, "pending_jobs": 2},
+            "latest_benchmark": None,
+        },
+        {
+            "root_name": "disabled",
+            "enabled": False,
+            "readiness": "blocked",
+            "scope_hash": "sha256:disabled",
+            "blockers": {},
+            "latest_benchmark": None,
+        },
+    ]
+
+    report = build_roots_reliability_report(roots=roots, include_disabled=False, freshness_hours=24)
+
+    assert report["settings_mutated"] is False
+    assert report["totals"] == {"ready": 1, "partial": 1, "blocked": 0, "not_run": 0, "total": 2}
+    assert [item["root_name"] for item in report["roots"]] == ["cloud", "docs"]
+    assert report["roots"][0]["required_action"] == "Run scoped host/cloud reliability evidence and clear blocked or pending work."
+    assert report["roots"][1]["required_action"] == "No action required."
+    assert "disabled" not in {item["root_name"] for item in report["roots"]}
+    serialized = json.dumps(report).lower()
+    assert "e:/private" not in serialized
+    assert "root_path" not in serialized

@@ -157,6 +157,31 @@ def main(argv: list[str] | None = None) -> int:
     embeddings_backfill.add_argument("--all", action="store_false", dest="stale_only", help="Refresh all vectors, not only missing or stale vectors")
     embeddings_backfill.set_defaults(stale_only=True)
 
+    code_parser = subparsers.add_parser("code", help="Inspect code-aware retrieval diagnostics")
+    code_subparsers = code_parser.add_subparsers(dest="code_command", required=True)
+    code_status = code_subparsers.add_parser("status", help="Show code index coverage and parser status")
+    code_status.add_argument("--root", dest="root_name")
+    code_search = code_subparsers.add_parser("search", help="Search code symbols and definitions")
+    code_search.add_argument("query")
+    code_search.add_argument("--root", dest="root_name")
+    code_search.add_argument("--language")
+    code_search.add_argument("--symbol-kind")
+    code_search.add_argument("--relationship")
+    code_search.add_argument("--limit", type=int, default=20)
+    code_symbol = code_subparsers.add_parser("symbol", help="Look up a code symbol and references")
+    code_symbol.add_argument("symbol")
+    code_symbol.add_argument("--root", dest="root_name")
+    code_symbol.add_argument("--language")
+    code_symbol.add_argument("--no-references", action="store_false", dest="include_references")
+    code_symbol.add_argument("--limit", type=int, default=20)
+    code_symbol.set_defaults(include_references=True)
+
+    diagnostics_parser = subparsers.add_parser("diagnostics", help="Inspect operational diagnostic read models")
+    diagnostics_subparsers = diagnostics_parser.add_subparsers(dest="diagnostics_command", required=True)
+    for diagnostics_name in ("all", "retrieval", "watcher", "workers", "jobs", "mail"):
+        diagnostics_command = diagnostics_subparsers.add_parser(diagnostics_name, help=f"Show {diagnostics_name} diagnostics")
+        diagnostics_command.add_argument("--limit", type=int, default=25)
+
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
     forget_parser.add_argument("--reason", default="user_request")
@@ -325,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     reliability_status.add_argument("--freshness-hours", type=int, default=336)
     reliability_status.add_argument("--limit", type=int, default=100)
     reliability_run = reliability_subparsers.add_parser("run", help="Run the reliability validation benchmark suite")
-    reliability_run.add_argument("--scope", choices=["synthetic", "root", "path"], default="synthetic")
+    reliability_run.add_argument("--scope", choices=["synthetic", "root", "path", "all-roots", "all_roots"], default="synthetic")
     reliability_run.add_argument("--root", dest="root_name")
     reliability_run.add_argument("--path")
     reliability_run.add_argument("--label")
@@ -337,6 +362,10 @@ def main(argv: list[str] | None = None) -> int:
     reliability_run.set_defaults(include_tuning=True)
     reliability_root = reliability_subparsers.add_parser("root-status", help="Show monitored-root reliability card")
     reliability_root.add_argument("--root", dest="root_name", required=True)
+    reliability_roots = reliability_subparsers.add_parser("roots", help="Show all monitored-root reliability cards")
+    reliability_roots.add_argument("--include-disabled", action="store_true")
+    reliability_roots.add_argument("--freshness-hours", type=int, default=336)
+    reliability_roots.add_argument("--limit", type=int, default=100)
 
     mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
     mail_subparsers = mail_parser.add_subparsers(dest="mail_command", required=True)
@@ -440,6 +469,8 @@ def main(argv: list[str] | None = None) -> int:
         "codex": _codex,
         "settings": _settings,
         "acceleration": _acceleration,
+        "code": _code,
+        "diagnostics": _diagnostics,
         "mail": _mail,
         "outlook-host": _outlook_host,
         "host-agent": _host_agent,
@@ -718,6 +749,43 @@ def _embeddings(args: argparse.Namespace) -> int:
     return 0
 
 
+def _code(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.code_command == "status":
+        payload = service.code_status(root_name=args.root_name)
+    elif args.code_command == "search":
+        payload = service.code_search(
+            query=args.query,
+            root_name=args.root_name,
+            language=args.language,
+            symbol_kind=args.symbol_kind,
+            relationship=args.relationship,
+            limit=args.limit,
+        )
+    elif args.code_command == "symbol":
+        payload = service.code_symbol_lookup(
+            symbol=args.symbol,
+            root_name=args.root_name,
+            language=args.language,
+            include_references=args.include_references,
+            limit=args.limit,
+        )
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.code_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _diagnostics(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    payload = KnowledgeService().operational_diagnostics(section=args.diagnostics_command, limit=args.limit)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
 def _audit(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
@@ -988,6 +1056,12 @@ def _acceleration(args: argparse.Namespace) -> int:
             )
         elif args.reliability_command == "root-status":
             payload = KnowledgeService().indexer_root_reliability(root_name=args.root_name)
+        elif args.reliability_command == "roots":
+            payload = KnowledgeService().indexer_reliability_roots(
+                include_disabled=args.include_disabled,
+                freshness_hours=args.freshness_hours,
+                limit=args.limit,
+            )
         else:  # pragma: no cover - argparse prevents this
             raise ValueError(args.reliability_command)
     else:  # pragma: no cover - argparse prevents this

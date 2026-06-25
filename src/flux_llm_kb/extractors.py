@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import bz2
 import binascii
+import csv
 from dataclasses import dataclass, field, replace
 import gzip
 import hashlib
@@ -137,6 +138,9 @@ class FrameSamplingResult:
 def extract_file(path: str | Path, policy: CorpusPolicy) -> ExtractionResult:
     file_path = Path(path).expanduser().resolve()
     classification = classify_file(file_path, policy)
+    sample_first = _extract_sample_first_structured(file_path, policy)
+    if sample_first is not None:
+        return sample_first
     if classification.file_kind in {"text", "code"}:
         return _extract_text(file_path, policy, extractor=classification.file_kind)
     if classification.file_kind == "document":
@@ -234,6 +238,226 @@ def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str) -> Extrac
     text = path.read_text(encoding="utf-8", errors="replace").strip()
     chunks = _chunks_from_text(text, path.name)
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": extractor})
+
+
+def _extract_sample_first_structured(path: Path, policy: CorpusPolicy) -> ExtractionResult | None:
+    if path.stat().st_size <= policy.max_inline_bytes:
+        return None
+    ext = path.suffix.lower()
+    if ext in {".csv", ".tsv"}:
+        delimiter = "\t" if ext == ".tsv" else ","
+        return _extract_sample_first_delimited(path, delimiter=delimiter)
+    if ext == ".json":
+        return _extract_sample_first_json(path)
+    if ext == ".jsonl":
+        return _extract_sample_first_jsonl(path)
+    if ext in OPENPYXL_EXTENSIONS:
+        return _extract_sample_first_workbook(path, extractor=ext.lstrip("."))
+    return None
+
+
+def _extract_sample_first_delimited(path: Path, *, delimiter: str, sample_limit: int = 10) -> ExtractionResult:
+    rows: list[dict[str, str]] = []
+    row_count = 0
+    columns: list[str] = []
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        columns = list(reader.fieldnames or [])
+        for row in reader:
+            row_count += 1
+            if len(rows) < sample_limit:
+                rows.append({str(key): str(value) for key, value in row.items() if key is not None})
+    sample = {
+        "format": "tsv" if delimiter == "\t" else "csv",
+        "columns": columns,
+        "row_count_estimate": row_count,
+        "sample_row_count": len(rows),
+        "truncated": row_count > len(rows),
+        "parse_status": "sampled",
+    }
+    body = _sample_first_body(title=path.name, sample=sample, rows=rows)
+    chunk = AssetChunk(
+        chunk_index=0,
+        title=f"{path.name} sample",
+        body=body,
+        token_estimate=max(1, len(body) // 4),
+        metadata={"sample_first": True, "format": sample["format"], "columns": columns},
+    )
+    return ExtractionResult(status="indexed", chunks=(chunk,), metadata={"extractor": "sample_first_tabular", "sample_first": sample})
+
+
+def _extract_sample_first_jsonl(path: Path, *, sample_limit: int = 10) -> ExtractionResult:
+    rows: list[dict[str, Any]] = []
+    columns: set[str] = set()
+    row_count = 0
+    parse_errors = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            row_count += 1
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                parse_errors += 1
+                continue
+            if isinstance(payload, dict):
+                columns.update(str(key) for key in payload)
+                if len(rows) < sample_limit:
+                    rows.append(payload)
+    ordered_columns = sorted(columns)
+    sample = {
+        "format": "jsonl",
+        "columns": ordered_columns,
+        "row_count_estimate": row_count,
+        "sample_row_count": len(rows),
+        "truncated": row_count > len(rows),
+        "parse_status": "sampled_with_errors" if parse_errors else "sampled",
+        "parse_errors": parse_errors,
+    }
+    body = _sample_first_body(title=path.name, sample=sample, rows=rows)
+    chunk = AssetChunk(
+        chunk_index=0,
+        title=f"{path.name} sample",
+        body=body,
+        token_estimate=max(1, len(body) // 4),
+        metadata={"sample_first": True, "format": "jsonl", "columns": ordered_columns},
+    )
+    return ExtractionResult(status="indexed", chunks=(chunk,), metadata={"extractor": "sample_first_jsonl", "sample_first": sample})
+
+
+def _extract_sample_first_json(path: Path, *, sample_limit: int = 10) -> ExtractionResult:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError as exc:
+        return ExtractionResult(
+            status="blocked_missing_dependency",
+            metadata={"extractor": "sample_first_json", "sample_first": {"format": "json", "parse_status": "parse_error"}},
+            message=f"JSON parse failed: {exc.msg}",
+        )
+    rows: list[dict[str, Any]]
+    source_key: str | None = None
+    if isinstance(payload, list):
+        source_rows = payload
+    elif isinstance(payload, dict):
+        source_rows = None
+        for key, value in payload.items():
+            if isinstance(value, list):
+                source_key = str(key)
+                source_rows = value
+                break
+        if source_rows is None:
+            source_rows = [payload]
+    else:
+        source_rows = [{"value": payload}]
+    rows = [_coerce_sample_row(row) for row in source_rows[:sample_limit]]
+    columns = sorted({key for row in source_rows if isinstance(row, dict) for key in row})
+    if not columns and rows:
+        columns = sorted({key for row in rows for key in row})
+    sample = {
+        "format": "json",
+        "columns": [str(column) for column in columns],
+        "row_count_estimate": len(source_rows),
+        "sample_row_count": len(rows),
+        "truncated": len(source_rows) > len(rows),
+        "parse_status": "sampled",
+    }
+    if source_key is not None:
+        sample["source_key"] = source_key
+    body = _sample_first_body(title=path.name, sample=sample, rows=rows)
+    chunk = AssetChunk(
+        chunk_index=0,
+        title=f"{path.name} sample",
+        body=body,
+        token_estimate=max(1, len(body) // 4),
+        metadata={"sample_first": True, "format": "json", "columns": sample["columns"]},
+    )
+    return ExtractionResult(status="indexed", chunks=(chunk,), metadata={"extractor": "sample_first_json", "sample_first": sample})
+
+
+def _extract_sample_first_workbook(path: Path, *, extractor: str, sample_limit: int = 10) -> ExtractionResult:
+    try:
+        import openpyxl
+    except ImportError:
+        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="openpyxl not installed")
+    workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    rows: list[dict[str, Any]] = []
+    row_count = 0
+    columns: list[str] = []
+    sheet_names: list[str] = []
+    try:
+        for worksheet in workbook.worksheets[:10]:
+            sheet_names.append(str(worksheet.title))
+            sheet_columns: list[str] | None = None
+            for raw_row in worksheet.iter_rows(values_only=True):
+                values = list(raw_row[:30])
+                if not any(value is not None for value in values):
+                    continue
+                if sheet_columns is None:
+                    sheet_columns = [str(value) if value is not None else f"column_{index + 1}" for index, value in enumerate(values)]
+                    if not columns:
+                        columns = sheet_columns
+                    continue
+                row_count += 1
+                if len(rows) < sample_limit:
+                    rows.append(
+                        {
+                            str(column): _sample_value(value)
+                            for column, value in zip(sheet_columns, values, strict=False)
+                            if value is not None
+                        }
+                        | {"_sheet": str(worksheet.title)}
+                    )
+    finally:
+        close = getattr(workbook, "close", None)
+        if callable(close):
+            close()
+    sample = {
+        "format": "workbook",
+        "columns": columns,
+        "row_count_estimate": row_count,
+        "sample_row_count": len(rows),
+        "truncated": row_count > len(rows),
+        "parse_status": "sampled",
+        "sheet_count": len(getattr(workbook, "worksheets", [])),
+        "sheet_names": sheet_names,
+        "source_extension": path.suffix.lower(),
+    }
+    body = _sample_first_body(title=path.name, sample=sample, rows=rows)
+    chunk = AssetChunk(
+        chunk_index=0,
+        title=f"{path.name} sample",
+        body=body,
+        token_estimate=max(1, len(body) // 4),
+        metadata={"sample_first": True, "format": "workbook", "columns": columns},
+    )
+    return ExtractionResult(status="indexed", chunks=(chunk,), metadata={"extractor": "sample_first_workbook", "sample_first": sample})
+
+
+def _coerce_sample_row(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return {str(key): _sample_value(value) for key, value in row.items()}
+    return {"value": _sample_value(row)}
+
+
+def _sample_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _sample_first_body(*, title: str, sample: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        [
+            f"# {title} sample-first profile",
+            f"Format: {sample.get('format')}",
+            f"Rows estimated: {sample.get('row_count_estimate')}",
+            f"Columns: {', '.join(sample.get('columns') or [])}",
+            "Sample rows:",
+            json.dumps(rows, ensure_ascii=True, sort_keys=True, default=str),
+        ]
+    )
 
 
 def _extract_document(path: Path, policy: CorpusPolicy) -> ExtractionResult:

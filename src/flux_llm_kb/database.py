@@ -3169,6 +3169,305 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
             ]
 
 
+def code_index_status(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    root_filter = "WHERE r.name = %s" if root_name else ""
+    params: list[Any] = []
+    if root_name:
+        params.append(root_name)
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT r.name,
+                       count(DISTINCT a.id)::integer AS asset_count,
+                       count(DISTINCT c.id)::integer AS chunk_count,
+                       count(DISTINCT cs.id)::integer AS symbol_count,
+                       count(DISTINCT cr.id)::integer AS reference_count,
+                       count(DISTINCT a.id) FILTER (
+                         WHERE a.metadata->'code'->>'parser_status' = 'fallback'
+                            OR c.metadata->'code'->>'parser_status' = 'fallback'
+                            OR cs.parser_status = 'fallback'
+                       )::integer AS fallback_count,
+                       count(DISTINCT a.id) FILTER (
+                         WHERE a.metadata->'code'->>'generated' = 'true'
+                            OR c.metadata->>'generated' = 'true'
+                            OR c.metadata->'code'->>'generated' = 'true'
+                            OR cs.metadata->>'generated' = 'true'
+                       )::integer AS generated_count
+                FROM monitored_roots r
+                LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL
+                LEFT JOIN asset_chunks c ON c.asset_id = a.id
+                LEFT JOIN code_symbols cs ON cs.source_asset_id = a.id
+                LEFT JOIN code_references cr ON cr.source_asset_id = a.id
+                {root_filter}
+                GROUP BY r.name
+                ORDER BY r.name
+                """,
+                tuple(params),
+            )
+            roots = []
+            for row in cur.fetchall():
+                roots.append(
+                    {
+                        "root_name": row[0],
+                        "asset_count": row[1],
+                        "chunk_count": row[2],
+                        "symbol_count": row[3],
+                        "reference_count": row[4],
+                        "fallback_count": row[5],
+                        "generated_count": row[6],
+                        "languages": _code_language_counts(cur, row[0]),
+                        "parser_statuses": _code_parser_status_counts(cur, row[0]),
+                        "slow_files": _code_slow_files(cur, row[0]),
+                    }
+                )
+            return {
+                "roots": roots,
+                "totals": {
+                    "asset_count": sum(row["asset_count"] for row in roots),
+                    "chunk_count": sum(row["chunk_count"] for row in roots),
+                    "symbol_count": sum(row["symbol_count"] for row in roots),
+                    "reference_count": sum(row["reference_count"] for row in roots),
+                    "fallback_count": sum(row["fallback_count"] for row in roots),
+                    "generated_count": sum(row["generated_count"] for row in roots),
+                },
+            }
+
+
+def search_code_symbols(
+    *,
+    query: str,
+    root_name: str | None = None,
+    language: str | None = None,
+    symbol_kind: str | None = None,
+    relationship: str | None = None,
+    limit: int = 20,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    filters = ["a.deleted_at IS NULL", "(cs.name ILIKE %s OR cs.qualified_name ILIKE %s OR cs.path ILIKE %s)"]
+    needle = f"%{query}%"
+    params: list[Any] = [needle, needle, needle]
+    if root_name:
+        filters.append("r.name = %s")
+        params.append(root_name)
+    if language:
+        filters.append("cs.language = %s")
+        params.append(language)
+    if symbol_kind:
+        filters.append("cs.symbol_kind = %s")
+        params.append(symbol_kind)
+    if relationship:
+        filters.append(
+            """
+            EXISTS (
+                SELECT 1 FROM code_references cr_filter
+                WHERE cr_filter.source_asset_id = cs.source_asset_id
+                  AND cr_filter.relationship_kind = %s
+            )
+            """
+        )
+        params.append(relationship)
+    capped_limit = max(1, min(int(limit or 20), 100))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT cs.qualified_name, cs.name, cs.symbol_kind, cs.language, cs.path,
+                       cs.line_start, cs.line_end, cs.parser_status, cs.confidence, r.name
+                FROM code_symbols cs
+                JOIN source_assets a ON a.id = cs.source_asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE {' AND '.join(filters)}
+                ORDER BY
+                  CASE WHEN lower(cs.qualified_name) = lower(%s) OR lower(cs.name) = lower(%s) THEN 0 ELSE 1 END,
+                  cs.confidence DESC,
+                  cs.qualified_name
+                LIMIT %s
+                """,
+                tuple([*params, query, query, capped_limit]),
+            )
+            return [_code_symbol_row(row) for row in cur.fetchall()]
+
+
+def lookup_code_symbol(
+    *,
+    symbol: str,
+    root_name: str | None = None,
+    language: str | None = None,
+    include_references: bool = True,
+    limit: int = 20,
+    url: str | None = None,
+) -> dict[str, Any]:
+    matches = search_code_symbols(query=symbol, root_name=root_name, language=language, limit=limit, url=url)
+    references = (
+        _lookup_code_references(symbol=symbol, root_name=root_name, language=language, limit=limit, url=url)
+        if include_references
+        else []
+    )
+    return {"query": symbol, "matches": matches, "references": references}
+
+
+def recent_retrieval_explain_diagnostics(*, limit: int = 25, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT query_hashes, aggregate_metrics, failed_cases, created_at
+                FROM retrieval_benchmark_runs
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (max(1, min(int(limit or 25), 100)),),
+            )
+            rows = []
+            for row in cur.fetchall():
+                hashes = row[0] if isinstance(row[0], list) else []
+                metrics = row[1] if isinstance(row[1], dict) else {}
+                failures = row[2] if isinstance(row[2], list) else []
+                rows.append(
+                    {
+                        "query_hash": hashes[0] if hashes else None,
+                        "result_count": int(metrics.get("query_count") or metrics.get("case_count") or 0),
+                        "confidence": metrics.get("confidence_band") or "metadata_only",
+                        "failed_case_count": len(failures),
+                        "created_at": row[3].isoformat() if row[3] else None,
+                    }
+                )
+            return rows
+
+
+def _code_language_counts(cur: Any, root_name: str) -> dict[str, int]:
+    cur.execute(
+        """
+        SELECT language, count(*)::integer
+        FROM code_symbols cs
+        JOIN source_assets a ON a.id = cs.source_asset_id
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE r.name = %s
+          AND a.deleted_at IS NULL
+        GROUP BY language
+        ORDER BY language
+        """,
+        (root_name,),
+    )
+    return {str(row[0] or "unknown"): int(row[1] or 0) for row in cur.fetchall()}
+
+
+def _code_parser_status_counts(cur: Any, root_name: str) -> dict[str, int]:
+    cur.execute(
+        """
+        SELECT parser_status, count(*)::integer
+        FROM (
+            SELECT cs.parser_status
+            FROM code_symbols cs
+            JOIN source_assets a ON a.id = cs.source_asset_id
+            JOIN monitored_roots r ON r.id = a.root_id
+            WHERE r.name = %s
+              AND a.deleted_at IS NULL
+            UNION ALL
+            SELECT COALESCE(c.metadata->'code'->>'parser_status', c.metadata->>'parser_status')
+            FROM asset_chunks c
+            JOIN source_assets a ON a.id = c.asset_id
+            JOIN monitored_roots r ON r.id = a.root_id
+            WHERE r.name = %s
+              AND a.deleted_at IS NULL
+        ) statuses
+        WHERE parser_status IS NOT NULL
+        GROUP BY parser_status
+        ORDER BY parser_status
+        """,
+        (root_name, root_name),
+    )
+    return {str(row[0] or "unknown"): int(row[1] or 0) for row in cur.fetchall()}
+
+
+def _code_slow_files(cur: Any, root_name: str) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT payload->>'path', last_duration_ms
+        FROM capture_jobs
+        WHERE payload->>'root_name' = %s
+          AND job_type LIKE 'corpus_%%'
+          AND last_duration_ms IS NOT NULL
+        ORDER BY last_duration_ms DESC NULLS LAST
+        LIMIT 5
+        """,
+        (root_name,),
+    )
+    return [{"path": row[0], "duration_ms": row[1]} for row in cur.fetchall()]
+
+
+def _lookup_code_references(
+    *,
+    symbol: str,
+    root_name: str | None,
+    language: str | None,
+    limit: int,
+    url: str | None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    filters = ["a.deleted_at IS NULL", "(cr.target ILIKE %s OR cr.source_symbol ILIKE %s)"]
+    needle = f"%{symbol}%"
+    params: list[Any] = [needle, needle]
+    if root_name:
+        filters.append("r.name = %s")
+        params.append(root_name)
+    if language:
+        filters.append("cr.language = %s")
+        params.append(language)
+    params.append(max(1, min(int(limit or 20), 100)))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT cr.target, cr.relationship_kind, cr.source_symbol, cr.language, cr.path,
+                       cr.line_start, cr.line_end, cr.parser_status, cr.confidence, r.name
+                FROM code_references cr
+                JOIN source_assets a ON a.id = cr.source_asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE {' AND '.join(filters)}
+                ORDER BY cr.confidence DESC, cr.target
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            return [_code_reference_row(row) for row in cur.fetchall()]
+
+
+def _code_symbol_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "symbol": row[0],
+        "name": row[1],
+        "symbol_kind": row[2],
+        "language": row[3],
+        "path": row[4],
+        "line_start": row[5],
+        "line_end": row[6],
+        "parser_status": row[7],
+        "confidence": row[8],
+        "root_name": row[9],
+        "relationship": "definition",
+    }
+
+
+def _code_reference_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "target": row[0],
+        "relationship": row[1],
+        "source_symbol": row[2],
+        "language": row[3],
+        "path": row[4],
+        "line_start": row[5],
+        "line_end": row[6],
+        "parser_status": row[7],
+        "confidence": row[8],
+        "root_name": row[9],
+    }
+
+
 def benchmark_fixture_stats(*, url: str | None = None) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:

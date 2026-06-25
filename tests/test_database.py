@@ -120,6 +120,67 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
     assert any("FOR UPDATE SKIP LOCKED" in sql for sql in executed_sql)
 
 
+def test_code_index_status_filters_selected_root_without_join_leakage(monkeypatch):
+    executed: list[tuple[str, tuple]] = []
+    result_sets = [
+        [("app", 3, 5, 7, 11, 1, 2)],
+        [("python", 4)],
+        [("parsed", 6), ("fallback", 1)],
+        [("src/app.py", 1200)],
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, tuple(params)))
+
+        def fetchall(self):
+            return result_sets.pop(0)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    report = database.code_index_status(root_name="app")
+
+    main_sql, main_params = executed[0]
+    assert "LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL" in main_sql
+    assert "WHERE r.name = %s" in main_sql
+    assert "LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL AND r.name" not in main_sql
+    assert main_params == ("app",)
+    assert report["roots"] == [
+        {
+            "root_name": "app",
+            "asset_count": 3,
+            "chunk_count": 5,
+            "symbol_count": 7,
+            "reference_count": 11,
+            "fallback_count": 1,
+            "generated_count": 2,
+            "languages": {"python": 4},
+            "parser_statuses": {"parsed": 6, "fallback": 1},
+            "slow_files": [{"path": "src/app.py", "duration_ms": 1200}],
+        }
+    ]
+
+
 def test_claim_corpus_jobs_filters_by_family_and_orders_by_priority(monkeypatch):
     executed = []
 

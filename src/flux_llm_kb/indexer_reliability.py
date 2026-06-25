@@ -115,6 +115,75 @@ def build_root_reliability_card(
     }
 
 
+def build_roots_reliability_report(
+    *,
+    roots: list[dict[str, Any]],
+    include_disabled: bool = False,
+    freshness_hours: int = 336,
+) -> dict[str, Any]:
+    cards = [_safe_root_card(root) for root in roots if include_disabled or root.get("enabled", True)]
+    cards.sort(key=lambda item: (_readiness_sort_key(str(item.get("readiness") or "not_run")), str(item.get("root_name") or "")))
+    totals = {"ready": 0, "partial": 0, "blocked": 0, "not_run": 0, "total": len(cards)}
+    for card in cards:
+        readiness = str(card.get("readiness") or "not_run")
+        if readiness not in totals:
+            readiness = "not_run"
+        totals[readiness] += 1
+        card["required_action"] = _root_required_action(card)
+        card["settings_mutated"] = False
+    return {
+        "settings_mutated": False,
+        "freshness_hours": max(1, int(freshness_hours or 336)),
+        "totals": totals,
+        "roots": cards,
+        "required_actions": [
+            {
+                "root_name": card.get("root_name"),
+                "readiness": card.get("readiness"),
+                "required_action": card.get("required_action"),
+            }
+            for card in cards
+            if card.get("required_action") != "No action required."
+        ],
+    }
+
+
+def _safe_root_card(root: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "root_name",
+        "enabled",
+        "watch_enabled",
+        "readiness",
+        "scope_hash",
+        "asset_counts",
+        "job_counts",
+        "blockers",
+        "latest_crawl",
+        "latest_benchmark",
+        "required_action",
+    }
+    return {key: root.get(key) for key in allowed if key in root}
+
+
+def _readiness_sort_key(readiness: str) -> int:
+    return {"blocked": 0, "partial": 1, "not_run": 2, "ready": 3}.get(readiness, 2)
+
+
+def _root_required_action(card: dict[str, Any]) -> str:
+    readiness = str(card.get("readiness") or "not_run")
+    blockers = card.get("blockers") if isinstance(card.get("blockers"), dict) else {}
+    has_blockers = any(int(value or 0) > 0 for value in blockers.values())
+    if readiness == "ready":
+        return "No action required."
+    if readiness == "not_run":
+        return "Run scoped host/cloud reliability evidence for this root."
+    if has_blockers:
+        return "Run scoped host/cloud reliability evidence and clear blocked or pending work."
+    if readiness == "blocked":
+        return "Re-enable the root or clear blocking worker/indexer evidence."
+    return "Run scoped host/cloud reliability evidence and review partial root evidence."
+
+
 def _synthetic_reliability_check(runs: list[dict[str, Any]], all_runs: list[dict[str, Any]], fresh_after: datetime) -> dict[str, Any]:
     if not runs:
         stale = [run for run in all_runs if _scenario(run) == "reliability" and _run_created_at(run) and _run_created_at(run) < fresh_after]

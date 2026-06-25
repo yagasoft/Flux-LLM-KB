@@ -2,6 +2,7 @@ import base64
 import gzip
 import importlib.machinery
 import importlib.util
+import json
 import sys
 import tarfile
 from io import BytesIO
@@ -1320,6 +1321,94 @@ def test_extract_legacy_ppt_blocks_when_no_local_extractor(monkeypatch, tmp_path
     assert result.metadata["extractor"] == "legacy_presentation"
     assert result.metadata["attempted"] == ["libreoffice", "powerpoint_com"]
     assert "PowerPoint COM" in (result.message or "")
+
+
+def test_extract_large_csv_uses_sample_first_profile(tmp_path):
+    csv_path = tmp_path / "large.csv"
+    csv_path.write_text(
+        "id,name,amount\n"
+        + "\n".join(f"{index},Customer {index},{index * 10}" for index in range(25)),
+        encoding="utf-8",
+    )
+
+    result = extract_file(csv_path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=32))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "sample_first_tabular"
+    assert result.metadata["sample_first"]["row_count_estimate"] == 25
+    assert result.metadata["sample_first"]["sample_row_count"] < 25
+    assert result.metadata["sample_first"]["truncated"] is True
+    assert result.metadata["sample_first"]["columns"] == ["id", "name", "amount"]
+    assert result.chunks[0].metadata["sample_first"] is True
+    assert "Customer 24" not in result.chunks[0].body
+
+
+def test_extract_large_jsonl_uses_sample_first_profile(tmp_path):
+    jsonl_path = tmp_path / "events.jsonl"
+    jsonl_path.write_text(
+        "\n".join(f'{{"id": {index}, "kind": "event", "amount": {index * 10}}}' for index in range(20)),
+        encoding="utf-8",
+    )
+
+    result = extract_file(jsonl_path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=64))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "sample_first_jsonl"
+    assert result.metadata["sample_first"]["row_count_estimate"] == 20
+    assert result.metadata["sample_first"]["sample_row_count"] < 20
+    assert result.metadata["sample_first"]["columns"] == ["amount", "id", "kind"]
+    assert result.metadata["sample_first"]["truncated"] is True
+    assert result.chunks[0].metadata["sample_first"] is True
+    assert '"id": 19' not in result.chunks[0].body
+
+
+def test_extract_large_json_array_uses_sample_first_profile(tmp_path):
+    json_path = tmp_path / "events.json"
+    json_path.write_text(
+        json.dumps([{"id": index, "kind": "event", "amount": index * 10} for index in range(18)]),
+        encoding="utf-8",
+    )
+
+    result = extract_file(json_path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=64))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "sample_first_json"
+    assert result.metadata["sample_first"]["row_count_estimate"] == 18
+    assert result.metadata["sample_first"]["sample_row_count"] < 18
+    assert result.metadata["sample_first"]["columns"] == ["amount", "id", "kind"]
+    assert result.metadata["sample_first"]["truncated"] is True
+    assert result.chunks[0].metadata["sample_first"] is True
+    assert '"id": 17' not in result.chunks[0].body
+
+
+def test_extract_large_xlsx_uses_sample_first_profile(monkeypatch, tmp_path):
+    path = tmp_path / "large.xlsx"
+    path.write_bytes(b"xlsx placeholder large enough")
+
+    class FakeWorksheet:
+        title = "Pipeline"
+
+        def iter_rows(self, values_only=True):
+            rows = [("id", "name", "amount")]
+            rows.extend((index, f"Deal {index}", index * 100) for index in range(16))
+            return iter(rows)
+
+    fake_openpyxl = SimpleNamespace(
+        load_workbook=lambda _path, read_only, data_only: SimpleNamespace(worksheets=[FakeWorksheet()])
+    )
+    monkeypatch.setitem(sys.modules, "openpyxl", fake_openpyxl)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=8))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "sample_first_workbook"
+    assert result.metadata["sample_first"]["row_count_estimate"] == 16
+    assert result.metadata["sample_first"]["sample_row_count"] < 16
+    assert result.metadata["sample_first"]["columns"] == ["id", "name", "amount"]
+    assert result.metadata["sample_first"]["sheet_count"] == 1
+    assert result.metadata["sample_first"]["truncated"] is True
+    assert result.chunks[0].metadata["sample_first"] is True
+    assert "Deal 15" not in result.chunks[0].body
 
 
 def test_extract_opendocument_spreadsheet_uses_libreoffice_conversion(monkeypatch, tmp_path):

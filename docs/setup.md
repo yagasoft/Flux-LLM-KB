@@ -143,6 +143,12 @@ flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
 flux-kb acceleration benchmark run --scope root --root docs --max-files 1000 --mode scan --deployment-label after-update
 flux-kb acceleration benchmark run --fixture image-heavy --mode model --passes 2 --deployment-label after-update
 flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
+flux-kb acceleration reliability roots
+flux-kb acceleration reliability run --scope all-roots
+flux-kb code status --root docs
+flux-kb code search build_invoice --root app --language python
+flux-kb code symbol OrderService.build_invoice
+flux-kb diagnostics all
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
 flux-kb embeddings backfill --owner-class all --limit 100
@@ -248,10 +254,20 @@ under one label. The gate reports `ready`, `partial`, `blocked`, or `not_run`,
 keeps `settings_mutated: false`, and emits manual follow-up commands for tuning
 candidates. It does not apply settings, change worker caps, read raw content, or
 unblock VSS/provider-specific acceleration without fresh operator evidence.
+Use `flux-kb acceleration reliability roots` to inspect sanitized readiness for
+all enabled monitored roots, and `flux-kb acceleration reliability run --scope
+all-roots` when you need a read-only all-root evidence pass. Code index
+diagnostics are available with `flux-kb code status`, `flux-kb code search`, and
+`flux-kb code symbol`; operational evidence summaries are available with
+`flux-kb diagnostics retrieval|watcher|workers|jobs|mail|all`.
 Worker-family status is available with `flux-kb crawl worker status --family
 <name|all>` and reports configured caps, cap pressure, worker-family
 backpressure, oldest pending age, slow recent jobs, retry/lock transitions,
 parser cache counters, and manifest skip counters.
+Large CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbook files use
+sample-first extraction when they exceed the inline extraction limit. The stored
+chunk contains a bounded schema/profile/sample with row estimates and truncation
+metadata rather than a full-file dump.
 Embedding refresh uses the local deterministic `flux-hash-v1` provider by
 default. New vectors keep source hashes and cache keys in embedding metadata
 without raw source text. Use `flux-kb embeddings status` to inspect coverage,

@@ -721,6 +721,65 @@ def test_indexer_reliability_run_orchestrates_scenarios_without_mutating_setting
     assert calls[3]["max_files"] == 100
 
 
+def test_indexer_reliability_all_roots_runs_scoped_evidence_per_enabled_root(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        database,
+        "crawl_root_summaries",
+        lambda **kwargs: [
+            {"name": "docs", "enabled": True, "root_path": "E:/private/docs"},
+            {"name": "code", "enabled": True, "root_path": "E:/private/code"},
+            {"name": "disabled", "enabled": False, "root_path": "E:/private/disabled"},
+        ],
+    )
+
+    def fake_run_benchmark(self, **kwargs):
+        calls.append(kwargs)
+        return {
+            "scenario": kwargs["scenario"],
+            "scope_type": "monitored_root" if kwargs.get("scope") == "root" else "synthetic",
+            "runs": [
+                {
+                    "id": f"run-{len(calls)}",
+                    "scenario": kwargs["scenario"],
+                    "scope_type": "monitored_root" if kwargs.get("scope") == "root" else "synthetic",
+                    "recommendation_metadata": {"settings_mutated": False, "scenario": kwargs["scenario"]},
+                }
+            ],
+            "recommendations": {"settings_mutated": False, "scenario": kwargs["scenario"], "candidates": []},
+        }
+
+    monkeypatch.setattr(KnowledgeService, "run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr(
+        KnowledgeService,
+        "indexer_reliability_roots",
+        lambda self, **kwargs: {"settings_mutated": False, "roots": [], "status_args": kwargs},
+    )
+
+    result = KnowledgeService().run_indexer_reliability(
+        scope="all_roots",
+        label="nightly",
+        deployment_label="desktop",
+        max_files=250,
+        include_cache_readiness=True,
+        include_tuning=True,
+    )
+
+    assert result["settings_mutated"] is False
+    assert [call["scenario"] for call in calls] == [
+        "reliability",
+        "host_cloud",
+        "host_cloud",
+        "cache_readiness",
+        "tuning",
+        "tuning",
+    ]
+    assert [call.get("root_name") for call in calls if call["scenario"] == "host_cloud"] == ["docs", "code"]
+    assert all(call.get("max_files") == 250 for call in calls if call["scenario"] in {"host_cloud", "tuning"})
+    assert "disabled" not in {call.get("root_name") for call in calls}
+
+
 def test_benchmark_soak_mode_claims_worker_family_jobs_and_purges(monkeypatch):
     calls = {"created": [], "claimed": [], "completed": [], "blocked": [], "purged": []}
     monkeypatch.setattr(service_module, "_configured_worker_caps", lambda: {"media": 1, "office": 2})

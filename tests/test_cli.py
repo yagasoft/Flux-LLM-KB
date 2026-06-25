@@ -256,6 +256,10 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
             calls.append(("root", root_name))
             return {"root_name": root_name, "readiness": "partial"}
 
+        def indexer_reliability_roots(self, **kwargs):
+            calls.append(("roots", kwargs))
+            return {"roots": [{"root_name": "docs", "readiness": "ready"}], "settings_mutated": False}
+
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
     assert cli.main(["acceleration", "reliability", "status", "--root", "docs", "--label", "nightly", "--freshness-hours", "12"]) == 0
@@ -267,9 +271,13 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
     assert cli.main(["acceleration", "reliability", "root-status", "--root", "docs"]) == 0
     root_payload = json.loads(capsys.readouterr().out)
 
+    assert cli.main(["acceleration", "reliability", "roots", "--freshness-hours", "24"]) == 0
+    roots_payload = json.loads(capsys.readouterr().out)
+
     assert status_payload["readiness"] == "partial"
     assert run_payload["settings_mutated"] is False
     assert root_payload == {"root_name": "docs", "readiness": "partial"}
+    assert roots_payload["roots"][0]["root_name"] == "docs"
     assert calls[0] == (
         "status",
         {
@@ -284,7 +292,52 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
     assert calls[1][0] == "run"
     assert calls[1][1]["scope"] == "root"
     assert calls[1][1]["include_cache_readiness"] is True
-    assert calls[2] == ("root", "docs")
+    assert calls[3] == ("roots", {"include_disabled": False, "freshness_hours": 24, "limit": 100})
+
+
+def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def code_status(self, **kwargs):
+            calls.append(("code_status", kwargs))
+            return {"totals": {"symbol_count": 2}, "roots": []}
+
+        def code_search(self, **kwargs):
+            calls.append(("code_search", kwargs))
+            return {"query": kwargs["query"], "results": [{"symbol": "OrderService"}]}
+
+        def code_symbol_lookup(self, **kwargs):
+            calls.append(("code_symbol", kwargs))
+            return {"query": kwargs["symbol"], "matches": [{"symbol": kwargs["symbol"]}]}
+
+        def operational_diagnostics(self, **kwargs):
+            calls.append(("diagnostics", kwargs))
+            return {"section": kwargs["section"], "settings_mutated": False, "sections": {}}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["code", "status", "--root", "app"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert cli.main(["code", "search", "OrderService", "--language", "python"]) == 0
+    search_payload = json.loads(capsys.readouterr().out)
+    assert cli.main(["code", "symbol", "OrderService", "--no-references"]) == 0
+    symbol_payload = json.loads(capsys.readouterr().out)
+    assert cli.main(["diagnostics", "workers", "--limit", "5"]) == 0
+    diagnostics_payload = json.loads(capsys.readouterr().out)
+
+    assert status_payload["totals"]["symbol_count"] == 2
+    assert search_payload["results"][0]["symbol"] == "OrderService"
+    assert symbol_payload["matches"][0]["symbol"] == "OrderService"
+    assert diagnostics_payload["settings_mutated"] is False
+    assert calls == [
+        ("code_status", {"root_name": "app"}),
+        ("code_search", {"query": "OrderService", "root_name": None, "language": "python", "symbol_kind": None, "relationship": None, "limit": 20}),
+        ("code_symbol", {"symbol": "OrderService", "root_name": None, "language": None, "include_references": False, "limit": 20}),
+        ("diagnostics", {"section": "workers", "limit": 5}),
+    ]
 
 
 def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch, capsys):

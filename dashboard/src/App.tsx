@@ -242,6 +242,42 @@ type RootReliabilityCard = {
   readiness?: string;
   blockers?: Record<string, number>;
   latest_benchmark?: { id?: string; scenario?: string };
+  required_action?: string;
+};
+
+type ReliabilityRootsStatus = {
+  settings_mutated?: boolean;
+  totals?: Record<string, number>;
+  roots?: RootReliabilityCard[];
+  required_actions?: Array<{ root_name?: string; readiness?: string; required_action?: string }>;
+};
+
+type CodeStatus = {
+  totals?: Record<string, number>;
+  roots?: Array<{
+    root_name?: string;
+    health?: string;
+    asset_count?: number;
+    symbol_count?: number;
+    reference_count?: number;
+    fallback_count?: number;
+    generated_count?: number;
+    languages?: Record<string, number>;
+    parser_statuses?: Record<string, number>;
+  }>;
+};
+
+type OperationalDiagnostics = {
+  section?: string;
+  settings_mutated?: boolean;
+  counts?: Record<string, number>;
+  sections?: {
+    retrieval?: { recent_explains?: Array<Record<string, unknown>> };
+    watcher?: { events?: Array<Record<string, unknown>> };
+    workers?: { families?: Array<Record<string, unknown>> };
+    jobs?: { jobs?: Array<Record<string, unknown>> };
+    mail?: { sync_runs?: Array<Record<string, unknown>>; post_process_events?: Array<Record<string, unknown>> };
+  };
 };
 
 type RetrievalBenchmarkCaseResult = {
@@ -1874,6 +1910,8 @@ function HealthTab({
       </Panel>
       <CodexHooksPanel codex={codex} />
       <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
+      <CodeDiagnosticsPanel />
+      <OperationalDiagnosticsPanel />
       <Panel title="Deployment">
         <div className="status-grid">
           <StatusTile
@@ -1901,12 +1939,87 @@ function HealthTab({
   );
 }
 
+function CodeDiagnosticsPanel() {
+  const [status, setStatus] = useState<CodeStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getJson<CodeStatus>("/api/code/status", { totals: {}, roots: [] }).then((payload) => {
+      if (!cancelled) setStatus(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const totals = status?.totals ?? {};
+  const roots = status?.roots ?? [];
+  const rows = roots.slice(0, 5).map((root) => {
+    const languages = Object.entries(root.languages ?? {})
+      .slice(0, 3)
+      .map(([language, count]) => `${language} ${count}`)
+      .join("; ") || "no language evidence";
+    const parser = Object.entries(root.parser_statuses ?? {})
+      .slice(0, 3)
+      .map(([state, count]) => `${humanizeIdentifier(state)} ${count}`)
+      .join("; ") || `${root.fallback_count ?? 0} fallback`;
+    return [
+      root.root_name ?? "root",
+      humanizeIdentifier(root.health ?? "not_run"),
+      `${root.symbol_count ?? 0} symbols / ${root.reference_count ?? 0} refs`,
+      `${languages}; ${parser}`
+    ] as [string, string, string, string];
+  });
+  return (
+    <Panel title="Code Diagnostics">
+      <div className="summary-cards">
+        <Stat label="Code Assets" value={String(totals.asset_count ?? 0)} />
+        <Stat label="Symbols" value={String(totals.symbol_count ?? 0)} />
+        <Stat label="References" value={String(totals.reference_count ?? 0)} />
+        <Stat label="Fallbacks" value={String(totals.fallback_count ?? 0)} />
+      </div>
+      {rows.length > 0 ? <MiniTable rows={rows} /> : <p className="muted">No code index diagnostics yet.</p>}
+    </Panel>
+  );
+}
+
+function OperationalDiagnosticsPanel() {
+  const [diagnostics, setDiagnostics] = useState<OperationalDiagnostics | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getJson<OperationalDiagnostics>("/api/diagnostics/all", { section: "all", counts: {}, sections: {} }).then((payload) => {
+      if (!cancelled) setDiagnostics(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const counts = diagnostics?.counts ?? {};
+  const workerFamilies = diagnostics?.sections?.workers?.families ?? [];
+  const rows: MiniTableRow[] = [
+    ["Watcher events", "recent", String(counts.watcher_events ?? 0)],
+    ["Worker families", "status", String(counts.worker_families ?? 0)],
+    ["Blocked jobs", "queue", String(counts.blocked_jobs ?? 0)],
+    ["Mail sync runs", "recent", String(counts.mail_sync_runs ?? 0)]
+  ];
+  const workerRows = workerFamilies.slice(0, 4).map((family) => [
+    String(family.family ?? "family"),
+    `${family.pending ?? 0} pending`,
+    `${family.blocked_locked ?? 0} blocked locks`
+  ] as [string, string, string]);
+  return (
+    <Panel title="Operational Diagnostics">
+      <MiniTable rows={rows} />
+      {workerRows.length > 0 ? <MiniTable rows={workerRows} /> : <p className="muted">No worker diagnostic rows yet.</p>}
+    </Panel>
+  );
+}
+
 function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: AccelerationStatus; selectedRoot?: RootSummary | MonitoredRoot }) {
   const [benchmarkStatus, setBenchmarkStatus] = useState("");
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [benchmarkResult, setBenchmarkResult] = useState<BenchmarkRunResponse | null>(null);
   const [reliabilityStatus, setReliabilityStatus] = useState<ReliabilityStatus | null>(null);
   const [rootReliability, setRootReliability] = useState<RootReliabilityCard | null>(null);
+  const [reliabilityRoots, setReliabilityRoots] = useState<ReliabilityRootsStatus | null>(null);
   const capabilities = acceleration?.capabilities ?? {};
   const cache = acceleration?.cache ?? {};
   const families = acceleration?.worker_families ?? [];
@@ -1916,10 +2029,25 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
   const benchmarkCandidates = benchmarkResult?.recommendations?.candidates ?? [];
   const reliabilityChecks = reliabilityStatus?.checks ?? [];
   const reliabilityCandidates = reliabilityStatus?.candidates ?? [];
+  const reliabilityRootRows = (reliabilityRoots?.roots ?? []).slice(0, 6).map((root) => [
+    root.root_name ?? "root",
+    humanizeIdentifier(root.readiness ?? "not_run"),
+    root.latest_benchmark?.id ? `benchmark ${root.latest_benchmark.id}` : "no scoped benchmark",
+    root.required_action ?? "Review reliability evidence"
+  ] as [string, string, string, string]);
   useEffect(() => {
     let cancelled = false;
     getJson<ReliabilityStatus>("/api/acceleration/reliability", { readiness: "not_run", checks: [], candidates: [] }).then((payload) => {
       if (!cancelled) setReliabilityStatus(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    getJson<ReliabilityRootsStatus>("/api/acceleration/reliability/roots", { roots: [], totals: {}, settings_mutated: false }).then((payload) => {
+      if (!cancelled) setReliabilityRoots(payload);
     });
     return () => {
       cancelled = true;
@@ -2062,6 +2190,20 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
       setBenchmarkRunning(false);
     }
   }
+  async function runAllRootsReliabilityGate() {
+    const request = { scope: "all_roots", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true };
+    try {
+      setBenchmarkRunning(true);
+      setBenchmarkStatus("All-root reliability gate queued...");
+      const result = await sendJson<ReliabilityRootsStatus>("/api/acceleration/reliability/run", "POST", request);
+      setReliabilityRoots(result);
+      setBenchmarkStatus(`All-root reliability checked ${result.roots?.length ?? 0} roots.`);
+    } catch (error) {
+      setBenchmarkStatus(`All-root reliability failed: ${errorMessage(error)}`);
+    } finally {
+      setBenchmarkRunning(false);
+    }
+  }
   return (
     <Panel title="Acceleration">
       <div className="status-grid">
@@ -2093,10 +2235,21 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
         <div className="settings-row">
           <strong>Reliability Gate</strong>
           <span>{humanizeIdentifier(reliabilityStatus?.readiness ?? "not_run")}</span>
-          <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runReliabilityGate()}>
-            <Play size={15} /> Run reliability gate
-          </button>
+          <div className="button-row">
+            <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runReliabilityGate()}>
+              <Play size={15} /> Run reliability gate
+            </button>
+            <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runAllRootsReliabilityGate()}>
+              <Play size={15} /> Run all roots
+            </button>
+          </div>
         </div>
+        <div className="settings-row">
+          <strong>Reliability Matrix</strong>
+          <span>{reliabilityRoots?.totals?.ready ?? 0} ready / {reliabilityRoots?.totals?.partial ?? 0} partial / {reliabilityRoots?.totals?.not_run ?? 0} not run</span>
+          <em>{reliabilityRoots?.settings_mutated ? "settings changed" : "settings_mutated false"}</em>
+        </div>
+        {reliabilityRootRows.length > 0 ? <MiniTable rows={reliabilityRootRows} /> : <p className="panel-note">No monitored-root reliability evidence yet.</p>}
         {rootReliability && (
           <div className="settings-row">
             <strong>Selected Root</strong>

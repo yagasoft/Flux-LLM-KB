@@ -72,6 +72,11 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.indexer_reliability_status")' in source
     assert '@mcp.tool(name="kb.indexer_reliability_run")' in source
     assert '@mcp.tool(name="kb.indexer_root_reliability")' in source
+    assert '@mcp.tool(name="kb.indexer_reliability_roots")' in source
+    assert '@mcp.tool(name="kb.code_status")' in source
+    assert '@mcp.tool(name="kb.code_search")' in source
+    assert '@mcp.tool(name="kb.code_symbol_lookup")' in source
+    assert '@mcp.tool(name="kb.operational_diagnostics")' in source
     assert '@mcp.tool(name="kb.retrieval_benchmark_run")' in source
     assert '@mcp.tool(name="kb.retrieval_benchmark_history")' in source
     assert '@mcp.tool(name="kb.embeddings_status")' in source
@@ -89,6 +94,11 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def indexer_reliability_status(root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, freshness_hours: int = 336, limit: int = 100)" in source
     assert "def indexer_reliability_run(scope: str = \"synthetic\", root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, max_files: int = 1000, passes: int = 2, include_cache_readiness: bool = False, include_tuning: bool = True)" in source
     assert "def indexer_root_reliability(root_name: str)" in source
+    assert "def indexer_reliability_roots(include_disabled: bool = False, freshness_hours: int = 336, limit: int = 100)" in source
+    assert "def code_status(root_name: str | None = None)" in source
+    assert "def code_search(query: str, root_name: str | None = None, language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, limit: int = 20)" in source
+    assert "def code_symbol_lookup(symbol: str, root_name: str | None = None, language: str | None = None, include_references: bool = True, limit: int = 20)" in source
+    assert "def operational_diagnostics(section: str = \"all\", limit: int = 25)" in source
     assert 'def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True)' in source
     assert 'def retrieval_benchmark_history(suite: str | None = None, label: str | None = None, limit: int = 20)' in source
     assert "confidence bands, calibration candidates, and metric deltas" in source

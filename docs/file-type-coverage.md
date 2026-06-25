@@ -118,6 +118,11 @@ parser or local tool exists.
   conservative local pattern parsing. Parser failures and unsupported code-like
   files fall back to redacted text chunks with sanitized `parser_status`
   metadata; they do not block crawl/watch loops.
+- Oversized structured files use sample-first indexing where local parsing is
+  reliable. CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbooks store a
+  bounded schema/profile/sample chunk with columns, row-count estimate, sample
+  row count, parse status, truncation state, and sheet metadata where relevant;
+  they do not full-index tail rows by default.
 - Office and OpenDocument business files should use local adapters only.
   Cross-platform extraction prefers bundled Python parsers or LibreOffice
   conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy

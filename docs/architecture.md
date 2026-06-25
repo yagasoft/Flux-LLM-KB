@@ -157,6 +157,14 @@ cells, generated-code markers, and common configuration/manifests. Parser
 failures and unsupported code-like files still index as redacted fallback
 chunks with sanitized parser status metadata.
 
+Large structured files use sample-first indexing before any full-file backfill.
+For CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbook files, oversized
+inputs produce a bounded schema/profile/sample chunk plus metadata such as
+columns, row-count estimate, sample row count, parse status, source format,
+sheet count where applicable, and truncation state. The sample-first path avoids
+returning full tail rows or raw private dumps while still making large data
+assets discoverable and diagnosable.
+
 When the API/dashboard is Docker-hosted, arbitrary Windows/macOS/Linux host
 paths are accessed through a separate local host agent (`flux-kb host-agent run`).
 The dashboard can ask that host process to open a native folder picker, validate
@@ -325,6 +333,29 @@ cards, and evidence-scored manual candidates. It does not create a separate
 evidence table, store private paths or raw content, mutate settings, or
 automatically unblock VSS/provider-specific acceleration.
 
+The multi-root reliability view applies that same interpretation across enabled
+monitored roots and returns sanitized root cards plus readiness totals,
+stale/missing scoped evidence, blocked job and asset counts, latest benchmark
+references, and manual tuning candidates. The `all_roots` reliability run
+orchestrates metadata-only synthetic reliability, scoped host/cloud evidence,
+cache readiness, and tuning diagnostics for enabled roots while preserving
+`settings_mutated: false`.
+
+Code diagnostics are read-only and privacy-safe. They aggregate coverage from
+`source_assets`, `asset_chunks`, `code_symbols`, and `code_references`, reporting
+per-root language counts, parser status/fallback counts, generated-file counts,
+definition/reference coverage, and slow/problematic code-index rows without raw
+code content or private root paths. Dedicated code status/search/symbol lookup
+surfaces reuse the stored symbol/reference tables and sanitize path output.
+
+Operational diagnostics are also read-only. They aggregate retrieval explain
+traces, watcher events, worker heartbeat/history, slow jobs, blocked
+dependencies, mail sync runs, and mail post-process events into bounded
+dashboard/API evidence summaries rather than raw log dumps. Diagnostic payloads
+should carry counts, statuses, timestamps, sanitized identifiers, and next-action
+signals; raw mail bodies, private paths, credentials, embeddings, and runtime
+dumps remain out of public-safe surfaces.
+
 `scan` mode creates temporary fixtures or aggregate real-root dry-runs and can
 run multiple passes; pass 1 is recorded as `cold`, later passes reuse an
 in-memory manifest and are recorded as `warm`. `soak` mode creates
@@ -347,6 +378,12 @@ flux-kb acceleration benchmark run --scenario reliability --mode all --passes 2
 flux-kb acceleration benchmark run --scenario host_cloud --scope root --root docs --max-files 100
 flux-kb acceleration benchmark run --scenario cache_readiness --mode model
 flux-kb acceleration benchmark run --scenario tuning --mode scan --passes 2
+flux-kb acceleration reliability roots
+flux-kb acceleration reliability run --scope all-roots
+flux-kb code status --root docs
+flux-kb code search build_invoice --root app --language python
+flux-kb code symbol OrderService.build_invoice
+flux-kb diagnostics all
 ```
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
@@ -354,6 +391,9 @@ backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,
 and future graph/review workflows. The UI is a React/Vite operations console
 bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
+The Health tab includes the acceleration all-root reliability matrix, code
+diagnostics, and operational diagnostics panels so operators can inspect
+evidence without reading raw logs.
 
 REST errors preserve a readable `detail`/`message` string for existing clients
 and also include a structured `error` envelope for operators. Envelopes carry a

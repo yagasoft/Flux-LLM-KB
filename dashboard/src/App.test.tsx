@@ -623,8 +623,37 @@ describe("Flux dashboard", () => {
           ]
         });
       }
+      if (url === "/api/acceleration/reliability/roots") {
+        return json({
+          settings_mutated: false,
+          totals: { ready: 1, partial: 1, blocked: 0, not_run: 1, total: 3 },
+          roots: [
+            {
+              root_name: "docs",
+              readiness: "ready",
+              latest_benchmark: { id: "bench-docs", scenario: "host_cloud" },
+              required_action: "No action required."
+            },
+            {
+              root_name: "code",
+              readiness: "partial",
+              latest_benchmark: null,
+              required_action: "Run scoped host/cloud reliability evidence and clear blocked or pending work."
+            }
+          ]
+        });
+      }
       if (url === "/api/acceleration/reliability/run" && init?.method === "POST") {
         reliabilityRunPayload = JSON.parse(String(init.body));
+        if ((reliabilityRunPayload as { scope?: string }).scope === "all_roots") {
+          return json({
+            settings_mutated: false,
+            totals: { ready: 2, partial: 0, blocked: 0, not_run: 0, total: 2 },
+            roots: [
+              { root_name: "docs", readiness: "ready", latest_benchmark: { id: "bench-docs" }, required_action: "No action required." }
+            ]
+          });
+        }
         return json({ readiness: "ready", settings_mutated: false, checks: [] });
       }
       if (url === "/api/acceleration/reliability/root/docs") {
@@ -655,6 +684,30 @@ describe("Flux dashboard", () => {
               }
             ]
           }
+        });
+      }
+      if (url === "/api/code/status") {
+        return json({
+          totals: { asset_count: 4, symbol_count: 7, reference_count: 9, fallback_count: 1 },
+          roots: [
+            {
+              root_name: "app",
+              health: "partial",
+              symbol_count: 7,
+              reference_count: 9,
+              fallback_count: 1,
+              languages: { python: 4, typescript: 3 },
+              parser_statuses: { parsed: 6, fallback: 1 }
+            }
+          ]
+        });
+      }
+      if (url === "/api/diagnostics/all") {
+        return json({
+          section: "all",
+          settings_mutated: false,
+          counts: { watcher_events: 2, worker_families: 1, blocked_jobs: 1, mail_sync_runs: 3 },
+          sections: { workers: { families: [{ family: "office", pending: 2, blocked_locked: 1 }] } }
         });
       }
       if (url === "/api/retrieval/benchmarks") return json(retrievalBenchmarkHistoryPayload);
@@ -878,19 +931,33 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("10 files/s; -250ms; +2 files/s")).toBeInTheDocument();
     expect(screen.getByText("after-deploy; desktop-after; Monitored Root; hash 4; workers 3; 8 manifest skips; model disabled; 2 blocked")).toBeInTheDocument();
     expect(screen.getByText("Reliability Gate")).toBeInTheDocument();
-    expect(screen.getByText("Partial")).toBeInTheDocument();
+    expect(screen.getByText("Reliability Matrix")).toBeInTheDocument();
+    expect(screen.getByText("1 ready / 1 partial / 1 not run")).toBeInTheDocument();
+    expect(screen.getByText("benchmark bench-docs")).toBeInTheDocument();
+    expect(screen.getByText("Run scoped host/cloud reliability evidence and clear blocked or pending work.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Code Diagnostics" })).toBeInTheDocument();
+    expect(screen.getByText("Code Assets")).toBeInTheDocument();
+    expect(screen.getByText("7 symbols / 9 refs")).toBeInTheDocument();
+    expect(screen.getByText("python 4; typescript 3; Parsed 6; Fallback 1")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Operational Diagnostics" })).toBeInTheDocument();
+    expect(screen.getByText("Blocked jobs")).toBeInTheDocument();
+    expect(screen.getByText("1 blocked locks")).toBeInTheDocument();
+    expect(screen.getAllByText("Partial").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Synthetic reliability evidence is current.")).toBeInTheDocument();
     expect(screen.getByText("Run scoped host/cloud calibration for the selected root.")).toBeInTheDocument();
     expect(await screen.findByText("docs / partial")).toBeInTheDocument();
     expect(screen.getByText("crawler.hash_parallelism")).toBeInTheDocument();
     expect(screen.getByText("needs comparison")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run reliability gate" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run all roots" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run reliability diagnostics" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run host/cloud calibration" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run cache readiness" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run tuning diagnostics" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Run reliability gate" }));
     expect(reliabilityRunPayload).toEqual({ scope: "root", root_name: "docs", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true });
+    await user.click(screen.getByRole("button", { name: "Run all roots" }));
+    expect(reliabilityRunPayload).toEqual({ scope: "all_roots", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true });
     await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
     expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "standard" });
     await user.click(screen.getByRole("button", { name: "Run tuning diagnostics" }));
@@ -898,7 +965,7 @@ describe("Flux dashboard", () => {
     expect(await screen.findByText("Manual candidates")).toBeInTheDocument();
     expect(screen.getByText("crawler.hash_parallelism")).toBeInTheDocument();
     expect(screen.getByText("current 1 -> candidate 4")).toBeInTheDocument();
-    expect(screen.getByText("office")).toBeInTheDocument();
+    expect(screen.getAllByText("office").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });
 

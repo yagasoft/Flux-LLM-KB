@@ -165,6 +165,10 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
             calls.append(("root", root_name))
             return {"root_name": root_name, "readiness": "partial"}
 
+        def indexer_reliability_roots(self, **kwargs):
+            calls.append(("roots", kwargs))
+            return {"roots": [{"root_name": "docs", "readiness": "ready"}], "settings_mutated": False}
+
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
     client = fastapi_testclient.TestClient(create_app())
@@ -181,6 +185,7 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
         },
     )
     root_response = client.get("/api/acceleration/reliability/root/docs")
+    roots_response = client.get("/api/acceleration/reliability/roots", params={"freshness_hours": 24})
 
     assert status_response.status_code == 200
     assert status_response.json()["readiness"] == "partial"
@@ -188,6 +193,8 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
     assert run_response.json()["settings_mutated"] is False
     assert root_response.status_code == 200
     assert root_response.json() == {"root_name": "docs", "readiness": "partial"}
+    assert roots_response.status_code == 200
+    assert roots_response.json()["roots"][0]["root_name"] == "docs"
     assert calls[0] == (
         "status",
         {
@@ -203,6 +210,53 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
     assert calls[1][1]["scope"] == "synthetic"
     assert calls[1][1]["include_cache_readiness"] is True
     assert calls[2] == ("root", "docs")
+    assert calls[3] == (
+        "roots",
+        {
+            "include_disabled": False,
+            "freshness_hours": 24,
+            "limit": 100,
+        },
+    )
+
+
+def test_code_and_operational_diagnostic_routes_forward_to_service(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def code_status(self, **kwargs):
+            calls.append(("code_status", kwargs))
+            return {"totals": {"symbol_count": 1}, "roots": []}
+
+        def code_search(self, **kwargs):
+            calls.append(("code_search", kwargs))
+            return {"query": kwargs["query"], "results": [{"symbol": "OrderService"}]}
+
+        def code_symbol_lookup(self, **kwargs):
+            calls.append(("code_symbol", kwargs))
+            return {"query": kwargs["symbol"], "matches": [{"symbol": kwargs["symbol"]}]}
+
+        def operational_diagnostics(self, **kwargs):
+            calls.append(("diagnostics", kwargs))
+            return {"section": kwargs["section"], "settings_mutated": False, "sections": {}}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+
+    client = fastapi_testclient.TestClient(create_app())
+
+    assert client.get("/api/code/status", params={"root_name": "app"}).json()["totals"]["symbol_count"] == 1
+    assert client.get("/api/code/search", params={"query": "OrderService", "language": "python"}).json()["results"][0]["symbol"] == "OrderService"
+    assert client.get("/api/code/symbols", params={"symbol": "OrderService"}).json()["matches"][0]["symbol"] == "OrderService"
+    assert client.get("/api/diagnostics/workers", params={"limit": 5}).json()["settings_mutated"] is False
+
+    assert calls == [
+        ("code_status", {"root_name": "app"}),
+        ("code_search", {"query": "OrderService", "root_name": None, "language": "python", "symbol_kind": None, "relationship": None, "limit": 20}),
+        ("code_symbol", {"symbol": "OrderService", "root_name": None, "language": None, "include_references": True, "limit": 20}),
+        ("diagnostics", {"section": "workers", "limit": 5}),
+    ]
 
 
 def test_host_routes_are_exposed(monkeypatch):

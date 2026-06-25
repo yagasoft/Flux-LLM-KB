@@ -31,7 +31,9 @@ from .indexer_diagnostics import (
     normalize_benchmark_scenario,
     scenario_recommendation_metadata,
 )
-from .indexer_reliability import build_indexer_reliability_report, build_root_reliability_card
+from .code_diagnostics import build_code_status_report, sanitize_code_lookup, sanitize_code_result
+from .indexer_reliability import build_indexer_reliability_report, build_root_reliability_card, build_roots_reliability_report
+from .operational_diagnostics import summarize_operational_diagnostics
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
 from .retrieval_benchmark import build_retrieval_recommendations, evaluate_retrieval_cases, metric_deltas
@@ -969,6 +971,8 @@ class KnowledgeService:
         include_tuning: bool = True,
     ) -> dict[str, Any]:
         normalized_scope = str(scope or "synthetic").strip().lower()
+        if normalized_scope in {"all-roots", "all_roots"}:
+            normalized_scope = "all_roots"
         self.run_benchmark(
             fixture="all",
             files=10,
@@ -978,6 +982,50 @@ class KnowledgeService:
             deployment_label=deployment_label,
             scenario="reliability",
         )
+        if normalized_scope == "all_roots":
+            roots = [
+                root
+                for root in database.crawl_root_summaries(limit_assets=0, limit_jobs=0)
+                if root.get("enabled")
+            ]
+            for root in roots:
+                self.run_benchmark(
+                    fixture="all",
+                    files=10,
+                    mode="scan",
+                    passes=max(1, int(passes or 2)),
+                    label=label,
+                    deployment_label=deployment_label,
+                    scenario="host_cloud",
+                    scope="root",
+                    root_name=str(root.get("name") or ""),
+                    max_files=max(1, int(max_files or 1000)),
+                )
+            if include_cache_readiness:
+                self.run_benchmark(
+                    fixture="image-heavy",
+                    files=10,
+                    mode="model",
+                    passes=1,
+                    label=label,
+                    deployment_label=deployment_label,
+                    scenario="cache_readiness",
+                )
+            if include_tuning:
+                for root in roots:
+                    self.run_benchmark(
+                        fixture="all",
+                        files=10,
+                        mode="scan",
+                        passes=max(1, int(passes or 2)),
+                        label=label,
+                        deployment_label=deployment_label,
+                        scenario="tuning",
+                        scope="root",
+                        root_name=str(root.get("name") or ""),
+                        max_files=max(1, int(max_files or 1000)),
+                    )
+            return self.indexer_reliability_roots(freshness_hours=336)
         if normalized_scope != "synthetic":
             self.run_benchmark(
                 fixture="all",
@@ -1050,6 +1098,117 @@ class KnowledgeService:
             latest_crawl=root.get("latest_crawl"),
             latest_benchmark=latest_benchmark,
             scope_hash=scope_hash,
+        )
+
+    def indexer_reliability_roots(
+        self,
+        *,
+        include_disabled: bool = False,
+        freshness_hours: int = 336,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        summaries = database.crawl_root_summaries(limit_assets=0, limit_jobs=0)
+        cards: list[dict[str, Any]] = []
+        capped = max(1, min(int(limit or 100), 500))
+        for root in summaries[:capped]:
+            if not include_disabled and not root.get("enabled"):
+                continue
+            scope_hash = _benchmark_scope_hash("monitored_root", str(root.get("name") or ""), str(root.get("root_path") or ""))
+            runs = database.list_benchmark_runs(
+                scenario="host_cloud",
+                scope_type="monitored_root",
+                scope_hash=scope_hash,
+                freshness_hours=max(1, int(freshness_hours or 336)),
+                limit=1,
+            )
+            cards.append(
+                build_root_reliability_card(
+                    root=root,
+                    asset_counts=root.get("asset_counts") or {},
+                    job_counts=root.get("job_counts") or {},
+                    latest_crawl=root.get("latest_crawl"),
+                    latest_benchmark=runs[0] if runs else None,
+                    scope_hash=scope_hash,
+                )
+            )
+        return build_roots_reliability_report(
+            roots=cards,
+            include_disabled=include_disabled,
+            freshness_hours=freshness_hours,
+        )
+
+    def code_status(self, *, root_name: str | None = None) -> dict[str, Any]:
+        payload = database.code_index_status(root_name=root_name)
+        roots = payload.get("roots") if isinstance(payload, dict) else []
+        totals = payload.get("totals") if isinstance(payload, dict) else {}
+        return build_code_status_report(roots=roots or [], totals=totals or {})
+
+    def code_search(
+        self,
+        query: str,
+        *,
+        root_name: str | None = None,
+        language: str | None = None,
+        symbol_kind: str | None = None,
+        relationship: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        rows = database.search_code_symbols(
+            query=query,
+            root_name=root_name,
+            language=language,
+            symbol_kind=symbol_kind,
+            relationship=relationship,
+            limit=max(1, min(int(limit or 20), 100)),
+        )
+        return {
+            "query": query,
+            "settings_mutated": False,
+            "results": [sanitize_code_result(row) for row in rows],
+        }
+
+    def code_symbol_lookup(
+        self,
+        symbol: str,
+        *,
+        root_name: str | None = None,
+        language: str | None = None,
+        include_references: bool = True,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        payload = database.lookup_code_symbol(
+            symbol=symbol,
+            root_name=root_name,
+            language=language,
+            include_references=include_references,
+            limit=max(1, min(int(limit or 20), 100)),
+        )
+        return sanitize_code_lookup(payload)
+
+    def operational_diagnostics(self, *, section: str = "all", limit: int = 25) -> dict[str, Any]:
+        normalized = str(section or "all").strip().lower().replace("-", "_")
+        if normalized not in {"all", "retrieval", "watcher", "workers", "jobs", "mail"}:
+            raise ValueError("diagnostics section must be all, retrieval, watcher, workers, jobs, or mail")
+        capped = max(1, min(int(limit or 25), 100))
+        retrieval = {"recent_explains": database.recent_retrieval_explain_diagnostics(limit=capped)} if normalized in {"all", "retrieval"} else {}
+        watcher = {"events": database.list_watch_events(limit=capped)} if normalized in {"all", "watcher"} else {}
+        workers = {"families": database.worker_family_stats()} if normalized in {"all", "workers"} else {}
+        jobs = {"jobs": database.list_capture_jobs(limit=capped)} if normalized in {"all", "jobs"} else {}
+        mail = (
+            {
+                "sync_runs": database.list_mail_sync_runs(limit=capped),
+                "post_process_events": database.list_mail_post_process_events(limit=capped),
+            }
+            if normalized in {"all", "mail"}
+            else {}
+        )
+        return summarize_operational_diagnostics(
+            retrieval=retrieval,
+            watcher=watcher,
+            workers=workers,
+            jobs=jobs,
+            mail=mail,
+            section=normalized,
         )
 
     def run_benchmark(

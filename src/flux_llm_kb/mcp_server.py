@@ -248,6 +248,48 @@ def create_server():
         """Return a monitored-root reliability card with sanitized counts and latest benchmark evidence."""
         return service.indexer_root_reliability(root_name=root_name)
 
+    @mcp.tool(name="kb.indexer_reliability_roots")
+    def indexer_reliability_roots(include_disabled: bool = False, freshness_hours: int = 336, limit: int = 100):
+        """Return all monitored-root reliability cards with readiness totals and required actions."""
+        return service.indexer_reliability_roots(
+            include_disabled=include_disabled,
+            freshness_hours=freshness_hours,
+            limit=limit,
+        )
+
+    @mcp.tool(name="kb.code_status")
+    def code_status(root_name: str | None = None):
+        """Return privacy-safe code index coverage, parser status, and fallback summaries."""
+        return service.code_status(root_name=root_name)
+
+    @mcp.tool(name="kb.code_search")
+    def code_search(query: str, root_name: str | None = None, language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, limit: int = 20):
+        """Search code symbols and definitions without returning raw private code."""
+        return service.code_search(
+            query=query,
+            root_name=root_name,
+            language=language,
+            symbol_kind=symbol_kind,
+            relationship=relationship,
+            limit=limit,
+        )
+
+    @mcp.tool(name="kb.code_symbol_lookup")
+    def code_symbol_lookup(symbol: str, root_name: str | None = None, language: str | None = None, include_references: bool = True, limit: int = 20):
+        """Look up a code symbol and optional references with sanitized metadata."""
+        return service.code_symbol_lookup(
+            symbol=symbol,
+            root_name=root_name,
+            language=language,
+            include_references=include_references,
+            limit=limit,
+        )
+
+    @mcp.tool(name="kb.operational_diagnostics")
+    def operational_diagnostics(section: str = "all", limit: int = 25):
+        """Return read-only operational diagnostics for retrieval, watcher, workers, jobs, and mail."""
+        return service.operational_diagnostics(section=section, limit=limit)
+
     @mcp.tool(name="kb.retrieval_benchmark_run")
     def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True):
         """Run the synthetic retrieval-quality benchmark suite with confidence bands, calibration candidates, and metric deltas."""

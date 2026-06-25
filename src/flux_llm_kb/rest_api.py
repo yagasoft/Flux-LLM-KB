@@ -432,9 +432,63 @@ def create_app():
             include_tuning=request.include_tuning,
         )
 
+    @app.get("/api/acceleration/reliability/roots")
+    def acceleration_reliability_roots(
+        include_disabled: bool = False,
+        freshness_hours: int = 336,
+        limit: int = 100,
+    ):
+        return service.indexer_reliability_roots(
+            include_disabled=include_disabled,
+            freshness_hours=freshness_hours,
+            limit=limit,
+        )
+
     @app.get("/api/acceleration/reliability/root/{root_name}")
     def acceleration_reliability_root(root_name: str):
         return service.indexer_root_reliability(root_name)
+
+    @app.get("/api/code/status")
+    def code_status(root_name: str | None = None):
+        return service.code_status(root_name=root_name)
+
+    @app.get("/api/code/search")
+    def code_search(
+        query: str,
+        root_name: str | None = None,
+        language: str | None = None,
+        symbol_kind: str | None = None,
+        relationship: str | None = None,
+        limit: int = 20,
+    ):
+        return service.code_search(
+            query=query,
+            root_name=root_name,
+            language=language,
+            symbol_kind=symbol_kind,
+            relationship=relationship,
+            limit=limit,
+        )
+
+    @app.get("/api/code/symbols")
+    def code_symbols(
+        symbol: str,
+        root_name: str | None = None,
+        language: str | None = None,
+        include_references: bool = True,
+        limit: int = 20,
+    ):
+        return service.code_symbol_lookup(
+            symbol=symbol,
+            root_name=root_name,
+            language=language,
+            include_references=include_references,
+            limit=limit,
+        )
+
+    @app.get("/api/diagnostics/{section}")
+    def operational_diagnostics(section: str, limit: int = 25):
+        return service.operational_diagnostics(section=section, limit=limit)
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
