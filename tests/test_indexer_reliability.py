@@ -8,6 +8,7 @@ from flux_llm_kb.indexer_reliability import (
     build_root_reliability_card,
     build_roots_reliability_report,
 )
+from flux_llm_kb.operator_evidence import build_operator_evidence_report
 
 
 def _run(
@@ -236,3 +237,87 @@ def test_roots_reliability_report_summarizes_readiness_and_remaining_actions():
     serialized = json.dumps(report).lower()
     assert "e:/private" not in serialized
     assert "root_path" not in serialized
+
+
+def test_operator_evidence_blocks_acceleration_until_full_live_evidence_is_ready():
+    reliability = {
+        "readiness": "partial",
+        "settings_mutated": False,
+        "evidence_age_hours": 2,
+        "checks": [
+            {"check": "synthetic_reliability", "status": "ok", "summary": "fresh"},
+            {"check": "scoped_host_cloud", "status": "missing", "summary": "root evidence missing"},
+            {"check": "worker_tuning", "status": "ok", "summary": "tuning observed"},
+        ],
+        "latest_runs": [{"id": "rel-1", "scenario": "reliability"}],
+        "candidates": [{"setting": "crawler.hash_parallelism", "follow_up_command": "flux-kb acceleration benchmark run --scenario tuning"}],
+    }
+    roots = {
+        "settings_mutated": False,
+        "totals": {"ready": 1, "partial": 1, "blocked": 0, "not_run": 0, "total": 2},
+        "roots": [
+            {"root_name": "docs", "readiness": "ready", "blockers": {}, "latest_benchmark": {"id": "docs-run"}},
+            {
+                "root_name": "cloud",
+                "readiness": "partial",
+                "blockers": {"blocked_assets": 1},
+                "required_action": "Run scoped host/cloud reliability evidence and clear blocked or pending work.",
+            },
+        ],
+    }
+
+    report = build_operator_evidence_report(
+        reliability=reliability,
+        roots=roots,
+        code_status={"totals": {"fallback_count": 2}, "gaps": [{"category": "parser_fallback", "count": 2}]},
+        diagnostics={"items": [{"section": "jobs", "severity": "warning", "summary": "blocked job"}]},
+    )
+
+    assert report["settings_mutated"] is False
+    assert report["gates"]["vss_snapshot"]["state"] == "hold"
+    assert report["gates"]["provider_acceleration"]["state"] == "hold"
+    assert report["root_readiness"]["partial"] == 1
+    assert report["top_blockers"][0]["root_name"] == "cloud"
+    assert report["manual_follow_ups"][0]["command"].startswith("flux-kb acceleration benchmark")
+    serialized = json.dumps(report).lower()
+    assert "e:/private" not in serialized
+    assert "root_path" not in serialized
+
+
+def test_operator_evidence_marks_design_eligible_only_with_full_clean_evidence():
+    reliability = {
+        "readiness": "ready",
+        "settings_mutated": False,
+        "evidence_age_hours": 1,
+        "checks": [
+            {"check": "synthetic_reliability", "status": "ok", "evidence": {"cold_scan": True, "warm_scan": True}},
+            {"check": "scoped_host_cloud", "status": "ok", "evidence": {"run_count": 2}},
+            {"check": "worker_tuning", "status": "ok", "evidence": {"run_count": 1}},
+        ],
+        "watcher": {"run_count": 1, "probe_event_count": 2},
+        "latest_runs": [
+            {"id": "rel-1", "scenario": "reliability"},
+            {"id": "host-1", "scenario": "host_cloud"},
+            {"id": "tune-1", "scenario": "tuning"},
+        ],
+        "candidates": [],
+    }
+    roots = {
+        "settings_mutated": False,
+        "totals": {"ready": 2, "partial": 0, "blocked": 0, "not_run": 0, "total": 2},
+        "roots": [
+            {"root_name": "docs", "readiness": "ready", "latest_benchmark": {"id": "docs-run"}},
+            {"root_name": "code", "readiness": "ready", "latest_benchmark": {"id": "code-run"}},
+        ],
+    }
+
+    report = build_operator_evidence_report(
+        reliability=reliability,
+        roots=roots,
+        code_status={"totals": {"fallback_count": 0}, "gaps": []},
+        diagnostics={"items": []},
+    )
+
+    assert report["gates"]["vss_snapshot"]["state"] == "eligible_for_design"
+    assert report["gates"]["provider_acceleration"]["state"] == "eligible_for_design"
+    assert report["settings_mutated"] is False

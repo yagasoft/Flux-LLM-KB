@@ -725,6 +725,87 @@ def test_retrieval_benchmark_runs_insert_list_and_sanitize_metadata(monkeypatch)
     assert "raw_text" not in json.dumps(rows)
 
 
+def test_code_feedback_events_insert_summary_and_sanitize_private_values(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("feedback-1", timestamp)
+
+        def fetchall(self):
+            return [
+                (
+                    "missing_symbol",
+                    "docs",
+                    2,
+                    0,
+                    3,
+                    timestamp,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    inserted = database.record_code_feedback_event(
+        query="Find private implementation details",
+        root_name="docs",
+        result_count=0,
+        surface="dashboard",
+        miss_category="missing_symbol",
+        expected_symbol="PrivateService.build",
+        path="E:/private/repo/src/private_service.py",
+        metadata={"raw_query": "do not store", "private_path": "E:/private/repo", "note": "safe"},
+    )
+    summary = database.code_feedback_summary(root_name="docs", limit=5)
+
+    insert_sql, insert_params = executed[0]
+    assert "INSERT INTO code_retrieval_feedback_events" in insert_sql
+    assert insert_params[0] == "docs"
+    assert str(insert_params[1]).startswith("sha256:")
+    assert str(insert_params[2]).startswith("sha256:")
+    assert insert_params[3] == 0
+    assert insert_params[4] == "dashboard"
+    assert insert_params[5] == "missing_symbol"
+    assert str(insert_params[6]).startswith("sha256:")
+    assert insert_params[7] == "private_service.py"
+    assert json.loads(insert_params[8]) == {"note": "safe"}
+    list_sql, list_params = executed[1]
+    assert "miss_category" in list_sql
+    assert "root_name = %s" in list_sql
+    assert list_params == ["docs", 5]
+    assert inserted["id"] == "feedback-1"
+    assert summary["settings_mutated"] is False
+    assert summary["rows"][0]["miss_category"] == "missing_symbol"
+    serialized = json.dumps({"inserted": inserted, "summary": summary}).lower()
+    assert "private implementation" not in serialized
+    assert "privateservice" not in serialized
+    assert "e:/private" not in serialized
+
+
 def test_watcher_events_store_metadata_counts_and_sanitized_paths(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)

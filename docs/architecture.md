@@ -26,6 +26,10 @@ system rather than a large prompt-injected memory file.
 - `code_symbols` and `code_references`: parser-derived code definitions,
   imports, calls, routes, SQL objects, and configuration facts tied back to
   `source_assets` and `asset_chunks`.
+- `code_retrieval_feedback_events`: privacy-safe code retrieval miss evidence
+  with root names, stable scope/query/symbol hashes, safe filename leaves,
+  categories, counts, and timestamps; raw queries, paths, snippets, code, and
+  embeddings are not persisted.
 - `crawl_runs`, `crawl_path_manifests`, `watcher_state`, and `watcher_events`:
   crawler statistics, per-root/path scan fingerprints, watcher heartbeat,
   event counters, sanitized event rows, and error state for dashboard
@@ -338,22 +342,35 @@ monitored roots and returns sanitized root cards plus readiness totals,
 stale/missing scoped evidence, blocked job and asset counts, latest benchmark
 references, and manual tuning candidates. The `all_roots` reliability run
 orchestrates metadata-only synthetic reliability, scoped host/cloud evidence,
-cache readiness, and tuning diagnostics for enabled roots while preserving
-`settings_mutated: false`.
+cache readiness, and tuning diagnostics for enabled roots when
+`evidence_level=full` while preserving `settings_mutated: false`.
+
+The operator evidence report is a read-only decision layer over reliability,
+code diagnostics, and operational diagnostics. It reports the
+`settings_mutated` field as `false`, plus root readiness totals, freshness,
+latest benchmark references, top blockers, manual follow-up commands, and the
+explicit `vss_snapshot` and `provider_acceleration` gates. Gate states are
+`blocked`, `hold`, or `eligible_for_design`; they never enable VSS, provider
+acceleration, worker caps, hash parallelism, or any setting automatically.
 
 Code diagnostics are read-only and privacy-safe. They aggregate coverage from
 `source_assets`, `asset_chunks`, `code_symbols`, and `code_references`, reporting
 per-root language counts, parser status/fallback counts, generated-file counts,
 definition/reference coverage, and slow/problematic code-index rows without raw
 code content or private root paths. Dedicated code status/search/symbol lookup
-surfaces reuse the stored symbol/reference tables and sanitize path output.
+surfaces reuse the stored symbol/reference tables and sanitize path output. Code
+retrieval feedback records only hashed/sanitized miss evidence and appears in
+`code status` as `feedback_summary`, `gaps[]`, and retrieval benchmark summary
+metadata when available.
 
 Operational diagnostics are also read-only. They aggregate retrieval explain
 traces, watcher events, worker heartbeat/history, slow jobs, blocked
 dependencies, mail sync runs, and mail post-process events into bounded
 dashboard/API evidence summaries rather than raw log dumps. Diagnostic payloads
-should carry counts, statuses, timestamps, sanitized identifiers, and next-action
-signals; raw mail bodies, private paths, credentials, embeddings, and runtime
+support `root_name`, `status`, `family`, `since_hours`, and `include_details`
+filters and include standardized read-only items with section, severity, status,
+root name, summary, bounded evidence, follow-up command, and dashboard target
+metadata. Raw mail bodies, private paths, credentials, embeddings, and runtime
 dumps remain out of public-safe surfaces.
 
 `scan` mode creates temporary fixtures or aggregate real-root dry-runs and can
@@ -378,12 +395,15 @@ flux-kb acceleration benchmark run --scenario reliability --mode all --passes 2
 flux-kb acceleration benchmark run --scenario host_cloud --scope root --root docs --max-files 100
 flux-kb acceleration benchmark run --scenario cache_readiness --mode model
 flux-kb acceleration benchmark run --scenario tuning --mode scan --passes 2
+flux-kb acceleration evidence --compare-label baseline
 flux-kb acceleration reliability roots
-flux-kb acceleration reliability run --scope all-roots
+flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
 flux-kb code status --root docs
 flux-kb code search build_invoice --root app --language python
 flux-kb code symbol OrderService.build_invoice
-flux-kb diagnostics all
+flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
+flux-kb code feedback summary --root app
+flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
 ```
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
@@ -391,9 +411,10 @@ backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,
 and future graph/review workflows. The UI is a React/Vite operations console
 bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
-The Health tab includes the acceleration all-root reliability matrix, code
-diagnostics, and operational diagnostics panels so operators can inspect
-evidence without reading raw logs.
+The Health tab includes the operator evidence gate panel, acceleration all-root
+reliability matrix, code diagnostics with feedback capture, and filtered
+operational diagnostics panels so operators can inspect evidence without
+reading raw logs.
 
 REST errors preserve a readable `detail`/`message` string for existing clients
 and also include a structured `error` envelope for operators. Envelopes carry a

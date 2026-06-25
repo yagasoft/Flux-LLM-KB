@@ -336,6 +336,7 @@ let retentionQualityPayload: unknown;
 let retentionPolicyUpdatePayload: unknown;
 let benchmarkRunPayload: unknown;
 let reliabilityRunPayload: unknown;
+let codeFeedbackPayload: unknown;
 let retrievalBenchmarkRunPayload: unknown;
 let retrievalBenchmarkHistoryPayload: unknown;
 
@@ -507,6 +508,7 @@ describe("Flux dashboard", () => {
     retentionPolicyUpdatePayload = undefined;
     benchmarkRunPayload = undefined;
     reliabilityRunPayload = undefined;
+    codeFeedbackPayload = undefined;
     retrievalBenchmarkRunPayload = undefined;
     retrievalBenchmarkHistoryPayload = {
       suite: "standard",
@@ -643,6 +645,20 @@ describe("Flux dashboard", () => {
           ]
         });
       }
+      if (url === "/api/acceleration/evidence") {
+        return json({
+          settings_mutated: false,
+          readiness: "partial",
+          root_readiness: { ready: 1, partial: 1, blocked: 0, not_run: 1, total: 3 },
+          top_blockers: [{ section: "reliability", severity: "warning", root_name: "code", summary: "Run scoped host/cloud reliability evidence." }],
+          manual_follow_ups: [{ setting: "crawler.hash_parallelism", command: "flux-kb acceleration benchmark run --scenario tuning" }],
+          code_gaps: [{ category: "missing_symbol", count: 2, summary: "Code feedback reported misses." }],
+          gates: {
+            vss_snapshot: { state: "hold", reason: "VSS remains design-only." },
+            provider_acceleration: { state: "hold", reason: "Provider acceleration remains blocked." }
+          }
+        });
+      }
       if (url === "/api/acceleration/reliability/run" && init?.method === "POST") {
         reliabilityRunPayload = JSON.parse(String(init.body));
         if ((reliabilityRunPayload as { scope?: string }).scope === "all_roots") {
@@ -689,6 +705,8 @@ describe("Flux dashboard", () => {
       if (url === "/api/code/status") {
         return json({
           totals: { asset_count: 4, symbol_count: 7, reference_count: 9, fallback_count: 1 },
+          feedback_summary: { totals: { event_count: 2 }, rows: [{ miss_category: "missing_symbol", root_name: "app", event_count: 2 }] },
+          gaps: [{ category: "missing_symbol", count: 2, summary: "Code feedback reported missing symbol misses." }],
           roots: [
             {
               root_name: "app",
@@ -702,12 +720,20 @@ describe("Flux dashboard", () => {
           ]
         });
       }
-      if (url === "/api/diagnostics/all") {
+      if (url === "/api/code/feedback" && init?.method === "POST") {
+        codeFeedbackPayload = JSON.parse(String(init.body));
+        return json({ id: "feedback-1", settings_mutated: false });
+      }
+      if (url === "/api/code/feedback/summary") {
+        return json({ settings_mutated: false, totals: { event_count: 2 }, rows: [{ miss_category: "missing_symbol", root_name: "app", event_count: 2 }] });
+      }
+      if (url.startsWith("/api/diagnostics/all")) {
         return json({
           section: "all",
           settings_mutated: false,
           counts: { watcher_events: 2, worker_families: 1, blocked_jobs: 1, mail_sync_runs: 3 },
-          sections: { workers: { families: [{ family: "office", pending: 2, blocked_locked: 1 }] } }
+          sections: { workers: { families: [{ family: "office", pending: 2, blocked_locked: 1 }] } },
+          items: [{ section: "jobs", severity: "warning", status: "blocked_missing_dependency", root_name: "docs", summary: "Job job-1 is blocked.", follow_up_command: "flux-kb crawl worker status --family office" }]
         });
       }
       if (url === "/api/retrieval/benchmarks") return json(retrievalBenchmarkHistoryPayload);
@@ -935,13 +961,22 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("1 ready / 1 partial / 1 not run")).toBeInTheDocument();
     expect(screen.getByText("benchmark bench-docs")).toBeInTheDocument();
     expect(screen.getByText("Run scoped host/cloud reliability evidence and clear blocked or pending work.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Operator Evidence" })).toBeInTheDocument();
+    expect(screen.getByText("VSS Snapshot")).toBeInTheDocument();
+    expect(screen.getAllByText("Hold").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Provider Acceleration")).toBeInTheDocument();
+    expect(screen.getByText("Run scoped host/cloud reliability evidence.")).toBeInTheDocument();
+    expect(screen.getByText("Code feedback reported misses.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Code Diagnostics" })).toBeInTheDocument();
     expect(screen.getByText("Code Assets")).toBeInTheDocument();
     expect(screen.getByText("7 symbols / 9 refs")).toBeInTheDocument();
     expect(screen.getByText("python 4; typescript 3; Parsed 6; Fallback 1")).toBeInTheDocument();
+    expect(screen.getByText("Code Feedback")).toBeInTheDocument();
+    expect(screen.getByText("2 feedback events")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Operational Diagnostics" })).toBeInTheDocument();
     expect(screen.getByText("Blocked jobs")).toBeInTheDocument();
     expect(screen.getByText("1 blocked locks")).toBeInTheDocument();
+    expect(screen.getByText("Job job-1 is blocked.")).toBeInTheDocument();
     expect(screen.getAllByText("Partial").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Synthetic reliability evidence is current.")).toBeInTheDocument();
     expect(screen.getByText("Run scoped host/cloud calibration for the selected root.")).toBeInTheDocument();
@@ -957,7 +992,11 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Run reliability gate" }));
     expect(reliabilityRunPayload).toEqual({ scope: "root", root_name: "docs", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true });
     await user.click(screen.getByRole("button", { name: "Run all roots" }));
-    expect(reliabilityRunPayload).toEqual({ scope: "all_roots", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true });
+    expect(reliabilityRunPayload).toEqual({ scope: "all_roots", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true, evidence_level: "full" });
+    await user.click(screen.getByRole("button", { name: "Submit code feedback" }));
+    expect(codeFeedbackPayload).toMatchObject({ surface: "dashboard", miss_category: "missing_symbol" });
+    await user.click(screen.getByRole("button", { name: "Apply diagnostic filters" }));
+    expect(fetch).toHaveBeenCalledWith("/api/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
     await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
     expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "standard" });
     await user.click(screen.getByRole("button", { name: "Run tuning diagnostics" }));

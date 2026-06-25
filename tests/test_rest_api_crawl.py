@@ -161,6 +161,10 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
             calls.append(("run", kwargs))
             return {"readiness": "ready", "settings_mutated": False, "run": kwargs}
 
+        def operator_evidence(self, **kwargs):
+            calls.append(("evidence", kwargs))
+            return {"settings_mutated": False, "gates": {"vss_snapshot": {"state": "hold"}}}
+
         def indexer_root_reliability(self, root_name):
             calls.append(("root", root_name))
             return {"root_name": root_name, "readiness": "partial"}
@@ -182,8 +186,11 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
             "scope": "synthetic",
             "deployment_label": "desktop",
             "include_cache_readiness": True,
+            "evidence_level": "full",
+            "compare_label": "baseline",
         },
     )
+    evidence_response = client.get("/api/acceleration/evidence", params={"label": "nightly", "compare_label": "baseline"})
     root_response = client.get("/api/acceleration/reliability/root/docs")
     roots_response = client.get("/api/acceleration/reliability/roots", params={"freshness_hours": 24})
 
@@ -191,6 +198,8 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
     assert status_response.json()["readiness"] == "partial"
     assert run_response.status_code == 200
     assert run_response.json()["settings_mutated"] is False
+    assert evidence_response.status_code == 200
+    assert evidence_response.json()["gates"]["vss_snapshot"]["state"] == "hold"
     assert root_response.status_code == 200
     assert root_response.json() == {"root_name": "docs", "readiness": "partial"}
     assert roots_response.status_code == 200
@@ -200,22 +209,86 @@ def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
         {
             "root_name": "docs",
             "path": None,
-            "label": "nightly",
-            "deployment_label": None,
-            "freshness_hours": 12,
-            "limit": 100,
-        },
+                "label": "nightly",
+                "deployment_label": None,
+                "compare_label": None,
+                "freshness_hours": 12,
+                "limit": 100,
+            },
     )
     assert calls[1][0] == "run"
     assert calls[1][1]["scope"] == "synthetic"
     assert calls[1][1]["include_cache_readiness"] is True
-    assert calls[2] == ("root", "docs")
-    assert calls[3] == (
+    assert calls[1][1]["evidence_level"] == "full"
+    assert calls[1][1]["compare_label"] == "baseline"
+    assert calls[2] == ("evidence", {"label": "nightly", "deployment_label": None, "compare_label": "baseline", "freshness_hours": 336, "limit": 100})
+    assert calls[3] == ("root", "docs")
+    assert calls[4] == (
         "roots",
         {
             "include_disabled": False,
             "freshness_hours": 24,
             "limit": 100,
+        },
+    )
+
+
+def test_code_feedback_and_diagnostics_filter_routes_forward_to_service(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def record_code_feedback(self, **kwargs):
+            calls.append(("feedback", kwargs))
+            return {"id": "feedback-1", "settings_mutated": False}
+
+        def code_feedback_summary(self, **kwargs):
+            calls.append(("summary", kwargs))
+            return {"settings_mutated": False, "rows": [{"miss_category": "missing_symbol"}]}
+
+        def operational_diagnostics(self, **kwargs):
+            calls.append(("diagnostics", kwargs))
+            return {"settings_mutated": False, "items": [{"section": "jobs"}]}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    feedback_response = client.post(
+        "/api/code/feedback",
+        json={
+            "query": "build invoice",
+            "root_name": "docs",
+            "result_count": 0,
+            "surface": "dashboard",
+            "miss_category": "missing_symbol",
+            "expected_symbol": "OrderService.build_invoice",
+            "path": "E:/private/docs/orders.py",
+            "metadata": {"note": "safe"},
+        },
+    )
+    summary_response = client.get("/api/code/feedback/summary", params={"root_name": "docs"})
+    diagnostics_response = client.get(
+        "/api/diagnostics/jobs",
+        params={"root_name": "docs", "status": "blocked_missing_dependency", "family": "office", "since_hours": 24, "include_details": True},
+    )
+
+    assert feedback_response.status_code == 200
+    assert summary_response.json()["rows"][0]["miss_category"] == "missing_symbol"
+    assert diagnostics_response.json()["items"][0]["section"] == "jobs"
+    assert calls[0][0] == "feedback"
+    assert calls[0][1]["miss_category"] == "missing_symbol"
+    assert calls[1] == ("summary", {"root_name": "docs", "limit": 20})
+    assert calls[2] == (
+        "diagnostics",
+        {
+            "section": "jobs",
+            "limit": 25,
+            "root_name": "docs",
+            "status": "blocked_missing_dependency",
+            "family": "office",
+            "since_hours": 24,
+            "include_details": True,
         },
     )
 
@@ -255,7 +328,18 @@ def test_code_and_operational_diagnostic_routes_forward_to_service(monkeypatch):
         ("code_status", {"root_name": "app"}),
         ("code_search", {"query": "OrderService", "root_name": None, "language": "python", "symbol_kind": None, "relationship": None, "limit": 20}),
         ("code_symbol", {"symbol": "OrderService", "root_name": None, "language": None, "include_references": True, "limit": 20}),
-        ("diagnostics", {"section": "workers", "limit": 5}),
+        (
+            "diagnostics",
+            {
+                "section": "workers",
+                "limit": 5,
+                "root_name": None,
+                "status": None,
+                "family": None,
+                "since_hours": None,
+                "include_details": False,
+            },
+        ),
     ]
 
 
@@ -500,6 +584,7 @@ def test_reliability_run_proxies_host_agent_root_benchmark_slices(monkeypatch):
             "path": None,
             "label": "nightly",
             "deployment_label": "desktop",
+            "compare_label": None,
         }
     }
 

@@ -143,12 +143,15 @@ flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
 flux-kb acceleration benchmark run --scope root --root docs --max-files 1000 --mode scan --deployment-label after-update
 flux-kb acceleration benchmark run --fixture image-heavy --mode model --passes 2 --deployment-label after-update
 flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
+flux-kb acceleration evidence --compare-label baseline
 flux-kb acceleration reliability roots
-flux-kb acceleration reliability run --scope all-roots
+flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
 flux-kb code status --root docs
 flux-kb code search build_invoice --root app --language python
 flux-kb code symbol OrderService.build_invoice
-flux-kb diagnostics all
+flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
+flux-kb code feedback summary --root app
+flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
 flux-kb embeddings backfill --owner-class all --limit 100
@@ -250,16 +253,25 @@ with sanitized worker-family and watcher evidence. Use
 `flux-kb acceleration reliability status` to inspect readiness, and
 `flux-kb acceleration reliability run --scope root --root <name> --label <label>`
 to run synthetic reliability, scoped host/cloud calibration, and tuning evidence
-under one label. The gate reports `ready`, `partial`, `blocked`, or `not_run`,
-keeps `settings_mutated: false`, and emits manual follow-up commands for tuning
-candidates. It does not apply settings, change worker caps, read raw content, or
-unblock VSS/provider-specific acceleration without fresh operator evidence.
+under one label. Add `--full` when you want synthetic reliability, scoped
+host/cloud evidence for enabled roots, cache readiness, and tuning comparison
+evidence in one pass. The gate reports `ready`, `partial`, `blocked`, or
+`not_run`, keeps `settings_mutated: false`, and emits manual follow-up commands
+for tuning candidates. It does not apply settings, change worker caps, read raw
+content, or unblock VSS/provider-specific acceleration without fresh operator
+evidence.
 Use `flux-kb acceleration reliability roots` to inspect sanitized readiness for
 all enabled monitored roots, and `flux-kb acceleration reliability run --scope
-all-roots` when you need a read-only all-root evidence pass. Code index
-diagnostics are available with `flux-kb code status`, `flux-kb code search`, and
-`flux-kb code symbol`; operational evidence summaries are available with
-`flux-kb diagnostics retrieval|watcher|workers|jobs|mail|all`.
+all-roots --full` when you need a read-only all-root evidence pass. Use
+`flux-kb acceleration evidence` to inspect the combined operator evidence report
+with VSS/provider gate decisions; those gates can become `eligible_for_design`
+but never enable VSS or provider acceleration.
+Code index diagnostics are available with `flux-kb code status`, `flux-kb code
+search`, and `flux-kb code symbol`; privacy-safe miss feedback is available with
+`flux-kb code feedback add|summary`. Operational evidence summaries are
+available with `flux-kb diagnostics retrieval|watcher|workers|jobs|mail|all`,
+optionally filtered by `--root`, `--status`, `--family`, `--since-hours`, and
+`--include-details`.
 Worker-family status is available with `flux-kb crawl worker status --family
 <name|all>` and reports configured caps, cap pressure, worker-family
 backpressure, oldest pending age, slow recent jobs, retry/lock transitions,

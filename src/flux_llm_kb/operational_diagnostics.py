@@ -12,6 +12,11 @@ def summarize_operational_diagnostics(
     jobs: dict[str, Any] | None = None,
     mail: dict[str, Any] | None = None,
     section: str = "all",
+    root_name: str | None = None,
+    status: str | None = None,
+    family: str | None = None,
+    since_hours: int | None = None,
+    include_details: bool = False,
 ) -> dict[str, Any]:
     sections = {
         "retrieval": _sanitize_section(retrieval or {}),
@@ -29,12 +34,23 @@ def summarize_operational_diagnostics(
         "mail_sync_runs": len(sections["mail"].get("sync_runs", []) or []),
         "mail_post_process_events": len(sections["mail"].get("post_process_events", []) or []),
     }
-    selected_sections = sections if section == "all" else {section: sections.get(section, {})}
+    filters = {
+        "root_name": root_name,
+        "status": status,
+        "family": family,
+        "since_hours": since_hours,
+        "include_details": bool(include_details),
+    }
+    items = _diagnostic_items(sections, filters=filters)
+    filtered_sections = _filter_sections(sections, filters=filters)
+    selected_sections = filtered_sections if section == "all" else {section: filtered_sections.get(section, {})}
     return {
         "section": section,
         "settings_mutated": False,
         "counts": counts,
         "sections": selected_sections,
+        "filters": filters,
+        "items": items,
     }
 
 
@@ -54,3 +70,129 @@ def _sanitize_text(value: str) -> str:
         leaf = PurePosixPath(normalized).name or PureWindowsPath(value).name
         return leaf or "<path>"
     return value
+
+
+def _diagnostic_items(sections: dict[str, Any], *, filters: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for event in sections["watcher"].get("events", []) or []:
+        if not isinstance(event, dict):
+            continue
+        rows.append(_item("watcher", event, status=str(event.get("status") or event.get("action") or "event"), family=None))
+    for family in sections["workers"].get("families", []) or []:
+        if not isinstance(family, dict):
+            continue
+        severity = "warning" if int(family.get("blocked_locked") or 0) or int(family.get("failed") or 0) else "info"
+        rows.append(
+            _item(
+                "workers",
+                family,
+                status=str(family.get("backpressure") or "observed"),
+                family=str(family.get("family") or ""),
+                severity=severity,
+            )
+        )
+    for job in sections["jobs"].get("jobs", []) or []:
+        if not isinstance(job, dict):
+            continue
+        job_status = str(job.get("status") or "unknown")
+        severity = "warning" if "blocked" in job_status or "failed" in job_status else "info"
+        rows.append(_item("jobs", job, status=job_status, family=str(job.get("job_family") or ""), severity=severity))
+    for run in sections["mail"].get("sync_runs", []) or []:
+        if not isinstance(run, dict):
+            continue
+        run_status = str(run.get("status") or "unknown")
+        severity = "warning" if run_status not in {"completed", "queued", "claimed", "running"} else "info"
+        rows.append(_item("mail", run, status=run_status, family=None, severity=severity))
+    return [row for row in rows if _matches_filters(row, filters)][:25]
+
+
+def _filter_sections(sections: dict[str, Any], *, filters: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "retrieval": sections.get("retrieval", {}),
+        "watcher": {"events": []},
+        "workers": {"families": []},
+        "jobs": {"jobs": []},
+        "mail": sections.get("mail", {}),
+    }
+    for event in sections.get("watcher", {}).get("events", []) or []:
+        item = _item("watcher", event, status=str(event.get("status") or event.get("action") or "event"), family=None) if isinstance(event, dict) else {}
+        if item and _matches_filters(item, filters):
+            result["watcher"]["events"].append(event)
+    for family in sections.get("workers", {}).get("families", []) or []:
+        if not isinstance(family, dict):
+            continue
+        item = _item("workers", family, status=str(family.get("backpressure") or "observed"), family=str(family.get("family") or ""))
+        if _matches_filters(item, filters):
+            result["workers"]["families"].append(family)
+    for job in sections.get("jobs", {}).get("jobs", []) or []:
+        if not isinstance(job, dict):
+            continue
+        item = _item("jobs", job, status=str(job.get("status") or "unknown"), family=str(job.get("job_family") or ""))
+        if _matches_filters(item, filters):
+            result["jobs"]["jobs"].append(job)
+    return result
+
+
+def _item(
+    section: str,
+    row: dict[str, Any],
+    *,
+    status: str,
+    family: str | None,
+    severity: str = "info",
+) -> dict[str, Any]:
+    root_name = row.get("root_name")
+    target_id = row.get("id") or row.get("root_name") or row.get("family") or row.get("profile_name") or section
+    summary = _summary(section=section, status=status, row=row)
+    evidence = {
+        key: value
+        for key, value in row.items()
+        if key in {"pending", "running", "blocked", "failed", "retrying_locked", "blocked_locked", "action", "status", "duration_ms"}
+    }
+    return {
+        "section": section,
+        "severity": severity,
+        "status": status,
+        "family": family,
+        "root_name": root_name,
+        "summary": summary,
+        "evidence": evidence,
+        "follow_up_command": _follow_up_command(section, row),
+        "target": {"type": "job" if section == "jobs" else section.rstrip("s"), "id": target_id},
+    }
+
+
+def _summary(*, section: str, status: str, row: dict[str, Any]) -> str:
+    if section == "jobs":
+        return f"Job {row.get('id') or ''} is {status}.".strip()
+    if section == "workers":
+        return f"Worker family {row.get('family') or 'unknown'} reports {status}."
+    if section == "watcher":
+        return f"Watcher event {status} observed."
+    if section == "mail":
+        return f"Mail sync {row.get('profile_name') or 'profile'} is {status}."
+    return f"{section} diagnostic is {status}."
+
+
+def _follow_up_command(section: str, row: dict[str, Any]) -> str:
+    if section == "jobs":
+        family = row.get("job_family") or "all"
+        return f"flux-kb crawl worker status --family {family}"
+    if section == "workers":
+        family = row.get("family") or "all"
+        return f"flux-kb crawl worker status --family {family}"
+    if section == "watcher":
+        return "flux-kb crawl watch probe --timeout 2"
+    if section == "mail":
+        return "flux-kb mail status"
+    return "flux-kb diagnostics all"
+
+
+def _matches_filters(row: dict[str, Any], filters: dict[str, Any]) -> bool:
+    if filters.get("root_name") and row.get("root_name") != filters.get("root_name"):
+        return False
+    if filters.get("status") and row.get("status") != filters.get("status"):
+        return False
+    if filters.get("family") and row.get("family") != filters.get("family"):
+        return False
+    return True

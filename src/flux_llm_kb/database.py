@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -3684,6 +3685,7 @@ def list_benchmark_runs(
     fixture: str | None = None,
     mode: str | None = None,
     label: str | None = None,
+    compare_label: str | None = None,
     warm_state: str | None = None,
     scope_type: str | None = None,
     scope_hash: str | None = None,
@@ -3705,6 +3707,9 @@ def list_benchmark_runs(
     if label:
         filters.append("label = %s")
         params.append(label)
+    if compare_label:
+        filters.append("compare_label = %s")
+        params.append(compare_label)
     if warm_state:
         filters.append("warm_state = %s")
         params.append(warm_state)
@@ -3909,6 +3914,124 @@ def list_retrieval_benchmark_runs(
                 params,
             )
             return [_retrieval_benchmark_run_row(row) for row in cur.fetchall()]
+
+
+CODE_FEEDBACK_CATEGORIES = {
+    "missing_symbol",
+    "wrong_root",
+    "wrong_relationship",
+    "parser_fallback",
+    "ranking_order",
+    "stale_generated",
+    "other",
+}
+
+
+def record_code_feedback_event(
+    *,
+    query: str,
+    root_name: str | None = None,
+    result_count: int = 0,
+    surface: str = "unknown",
+    miss_category: str = "other",
+    expected_symbol: str | None = None,
+    path: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    safe_category = _normalize_code_feedback_category(miss_category)
+    safe_root = _blank_to_none(root_name)
+    scope = f"sha256:{_stable_digest(safe_root or 'global')}"
+    query_hash = f"sha256:{_stable_digest(query)}"
+    expected_hash = f"sha256:{_stable_digest(expected_symbol)}" if expected_symbol else None
+    path_leaf = _safe_path_leaf(path or "") if path else None
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO code_retrieval_feedback_events (
+                    root_name, scope_hash, query_hash, result_count, surface,
+                    miss_category, expected_symbol_hash, path_leaf, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                RETURNING id::text, created_at
+                """,
+                (
+                    safe_root,
+                    scope,
+                    query_hash,
+                    max(0, int(result_count or 0)),
+                    str(surface or "unknown")[:64],
+                    safe_category,
+                    expected_hash,
+                    path_leaf,
+                    _json(_sanitize_operational_metadata(metadata or {})),
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "root_name": safe_root,
+                "scope_hash": scope,
+                "query_hash": query_hash,
+                "result_count": max(0, int(result_count or 0)),
+                "surface": str(surface or "unknown")[:64],
+                "miss_category": safe_category,
+                "expected_symbol_hash": expected_hash,
+                "path_leaf": path_leaf,
+                "settings_mutated": False,
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def code_feedback_summary(
+    *,
+    root_name: str | None = None,
+    limit: int = 20,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    filters: list[str] = []
+    params: list[Any] = []
+    if root_name:
+        filters.append("root_name = %s")
+        params.append(root_name)
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(max(1, min(int(limit or 20), 100)))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT miss_category, root_name, count(*)::integer AS event_count,
+                       COALESCE(min(result_count), 0)::integer AS min_result_count,
+                       COALESCE(max(result_count), 0)::integer AS max_result_count,
+                       max(created_at) AS latest_at
+                FROM code_retrieval_feedback_events
+                {where_clause}
+                GROUP BY miss_category, root_name
+                ORDER BY event_count DESC, latest_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            rows = [
+                {
+                    "miss_category": row[0],
+                    "root_name": row[1],
+                    "event_count": int(row[2] or 0),
+                    "min_result_count": int(row[3] or 0),
+                    "max_result_count": int(row[4] or 0),
+                    "latest_at": row[5].isoformat() if row[5] else None,
+                }
+                for row in cur.fetchall()
+            ]
+    return {
+        "settings_mutated": False,
+        "root_name": root_name,
+        "totals": {"event_count": sum(int(row["event_count"]) for row in rows), "category_count": len(rows)},
+        "rows": rows,
+    }
 
 
 def upsert_scan_manifest(
@@ -8414,6 +8537,23 @@ def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
     if normalized not in {"standard"}:
         raise ValueError("retrieval benchmark suite must be standard")
     return normalized
+
+
+def _normalize_code_feedback_category(value: str | None) -> str:
+    normalized = str(value or "other").strip().lower().replace("-", "_")
+    return normalized if normalized in CODE_FEEDBACK_CATEGORIES else "other"
+
+
+def _stable_digest(value: Any) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _safe_path_leaf(value: str) -> str:
+    if not value:
+        return ""
+    normalized = value.replace("\\", "/")
+    leaf = Path(normalized).name
+    return leaf or Path(value).name or "<path>"
 
 
 def _slow_jobs_from_db(value: Any) -> list[dict[str, Any]]:

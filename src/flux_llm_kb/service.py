@@ -33,6 +33,7 @@ from .indexer_diagnostics import (
 )
 from .code_diagnostics import build_code_status_report, sanitize_code_lookup, sanitize_code_result
 from .indexer_reliability import build_indexer_reliability_report, build_root_reliability_card, build_roots_reliability_report
+from .operator_evidence import build_operator_evidence_report
 from .operational_diagnostics import summarize_operational_diagnostics
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
@@ -927,6 +928,7 @@ class KnowledgeService:
         path: str | None = None,
         label: str | None = None,
         deployment_label: str | None = None,
+        compare_label: str | None = None,
         freshness_hours: int = 336,
         limit: int = 100,
     ) -> dict[str, Any]:
@@ -934,6 +936,7 @@ class KnowledgeService:
         scope_descriptor = _benchmark_scope_descriptor(scope=scope, root_name=root_name, path=path)
         runs = database.list_benchmark_runs(
             label=label or None,
+            compare_label=compare_label or None,
             deployment_label=deployment_label or None,
             freshness_hours=max(1, int(freshness_hours or 336)),
             limit=max(1, min(int(limit or 100), 500)),
@@ -965,20 +968,29 @@ class KnowledgeService:
         path: str | None = None,
         label: str | None = None,
         deployment_label: str | None = None,
+        compare_label: str | None = None,
         max_files: int = 1000,
         passes: int = 2,
         include_cache_readiness: bool = False,
         include_tuning: bool = True,
+        evidence_level: str = "standard",
     ) -> dict[str, Any]:
         normalized_scope = str(scope or "synthetic").strip().lower()
         if normalized_scope in {"all-roots", "all_roots"}:
             normalized_scope = "all_roots"
+        normalized_evidence = str(evidence_level or "standard").strip().lower()
+        if normalized_evidence not in {"standard", "full"}:
+            raise ValueError("evidence_level must be standard or full")
+        if normalized_evidence == "full":
+            include_cache_readiness = True
+            include_tuning = True
         self.run_benchmark(
             fixture="all",
             files=10,
             mode="all",
             passes=max(1, int(passes or 2)),
             label=label,
+            compare_label=compare_label,
             deployment_label=deployment_label,
             scenario="reliability",
         )
@@ -995,6 +1007,7 @@ class KnowledgeService:
                     mode="scan",
                     passes=max(1, int(passes or 2)),
                     label=label,
+                    compare_label=compare_label,
                     deployment_label=deployment_label,
                     scenario="host_cloud",
                     scope="root",
@@ -1008,6 +1021,7 @@ class KnowledgeService:
                     mode="model",
                     passes=1,
                     label=label,
+                    compare_label=compare_label,
                     deployment_label=deployment_label,
                     scenario="cache_readiness",
                 )
@@ -1019,6 +1033,7 @@ class KnowledgeService:
                         mode="scan",
                         passes=max(1, int(passes or 2)),
                         label=label,
+                        compare_label=compare_label,
                         deployment_label=deployment_label,
                         scenario="tuning",
                         scope="root",
@@ -1032,9 +1047,10 @@ class KnowledgeService:
                 files=10,
                 mode="scan",
                 passes=max(1, int(passes or 2)),
-                label=label,
-                deployment_label=deployment_label,
-                scenario="host_cloud",
+            label=label,
+            compare_label=compare_label,
+            deployment_label=deployment_label,
+            scenario="host_cloud",
                 scope=normalized_scope,
                 root_name=root_name,
                 path=path,
@@ -1046,9 +1062,10 @@ class KnowledgeService:
                 files=10,
                 mode="model",
                 passes=1,
-                label=label,
-                deployment_label=deployment_label,
-                scenario="cache_readiness",
+            label=label,
+            compare_label=compare_label,
+            deployment_label=deployment_label,
+            scenario="cache_readiness",
             )
         if include_tuning:
             tuning_kwargs: dict[str, Any] = {}
@@ -1067,6 +1084,7 @@ class KnowledgeService:
                 mode="scan",
                 passes=max(1, int(passes or 2)),
                 label=label,
+                compare_label=compare_label,
                 deployment_label=deployment_label,
                 scenario="tuning",
                 **tuning_kwargs,
@@ -1076,6 +1094,7 @@ class KnowledgeService:
             path=path if normalized_scope == "path" else None,
             label=label,
             deployment_label=deployment_label,
+            compare_label=compare_label,
         )
 
     def indexer_root_reliability(self, root_name: str) -> dict[str, Any]:
@@ -1137,11 +1156,46 @@ class KnowledgeService:
             freshness_hours=freshness_hours,
         )
 
+    def operator_evidence(
+        self,
+        *,
+        label: str | None = None,
+        deployment_label: str | None = None,
+        compare_label: str | None = None,
+        freshness_hours: int = 336,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        reliability = self.indexer_reliability_status(
+            label=label,
+            deployment_label=deployment_label,
+            compare_label=compare_label,
+            freshness_hours=freshness_hours,
+            limit=limit,
+        )
+        roots = self.indexer_reliability_roots(freshness_hours=freshness_hours, limit=limit)
+        code_status = self.code_status()
+        diagnostics = self.operational_diagnostics(section="all", limit=25, include_details=True)
+        return build_operator_evidence_report(
+            reliability=reliability,
+            roots=roots,
+            code_status=code_status,
+            diagnostics=diagnostics,
+        )
+
     def code_status(self, *, root_name: str | None = None) -> dict[str, Any]:
         payload = database.code_index_status(root_name=root_name)
         roots = payload.get("roots") if isinstance(payload, dict) else []
         totals = payload.get("totals") if isinstance(payload, dict) else {}
-        return build_code_status_report(roots=roots or [], totals=totals or {})
+        report = build_code_status_report(roots=roots or [], totals=totals or {})
+        feedback = self.code_feedback_summary(root_name=root_name)
+        report["feedback_summary"] = feedback
+        report["gaps"] = _code_gaps(report, feedback)
+        try:
+            latest_retrieval = database.list_retrieval_benchmark_runs(suite="standard", limit=1)
+        except Exception:
+            latest_retrieval = []
+        report["retrieval_benchmark_summary"] = latest_retrieval[0] if latest_retrieval else {}
+        return report
 
     def code_search(
         self,
@@ -1185,7 +1239,51 @@ class KnowledgeService:
         )
         return sanitize_code_lookup(payload)
 
-    def operational_diagnostics(self, *, section: str = "all", limit: int = 25) -> dict[str, Any]:
+    def record_code_feedback(
+        self,
+        *,
+        query: str,
+        root_name: str | None = None,
+        result_count: int = 0,
+        surface: str = "unknown",
+        miss_category: str = "other",
+        expected_symbol: str | None = None,
+        path: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return database.record_code_feedback_event(
+            query=query,
+            root_name=root_name,
+            result_count=result_count,
+            surface=surface,
+            miss_category=miss_category,
+            expected_symbol=expected_symbol,
+            path=path,
+            metadata=metadata or {},
+        )
+
+    def code_feedback_summary(
+        self,
+        *,
+        root_name: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        try:
+            return database.code_feedback_summary(root_name=root_name, limit=limit)
+        except Exception:
+            return {"settings_mutated": False, "root_name": root_name, "totals": {"event_count": 0, "category_count": 0}, "rows": []}
+
+    def operational_diagnostics(
+        self,
+        *,
+        section: str = "all",
+        limit: int = 25,
+        root_name: str | None = None,
+        status: str | None = None,
+        family: str | None = None,
+        since_hours: int | None = None,
+        include_details: bool = False,
+    ) -> dict[str, Any]:
         normalized = str(section or "all").strip().lower().replace("-", "_")
         if normalized not in {"all", "retrieval", "watcher", "workers", "jobs", "mail"}:
             raise ValueError("diagnostics section must be all, retrieval, watcher, workers, jobs, or mail")
@@ -1209,6 +1307,11 @@ class KnowledgeService:
             jobs=jobs,
             mail=mail,
             section=normalized,
+            root_name=root_name,
+            status=status,
+            family=family,
+            since_hours=since_hours,
+            include_details=include_details,
         )
 
     def run_benchmark(
@@ -2921,6 +3024,26 @@ def _watch_event_path_hash(event: WatchEvent) -> str:
 
 def _benchmark_family_breakdown(plan: Any) -> dict[str, dict[str, int]]:
     return _benchmark_family_breakdown_for_assets(plan.assets)
+
+
+def _code_gaps(report: dict[str, Any], feedback: dict[str, Any]) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    totals = report.get("totals") if isinstance(report.get("totals"), dict) else {}
+    fallback_count = int(totals.get("fallback_count") or 0)
+    if fallback_count:
+        gaps.append({"category": "parser_fallback", "count": fallback_count, "summary": "Parser fallback rows need review before code retrieval tuning."})
+    for row in feedback.get("rows", []) if isinstance(feedback.get("rows"), list) else []:
+        if not isinstance(row, dict):
+            continue
+        gaps.append(
+            {
+                "category": row.get("miss_category") or "other",
+                "root_name": row.get("root_name"),
+                "count": int(row.get("event_count") or 0),
+                "summary": f"Code feedback reported {row.get('miss_category') or 'other'} misses.",
+            }
+        )
+    return gaps[:8]
 
 
 def _benchmark_family_breakdown_for_assets(assets: list[Any]) -> dict[str, dict[str, int]]:

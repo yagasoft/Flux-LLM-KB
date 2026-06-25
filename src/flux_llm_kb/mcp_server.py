@@ -217,19 +217,20 @@ def create_server():
         )
 
     @mcp.tool(name="kb.indexer_reliability_status")
-    def indexer_reliability_status(root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, freshness_hours: int = 336, limit: int = 100):
+    def indexer_reliability_status(root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, compare_label: str | None = None, freshness_hours: int = 336, limit: int = 100):
         """Return the metadata-only indexer reliability evidence gate status."""
         return service.indexer_reliability_status(
             root_name=root_name,
             path=path,
             label=label,
             deployment_label=deployment_label,
+            compare_label=compare_label,
             freshness_hours=freshness_hours,
             limit=limit,
         )
 
     @mcp.tool(name="kb.indexer_reliability_run")
-    def indexer_reliability_run(scope: str = "synthetic", root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, max_files: int = 1000, passes: int = 2, include_cache_readiness: bool = False, include_tuning: bool = True):
+    def indexer_reliability_run(scope: str = "synthetic", root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, compare_label: str | None = None, max_files: int = 1000, passes: int = 2, include_cache_readiness: bool = False, include_tuning: bool = True, evidence_level: str = "standard"):
         """Run the indexer reliability validation suite without mutating settings."""
         return service.run_indexer_reliability(
             scope=scope,
@@ -237,10 +238,23 @@ def create_server():
             path=path,
             label=label,
             deployment_label=deployment_label,
+            compare_label=compare_label,
             max_files=max_files,
             passes=passes,
             include_cache_readiness=include_cache_readiness,
             include_tuning=include_tuning,
+            evidence_level=evidence_level,
+        )
+
+    @mcp.tool(name="kb.operator_evidence")
+    def operator_evidence(label: str | None = None, deployment_label: str | None = None, compare_label: str | None = None, freshness_hours: int = 336, limit: int = 100):
+        """Return combined operator evidence gates for reliability, code diagnostics, and blockers."""
+        return service.operator_evidence(
+            label=label,
+            deployment_label=deployment_label,
+            compare_label=compare_label,
+            freshness_hours=freshness_hours,
+            limit=limit,
         )
 
     @mcp.tool(name="kb.indexer_root_reliability")
@@ -285,10 +299,37 @@ def create_server():
             limit=limit,
         )
 
+    @mcp.tool(name="kb.code_feedback_record")
+    def code_feedback_record(query: str, root_name: str | None = None, result_count: int = 0, surface: str = "mcp", miss_category: str = "other", expected_symbol: str | None = None, path: str | None = None):
+        """Record privacy-safe code retrieval miss feedback without raw query or code persistence."""
+        return service.record_code_feedback(
+            query=query,
+            root_name=root_name,
+            result_count=result_count,
+            surface=surface,
+            miss_category=miss_category,
+            expected_symbol=expected_symbol,
+            path=path,
+            metadata={},
+        )
+
+    @mcp.tool(name="kb.code_feedback_summary")
+    def code_feedback_summary(root_name: str | None = None, limit: int = 20):
+        """Summarize privacy-safe code retrieval feedback by miss category and root."""
+        return service.code_feedback_summary(root_name=root_name, limit=limit)
+
     @mcp.tool(name="kb.operational_diagnostics")
-    def operational_diagnostics(section: str = "all", limit: int = 25):
+    def operational_diagnostics(section: str = "all", limit: int = 25, root_name: str | None = None, status: str | None = None, family: str | None = None, since_hours: int | None = None, include_details: bool = False):
         """Return read-only operational diagnostics for retrieval, watcher, workers, jobs, and mail."""
-        return service.operational_diagnostics(section=section, limit=limit)
+        return service.operational_diagnostics(
+            section=section,
+            limit=limit,
+            root_name=root_name,
+            status=status,
+            family=family,
+            since_hours=since_hours,
+            include_details=include_details,
+        )
 
     @mcp.tool(name="kb.retrieval_benchmark_run")
     def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True):

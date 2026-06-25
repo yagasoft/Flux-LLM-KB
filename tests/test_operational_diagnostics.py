@@ -43,3 +43,41 @@ def test_service_operational_diagnostics_reads_existing_status_helpers(monkeypat
     assert payload["counts"]["watcher_events"] == 1
     assert payload["sections"]["workers"]["families"][0]["family"] == "office"
     assert payload["sections"]["retrieval"]["recent_explains"][0]["query_hash"] == "sha256:abc"
+
+
+def test_operational_diagnostics_filters_and_standardizes_drilldown_items():
+    report = summarize_operational_diagnostics(
+        watcher={
+            "events": [
+                {"root_name": "docs", "action": "modified", "status": "ok", "path": "E:/private/docs/file.docx"},
+                {"root_name": "code", "action": "deleted", "status": "ok", "path": "E:/private/code/app.py"},
+            ]
+        },
+        workers={
+            "families": [
+                {"family": "office", "pending": 2, "blocked_locked": 1, "root_name": "docs"},
+                {"family": "media", "pending": 1, "blocked_locked": 0, "root_name": "videos"},
+            ]
+        },
+        jobs={
+            "jobs": [
+                {"id": "job-1", "job_family": "office", "status": "blocked_missing_dependency", "root_name": "docs", "path": "E:/private/docs/file.docx"},
+                {"id": "job-2", "job_family": "media", "status": "pending", "root_name": "videos", "path": "E:/private/videos/clip.mp4"},
+            ]
+        },
+        root_name="docs",
+        status="blocked_missing_dependency",
+        family="office",
+        include_details=True,
+    )
+
+    assert report["settings_mutated"] is False
+    assert report["filters"] == {"root_name": "docs", "status": "blocked_missing_dependency", "family": "office", "since_hours": None, "include_details": True}
+    assert report["items"][0]["section"] == "jobs"
+    assert report["items"][0]["severity"] == "warning"
+    assert report["items"][0]["root_name"] == "docs"
+    assert report["items"][0]["follow_up_command"].startswith("flux-kb")
+    assert report["items"][0]["target"]["type"] == "job"
+    serialized = json.dumps(report).lower()
+    assert "e:/private" not in serialized
+    assert "clip.mp4" not in serialized

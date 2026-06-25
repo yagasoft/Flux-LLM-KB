@@ -45,12 +45,12 @@ The detailed roadmap tables and queued work use the same priority labels:
 | --- | --- | --- | --- | --- | --- |
 | V0 Foundation | Put the project on safe, repeatable footing before adding memory features. | shipped | 100% | Public repo, safety model, ADRs, PostgreSQL/pgvector migrations, Docker Compose, fixtures, and initial interfaces exist. | Maintenance only: keep public/private boundaries, migrations, fixtures, and interfaces aligned as later features land. |
 | V1 Working Knowledge Kernel | Store useful agent knowledge in a searchable system instead of relying on one giant memory file. | in progress | 85% | Core storage, CLI/REST/MCP surfaces, redaction/audit, wiki export, hybrid retrieval, Codex hooks, Codex MCP setup, safe reference capture, and V1 graph/lifecycle backend hardening exist; review UI depth remains future work. | Finish deeper review UX proof, live-session capture tuning, and retrieval explainability feedback loops. |
-| V2 Review And Visualization | Give the operator a dashboard to inspect, correct, and trust what Flux remembers. | in progress | 82% | React dashboard is the unified operational UI; graph browsing, claim lifecycle review, capture-review visibility, approval/rejection decisions, audit-visible rationales, retention policy tuning, and memory quality reporting exist. | Complete deeper drill-down workflows, approved-backfill ingestion, and exception-oriented retention/recovery views. |
+| V2 Review And Visualization | Give the operator a dashboard to inspect, correct, and trust what Flux remembers. | in progress | 84% | React dashboard is the unified operational UI; graph browsing, claim lifecycle review, capture-review visibility, approval/rejection decisions, audit-visible rationales, retention policy tuning, memory quality reporting, operator evidence gates, code feedback, and filtered operational diagnostics exist. | Complete deeper review workflows, approved-backfill ingestion, and exception-oriented remediation/recovery views. |
 | V2.5 Autonomous Corpus Expansion | Let Flux safely notice and index useful local files without constant manual imports. | in progress | 84% | Watch roots, host agent, reconciliation, worker processing, duplicate/version suppression, broad file-type roadmap, structured diagram extraction, business document extractor expansion, and bounded recursive archive/container extraction exist; deeper media parsing remains planned. | Finish remaining file-type stages, richer media/vector diagnostics, optional-tool validation, and live sync-client proof. |
 | V2.6 Mail Capture And Runtime Configuration | Make mail capture and runtime settings manageable from the local app instead of hidden scripts. | in progress | 88% | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, provider-specific post-processing, and consumer access exist; broader live-provider validation should continue. | Broaden live-provider validation and complete real-world Outlook catch-up proof. |
-| V2.7 Mail And Retrieval Production Hardening | Make search, mail handling, and file indexing reliable enough for daily use. | in progress | 84% | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, provider-specific mail post-processing, lock-tolerant indexing/watch states, query-aware snippets, retrieval/brief explainability, configurable retrieval filters, and suppression/lifecycle diagnostics exist; automated-action rationale remains planned. | Finish automated-action rationale, row-level diagnostic drill-downs, cloud-sync proof, and semantic media follow-through. |
-| V2.8 Indexer Acceleration And Local Inference Optimization | Make large local indexing faster, observable, and easier to tune on one PC. | in progress | 82% | Dedicated acceleration lane foundations exist for local capability status, explicit watcher backend policy/probe, cache layout visibility, worker-family queues and caps, backpressure/debug status, bounded crawler hash parallelism, incremental scan manifest skips, throughput telemetry, cache-backed local OCR for image/image-only PDF jobs, cache-backed local ASR for audio/video jobs, recursive container telemetry, local vision cache telemetry, scene-transition video frame sampling, thumbnail cache reuse, embedding vector refresh jobs, durable deterministic scan/soak/watcher/model benchmark history with labeled comparisons, and scenario diagnostics for reliability, host/cloud calibration, cache readiness, and manual tuning recommendations. | Run live high-volume reliability evidence, tune defaults from observed hardware, and defer provider acceleration until evaluation controls exist. |
-| V3 Scale And Evaluation | Prove Flux improves retrieval and memory quality before trusting more automation. | in progress | 48% | Code-aware corpus indexing, historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. Code-aware foundations and metadata-only retrieval benchmark calibration now exist; broader governance automation remains planned. | Use benchmark/live feedback to drive librarian shadow mode, governance automation, optional backend decisions, and historical backfill. |
+| V2.7 Mail And Retrieval Production Hardening | Make search, mail handling, and file indexing reliable enough for daily use. | in progress | 86% | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, provider-specific mail post-processing, lock-tolerant indexing/watch states, query-aware snippets, retrieval/brief explainability, configurable retrieval filters, suppression/lifecycle diagnostics, and read-only filtered operational drill-downs exist; automated-action rationale remains planned. | Finish automated-action rationale, remediation/recovery links, cloud-sync proof, and semantic media follow-through. |
+| V2.8 Indexer Acceleration And Local Inference Optimization | Make large local indexing faster, observable, and easier to tune on one PC. | in progress | 86% | Dedicated acceleration lane foundations exist for local capability status, explicit watcher backend policy/probe, cache layout visibility, worker-family queues and caps, backpressure/debug status, bounded crawler hash parallelism, incremental scan manifest skips, throughput telemetry, cache-backed local OCR for image/image-only PDF jobs, cache-backed local ASR for audio/video jobs, recursive container telemetry, local vision cache telemetry, scene-transition video frame sampling, thumbnail cache reuse, embedding vector refresh jobs, durable deterministic scan/soak/watcher/model benchmark history with labeled comparisons, scenario diagnostics for reliability/host-cloud/cache/tuning, all-root full evidence runs, and operator evidence gates. | Run and compare live high-volume all-root evidence after deployment, tune defaults from observed hardware, and keep VSS/provider acceleration future-only until the gate justifies design work. |
+| V3 Scale And Evaluation | Prove Flux improves retrieval and memory quality before trusting more automation. | in progress | 52% | Code-aware corpus indexing, historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. Code-aware foundations, metadata-only retrieval benchmark calibration, and privacy-safe code retrieval feedback now exist; broader governance automation remains planned. | Use benchmark/live feedback to drive parser/ranking improvements, librarian shadow mode, governance automation, optional backend decisions, and historical backfill. |
 | V4 Collaboration And Transfer | Explore sharing and transfer only after the personal local system is safe and stable. | planned | 0% | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. | Start only after single-user retrieval, diagnostics, governance, recovery, and privacy controls are stable. |
 
 ## V0: Foundation
@@ -376,50 +376,56 @@ Queue policy: chip away at roadmap items in priority order from P0 to Pn. Do not
 keep each blocked P0 visible with its blocker and wake condition.
 
 Completed P0/P1 bundles: retrieval evaluation foundation, retrieval calibration
-follow-through, and the first operator evidence/diagnostics bundle. Flux now has
+follow-through, and the operator evidence/diagnostics accelerator. Flux now has
 metadata-only synthetic retrieval benchmarks, indexer reliability gates,
-multi-root reliability readiness, privacy-safe code diagnostics/search/symbol
-surfaces, read-only operational diagnostics, dashboard evidence panels,
-comparison deltas, confidence-band summaries, semantic duplicate calibration candidates,
-richer suppression/deprioritization explanations, sample-first
-large structured-file indexing, and `settings_mutated: false`. It remains
+multi-root reliability readiness, full all-root evidence runs, operator evidence
+gate decisions, privacy-safe code diagnostics/search/symbol surfaces, code
+retrieval feedback summaries, read-only filtered operational diagnostics,
+dashboard evidence panels, comparison deltas, confidence-band summaries,
+semantic duplicate calibration candidates, richer suppression/deprioritization
+explanations, sample-first large structured-file indexing, and
+`settings_mutated: false`. It remains
 conservative: live private query sets, automatic ranking/threshold/settings
 mutation, VSS extraction, provider-specific acceleration, full IDE/static
 analysis replacement, and librarian-worker automation are still out of scope.
 
-1. Priority: P0. Plain-English purpose: prove indexer and filesystem reliability on real workloads before adding snapshot extraction. Progress: 88%.
-   Model-actionable item: use the all-root reliability matrix and scoped
-   reliability run to validate live high-volume roots, cloud-sync delayed
+1. Priority: P0. Plain-English purpose: prove indexer and filesystem reliability on real workloads before adding snapshot extraction. Progress: 90%.
+   Model-actionable item: use `flux-kb acceleration evidence` and
+   `flux-kb acceleration reliability run --scope all-roots --full` with labels
+   and compare labels to validate live high-volume roots, cloud-sync delayed
    availability, open Office files, large writes, rename-save patterns, watcher
-   reconciliation, worker cap telemetry, and default-cap tuning from observed
-   hardware evidence.
+   reconciliation, lock/churn evidence, worker cap telemetry, and default-cap
+   tuning from observed hardware evidence.
    Remaining Work: run and compare live all-root evidence after deployments,
-   decide whether any gaps still require VSS snapshot extraction, and keep
-   provider-specific acceleration blocked until telemetry justifies it.
-   Plain-English explanation: The read-only evidence surfaces exist, but VSS and
+   decide whether any gaps justify a later VSS design, and keep
+   provider-specific acceleration blocked until telemetry justifies design work.
+   Plain-English explanation: The read-only evidence gate exists, but VSS and
    provider-specific acceleration still need real workload proof before they
    deserve implementation time.
-2. Priority: P0. Progress: 72%. Plain-English purpose: make code-aware retrieval diagnosable after feedback exists.
+2. Priority: P0. Progress: 76%. Plain-English purpose: make code-aware retrieval diagnosable after feedback exists.
    Model-actionable item: use code coverage views, parser failure/fallback
-   summaries, privacy-safe per-repository status, relationship coverage, and
-   dedicated code-search/symbol surfaces to collect live miss patterns.
+   summaries, privacy-safe per-repository status, relationship coverage,
+   dedicated code-search/symbol surfaces, and hashed code retrieval feedback to
+   collect live miss patterns.
    Remaining Work: prioritize deeper parser coverage, relationship ranking,
    parser-failure drill-downs, and code result tuning from benchmark/live
-   retrieval feedback without exposing raw private code.
-   Plain-English explanation: Code-aware foundations and first diagnostics are
-   implemented; deeper ranking and parser expansion remain blocked until retrieval benchmark/live feedback
-   identifies the highest-value misses.
-3. Priority: P1. Progress: 80%. Plain-English purpose: make daily operation inspectable without raw logs.
+   retrieval feedback without exposing raw private code or queries.
+   Plain-English explanation: Code-aware foundations, first diagnostics, and a
+   privacy-safe feedback loop are implemented; deeper ranking and parser
+   expansion remain blocked until retrieval benchmark/live feedback identifies
+   the highest-value misses.
+3. Priority: P1. Progress: 83%. Plain-English purpose: make daily operation inspectable without raw logs.
    Model-actionable item: validate the read-only operator diagnostics and basic
    corpus completion bundle: retrieval drill-downs, watcher event summaries,
-   worker heartbeat/history, mail sync/post-process evidence, blocked dependency
-   views, slow-job history, and sample-first indexing for large tabular and
-   structured data files.
-   Remaining Work: add row-level drill-downs, filters, remediation/recovery
-   links, converted legacy/ODS sample-first paths where reliable, and optional
-   full structured backfill only after sample-first metadata is trusted.
-   Plain-English explanation: Operators now have stable evidence panels; the
-   next slice should turn repeated evidence into focused remediation workflows.
+   worker heartbeat/history, mail sync/post-process evidence, filtered blocked
+   dependency views, slow-job history, and sample-first indexing for large
+   tabular and structured data files.
+   Remaining Work: add remediation/recovery links, converted legacy/ODS
+   sample-first paths where reliable, and optional full structured backfill only
+   after sample-first metadata is trusted.
+   Plain-English explanation: Operators now have stable filtered evidence
+   panels; the next slice should turn repeated evidence into focused remediation
+   workflows without adding mutations to diagnostics.
 4. Priority: P2. Progress: 15%. Plain-English purpose: improve memory quality with reversible evaluated automation.
    Model-actionable item: ship evaluated memory-governance automation with
    librarian-worker shadow mode, benchmarked thresholds, reversible lifecycle

@@ -244,10 +244,22 @@ def create_app():
         path: str | None = None
         label: str | None = None
         deployment_label: str | None = None
+        compare_label: str | None = None
         max_files: int = 1000
         passes: int = 2
         include_cache_readiness: bool = False
         include_tuning: bool = True
+        evidence_level: str = "standard"
+
+    class CodeFeedbackRequest(BaseModel):
+        query: str
+        root_name: str | None = None
+        result_count: int = 0
+        surface: str = "rest"
+        miss_category: str = "other"
+        expected_symbol: str | None = None
+        path: str | None = None
+        metadata: dict | None = None
 
     class SettingUpdateRequest(BaseModel):
         value: object
@@ -404,6 +416,7 @@ def create_app():
         path: str | None = None,
         label: str | None = None,
         deployment_label: str | None = None,
+        compare_label: str | None = None,
         freshness_hours: int = 336,
         limit: int = 100,
     ):
@@ -412,6 +425,7 @@ def create_app():
             path=path,
             label=label,
             deployment_label=deployment_label,
+            compare_label=compare_label,
             freshness_hours=freshness_hours,
             limit=limit,
         )
@@ -426,10 +440,28 @@ def create_app():
             path=request.path,
             label=request.label,
             deployment_label=request.deployment_label,
+            compare_label=request.compare_label,
             max_files=request.max_files,
             passes=request.passes,
             include_cache_readiness=request.include_cache_readiness,
             include_tuning=request.include_tuning,
+            evidence_level=request.evidence_level,
+        )
+
+    @app.get("/api/acceleration/evidence")
+    def acceleration_operator_evidence(
+        label: str | None = None,
+        deployment_label: str | None = None,
+        compare_label: str | None = None,
+        freshness_hours: int = 336,
+        limit: int = 100,
+    ):
+        return service.operator_evidence(
+            label=label,
+            deployment_label=deployment_label,
+            compare_label=compare_label,
+            freshness_hours=freshness_hours,
+            limit=limit,
         )
 
     @app.get("/api/acceleration/reliability/roots")
@@ -486,9 +518,42 @@ def create_app():
             limit=limit,
         )
 
+    @app.post("/api/code/feedback")
+    def code_feedback(request: CodeFeedbackRequest = Body(...)):
+        return service.record_code_feedback(
+            query=request.query,
+            root_name=request.root_name,
+            result_count=request.result_count,
+            surface=request.surface,
+            miss_category=request.miss_category,
+            expected_symbol=request.expected_symbol,
+            path=request.path,
+            metadata=request.metadata or {},
+        )
+
+    @app.get("/api/code/feedback/summary")
+    def code_feedback_summary(root_name: str | None = None, limit: int = 20):
+        return service.code_feedback_summary(root_name=root_name, limit=limit)
+
     @app.get("/api/diagnostics/{section}")
-    def operational_diagnostics(section: str, limit: int = 25):
-        return service.operational_diagnostics(section=section, limit=limit)
+    def operational_diagnostics(
+        section: str,
+        limit: int = 25,
+        root_name: str | None = None,
+        status: str | None = None,
+        family: str | None = None,
+        since_hours: int | None = None,
+        include_details: bool = False,
+    ):
+        return service.operational_diagnostics(
+            section=section,
+            limit=limit,
+            root_name=root_name,
+            status=status,
+            family=family,
+            since_hours=since_hours,
+            include_details=include_details,
+        )
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
@@ -1411,12 +1476,17 @@ def _run_indexer_reliability_with_benchmark_proxy(service: KnowledgeService, req
     path = getattr(request, "path", None)
     label = getattr(request, "label", None)
     deployment_label = getattr(request, "deployment_label", None)
+    compare_label = getattr(request, "compare_label", None)
+    evidence_level = str(getattr(request, "evidence_level", "standard") or "standard").strip().lower()
+    include_cache_readiness = bool(getattr(request, "include_cache_readiness", False)) or evidence_level == "full"
+    include_tuning = bool(getattr(request, "include_tuning", True)) or evidence_level == "full"
     service.run_benchmark(
         fixture="all",
         files=10,
         mode="all",
         passes=passes,
         label=label,
+        compare_label=compare_label,
         deployment_label=deployment_label,
         scenario="reliability",
     )
@@ -1426,6 +1496,7 @@ def _run_indexer_reliability_with_benchmark_proxy(service: KnowledgeService, req
         mode="scan",
         passes=passes,
         label=label,
+        compare_label=compare_label,
         scope=scope,
         root_name=root_name,
         path=path,
@@ -1433,23 +1504,25 @@ def _run_indexer_reliability_with_benchmark_proxy(service: KnowledgeService, req
         deployment_label=deployment_label,
         scenario="host_cloud",
     )
-    if getattr(request, "include_cache_readiness", False):
+    if include_cache_readiness:
         service.run_benchmark(
             fixture="image-heavy",
             files=10,
             mode="model",
             passes=1,
             label=label,
+            compare_label=compare_label,
             deployment_label=deployment_label,
             scenario="cache_readiness",
         )
-    if getattr(request, "include_tuning", True):
+    if include_tuning:
         host_agent_benchmark(
             fixture="all",
             files=10,
             mode="scan",
             passes=passes,
             label=label,
+            compare_label=compare_label,
             scope=scope,
             root_name=root_name,
             path=path,
@@ -1462,6 +1535,7 @@ def _run_indexer_reliability_with_benchmark_proxy(service: KnowledgeService, req
         path=path if str(scope or "").strip().lower().replace("-", "_") == "path" else None,
         label=label,
         deployment_label=deployment_label,
+        compare_label=compare_label,
     )
 
 

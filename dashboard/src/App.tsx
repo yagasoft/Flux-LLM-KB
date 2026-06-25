@@ -35,7 +35,7 @@ import {
   X
 } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 type HealthPayload = {
   database?: { ok?: boolean; message?: string };
@@ -252,8 +252,20 @@ type ReliabilityRootsStatus = {
   required_actions?: Array<{ root_name?: string; readiness?: string; required_action?: string }>;
 };
 
+type OperatorEvidence = {
+  settings_mutated?: boolean;
+  readiness?: string;
+  root_readiness?: Record<string, number>;
+  gates?: Record<string, { state?: string; reason?: string }>;
+  top_blockers?: Array<{ section?: string; severity?: string; root_name?: string; summary?: string }>;
+  manual_follow_ups?: Array<{ setting?: string; command?: string }>;
+  code_gaps?: Array<{ category?: string; count?: number; summary?: string }>;
+};
+
 type CodeStatus = {
   totals?: Record<string, number>;
+  feedback_summary?: { totals?: Record<string, number>; rows?: Array<{ miss_category?: string; root_name?: string; event_count?: number }> };
+  gaps?: Array<{ category?: string; count?: number; summary?: string }>;
   roots?: Array<{
     root_name?: string;
     health?: string;
@@ -271,6 +283,7 @@ type OperationalDiagnostics = {
   section?: string;
   settings_mutated?: boolean;
   counts?: Record<string, number>;
+  items?: Array<{ section?: string; severity?: string; status?: string; root_name?: string; summary?: string; follow_up_command?: string }>;
   sections?: {
     retrieval?: { recent_explains?: Array<Record<string, unknown>> };
     watcher?: { events?: Array<Record<string, unknown>> };
@@ -1909,6 +1922,7 @@ function HealthTab({
         </div>
       </Panel>
       <CodexHooksPanel codex={codex} />
+      <OperatorEvidencePanel />
       <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
       <CodeDiagnosticsPanel />
       <OperationalDiagnosticsPanel />
@@ -1941,6 +1955,8 @@ function HealthTab({
 
 function CodeDiagnosticsPanel() {
   const [status, setStatus] = useState<CodeStatus | null>(null);
+  const [feedbackCategory, setFeedbackCategory] = useState("missing_symbol");
+  const [feedbackStatus, setFeedbackStatus] = useState("");
   useEffect(() => {
     let cancelled = false;
     getJson<CodeStatus>("/api/code/status", { totals: {}, roots: [] }).then((payload) => {
@@ -1952,6 +1968,22 @@ function CodeDiagnosticsPanel() {
   }, []);
   const totals = status?.totals ?? {};
   const roots = status?.roots ?? [];
+  const feedbackTotal = status?.feedback_summary?.totals?.event_count ?? 0;
+  async function submitFeedback() {
+    try {
+      const result = await sendJson<{ id?: string }>("/api/code/feedback", "POST", {
+        query: "dashboard-code-feedback",
+        root_name: roots[0]?.root_name ?? null,
+        result_count: 0,
+        surface: "dashboard",
+        miss_category: feedbackCategory,
+        metadata: {}
+      });
+      setFeedbackStatus(result.id ? `Feedback ${result.id} recorded.` : "Feedback recorded.");
+    } catch (error) {
+      setFeedbackStatus(`Feedback failed: ${errorMessage(error)}`);
+    }
+  }
   const rows = roots.slice(0, 5).map((root) => {
     const languages = Object.entries(root.languages ?? {})
       .slice(0, 3)
@@ -1977,15 +2009,97 @@ function CodeDiagnosticsPanel() {
         <Stat label="Fallbacks" value={String(totals.fallback_count ?? 0)} />
       </div>
       {rows.length > 0 ? <MiniTable rows={rows} /> : <p className="muted">No code index diagnostics yet.</p>}
+      <div className="settings-list">
+        <div className="settings-row">
+          <strong>Code Feedback</strong>
+          <span>{feedbackTotal} feedback events</span>
+          <select aria-label="Code feedback category" value={feedbackCategory} onChange={(event) => setFeedbackCategory(event.target.value)}>
+            <option value="missing_symbol">Missing symbol</option>
+            <option value="wrong_root">Wrong root</option>
+            <option value="wrong_relationship">Wrong relationship</option>
+            <option value="parser_fallback">Parser fallback</option>
+            <option value="ranking_order">Ranking order</option>
+            <option value="stale_generated">Stale generated</option>
+            <option value="other">Other</option>
+          </select>
+          <button className="ghost-action compact" type="button" onClick={() => void submitFeedback()}>Submit code feedback</button>
+        </div>
+        {(status?.gaps ?? []).slice(0, 3).map((gap) => (
+          <div className="settings-row" key={`code-gap-${gap.category}`}>
+            <strong>{humanizeIdentifier(gap.category ?? "gap")}</strong>
+            <span>{gap.summary ?? "Review code retrieval gap"}</span>
+            <em>{gap.count ?? 0}</em>
+          </div>
+        ))}
+        {feedbackStatus && <p className="panel-note">{feedbackStatus}</p>}
+      </div>
+    </Panel>
+  );
+}
+
+function OperatorEvidencePanel() {
+  const [evidence, setEvidence] = useState<OperatorEvidence | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getJson<OperatorEvidence>("/api/acceleration/evidence", { settings_mutated: false, gates: {}, top_blockers: [], code_gaps: [] }).then((payload) => {
+      if (!cancelled) setEvidence(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const gates = evidence?.gates ?? {};
+  const gateRows = Object.entries(gates).map(([name, gate]) => [
+    humanizeIdentifier(name),
+    humanizeIdentifier(gate.state ?? "hold"),
+    gate.reason ?? "Evidence required"
+  ] as [string, string, string]);
+  const readiness = evidence?.root_readiness ?? {};
+  const blockerRows = (evidence?.top_blockers ?? []).slice(0, 4).map((item) => [
+    item.root_name ?? item.section ?? "evidence",
+    humanizeIdentifier(item.severity ?? "info"),
+    item.summary ?? "Review operator evidence"
+  ] as [string, string, string]);
+  const codeRows = (evidence?.code_gaps ?? []).slice(0, 4).map((gap) => [
+    humanizeIdentifier(gap.category ?? "gap"),
+    String(gap.count ?? 0),
+    gap.summary ?? "Review code diagnostic evidence"
+  ] as [string, string, string]);
+  return (
+    <Panel title="Operator Evidence">
+      <div className="summary-cards">
+        <Stat label="Readiness" value={humanizeIdentifier(evidence?.readiness ?? "not_run")} />
+        <Stat label="Ready Roots" value={String(readiness.ready ?? 0)} />
+        <Stat label="Partial Roots" value={String(readiness.partial ?? 0)} />
+        <Stat label="Settings Mutated" value={evidence?.settings_mutated ? "true" : "false"} />
+      </div>
+      {gateRows.length > 0 ? <MiniTable rows={gateRows} /> : <p className="muted">No operator gate evidence yet.</p>}
+      {blockerRows.length > 0 && <MiniTable rows={blockerRows} />}
+      {codeRows.length > 0 && <MiniTable rows={codeRows} />}
     </Panel>
   );
 }
 
 function OperationalDiagnosticsPanel() {
   const [diagnostics, setDiagnostics] = useState<OperationalDiagnostics | null>(null);
+  const [rootFilter, setRootFilter] = useState("docs");
+  const [statusFilter, setStatusFilter] = useState("blocked_missing_dependency");
+  const [familyFilter, setFamilyFilter] = useState("office");
+  const [includeDetails, setIncludeDetails] = useState(true);
+  const loadDiagnostics = useCallback(() => {
+    const params = new URLSearchParams();
+    if (rootFilter) params.set("root_name", rootFilter);
+    if (statusFilter) params.set("status", statusFilter);
+    if (familyFilter) params.set("family", familyFilter);
+    if (includeDetails) params.set("include_details", "true");
+    const query = params.toString();
+    return getJson<OperationalDiagnostics>(`/api/diagnostics/all${query ? `?${query}` : ""}`, { section: "all", counts: {}, sections: {}, items: [] }).then((payload) => {
+      setDiagnostics(payload);
+    });
+  }, [familyFilter, includeDetails, rootFilter, statusFilter]);
   useEffect(() => {
     let cancelled = false;
-    getJson<OperationalDiagnostics>("/api/diagnostics/all", { section: "all", counts: {}, sections: {} }).then((payload) => {
+    getJson<OperationalDiagnostics>("/api/diagnostics/all", { section: "all", counts: {}, sections: {}, items: [] }).then((payload) => {
       if (!cancelled) setDiagnostics(payload);
     });
     return () => {
@@ -1994,6 +2108,11 @@ function OperationalDiagnosticsPanel() {
   }, []);
   const counts = diagnostics?.counts ?? {};
   const workerFamilies = diagnostics?.sections?.workers?.families ?? [];
+  const itemRows = (diagnostics?.items ?? []).slice(0, 5).map((item) => [
+    item.section ?? "section",
+    humanizeIdentifier(item.severity ?? "info"),
+    item.summary ?? item.follow_up_command ?? "diagnostic"
+  ] as [string, string, string]);
   const rows: MiniTableRow[] = [
     ["Watcher events", "recent", String(counts.watcher_events ?? 0)],
     ["Worker families", "status", String(counts.worker_families ?? 0)],
@@ -2007,7 +2126,19 @@ function OperationalDiagnosticsPanel() {
   ] as [string, string, string]);
   return (
     <Panel title="Operational Diagnostics">
+      <div className="settings-row">
+        <strong>Filters</strong>
+        <input aria-label="Diagnostic root filter" value={rootFilter} onChange={(event) => setRootFilter(event.target.value)} />
+        <input aria-label="Diagnostic status filter" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} />
+        <input aria-label="Diagnostic family filter" value={familyFilter} onChange={(event) => setFamilyFilter(event.target.value)} />
+        <label className="inline-check">
+          <input type="checkbox" checked={includeDetails} onChange={(event) => setIncludeDetails(event.target.checked)} />
+          Details
+        </label>
+        <button className="ghost-action compact" type="button" onClick={() => void loadDiagnostics()}>Apply diagnostic filters</button>
+      </div>
       <MiniTable rows={rows} />
+      {itemRows.length > 0 && <MiniTable rows={itemRows} />}
       {workerRows.length > 0 ? <MiniTable rows={workerRows} /> : <p className="muted">No worker diagnostic rows yet.</p>}
     </Panel>
   );
@@ -2191,7 +2322,14 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
     }
   }
   async function runAllRootsReliabilityGate() {
-    const request = { scope: "all_roots", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true };
+    const request = {
+      scope: "all_roots",
+      max_files: 1000,
+      passes: 2,
+      include_cache_readiness: false,
+      include_tuning: true,
+      evidence_level: "full"
+    };
     try {
       setBenchmarkRunning(true);
       setBenchmarkStatus("All-root reliability gate queued...");

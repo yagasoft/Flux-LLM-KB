@@ -106,6 +106,12 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "idx_acceleration_benchmark_runs_scenario_created" in reliability_migration.sql
     assert "idx_acceleration_benchmark_runs_scope_hash_created" in reliability_migration.sql
     assert "idx_acceleration_benchmark_runs_recommendation_scenario" in reliability_migration.sql
+    feedback_migration = next(item for item in migrations if item.name == "0022_code_retrieval_feedback")
+    assert "CREATE TABLE IF NOT EXISTS code_retrieval_feedback_events" in feedback_migration.sql
+    assert "miss_category" in feedback_migration.sql
+    assert "query_hash" in feedback_migration.sql
+    assert "expected_symbol_hash" in feedback_migration.sql
+    assert "idx_code_feedback_category_created" in feedback_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

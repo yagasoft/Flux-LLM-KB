@@ -175,12 +175,30 @@ def main(argv: list[str] | None = None) -> int:
     code_symbol.add_argument("--no-references", action="store_false", dest="include_references")
     code_symbol.add_argument("--limit", type=int, default=20)
     code_symbol.set_defaults(include_references=True)
+    code_feedback = code_subparsers.add_parser("feedback", help="Record or summarize code retrieval feedback")
+    code_feedback_subparsers = code_feedback.add_subparsers(dest="code_feedback_command", required=True)
+    code_feedback_add = code_feedback_subparsers.add_parser("add", help="Record privacy-safe code retrieval miss feedback")
+    code_feedback_add.add_argument("--query", required=True)
+    code_feedback_add.add_argument("--root", dest="root_name")
+    code_feedback_add.add_argument("--result-count", type=int, default=0)
+    code_feedback_add.add_argument("--surface", default="cli")
+    code_feedback_add.add_argument("--miss-category", default="other")
+    code_feedback_add.add_argument("--expected-symbol")
+    code_feedback_add.add_argument("--path")
+    code_feedback_summary = code_feedback_subparsers.add_parser("summary", help="Summarize code retrieval feedback")
+    code_feedback_summary.add_argument("--root", dest="root_name")
+    code_feedback_summary.add_argument("--limit", type=int, default=20)
 
     diagnostics_parser = subparsers.add_parser("diagnostics", help="Inspect operational diagnostic read models")
     diagnostics_subparsers = diagnostics_parser.add_subparsers(dest="diagnostics_command", required=True)
     for diagnostics_name in ("all", "retrieval", "watcher", "workers", "jobs", "mail"):
         diagnostics_command = diagnostics_subparsers.add_parser(diagnostics_name, help=f"Show {diagnostics_name} diagnostics")
         diagnostics_command.add_argument("--limit", type=int, default=25)
+        diagnostics_command.add_argument("--root", dest="root_name")
+        diagnostics_command.add_argument("--status")
+        diagnostics_command.add_argument("--family")
+        diagnostics_command.add_argument("--since-hours", type=int)
+        diagnostics_command.add_argument("--include-details", action="store_true")
 
     forget_parser = subparsers.add_parser("forget", help="Delete a stored memory by ID")
     forget_parser.add_argument("memory_id")
@@ -311,6 +329,12 @@ def main(argv: list[str] | None = None) -> int:
     acceleration_parser = subparsers.add_parser("acceleration", help="Inspect V2.8 acceleration capability and queue status")
     acceleration_subparsers = acceleration_parser.add_subparsers(dest="acceleration_command", required=True)
     acceleration_subparsers.add_parser("status", help="Show local capability, cache, and worker-family status")
+    acceleration_evidence = acceleration_subparsers.add_parser("evidence", help="Show combined operator evidence gates")
+    acceleration_evidence.add_argument("--label")
+    acceleration_evidence.add_argument("--deployment-label")
+    acceleration_evidence.add_argument("--compare-label")
+    acceleration_evidence.add_argument("--freshness-hours", type=int, default=336)
+    acceleration_evidence.add_argument("--limit", type=int, default=100)
     acceleration_benchmark = acceleration_subparsers.add_parser("benchmark", help="Run or inspect synthetic benchmark history")
     benchmark_subparsers = acceleration_benchmark.add_subparsers(dest="benchmark_command", required=True)
     benchmark_run = benchmark_subparsers.add_parser("run", help="Run synthetic indexing benchmarks")
@@ -347,6 +371,7 @@ def main(argv: list[str] | None = None) -> int:
     reliability_status.add_argument("--path")
     reliability_status.add_argument("--label")
     reliability_status.add_argument("--deployment-label")
+    reliability_status.add_argument("--compare-label")
     reliability_status.add_argument("--freshness-hours", type=int, default=336)
     reliability_status.add_argument("--limit", type=int, default=100)
     reliability_run = reliability_subparsers.add_parser("run", help="Run the reliability validation benchmark suite")
@@ -355,10 +380,12 @@ def main(argv: list[str] | None = None) -> int:
     reliability_run.add_argument("--path")
     reliability_run.add_argument("--label")
     reliability_run.add_argument("--deployment-label")
+    reliability_run.add_argument("--compare-label")
     reliability_run.add_argument("--max-files", type=int, default=1000)
     reliability_run.add_argument("--passes", type=int, default=2)
     reliability_run.add_argument("--include-cache-readiness", action="store_true")
     reliability_run.add_argument("--skip-tuning", action="store_false", dest="include_tuning")
+    reliability_run.add_argument("--full", action="store_const", const="full", default="standard", dest="evidence_level")
     reliability_run.set_defaults(include_tuning=True)
     reliability_root = reliability_subparsers.add_parser("root-status", help="Show monitored-root reliability card")
     reliability_root.add_argument("--root", dest="root_name", required=True)
@@ -772,6 +799,22 @@ def _code(args: argparse.Namespace) -> int:
             include_references=args.include_references,
             limit=args.limit,
         )
+    elif args.code_command == "feedback":
+        if args.code_feedback_command == "add":
+            payload = service.record_code_feedback(
+                query=args.query,
+                root_name=args.root_name,
+                result_count=args.result_count,
+                surface=args.surface,
+                miss_category=args.miss_category,
+                expected_symbol=args.expected_symbol,
+                path=args.path,
+                metadata={},
+            )
+        elif args.code_feedback_command == "summary":
+            payload = service.code_feedback_summary(root_name=args.root_name, limit=args.limit)
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.code_feedback_command)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.code_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -781,7 +824,15 @@ def _code(args: argparse.Namespace) -> int:
 def _diagnostics(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
-    payload = KnowledgeService().operational_diagnostics(section=args.diagnostics_command, limit=args.limit)
+    payload = KnowledgeService().operational_diagnostics(
+        section=args.diagnostics_command,
+        limit=args.limit,
+        root_name=args.root_name,
+        status=args.status,
+        family=args.family,
+        since_hours=args.since_hours,
+        include_details=args.include_details,
+    )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
@@ -994,6 +1045,16 @@ def _acceleration(args: argparse.Namespace) -> int:
         from .acceleration import collect_acceleration_status
 
         payload = collect_acceleration_status()
+    elif args.acceleration_command == "evidence":
+        from .service import KnowledgeService
+
+        payload = KnowledgeService().operator_evidence(
+            label=args.label,
+            deployment_label=args.deployment_label,
+            compare_label=args.compare_label,
+            freshness_hours=args.freshness_hours,
+            limit=args.limit,
+        )
     elif args.acceleration_command == "benchmark":
         from .service import KnowledgeService
 
@@ -1039,6 +1100,7 @@ def _acceleration(args: argparse.Namespace) -> int:
                 path=args.path,
                 label=args.label,
                 deployment_label=args.deployment_label,
+                compare_label=args.compare_label,
                 freshness_hours=args.freshness_hours,
                 limit=args.limit,
             )
@@ -1049,10 +1111,12 @@ def _acceleration(args: argparse.Namespace) -> int:
                 path=args.path,
                 label=args.label,
                 deployment_label=args.deployment_label,
+                compare_label=args.compare_label,
                 max_files=args.max_files,
                 passes=args.passes,
                 include_cache_readiness=args.include_cache_readiness,
                 include_tuning=args.include_tuning,
+                evidence_level=args.evidence_level,
             )
         elif args.reliability_command == "root-status":
             payload = KnowledgeService().indexer_root_reliability(root_name=args.root_name)

@@ -91,13 +91,40 @@ def test_service_code_search_and_symbol_lookup_use_database_helpers(monkeypatch)
             ],
         },
     )
+    monkeypatch.setattr(
+        database,
+        "code_feedback_summary",
+        lambda **kwargs: {
+            "settings_mutated": False,
+            "rows": [{"miss_category": "missing_symbol", "root_name": "app", "event_count": 2}],
+            "totals": {"event_count": 2},
+        },
+    )
+    feedback_calls = []
+    monkeypatch.setattr(database, "record_code_feedback_event", lambda **kwargs: feedback_calls.append(kwargs) or {"id": "feedback-1", "miss_category": kwargs["miss_category"]})
 
     service = KnowledgeService()
     status = service.code_status(root_name="app")
     search = service.code_search("build_invoice", root_name="app", language="python", limit=5)
     symbol = service.code_symbol_lookup("OrderService.build_invoice", root_name="app", include_references=True)
+    feedback = service.record_code_feedback(
+        query="build invoice",
+        root_name="app",
+        result_count=0,
+        surface="cli",
+        miss_category="missing_symbol",
+        expected_symbol="OrderService.build_invoice",
+        path="E:/private/app/src/orders.py",
+        metadata={"note": "safe"},
+    )
+    summary = service.code_feedback_summary(root_name="app")
 
     assert status["totals"]["symbol_count"] == 1
+    assert status["feedback_summary"]["totals"]["event_count"] == 2
+    assert status["gaps"][0]["category"] == "missing_symbol"
     assert search["results"][0]["symbol"] == "OrderService.build_invoice"
     assert symbol["references"][0]["relationship"] == "call"
+    assert feedback["id"] == "feedback-1"
+    assert feedback_calls[0]["miss_category"] == "missing_symbol"
+    assert summary["rows"][0]["miss_category"] == "missing_symbol"
     assert json.dumps(search).find("E:/private") == -1

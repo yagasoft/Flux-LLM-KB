@@ -252,6 +252,10 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
             calls.append(("run", kwargs))
             return {"readiness": "ready", "run": kwargs, "settings_mutated": False}
 
+        def operator_evidence(self, **kwargs):
+            calls.append(("evidence", kwargs))
+            return {"settings_mutated": False, "gates": {"vss_snapshot": {"state": "hold"}}}
+
         def indexer_root_reliability(self, root_name):
             calls.append(("root", root_name))
             return {"root_name": root_name, "readiness": "partial"}
@@ -262,11 +266,14 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
 
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
-    assert cli.main(["acceleration", "reliability", "status", "--root", "docs", "--label", "nightly", "--freshness-hours", "12"]) == 0
+    assert cli.main(["acceleration", "reliability", "status", "--root", "docs", "--label", "nightly", "--freshness-hours", "12", "--compare-label", "baseline"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
 
-    assert cli.main(["acceleration", "reliability", "run", "--scope", "root", "--root", "docs", "--deployment-label", "desktop", "--include-cache-readiness"]) == 0
+    assert cli.main(["acceleration", "reliability", "run", "--scope", "root", "--root", "docs", "--deployment-label", "desktop", "--include-cache-readiness", "--full", "--compare-label", "baseline"]) == 0
     run_payload = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["acceleration", "evidence", "--label", "nightly", "--compare-label", "baseline"]) == 0
+    evidence_payload = json.loads(capsys.readouterr().out)
 
     assert cli.main(["acceleration", "reliability", "root-status", "--root", "docs"]) == 0
     root_payload = json.loads(capsys.readouterr().out)
@@ -276,6 +283,7 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
 
     assert status_payload["readiness"] == "partial"
     assert run_payload["settings_mutated"] is False
+    assert evidence_payload["gates"]["vss_snapshot"]["state"] == "hold"
     assert root_payload == {"root_name": "docs", "readiness": "partial"}
     assert roots_payload["roots"][0]["root_name"] == "docs"
     assert calls[0] == (
@@ -285,6 +293,7 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
             "path": None,
             "label": "nightly",
             "deployment_label": None,
+            "compare_label": "baseline",
             "freshness_hours": 12,
             "limit": 100,
         },
@@ -292,7 +301,10 @@ def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
     assert calls[1][0] == "run"
     assert calls[1][1]["scope"] == "root"
     assert calls[1][1]["include_cache_readiness"] is True
-    assert calls[3] == ("roots", {"include_disabled": False, "freshness_hours": 24, "limit": 100})
+    assert calls[1][1]["evidence_level"] == "full"
+    assert calls[1][1]["compare_label"] == "baseline"
+    assert calls[2] == ("evidence", {"label": "nightly", "deployment_label": None, "compare_label": "baseline", "freshness_hours": 336, "limit": 100})
+    assert calls[4] == ("roots", {"include_disabled": False, "freshness_hours": 24, "limit": 100})
 
 
 def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
@@ -317,6 +329,14 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
             calls.append(("diagnostics", kwargs))
             return {"section": kwargs["section"], "settings_mutated": False, "sections": {}}
 
+        def record_code_feedback(self, **kwargs):
+            calls.append(("code_feedback", kwargs))
+            return {"id": "feedback-1", "settings_mutated": False}
+
+        def code_feedback_summary(self, **kwargs):
+            calls.append(("code_feedback_summary", kwargs))
+            return {"settings_mutated": False, "rows": [{"miss_category": "missing_symbol"}]}
+
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
     assert cli.main(["code", "status", "--root", "app"]) == 0
@@ -325,18 +345,49 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
     search_payload = json.loads(capsys.readouterr().out)
     assert cli.main(["code", "symbol", "OrderService", "--no-references"]) == 0
     symbol_payload = json.loads(capsys.readouterr().out)
-    assert cli.main(["diagnostics", "workers", "--limit", "5"]) == 0
+    assert cli.main(["code", "feedback", "add", "--query", "build invoice", "--root", "app", "--miss-category", "missing_symbol", "--result-count", "0", "--surface", "cli", "--expected-symbol", "OrderService.build_invoice", "--path", "E:/private/app/orders.py"]) == 0
+    feedback_payload = json.loads(capsys.readouterr().out)
+    assert cli.main(["code", "feedback", "summary", "--root", "app", "--limit", "5"]) == 0
+    feedback_summary_payload = json.loads(capsys.readouterr().out)
+    assert cli.main(["diagnostics", "workers", "--limit", "5", "--root", "app", "--status", "blocked_missing_dependency", "--family", "office", "--since-hours", "24", "--include-details"]) == 0
     diagnostics_payload = json.loads(capsys.readouterr().out)
 
     assert status_payload["totals"]["symbol_count"] == 2
     assert search_payload["results"][0]["symbol"] == "OrderService"
     assert symbol_payload["matches"][0]["symbol"] == "OrderService"
+    assert feedback_payload["id"] == "feedback-1"
+    assert feedback_summary_payload["rows"][0]["miss_category"] == "missing_symbol"
     assert diagnostics_payload["settings_mutated"] is False
     assert calls == [
         ("code_status", {"root_name": "app"}),
         ("code_search", {"query": "OrderService", "root_name": None, "language": "python", "symbol_kind": None, "relationship": None, "limit": 20}),
         ("code_symbol", {"symbol": "OrderService", "root_name": None, "language": None, "include_references": False, "limit": 20}),
-        ("diagnostics", {"section": "workers", "limit": 5}),
+        (
+            "code_feedback",
+            {
+                "query": "build invoice",
+                "root_name": "app",
+                "result_count": 0,
+                "surface": "cli",
+                "miss_category": "missing_symbol",
+                "expected_symbol": "OrderService.build_invoice",
+                "path": "E:/private/app/orders.py",
+                "metadata": {},
+            },
+        ),
+        ("code_feedback_summary", {"root_name": "app", "limit": 5}),
+        (
+            "diagnostics",
+            {
+                "section": "workers",
+                "limit": 5,
+                "root_name": "app",
+                "status": "blocked_missing_dependency",
+                "family": "office",
+                "since_hours": 24,
+                "include_details": True,
+            },
+        ),
     ]
 
 
