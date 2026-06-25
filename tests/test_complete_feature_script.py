@@ -75,6 +75,24 @@ def test_complete_feature_script_is_safe_to_rerun_after_empty_squash_merge():
     assert "git commit -m '$CommitMessage'" in script
 
 
+def test_complete_feature_script_bounds_step_processes_without_powershell_stream_redirection():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "[int]$StepTimeoutSeconds" in script
+    assert "[System.Diagnostics.ProcessStartInfo]" in script
+    assert "UseShellExecute = $false" in script
+    assert "CreateNoWindow = $true" in script
+    assert "RedirectStandardOutput = $true" in script
+    assert "RedirectStandardError = $true" in script
+    assert "ReadToEndAsync()" in script
+    assert "WaitForExit($StepTimeoutSeconds * 1000)" in script
+    assert "ExitCode" in script
+    assert "Stop-FeatureProcessTree" in script
+    assert "ProcessStreamReader_CliXmlError" in script
+    assert "Start-Process" not in script
+    assert "*> $logPath" not in script
+
+
 def test_dev_flux_kb_wrapper_is_worktree_safe():
     wrapper_path = ROOT / "scripts" / "dev" / "flux-kb.ps1"
     assert wrapper_path.exists()

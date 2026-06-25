@@ -4,7 +4,8 @@ param(
     [string]$CommitMessage = "Complete feature",
     [switch]$DryRun,
     [switch]$SkipDeploy,
-    [switch]$KeepWorktree
+    [switch]$KeepWorktree,
+    [int]$StepTimeoutSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +28,46 @@ function New-StepLogPath {
     param([string]$Name)
     $safeName = ($Name -replace "[^A-Za-z0-9_.-]", "-").Trim("-")
     return Join-Path $script:LogRoot ("{0:yyyyMMdd-HHmmss}-{1}.log" -f [DateTime]::UtcNow, $safeName)
+}
+
+function Stop-FeatureProcessTree {
+    param([int]$ProcessId)
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue)
+    foreach ($child in $children) {
+        Stop-FeatureProcessTree -ProcessId ([int]$child.ProcessId)
+    }
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function ConvertTo-FeatureCommandArgument {
+    param([string]$Value)
+    if ($Value -match '[\s"]') {
+        return '"' + ($Value -replace '"', '\"') + '"'
+    }
+    return $Value
+}
+
+function Get-FeatureTaskResult {
+    param($Task)
+    if ($null -eq $Task) { return "" }
+    if ($Task.Wait(5000)) { return $Task.Result }
+    return "[log stream did not close within 5 seconds]"
+}
+
+function Write-FeatureStepOutput {
+    param(
+        [string]$LogPath,
+        [string]$Stdout,
+        [string]$Stderr
+    )
+    "" | Out-File -FilePath $LogPath -Encoding UTF8
+    if ($Stdout) {
+        $Stdout | Out-File -FilePath $LogPath -Append -Encoding UTF8
+    }
+    if ($Stderr) {
+        "[stderr]" | Out-File -FilePath $LogPath -Append -Encoding UTF8
+        $Stderr | Out-File -FilePath $LogPath -Append -Encoding UTF8
+    }
 }
 
 function Write-SummaryAndExit {
@@ -61,27 +102,54 @@ function Invoke-FeatureStep {
         "DRY RUN: $Command" | Out-File -FilePath $logPath -Encoding UTF8
         return
     }
-    Push-Location $Cwd
+    $stdoutText = ""
+    $stderrText = ""
+    $stdoutTask = $null
+    $stderrTask = $null
     try {
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
         $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Command))
-        powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand *> $logPath
-        $ErrorActionPreference = $previousErrorActionPreference
-        $record.exit_code = $LASTEXITCODE
-        if ($LASTEXITCODE -ne 0) {
-            throw "Step '$Name' failed with exit code $LASTEXITCODE. See $logPath"
+        # Process-level redirection avoids nested PowerShell stream parsing failures
+        # such as ProcessStreamReader_CliXmlError from merging native stderr with *>.
+        $processArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand)
+        $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $processInfo.FileName = "powershell"
+        $processInfo.Arguments = ($processArguments | ForEach-Object { ConvertTo-FeatureCommandArgument $_ }) -join " "
+        $processInfo.WorkingDirectory = $Cwd
+        $processInfo.UseShellExecute = $false
+        $processInfo.CreateNoWindow = $true
+        $processInfo.RedirectStandardOutput = $true
+        $processInfo.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $processInfo
+        [void]$process.Start()
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($StepTimeoutSeconds * 1000)) {
+            $record.exit_code = 124
+            Stop-FeatureProcessTree -ProcessId $process.Id
+            $process.WaitForExit(5000) | Out-Null
+            $stdoutText = Get-FeatureTaskResult -Task $stdoutTask
+            $stderrText = Get-FeatureTaskResult -Task $stderrTask
+            Write-FeatureStepOutput -LogPath $logPath -Stdout $stdoutText -Stderr $stderrText
+            "Step '$Name' timed out after $StepTimeoutSeconds seconds; process tree was stopped." | Out-File -FilePath $logPath -Append -Encoding UTF8
+            throw "Step '$Name' timed out after $StepTimeoutSeconds seconds. See $logPath"
+        }
+        $process.WaitForExit()
+        $stdoutText = Get-FeatureTaskResult -Task $stdoutTask
+        $stderrText = Get-FeatureTaskResult -Task $stderrTask
+        Write-FeatureStepOutput -LogPath $logPath -Stdout $stdoutText -Stderr $stderrText
+        $record.exit_code = $process.ExitCode
+        if ($process.ExitCode -ne 0) {
+            throw "Step '$Name' failed with exit code $($process.ExitCode). See $logPath"
         }
     } catch {
-        if ($null -ne $previousErrorActionPreference) {
-            $ErrorActionPreference = $previousErrorActionPreference
-        }
+        $stdoutText = Get-FeatureTaskResult -Task $stdoutTask
+        $stderrText = Get-FeatureTaskResult -Task $stderrTask
+        Write-FeatureStepOutput -LogPath $logPath -Stdout $stdoutText -Stderr $stderrText
         if ($record.exit_code -eq 0) { $record.exit_code = 1 }
         $script:FailedStep = $Name
         $_ | Out-File -FilePath $logPath -Append -Encoding UTF8
         throw
-    } finally {
-        Pop-Location
     }
 }
 
