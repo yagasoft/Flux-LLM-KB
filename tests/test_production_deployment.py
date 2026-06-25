@@ -63,7 +63,8 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
 
     assert "docker build" in update
     assert "flux-llm-kb-api:" in update
-    assert "up -d --no-build postgres api worker" in update
+    assert '"up", "-d", "--no-build"' in update
+    assert '"postgres", "api", "worker"' in update
     assert "FLUX_KB_IMAGE_TAG" in update
     assert "private\\flux.env" in update
     assert 'Join-Path $appRoot "plugins"' in update
@@ -89,6 +90,21 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "[int]$PostgresPort = 5432" in update
     assert "Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort" in update
     assert "build:" not in _embedded_compose_template(update)
+
+
+def test_production_update_bounds_compose_up_and_recovers_created_services():
+    update = _script("update-flux.ps1")
+
+    assert "[int]$DockerComposeTimeoutSeconds" in update
+    assert "Invoke-FluxDockerComposeUp" in update
+    assert "WaitForExit($TimeoutSeconds * 1000)" in update
+    assert "Stop-FluxProcessTree" in update
+    assert "Start-FluxCreatedContainers" in update
+    assert "docker inspect" in update
+    assert "{{.State.Status}}" in update
+    assert "docker start" in update
+    assert "flux-llm-kb-api" in update
+    assert "flux-llm-kb-worker" in update
 
 
 def test_docs_describe_production_runtime_boundary():

@@ -6,7 +6,8 @@ param(
     [string]$PythonExe = "",
     [switch]$SkipDashboardBuild,
     [switch]$RecreateVenv,
-    [switch]$RestartHostTasks
+    [switch]$RestartHostTasks,
+    [int]$DockerComposeTimeoutSeconds = 120
 )
 
 $ErrorActionPreference = "Stop"
@@ -203,6 +204,112 @@ function Invoke-FluxCodexPluginInstall {
     }
 }
 
+function ConvertTo-FluxCommandArgument {
+    param([string]$Value)
+    if ($Value -match '[\s"]') {
+        return '"' + ($Value -replace '"', '\"') + '"'
+    }
+    return $Value
+}
+
+function Stop-FluxProcessTree {
+    param([int]$ProcessId)
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue)
+    foreach ($child in $children) {
+        Stop-FluxProcessTree -ProcessId ([int]$child.ProcessId)
+    }
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Get-FluxContainerStatus {
+    param([string]$ContainerName)
+    $status = docker inspect --format "{{.State.Status}}" $ContainerName 2>$null
+    if ($LASTEXITCODE -ne 0) { return "" }
+    return ($status | Select-Object -First 1).Trim()
+}
+
+function Start-FluxCreatedContainers {
+    param([string[]]$ContainerNames)
+    foreach ($containerName in $ContainerNames) {
+        $status = Get-FluxContainerStatus -ContainerName $containerName
+        if ($status -eq "created") {
+            Write-Warning "Container $containerName was left in Created state; starting it directly."
+            docker start $containerName | Out-Host
+        }
+    }
+}
+
+function Wait-FluxContainersRunning {
+    param([string[]]$ContainerNames, [int]$TimeoutSeconds = 30)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $notRunning = @()
+        foreach ($containerName in $ContainerNames) {
+            $status = Get-FluxContainerStatus -ContainerName $containerName
+            if ($status -ne "running") {
+                $notRunning += "$containerName=$status"
+            }
+        }
+        if ($notRunning.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    docker ps -a --filter "name=flux-llm-kb" | Out-Host
+    foreach ($containerName in $ContainerNames) {
+        Write-Warning "Last logs for $containerName"
+        docker logs --tail 80 $containerName 2>&1 | Out-Host
+    }
+    throw "Timed out waiting for Flux Docker containers to run: $($notRunning -join ', ')"
+}
+
+function Invoke-FluxDockerComposeUp {
+    param(
+        [string]$AppRoot,
+        [string]$AppEnvPath,
+        [string]$ComposePath,
+        [int]$TimeoutSeconds
+    )
+    $containers = @("flux-llm-kb-postgres", "flux-llm-kb-api", "flux-llm-kb-worker")
+    $recoverableContainers = @("flux-llm-kb-api", "flux-llm-kb-worker")
+    $arguments = @(
+        "compose",
+        "--env-file", $AppEnvPath,
+        "-f", $ComposePath,
+        "up", "-d", "--no-build",
+        "postgres", "api", "worker"
+    )
+    $argumentText = ($arguments | ForEach-Object { ConvertTo-FluxCommandArgument $_ }) -join " "
+    $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("flux-compose-up-{0}-out.log" -f ([Guid]::NewGuid().ToString("N")))
+    $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("flux-compose-up-{0}-err.log" -f ([Guid]::NewGuid().ToString("N")))
+    $process = Start-Process -FilePath "docker" -ArgumentList $argumentText -WorkingDirectory $AppRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Write-Warning "docker compose up did not exit within $TimeoutSeconds seconds; stopping compose process tree and checking container state."
+        Stop-FluxProcessTree -ProcessId $process.Id
+        Start-FluxCreatedContainers -ContainerNames $recoverableContainers
+        Wait-FluxContainersRunning -ContainerNames $containers
+        return
+    }
+
+    if (Test-Path $stdoutPath) {
+        Get-Content -Path $stdoutPath | Out-Host
+    }
+    if (Test-Path $stderrPath) {
+        Get-Content -Path $stderrPath | Out-Host
+    }
+    if ($process.ExitCode -ne 0) {
+        Start-FluxCreatedContainers -ContainerNames $recoverableContainers
+        try {
+            Wait-FluxContainersRunning -ContainerNames $containers
+            Write-Warning "docker compose up exited with $($process.ExitCode), but required Flux containers are running after recovery."
+            return
+        } catch {
+            throw "docker compose up failed with exit code $($process.ExitCode)."
+        }
+    }
+    Start-FluxCreatedContainers -ContainerNames $recoverableContainers
+    Wait-FluxContainersRunning -ContainerNames $containers
+}
+
 if (-not (Test-Path $composePath)) {
     throw "Flux production runtime is not installed at $InstallRoot. Run install-flux.ps1 first."
 }
@@ -257,7 +364,7 @@ Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 
 Push-Location $appRoot
 try {
-    docker compose --env-file $appEnvPath -f $composePath up -d --no-build postgres api worker
+    Invoke-FluxDockerComposeUp -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -TimeoutSeconds $DockerComposeTimeoutSeconds
 } finally {
     Pop-Location
 }
