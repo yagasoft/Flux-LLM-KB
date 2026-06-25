@@ -8038,6 +8038,9 @@ def _benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 
 def _retrieval_benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    metrics = _sanitize_operational_metadata(row[8] or {})
+    metadata = _sanitize_operational_metadata(row[10] or {})
+    previous_metrics = _sanitize_operational_metadata(row[13] or {})
     return {
         "id": row[0],
         "suite": _normalize_retrieval_benchmark_suite(row[1]),
@@ -8047,13 +8050,23 @@ def _retrieval_benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "query_count": int(row[5] or 0),
         "passed_count": int(row[6] or 0),
         "failed_count": int(row[7] or 0),
-        "metrics": _sanitize_operational_metadata(row[8] or {}),
+        "metrics": metrics,
         "case_results": _sanitize_retrieval_case_results(row[9] or []),
-        "metadata": _sanitize_operational_metadata(row[10] or {}),
+        "metadata": metadata,
         "recommendation_metadata": _sanitize_operational_metadata(row[11] or {}),
         "created_at": row[12].isoformat() if row[12] else None,
-        "previous_metrics": _sanitize_operational_metadata(row[13] or {}),
+        "previous_metrics": previous_metrics,
+        "metric_deltas": _metric_deltas(metrics, previous_metrics),
+        "calibration_summary": metadata.get("calibration_summary") if isinstance(metadata.get("calibration_summary"), dict) else {},
     }
+
+
+def _metric_deltas(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, float]:
+    deltas: dict[str, float] = {}
+    for key, value in current.items():
+        if isinstance(value, (int, float)) and isinstance(previous.get(key), (int, float)):
+            deltas[key] = round(float(value) - float(previous[key]), 6)
+    return deltas
 
 
 def _percentile_disc(values: list[int], percentile: float) -> int | None:

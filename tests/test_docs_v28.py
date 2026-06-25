@@ -129,5 +129,8 @@ def test_docs_describe_p0_retrieval_benchmark_queue_policy_and_interfaces():
     assert "p0 to pn" in roadmap
     assert "do not force blocked p0 items" in roadmap
     queue_section = roadmap.split("## queued work in roadmap order", 1)[1].split("## update rules", 1)[0]
-    assert "priority: p0. plain-english purpose: measure retrieval quality" in queue_section
+    assert "retrieval calibration" in queue_section
+    assert "confidence-band" in queue_section
+    assert "semantic duplicate calibration candidates" in queue_section
+    assert "priority: p0. plain-english purpose: prove indexer and filesystem reliability" in queue_section
     assert "blocked until retrieval benchmark/live feedback" in queue_section

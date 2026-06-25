@@ -384,11 +384,29 @@ def test_cli_retrieval_benchmark_run_and_history_use_service(monkeypatch, capsys
     class FakeService:
         def run_retrieval_benchmark(self, **kwargs):
             calls.append(("retrieval_benchmark_run", kwargs))
-            return {"suite": kwargs["suite"], "metrics": {"top1_accuracy": 1.0}}
+            return {
+                "suite": kwargs["suite"],
+                "metrics": {"top1_accuracy": 1.0},
+                "metric_deltas": {"top1_accuracy": 0.2},
+                "calibration_summary": {"confidence_bands": {"high": 2}},
+                "recommendations": {
+                    "settings_mutated": False,
+                    "candidates": [{"kind": "semantic_duplicate_threshold", "threshold": 0.86}],
+                },
+            }
 
         def retrieval_benchmark_history(self, **kwargs):
             calls.append(("retrieval_benchmark_history", kwargs))
-            return {"suite": kwargs["suite"], "runs": [{"id": "retrieval-run-1"}]}
+            return {
+                "suite": kwargs["suite"],
+                "runs": [
+                    {
+                        "id": "retrieval-run-1",
+                        "metric_deltas": {"top1_accuracy": 0.2},
+                        "calibration_summary": {"confidence_bands": {"high": 2}},
+                    }
+                ],
+            }
 
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
@@ -414,11 +432,14 @@ def test_cli_retrieval_benchmark_run_and_history_use_service(monkeypatch, capsys
     )
     run_payload = json.loads(capsys.readouterr().out)
     assert run_payload["suite"] == "standard"
+    assert run_payload["metric_deltas"] == {"top1_accuracy": 0.2}
+    assert run_payload["recommendations"]["candidates"][0]["kind"] == "semantic_duplicate_threshold"
 
     assert cli.main(["retrieval", "benchmark", "history", "--suite", "standard", "--label", "nightly", "--limit", "3"]) == 0
     history_payload = json.loads(capsys.readouterr().out)
 
-    assert history_payload["runs"] == [{"id": "retrieval-run-1"}]
+    assert history_payload["runs"][0]["metric_deltas"] == {"top1_accuracy": 0.2}
+    assert history_payload["runs"][0]["calibration_summary"]["confidence_bands"] == {"high": 2}
     assert calls == [
         (
             "retrieval_benchmark_run",

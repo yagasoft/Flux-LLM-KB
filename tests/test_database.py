@@ -657,6 +657,7 @@ def test_retrieval_benchmark_runs_insert_list_and_sanitize_metadata(monkeypatch)
     assert list_params == ["standard", "nightly", 5]
     assert inserted["id"] == "retrieval-run-2"
     assert rows[0]["previous_metrics"] == {"top1_accuracy": 0.7}
+    assert rows[0]["metric_deltas"] == {"top1_accuracy": 0.1}
     assert rows[0]["case_results"] == [{"case_id": "case-1", "query_hash": "sha256:abc"}]
     assert "private_path" not in json.dumps(rows)
     assert "raw_query" not in json.dumps(rows)

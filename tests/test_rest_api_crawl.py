@@ -344,11 +344,29 @@ def test_retrieval_benchmark_routes_are_exposed(monkeypatch):
     class FakeService:
         def run_retrieval_benchmark(self, **kwargs):
             calls.append(("retrieval_run", kwargs))
-            return {"suite": kwargs["suite"], "metrics": {"top1_accuracy": 1.0}}
+            return {
+                "suite": kwargs["suite"],
+                "metrics": {"top1_accuracy": 1.0},
+                "metric_deltas": {"top1_accuracy": 0.2},
+                "calibration_summary": {"confidence_bands": {"high": 2}},
+                "recommendations": {
+                    "settings_mutated": False,
+                    "candidates": [{"kind": "semantic_duplicate_threshold", "threshold": 0.86}],
+                },
+            }
 
         def retrieval_benchmark_history(self, **kwargs):
             calls.append(("retrieval_history", kwargs))
-            return {"suite": kwargs["suite"], "runs": [{"id": "retrieval-run-1"}]}
+            return {
+                "suite": kwargs["suite"],
+                "runs": [
+                    {
+                        "id": "retrieval-run-1",
+                        "metric_deltas": {"top1_accuracy": 0.2},
+                        "calibration_summary": {"confidence_bands": {"high": 2}},
+                    }
+                ],
+            }
 
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
     client = fastapi_testclient.TestClient(create_app())
@@ -367,8 +385,11 @@ def test_retrieval_benchmark_routes_are_exposed(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["metrics"]["top1_accuracy"] == 1.0
+    assert response.json()["metric_deltas"] == {"top1_accuracy": 0.2}
+    assert response.json()["recommendations"]["candidates"][0]["kind"] == "semantic_duplicate_threshold"
     assert history.status_code == 200
-    assert history.json()["runs"] == [{"id": "retrieval-run-1"}]
+    assert history.json()["runs"][0]["metric_deltas"] == {"top1_accuracy": 0.2}
+    assert history.json()["runs"][0]["calibration_summary"]["confidence_bands"] == {"high": 2}
     assert calls == [
         (
             "retrieval_run",

@@ -85,6 +85,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def benchmark_history(fixture: str | None = None, mode: str | None = None, label: str | None = None, warm_state: str | None = None, scope_type: str | None = None, deployment_label: str | None = None, limit: int = 20)" in source
     assert 'def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True)' in source
     assert 'def retrieval_benchmark_history(suite: str | None = None, label: str | None = None, limit: int = 20)' in source
+    assert "confidence bands, calibration candidates, and metric deltas" in source
     assert "review_capture_job(" in source
 
 

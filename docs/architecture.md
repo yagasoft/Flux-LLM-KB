@@ -40,9 +40,10 @@ system rather than a large prompt-injected memory file.
 - `retrieval_benchmark_runs`: metadata-only retrieval-quality benchmark history
   for synthetic suite names, labels, comparison labels, query counts,
   passed/failed case counts, aggregate metrics, sanitized case ids, stable query
-  hashes, ranks, result ids, stream/kind labels, reasons, and previous-run
-  metrics. It must not store raw query text, snippets, private content,
-  credentials, embeddings, or private watched roots.
+  hashes, ranks, result ids, stream/kind labels, reasons, case categories,
+  confidence bands, score evidence, calibration summaries, advisory threshold
+  candidates, and previous-run metrics/deltas. It must not store raw query text,
+  snippets, private content, credentials, embeddings, or private watched roots.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -87,12 +88,25 @@ new active metadata clusters from local embeddings; they do not delete or modify
 the underlying memories. Retrieval suppresses only noncanonical members of
 active semantic clusters and exposes sanitized cluster counts, paths, and
 canonical identifiers when callers request suppressed metadata.
+Retrieval explanations keep ranking score separate from confidence. Search and
+explain results may include `retrieval_explanation.confidence` with stable bands
+(`high`, `medium`, `low`, or `insufficient_evidence`) plus sanitized factors
+such as rank margin, stream mix, exact/path/symbol match, local scope match,
+lifecycle penalties, and suppression signals. Results can also include
+`retrieval_explanation.deprioritization` when lifecycle, retention, or brief
+packing penalties affected ranking or packing. Semantic duplicate suppression
+is surfaced alongside exact duplicate and version-family suppression without
+returning raw suppressed content.
+
 Retrieval evaluation uses deterministic public-safe synthetic cases to exercise
-search, explain, brief packing, scope filters, duplicate suppression, and code
-retrieval. The first suite records top-1 accuracy, precision@3, recall@5, MRR,
+search, explain, brief packing, scope filters, duplicate suppression, current-only
+retrieval, lifecycle-deprioritized evidence, semantic duplicate guardrails, and
+code retrieval. The suite records top-1 accuracy, precision@3, recall@5, MRR,
 nDCG@5, brief recall, brief dilution, scope pass counts, suppression pass
-counts, and elapsed time. Benchmark outputs are evidence for later calibration;
-they do not mutate ranking, thresholds, retention policy, or settings.
+counts, elapsed time, metric deltas, confidence-band summaries, sanitized failed
+case evidence, and semantic duplicate threshold candidates. Benchmark outputs
+are evidence for later calibration; they do not mutate ranking, thresholds,
+retention policy, semantic clusters, or settings.
 
 ## Corpus Monitoring
 

@@ -235,8 +235,21 @@ def test_postgres_retrieval_benchmark_seeds_searches_persists_and_cleans_up(monk
     assert result["query_count"] >= 4
     assert result["metrics"]["top1_accuracy"] >= 0.5
     assert result["metrics"]["brief_dilution"] >= 0.0
+    categories = {str(case.get("category") or "") for case in result["case_results"]}
+    assert {
+        "mail_filter",
+        "current_only",
+        "semantic_duplicate",
+        "semantic_guardrail",
+        "code_symbol_miss",
+    }.issubset(categories)
+    assert result["calibration_summary"]["semantic_thresholds"]
+    assert result["recommendations"]["settings_mutated"] is False
+    assert result["recommendations"]["candidates"]
     assert history
     assert history[0]["label"] == label
+    assert history[0]["calibration_summary"]["confidence_bands"]
+    assert "metric_deltas" in history[0]
     assert synthetic_roots == 0
 
 

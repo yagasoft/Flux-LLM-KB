@@ -5,6 +5,9 @@ import math
 from typing import Any
 
 
+SEMANTIC_THRESHOLD_CANDIDATES = (0.82, 0.86, 0.9)
+
+
 def evaluate_retrieval_cases(
     cases: list[dict[str, Any]],
     observations: dict[str, dict[str, Any]],
@@ -27,14 +30,17 @@ def evaluate_retrieval_cases(
         "suppression_pass_count": sum(1 for case in case_results if case["suppression_pass"]),
         "elapsed_ms": sum(int(case.get("elapsed_ms") or 0) for case in case_results),
     }
+    calibration_summary = _calibration_summary(case_results)
     return {
         "query_count": query_count,
         "passed_count": passed_count,
         "failed_count": query_count - passed_count,
         "metrics": metrics,
+        "calibration_summary": calibration_summary,
         "case_results": [
             {
                 "case_id": case["case_id"],
+                "category": case["category"],
                 "query_hash": case["query_hash"],
                 "status": case["status"],
                 "expected_ids": case["expected_ids"],
@@ -46,10 +52,48 @@ def evaluate_retrieval_cases(
                 "rank": case.get("rank"),
                 "elapsed_ms": case.get("elapsed_ms", 0),
                 "reasons": case["reasons"],
+                "failure_details": case["failure_details"],
+                "score_evidence": case["score_evidence"],
+                "confidence_band": case["confidence_band"],
                 "result_summaries": case["result_summaries"],
             }
             for case in case_results
         ],
+    }
+
+
+def build_retrieval_recommendations(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("calibration_summary") if isinstance(report.get("calibration_summary"), dict) else {}
+    candidates: list[dict[str, Any]] = []
+    thresholds = summary.get("semantic_thresholds") if isinstance(summary.get("semantic_thresholds"), list) else []
+    if thresholds:
+        best = sorted(
+            [item for item in thresholds if isinstance(item, dict) and int(item.get("evaluated_count") or 0) > 0],
+            key=lambda item: (
+                int(item.get("false_positive_count") or 0) + int(item.get("false_negative_count") or 0),
+                -int(item.get("pass_count") or 0),
+                abs(float(item.get("threshold") or 0.0) - 0.86),
+            ),
+        )
+        if best:
+            selected = best[0]
+            threshold = float(selected.get("threshold") or 0.0)
+            evaluated = int(selected.get("evaluated_count") or 0)
+            passed = int(selected.get("pass_count") or 0)
+            candidates.append(
+                {
+                    "kind": "semantic_duplicate_threshold",
+                    "threshold": threshold,
+                    "evidence_count": evaluated,
+                    "false_positive_count": int(selected.get("false_positive_count") or 0),
+                    "false_negative_count": int(selected.get("false_negative_count") or 0),
+                    "rationale": f"Synthetic semantic duplicate calibration passed for {passed}/{evaluated} cases at threshold {threshold:.2f}.",
+                }
+            )
+    return {
+        "settings_mutated": False,
+        "purpose": "retrieval_evaluation",
+        "candidates": candidates,
     }
 
 
@@ -64,6 +108,7 @@ def metric_deltas(current: dict[str, Any], previous: dict[str, Any] | None) -> d
 
 
 def _evaluate_case(case: dict[str, Any], observation: dict[str, Any], *, limit_per_query: int) -> dict[str, Any]:
+    category = str(case.get("category") or "standard").strip().lower().replace("-", "_") or "standard"
     expected_ids = [str(value) for value in case.get("expected_ids") or [] if value]
     expected_brief_ids = [str(value) for value in (case.get("expected_brief_ids") or expected_ids) if value]
     results = [item for item in observation.get("results") or [] if isinstance(item, dict)]
@@ -100,8 +145,11 @@ def _evaluate_case(case: dict[str, Any], observation: dict[str, Any], *, limit_p
         reasons.append("scope_miss")
     if not suppression_pass:
         reasons.append("suppression_miss")
+    score_evidence = _score_evidence(results)
+    confidence_band = _confidence_band(results)
     return {
         "case_id": str(case.get("id") or ""),
+        "category": category,
         "query_hash": _hash_text(str(case.get("query") or "")),
         "expected_ids": expected_ids,
         "observed_ids": top_ids,
@@ -119,8 +167,13 @@ def _evaluate_case(case: dict[str, Any], observation: dict[str, Any], *, limit_p
         "brief_dilution": brief_dilution,
         "scope_pass": scope_pass,
         "suppression_pass": suppression_pass,
+        "semantic_similarity": _optional_float(case.get("semantic_similarity")),
+        "expected_semantic_duplicate": _optional_bool(case.get("expected_semantic_duplicate")),
         "elapsed_ms": int(observation.get("elapsed_ms") or 0),
         "reasons": reasons,
+        "failure_details": [_failure_detail(reason) for reason in reasons],
+        "score_evidence": score_evidence,
+        "confidence_band": confidence_band,
         "result_summaries": [_result_summary(index, item) for index, item in enumerate(results[:limit_per_query], start=1)],
         "status": "passed" if not reasons else "failed",
     }
@@ -157,6 +210,8 @@ def _observed_suppression(results: list[dict[str, Any]]) -> bool:
 
 
 def _result_summary(rank: int, item: dict[str, Any]) -> dict[str, Any]:
+    explanation = item.get("retrieval_explanation") if isinstance(item.get("retrieval_explanation"), dict) else {}
+    confidence = explanation.get("confidence") if isinstance(explanation.get("confidence"), dict) else {}
     return {
         "rank": rank,
         "id": str(item.get("id") or ""),
@@ -164,7 +219,114 @@ def _result_summary(rank: int, item: dict[str, Any]) -> dict[str, Any]:
         "logical_kind": str(item.get("logical_kind") or ""),
         "streams": [str(value) for value in item.get("streams") or []],
         "score": float(item.get("score") or 0.0),
+        "confidence_band": str(confidence.get("band") or "") or None,
     }
+
+
+def _score_evidence(results: list[dict[str, Any]]) -> dict[str, Any]:
+    if not results:
+        return {
+            "top_score": None,
+            "runner_up_score": None,
+            "rank_margin": None,
+            "top_streams": [],
+            "top_scope": None,
+        }
+    top = results[0]
+    top_score = round(float(top.get("score") or 0.0), 6)
+    runner_up_score = round(float(results[1].get("score") or 0.0), 6) if len(results) > 1 else None
+    rank_margin = round(top_score - runner_up_score, 6) if runner_up_score is not None else None
+    return {
+        "top_score": top_score,
+        "runner_up_score": runner_up_score,
+        "rank_margin": rank_margin,
+        "top_streams": [str(value) for value in top.get("streams") or []],
+        "top_scope": str(top.get("retrieval_scope") or "") or None,
+    }
+
+
+def _confidence_band(results: list[dict[str, Any]]) -> str:
+    if not results:
+        return "insufficient_evidence"
+    explanation = results[0].get("retrieval_explanation") if isinstance(results[0].get("retrieval_explanation"), dict) else {}
+    confidence = explanation.get("confidence") if isinstance(explanation.get("confidence"), dict) else {}
+    band = str(confidence.get("band") or "").strip().lower().replace("-", "_")
+    return band if band in {"high", "medium", "low", "insufficient_evidence"} else "insufficient_evidence"
+
+
+def _calibration_summary(case_results: list[dict[str, Any]]) -> dict[str, Any]:
+    confidence_bands: dict[str, int] = {}
+    case_categories: dict[str, dict[str, int]] = {}
+    for case in case_results:
+        band = str(case.get("confidence_band") or "insufficient_evidence")
+        confidence_bands[band] = confidence_bands.get(band, 0) + 1
+        category = str(case.get("category") or "standard")
+        category_counts = case_categories.setdefault(category, {"passed": 0, "failed": 0, "total": 0})
+        category_counts["total"] += 1
+        if case.get("status") == "passed":
+            category_counts["passed"] += 1
+        else:
+            category_counts["failed"] += 1
+    return {
+        "confidence_bands": confidence_bands,
+        "case_categories": case_categories,
+        "semantic_thresholds": _semantic_threshold_summary(case_results),
+    }
+
+
+def _semantic_threshold_summary(case_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    semantic_cases = [
+        case
+        for case in case_results
+        if isinstance(case.get("semantic_similarity"), (int, float))
+        and isinstance(case.get("expected_semantic_duplicate"), bool)
+    ]
+    rows: list[dict[str, Any]] = []
+    for threshold in SEMANTIC_THRESHOLD_CANDIDATES:
+        false_positive = 0
+        false_negative = 0
+        pass_count = 0
+        for case in semantic_cases:
+            predicted = float(case["semantic_similarity"]) >= threshold
+            expected = bool(case["expected_semantic_duplicate"])
+            if predicted == expected:
+                pass_count += 1
+            elif predicted and not expected:
+                false_positive += 1
+            else:
+                false_negative += 1
+        rows.append(
+            {
+                "threshold": threshold,
+                "evaluated_count": len(semantic_cases),
+                "false_positive_count": false_positive,
+                "false_negative_count": false_negative,
+                "pass_count": pass_count,
+            }
+        )
+    return rows
+
+
+def _failure_detail(reason: str) -> dict[str, str]:
+    messages = {
+        "top1_miss": "Expected evidence was not ranked first.",
+        "recall_miss": "Expected evidence was missing from the top 5 results.",
+        "brief_miss": "Expected evidence was missing from the packed brief.",
+        "scope_miss": "The top result came from an unexpected retrieval scope.",
+        "suppression_miss": "Suppression evidence did not match the case expectation.",
+    }
+    return {"reason": reason, "message": messages.get(reason, "Retrieval case failed.")}
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _hash_text(value: str) -> str:

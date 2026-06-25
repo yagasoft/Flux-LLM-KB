@@ -80,6 +80,12 @@ def explain_search_result(query: str, item: dict[str, Any]) -> dict[str, Any]:
     suppression = _suppression_explanation(item)
     if suppression:
         explanation["suppression"] = suppression
+    confidence = _confidence_explanation(item)
+    if confidence:
+        explanation["confidence"] = confidence
+    deprioritization = _deprioritization_explanation(item)
+    if deprioritization:
+        explanation["deprioritization"] = deprioritization
     return explanation
 
 
@@ -223,6 +229,89 @@ def _suppression_explanation(item: dict[str, Any]) -> dict[str, Any]:
                 semantic[key] = semantic_cluster.get(key)
         suppression["semantic_duplicates"] = semantic
     return suppression
+
+
+def _confidence_explanation(item: dict[str, Any]) -> dict[str, Any]:
+    streams = [str(stream) for stream in item.get("streams", [])]
+    score = float(item.get("score") or 0.0)
+    rank = _positive_int(item.get("rank")) or None
+    rank_margin = _optional_float(item.get("rank_margin"))
+    scope_label = str(item.get("retrieval_scope") or "").lower()
+    lifecycle = item.get("lifecycle") if isinstance(item.get("lifecycle"), dict) else {}
+    lifecycle_score = _optional_float(lifecycle.get("score"))
+    suppression_present = _has_suppression_signal(item)
+    exact_signal = any(stream in {"code_symbol_exact"} for stream in streams)
+    local_scope = scope_label == "local"
+    if not streams or score <= 0:
+        band = "insufficient_evidence"
+    elif exact_signal or (
+        (rank in {None, 1})
+        and len(streams) >= 2
+        and local_scope
+        and (lifecycle_score is None or lifecycle_score >= 0.75)
+    ):
+        band = "high"
+    elif local_scope or len(streams) >= 2:
+        band = "medium"
+    else:
+        band = "low"
+    return {
+        "band": band,
+        "factors": {
+            "rank": rank,
+            "rank_margin": rank_margin,
+            "stream_count": len(streams),
+            "local_scope": local_scope,
+            "exact_signal": exact_signal,
+            "lifecycle_score": lifecycle_score,
+            "suppression_present": suppression_present,
+        },
+    }
+
+
+def _deprioritization_explanation(item: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = item.get("lifecycle") if isinstance(item.get("lifecycle"), dict) else {}
+    if not lifecycle:
+        return {}
+    lifecycle_explanation = lifecycle.get("explanation") if isinstance(lifecycle.get("explanation"), dict) else {}
+    penalties = lifecycle_explanation.get("penalties") if isinstance(lifecycle_explanation.get("penalties"), dict) else {}
+    retention_action = str(lifecycle.get("retention_action") or lifecycle_explanation.get("retention_action") or "keep")
+    state = str(lifecycle.get("state") or "").strip().lower()
+    reasons: list[str] = []
+    if lifecycle.get("current") is False:
+        reasons.append("non_current")
+    if state and state not in {"active", "confirmed", "reinforced"}:
+        reasons.append(f"state:{state}")
+    if retention_action and retention_action != "keep":
+        reasons.append(f"retention:{retention_action}")
+    for key, value in penalties.items():
+        numeric = _optional_float(value)
+        if numeric is not None and numeric < 1.0:
+            reasons.append(f"penalty:{key}")
+    if not reasons:
+        return {}
+    return {
+        "reasons": reasons,
+        "lifecycle_score": _optional_float(lifecycle.get("score")),
+        "penalties": {str(key): float(value) for key, value in penalties.items() if _optional_float(value) is not None},
+    }
+
+
+def _has_suppression_signal(item: dict[str, Any]) -> bool:
+    if _positive_int(item.get("duplicate_count")):
+        return True
+    version_family = item.get("version_family")
+    if isinstance(version_family, dict) and _positive_int(version_family.get("suppressed_count")):
+        return True
+    semantic_cluster = item.get("semantic_duplicate_cluster")
+    return isinstance(semantic_cluster, dict) and _positive_int(semantic_cluster.get("suppressed_count")) > 0
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _positive_int(value: Any) -> int:

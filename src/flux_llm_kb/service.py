@@ -33,7 +33,7 @@ from .indexer_diagnostics import (
 )
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
-from .retrieval_benchmark import evaluate_retrieval_cases, metric_deltas
+from .retrieval_benchmark import build_retrieval_recommendations, evaluate_retrieval_cases, metric_deltas
 from .retrieval_explain import enrich_search_result
 from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
 from .scoring import ContextCandidate, pack_context, pack_context_with_trace
@@ -324,10 +324,7 @@ class KnowledgeService:
                     "elapsed_ms": max(0, int((time.perf_counter() - started) * 1000)),
                 }
             report = evaluate_retrieval_cases(cases, observations, limit_per_query=bounded_limit)
-            recommendations = {
-                "settings_mutated": False,
-                "purpose": "retrieval_evaluation",
-            }
+            recommendations = build_retrieval_recommendations(report)
             recorded: dict[str, Any] | None = None
             if persist:
                 recorded = database.record_retrieval_benchmark_run(
@@ -342,11 +339,19 @@ class KnowledgeService:
                     case_results=report["case_results"],
                     metadata={
                         "provider": "synthetic",
-                        "suite_version": "v1",
+                        "suite_version": "v2",
                         "limit_per_query": bounded_limit,
+                        "calibration_summary": report["calibration_summary"],
                     },
                     recommendation_metadata=recommendations,
                 )
+                history_rows = database.list_retrieval_benchmark_runs(
+                    suite=normalized_suite,
+                    label=label or None,
+                    limit=1,
+                )
+                if history_rows:
+                    recorded = {**recorded, **history_rows[0]}
             return {
                 "id": recorded.get("id") if recorded else None,
                 "suite": normalized_suite,
@@ -357,7 +362,8 @@ class KnowledgeService:
                 "passed_count": report["passed_count"],
                 "failed_count": report["failed_count"],
                 "metrics": report["metrics"],
-                "metric_deltas": metric_deltas(report["metrics"], None),
+                "metric_deltas": recorded.get("metric_deltas") if recorded else metric_deltas(report["metrics"], None),
+                "calibration_summary": report["calibration_summary"],
                 "case_results": report["case_results"],
                 "recommendations": recommendations,
                 "created_at": recorded.get("created_at") if recorded else None,
@@ -388,11 +394,11 @@ class KnowledgeService:
         temp_dir = tempfile.TemporaryDirectory(prefix="flux-kb-retrieval-benchmark-")
         root = Path(temp_dir.name)
         root_name = f"__retrieval_benchmark_{uuid4().hex[:12]}"
-        episode_id: str | None = None
+        episode_ids: list[str] = []
         root_created = False
 
         def cleanup() -> None:
-            if episode_id:
+            for episode_id in episode_ids:
                 database.forget_episode(episode_id)
             if root_created:
                 database.delete_monitored_root(root_id=root_name, purge_index=True, actor="retrieval_benchmark")
@@ -422,9 +428,35 @@ class KnowledgeService:
                     f"contradiction-{marker} benchmark evidence says the older statement was superseded "
                     "by a newer local review note."
                 ),
+                "current-note.md": (
+                    f"current-{marker} current-only benchmark evidence. "
+                    "This current file should remain after stale memory filtering."
+                ),
+                "semantic-guardrail.md": (
+                    f"semantic-guardrail-{marker} benchmark note. "
+                    "This similar-looking note should not be treated as a semantic duplicate."
+                ),
+                "code_fallback.py": (
+                    f"# fallback-{marker} code-symbol miss benchmark fixture\n\n"
+                    "def unrelated_handler(request):\n"
+                    "    return {'status': 'fallback'}\n"
+                ),
+                "mail-alpha/manifest.json": json.dumps(
+                    {
+                        "subject": f"mail-{marker} benchmark message",
+                        "sender": "synthetic@example.invalid",
+                        "recipients": ["operator@example.invalid"],
+                        "source_type": "synthetic",
+                        "source_folder": "FluxBenchmark",
+                        "attachment_count": 0,
+                    },
+                    sort_keys=True,
+                ),
             }
             for relative_path, content in files.items():
-                (root / relative_path).write_text(content, encoding="utf-8")
+                target = root / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
             database.add_monitored_root(
                 name=root_name,
                 root_path=root,
@@ -440,10 +472,32 @@ class KnowledgeService:
                 summary="Synthetic benchmark episode for brief packing and workspace-scoped memory retrieval.",
                 metadata={"root_name": root_name, "workspace_key": f"root:{root_name}", "benchmark_tag": root_name},
             )
+            episode_ids.append(episode_id)
+            stale_episode_id = database.insert_episode(
+                title=f"stale-{marker} retrieval benchmark memory",
+                summary=f"current-{marker} stale memory should be excluded by current_only filtering.",
+                metadata={"root_name": root_name, "workspace_key": f"root:{root_name}", "benchmark_tag": root_name},
+            )
+            episode_ids.append(stale_episode_id)
+            stale_claim = database.upsert_claim(
+                subject_type="benchmark",
+                subject_name=f"current-{marker}",
+                predicate="mentions",
+                object_text=f"current-{marker} stale memory should be deprioritized.",
+                confidence=0.7,
+                episode_id=stale_episode_id,
+                metadata={"benchmark_tag": root_name},
+            )
+            database.transition_claim(
+                claim_id=stale_claim["id"],
+                transition="deprioritize",
+                reason="synthetic retrieval benchmark stale evidence",
+            )
             cases = [
                 _retrieval_benchmark_case(
                     self,
                     case_id="scoped-corpus",
+                    category="scoped_corpus",
                     query=f"alpha-{marker} scoped corpus evidence",
                     root_name=root_name,
                     source_path="alpha-decision.md",
@@ -451,21 +505,63 @@ class KnowledgeService:
                 _retrieval_benchmark_case(
                     self,
                     case_id="duplicate-suppression",
+                    category="semantic_duplicate",
                     query=f"duplicate-{marker} exact duplicate suppression",
                     root_name=root_name,
                     source_path="duplicate-canonical.md",
                     expect_suppression=True,
+                    semantic_similarity=0.92,
+                    expected_semantic_duplicate=True,
                 ),
                 _retrieval_benchmark_case(
                     self,
                     case_id="code-symbol",
+                    category="code_symbol",
                     query=f"code-{marker} benchmark_handler",
                     root_name=root_name,
                     source_path="service_impl.py",
                     filters={"logical_kinds": ["file"], "current_only": True},
                 ),
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="mail-filter",
+                    category="mail_filter",
+                    query=f"mail-{marker} benchmark message",
+                    root_name=root_name,
+                    source_path="mail-alpha/manifest.json",
+                    filters={"logical_kinds": ["mail"], "current_only": True},
+                ),
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="current-only",
+                    category="current_only",
+                    query=f"current-{marker} current-only benchmark evidence",
+                    root_name=root_name,
+                    source_path="current-note.md",
+                    filters={"current_only": True},
+                ),
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="semantic-guardrail",
+                    category="semantic_guardrail",
+                    query=f"semantic-guardrail-{marker} benchmark note",
+                    root_name=root_name,
+                    source_path="semantic-guardrail.md",
+                    semantic_similarity=0.81,
+                    expected_semantic_duplicate=False,
+                ),
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="code-symbol-miss",
+                    category="code_symbol_miss",
+                    query=f"fallback-{marker} missing symbol fallback note",
+                    root_name=root_name,
+                    source_path="code_fallback.py",
+                    filters={"logical_kinds": ["file"], "current_only": True},
+                ),
                 {
                     "id": "episode-brief",
+                    "category": "brief_packing",
                     "query": f"episode-{marker} benchmark memory",
                     "root_name": root_name,
                     "scope_mode": "local_only",
@@ -477,6 +573,7 @@ class KnowledgeService:
                 _retrieval_benchmark_case(
                     self,
                     case_id="contradiction-review",
+                    category="lifecycle_review",
                     query=f"contradiction-{marker} superseded older statement",
                     root_name=root_name,
                     source_path="contradiction-review.md",
@@ -1784,11 +1881,14 @@ def _retrieval_benchmark_case(
     service: KnowledgeService,
     *,
     case_id: str,
+    category: str,
     query: str,
     root_name: str,
     source_path: str,
     expect_suppression: bool = False,
     filters: dict[str, Any] | None = None,
+    semantic_similarity: float | None = None,
+    expected_semantic_duplicate: bool | None = None,
 ) -> dict[str, Any]:
     expected_id = _retrieval_benchmark_expected_id(
         service,
@@ -1799,6 +1899,7 @@ def _retrieval_benchmark_case(
     )
     return {
         "id": case_id,
+        "category": category,
         "query": query,
         "root_name": root_name,
         "scope_mode": "local_only",
@@ -1807,6 +1908,8 @@ def _retrieval_benchmark_case(
         "expected_brief_ids": [expected_id] if expected_id else [],
         "expected_scope": "local",
         "expect_suppression": expect_suppression,
+        "semantic_similarity": semantic_similarity,
+        "expected_semantic_duplicate": expected_semantic_duplicate,
     }
 
 
@@ -1927,7 +2030,20 @@ def _enrich_search_results(
     *,
     retrieval_filters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    return [enrich_search_result(query, _with_retrieval_filters(item, retrieval_filters)) for item in results]
+    ranked_results = _with_rank_evidence(results)
+    return [enrich_search_result(query, _with_retrieval_filters(item, retrieval_filters)) for item in ranked_results]
+
+
+def _with_rank_evidence(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for index, item in enumerate(results):
+        current_score = float(item.get("score") or 0.0)
+        next_score = float(results[index + 1].get("score") or 0.0) if index + 1 < len(results) else None
+        enriched = dict(item)
+        enriched["rank"] = index + 1
+        enriched["rank_margin"] = round(current_score - next_score, 6) if next_score is not None else None
+        ranked.append(enriched)
+    return ranked
 
 
 def _with_retrieval_filters(item: dict[str, Any], filters: dict[str, Any] | None) -> dict[str, Any]:

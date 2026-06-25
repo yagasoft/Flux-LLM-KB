@@ -221,10 +221,33 @@ type BenchmarkRunResponse = {
 
 type RetrievalBenchmarkCaseResult = {
   case_id?: string;
+  category?: string;
   status?: string;
   expected_ids?: string[];
   observed_ids?: string[];
   reasons?: string[];
+  confidence_band?: string;
+  failure_details?: Array<{ reason?: string; message?: string }>;
+};
+
+type RetrievalBenchmarkCalibrationSummary = {
+  confidence_bands?: Record<string, number>;
+  semantic_thresholds?: Array<{
+    threshold?: number;
+    evaluated_count?: number;
+    false_positive_count?: number;
+    false_negative_count?: number;
+    pass_count?: number;
+  }>;
+};
+
+type RetrievalBenchmarkCandidate = {
+  kind?: string;
+  threshold?: number;
+  evidence_count?: number;
+  false_positive_count?: number;
+  false_negative_count?: number;
+  rationale?: string;
 };
 
 type RetrievalBenchmarkRun = {
@@ -238,12 +261,15 @@ type RetrievalBenchmarkRun = {
   failed_count?: number;
   metrics?: Record<string, number>;
   metric_deltas?: Record<string, number>;
+  calibration_summary?: RetrievalBenchmarkCalibrationSummary;
   case_results?: RetrievalBenchmarkCaseResult[];
   recommendations?: {
     settings_mutated?: boolean;
+    candidates?: RetrievalBenchmarkCandidate[];
   };
   recommendation_metadata?: {
     settings_mutated?: boolean;
+    candidates?: RetrievalBenchmarkCandidate[];
   };
   created_at?: string | null;
 };
@@ -453,6 +479,7 @@ type RetrievalFilterTrace = {
 type RetrievalSuppression = {
   exact_duplicates?: Array<Record<string, unknown>>;
   version_families?: Array<Record<string, unknown>>;
+  semantic_duplicates?: Array<Record<string, unknown>>;
 };
 
 type ExplainPayload = {
@@ -2643,6 +2670,9 @@ function RetrievalTab({
   const benchmarkRuns = benchmarkResult ? [benchmarkResult, ...(benchmarkHistory.runs ?? [])] : benchmarkHistory.runs ?? [];
   const latestBenchmark = benchmarkRuns[0];
   const failedBenchmarkCases = (latestBenchmark?.case_results ?? []).filter((item) => item.status === "failed").slice(0, 3);
+  const confidenceBandRows = retrievalConfidenceBandRows(latestBenchmark);
+  const semanticThresholdRows = (latestBenchmark?.calibration_summary?.semantic_thresholds ?? []).slice(0, 2);
+  const recommendationCandidates = retrievalRecommendationCandidates(latestBenchmark).slice(0, 3);
 
   useEffect(() => {
     let cancelled = false;
@@ -2740,7 +2770,9 @@ function RetrievalTab({
               run.label ?? run.id ?? "unlabeled",
               `${run.passed_count ?? 0}/${run.query_count ?? 0} passed`,
               `top1 ${formatPercentMetric(run.metrics?.top1_accuracy)}`,
-              `brief dilution ${formatPercentMetric(run.metrics?.brief_dilution)}`
+              `brief dilution ${formatPercentMetric(run.metrics?.brief_dilution)}`,
+              `top1 ${formatSignedPercentMetric(run.metric_deltas?.top1_accuracy)}`,
+              `brief dilution ${formatSignedPercentMetric(run.metric_deltas?.brief_dilution)}`
             ])}
           />
         ) : (
@@ -2753,11 +2785,35 @@ function RetrievalTab({
               <span>{humanizeIdentifier(latestBenchmark.status ?? "observed")}</span>
               <em>{benchmarkSettingsMutated(latestBenchmark) ? "settings changed" : "settings_mutated false"}</em>
             </div>
+            {confidenceBandRows.map(([band, count]) => (
+              <div className="diagnostic-item" key={`confidence-${band}`}>
+                <strong>{formatIdentifierWord(band)} confidence: {count}</strong>
+                <span>score-confidence separation</span>
+                <em>metadata only</em>
+              </div>
+            ))}
+            {semanticThresholdRows.map((item) => (
+              <div className="diagnostic-item" key={`semantic-threshold-${item.threshold}`}>
+                <strong>Semantic threshold {formatDecimal(item.threshold, 2)}</strong>
+                <span>{item.pass_count ?? 0}/{item.evaluated_count ?? 0} calibration cases passed</span>
+                <em>{item.false_positive_count ?? 0} FP / {item.false_negative_count ?? 0} FN</em>
+              </div>
+            ))}
+            {recommendationCandidates.map((candidate, index) => (
+              <div className="diagnostic-item" key={`${candidate.kind ?? "candidate"}-${index}`}>
+                <strong>{humanizeIdentifier(candidate.kind ?? "candidate")}</strong>
+                <span>{candidate.rationale ?? "advisory candidate"}</span>
+                <em>{candidate.threshold !== undefined ? `threshold ${formatDecimal(candidate.threshold, 2)}` : "advisory"}</em>
+              </div>
+            ))}
             {failedBenchmarkCases.map((item) => (
               <div className="diagnostic-item" key={item.case_id ?? item.observed_ids?.join(",") ?? "case"}>
                 <strong>{item.case_id ?? "case"}</strong>
                 <span>{formatReasonList(item.reasons)}</span>
-                <em>{(item.observed_ids ?? []).length} observed</em>
+                <em>{failedRetrievalCaseLabel(item)}</em>
+                {(item.failure_details ?? []).slice(0, 2).map((detail, index) => (
+                  <span key={`${item.case_id ?? "case"}-detail-${index}`}>{detail.message ?? formatRetrievalReason(detail.reason)}</span>
+                ))}
               </div>
             ))}
           </div>
@@ -2793,6 +2849,7 @@ function SearchResultExplanation({ result }: { result: SearchResult }) {
   const suppression = explanation.suppression ?? {};
   const exactDuplicateCount = suppressionObjectCount(suppression, "exact_duplicates");
   const versionFamilyCount = suppressionObjectCount(suppression, "version_family");
+  const semanticDuplicateCount = suppressionObjectCount(suppression, "semantic_duplicates");
   return (
     <details className="result-explanation">
       <summary>Why this result</summary>
@@ -2827,6 +2884,12 @@ function SearchResultExplanation({ result }: { result: SearchResult }) {
             <strong>{versionFamilyCount} suppressed</strong>
           </>
         )}
+        {semanticDuplicateCount > 0 && (
+          <>
+            <span>Semantic duplicates</span>
+            <strong>{semanticDuplicateCount} suppressed</strong>
+          </>
+        )}
       </div>
       {Object.keys(rawScores).length > 0 && (
         <div className="raw-score-row">
@@ -2843,7 +2906,8 @@ function RetrievalDebugTrace({ trace, suppression }: { trace: RetrievalFilterTra
   const excluded = trace.excluded ?? [];
   const exactDuplicateCount = suppressionCount(suppression.exact_duplicates);
   const versionFamilyCount = suppressionCount(suppression.version_families);
-  if (excluded.length === 0 && exactDuplicateCount === 0 && versionFamilyCount === 0) return null;
+  const semanticDuplicateCount = suppressionCount(suppression.semantic_duplicates);
+  if (excluded.length === 0 && exactDuplicateCount === 0 && versionFamilyCount === 0 && semanticDuplicateCount === 0) return null;
   return (
     <div className="retrieval-debug-trace">
       {excluded.length > 0 && (
@@ -2858,11 +2922,12 @@ function RetrievalDebugTrace({ trace, suppression }: { trace: RetrievalFilterTra
           </ul>
         </section>
       )}
-      {(exactDuplicateCount > 0 || versionFamilyCount > 0) && (
+      {(exactDuplicateCount > 0 || versionFamilyCount > 0 || semanticDuplicateCount > 0) && (
         <section>
           <strong>Suppressed evidence</strong>
           {exactDuplicateCount > 0 && <span>Exact duplicates: {exactDuplicateCount}</span>}
           {versionFamilyCount > 0 && <span>Version families: {versionFamilyCount}</span>}
+          {semanticDuplicateCount > 0 && <span>Semantic duplicates: {semanticDuplicateCount}</span>}
         </section>
       )}
     </div>
@@ -3780,6 +3845,17 @@ function formatPercentMetric(value: number | undefined) {
   return `${(numeric * 100).toFixed(1)}%`;
 }
 
+function formatSignedPercentMetric(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "+0.0%";
+  const signed = value >= 0 ? "+" : "";
+  return `${signed}${(value * 100).toFixed(1)}%`;
+}
+
+function formatDecimal(value: number | undefined, digits: number) {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return numeric.toFixed(digits);
+}
+
 function formatReasonList(values?: string[]) {
   const rows = values?.length ? values : ["observed"];
   return rows.map((value) => value.replace(/[_-]+/g, " ").toLowerCase()).join(", ");
@@ -3787,6 +3863,21 @@ function formatReasonList(values?: string[]) {
 
 function benchmarkSettingsMutated(run: RetrievalBenchmarkRun) {
   return Boolean(run.recommendations?.settings_mutated ?? run.recommendation_metadata?.settings_mutated);
+}
+
+function retrievalConfidenceBandRows(run?: RetrievalBenchmarkRun) {
+  const bands = run?.calibration_summary?.confidence_bands ?? {};
+  return Object.entries(bands).filter(([, count]) => Number(count) > 0);
+}
+
+function retrievalRecommendationCandidates(run?: RetrievalBenchmarkRun) {
+  return run?.recommendations?.candidates ?? run?.recommendation_metadata?.candidates ?? [];
+}
+
+function failedRetrievalCaseLabel(item: RetrievalBenchmarkCaseResult) {
+  const category = item.category ? humanizeIdentifier(item.category).toLowerCase() : `${(item.observed_ids ?? []).length} observed`;
+  const confidence = item.confidence_band ? `${humanizeIdentifier(item.confidence_band)} confidence`.toLowerCase() : "confidence unknown";
+  return `${category} - ${confidence}`;
 }
 
 function formatIdentifierWord(word: string) {

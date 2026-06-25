@@ -388,7 +388,8 @@ describe("Flux dashboard", () => {
           lifecycle: { state: "active", score: 0.88, explanation: { penalties: { state: 1, retention: 0.6 } } },
           suppression: {
             exact_duplicates: { suppressed_count: 2, reason: "exact_content_duplicate", canonical_source_path: "docs/operations.md" },
-            version_family: { suppressed_count: 1, reason: "same_document_version_family", canonical_source_path: "docs/operations.md" }
+            version_family: { suppressed_count: 1, reason: "same_document_version_family", canonical_source_path: "docs/operations.md" },
+            semantic_duplicates: { suppressed_count: 2, reason: "semantic_near_duplicate", threshold: 0.86 }
           }
         }
       }
@@ -524,16 +525,44 @@ describe("Flux dashboard", () => {
             scope_pass_count: 5,
             suppression_pass_count: 4
           },
+          metric_deltas: {
+            top1_accuracy: 0.1,
+            brief_dilution: -0.05
+          },
+          calibration_summary: {
+            confidence_bands: { high: 3, medium: 1, low: 1 },
+            semantic_thresholds: [
+              { threshold: 0.86, evaluated_count: 4, false_positive_count: 0, false_negative_count: 1, pass_count: 3 }
+            ]
+          },
           case_results: [
             {
               case_id: "scope-filter",
+              category: "current_only",
               status: "failed",
               expected_ids: ["chunk-scope"],
               observed_ids: ["chunk-other"],
-              reasons: ["top1_miss", "scope_miss"]
+              reasons: ["top1_miss", "scope_miss"],
+              confidence_band: "low",
+              failure_details: [
+                { reason: "top1_miss", message: "Expected evidence was not ranked first." },
+                { reason: "scope_miss", message: "The top result came from an unexpected retrieval scope." }
+              ]
             }
           ],
-          recommendations: { settings_mutated: false }
+          recommendations: {
+            settings_mutated: false,
+            candidates: [
+              {
+                kind: "semantic_duplicate_threshold",
+                threshold: 0.86,
+                evidence_count: 4,
+                false_positive_count: 0,
+                false_negative_count: 1,
+                rationale: "Synthetic semantic duplicate calibration passed for 3/4 cases at threshold 0.86."
+              }
+            ]
+          }
         }
       ]
     };
@@ -607,16 +636,44 @@ describe("Flux dashboard", () => {
             recall_at_5: 0.85,
             brief_dilution: 0.2
           },
+          metric_deltas: {
+            top1_accuracy: 0.1,
+            brief_dilution: -0.05
+          },
+          calibration_summary: {
+            confidence_bands: { high: 3, medium: 1, low: 1 },
+            semantic_thresholds: [
+              { threshold: 0.86, evaluated_count: 4, false_positive_count: 0, false_negative_count: 1, pass_count: 3 }
+            ]
+          },
           case_results: [
             {
               case_id: "scope-filter",
+              category: "current_only",
               status: "failed",
               expected_ids: ["chunk-scope"],
               observed_ids: ["chunk-other"],
-              reasons: ["top1_miss", "scope_miss"]
+              reasons: ["top1_miss", "scope_miss"],
+              confidence_band: "low",
+              failure_details: [
+                { reason: "top1_miss", message: "Expected evidence was not ranked first." },
+                { reason: "scope_miss", message: "The top result came from an unexpected retrieval scope." }
+              ]
             }
           ],
-          recommendations: { settings_mutated: false }
+          recommendations: {
+            settings_mutated: false,
+            candidates: [
+              {
+                kind: "semantic_duplicate_threshold",
+                threshold: 0.86,
+                evidence_count: 4,
+                false_positive_count: 0,
+                false_negative_count: 1,
+                rationale: "Synthetic semantic duplicate calibration passed for 3/4 cases at threshold 0.86."
+              }
+            ]
+          }
         });
       }
       if (url === "/api/mail/profiles" && init?.method === "POST") return json({ ...JSON.parse(String(init.body)), enabled: true });
@@ -1539,9 +1596,10 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Lifecycle penalties")).toBeInTheDocument();
     expect(screen.getByText("state 1.000, retention 0.600")).toBeInTheDocument();
     expect(screen.getByText("Exact duplicates")).toBeInTheDocument();
-    expect(screen.getByText("2 suppressed")).toBeInTheDocument();
     expect(screen.getByText("Same document versions")).toBeInTheDocument();
     expect(screen.getByText("1 suppressed")).toBeInTheDocument();
+    expect(screen.getByText("Semantic duplicates")).toBeInTheDocument();
+    expect(screen.getAllByText("2 suppressed").length).toBeGreaterThanOrEqual(2);
 
     await user.click(screen.getByRole("button", { name: "View error ffprobe command not found" }));
     expect(screen.getByRole("dialog", { name: "Error detail" })).toHaveTextContent("ffprobe command not found");
@@ -1566,7 +1624,8 @@ describe("Flux dashboard", () => {
       },
       suppression: {
         exact_duplicates: [{ title: "RFP", suppressed_count: 3, reason: "exact_content_duplicate" }],
-        version_families: [{ title: "Proposal", suppressed_count: 1, reason: "same_document_version_family" }]
+        version_families: [{ title: "Proposal", suppressed_count: 1, reason: "same_document_version_family" }],
+        semantic_duplicates: [{ title: "Proposal Copy", suppressed_count: 2, reason: "semantic_near_duplicate" }]
       }
     };
     const user = userEvent.setup();
@@ -1585,6 +1644,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Suppressed evidence")).toBeInTheDocument();
     expect(screen.getByText("Exact duplicates: 3")).toBeInTheDocument();
     expect(screen.getByText("Version families: 1")).toBeInTheDocument();
+    expect(screen.getByText("Semantic duplicates: 2")).toBeInTheDocument();
     expect(explainRequestPayload).toEqual({
       query: "customer rfp",
       limit: 8,
@@ -1608,8 +1668,15 @@ describe("Flux dashboard", () => {
     expect(screen.getAllByText("baseline").length).toBeGreaterThan(0);
     expect(screen.getByText("top1 80.0%")).toBeInTheDocument();
     expect(screen.getByText("brief dilution 20.0%")).toBeInTheDocument();
+    expect(screen.getByText("top1 +10.0%")).toBeInTheDocument();
+    expect(screen.getByText("brief dilution -5.0%")).toBeInTheDocument();
+    expect(screen.getByText("High confidence: 3")).toBeInTheDocument();
+    expect(screen.getByText("Semantic threshold 0.86")).toBeInTheDocument();
+    expect(screen.getByText("3/4 calibration cases passed")).toBeInTheDocument();
     expect(screen.getByText("scope-filter")).toBeInTheDocument();
     expect(screen.getByText("top1 miss, scope miss")).toBeInTheDocument();
+    expect(screen.getByText("current only - low confidence")).toBeInTheDocument();
+    expect(screen.getByText("Expected evidence was not ranked first.")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Run retrieval benchmark" }));
 
@@ -1625,6 +1692,7 @@ describe("Flux dashboard", () => {
       expect(screen.getAllByText("nightly").length).toBeGreaterThan(0);
     });
     expect(screen.getByText("settings_mutated false")).toBeInTheDocument();
+    expect(screen.getByText("Synthetic semantic duplicate calibration passed for 3/4 cases at threshold 0.86.")).toBeInTheDocument();
   });
 
   test("health renders structured diagnostics with details, copy, and target navigation", async () => {

@@ -215,7 +215,7 @@ def create_server():
 
     @mcp.tool(name="kb.retrieval_benchmark_run")
     def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True):
-        """Run the synthetic retrieval-quality benchmark suite and store metadata-only history."""
+        """Run the synthetic retrieval-quality benchmark suite with confidence bands, calibration candidates, and metric deltas."""
         return service.run_retrieval_benchmark(
             suite=suite,
             label=label,
@@ -227,7 +227,7 @@ def create_server():
 
     @mcp.tool(name="kb.retrieval_benchmark_history")
     def retrieval_benchmark_history(suite: str | None = None, label: str | None = None, limit: int = 20):
-        """List metadata-only retrieval benchmark history and metric deltas."""
+        """List metadata-only retrieval benchmark history with confidence bands, calibration candidates, and metric deltas."""
         return service.retrieval_benchmark_history(
             suite=suite,
             label=label,

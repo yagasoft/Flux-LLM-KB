@@ -16,8 +16,8 @@ Tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `kb.search` | Search Flux memory and corpus evidence, optionally scoped and filtered by workspace/root, evidence kind, lifecycle, or current-state policy. |
-| `kb.explain` | Search with query-aware snippets, ranking signals, filters, suppression metadata, and brief-packing rationale. |
+| `kb.search` | Search Flux memory and corpus evidence, optionally scoped and filtered by workspace/root, evidence kind, lifecycle, or current-state policy, with optional confidence/deprioritization explanation metadata. |
+| `kb.explain` | Search with query-aware snippets, ranking signals, confidence bands, deprioritization signals, filters, suppression metadata, and brief-packing rationale. |
 | `kb.brief` | Build a compact task brief for non-trivial work. |
 | `kb.remember` | Store a concise redacted durable atomic save with optional workspace provenance. |
 | `kb.finalize_turn` | Store a redacted end-of-turn summary for meaningful agent work. |
@@ -35,8 +35,8 @@ Tools:
 | `kb.worker_status` | Return worker-family cap usage, backpressure, retry/lock, and slow-job status. |
 | `kb.benchmark_run` | Run deterministic synthetic scan, soak, watcher, or all-mode benchmarks and store metadata-only history. |
 | `kb.benchmark_history` | List metadata-only synthetic benchmark history with mode, label, warm-state, and previous-run delta filters. |
-| `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history. |
-| `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, and case-failure summaries. |
+| `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history with metric deltas, calibration summaries, and advisory candidates. |
+| `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, deltas, calibration summaries, and case-failure evidence. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
 | `kb.embeddings_enqueue` | Queue a local `corpus_embed` job for missing or stale vectors. |
 | `kb.embeddings_backfill` | Refresh missing or stale vectors immediately with the local deterministic provider. |
@@ -152,9 +152,14 @@ object; CLI search/explain use `--kind`, `--current-only`,
 `--lifecycle-state`, and `--include-suppressed`.
 `scope_mode=local_first` is the default: Flux searches matching
 workspace/root evidence first, then falls back to global memory only when local
-results have no lexical or fuzzy evidence. Use `local_only` to forbid global
-fallback, or `global` for deliberate cross-workspace retrieval. Explicit
-mid-turn searches can use `scope_mode=workspace_boosted` to blend local
+results have no lexical or fuzzy evidence. Search and explain responses may
+include `retrieval_explanation.confidence` and
+`retrieval_explanation.deprioritization`; the `score` field remains the ranking
+score, not a confidence value. Semantic near-duplicate suppression is reported
+alongside exact duplicate and same-document version suppression when
+`include_suppressed` is enabled. Use `local_only` to forbid global fallback, or
+`global` for deliberate cross-workspace retrieval. Explicit mid-turn searches
+can use `scope_mode=workspace_boosted` to blend local
 workspace/root evidence with strong cross-workspace or general indexed evidence
 while suppressing weak trust-only global matches. Briefing should keep the
 default `local_first` mode unless the caller intentionally requests a broader
@@ -288,9 +293,13 @@ temporary public-safe synthetic retrieval cases, call the same search, explain,
 and brief paths used by consumers, and persist metadata-only quality evidence:
 top-1 accuracy, precision@3, recall@5, MRR, nDCG@5, brief recall, brief
 dilution, scope and suppression pass counts, elapsed time, sanitized case ids,
-query hashes, ranks, result ids, stream/kind labels, and failure reasons. They
-also report `settings_mutated: false`; benchmark output is advisory evidence for
-later calibration, not automatic ranking or policy mutation.
+query hashes, ranks, result ids, stream/kind labels, case categories, confidence
+bands, score evidence, and failure reasons. Suite v2 also reports
+`metric_deltas`, `calibration_summary`, semantic duplicate
+`recommendations.candidates[]`, richer sanitized `case_results[]`, and
+`settings_mutated: false`; benchmark output is advisory evidence for later
+calibration, not automatic ranking, threshold, semantic-cluster, settings, or
+policy mutation.
 Embedding status, enqueue, and immediate backfill are also exposed through
 `GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
 `POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,
