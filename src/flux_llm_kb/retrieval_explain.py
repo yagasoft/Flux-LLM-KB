@@ -68,6 +68,9 @@ def explain_search_result(query: str, item: dict[str, Any]) -> dict[str, Any]:
     corpus = _corpus_explanation(item)
     if corpus:
         explanation["corpus"] = corpus
+    code = item.get("code")
+    if isinstance(code, dict):
+        explanation["code"] = code
     adjustments = _adjustments(item)
     if adjustments:
         explanation["adjustments"] = adjustments

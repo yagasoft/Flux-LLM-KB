@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -88,7 +89,7 @@ class KnowledgeService:
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
-        raw_results = self._search_raw(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode)
+        raw_results = self._search_raw(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=normalized_filters)
         filtered_results, _excluded = _apply_retrieval_filters(raw_results, normalized_filters)
         return _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
 
@@ -100,14 +101,15 @@ class KnowledgeService:
         cwd: str | None,
         root_name: str | None,
         scope_mode: str,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         scope = _resolve_retrieval_scope(cwd=cwd, root_name=root_name, scope_mode=scope_mode)
         if scope.mode == "global" or not scope.is_scoped:
-            return self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global")
+            return self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global", filters=filters)
         if scope.mode == "workspace_boosted":
-            return self._search_workspace_boosted(query, limit=limit, scope=scope)
+            return self._search_workspace_boosted(query, limit=limit, scope=scope, filters=filters)
 
-        scoped_results = self._search_once(query, limit=limit, scope=scope, label="local")
+        scoped_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters)
         if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
             return scoped_results
 
@@ -116,11 +118,12 @@ class KnowledgeService:
             limit=limit,
             scope=RetrievalScope(mode="global"),
             label="global_fallback",
+            filters=filters,
         )
 
-    def _search_workspace_boosted(self, query: str, *, limit: int, scope: RetrievalScope) -> list[dict[str, Any]]:
+    def _search_workspace_boosted(self, query: str, *, limit: int, scope: RetrievalScope, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit or 5), 50))
-        local_results = self._search_once(query, limit=limit, scope=scope, label="local")
+        local_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters)
         local_keys = {_result_identity(item) for item in local_results}
 
         cross_candidate_limit = min(max(limit * 2, 8), 50)
@@ -130,6 +133,7 @@ class KnowledgeService:
             scope=RetrievalScope(mode="global"),
             label_scope=scope,
             label="cross_workspace",
+            filters=filters,
         )
         cross_results = [
             item
@@ -155,6 +159,7 @@ class KnowledgeService:
         scope: RetrievalScope,
         label: str,
         label_scope: RetrievalScope | None = None,
+        filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         corpus_limit = max(limit * 4, 20)
         is_local = label == "local"
@@ -169,11 +174,10 @@ class KnowledgeService:
             if not is_local or scope.cwd or scope.root_path or scope.workspace_key
             else []
         )
-        corpus_items = (
-            database.search_corpus_chunks(query, limit=corpus_limit, root_name=scope.root_name)
-            if not is_local or scope.root_name
-            else []
-        )
+        corpus_kwargs: dict[str, Any] = {"limit": corpus_limit, "root_name": scope.root_name}
+        if filters is not None:
+            corpus_kwargs["filters"] = filters
+        corpus_items = database.search_corpus_chunks(query, **corpus_kwargs) if not is_local or scope.root_name else []
         episodes = [
             {
                 "kind": "episode",
@@ -1507,12 +1511,21 @@ def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[s
     invalid_kinds = [kind for kind in logical_kinds if kind not in ALLOWED_RETRIEVAL_LOGICAL_KINDS]
     if invalid_kinds:
         raise ValueError("logical_kinds must contain only: episode, file, mail")
-    return {
+    normalized = {
         "logical_kinds": logical_kinds,
         "current_only": bool(filters.get("current_only", False)),
         "lifecycle_states": _normalize_filter_values(filters.get("lifecycle_states") or filters.get("lifecycle_state")),
         "include_suppressed": bool(filters.get("include_suppressed", False)),
     }
+    code_filters = {
+        "file_kinds": _normalize_filter_values(filters.get("file_kinds") or filters.get("file_kind")),
+        "languages": _normalize_filter_values(filters.get("languages") or filters.get("language")),
+        "symbol_kinds": _normalize_filter_values(filters.get("symbol_kinds") or filters.get("symbol_kind")),
+        "relationships": _normalize_filter_values(filters.get("relationships") or filters.get("relationship")),
+        "path_globs": _normalize_filter_values(filters.get("path_globs") or filters.get("path_glob")),
+    }
+    normalized.update({key: value for key, value in code_filters.items() if value})
+    return normalized
 
 
 def _normalize_filter_values(value: Any) -> list[str]:
@@ -1560,6 +1573,32 @@ def _retrieval_filter_exclusion_reason(item: dict[str, Any], filters: dict[str, 
 
     if filters.get("current_only") and not _is_current_evidence(item):
         return "current_only"
+
+    file_kinds = set(filters.get("file_kinds") or [])
+    item_file_kind = str(item.get("file_kind") or "").lower().replace("-", "_")
+    if file_kinds and item_file_kind not in file_kinds:
+        return "file_kind"
+
+    code = item.get("code") if isinstance(item.get("code"), dict) else {}
+    languages = set(filters.get("languages") or [])
+    item_language = str(code.get("language") or item.get("language") or "").lower().replace("-", "_")
+    if languages and item_language not in languages:
+        return "language"
+
+    symbol_kinds = set(filters.get("symbol_kinds") or [])
+    item_symbol_kind = str(code.get("symbol_kind") or item.get("symbol_kind") or "").lower().replace("-", "_")
+    if symbol_kinds and item_symbol_kind not in symbol_kinds:
+        return "symbol_kind"
+
+    relationships = set(filters.get("relationships") or [])
+    item_relationship = str(code.get("relationship") or item.get("relationship") or "").lower().replace("-", "_")
+    if relationships and item_relationship not in relationships:
+        return "relationship"
+
+    path_globs = filters.get("path_globs") or []
+    source_path = str(item.get("source_path") or code.get("source_path") or "").replace("\\", "/")
+    if path_globs and not any(fnmatch.fnmatch(source_path, pattern) for pattern in path_globs):
+        return "path_glob"
     return None
 
 
@@ -2278,6 +2317,7 @@ def _write_benchmark_fixture(root: Path, fixture: str, files: int) -> None:
     root.mkdir(parents=True, exist_ok=True)
     writers = {
         "text-heavy": _write_text_fixture,
+        "code-heavy": _write_code_fixture,
         "office-pdf-heavy": _write_office_pdf_fixture,
         "archive-container-heavy": _write_archive_fixture,
         "image-heavy": _write_image_fixture,
@@ -2292,6 +2332,126 @@ def _write_text_fixture(root: Path, files: int) -> None:
             f"# Synthetic note {index}\n\nThis benchmark fixture contains deterministic public-safe text.\n",
             encoding="utf-8",
         )
+
+
+def _write_code_fixture(root: Path, files: int) -> None:
+    service_source = "\n".join(
+        [
+            "from fastapi import APIRouter",
+            "",
+            "router = APIRouter()",
+            "",
+            "class OrderService:",
+            "    def build_invoice(self, order_id: str) -> dict[str, str]:",
+            "        return {'order_id': order_id, 'status': 'ready'}",
+            "",
+            "@router.get('/orders/{order_id}')",
+            "def get_order(order_id: str):",
+            "    service = OrderService()",
+            "    return service.build_invoice(order_id)",
+            "",
+        ]
+    )
+    templates: list[tuple[str, str]] = [
+        ("src/orders.py", service_source),
+        (
+            "tests/test_orders.py",
+            "\n".join(
+                [
+                    "from src.orders import OrderService",
+                    "",
+                    "def test_build_invoice_returns_ready_status():",
+                    "    invoice = OrderService().build_invoice('order-1')",
+                    "    assert invoice['status'] == 'ready'",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/routes.ts",
+            "\n".join(
+                [
+                    "import express from 'express';",
+                    "",
+                    "const router = express.Router();",
+                    "",
+                    "router.get('/api/orders/:orderId', async (req, res) => {",
+                    "  res.json({ id: req.params.orderId });",
+                    "});",
+                    "",
+                    "export function configureRoutes(app) {",
+                    "  app.use(router);",
+                    "}",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "db/migrations/0001_create_orders.sql",
+            "\n".join(
+                [
+                    "CREATE TABLE orders (id text primary key, status text not null);",
+                    "CREATE INDEX idx_orders_status ON orders (status);",
+                    "",
+                ]
+            ),
+        ),
+        ("pyproject.toml", "[project]\nname = 'synthetic-code-heavy'\nversion = '0.1.0'\n"),
+        (
+            "generated/client.py",
+            "\n".join(
+                [
+                    "# Code generated by Flux benchmark. DO NOT EDIT.",
+                    "",
+                    "class GeneratedOrdersClient:",
+                    "    def fetch_order(self, order_id: str):",
+                    "        return {'order_id': order_id}",
+                    "",
+                ]
+            ),
+        ),
+        ("src/broken.py", "def broken(:\n    return 'ops@example.com'\n"),
+        ("src/unsupported.go", "package orders\n\nfunc BuildInvoice( {\n"),
+        ("duplicates/orders_copy.py", service_source),
+        (
+            "openapi.yaml",
+            "\n".join(
+                [
+                    "openapi: 3.1.0",
+                    "info:",
+                    "  title: Synthetic Orders API",
+                    "  version: 1.0.0",
+                    "paths:",
+                    "  /orders/{order_id}:",
+                    "    get:",
+                    "      operationId: getOrder",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "notebooks/orders.ipynb",
+            json.dumps(
+                {
+                    "cells": [
+                        {"cell_type": "markdown", "source": ["# Synthetic notebook\n"]},
+                        {"cell_type": "code", "source": ["from src.orders import OrderService\n", "OrderService().build_invoice('order-1')\n"]},
+                    ],
+                    "metadata": {},
+                    "nbformat": 4,
+                    "nbformat_minor": 5,
+                },
+                sort_keys=True,
+            ),
+        ),
+    ]
+    for index in range(files):
+        relative_path, body = templates[index % len(templates)]
+        if index >= len(templates):
+            relative_path = f"extra/{index:04d}-{Path(relative_path).name}"
+        target = root.joinpath(*relative_path.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
 
 
 def _write_office_pdf_fixture(root: Path, files: int) -> None:

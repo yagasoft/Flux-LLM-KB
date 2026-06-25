@@ -9,6 +9,7 @@ from pathlib import Path
 import time
 from typing import Any, Callable, Iterable
 
+from .code_index import CODE_LANGUAGE_EXTENSIONS, DEVELOPER_ARTIFACT_NAMES, is_code_like_path
 from .redaction import redact_text
 
 
@@ -38,18 +39,7 @@ TEXT_EXTENSIONS = {
     ".yaml",
     ".yml",
 }
-CODE_EXTENSIONS = {
-    ".cs",
-    ".css",
-    ".html",
-    ".java",
-    ".js",
-    ".ps1",
-    ".py",
-    ".rs",
-    ".sql",
-    ".ts",
-}
+CODE_EXTENSIONS = set(CODE_LANGUAGE_EXTENSIONS)
 DOCUMENT_EXTENSIONS = {
     ".azw",
     ".azw3",
@@ -171,6 +161,7 @@ class AssetChunk:
     modality: str = "text"
     locator: str | None = None
     token_estimate: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -347,7 +338,7 @@ def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
             mime_type=mime_type,
             reason="heavy_file",
         )
-    if ext in TEXT_EXTENSIONS and size <= policy.max_inline_bytes:
+    if file_kind in {"text", "code"} and size <= policy.max_inline_bytes:
         return FileClassification(file_kind=file_kind, extraction_tier="inline", mime_type=mime_type)
     if ext in DOCUMENT_EXTENSIONS:
         return FileClassification(file_kind=file_kind, extraction_tier="deferred", mime_type=mime_type)
@@ -412,9 +403,9 @@ def _file_kind(path: str | Path, mime_type: str | None) -> str:
     name = file_path.name.lower()
     if ext in DIAGRAM_EXTENSIONS or any(name.endswith(suffix) for suffix in DIAGRAM_COMPOUND_SUFFIXES):
         return "diagram"
-    if ext in CODE_EXTENSIONS:
+    if is_code_like_path(file_path):
         return "code"
-    if ext in TEXT_EXTENSIONS:
+    if ext in TEXT_EXTENSIONS or name in DEVELOPER_ARTIFACT_NAMES:
         return "text"
     if ext in DOCUMENT_EXTENSIONS:
         return "document"

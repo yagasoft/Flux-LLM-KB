@@ -93,6 +93,15 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "ADD COLUMN IF NOT EXISTS deployment_label" in calibration_migration.sql
     assert "ADD COLUMN IF NOT EXISTS model_telemetry" in calibration_migration.sql
     assert "idx_acceleration_benchmark_runs_scope_deployment" in calibration_migration.sql
+    code_migration = next(item for item in migrations if item.name == "0019_code_aware_retrieval")
+    assert "CREATE TABLE IF NOT EXISTS code_symbols" in code_migration.sql
+    assert "CREATE TABLE IF NOT EXISTS code_references" in code_migration.sql
+    assert "source_asset_id uuid NOT NULL REFERENCES source_assets" in code_migration.sql
+    assert "asset_chunk_id uuid REFERENCES asset_chunks" in code_migration.sql
+    assert "relationship_kind text NOT NULL" in code_migration.sql
+    assert "parser_status text NOT NULL" in code_migration.sql
+    assert "idx_code_symbols_lookup" in code_migration.sql
+    assert "idx_code_references_target" in code_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

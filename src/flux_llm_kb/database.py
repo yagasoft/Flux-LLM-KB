@@ -16,6 +16,7 @@ from .acceleration import (
     time_budget_for_family,
 )
 from .crawler import CrawlPlan
+from .code_index import scope_hash as code_scope_hash
 from .embeddings import (
     DEFAULT_EMBEDDING_DIMENSIONS,
     DEFAULT_EMBEDDING_MODEL,
@@ -445,6 +446,7 @@ def search_corpus_chunks(
     *,
     limit: int = 5,
     root_name: str | None = None,
+    filters: dict[str, Any] | None = None,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
@@ -453,6 +455,7 @@ def search_corpus_chunks(
     query_vector = to_pgvector_literal(embed_text(query))
     root_name_sql = "AND r.name = %s" if root_name else ""
     root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    code_filter_sql, code_filter_params = _corpus_code_filter_sql(filters)
 
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -469,7 +472,9 @@ def search_corpus_chunks(
                        ) AS duplicate_count,
                        r.trust_rank,
                        r.name AS root_name,
-                       ts_rank(c.search_vector, plainto_tsquery('english', %s)) AS score
+                       ts_rank(c.search_vector, plainto_tsquery('english', %s)) AS score,
+                       a.file_kind,
+                       c.metadata -> 'code' AS code
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
                 JOIN monitored_roots r ON r.id = a.root_id
@@ -487,10 +492,11 @@ def search_corpus_chunks(
                         AND sm.member_role = 'duplicate'
                   )
                   {root_name_sql}
+                  {code_filter_sql}
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
                 """,
-                (query, query, *root_name_params, candidate_limit),
+                (query, query, *root_name_params, *code_filter_params, candidate_limit),
             )
             _add_ranked_corpus_rows("corpus_lexical", cur.fetchall(), streams, details)
 
@@ -504,7 +510,9 @@ def search_corpus_chunks(
                        ) AS duplicate_count,
                        r.trust_rank,
                        r.name AS root_name,
-                       greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score
+                       greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score,
+                       a.file_kind,
+                       c.metadata -> 'code' AS code
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
                 JOIN monitored_roots r ON r.id = a.root_id
@@ -522,10 +530,11 @@ def search_corpus_chunks(
                         AND sm.member_role = 'duplicate'
                   )
                   {root_name_sql}
+                  {code_filter_sql}
                 ORDER BY score DESC, c.updated_at DESC
                 LIMIT %s
                 """,
-                (query, query, query, query, *root_name_params, candidate_limit),
+                (query, query, query, query, *root_name_params, *code_filter_params, candidate_limit),
             )
             _add_ranked_corpus_rows("corpus_fuzzy", cur.fetchall(), streams, details)
 
@@ -539,7 +548,9 @@ def search_corpus_chunks(
                        ) AS duplicate_count,
                        r.trust_rank,
                        r.name AS root_name,
-                       1 - (emb.embedding <=> %s::vector) AS score
+                       1 - (emb.embedding <=> %s::vector) AS score,
+                       a.file_kind,
+                       c.metadata -> 'code' AS code
                 FROM embeddings emb
                 JOIN asset_chunks c
                   ON emb.owner_table = 'asset_chunks'
@@ -561,6 +572,7 @@ def search_corpus_chunks(
                         AND sm.member_role = 'duplicate'
                   )
                   {root_name_sql}
+                  {code_filter_sql}
                 ORDER BY emb.embedding <=> %s::vector
                 LIMIT %s
                 """,
@@ -569,11 +581,68 @@ def search_corpus_chunks(
                     DEFAULT_EMBEDDING_MODEL,
                     query_vector,
                     *root_name_params,
+                    *code_filter_params,
                     query_vector,
                     candidate_limit,
                 ),
             )
             _add_ranked_corpus_rows("corpus_vector", cur.fetchall(), streams, details)
+
+            if query.strip() or _has_code_filters(filters):
+                cur.execute(
+                    f"""
+                    SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
+                           (
+                               SELECT count(*)
+                               FROM source_assets duplicate
+                               WHERE duplicate.canonical_asset_id = a.id
+                           ) AS duplicate_count,
+                           r.trust_rank,
+                           r.name AS root_name,
+                           CASE
+                               WHEN lower(cs.qualified_name) = lower(%s) THEN 3.0
+                               WHEN lower(cs.name) = lower(%s) THEN 2.5
+                               WHEN cs.qualified_name ILIKE %s THEN 2.0
+                               WHEN cs.name ILIKE %s THEN 1.8
+                               ELSE greatest(similarity(cs.qualified_name, %s), similarity(cs.name, %s))
+                           END AS score,
+                           a.file_kind,
+                           c.metadata -> 'code' AS code
+                    FROM code_symbols cs
+                    JOIN asset_chunks c ON c.id = cs.asset_chunk_id
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE r.enabled
+                      AND a.deleted_at IS NULL
+                      AND a.canonical_asset_id IS NULL
+                      AND (
+                          cs.qualified_name ILIKE %s
+                          OR cs.name ILIKE %s
+                          OR similarity(cs.qualified_name, %s) > 0.20
+                          OR similarity(cs.name, %s) > 0.20
+                      )
+                      {root_name_sql}
+                      {code_filter_sql}
+                    ORDER BY score DESC, c.updated_at DESC
+                    LIMIT %s
+                    """,
+                    (
+                        query,
+                        query,
+                        f"%{query}%",
+                        f"%{query}%",
+                        query,
+                        query,
+                        f"%{query}%",
+                        f"%{query}%",
+                        query,
+                        query,
+                        *root_name_params,
+                        *code_filter_params,
+                        candidate_limit,
+                    ),
+                )
+                _add_ranked_corpus_rows("code_symbol_exact", cur.fetchall(), streams, details)
 
             if details:
                 cur.execute(
@@ -586,15 +655,18 @@ def search_corpus_chunks(
                            ) AS duplicate_count,
                            r.trust_rank,
                            r.name AS root_name,
-                           1.0 / greatest(r.trust_rank, 1) AS score
+                           1.0 / greatest(r.trust_rank, 1) AS score,
+                           a.file_kind,
+                           c.metadata -> 'code' AS code
                     FROM asset_chunks c
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
                       {root_name_sql}
+                      {code_filter_sql}
                     ORDER BY r.trust_rank ASC, c.updated_at DESC
                     """,
-                    (list(details.keys()), *root_name_params),
+                    (list(details.keys()), *root_name_params, *code_filter_params),
                 )
                 _add_ranked_corpus_rows("corpus_trust", cur.fetchall(), streams, details)
 
@@ -613,15 +685,18 @@ def search_corpus_chunks(
                                    GREATEST(EXTRACT(EPOCH FROM (now() - c.updated_at)), 0)
                                    / 86400.0 / 30.0
                                )
-                           ) AS score
+                           ) AS score,
+                           a.file_kind,
+                           c.metadata -> 'code' AS code
                     FROM asset_chunks c
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
                       {root_name_sql}
+                      {code_filter_sql}
                     ORDER BY score DESC, c.updated_at DESC
                     """,
-                    (list(details.keys()), *root_name_params),
+                    (list(details.keys()), *root_name_params, *code_filter_params),
                 )
                 _add_ranked_corpus_rows("corpus_freshness", cur.fetchall(), streams, details)
                 _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=details)
@@ -645,6 +720,10 @@ def search_corpus_chunks(
                 "trust_rank": result["trust_rank"],
             }
         )
+        if result.get("file_kind") is not None:
+            results[-1]["file_kind"] = result["file_kind"]
+        if isinstance(result.get("code"), dict):
+            results[-1]["code"] = result["code"]
         if "semantic_duplicate_cluster" in result:
             results[-1]["semantic_duplicate_cluster"] = result["semantic_duplicate_cluster"]
     return results
@@ -5516,6 +5595,57 @@ def _add_ranked_corpus_rows(
             },
         )
         detail["raw_scores"][stream] = float(row[8] or 0.0)
+        if len(row) > 9 and row[9] is not None:
+            detail["file_kind"] = row[9]
+        if len(row) > 10 and row[10]:
+            detail["code"] = row[10]
+
+
+def _has_code_filters(filters: dict[str, Any] | None) -> bool:
+    if not isinstance(filters, dict):
+        return False
+    return any(filters.get(key) for key in ("file_kinds", "languages", "symbol_kinds", "relationships", "path_globs"))
+
+
+def _corpus_code_filter_sql(filters: dict[str, Any] | None) -> tuple[str, list[Any]]:
+    if not isinstance(filters, dict):
+        return "", []
+    clauses: list[str] = []
+    params: list[Any] = []
+    if filters.get("file_kinds"):
+        clauses.append("AND a.file_kind = ANY(%s::text[])")
+        params.append(list(filters["file_kinds"]))
+    if filters.get("languages"):
+        clauses.append("AND (c.metadata -> 'code' ->> 'language') = ANY(%s::text[])")
+        params.append(list(filters["languages"]))
+    if filters.get("symbol_kinds"):
+        clauses.append("AND (c.metadata -> 'code' ->> 'symbol_kind') = ANY(%s::text[])")
+        params.append(list(filters["symbol_kinds"]))
+    if filters.get("relationships"):
+        clauses.append("AND (c.metadata -> 'code' ->> 'relationship') = ANY(%s::text[])")
+        params.append(list(filters["relationships"]))
+    path_globs = filters.get("path_globs") or []
+    if path_globs:
+        glob_clauses = []
+        for pattern in path_globs:
+            glob_clauses.append("a.path LIKE %s ESCAPE '\\'")
+            params.append(_glob_to_sql_like(str(pattern)))
+        clauses.append(f"AND ({' OR '.join(glob_clauses)})")
+    return ("\n                  " + "\n                  ".join(clauses)) if clauses else "", params
+
+
+def _glob_to_sql_like(pattern: str) -> str:
+    escaped = []
+    for char in pattern.replace("\\", "/"):
+        if char == "*":
+            escaped.append("%")
+        elif char == "?":
+            escaped.append("_")
+        elif char in {"%", "_", "\\"}:
+            escaped.append(f"\\{char}")
+        else:
+            escaped.append(char)
+    return "".join(escaped)
 
 
 def _validate_semantic_duplicate_memory_class(memory_class: str) -> str:
@@ -7131,6 +7261,8 @@ def _replace_container_child_assets(
 
 
 def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> int:
+    cur.execute("DELETE FROM code_references WHERE source_asset_id = %s", (asset_id,))
+    cur.execute("DELETE FROM code_symbols WHERE source_asset_id = %s", (asset_id,))
     cur.execute(
         """
         DELETE FROM embeddings
@@ -7145,9 +7277,9 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
         cur.execute(
             """
             INSERT INTO asset_chunks (
-                asset_id, chunk_index, title, body, modality, locator, token_estimate
+                asset_id, chunk_index, title, body, modality, locator, token_estimate, metadata
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
             RETURNING id::text
             """,
             (
@@ -7158,9 +7290,11 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
                 chunk.modality,
                 chunk.locator,
                 chunk.token_estimate,
+                _json(_sanitize_operational_metadata(dict(getattr(chunk, "metadata", {}) or {}))),
             ),
         )
         chunk_id = cur.fetchone()[0]
+        _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
         _insert_embedding_result(
             cur,
             _embedding_result_for_text(
@@ -7171,6 +7305,98 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
         )
         inserted += 1
     return inserted
+
+
+def _insert_code_metadata_for_chunk(cur: Any, *, asset_id: str, chunk_id: str, chunk: Any) -> None:
+    metadata = dict(getattr(chunk, "metadata", {}) or {})
+    symbols = metadata.get("code_symbols") if isinstance(metadata.get("code_symbols"), list) else []
+    references = metadata.get("code_references") if isinstance(metadata.get("code_references"), list) else []
+    for symbol in symbols:
+        if not isinstance(symbol, dict):
+            continue
+        path = str(symbol.get("path") or _chunk_code_path(metadata))
+        cur.execute(
+            """
+            INSERT INTO code_symbols (
+                source_asset_id, asset_chunk_id, language, symbol_kind, name, qualified_name,
+                path, line_start, line_end, byte_start, byte_end, parent_symbol, exported,
+                signature, parser_status, confidence, scope_hash, metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (source_asset_id, qualified_name, symbol_kind, line_start) DO UPDATE SET
+                asset_chunk_id = EXCLUDED.asset_chunk_id,
+                line_end = EXCLUDED.line_end,
+                signature = EXCLUDED.signature,
+                parser_status = EXCLUDED.parser_status,
+                confidence = EXCLUDED.confidence,
+                metadata = EXCLUDED.metadata,
+                updated_at = now()
+            """,
+            (
+                asset_id,
+                chunk_id,
+                str(symbol.get("language") or metadata.get("language") or "text"),
+                str(symbol.get("symbol_kind") or metadata.get("symbol_kind") or "unknown"),
+                str(symbol.get("name") or symbol.get("qualified_name") or ""),
+                str(symbol.get("qualified_name") or symbol.get("name") or ""),
+                path,
+                int(symbol.get("line_start") or 1),
+                int(symbol.get("line_end") or symbol.get("line_start") or 1),
+                _optional_int(symbol.get("byte_start")),
+                _optional_int(symbol.get("byte_end")),
+                symbol.get("parent_symbol"),
+                symbol.get("exported"),
+                symbol.get("signature"),
+                str(symbol.get("parser_status") or metadata.get("parser_status") or "parsed"),
+                float(symbol.get("confidence") or 1.0),
+                str(symbol.get("scope_hash") or code_scope_hash(None, path)),
+                _json(_sanitize_operational_metadata(dict(symbol.get("metadata") or {}))),
+            ),
+        )
+    for reference in references:
+        if not isinstance(reference, dict):
+            continue
+        path = str(reference.get("path") or _chunk_code_path(metadata))
+        cur.execute(
+            """
+            INSERT INTO code_references (
+                source_asset_id, asset_chunk_id, language, relationship_kind, source_symbol,
+                target, path, line_start, line_end, parser_status, confidence, scope_hash, metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            """,
+            (
+                asset_id,
+                chunk_id,
+                str(reference.get("language") or metadata.get("language") or "text"),
+                str(reference.get("relationship_kind") or metadata.get("relationship") or "reference"),
+                reference.get("source_symbol"),
+                str(reference.get("target") or ""),
+                path,
+                int(reference.get("line_start") or 1),
+                int(reference.get("line_end") or reference.get("line_start") or 1),
+                str(reference.get("parser_status") or metadata.get("parser_status") or "parsed"),
+                float(reference.get("confidence") or 0.8),
+                str(reference.get("scope_hash") or code_scope_hash(None, path)),
+                _json(_sanitize_operational_metadata(dict(reference.get("metadata") or {}))),
+            ),
+        )
+
+
+def _chunk_code_path(metadata: dict[str, Any]) -> str:
+    code = metadata.get("code")
+    if isinstance(code, dict):
+        return str(code.get("source_path") or "")
+    return ""
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _job_schedule_metadata(job_type: str) -> dict[str, Any]:

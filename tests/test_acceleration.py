@@ -261,6 +261,7 @@ def test_collect_status_reports_empty_deterministic_benchmark_fixtures():
     names = [fixture["name"] for fixture in payload["benchmarks"]["fixtures"]]
     assert names == [
         "text-heavy",
+        "code-heavy",
         "office-pdf-heavy",
         "archive-container-heavy",
         "image-heavy",

@@ -23,6 +23,9 @@ system rather than a large prompt-injected memory file.
   and duplicate/canonical tracking.
 - `asset_chunks`: extracted text/code/document snippets for retrieval without turning
   every file into an interaction episode.
+- `code_symbols` and `code_references`: parser-derived code definitions,
+  imports, calls, routes, SQL objects, and configuration facts tied back to
+  `source_assets` and `asset_chunks`.
 - `crawl_runs`, `crawl_path_manifests`, `watcher_state`, and `watcher_events`:
   crawler statistics, per-root/path scan fingerprints, watcher heartbeat,
   event counters, sanitized event rows, and error state for dashboard
@@ -61,6 +64,11 @@ Corpus chunks use the same `embeddings` table as episodes with
 `owner_table = 'asset_chunks'`. Corpus retrieval fuses PostgreSQL full-text,
 trigram fuzzy matching, pgvector similarity, source trust rank, and freshness.
 Deleted assets and non-canonical duplicate assets are suppressed from retrieval.
+Code-aware retrieval adds an exact symbol stream over `code_symbols`, preserves
+the normal corpus chunk result shape, and exposes code metadata in retrieval
+explanations. Callers can keep using `kb.search`, REST search, and CLI search
+while narrowing by file kind, language, symbol kind, relationship, path glob,
+and monitored root.
 Embedding rows carry redacted provider metadata such as model, dimensions,
 source hash, and cache key, but not raw source text. Existing synchronous writes
 still create vectors for new episodes, claims, and chunks, while `corpus_embed`
@@ -114,6 +122,14 @@ publication, mail, calendar/contact, image, diagram, audio, video, subtitle,
 archive, database/export, notebook, CAD/BIM/GIS/design,
 security scan, operations log, and unknown-binary families without requiring
 cloud services or blocking normal watch/crawl loops.
+
+Code-like files use parser-backed chunking when a reliable local parser exists.
+The first parser layer uses Python `ast` for modules, classes, functions,
+methods, imports, calls, and common route decorators; conservative local pattern
+parsers cover SQL objects, JavaScript/TypeScript symbols/routes, notebook
+cells, generated-code markers, and common configuration/manifests. Parser
+failures and unsupported code-like files still index as redacted fallback
+chunks with sanitized parser status metadata.
 
 When the API/dashboard is Docker-hosted, arbitrary Windows/macOS/Linux host
 paths are accessed through a separate local host agent (`flux-kb host-agent run`).
@@ -250,7 +266,7 @@ user cache, and exposes named directories for models, OCR, ASR, vision,
 thumbnails, parser output, embeddings, and temp files.
 
 Benchmark history is durable and public-safe. Synthetic runs are generated from
-temporary fixture trees (`text-heavy`, `office-pdf-heavy`,
+temporary fixture trees (`text-heavy`, `code-heavy`, `office-pdf-heavy`,
 `archive-container-heavy`, `image-heavy`, and `audio-video-heavy`). Aggregate
 real-root calibration can also dry-run opted-in monitored roots or paths and
 stores only scope type, a stable scope hash, optional operator labels, counts,

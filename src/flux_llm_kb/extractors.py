@@ -27,6 +27,7 @@ from zipfile import BadZipFile, ZipFile
 import zlib
 
 from .acceleration import resolve_cache_layout, validate_local_model_base_url
+from .code_index import parse_code_file, references_to_metadata, symbols_to_metadata
 from .crawler import (
     ARCHIVE_COMPOUND_SUFFIXES,
     ARCHIVE_EXTENSIONS,
@@ -201,6 +202,35 @@ def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str) -> Extrac
             metadata={"extractor": extractor},
             message="text file exceeds inline extraction limit",
         )
+    if extractor == "code":
+        parsed = parse_code_file(path, root=policy.root_path)
+        symbol_metadata = symbols_to_metadata(parsed.symbols)
+        reference_metadata = references_to_metadata(parsed.references)
+        chunks = tuple(
+            AssetChunk(
+                chunk_index=chunk.chunk_index,
+                title=chunk.title,
+                body=chunk.body,
+                modality="code",
+                locator=chunk.locator,
+                token_estimate=chunk.token_estimate,
+                metadata={
+                    **chunk.metadata,
+                    "code_symbols": [symbol for symbol in symbol_metadata if symbol.get("chunk_index") == chunk.chunk_index],
+                    "code_references": [reference for reference in reference_metadata if reference.get("chunk_index") == chunk.chunk_index],
+                },
+            )
+            for chunk in parsed.chunks
+        )
+        metadata = {
+            "extractor": extractor,
+            "code": {
+                **parsed.metadata,
+                "symbols": symbol_metadata,
+                "references": reference_metadata,
+            },
+        }
+        return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
     text = path.read_text(encoding="utf-8", errors="replace").strip()
     chunks = _chunks_from_text(text, path.name)
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": extractor})

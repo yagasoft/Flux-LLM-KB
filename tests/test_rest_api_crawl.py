@@ -586,6 +586,11 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
             "kind": ["mail", "file"],
             "current_only": "true",
             "include_suppressed": "true",
+            "file_kind": "code",
+            "language": "python",
+            "symbol_kind": "method",
+            "relationship": "definition",
+            "path_glob": "src/*.py",
         },
     )
     brief = client.get(
@@ -615,6 +620,11 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
             "current_only": True,
             "lifecycle_states": [],
             "include_suppressed": True,
+            "file_kinds": ["code"],
+            "languages": ["python"],
+            "symbol_kinds": ["method"],
+            "relationships": ["definition"],
+            "path_globs": ["src/*.py"],
         },
     }
     assert calls["brief"] == {

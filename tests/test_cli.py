@@ -108,8 +108,8 @@ def test_cli_search_and_explain_forward_retrieval_filters(monkeypatch, capsys):
     calls = []
 
     class FakeService:
-        def search(self, query, limit=5, filters=None):
-            calls.append(("search", query, limit, filters))
+        def search(self, query, limit=5, root_name=None, filters=None):
+            calls.append(("search", query, limit, root_name, filters))
             return [{"query": query, "filters": filters}]
 
         def explain(self, query, limit=5, token_budget=None, cwd=None, root_name=None, scope_mode="local_first", filters=None):
@@ -118,17 +118,46 @@ def test_cli_search_and_explain_forward_retrieval_filters(monkeypatch, capsys):
 
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
-    assert cli.main(["search", "rfp", "--kind", "mail", "--current-only", "--include-suppressed"]) == 0
+    assert (
+        cli.main(
+            [
+                "search",
+                "build_invoice",
+                "--kind",
+                "file",
+                "--root",
+                "repo",
+                "--file-kind",
+                "code",
+                "--language",
+                "python",
+                "--symbol-kind",
+                "method",
+                "--relationship",
+                "definition",
+                "--path-glob",
+                "src/*.py",
+                "--current-only",
+                "--include-suppressed",
+            ]
+        )
+        == 0
+    )
     search_payload = json.loads(capsys.readouterr().out)
 
     assert cli.main(["explain", "rfp", "--kind", "file", "--lifecycle-state", "active"]) == 0
     explain_payload = json.loads(capsys.readouterr().out)
 
     assert search_payload[0]["filters"] == {
-        "logical_kinds": ["mail"],
+        "logical_kinds": ["file"],
         "current_only": True,
         "lifecycle_states": [],
         "include_suppressed": True,
+        "file_kinds": ["code"],
+        "languages": ["python"],
+        "symbol_kinds": ["method"],
+        "relationships": ["definition"],
+        "path_globs": ["src/*.py"],
     }
     assert explain_payload["filters"] == {
         "logical_kinds": ["file"],
@@ -137,6 +166,7 @@ def test_cli_search_and_explain_forward_retrieval_filters(monkeypatch, capsys):
         "include_suppressed": False,
     }
     assert calls[0][0] == "search"
+    assert calls[0][3] == "repo"
     assert calls[1][0] == "explain"
 
 

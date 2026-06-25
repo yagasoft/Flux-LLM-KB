@@ -142,13 +142,13 @@ The detailed roadmap tables and queued work use the same priority labels:
 | Embedding and vectorization throughput | P1 | Keep search vectors fresh without redoing unchanged work. | Batch embeddings by model/provider/hardware target, support optional accelerated providers, and bulk upsert vectors. | in progress | Deterministic local `flux-hash-v1` embeddings now use a provider boundary, source-hash metadata, `corpus_embed` jobs, CLI/REST/MCP status/enqueue/backfill surfaces, and worker-family telemetry for vectors, skipped unchanged items, batches, and cache hits/misses. Optional accelerated providers remain planned. | Add provider-specific accelerated backends only after evaluation controls and dimensionality migration policy are designed. |
 | Local model-assisted knowledge optimization | P2 | Use local models later to suggest better memory cleanup without sending data away. | Use local model backends only when available to enrich memory governance and indexing decisions. | planned | Local inference routing is not yet implemented as a shared provider layer for knowledge optimization. | Let optional local Llama/Gemma-class models assist librarian-worker proposals, semantic clustering, contradiction checks, canonical-summary drafts, and audit rationale generation without remote calls; fall back cleanly to rule-based behavior when unavailable. |
 | Native and incremental filesystem performance | P0 | Make repeated scans and file watching cheaper on large folders. | Evaluate native watcher backends, incremental scan manifests, prefilters, content-hash caches, bounded parallel hashing, and temporary snapshots. | in progress | `watcher.backend` supports `auto`, `watchdog`, and `polling`, with `FLUX_KB_WATCHER_BACKEND` override, native/fallback status, fallback reasons, and a temp-directory synthetic probe that never touches private watched roots. Incremental scan manifest rows store metadata only and allow unchanged files to skip expensive hashing/extraction while reconciliation remains authoritative. `crawler.hash_parallelism` now bounds concurrent content hashing while preserving deterministic asset ordering, manifest skip behavior, stability gating, lock handling, and serial local parser extraction. Benchmark `watcher` mode stores backend policy, selected backend, fallback reason, event counts, and latency metadata. Real-root benchmark scope records aggregate-only calibration data for monitored roots and host-agent paths. | Broaden cloud-sync/native watcher compatibility proof and tune hash parallelism from real high-volume roots. |
-| Observability and benchmarks | P0 | Give operators before/after evidence instead of guessing which setting or update helped. | Dashboard panels and benchmark fixtures for throughput, latency, cache hits, model warm/cold state, CPU/GPU mode, blocked dependencies, slow files, and p50/p95 indexing times. | in progress | Dashboard Health and Jobs show acceleration capabilities, selected watcher backend, cache root, worker-family queue counts, cap/backpressure status, p95 duration where available, OCR/ASR/container/parser/embedding telemetry, manifest skip counters, slow-job diagnostics, watcher event drill-down foundations, and durable benchmark history for text-heavy, Office/PDF-heavy, archive/container-heavy, image-heavy, audio/video-heavy, monitored-root, monitored-path, and model-readiness runs. Benchmark run modes cover `scan`, `soak`, `watcher`, `model`, and `all`; scan supports cold/warm passes, labels, deployment labels, compare labels, scope hashes, hash parallelism and manifest skip fields, throughput deltas, and read-only diagnostic recommendations that do not mutate settings. Stored benchmark records are metadata only and exclude raw text, private watched roots, mail contents, credentials, and embeddings. | Compare benchmark history across deployment updates and tune defaults from observed hardware evidence. |
+| Observability and benchmarks | P0 | Give operators before/after evidence instead of guessing which setting or update helped. | Dashboard panels and benchmark fixtures for throughput, latency, cache hits, model warm/cold state, CPU/GPU mode, blocked dependencies, slow files, and p50/p95 indexing times. | in progress | Dashboard Health and Jobs show acceleration capabilities, selected watcher backend, cache root, worker-family queue counts, cap/backpressure status, p95 duration where available, OCR/ASR/container/parser/embedding telemetry, manifest skip counters, slow-job diagnostics, watcher event drill-down foundations, and durable benchmark history for text-heavy, code-heavy, Office/PDF-heavy, archive/container-heavy, image-heavy, audio/video-heavy, monitored-root, monitored-path, and model-readiness runs. Benchmark run modes cover `scan`, `soak`, `watcher`, `model`, and `all`; scan supports cold/warm passes, labels, deployment labels, compare labels, scope hashes, hash parallelism and manifest skip fields, throughput deltas, and read-only diagnostic recommendations that do not mutate settings. Stored benchmark records are metadata only and exclude raw text, private watched roots, mail contents, credentials, and embeddings. | Compare benchmark history across deployment updates and tune defaults from observed hardware evidence. |
 
 ## V3: Scale And Evaluation
 
 | Piece | Priority | Plain-English Purpose | Roadmap Intent | Status | Current Evidence / Remaining Gap | Queued Next |
 | --- | --- | --- | --- | --- | --- | --- |
-| Code-aware corpus indexing | P0 | Help Codex answer code questions by understanding symbols, files, tests, and relationships. | Parser-backed code intelligence over opted-in repositories so Codex can find files, symbols, definitions, references, tests, routes, handlers, and implementation locations without treating code only as generic text. | planned | Today Flux indexes supported code-like files as text chunks in `asset_chunks`, searchable through `kb.search`, REST search, CLI search, and MCP wrappers. This is useful but not code-aware: there is no durable symbol index, function/class boundary chunking, AST/tree-sitter parser layer, definition/reference graph, or code-specific retrieval surface. | Build a future code-intelligence slice on top of V2.8 watcher, scheduling, manifest, parser-cache, and benchmark foundations. Preserve generic search compatibility while adding code-specific schema, ranking, diagnostics, and synthetic fixture repos. |
+| Code-aware corpus indexing | P0 | Help Codex answer code questions by understanding symbols, files, tests, and relationships. | Parser-backed code intelligence over opted-in repositories so Codex can find files, symbols, definitions, references, tests, routes, handlers, and implementation locations without treating code only as generic text. | in progress | The foundation bundle is implemented: code-like files now produce parser-aware `asset_chunks` plus durable `code_symbols` and `code_references`; Python `ast`, SQL/config, notebook, generated-marker, and conservative JS/TS parsers provide definitions, imports, calls, routes, fallback metadata, code filters, exact-symbol ranking, and code metadata through `kb.search`, REST search, and CLI search. A public-safe `code-heavy` benchmark fixture covers Python service/test code, TS routes, SQL migrations, manifests, generated code, notebooks, unsupported syntax, parser failures, and duplicate files. Deeper parser coverage, dashboard code diagnostics, and dedicated code-search tools remain future work. | Add operator diagnostics, code coverage views, parser failure/fallback summaries, richer relationship coverage, and dedicated code surfaces only after the foundation has live retrieval feedback. |
 | Historical Codex backfill | P2 | Safely import useful older Codex work without pulling in unsafe or noisy history. | Historical Codex backfill with redaction. | planned | Codex capture exists, but historical backfill is not production-ready. | Design redaction-first backfill after V1 lifecycle and V2 review workflows are stronger. |
 | Retrieval benchmarks | P0 | Measure whether Flux search is actually finding the right things. | Retrieval benchmark suite. | planned | Benchmarks are planned; V2.8 indexing benchmarks should land first for corpus throughput. | Define query sets and quality metrics for retrieval precision, recall loss, contradiction reduction, brief dilution, and librarian-worker shadow-mode evaluation after retrieval explainability work starts. |
 | Optional search backend | P3 | Consider a stronger search engine only after the current baseline is measured. | Optional ParadeDB/BM25 path. | planned | Not started. | Evaluate only after baseline retrieval benchmarks exist. |
@@ -159,66 +159,66 @@ The detailed roadmap tables and queued work use the same priority labels:
 
 ### Future Slice: Code-Aware Corpus Indexing
 
-Status: `planned`. This is a future cohesive implementation slice, separate
+Status: foundation bundle `implemented`; broader code-aware indexing remains
+`in progress`. This is a cohesive implementation slice, separate
 from V2.8 indexer reliability and benchmark history. It should use the V2.8
 watcher backend policy, worker-family scheduling, crawl manifests, parser cache
 telemetry, and synthetic benchmark history as foundations, but it should not
 implement VSS extraction, provider-specific embedding backends, runtime tracing,
 or V3 retrieval/governance benchmarks as part of the same slice.
 
-Plain-English overview: this future work would help Codex answer questions
+Plain-English overview: this foundation helps Codex answer questions
 about codebases by understanding files, symbols, tests, routes, and references
 instead of treating every source file like ordinary text.
 
-Current behavior is intentionally generic: small supported code-like files are
-recognized by extension, extracted as text, stored as `source_assets` plus
-`asset_chunks`, embedded like other corpus chunks, and retrievable through
-`kb.search`, REST search, CLI search, and MCP wrappers. The future requirement is
-to make opted-in repositories code-aware while preserving that generic baseline.
+Current behavior preserves the generic baseline: code results are still
+`source_assets` plus `asset_chunks`, embedded like other corpus chunks, and
+retrievable through `kb.search`, REST search, CLI search, and MCP wrappers.
+The foundation now adds parser-backed chunks, durable symbols/references,
+code-aware filters, exact-symbol ranking, generated-file markers, notebook
+cells, a public-safe `code-heavy` benchmark baseline, and sanitized parser
+fallback metadata for opted-in repositories.
 
-Planned scope:
+Implemented foundation scope:
 
 - Plain-English purpose: cover the kinds of source, config, test, and build
   files real projects contain.
-  Broaden code and developer-artifact coverage beyond the current extension
-  set, including common source languages, notebooks, build scripts, package
-  manifests, infrastructure/config files, API schemas, SQL files, migrations,
-  tests, generated-code markers, and patch/diff artifacts.
+  Code and developer-artifact coverage now includes common source languages,
+  notebooks, build scripts, package manifests, infrastructure/config files, API
+  schemas, SQL files, migrations, tests, generated-code markers, and patch/diff
+  artifacts.
 - Plain-English purpose: split code into meaningful pieces such as functions
   and classes so search lands on the right area.
-  Add parser-backed chunking that prefers stable semantic boundaries over fixed
-  text windows: module, class, function, method, interface/type, route or
-  handler, config block, SQL object/query, migration step, notebook cell, and
-  test case where reliably detectable.
+  Parser-backed chunking now prefers stable semantic boundaries over fixed text
+  windows for modules, classes, functions, methods, route evidence, config
+  blocks, SQL objects, migrations, notebook cells, and test functions where
+  reliably detectable.
 - Plain-English purpose: remember where important code names live and what
   kind of thing they are.
-  Store durable symbol metadata such as symbol name, kind, language, file path,
-  line and byte ranges, parent symbol, exported/public flag where detectable,
-  signature when safe, and docstring/comment summary when safe.
+  Durable symbol metadata stores symbol name, kind, language, file path, line
+  and byte ranges, parent symbol, exported/public flag where detectable,
+  signature when safe, parser status, confidence, scope hash, and chunk link.
 - Plain-English purpose: use real code parsers when available, but keep indexing
   useful when a parser cannot handle a file.
-  Introduce optional AST/tree-sitter or language-specific parser adapters behind
-  a parser abstraction. Unsupported languages and parser failures must fall back
-  to inline text chunking with explicit sanitized fallback metadata.
+  The parser abstraction uses Python `ast` first, conservative SQL/JS/TS/config
+  adapters where reliable, and explicit sanitized fallback metadata for
+  unsupported languages or parser failures.
 - Plain-English purpose: store code facts in a way that can be searched,
   explained, and linked back to files.
-  Add a future durable storage concept such as `code_symbols` and
-  `code_references`, or an equivalent schema, tied back to `source_assets` and
-  `asset_chunks` so code results can still participate in normal corpus
-  retrieval and provenance flows.
+  Durable `code_symbols` and `code_references` tables are tied back to
+  `source_assets` and `asset_chunks` so code results still participate in normal
+  corpus retrieval and provenance flows.
 - Plain-English purpose: show how code pieces relate so Codex can answer
   questions like "who calls this?" or "where are the tests?"
-  Capture definition, reference, call, import, route, test-to-target, and
-  config-to-implementation relationships where the parser can produce reliable
-  evidence. The roadmap must not imply perfect static analysis across all
-  languages or dynamic frameworks.
+  The foundation captures definitions, imports, calls, routes, SQL objects, and
+  config facts where the parser can produce reliable evidence. The roadmap does
+  not imply perfect static analysis across all languages or dynamic frameworks.
 - Plain-English purpose: keep answers focused on the selected project instead
   of mixing unrelated code from elsewhere.
-  Scope results by repository, workspace, monitored root, language, and path so
-  Codex can ask targeted questions such as "Find the implementation of X",
-  "Where is this CLI command registered?", "Show route handlers for Y", "Find
-  tests for this function", "Find callers/references of this symbol", and
-  "Summarize the public API of this module".
+  Search now scopes code results by monitored root, repository/root name,
+  language, symbol kind, relationship, and path glob so Codex can ask targeted
+  questions such as "Find the implementation of X", "Show route handlers for Y",
+  and "Find callers/references of this symbol".
 
 Codex-facing retrieval surfaces:
 
@@ -228,10 +228,9 @@ Codex-facing retrieval surfaces:
   lookup backward compatible.
 - Plain-English purpose: let callers narrow searches by language, path, symbol
   type, or code relationship.
-  Add future generic search filters such as `logical_kinds=["file"]`,
-  `file_kind="code"`, `language`, `symbol_kind`, `path_glob`, `repo`, `root`,
-  `relationship`, and definition/reference/test/config/example facets if those
-  fit the existing search contract cleanly.
+  Generic search filters now include `file_kind`, `language`, `symbol_kind`,
+  `path_glob`, `relationship`, and `repo`/`root_name` on the existing search
+  contract.
 - Plain-English purpose: add a clearer code-search command if generic search
   becomes too crowded.
   Consider dedicated MCP/CLI/REST surfaces such as `kb.code_search`,
@@ -239,7 +238,7 @@ Codex-facing retrieval surfaces:
   separate contract than overloading generic search.
 - Plain-English purpose: make code answers cite where they came from and why
   they matched.
-  Return enough structured metadata for Codex to cite the defining file, line
+  Search results return enough structured metadata for Codex to cite the defining file, line
   range, symbol kind, relationship type, parser/fallback status, and associated
   chunk without exposing raw private code outside the normal private corpus
   retrieval path.
@@ -295,44 +294,43 @@ Out of scope for this slice:
 - VSS snapshot extraction.
 - V3 retrieval benchmark design, librarian workers, or automated governance.
 
-Prioritized implementation breakdown:
+Foundation implementation breakdown:
 
-1. Priority: P0. Model-actionable item: expand code and developer-artifact
+1. Priority: P0. Status: implemented. Model-actionable item: expand code and developer-artifact
    classification for opted-in repositories, including source files, tests,
    configs, manifests, API schemas, SQL, infrastructure files, notebooks, and
    generated-code markers.
    Plain-English explanation: Flux first needs to recognize the files Codex is
    likely to ask about before deeper symbol search can add value.
-2. Priority: P0. Model-actionable item: add public-safe synthetic fixture
+2. Priority: P0. Status: implemented. Model-actionable item: add public-safe synthetic fixture
    repositories that cover small invented implementations, tests, configs,
    routes, imports, generated files, unsupported languages, and parser failures.
    Plain-English explanation: The feature needs correctness tests before it can
    safely index private repositories or change retrieval ranking.
-3. Priority: P0. Model-actionable item: implement a parser abstraction that
+3. Priority: P0. Status: implemented. Model-actionable item: implement a parser abstraction that
    produces stable semantic chunks for modules, classes, functions, methods,
    routes, SQL objects, notebook cells, and tests when reliable, with explicit
    sanitized fallback metadata when parsing is unavailable or fails.
    Plain-English explanation: Codex gets quick value when search lands on the
    right function or test, while fallback behavior keeps indexing useful for
    unsupported files.
-4. Priority: P0. Model-actionable item: add durable code symbol and reference
+4. Priority: P0. Status: implemented. Model-actionable item: add durable code symbol and reference
    storage tied to `source_assets` and `asset_chunks`, including symbol name,
    kind, language, file path, range metadata, parent symbol, definition/reference
    relationship, parser status, and safe provenance.
    Plain-English explanation: A stored symbol layer is the core data foundation
    that turns generic corpus search into code-aware retrieval.
-5. Priority: P0. Model-actionable item: add repository-scoped code retrieval and
+5. Priority: P0. Status: implemented. Model-actionable item: add repository-scoped code retrieval and
    ranking so exact symbol/path matches, local workspace evidence, definitions,
    references, tests, configs, and examples are distinguishable in results.
    Plain-English explanation: This completes the basic user-facing behavior:
    Codex can ask where code lives and receive focused, explainable answers.
-6. Priority: P1. Model-actionable item: expose code-aware retrieval through the
-   least-surprising MCP, CLI, and REST contract, either as code filters on
-   existing search or as dedicated code-search and symbol-lookup surfaces if the
-   generic contract becomes crowded.
+6. Priority: P1. Status: implemented for generic search filters; dedicated
+   code-search surfaces remain future. Model-actionable item: expose code-aware
+   retrieval through the least-surprising MCP, CLI, and REST contract.
    Plain-English explanation: Tooling should be easy for Codex and scripts to
    call without breaking existing `kb.search` users.
-7. Priority: P1. Model-actionable item: add dashboard and diagnostic views for
+7. Priority: P1. Status: remaining. Model-actionable item: add dashboard and diagnostic views for
    code index coverage, parser failures, fallback rates, slow files, language
    coverage, and privacy-safe per-repository status.
    Plain-English explanation: Operators need to see what indexed well and what
@@ -362,7 +360,7 @@ Acceptance criteria:
 | Optional graph backend | P3 | Consider a specialized relationship database only if PostgreSQL stops being enough. | Optional Apache AGE graph backend. | planned | PostgreSQL remains the primary store; optional AGE is not started. | Evaluate after graph traversal and lifecycle semantics stabilize. |
 | Synthetic data and fine-tuning | P3 | Use generated safe data later to improve testing or training without exposing private content. | Synthetic-data and fine-tuning pipeline. | planned | Not started. | Defer until evaluation and governance foundations are in place. |
 
-## Queued Work In Priority Order
+## Queued Work In Roadmap Order
 
 The queue uses the same priority labels as the detailed roadmap item tables.
 
@@ -370,18 +368,7 @@ Queued items are intentionally larger related slices so one model run can spend
 more tokens on implementation and verification instead of repeated planning,
 branch setup, and context rebuilding.
 
-1. Priority: P0. Model-actionable item: ship a code-aware retrieval foundation
-   bundle that includes the first five P0 items in the Future Slice breakdown
-   plus a public-safe retrieval benchmark baseline. Implement classification,
-   synthetic fixture repositories, parser/fallback chunks, durable
-   symbol/reference storage, repository-scoped code retrieval ranking, expected
-   benchmark results, precision/recall-style checks, brief-packing dilution
-   checks, duplicate-suppression checks, and regression commands for CLI, REST,
-   MCP, and service-level retrieval paths.
-   Plain-English explanation: This is the highest-value next slice because it
-   gives Codex useful code navigation while proving that retrieval changes still
-   return correct, focused, explainable results.
-2. Priority: P0. Model-actionable item: ship an indexer reliability and tuning
+1. Priority: P0. Plain-English purpose: make indexing reliable under real file churn. Model-actionable item: ship an indexer reliability and tuning
    bundle that validates lock/cloud-sync correctness, watcher reconciliation,
    retry-to-blocked transitions, benchmark comparison summaries, and default
    tuning recommendations for crawler hash parallelism, worker-family caps, and
@@ -393,7 +380,7 @@ branch setup, and context rebuilding.
    correctly before more heavy extractors or automation depend on the indexer.
    This bundle turns the V2.8 benchmark machinery into practical reliability
    evidence and safer defaults.
-3. Priority: P1. Model-actionable item: ship an operator diagnostics and basic
+2. Priority: P1. Plain-English purpose: make daily operation inspectable without raw logs. Model-actionable item: ship an operator diagnostics and basic
    corpus completion bundle that completes code-aware MCP/CLI/REST contracts,
    code result metadata, dashboard code coverage views, parser failure views,
    fallback-rate summaries, privacy-safe per-repository status, retrieval
@@ -404,7 +391,7 @@ branch setup, and context rebuilding.
    users need stable tool calls, dashboard evidence, and basic large-data
    coverage so daily operation does not require reading raw logs or forcing huge
    files through full extraction.
-4. Priority: P2. Model-actionable item: ship an evaluated memory-governance
+3. Priority: P2. Plain-English purpose: improve memory quality with reversible evaluated automation. Model-actionable item: ship an evaluated memory-governance
    automation bundle that implements librarian-worker shadow mode, benchmarked
    thresholds, reversible lifecycle actions, duplicate suppression, retrieval
    deprioritization, stale tagging, canonical cluster presentation, recovery
@@ -414,7 +401,7 @@ branch setup, and context rebuilding.
    Plain-English explanation: Automation should arrive as one evaluated system,
    not as scattered cleanup mutations. This keeps memory quality improvements
    measurable, reversible, and private.
-5. Priority: P3. Model-actionable item: defer optional ParadeDB/BM25,
+4. Priority: P3. Plain-English purpose: keep optional scale-outs behind proven local value. Model-actionable item: defer optional ParadeDB/BM25,
    shared-vault collaboration, sync/export governance, Apache AGE, and
    synthetic-data/fine-tuning until single-user retrieval, code indexing,
    indexer reliability, diagnostics, evaluation, and recovery flows are stable.

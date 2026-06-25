@@ -44,8 +44,23 @@ def _filters_from_query(
     current_only: bool | None,
     lifecycle_state: list[str] | None,
     include_suppressed: bool | None,
+    file_kind: list[str] | None = None,
+    language: list[str] | None = None,
+    symbol_kind: list[str] | None = None,
+    relationship: list[str] | None = None,
+    path_glob: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    if not kind and current_only is None and not lifecycle_state and include_suppressed is None:
+    if (
+        not kind
+        and current_only is None
+        and not lifecycle_state
+        and include_suppressed is None
+        and not file_kind
+        and not language
+        and not symbol_kind
+        and not relationship
+        and not path_glob
+    ):
         return None
     return normalize_retrieval_filters(
         {
@@ -53,6 +68,11 @@ def _filters_from_query(
             "current_only": bool(current_only),
             "lifecycle_states": lifecycle_state or [],
             "include_suppressed": bool(include_suppressed),
+            "file_kind": file_kind or [],
+            "language": language or [],
+            "symbol_kind": symbol_kind or [],
+            "relationship": relationship or [],
+            "path_glob": path_glob or [],
         }
     )
 
@@ -392,12 +412,22 @@ def create_app():
         current_only: bool | None = None,
         lifecycle_state: list[str] | None = Query(None),
         include_suppressed: bool | None = None,
+        file_kind: list[str] | None = Query(None),
+        language: list[str] | None = Query(None),
+        symbol_kind: list[str] | None = Query(None),
+        relationship: list[str] | None = Query(None),
+        path_glob: list[str] | None = Query(None),
     ):
         filters = _filters_from_query(
             kind=kind,
             current_only=current_only,
             lifecycle_state=lifecycle_state,
             include_suppressed=include_suppressed,
+            file_kind=file_kind,
+            language=language,
+            symbol_kind=symbol_kind,
+            relationship=relationship,
+            path_glob=path_glob,
         )
         kwargs = _service_retrieval_kwargs(limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
         return service.search(query, **kwargs)

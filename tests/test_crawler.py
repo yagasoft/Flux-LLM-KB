@@ -26,6 +26,41 @@ def test_policy_honors_marker_ignores(tmp_path):
     assert plan.assets[0].chunks[0].body == "durable project decision"
 
 
+def test_scan_path_indexes_python_code_with_semantic_chunks_and_metadata(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "service.py").write_text(
+        "\n".join(
+            [
+                "class BillingService:",
+                "    def issue_invoice(self, customer_id):",
+                "        return customer_id",
+                "",
+                "def create_invoice(customer_id):",
+                "    return BillingService().issue_invoice(customer_id)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert len(plan.assets) == 1
+    asset = plan.assets[0]
+    assert asset.file_kind == "code"
+    assert asset.extraction_tier == "inline"
+    assert asset.metadata["code"]["language"] == "python"
+    assert asset.metadata["code"]["parser_status"] == "parsed"
+    assert {chunk.title for chunk in asset.chunks} == {
+        "service.py::module",
+        "service.py::BillingService",
+        "service.py::BillingService.issue_invoice",
+        "service.py::create_invoice",
+    }
+    assert all(chunk.metadata["language"] == "python" for chunk in asset.chunks)
+    assert any(symbol["qualified_name"] == "BillingService.issue_invoice" for symbol in asset.metadata["code"]["symbols"])
+
+
 def test_scan_path_classifies_heavy_media_as_deferred(tmp_path):
     root = tmp_path / "media"
     root.mkdir()

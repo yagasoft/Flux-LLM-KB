@@ -12,6 +12,11 @@ def test_normalize_retrieval_filters_canonicalizes_contract():
             "current_only": True,
             "lifecycle_states": ["active", "stale", "active"],
             "include_suppressed": True,
+            "file_kind": ["code", "code"],
+            "language": ["Python", "python"],
+            "symbol_kind": "Function",
+            "relationship": "Definition",
+            "path_glob": ["src/*.py", "src/*.py"],
         }
     )
 
@@ -20,6 +25,11 @@ def test_normalize_retrieval_filters_canonicalizes_contract():
         "current_only": True,
         "lifecycle_states": ["active", "stale"],
         "include_suppressed": True,
+        "file_kinds": ["code"],
+        "languages": ["python"],
+        "symbol_kinds": ["function"],
+        "relationships": ["definition"],
+        "path_globs": ["src/*.py"],
     }
 
 
@@ -91,6 +101,67 @@ def test_service_search_adds_query_snippet_and_retrieval_explanation(monkeypatch
     assert result["retrieval_explanation"]["scope"] == {"label": "global"}
     assert result["retrieval_explanation"]["corpus"]["source_path"] == "docs/architecture.md"
     assert result["retrieval_explanation"]["corpus"]["duplicate_count"] == 1
+
+
+def test_service_search_forwards_code_filters_and_exposes_code_explanation(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, limit=20, root_name=None, filters=None, **_kwargs):
+        captured.update({"query": query, "limit": limit, "root_name": root_name, "filters": filters})
+        return [
+            {
+                "id": "chunk-code",
+                "asset_id": "asset-code",
+                "title": "src/orders.py::OrderService.build_invoice",
+                "summary": "def build_invoice(self, order_id): return order_id",
+                "score": 0.97,
+                "streams": ["code_symbol_exact", "corpus_lexical"],
+                "raw_scores": {"code_symbol_exact": 2.5, "corpus_lexical": 0.8},
+                "source_path": "src/orders.py",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {
+                    "language": "python",
+                    "primary_symbol": "OrderService.build_invoice",
+                    "symbol_kind": "method",
+                    "relationship": "definition",
+                    "range": {"line_start": 6, "line_end": 7},
+                    "parser_status": "parsed",
+                },
+            }
+        ]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    results = KnowledgeService().search(
+        "build_invoice",
+        root_name="repo",
+        filters={
+            "file_kind": "code",
+            "language": "python",
+            "symbol_kind": "method",
+            "relationship": "definition",
+            "path_glob": "src/*.py",
+        },
+    )
+
+    assert captured["filters"] == {
+        "logical_kinds": [],
+        "current_only": False,
+        "lifecycle_states": [],
+        "include_suppressed": False,
+        "file_kinds": ["code"],
+        "languages": ["python"],
+        "symbol_kinds": ["method"],
+        "relationships": ["definition"],
+        "path_globs": ["src/*.py"],
+    }
+    assert results[0]["code"]["primary_symbol"] == "OrderService.build_invoice"
+    assert results[0]["retrieval_explanation"]["code"] == results[0]["code"]
+    assert results[0]["retrieval_explanation"]["streams"][0] == "code_symbol_exact"
 
 
 def test_service_explain_surfaces_semantic_duplicate_suppression_without_raw_duplicate_content(monkeypatch):

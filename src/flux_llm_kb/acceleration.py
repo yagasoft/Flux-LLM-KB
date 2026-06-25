@@ -76,6 +76,7 @@ FAMILY_DEFAULT_CAPS: dict[str, int] = {
 
 BENCHMARK_FIXTURES: tuple[dict[str, str], ...] = (
     {"name": "text-heavy", "description": "Markdown, code, and plain text files"},
+    {"name": "code-heavy", "description": "Synthetic repositories with source, tests, routes, SQL, config, generated code, and parser fallbacks"},
     {"name": "office-pdf-heavy", "description": "Office documents, spreadsheets, presentations, and PDFs"},
     {"name": "archive-container-heavy", "description": "Nested archives, packages, and embedded documents"},
     {"name": "image-heavy", "description": "Images, diagrams, and scanned PDFs"},

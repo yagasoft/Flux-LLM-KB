@@ -29,6 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     search_parser = subparsers.add_parser("search", help="Search stored episodes")
     search_parser.add_argument("query")
     search_parser.add_argument("--limit", type=int, default=5)
+    search_parser.add_argument("--root", dest="root_name")
     _add_retrieval_filter_args(search_parser)
 
     explain_parser = subparsers.add_parser("explain", help="Search with snippets, ranking signals, and brief packing rationale")
@@ -441,10 +442,13 @@ def _search(args: argparse.Namespace) -> int:
     from .service import KnowledgeService
 
     filters = _retrieval_filters_from_args(args)
-    if filters is None:
-        payload = KnowledgeService().search(args.query, limit=args.limit)
-    else:
-        payload = KnowledgeService().search(args.query, limit=args.limit, filters=filters)
+    root_name = getattr(args, "root_name", None)
+    kwargs = {"limit": args.limit}
+    if root_name:
+        kwargs["root_name"] = root_name
+    if filters is not None:
+        kwargs["filters"] = filters
+    payload = KnowledgeService().search(args.query, **kwargs)
     print(json.dumps(payload, indent=2))
     return 0
 
@@ -476,6 +480,11 @@ def _add_retrieval_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--current-only", action="store_true")
     parser.add_argument("--lifecycle-state", action="append", dest="lifecycle_states")
     parser.add_argument("--include-suppressed", action="store_true")
+    parser.add_argument("--file-kind", action="append", dest="file_kinds")
+    parser.add_argument("--language", action="append", dest="languages")
+    parser.add_argument("--symbol-kind", action="append", dest="symbol_kinds")
+    parser.add_argument("--relationship", action="append", dest="relationships")
+    parser.add_argument("--path-glob", action="append", dest="path_globs")
 
 
 def _retrieval_filters_from_args(args: argparse.Namespace) -> dict | None:
@@ -484,6 +493,11 @@ def _retrieval_filters_from_args(args: argparse.Namespace) -> dict | None:
         "current_only": bool(getattr(args, "current_only", False)),
         "lifecycle_states": getattr(args, "lifecycle_states", None) or [],
         "include_suppressed": bool(getattr(args, "include_suppressed", False)),
+        "file_kinds": getattr(args, "file_kinds", None) or [],
+        "languages": getattr(args, "languages", None) or [],
+        "symbol_kinds": getattr(args, "symbol_kinds", None) or [],
+        "relationships": getattr(args, "relationships", None) or [],
+        "path_globs": getattr(args, "path_globs", None) or [],
     }
     if not any(filters.values()):
         return None

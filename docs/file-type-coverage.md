@@ -111,6 +111,13 @@ parser or local tool exists.
 
 ## Extraction Notes
 
+- Code and developer artifacts are indexed through normal corpus chunks plus
+  parser metadata. Python files use local `ast` chunking for modules, classes,
+  functions, methods, imports, calls, and route decorators. SQL, JavaScript,
+  TypeScript, notebooks, generated-code markers, and common config/manifests use
+  conservative local pattern parsing. Parser failures and unsupported code-like
+  files fall back to redacted text chunks with sanitized `parser_status`
+  metadata; they do not block crawl/watch loops.
 - Office and OpenDocument business files should use local adapters only.
   Cross-platform extraction prefers bundled Python parsers or LibreOffice
   conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy
