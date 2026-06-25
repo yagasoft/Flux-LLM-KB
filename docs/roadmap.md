@@ -284,29 +284,48 @@ Out of scope for this slice:
 - VSS snapshot extraction.
 - V3 retrieval benchmark design, librarian workers, or automated governance.
 
-Possible implementation breakdown:
+Prioritized implementation breakdown:
 
-1. Plain-English purpose: recognize the common project files Codex needs to
-   navigate. Code coverage and classification expansion for source, tests, configs,
-   manifests, API schemas, SQL, infrastructure files, and generated artifacts.
-2. Plain-English purpose: parse code when possible and fall back safely when not.
-   Parser abstraction with AST/tree-sitter or language-specific adapters plus
-   deterministic fallback text chunking.
-3. Plain-English purpose: store code facts and relationships durably.
-   Symbol, chunk, reference, and relationship schema/migrations tied to
-   `source_assets` and `asset_chunks`.
-4. Plain-English purpose: return the right project-local code results first.
-   Repository-scoped code search, filters, ranking, and result explanations.
-5. Plain-English purpose: give Codex and scripts direct code-search commands.
-   Codex-facing MCP, CLI, and REST query surfaces for code search and symbol
-   lookup while preserving `kb.search` compatibility.
-6. Plain-English purpose: show operators which languages and files indexed well.
-   Dashboard/debug views for code index coverage, parser failures, fallback
-   rates, slow files, and per-language status.
-7. Plain-English purpose: prove code search works without using private code.
-   Synthetic fixture repositories and tests covering definitions, references,
-   tests, config/examples, fallback languages, parser errors, and privacy
-   constraints.
+1. Priority: P0. Model-actionable item: expand code and developer-artifact
+   classification for opted-in repositories, including source files, tests,
+   configs, manifests, API schemas, SQL, infrastructure files, notebooks, and
+   generated-code markers.
+   Plain-English explanation: Flux first needs to recognize the files Codex is
+   likely to ask about before deeper symbol search can add value.
+2. Priority: P0. Model-actionable item: add public-safe synthetic fixture
+   repositories that cover small invented implementations, tests, configs,
+   routes, imports, generated files, unsupported languages, and parser failures.
+   Plain-English explanation: The feature needs correctness tests before it can
+   safely index private repositories or change retrieval ranking.
+3. Priority: P0. Model-actionable item: implement a parser abstraction that
+   produces stable semantic chunks for modules, classes, functions, methods,
+   routes, SQL objects, notebook cells, and tests when reliable, with explicit
+   sanitized fallback metadata when parsing is unavailable or fails.
+   Plain-English explanation: Codex gets quick value when search lands on the
+   right function or test, while fallback behavior keeps indexing useful for
+   unsupported files.
+4. Priority: P0. Model-actionable item: add durable code symbol and reference
+   storage tied to `source_assets` and `asset_chunks`, including symbol name,
+   kind, language, file path, range metadata, parent symbol, definition/reference
+   relationship, parser status, and safe provenance.
+   Plain-English explanation: A stored symbol layer is the core data foundation
+   that turns generic corpus search into code-aware retrieval.
+5. Priority: P0. Model-actionable item: add repository-scoped code retrieval and
+   ranking so exact symbol/path matches, local workspace evidence, definitions,
+   references, tests, configs, and examples are distinguishable in results.
+   Plain-English explanation: This completes the basic user-facing behavior:
+   Codex can ask where code lives and receive focused, explainable answers.
+6. Priority: P1. Model-actionable item: expose code-aware retrieval through the
+   least-surprising MCP, CLI, and REST contract, either as code filters on
+   existing search or as dedicated code-search and symbol-lookup surfaces if the
+   generic contract becomes crowded.
+   Plain-English explanation: Tooling should be easy for Codex and scripts to
+   call without breaking existing `kb.search` users.
+7. Priority: P1. Model-actionable item: add dashboard and diagnostic views for
+   code index coverage, parser failures, fallback rates, slow files, language
+   coverage, and privacy-safe per-repository status.
+   Plain-English explanation: Operators need to see what indexed well and what
+   fell back before trusting code-aware results on real projects.
 
 Acceptance criteria:
 
@@ -332,27 +351,72 @@ Acceptance criteria:
 | Optional graph backend | Consider a specialized relationship database only if PostgreSQL stops being enough. | Optional Apache AGE graph backend. | planned | PostgreSQL remains the primary store; optional AGE is not started. | Evaluate after graph traversal and lifecycle semantics stabilize. |
 | Synthetic data and fine-tuning | Use generated safe data later to improve testing or training without exposing private content. | Synthetic-data and fine-tuning pipeline. | planned | Not started. | Defer until evaluation and governance foundations are in place. |
 
-## Queued Work In Roadmap Order
+## Queued Work In Priority Order
 
-1. Plain-English purpose: help Codex navigate real code projects by symbol,
-   file, test, and relationship instead of treating code as plain text. Add the
-   planned code-aware corpus indexing slice so Codex can retrieve opted-in
-   repository files, symbols, definitions, references, tests, route/handler
-   implementations, and public APIs with code-specific ranking while preserving
-   generic search compatibility.
-2. Plain-English purpose: measure whether search and future cleanup automation
-   are genuinely helping before trusting them. Add V3 retrieval benchmarks and
-   governance evaluation: query sets, quality metrics, shadow-mode librarian
-   evaluation, and thresholds for automated lifecycle actions.
-3. Plain-English purpose: keep memory tidy by proposing low-risk cleanup instead
-   of making the user review every item manually. Add automation-first librarian
-   workers for reversible low-risk stale tagging, deprioritization, duplicate
-   suppression, canonical cluster presentation, audit recovery, and operator
-   digests.
-4. Plain-English purpose: postpone shared-team features until single-user safety,
-   evaluation, and recovery are strong enough. Defer V4
-   collaboration/shared-vault design until single-user governance, evaluation,
-   and recovery flows are stable.
+Priority meanings:
+
+- P0: next core-value or correctness work that should come before broader
+  automation.
+- P1: basic feature completion and reliability hardening that should follow the
+  P0 foundation.
+- P2: automation and optimization work that should wait for evaluation signals.
+- P3: deferred exploration that should not distract from single-user reliability.
+
+Queued items are intentionally larger related slices so one model run can spend
+more tokens on implementation and verification instead of repeated planning,
+branch setup, and context rebuilding.
+
+1. Priority: P0. Model-actionable item: ship a code-aware retrieval foundation
+   bundle that includes the first five P0 items in the Future Slice breakdown
+   plus a public-safe retrieval benchmark baseline. Implement classification,
+   synthetic fixture repositories, parser/fallback chunks, durable
+   symbol/reference storage, repository-scoped code retrieval ranking, expected
+   benchmark results, precision/recall-style checks, brief-packing dilution
+   checks, duplicate-suppression checks, and regression commands for CLI, REST,
+   MCP, and service-level retrieval paths.
+   Plain-English explanation: This is the highest-value next slice because it
+   gives Codex useful code navigation while proving that retrieval changes still
+   return correct, focused, explainable results.
+2. Priority: P0. Model-actionable item: ship an indexer reliability and tuning
+   bundle that validates lock/cloud-sync correctness, watcher reconciliation,
+   retry-to-blocked transitions, benchmark comparison summaries, and default
+   tuning recommendations for crawler hash parallelism, worker-family caps, and
+   cache-readiness checks. Cover synthetic and local-safe scenarios for open
+   Office files, large writes, rename/save patterns, OneDrive/SharePoint/Dropbox
+   delayed availability, startup reconciliation, periodic reconciliation, and
+   diagnostic runs that do not mutate settings.
+   Plain-English explanation: Flux must notice and process real folders
+   correctly before more heavy extractors or automation depend on the indexer.
+   This bundle turns the V2.8 benchmark machinery into practical reliability
+   evidence and safer defaults.
+3. Priority: P1. Model-actionable item: ship an operator diagnostics and basic
+   corpus completion bundle that completes code-aware MCP/CLI/REST contracts,
+   code result metadata, dashboard code coverage views, parser failure views,
+   fallback-rate summaries, privacy-safe per-repository status, retrieval
+   explanation drill-downs, watcher event views, worker heartbeat views, mail
+   sync/post-process views, blocked dependency views, slow-job history, and
+   sample-first indexing for large tabular and structured data files.
+   Plain-English explanation: After the core retrieval and indexer bundles,
+   users need stable tool calls, dashboard evidence, and basic large-data
+   coverage so daily operation does not require reading raw logs or forcing huge
+   files through full extraction.
+4. Priority: P2. Model-actionable item: ship an evaluated memory-governance
+   automation bundle that implements librarian-worker shadow mode, benchmarked
+   thresholds, reversible lifecycle actions, duplicate suppression, retrieval
+   deprioritization, stale tagging, canonical cluster presentation, recovery
+   views, audit records, operator digests, and optional loopback-only local model
+   routing for proposals, semantic clustering, contradiction checks,
+   canonical-summary drafts, and rationale generation with rule-based fallback.
+   Plain-English explanation: Automation should arrive as one evaluated system,
+   not as scattered cleanup mutations. This keeps memory quality improvements
+   measurable, reversible, and private.
+5. Priority: P3. Model-actionable item: defer optional ParadeDB/BM25,
+   shared-vault collaboration, sync/export governance, Apache AGE, and
+   synthetic-data/fine-tuning until single-user retrieval, code indexing,
+   indexer reliability, diagnostics, evaluation, and recovery flows are stable.
+   Plain-English explanation: These may matter later, but they should not spend
+   roadmap or model context before the local single-user knowledge system is
+   correct, inspectable, and useful.
 
 ## Update Rules
 
