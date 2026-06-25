@@ -102,6 +102,10 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "parser_status text NOT NULL" in code_migration.sql
     assert "idx_code_symbols_lookup" in code_migration.sql
     assert "idx_code_references_target" in code_migration.sql
+    reliability_migration = next(item for item in migrations if item.name == "0021_indexer_reliability_gate")
+    assert "idx_acceleration_benchmark_runs_scenario_created" in reliability_migration.sql
+    assert "idx_acceleration_benchmark_runs_scope_hash_created" in reliability_migration.sql
+    assert "idx_acceleration_benchmark_runs_recommendation_scenario" in reliability_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

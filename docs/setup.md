@@ -239,6 +239,15 @@ names, mode, labels, scope type, stable scope hashes, counts, timings, cache
 counters, hash-parallelism, worker-count, manifest-skip, model/tool telemetry,
 backend/provider metadata, and sanitized summaries only; it does not store raw
 text, mail contents, private watched roots, credentials, or embeddings.
+The indexer reliability gate aggregates this metadata-only benchmark history
+with sanitized worker-family and watcher evidence. Use
+`flux-kb acceleration reliability status` to inspect readiness, and
+`flux-kb acceleration reliability run --scope root --root <name> --label <label>`
+to run synthetic reliability, scoped host/cloud calibration, and tuning evidence
+under one label. The gate reports `ready`, `partial`, `blocked`, or `not_run`,
+keeps `settings_mutated: false`, and emits manual follow-up commands for tuning
+candidates. It does not apply settings, change worker caps, read raw content, or
+unblock VSS/provider-specific acceleration without fresh operator evidence.
 Worker-family status is available with `flux-kb crawl worker status --family
 <name|all>` and reports configured caps, cap pressure, worker-family
 backpressure, oldest pending age, slow recent jobs, retry/lock transitions,

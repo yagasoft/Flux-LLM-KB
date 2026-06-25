@@ -238,6 +238,55 @@ def test_cli_acceleration_status_uses_status_collector(monkeypatch, capsys):
     assert payload["worker_families"][0]["ocr_cache_misses"] == 1
 
 
+def test_cli_acceleration_reliability_commands_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def indexer_reliability_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"readiness": "partial", "scope": kwargs}
+
+        def run_indexer_reliability(self, **kwargs):
+            calls.append(("run", kwargs))
+            return {"readiness": "ready", "run": kwargs, "settings_mutated": False}
+
+        def indexer_root_reliability(self, root_name):
+            calls.append(("root", root_name))
+            return {"root_name": root_name, "readiness": "partial"}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["acceleration", "reliability", "status", "--root", "docs", "--label", "nightly", "--freshness-hours", "12"]) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["acceleration", "reliability", "run", "--scope", "root", "--root", "docs", "--deployment-label", "desktop", "--include-cache-readiness"]) == 0
+    run_payload = json.loads(capsys.readouterr().out)
+
+    assert cli.main(["acceleration", "reliability", "root-status", "--root", "docs"]) == 0
+    root_payload = json.loads(capsys.readouterr().out)
+
+    assert status_payload["readiness"] == "partial"
+    assert run_payload["settings_mutated"] is False
+    assert root_payload == {"root_name": "docs", "readiness": "partial"}
+    assert calls[0] == (
+        "status",
+        {
+            "root_name": "docs",
+            "path": None,
+            "label": "nightly",
+            "deployment_label": None,
+            "freshness_hours": 12,
+            "limit": 100,
+        },
+    )
+    assert calls[1][0] == "run"
+    assert calls[1][1]["scope"] == "root"
+    assert calls[1][1]["include_cache_readiness"] is True
+    assert calls[2] == ("root", "docs")
+
+
 def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 
@@ -369,7 +418,10 @@ def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch,
                 "label": "after-deploy",
                 "warm_state": "warm",
                 "scope_type": "monitored_root",
+                "scope_hash": None,
                 "deployment_label": "desktop-after",
+                "scenario": None,
+                "freshness_hours": None,
                 "limit": 3,
             },
         ),

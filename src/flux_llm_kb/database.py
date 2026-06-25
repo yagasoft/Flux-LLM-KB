@@ -3387,7 +3387,10 @@ def list_benchmark_runs(
     label: str | None = None,
     warm_state: str | None = None,
     scope_type: str | None = None,
+    scope_hash: str | None = None,
     deployment_label: str | None = None,
+    scenario: str | None = None,
+    freshness_hours: int | None = None,
     limit: int = 20,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -3409,9 +3412,18 @@ def list_benchmark_runs(
     if scope_type:
         filters.append("scope_type = %s")
         params.append(_normalize_benchmark_scope_type(scope_type))
+    if scope_hash:
+        filters.append("scope_hash = %s")
+        params.append(scope_hash)
     if deployment_label:
         filters.append("deployment_label = %s")
         params.append(deployment_label)
+    if scenario:
+        filters.append("COALESCE(recommendation_metadata->>'scenario', metadata->>'scenario', 'standard') = %s")
+        params.append(str(scenario).strip().lower().replace("-", "_"))
+    if freshness_hours is not None:
+        filters.append("created_at >= now() - (%s::int * interval '1 hour')")
+        params.append(max(1, int(freshness_hours)))
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
     params.append(max(1, min(limit, 200)))
     with psycopg.connect(url or database_url()) as conn:
@@ -8031,6 +8043,7 @@ def _benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "settings_snapshot": _sanitize_operational_metadata(row[28] or {}),
         "model_telemetry": _sanitize_operational_metadata(row[29] or {}),
         "recommendation_metadata": _sanitize_operational_metadata(row[30] or {}),
+        "scenario": str((row[30] or {}).get("scenario") or (row[23] or {}).get("scenario") or "standard"),
         "created_at": row[31].isoformat() if row[31] else None,
         "previous_elapsed_delta_ms": previous_delta,
         "previous_throughput_delta": throughput_delta,

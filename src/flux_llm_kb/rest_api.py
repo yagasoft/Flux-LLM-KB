@@ -238,6 +238,17 @@ def create_app():
         scenario: str = "standard"
         include_model_probe: bool = False
 
+    class ReliabilityRunRequest(BaseModel):
+        scope: str = "synthetic"
+        root_name: str | None = None
+        path: str | None = None
+        label: str | None = None
+        deployment_label: str | None = None
+        max_files: int = 1000
+        passes: int = 2
+        include_cache_readiness: bool = False
+        include_tuning: bool = True
+
     class SettingUpdateRequest(BaseModel):
         value: object
         confirmed: bool = False
@@ -368,7 +379,10 @@ def create_app():
         label: str | None = None,
         warm_state: str | None = None,
         scope_type: str | None = None,
+        scope_hash: str | None = None,
         deployment_label: str | None = None,
+        scenario: str | None = None,
+        freshness_hours: int | None = None,
         limit: int = 20,
     ):
         return service.benchmark_history(
@@ -377,9 +391,50 @@ def create_app():
             label=label,
             warm_state=warm_state,
             scope_type=scope_type,
+            scope_hash=scope_hash,
             deployment_label=deployment_label,
+            scenario=scenario,
+            freshness_hours=freshness_hours,
             limit=limit,
         )
+
+    @app.get("/api/acceleration/reliability")
+    def acceleration_reliability_status(
+        root_name: str | None = None,
+        path: str | None = None,
+        label: str | None = None,
+        deployment_label: str | None = None,
+        freshness_hours: int = 336,
+        limit: int = 100,
+    ):
+        return service.indexer_reliability_status(
+            root_name=root_name,
+            path=path,
+            label=label,
+            deployment_label=deployment_label,
+            freshness_hours=freshness_hours,
+            limit=limit,
+        )
+
+    @app.post("/api/acceleration/reliability/run")
+    def acceleration_reliability_run(request: ReliabilityRunRequest = Body(...)):
+        if _should_proxy_benchmark(request.scope, request.root_name, request.path):
+            return _run_indexer_reliability_with_benchmark_proxy(service, request)
+        return service.run_indexer_reliability(
+            scope=request.scope,
+            root_name=request.root_name,
+            path=request.path,
+            label=request.label,
+            deployment_label=request.deployment_label,
+            max_files=request.max_files,
+            passes=request.passes,
+            include_cache_readiness=request.include_cache_readiness,
+            include_tuning=request.include_tuning,
+        )
+
+    @app.get("/api/acceleration/reliability/root/{root_name}")
+    def acceleration_reliability_root(root_name: str):
+        return service.indexer_root_reliability(root_name)
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
@@ -1291,6 +1346,68 @@ def host_agent_benchmark(
         deployment_label=deployment_label,
         scenario=scenario,
         include_model_probe=include_model_probe,
+    )
+
+
+def _run_indexer_reliability_with_benchmark_proxy(service: KnowledgeService, request: Any) -> dict[str, Any]:
+    passes = max(1, int(getattr(request, "passes", 2) or 2))
+    max_files = max(1, int(getattr(request, "max_files", 1000) or 1000))
+    scope = getattr(request, "scope", "synthetic")
+    root_name = getattr(request, "root_name", None)
+    path = getattr(request, "path", None)
+    label = getattr(request, "label", None)
+    deployment_label = getattr(request, "deployment_label", None)
+    service.run_benchmark(
+        fixture="all",
+        files=10,
+        mode="all",
+        passes=passes,
+        label=label,
+        deployment_label=deployment_label,
+        scenario="reliability",
+    )
+    host_agent_benchmark(
+        fixture="all",
+        files=10,
+        mode="scan",
+        passes=passes,
+        label=label,
+        scope=scope,
+        root_name=root_name,
+        path=path,
+        max_files=max_files,
+        deployment_label=deployment_label,
+        scenario="host_cloud",
+    )
+    if getattr(request, "include_cache_readiness", False):
+        service.run_benchmark(
+            fixture="image-heavy",
+            files=10,
+            mode="model",
+            passes=1,
+            label=label,
+            deployment_label=deployment_label,
+            scenario="cache_readiness",
+        )
+    if getattr(request, "include_tuning", True):
+        host_agent_benchmark(
+            fixture="all",
+            files=10,
+            mode="scan",
+            passes=passes,
+            label=label,
+            scope=scope,
+            root_name=root_name,
+            path=path,
+            max_files=max_files,
+            deployment_label=deployment_label,
+            scenario="tuning",
+        )
+    return service.indexer_reliability_status(
+        root_name=root_name,
+        path=path if str(scope or "").strip().lower().replace("-", "_") == "path" else None,
+        label=label,
+        deployment_label=deployment_label,
     )
 
 

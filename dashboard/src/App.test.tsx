@@ -335,6 +335,7 @@ let retentionPoliciesPayload: unknown;
 let retentionQualityPayload: unknown;
 let retentionPolicyUpdatePayload: unknown;
 let benchmarkRunPayload: unknown;
+let reliabilityRunPayload: unknown;
 let retrievalBenchmarkRunPayload: unknown;
 let retrievalBenchmarkHistoryPayload: unknown;
 
@@ -505,6 +506,7 @@ describe("Flux dashboard", () => {
     };
     retentionPolicyUpdatePayload = undefined;
     benchmarkRunPayload = undefined;
+    reliabilityRunPayload = undefined;
     retrievalBenchmarkRunPayload = undefined;
     retrievalBenchmarkHistoryPayload = {
       suite: "standard",
@@ -598,6 +600,41 @@ describe("Flux dashboard", () => {
       }
       if (url.startsWith("/api/settings/") && url.endsWith("/reset")) return json({ status: "reset" });
       if (url === "/api/settings/apply") return json({ acknowledged: 1 });
+      if (url === "/api/acceleration/reliability") {
+        return json({
+          readiness: "partial",
+          settings_mutated: false,
+          evidence_age_hours: 3,
+          checks: [
+            { check: "synthetic_reliability", status: "ok", summary: "Synthetic reliability evidence is current." },
+            { check: "scoped_host_cloud", status: "missing", summary: "Run scoped host/cloud calibration for the selected root." },
+            { check: "worker_tuning", status: "ok", summary: "Tuning evidence is available." }
+          ],
+          watcher: { backend: "watchdog", event_count: 2 },
+          workers: { families: [{ family: "media", backpressure: "cap_reached", pending: 2 }] },
+          candidates: [
+            {
+              setting: "crawler.hash_parallelism",
+              current: 1,
+              candidate: 2,
+              evidence_state: "needs_comparison",
+              follow_up_command: "flux-kb acceleration benchmark run --scenario tuning"
+            }
+          ]
+        });
+      }
+      if (url === "/api/acceleration/reliability/run" && init?.method === "POST") {
+        reliabilityRunPayload = JSON.parse(String(init.body));
+        return json({ readiness: "ready", settings_mutated: false, checks: [] });
+      }
+      if (url === "/api/acceleration/reliability/root/docs") {
+        return json({
+          root_name: "docs",
+          readiness: "partial",
+          blockers: { blocked_assets: 1, pending_jobs: 2 },
+          latest_benchmark: { id: "root-run", scenario: "host_cloud" }
+        });
+      }
       if (url === "/api/acceleration/benchmarks/run" && init?.method === "POST") {
         benchmarkRunPayload = JSON.parse(String(init.body));
         return json({
@@ -840,10 +877,20 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Scan / warm / pass 2")).toBeInTheDocument();
     expect(screen.getByText("10 files/s; -250ms; +2 files/s")).toBeInTheDocument();
     expect(screen.getByText("after-deploy; desktop-after; Monitored Root; hash 4; workers 3; 8 manifest skips; model disabled; 2 blocked")).toBeInTheDocument();
+    expect(screen.getByText("Reliability Gate")).toBeInTheDocument();
+    expect(screen.getByText("Partial")).toBeInTheDocument();
+    expect(screen.getByText("Synthetic reliability evidence is current.")).toBeInTheDocument();
+    expect(screen.getByText("Run scoped host/cloud calibration for the selected root.")).toBeInTheDocument();
+    expect(await screen.findByText("docs / partial")).toBeInTheDocument();
+    expect(screen.getByText("crawler.hash_parallelism")).toBeInTheDocument();
+    expect(screen.getByText("needs comparison")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run reliability gate" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run reliability diagnostics" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run host/cloud calibration" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run cache readiness" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run tuning diagnostics" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Run reliability gate" }));
+    expect(reliabilityRunPayload).toEqual({ scope: "root", root_name: "docs", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true });
     await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
     expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "standard" });
     await user.click(screen.getByRole("button", { name: "Run tuning diagnostics" }));
@@ -871,7 +918,8 @@ describe("Flux dashboard", () => {
     expect(fetch).toHaveBeenCalledWith("/api/dashboard/health");
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledTimes(14);
+      const healthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
+      expect(healthCalls.length).toBeGreaterThanOrEqual(2);
     }, { timeout: 2500 });
     expect(screen.getByText(/Last updated/i)).toBeInTheDocument();
   });

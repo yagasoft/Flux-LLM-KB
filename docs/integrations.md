@@ -35,6 +35,9 @@ Tools:
 | `kb.worker_status` | Return worker-family cap usage, backpressure, retry/lock, and slow-job status. |
 | `kb.benchmark_run` | Run deterministic synthetic scan, soak, watcher, or all-mode benchmarks and store metadata-only history. |
 | `kb.benchmark_history` | List metadata-only synthetic benchmark history with mode, label, warm-state, and previous-run delta filters. |
+| `kb.indexer_reliability_status` | Report metadata-only indexer reliability readiness from benchmark history and sanitized worker/watcher evidence. |
+| `kb.indexer_reliability_run` | Run the indexer reliability validation suite without mutating settings. |
+| `kb.indexer_root_reliability` | Show a monitored-root reliability card with sanitized counts and latest scoped benchmark evidence. |
 | `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history with metric deltas, calibration summaries, and advisory candidates. |
 | `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, deltas, calibration summaries, and case-failure evidence. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
@@ -72,7 +75,10 @@ Endpoints:
 - `GET /api/health`
 - `GET /api/acceleration/status`
 - `POST /api/acceleration/benchmarks/run` with optional `fixture`, `files`, `mode`, `passes`, `label`, `compare_label`, `workers`, `family`, `scope`, `root_name`, `path`, `max_files`, `deployment_label`, and `include_model_probe`
-- `GET /api/acceleration/benchmarks?fixture=<name>&mode=<scan|soak|watcher|model>&label=<label>&warm_state=<cold|warm>&scope_type=<synthetic|monitored_root|path>&deployment_label=<label>&limit=<n>`
+- `GET /api/acceleration/benchmarks?fixture=<name>&mode=<scan|soak|watcher|model>&label=<label>&warm_state=<cold|warm>&scope_type=<synthetic|monitored_root|path>&scope_hash=<sha256:...>&deployment_label=<label>&scenario=<scenario>&freshness_hours=<n>&limit=<n>`
+- `GET /api/acceleration/reliability?root_name=<name>&path=<path>&label=<label>&deployment_label=<label>&freshness_hours=<n>&limit=<n>`
+- `POST /api/acceleration/reliability/run` with optional `scope`, `root_name`, `path`, `label`, `deployment_label`, `max_files`, `passes`, `include_cache_readiness`, and `include_tuning`
+- `GET /api/acceleration/reliability/root/{root_name}`
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -288,6 +294,18 @@ dependencies, and `all` mode runs scan/soak/watcher unless model probing is
 explicitly requested. Recommendation payloads are diagnostic only and report
 `settings_mutated: false`; callers must change settings explicitly through the
 normal settings APIs.
+The indexer reliability gate is a read-only aggregation over the same benchmark
+history plus sanitized worker-family, watcher, and monitored-root summaries.
+`flux-kb acceleration reliability status`, `GET /api/acceleration/reliability`,
+and `kb.indexer_reliability_status` return readiness (`ready`, `partial`,
+`blocked`, or `not_run`), required checks, latest run references, watcher and
+worker summaries, and evidence-scored manual candidates. `flux-kb acceleration
+reliability run`, `POST /api/acceleration/reliability/run`, and
+`kb.indexer_reliability_run` run the validation suite under one label while
+keeping `settings_mutated: false`; `root-status`, `root/{root_name}`, and
+`kb.indexer_root_reliability` expose a per-root readiness card. VSS extraction,
+provider-specific acceleration, and automatic settings changes remain outside
+this gate.
 Retrieval benchmarks are separate from acceleration benchmarks. They seed
 temporary public-safe synthetic retrieval cases, call the same search, explain,
 and brief paths used by consumers, and persist metadata-only quality evidence:

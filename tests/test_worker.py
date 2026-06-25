@@ -427,6 +427,38 @@ def test_benchmark_scan_mode_records_cold_and_warm_passes(monkeypatch):
     assert recorded[1]["cache_hits"] == 2
 
 
+def test_benchmark_history_forwards_reliability_filters(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(database, "list_benchmark_runs", lambda **kwargs: captured.update(kwargs) or [{"id": "run-1"}])
+
+    payload = KnowledgeService().benchmark_history(
+        fixture="monitored-root",
+        mode="scan",
+        label="nightly",
+        warm_state="warm",
+        scope_type="monitored_root",
+        deployment_label="desktop",
+        scenario="host_cloud",
+        scope_hash="sha256:root",
+        freshness_hours=24,
+        limit=7,
+    )
+
+    assert payload["runs"] == [{"id": "run-1"}]
+    assert captured == {
+        "fixture": "monitored-root",
+        "mode": "scan",
+        "label": "nightly",
+        "warm_state": "warm",
+        "scope_type": "monitored_root",
+        "deployment_label": "desktop",
+        "scenario": "host_cloud",
+        "scope_hash": "sha256:root",
+        "freshness_hours": 24,
+        "limit": 7,
+    }
+
+
 def test_benchmark_reliability_scenario_returns_diagnostics_and_persists_metadata(monkeypatch):
     recorded = []
     calls = {"created": [], "claimed": [], "completed": [], "blocked": [], "purged": []}
@@ -640,6 +672,53 @@ def test_benchmark_cache_readiness_scenario_reports_tool_blocks_without_private_
     serialized = json.dumps({"diagnostics": result["diagnostics"], "recommendations": result["recommendations"]}, default=str).lower()
     assert "private" not in serialized
     assert "e:/private/cache" not in serialized
+
+
+def test_indexer_reliability_run_orchestrates_scenarios_without_mutating_settings(monkeypatch):
+    calls = []
+
+    def fake_run_benchmark(self, **kwargs):
+        calls.append(kwargs)
+        return {
+            "scenario": kwargs["scenario"],
+            "scope_type": "monitored_root" if kwargs.get("scope") == "root" else "synthetic",
+            "runs": [
+                {
+                    "id": f"run-{len(calls)}",
+                    "scenario": kwargs["scenario"],
+                    "mode": kwargs["mode"],
+                    "scope_type": "monitored_root" if kwargs.get("scope") == "root" else "synthetic",
+                    "recommendation_metadata": {"settings_mutated": False, "scenario": kwargs["scenario"]},
+                }
+            ],
+            "recommendations": {"settings_mutated": False, "scenario": kwargs["scenario"], "candidates": []},
+        }
+
+    monkeypatch.setattr(KnowledgeService, "run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr(KnowledgeService, "indexer_reliability_status", lambda self, **kwargs: {"readiness": "ready", "settings_mutated": False, "status_args": kwargs})
+
+    result = KnowledgeService().run_indexer_reliability(
+        scope="root",
+        root_name="docs",
+        label="nightly",
+        deployment_label="desktop",
+        max_files=100,
+        include_cache_readiness=True,
+        include_tuning=True,
+    )
+
+    assert result["readiness"] == "ready"
+    assert result["settings_mutated"] is False
+    assert [call["scenario"] for call in calls] == ["reliability", "host_cloud", "cache_readiness", "tuning"]
+    assert calls[0]["label"] == "nightly"
+    assert calls[1]["scope"] == "root"
+    assert calls[1]["root_name"] == "docs"
+    assert calls[1]["max_files"] == 100
+    assert calls[2]["mode"] == "model"
+    assert calls[3]["mode"] == "scan"
+    assert calls[3]["scope"] == "root"
+    assert calls[3]["root_name"] == "docs"
+    assert calls[3]["max_files"] == 100
 
 
 def test_benchmark_soak_mode_claims_worker_family_jobs_and_purges(monkeypatch):

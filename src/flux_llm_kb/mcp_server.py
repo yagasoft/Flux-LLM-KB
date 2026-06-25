@@ -201,7 +201,7 @@ def create_server():
         )
 
     @mcp.tool(name="kb.benchmark_history")
-    def benchmark_history(fixture: str | None = None, mode: str | None = None, label: str | None = None, warm_state: str | None = None, scope_type: str | None = None, deployment_label: str | None = None, limit: int = 20):
+    def benchmark_history(fixture: str | None = None, mode: str | None = None, label: str | None = None, warm_state: str | None = None, scope_type: str | None = None, deployment_label: str | None = None, scenario: str | None = None, scope_hash: str | None = None, freshness_hours: int | None = None, limit: int = 20):
         """List metadata-only synthetic benchmark run history and previous-run deltas."""
         return service.benchmark_history(
             fixture=fixture,
@@ -210,8 +210,43 @@ def create_server():
             warm_state=warm_state,
             scope_type=scope_type,
             deployment_label=deployment_label,
+            scenario=scenario,
+            scope_hash=scope_hash,
+            freshness_hours=freshness_hours,
             limit=limit,
         )
+
+    @mcp.tool(name="kb.indexer_reliability_status")
+    def indexer_reliability_status(root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, freshness_hours: int = 336, limit: int = 100):
+        """Return the metadata-only indexer reliability evidence gate status."""
+        return service.indexer_reliability_status(
+            root_name=root_name,
+            path=path,
+            label=label,
+            deployment_label=deployment_label,
+            freshness_hours=freshness_hours,
+            limit=limit,
+        )
+
+    @mcp.tool(name="kb.indexer_reliability_run")
+    def indexer_reliability_run(scope: str = "synthetic", root_name: str | None = None, path: str | None = None, label: str | None = None, deployment_label: str | None = None, max_files: int = 1000, passes: int = 2, include_cache_readiness: bool = False, include_tuning: bool = True):
+        """Run the indexer reliability validation suite without mutating settings."""
+        return service.run_indexer_reliability(
+            scope=scope,
+            root_name=root_name,
+            path=path,
+            label=label,
+            deployment_label=deployment_label,
+            max_files=max_files,
+            passes=passes,
+            include_cache_readiness=include_cache_readiness,
+            include_tuning=include_tuning,
+        )
+
+    @mcp.tool(name="kb.indexer_root_reliability")
+    def indexer_root_reliability(root_name: str):
+        """Return a monitored-root reliability card with sanitized counts and latest benchmark evidence."""
+        return service.indexer_root_reliability(root_name=root_name)
 
     @mcp.tool(name="kb.retrieval_benchmark_run")
     def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True):

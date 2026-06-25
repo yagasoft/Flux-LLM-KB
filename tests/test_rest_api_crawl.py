@@ -147,6 +147,64 @@ def test_crawl_root_create_accepts_windows_host_path_via_host_agent(monkeypatch)
     assert captured["metadata"]["host_access"] == "host_agent"
 
 
+def test_acceleration_reliability_endpoints_forward_to_service(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def indexer_reliability_status(self, **kwargs):
+            calls.append(("status", kwargs))
+            return {"readiness": "partial", "scope": kwargs}
+
+        def run_indexer_reliability(self, **kwargs):
+            calls.append(("run", kwargs))
+            return {"readiness": "ready", "settings_mutated": False, "run": kwargs}
+
+        def indexer_root_reliability(self, root_name):
+            calls.append(("root", root_name))
+            return {"root_name": root_name, "readiness": "partial"}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+
+    client = fastapi_testclient.TestClient(create_app())
+    status_response = client.get(
+        "/api/acceleration/reliability",
+        params={"root_name": "docs", "label": "nightly", "freshness_hours": 12},
+    )
+    run_response = client.post(
+        "/api/acceleration/reliability/run",
+        json={
+            "scope": "synthetic",
+            "deployment_label": "desktop",
+            "include_cache_readiness": True,
+        },
+    )
+    root_response = client.get("/api/acceleration/reliability/root/docs")
+
+    assert status_response.status_code == 200
+    assert status_response.json()["readiness"] == "partial"
+    assert run_response.status_code == 200
+    assert run_response.json()["settings_mutated"] is False
+    assert root_response.status_code == 200
+    assert root_response.json() == {"root_name": "docs", "readiness": "partial"}
+    assert calls[0] == (
+        "status",
+        {
+            "root_name": "docs",
+            "path": None,
+            "label": "nightly",
+            "deployment_label": None,
+            "freshness_hours": 12,
+            "limit": 100,
+        },
+    )
+    assert calls[1][0] == "run"
+    assert calls[1][1]["scope"] == "synthetic"
+    assert calls[1][1]["include_cache_readiness"] is True
+    assert calls[2] == ("root", "docs")
+
+
 def test_host_routes_are_exposed(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
@@ -290,7 +348,10 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
                 "label": "after-deploy",
                 "warm_state": "warm",
                 "scope_type": "monitored_root",
+                "scope_hash": None,
                 "deployment_label": "desktop-after",
+                "scenario": None,
+                "freshness_hours": None,
                 "limit": 3,
             },
         ),
@@ -334,6 +395,59 @@ def test_benchmark_route_proxies_host_agent_roots(monkeypatch):
             "include_model_probe": False,
         }
     ]
+
+
+def test_reliability_run_proxies_host_agent_root_benchmark_slices(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    service_calls = []
+    host_calls = []
+
+    class FakeService:
+        def run_benchmark(self, **kwargs):
+            service_calls.append(kwargs)
+            return {"scenario": kwargs["scenario"], "runs": []}
+
+        def indexer_reliability_status(self, **kwargs):
+            service_calls.append({"status": kwargs})
+            return {"readiness": "partial", "settings_mutated": False, "scope": kwargs}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(
+        "flux_llm_kb.rest_api.database.get_monitored_root",
+        lambda root_name: {"name": root_name, "root_path": "E:\\Docs", "metadata": {"host_access": "host_agent"}},
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.host_agent_benchmark", lambda **kwargs: host_calls.append(kwargs) or {"status": "host_agent", "runs": []})
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post(
+        "/api/acceleration/reliability/run",
+        json={
+            "scope": "root",
+            "root_name": "docs",
+            "label": "nightly",
+            "deployment_label": "desktop",
+            "max_files": 77,
+            "passes": 3,
+            "include_cache_readiness": True,
+            "include_tuning": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["settings_mutated"] is False
+    assert [call["scenario"] for call in service_calls if "scenario" in call] == ["reliability", "cache_readiness"]
+    assert [call["scenario"] for call in host_calls] == ["host_cloud", "tuning"]
+    assert all(call["scope"] == "root" and call["root_name"] == "docs" for call in host_calls)
+    assert all(call["max_files"] == 77 and call["passes"] == 3 for call in host_calls)
+    assert service_calls[-1] == {
+        "status": {
+            "root_name": "docs",
+            "path": None,
+            "label": "nightly",
+            "deployment_label": "desktop",
+        }
+    }
 
 
 def test_retrieval_benchmark_routes_are_exposed(monkeypatch):

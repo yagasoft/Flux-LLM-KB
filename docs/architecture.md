@@ -317,6 +317,14 @@ cache directory count, local model readiness, and extractor/tool blocks without
 storing cache paths. `tuning` runs bounded comparisons for crawler hash
 parallelism and worker-family caps, returning manual candidates only.
 
+The indexer reliability gate is a read-only interpretation layer over
+`acceleration_benchmark_runs`, worker-family telemetry, watcher event summaries,
+and monitored-root crawl summaries. It reports `ready`, `partial`, `blocked`, or
+`not_run` readiness, required check status, latest run references, selected-root
+cards, and evidence-scored manual candidates. It does not create a separate
+evidence table, store private paths or raw content, mutate settings, or
+automatically unblock VSS/provider-specific acceleration.
+
 `scan` mode creates temporary fixtures or aggregate real-root dry-runs and can
 run multiple passes; pass 1 is recorded as `cold`, later passes reuse an
 in-memory manifest and are recorded as `warm`. `soak` mode creates

@@ -31,6 +31,7 @@ from .indexer_diagnostics import (
     normalize_benchmark_scenario,
     scenario_recommendation_metadata,
 )
+from .indexer_reliability import build_indexer_reliability_report, build_root_reliability_card
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
 from .retrieval_benchmark import build_retrieval_recommendations, evaluate_retrieval_cases, metric_deltas
@@ -892,7 +893,10 @@ class KnowledgeService:
         label: str | None = None,
         warm_state: str | None = None,
         scope_type: str | None = None,
+        scope_hash: str | None = None,
         deployment_label: str | None = None,
+        scenario: str | None = None,
+        freshness_hours: int | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
         normalized = None if fixture in {None, "", "all"} else str(fixture)
@@ -906,10 +910,147 @@ class KnowledgeService:
                 label=label or None,
                 warm_state=warm_state or None,
                 scope_type=scope_type or None,
+                scope_hash=scope_hash or None,
                 deployment_label=deployment_label or None,
+                scenario=scenario or None,
+                freshness_hours=freshness_hours,
                 limit=limit,
             ),
         }
+
+    def indexer_reliability_status(
+        self,
+        *,
+        root_name: str | None = None,
+        path: str | None = None,
+        label: str | None = None,
+        deployment_label: str | None = None,
+        freshness_hours: int = 336,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        scope = "root" if root_name or path else "synthetic"
+        scope_descriptor = _benchmark_scope_descriptor(scope=scope, root_name=root_name, path=path)
+        runs = database.list_benchmark_runs(
+            label=label or None,
+            deployment_label=deployment_label or None,
+            freshness_hours=max(1, int(freshness_hours or 336)),
+            limit=max(1, min(int(limit or 100), 500)),
+        )
+        try:
+            worker_families = collect_acceleration_status().get("worker_families", [])
+        except Exception:
+            worker_families = []
+        try:
+            watcher_events = database.list_watch_events(limit=25)
+        except Exception:
+            watcher_events = []
+        return build_indexer_reliability_report(
+            runs=runs,
+            scope_type=scope_descriptor["scope_type"],
+            scope_hash=scope_descriptor.get("scope_hash"),
+            label=label,
+            deployment_label=deployment_label,
+            worker_families=worker_families,
+            watcher_events=watcher_events,
+            freshness_hours=freshness_hours,
+        )
+
+    def run_indexer_reliability(
+        self,
+        *,
+        scope: str = "synthetic",
+        root_name: str | None = None,
+        path: str | None = None,
+        label: str | None = None,
+        deployment_label: str | None = None,
+        max_files: int = 1000,
+        passes: int = 2,
+        include_cache_readiness: bool = False,
+        include_tuning: bool = True,
+    ) -> dict[str, Any]:
+        normalized_scope = str(scope or "synthetic").strip().lower()
+        self.run_benchmark(
+            fixture="all",
+            files=10,
+            mode="all",
+            passes=max(1, int(passes or 2)),
+            label=label,
+            deployment_label=deployment_label,
+            scenario="reliability",
+        )
+        if normalized_scope != "synthetic":
+            self.run_benchmark(
+                fixture="all",
+                files=10,
+                mode="scan",
+                passes=max(1, int(passes or 2)),
+                label=label,
+                deployment_label=deployment_label,
+                scenario="host_cloud",
+                scope=normalized_scope,
+                root_name=root_name,
+                path=path,
+                max_files=max(1, int(max_files or 1000)),
+            )
+        if include_cache_readiness:
+            self.run_benchmark(
+                fixture="image-heavy",
+                files=10,
+                mode="model",
+                passes=1,
+                label=label,
+                deployment_label=deployment_label,
+                scenario="cache_readiness",
+            )
+        if include_tuning:
+            tuning_kwargs: dict[str, Any] = {}
+            if normalized_scope != "synthetic":
+                tuning_kwargs.update(
+                    {
+                        "scope": normalized_scope,
+                        "root_name": root_name,
+                        "path": path,
+                        "max_files": max(1, int(max_files or 1000)),
+                    }
+                )
+            self.run_benchmark(
+                fixture="all",
+                files=10,
+                mode="scan",
+                passes=max(1, int(passes or 2)),
+                label=label,
+                deployment_label=deployment_label,
+                scenario="tuning",
+                **tuning_kwargs,
+            )
+        return self.indexer_reliability_status(
+            root_name=root_name if normalized_scope != "synthetic" else None,
+            path=path if normalized_scope == "path" else None,
+            label=label,
+            deployment_label=deployment_label,
+        )
+
+    def indexer_root_reliability(self, root_name: str) -> dict[str, Any]:
+        summaries = database.crawl_root_summaries(limit_assets=0, limit_jobs=0)
+        root = next((item for item in summaries if item.get("name") == root_name), None)
+        if not root:
+            raise ValueError(f"unknown monitored root: {root_name}")
+        scope_hash = _benchmark_scope_hash("monitored_root", str(root.get("name") or ""), str(root.get("root_path") or ""))
+        runs = database.list_benchmark_runs(
+            scenario="host_cloud",
+            scope_type="monitored_root",
+            scope_hash=scope_hash,
+            limit=1,
+        )
+        latest_benchmark = runs[0] if runs else None
+        return build_root_reliability_card(
+            root=root,
+            asset_counts=root.get("asset_counts") or {},
+            job_counts=root.get("job_counts") or {},
+            latest_crawl=root.get("latest_crawl"),
+            latest_benchmark=latest_benchmark,
+            scope_hash=scope_hash,
+        )
 
     def run_benchmark(
         self,

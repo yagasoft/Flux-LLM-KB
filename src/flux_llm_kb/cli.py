@@ -310,8 +310,33 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_history.add_argument("--label")
     benchmark_history.add_argument("--warm-state")
     benchmark_history.add_argument("--scope-type")
+    benchmark_history.add_argument("--scope-hash")
     benchmark_history.add_argument("--deployment-label")
+    benchmark_history.add_argument("--scenario")
+    benchmark_history.add_argument("--freshness-hours", type=int)
     benchmark_history.add_argument("--limit", type=int, default=20)
+    reliability_parser = acceleration_subparsers.add_parser("reliability", help="Run or inspect indexer reliability evidence gate")
+    reliability_subparsers = reliability_parser.add_subparsers(dest="reliability_command", required=True)
+    reliability_status = reliability_subparsers.add_parser("status", help="Show metadata-only indexer reliability readiness")
+    reliability_status.add_argument("--root", dest="root_name")
+    reliability_status.add_argument("--path")
+    reliability_status.add_argument("--label")
+    reliability_status.add_argument("--deployment-label")
+    reliability_status.add_argument("--freshness-hours", type=int, default=336)
+    reliability_status.add_argument("--limit", type=int, default=100)
+    reliability_run = reliability_subparsers.add_parser("run", help="Run the reliability validation benchmark suite")
+    reliability_run.add_argument("--scope", choices=["synthetic", "root", "path"], default="synthetic")
+    reliability_run.add_argument("--root", dest="root_name")
+    reliability_run.add_argument("--path")
+    reliability_run.add_argument("--label")
+    reliability_run.add_argument("--deployment-label")
+    reliability_run.add_argument("--max-files", type=int, default=1000)
+    reliability_run.add_argument("--passes", type=int, default=2)
+    reliability_run.add_argument("--include-cache-readiness", action="store_true")
+    reliability_run.add_argument("--skip-tuning", action="store_false", dest="include_tuning")
+    reliability_run.set_defaults(include_tuning=True)
+    reliability_root = reliability_subparsers.add_parser("root-status", help="Show monitored-root reliability card")
+    reliability_root.add_argument("--root", dest="root_name", required=True)
 
     mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
     mail_subparsers = mail_parser.add_subparsers(dest="mail_command", required=True)
@@ -929,11 +954,42 @@ def _acceleration(args: argparse.Namespace) -> int:
                 label=args.label,
                 warm_state=args.warm_state,
                 scope_type=args.scope_type,
+                scope_hash=args.scope_hash,
                 deployment_label=args.deployment_label,
+                scenario=args.scenario,
+                freshness_hours=args.freshness_hours,
                 limit=args.limit,
             )
         else:  # pragma: no cover - argparse prevents this
             raise ValueError(args.benchmark_command)
+    elif args.acceleration_command == "reliability":
+        from .service import KnowledgeService
+
+        if args.reliability_command == "status":
+            payload = KnowledgeService().indexer_reliability_status(
+                root_name=args.root_name,
+                path=args.path,
+                label=args.label,
+                deployment_label=args.deployment_label,
+                freshness_hours=args.freshness_hours,
+                limit=args.limit,
+            )
+        elif args.reliability_command == "run":
+            payload = KnowledgeService().run_indexer_reliability(
+                scope=args.scope,
+                root_name=args.root_name,
+                path=args.path,
+                label=args.label,
+                deployment_label=args.deployment_label,
+                max_files=args.max_files,
+                passes=args.passes,
+                include_cache_readiness=args.include_cache_readiness,
+                include_tuning=args.include_tuning,
+            )
+        elif args.reliability_command == "root-status":
+            payload = KnowledgeService().indexer_root_reliability(root_name=args.root_name)
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.reliability_command)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.acceleration_command)
     print(json.dumps(payload, indent=2, sort_keys=True))

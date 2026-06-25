@@ -204,6 +204,8 @@ type BenchmarkCandidate = {
   candidate?: number | string;
   reason?: string;
   requires_manual_apply?: boolean;
+  evidence_state?: string;
+  follow_up_command?: string;
 };
 
 type BenchmarkRunResponse = {
@@ -217,6 +219,29 @@ type BenchmarkRunResponse = {
     scenario?: string;
     candidates?: BenchmarkCandidate[];
   };
+};
+
+type ReliabilityCheck = {
+  check?: string;
+  status?: string;
+  summary?: string;
+};
+
+type ReliabilityStatus = {
+  readiness?: string;
+  settings_mutated?: boolean;
+  evidence_age_hours?: number | null;
+  checks?: ReliabilityCheck[];
+  candidates?: BenchmarkCandidate[];
+  watcher?: { backend?: string; event_count?: number; probe_event_count?: number };
+  workers?: { families?: Array<{ family?: string; backpressure?: string; pending?: number }> };
+};
+
+type RootReliabilityCard = {
+  root_name?: string;
+  readiness?: string;
+  blockers?: Record<string, number>;
+  latest_benchmark?: { id?: string; scenario?: string };
 };
 
 type RetrievalBenchmarkCaseResult = {
@@ -1880,6 +1905,8 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
   const [benchmarkStatus, setBenchmarkStatus] = useState("");
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [benchmarkResult, setBenchmarkResult] = useState<BenchmarkRunResponse | null>(null);
+  const [reliabilityStatus, setReliabilityStatus] = useState<ReliabilityStatus | null>(null);
+  const [rootReliability, setRootReliability] = useState<RootReliabilityCard | null>(null);
   const capabilities = acceleration?.capabilities ?? {};
   const cache = acceleration?.cache ?? {};
   const families = acceleration?.worker_families ?? [];
@@ -1887,6 +1914,32 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
   const benchmarkHistory = acceleration?.benchmarks?.history ?? [];
   const benchmarkDiagnostics = benchmarkResult?.diagnostics ?? [];
   const benchmarkCandidates = benchmarkResult?.recommendations?.candidates ?? [];
+  const reliabilityChecks = reliabilityStatus?.checks ?? [];
+  const reliabilityCandidates = reliabilityStatus?.candidates ?? [];
+  useEffect(() => {
+    let cancelled = false;
+    getJson<ReliabilityStatus>("/api/acceleration/reliability", { readiness: "not_run", checks: [], candidates: [] }).then((payload) => {
+      if (!cancelled) setReliabilityStatus(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedRoot?.name) {
+      setRootReliability(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    getJson<RootReliabilityCard>(`/api/acceleration/reliability/root/${encodeURIComponent(selectedRoot.name)}`, { root_name: selectedRoot.name, readiness: "not_run" }).then((payload) => {
+      if (!cancelled) setRootReliability(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRoot?.name]);
   const familyRows = families.slice(0, 8).map((family) => {
     const name = family.family ?? "general";
     const pending = family.pending ?? 0;
@@ -1993,6 +2046,22 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
       setBenchmarkRunning(false);
     }
   }
+  async function runReliabilityGate() {
+    const request = selectedRoot?.name
+      ? { scope: "root", root_name: selectedRoot.name, max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true }
+      : { scope: "synthetic", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true };
+    try {
+      setBenchmarkRunning(true);
+      setBenchmarkStatus("Reliability gate queued...");
+      const result = await sendJson<ReliabilityStatus>("/api/acceleration/reliability/run", "POST", request);
+      setReliabilityStatus(result);
+      setBenchmarkStatus(`Reliability gate ${humanizeIdentifier(result.readiness ?? "observed").toLowerCase()}.`);
+    } catch (error) {
+      setBenchmarkStatus(`Reliability gate failed: ${errorMessage(error)}`);
+    } finally {
+      setBenchmarkRunning(false);
+    }
+  }
   return (
     <Panel title="Acceleration">
       <div className="status-grid">
@@ -2021,6 +2090,34 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
         </div>
       )}
       <div className="settings-list">
+        <div className="settings-row">
+          <strong>Reliability Gate</strong>
+          <span>{humanizeIdentifier(reliabilityStatus?.readiness ?? "not_run")}</span>
+          <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runReliabilityGate()}>
+            <Play size={15} /> Run reliability gate
+          </button>
+        </div>
+        {rootReliability && (
+          <div className="settings-row">
+            <strong>Selected Root</strong>
+            <span>{rootReliability.root_name ?? selectedRoot?.name} / {String(rootReliability.readiness ?? "not_run").toLowerCase()}</span>
+            <em>{rootReliability.latest_benchmark?.id ? `benchmark ${rootReliability.latest_benchmark.id}` : "no scoped benchmark"}</em>
+          </div>
+        )}
+        {reliabilityChecks.slice(0, 4).map((check) => (
+          <div className="settings-row" key={`reliability-${check.check}`}>
+            <strong>{humanizeIdentifier(check.check ?? "check")}</strong>
+            <span>{check.summary ?? "reliability evidence recorded"}</span>
+            <em>{humanizeIdentifier(check.status ?? "observed")}</em>
+          </div>
+        ))}
+        {reliabilityCandidates.length > 0 && (
+          <MiniTable rows={reliabilityCandidates.slice(0, 4).map((candidate) => [
+            String(candidate.setting ?? "setting"),
+            String(candidate.evidence_state ?? "needs_review").replace(/[_-]+/g, " "),
+            candidate.follow_up_command ?? "manual follow-up"
+          ] as [string, string, string])} />
+        )}
         <div className="settings-row">
           <strong>Benchmark History</strong>
           <span>{benchmarkRows.length} recent synthetic runs</span>
