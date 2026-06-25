@@ -41,6 +41,11 @@ def sanitize_code_result(row: dict[str, Any]) -> dict[str, Any]:
             "parser_status",
             "confidence",
             "root_name",
+            "is_generated",
+            "target_symbol",
+            "source_symbol",
+            "route",
+            "test_target",
         )
         if row.get(key) not in {None, ""}
     }

@@ -259,13 +259,50 @@ type OperatorEvidence = {
   gates?: Record<string, { state?: string; reason?: string }>;
   top_blockers?: Array<{ section?: string; severity?: string; root_name?: string; summary?: string }>;
   manual_follow_ups?: Array<{ setting?: string; command?: string }>;
-  code_gaps?: Array<{ category?: string; count?: number; summary?: string }>;
+  code_gaps?: CodeGap[];
+};
+
+type CodeGap = {
+  category?: string;
+  priority?: string;
+  count?: number;
+  summary?: string;
+  source?: string;
+  case_category?: string;
+  reasons?: string[];
+};
+
+type CodeSearchResult = {
+  symbol?: string;
+  target?: string;
+  symbol_kind?: string;
+  relationship?: string;
+  relationship_kind?: string;
+  language?: string;
+  path?: string;
+  line_start?: number;
+  line_end?: number;
+  is_generated?: boolean;
+  source_symbol?: string;
+  target_symbol?: string;
+};
+
+type CodeSearchResponse = {
+  settings_mutated?: boolean;
+  results?: CodeSearchResult[];
+};
+
+type CodeSymbolLookupResponse = {
+  settings_mutated?: boolean;
+  query?: string;
+  matches?: CodeSearchResult[];
+  references?: CodeSearchResult[];
 };
 
 type CodeStatus = {
   totals?: Record<string, number>;
   feedback_summary?: { totals?: Record<string, number>; rows?: Array<{ miss_category?: string; root_name?: string; event_count?: number }> };
-  gaps?: Array<{ category?: string; count?: number; summary?: string }>;
+  gaps?: CodeGap[];
   roots?: Array<{
     root_name?: string;
     health?: string;
@@ -276,6 +313,7 @@ type CodeStatus = {
     generated_count?: number;
     languages?: Record<string, number>;
     parser_statuses?: Record<string, number>;
+    slow_files?: Array<{ path?: string; duration_ms?: number }>;
   }>;
 };
 
@@ -1981,6 +2019,15 @@ function CodeDiagnosticsPanel() {
   const [status, setStatus] = useState<CodeStatus | null>(null);
   const [feedbackCategory, setFeedbackCategory] = useState("missing_symbol");
   const [feedbackStatus, setFeedbackStatus] = useState("");
+  const [codeSearchQuery, setCodeSearchQuery] = useState("build_invoice");
+  const [codeRelationship, setCodeRelationship] = useState("call");
+  const [codePathGlob, setCodePathGlob] = useState("");
+  const [codeIncludeGenerated, setCodeIncludeGenerated] = useState(false);
+  const [codeSearchStatus, setCodeSearchStatus] = useState("");
+  const [codeSearchResults, setCodeSearchResults] = useState<CodeSearchResult[]>([]);
+  const [symbolLookupQuery, setSymbolLookupQuery] = useState("OrderService.build_invoice");
+  const [symbolLookupStatus, setSymbolLookupStatus] = useState("");
+  const [symbolLookup, setSymbolLookup] = useState<CodeSymbolLookupResponse | null>(null);
   useEffect(() => {
     let cancelled = false;
     getJson<CodeStatus>("/api/code/status", { totals: {}, roots: [] }).then((payload) => {
@@ -2008,6 +2055,46 @@ function CodeDiagnosticsPanel() {
       setFeedbackStatus(`Feedback failed: ${errorMessage(error)}`);
     }
   }
+  async function runCodeSearch(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    const query = codeSearchQuery.trim();
+    if (!query) {
+      setCodeSearchStatus("Enter a code search query.");
+      return;
+    }
+    const params = new URLSearchParams({ query, limit: "5", include_generated: String(codeIncludeGenerated) });
+    if (roots[0]?.root_name) params.set("root_name", roots[0].root_name);
+    if (codeRelationship) params.set("relationship", codeRelationship);
+    if (codePathGlob.trim()) params.set("path_glob", codePathGlob.trim());
+    setCodeSearchStatus("Searching code...");
+    try {
+      const result = await fetchRequiredJson<CodeSearchResponse>(`/api/code/search?${params.toString()}`);
+      const results = result.results ?? [];
+      setCodeSearchResults(results);
+      setCodeSearchStatus(`${results.length} code result${results.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setCodeSearchStatus(`Code search failed: ${errorMessage(error)}`);
+    }
+  }
+  async function runSymbolLookup(event?: FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
+    const symbol = symbolLookupQuery.trim();
+    if (!symbol) {
+      setSymbolLookupStatus("Enter a symbol name.");
+      return;
+    }
+    const params = new URLSearchParams({ symbol, include_references: "true", limit: "5" });
+    if (roots[0]?.root_name) params.set("root_name", roots[0].root_name);
+    setSymbolLookupStatus("Looking up symbol...");
+    try {
+      const result = await fetchRequiredJson<CodeSymbolLookupResponse>(`/api/code/symbols?${params.toString()}`);
+      setSymbolLookup(result);
+      const count = (result.matches?.length ?? 0) + (result.references?.length ?? 0);
+      setSymbolLookupStatus(`${count} symbol row${count === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setSymbolLookupStatus(`Symbol lookup failed: ${errorMessage(error)}`);
+    }
+  }
   const rows = roots.slice(0, 5).map((root) => {
     const languages = Object.entries(root.languages ?? {})
       .slice(0, 3)
@@ -2024,6 +2111,36 @@ function CodeDiagnosticsPanel() {
       `${languages}; ${parser}`
     ] as [string, string, string, string];
   });
+  const gapRows = (status?.gaps ?? []).slice(0, 5).map((gap) => [
+    humanizeIdentifier(gap.category ?? "gap"),
+    humanizeIdentifier(gap.priority ?? "medium"),
+    String(gap.count ?? 0),
+    gap.summary ?? "Review code retrieval gap"
+  ] as [string, string, string, string]);
+  const hotspotRows = roots
+    .flatMap((root) => (root.slow_files ?? []).map((file) => ({ root: root.root_name ?? "root", ...file })))
+    .slice(0, 4)
+    .map((file) => [file.root, file.path ?? "file", `${file.duration_ms ?? 0}ms`] as [string, string, string]);
+  const codeResultRows = codeSearchResults.slice(0, 5).map((result) => [
+    codeResultLabel(result),
+    humanizeIdentifier(result.relationship ?? result.relationship_kind ?? result.symbol_kind ?? "match"),
+    `${result.language ?? "-"} ${result.path ?? ""}`.trim(),
+    `${lineRangeLabel(result)}${result.is_generated ? " generated" : ""}`.trim() || "-"
+  ] as [string, string, string, string]);
+  const lookupRows = [
+    ...(symbolLookup?.matches ?? []).map((result) => [
+      codeResultLabel(result),
+      humanizeIdentifier(result.symbol_kind ?? "definition"),
+      `${result.language ?? "-"} ${result.path ?? ""}`.trim(),
+      lineRangeLabel(result) || "-"
+    ] as [string, string, string, string]),
+    ...(symbolLookup?.references ?? []).map((result) => [
+      result.source_symbol ?? codeResultLabel(result),
+      humanizeIdentifier(result.relationship ?? result.relationship_kind ?? "reference"),
+      `${result.language ?? "-"} ${result.path ?? ""}`.trim(),
+      codeResultLabel(result)
+    ] as [string, string, string, string])
+  ];
   return (
     <Panel title="Code Diagnostics">
       <div className="summary-cards">
@@ -2031,9 +2148,42 @@ function CodeDiagnosticsPanel() {
         <Stat label="Symbols" value={String(totals.symbol_count ?? 0)} />
         <Stat label="References" value={String(totals.reference_count ?? 0)} />
         <Stat label="Fallbacks" value={String(totals.fallback_count ?? 0)} />
+        <Stat label="Generated" value={String(totals.generated_count ?? 0)} />
       </div>
       {rows.length > 0 ? <MiniTable rows={rows} /> : <p className="muted">No code index diagnostics yet.</p>}
+      {gapRows.length > 0 && <MiniTable rows={gapRows} />}
+      {hotspotRows.length > 0 && <MiniTable rows={hotspotRows} />}
       <div className="settings-list">
+        <form className="settings-row" onSubmit={(event) => void runCodeSearch(event)}>
+          <strong>Code Search</strong>
+          <input aria-label="Code search query" value={codeSearchQuery} onChange={(event) => setCodeSearchQuery(event.target.value)} />
+          <select aria-label="Code relationship filter" value={codeRelationship} onChange={(event) => setCodeRelationship(event.target.value)}>
+            <option value="call">Call</option>
+            <option value="definition">Definition</option>
+            <option value="import">Import</option>
+            <option value="route">Route</option>
+            <option value="test">Test</option>
+            <option value="fixture">Fixture</option>
+            <option value="config">Config</option>
+            <option value="migration">Migration</option>
+            <option value="notebook_cell">Notebook cell</option>
+          </select>
+          <input aria-label="Code path glob" value={codePathGlob} onChange={(event) => setCodePathGlob(event.target.value)} placeholder="src/*.py" />
+          <label className="inline-check">
+            <input type="checkbox" checked={codeIncludeGenerated} onChange={(event) => setCodeIncludeGenerated(event.target.checked)} />
+            Generated
+          </label>
+          <button className="ghost-action compact" type="submit" aria-label="Run code search"><Search size={15} /> Search</button>
+        </form>
+        {codeResultRows.length > 0 && <MiniTable rows={codeResultRows} />}
+        {codeSearchStatus && <p className="panel-note">{codeSearchStatus}</p>}
+        <form className="settings-row" onSubmit={(event) => void runSymbolLookup(event)}>
+          <strong>Symbol Lookup</strong>
+          <input aria-label="Symbol lookup query" value={symbolLookupQuery} onChange={(event) => setSymbolLookupQuery(event.target.value)} />
+          <button className="ghost-action compact" type="submit" aria-label="Lookup code symbol"><Search size={15} /> Lookup</button>
+        </form>
+        {lookupRows.length > 0 && <MiniTable rows={lookupRows} />}
+        {symbolLookupStatus && <p className="panel-note">{symbolLookupStatus}</p>}
         <div className="settings-row">
           <strong>Code Feedback</strong>
           <span>{feedbackTotal} feedback events</span>
@@ -2048,13 +2198,6 @@ function CodeDiagnosticsPanel() {
           </select>
           <button className="ghost-action compact" type="button" onClick={() => void submitFeedback()}>Submit code feedback</button>
         </div>
-        {(status?.gaps ?? []).slice(0, 3).map((gap) => (
-          <div className="settings-row" key={`code-gap-${gap.category}`}>
-            <strong>{humanizeIdentifier(gap.category ?? "gap")}</strong>
-            <span>{gap.summary ?? "Review code retrieval gap"}</span>
-            <em>{gap.count ?? 0}</em>
-          </div>
-        ))}
         {feedbackStatus && <p className="panel-note">{feedbackStatus}</p>}
       </div>
     </Panel>
@@ -5071,6 +5214,18 @@ function MiniTable({ rows }: { rows: MiniTableRow[] }) {
       ))}
     </div>
   );
+}
+
+function codeResultLabel(result: CodeSearchResult) {
+  return result.symbol ?? result.target_symbol ?? result.target ?? "code result";
+}
+
+function lineRangeLabel(result: CodeSearchResult) {
+  if (result.line_start == null) return "";
+  if (result.line_end != null && result.line_end !== result.line_start) {
+    return `L${result.line_start}-L${result.line_end}`;
+  }
+  return `L${result.line_start}`;
 }
 
 function restartSettings(settings: SettingRow[]) {

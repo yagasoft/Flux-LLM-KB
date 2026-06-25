@@ -361,10 +361,16 @@ Code diagnostics are read-only and privacy-safe. They aggregate coverage from
 per-root language counts, parser status/fallback counts, generated-file counts,
 definition/reference coverage, and slow/problematic code-index rows without raw
 code content or private root paths. Dedicated code status/search/symbol lookup
-surfaces reuse the stored symbol/reference tables and sanitize path output. Code
-retrieval feedback records only hashed/sanitized miss evidence and appears in
-`code status` as `feedback_summary`, `gaps[]`, and retrieval benchmark summary
-metadata when available.
+surfaces reuse the stored symbol/reference tables and sanitize path output.
+Code and generic corpus search filters accept `relationship`, `path_glob`, and
+`include_generated`; generated files are excluded when
+`include_generated=false` is part of the active filter set. Sanitized code
+results can include `is_generated`, `relationship`, `target_symbol`,
+`source_symbol`, `route`, `test_target`, `parser_status`, `language`,
+`symbol_kind`, and line ranges. Code retrieval feedback records only
+hashed/sanitized miss evidence and appears in `code status` as
+`feedback_summary`, `gaps[]`, retrieval benchmark summary metadata, and
+benchmark-derived code gap priorities when available.
 
 Operational diagnostics aggregate retrieval explain traces, watcher events,
 worker heartbeat/history, slow jobs, blocked dependencies, mail sync runs, and
@@ -407,7 +413,7 @@ flux-kb acceleration evidence --compare-label baseline
 flux-kb acceleration reliability roots
 flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
 flux-kb code status --root docs
-flux-kb code search build_invoice --root app --language python
+flux-kb code search build_invoice --root app --language python --relationship call --path-glob "src/*.py"
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
@@ -422,8 +428,9 @@ and future graph/review workflows. The UI is a React/Vite operations console
 bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
 The Health tab includes the operator evidence gate panel, acceleration all-root
-reliability matrix, code diagnostics with feedback capture, and filtered
-operational diagnostics panels. Diagnostic rows expose bounded evidence,
+reliability matrix, code diagnostics with feedback capture, top code gaps,
+parser/fallback hotspots, generated-file counts, direct code search/symbol
+lookup controls, and filtered operational diagnostics panels. Diagnostic rows expose bounded evidence,
 follow-up commands, and confirmation-gated remediation buttons where the service
 has a safe scoped recovery action.
 

@@ -248,3 +248,54 @@ def test_service_retrieval_benchmark_history_uses_database(monkeypatch):
         "runs": [{"id": "retrieval-run-1", "suite": "standard", "metrics": {"top1_accuracy": 1.0}}],
     }
     assert calls == [{"suite": "standard", "label": "nightly", "limit": 5}]
+
+
+def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases(monkeypatch):
+    calls = []
+    episode_ids = iter(["episode-current", "episode-stale"])
+
+    monkeypatch.setattr(database, "add_monitored_root", lambda **kwargs: calls.append(("add_root", kwargs)))
+    monkeypatch.setattr(database, "delete_monitored_root", lambda **kwargs: calls.append(("delete_root", kwargs)))
+    monkeypatch.setattr(database, "forget_episode", lambda episode_id: calls.append(("forget", episode_id)))
+    monkeypatch.setattr(database, "insert_episode", lambda **kwargs: next(episode_ids))
+    monkeypatch.setattr(database, "upsert_claim", lambda **kwargs: {"id": "claim-stale"})
+    monkeypatch.setattr(database, "transition_claim", lambda **kwargs: calls.append(("transition", kwargs)))
+
+    class FakeService(KnowledgeService):
+        def sync_corpus(self, **_kwargs):
+            calls.append(("sync", _kwargs))
+
+        def search(self, query, limit=10, **_kwargs):
+            if "caller" in query or "test" in query:
+                return [{"id": "chunk-test", "source_path": "tests/test_service_impl.py"}]
+            if "route" in query:
+                return [{"id": "chunk-route", "source_path": "web/routes.ts"}]
+            if "generated" in query:
+                return [{"id": "chunk-generated", "source_path": "generated/client.py"}]
+            if "migration" in query:
+                return [{"id": "chunk-migration", "source_path": "db/migrations/0001_create_benchmark_orders.sql"}]
+            if "config" in query:
+                return [{"id": "chunk-config", "source_path": "config/app.yaml"}]
+            if "disambiguate" in query:
+                return [{"id": "chunk-app-service", "source_path": "app/service_impl.py"}]
+            return [{"id": "chunk-default", "source_path": "alpha-decision.md"}]
+
+    cases, cleanup = FakeService()._prepare_retrieval_benchmark_cases("standard")
+    cleanup()
+
+    by_category = {case["category"]: case for case in cases}
+    for category in {
+        "code_caller",
+        "code_test",
+        "code_route",
+        "code_generated_suppression",
+        "code_config",
+        "code_migration",
+        "code_cross_root",
+    }:
+        assert category in by_category
+    assert by_category["code_route"]["filters"]["relationships"] == ["route"]
+    assert by_category["code_test"]["filters"]["relationships"] == ["test"]
+    assert by_category["code_generated_suppression"]["filters"]["include_generated"] is True
+    assert by_category["code_cross_root"]["filters"]["path_globs"] == ["app/*"]
+    assert any(call[0] == "delete_root" for call in calls)

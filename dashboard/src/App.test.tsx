@@ -337,6 +337,8 @@ let retentionPolicyUpdatePayload: unknown;
 let benchmarkRunPayload: unknown;
 let reliabilityRunPayload: unknown;
 let codeFeedbackPayload: unknown;
+let codeSearchRequestUrl: string | undefined;
+let codeSymbolRequestUrl: string | undefined;
 let retrievalBenchmarkRunPayload: unknown;
 let retrievalBenchmarkHistoryPayload: unknown;
 let diagnosticsActionPayload: unknown;
@@ -510,6 +512,8 @@ describe("Flux dashboard", () => {
     benchmarkRunPayload = undefined;
     reliabilityRunPayload = undefined;
     codeFeedbackPayload = undefined;
+    codeSearchRequestUrl = undefined;
+    codeSymbolRequestUrl = undefined;
     retrievalBenchmarkRunPayload = undefined;
     diagnosticsActionPayload = undefined;
     retrievalBenchmarkHistoryPayload = {
@@ -725,6 +729,49 @@ describe("Flux dashboard", () => {
       if (url === "/api/code/feedback" && init?.method === "POST") {
         codeFeedbackPayload = JSON.parse(String(init.body));
         return json({ id: "feedback-1", settings_mutated: false });
+      }
+      if (url.startsWith("/api/code/search")) {
+        codeSearchRequestUrl = url;
+        return json({
+          settings_mutated: false,
+          results: [
+            {
+              symbol: "OrderService.build_invoice",
+              relationship: "call",
+              language: "python",
+              path: "tests/test_orders.py",
+              line_start: 7,
+              line_end: 9,
+              is_generated: false
+            }
+          ]
+        });
+      }
+      if (url.startsWith("/api/code/symbols")) {
+        codeSymbolRequestUrl = url;
+        return json({
+          settings_mutated: false,
+          query: "OrderService.build_invoice",
+          matches: [
+            {
+              symbol: "OrderService.build_invoice",
+              symbol_kind: "method",
+              language: "python",
+              path: "src/orders.py",
+              line_start: 5,
+              line_end: 7
+            }
+          ],
+          references: [
+            {
+              target: "OrderService.build_invoice",
+              relationship: "test",
+              language: "python",
+              path: "tests/test_orders.py",
+              source_symbol: "test_build_invoice_returns_ready_status"
+            }
+          ]
+        });
       }
       if (url === "/api/code/feedback/summary") {
         return json({ settings_mutated: false, totals: { event_count: 2 }, rows: [{ miss_category: "missing_symbol", root_name: "app", event_count: 2 }] });
@@ -1010,6 +1057,8 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("python 4; typescript 3; Parsed 6; Fallback 1")).toBeInTheDocument();
     expect(screen.getByText("Code Feedback")).toBeInTheDocument();
     expect(screen.getByText("2 feedback events")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run code search" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Lookup code symbol" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Operational Diagnostics" })).toBeInTheDocument();
     expect(screen.getByText("Blocked jobs")).toBeInTheDocument();
     expect(screen.getByText("1 blocked locks")).toBeInTheDocument();
@@ -1033,6 +1082,23 @@ describe("Flux dashboard", () => {
     expect(reliabilityRunPayload).toEqual({ scope: "all_roots", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true, evidence_level: "full" });
     await user.click(screen.getByRole("button", { name: "Submit code feedback" }));
     expect(codeFeedbackPayload).toMatchObject({ surface: "dashboard", miss_category: "missing_symbol" });
+    await user.clear(screen.getByLabelText("Code search query"));
+    await user.type(screen.getByLabelText("Code search query"), "build_invoice");
+    await user.clear(screen.getByLabelText("Code path glob"));
+    await user.type(screen.getByLabelText("Code path glob"), "src/*.py");
+    await user.click(screen.getByRole("button", { name: "Run code search" }));
+    expect(codeSearchRequestUrl).toContain("/api/code/search?");
+    expect(codeSearchRequestUrl).toContain("query=build_invoice");
+    expect(codeSearchRequestUrl).toContain("relationship=call");
+    expect(codeSearchRequestUrl).toContain("path_glob=src%2F*.py");
+    expect(codeSearchRequestUrl).toContain("include_generated=false");
+    expect(await screen.findByText("OrderService.build_invoice")).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Symbol lookup query"));
+    await user.type(screen.getByLabelText("Symbol lookup query"), "OrderService.build_invoice");
+    await user.click(screen.getByRole("button", { name: "Lookup code symbol" }));
+    expect(codeSymbolRequestUrl).toContain("/api/code/symbols?");
+    expect(codeSymbolRequestUrl).toContain("symbol=OrderService.build_invoice");
+    expect(await screen.findByText("test_build_invoice_returns_ready_status")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Apply diagnostic filters" }));
     expect(fetch).toHaveBeenCalledWith("/api/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
     vi.spyOn(window, "confirm").mockReturnValueOnce(true);

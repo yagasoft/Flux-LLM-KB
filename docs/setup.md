@@ -148,7 +148,7 @@ flux-kb acceleration evidence --compare-label baseline
 flux-kb acceleration reliability roots
 flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
 flux-kb code status --root docs
-flux-kb code search build_invoice --root app --language python
+flux-kb code search build_invoice --root app --language python --relationship call --path-glob "src/*.py"
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app

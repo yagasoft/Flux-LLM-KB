@@ -103,7 +103,7 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def indexer_root_reliability(root_name: str)" in source
     assert "def indexer_reliability_roots(include_disabled: bool = False, freshness_hours: int = 336, limit: int = 100)" in source
     assert "def code_status(root_name: str | None = None)" in source
-    assert "def code_search(query: str, root_name: str | None = None, language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, limit: int = 20)" in source
+    assert "def code_search(query: str, root_name: str | None = None, language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, path_glob: str | None = None, include_generated: bool = False, limit: int = 20)" in source
     assert "def code_symbol_lookup(symbol: str, root_name: str | None = None, language: str | None = None, include_references: bool = True, limit: int = 20)" in source
     assert "def code_feedback_record(query: str, root_name: str | None = None, result_count: int = 0, surface: str = \"mcp\", miss_category: str = \"other\", expected_symbol: str | None = None, path: str | None = None)" in source
     assert "def code_feedback_summary(root_name: str | None = None, limit: int = 20)" in source

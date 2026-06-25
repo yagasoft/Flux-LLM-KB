@@ -49,6 +49,7 @@ def _filters_from_query(
     symbol_kind: list[str] | None = None,
     relationship: list[str] | None = None,
     path_glob: list[str] | None = None,
+    include_generated: bool | None = None,
 ) -> dict[str, Any] | None:
     if (
         not kind
@@ -60,6 +61,7 @@ def _filters_from_query(
         and not symbol_kind
         and not relationship
         and not path_glob
+        and include_generated is None
     ):
         return None
     return normalize_retrieval_filters(
@@ -73,6 +75,7 @@ def _filters_from_query(
             "symbol_kind": symbol_kind or [],
             "relationship": relationship or [],
             "path_glob": path_glob or [],
+            "include_generated": bool(include_generated),
         }
     )
 
@@ -500,6 +503,8 @@ def create_app():
         language: str | None = None,
         symbol_kind: str | None = None,
         relationship: str | None = None,
+        path_glob: str | None = None,
+        include_generated: bool = False,
         limit: int = 20,
     ):
         return service.code_search(
@@ -508,6 +513,8 @@ def create_app():
             language=language,
             symbol_kind=symbol_kind,
             relationship=relationship,
+            path_glob=path_glob,
+            include_generated=include_generated,
             limit=limit,
         )
 
@@ -623,6 +630,7 @@ def create_app():
         symbol_kind: list[str] | None = Query(None),
         relationship: list[str] | None = Query(None),
         path_glob: list[str] | None = Query(None),
+        include_generated: bool | None = None,
     ):
         filters = _filters_from_query(
             kind=kind,
@@ -634,6 +642,7 @@ def create_app():
             symbol_kind=symbol_kind,
             relationship=relationship,
             path_glob=path_glob,
+            include_generated=include_generated,
         )
         kwargs = _service_retrieval_kwargs(limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
         return service.search(query, **kwargs)

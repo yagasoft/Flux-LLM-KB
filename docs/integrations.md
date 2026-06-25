@@ -92,7 +92,7 @@ Endpoints:
 - `GET /api/acceleration/reliability/root/{root_name}`
 - `GET /api/acceleration/reliability/roots`
 - `GET /api/code/status?root_name=<name>`
-- `GET /api/code/search?query=<q>&root_name=<name>&language=<language>&limit=<n>`
+- `GET /api/code/search?query=<q>&root_name=<name>&language=<language>&symbol_kind=<kind>&relationship=<definition|call|import|route|test|fixture|config|migration|notebook_cell>&path_glob=<glob>&include_generated=<true|false>&limit=<n>`
 - `GET /api/code/symbols?symbol=<name>&root_name=<name>&language=<language>&include_references=<true|false>`
 - `POST /api/code/feedback` with `query`, optional `root_name`, `result_count`, `surface`, `miss_category`, optional `expected_symbol`, optional `path`, and optional metadata; only hashes/safe leaves are persisted
 - `GET /api/code/feedback/summary?root_name=<name>&limit=<n>`
@@ -225,7 +225,7 @@ flux-kb acceleration evidence --compare-label baseline
 flux-kb acceleration reliability roots
 flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
 flux-kb code status --root docs
-flux-kb code search build_invoice --root app --language python
+flux-kb code search build_invoice --root app --language python --relationship call --path-glob "src/*.py"
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
@@ -353,10 +353,16 @@ Code diagnostics use the existing `source_assets`, `asset_chunks`,
 `flux-kb code status|search|symbol`, `GET /api/code/status`,
 `GET /api/code/search`, `GET /api/code/symbols`, and the matching MCP tools
 expose coverage summaries, parser/fallback rates, generated counts,
-symbol/reference lookup, feedback summaries, and sanitized file labels without
-raw code content. Feedback can be recorded through `flux-kb code feedback add`,
-`POST /api/code/feedback`, or `kb.code_feedback_record`; these surfaces hash the
-query/symbol/scope and store only safe filename leaves and category metadata.
+symbol/reference lookup, feedback summaries, benchmark-derived code gaps, and
+sanitized file labels without raw code content. Code search accepts optional
+`relationship`, `path_glob`, and `include_generated` filters; generic
+`kb.search`, REST search, CLI search, and explain filters accept the same code
+filter fields through the normal `filters` contract. Sanitized result metadata
+may include generated status, relationship, source/target symbols, route or test
+target, parser status, language, symbol kind, and line ranges. Feedback can be
+recorded through `flux-kb code feedback add`, `POST /api/code/feedback`, or
+`kb.code_feedback_record`; these surfaces hash the query/symbol/scope and store
+only safe filename leaves and category metadata.
 Operational diagnostics are available through `flux-kb diagnostics <section>`,
 `GET /api/diagnostics/{section}`, and `kb.operational_diagnostics`; they
 aggregate retrieval traces, watcher events, worker state, slow/blocked jobs,
@@ -374,7 +380,9 @@ and brief paths used by consumers, and persist metadata-only quality evidence:
 top-1 accuracy, precision@3, recall@5, MRR, nDCG@5, brief recall, brief
 dilution, scope and suppression pass counts, elapsed time, sanitized case ids,
 query hashes, ranks, result ids, stream/kind labels, case categories, confidence
-bands, score evidence, and failure reasons. Suite v2 also reports
+bands, score evidence, and failure reasons. Suite v2 includes code cases for
+callers, tests, routes, generated-file handling, config/migration lookup,
+fallback recovery, and cross-root disambiguation, and also reports
 `metric_deltas`, `calibration_summary`, semantic duplicate
 `recommendations.candidates[]`, richer sanitized `case_results[]`, and
 `settings_mutated: false`; benchmark output is advisory evidence for later

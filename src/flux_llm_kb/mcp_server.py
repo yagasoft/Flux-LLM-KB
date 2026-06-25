@@ -287,7 +287,7 @@ def create_server():
         return service.code_status(root_name=root_name)
 
     @mcp.tool(name="kb.code_search")
-    def code_search(query: str, root_name: str | None = None, language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, limit: int = 20):
+    def code_search(query: str, root_name: str | None = None, language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, path_glob: str | None = None, include_generated: bool = False, limit: int = 20):
         """Search code symbols and definitions without returning raw private code."""
         return service.code_search(
             query=query,
@@ -295,6 +295,8 @@ def create_server():
             language=language,
             symbol_kind=symbol_kind,
             relationship=relationship,
+            path_glob=path_glob,
+            include_generated=include_generated,
             limit=limit,
         )
 

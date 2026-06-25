@@ -146,3 +146,98 @@ def test_parse_generated_typescript_routes_and_notebook_cells(tmp_path):
     assert any(symbol.qualified_name == "configureRoutes" for symbol in routes_result.symbols)
     assert [chunk.metadata["cell_type"] for chunk in notebook_result.chunks] == ["markdown", "code"]
     assert all(symbol.symbol_kind == "notebook_cell" for symbol in notebook_result.symbols)
+
+
+def test_parse_python_tests_emits_test_and_fixture_relationships(tmp_path):
+    root = tmp_path / "repo"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    path = tests / "test_orders.py"
+    path.write_text(
+        "\n".join(
+            [
+                "import pytest",
+                "from src.orders import OrderService",
+                "",
+                "@pytest.fixture",
+                "def order_service():",
+                "    return OrderService()",
+                "",
+                "def test_build_invoice(order_service):",
+                "    assert order_service.build_invoice('order-1')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_code_file(path, root=root)
+
+    assert any(symbol.qualified_name == "order_service" and symbol.symbol_kind == "fixture" for symbol in result.symbols)
+    assert any(symbol.qualified_name == "test_build_invoice" and symbol.symbol_kind == "test" for symbol in result.symbols)
+    assert any(
+        reference.relationship_kind == "fixture"
+        and reference.target == "order_service"
+        and reference.source_symbol == "test_build_invoice"
+        for reference in result.references
+    )
+    assert any(
+        reference.relationship_kind == "test"
+        and reference.target == "order_service.build_invoice"
+        and reference.source_symbol == "test_build_invoice"
+        for reference in result.references
+    )
+
+
+def test_parse_javascript_exports_callers_and_route_handlers(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    path = root / "routes.ts"
+    path.write_text(
+        "\n".join(
+            [
+                "import express from 'express';",
+                "const router = express.Router();",
+                "function renderOrder(id) { return { id }; }",
+                "export const buildOrder = (req) => renderOrder(req.params.orderId);",
+                "router.post('/api/orders/:orderId', buildOrder);",
+                "export default class OrdersController {}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_code_file(path, root=root)
+
+    assert any(symbol.qualified_name == "buildOrder" and symbol.exported is True for symbol in result.symbols)
+    assert any(symbol.qualified_name == "OrdersController" and symbol.exported is True for symbol in result.symbols)
+    assert any(
+        reference.relationship_kind == "call"
+        and reference.target == "renderOrder"
+        and reference.source_symbol == "buildOrder"
+        for reference in result.references
+    )
+    assert any(
+        reference.relationship_kind == "route"
+        and reference.target == "/api/orders/:orderId"
+        and reference.source_symbol == "buildOrder"
+        for reference in result.references
+    )
+
+
+def test_parse_common_language_symbols_instead_of_fallback(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    cases = {
+        "main.go": ("func BuildInvoice(id string) string {\n  return id\n}\n", "go", "BuildInvoice", "function"),
+        "lib.rs": ("pub fn build_invoice(id: &str) -> String {\n  id.to_string()\n}\n", "rust", "build_invoice", "function"),
+        "OrderService.cs": ("public class OrderService {\n  public string BuildInvoice(string id) { return id; }\n}\n", "csharp", "OrderService", "class"),
+        "tools.ps1": ("function Invoke-BuildInvoice {\n  param($Id)\n  return $Id\n}\n", "powershell", "Invoke-BuildInvoice", "function"),
+    }
+
+    for filename, (content, language, symbol_name, symbol_kind) in cases.items():
+        path = root / filename
+        path.write_text(content, encoding="utf-8")
+        result = parse_code_file(path, root=root)
+        assert result.metadata["language"] == language
+        assert result.metadata["parser_status"] == "parsed"
+        assert any(symbol.name == symbol_name and symbol.symbol_kind == symbol_kind for symbol in result.symbols)

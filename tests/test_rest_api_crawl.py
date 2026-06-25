@@ -360,13 +360,31 @@ def test_code_and_operational_diagnostic_routes_forward_to_service(monkeypatch):
     client = fastapi_testclient.TestClient(create_app())
 
     assert client.get("/api/code/status", params={"root_name": "app"}).json()["totals"]["symbol_count"] == 1
-    assert client.get("/api/code/search", params={"query": "OrderService", "language": "python"}).json()["results"][0]["symbol"] == "OrderService"
+    assert (
+        client.get(
+            "/api/code/search",
+            params={"query": "OrderService", "language": "python", "relationship": "call", "path_glob": "src/*.py", "include_generated": "true"},
+        ).json()["results"][0]["symbol"]
+        == "OrderService"
+    )
     assert client.get("/api/code/symbols", params={"symbol": "OrderService"}).json()["matches"][0]["symbol"] == "OrderService"
     assert client.get("/api/diagnostics/workers", params={"limit": 5}).json()["settings_mutated"] is False
 
     assert calls == [
         ("code_status", {"root_name": "app"}),
-        ("code_search", {"query": "OrderService", "root_name": None, "language": "python", "symbol_kind": None, "relationship": None, "limit": 20}),
+        (
+            "code_search",
+            {
+                "query": "OrderService",
+                "root_name": None,
+                "language": "python",
+                "symbol_kind": None,
+                "relationship": "call",
+                "path_glob": "src/*.py",
+                "include_generated": True,
+                "limit": 20,
+            },
+        ),
         ("code_symbol", {"symbol": "OrderService", "root_name": None, "language": None, "include_references": True, "limit": 20}),
         (
             "diagnostics",
@@ -981,31 +999,33 @@ def test_get_search_and_brief_support_external_consumers(monkeypatch):
         "cwd": "E:/Repo",
         "root_name": "repo",
         "scope_mode": "local_only",
-        "filters": {
-            "logical_kinds": ["file", "mail"],
-            "current_only": True,
-            "lifecycle_states": [],
-            "include_suppressed": True,
-            "file_kinds": ["code"],
-            "languages": ["python"],
-            "symbol_kinds": ["method"],
-            "relationships": ["definition"],
-            "path_globs": ["src/*.py"],
-        },
-    }
+            "filters": {
+                "logical_kinds": ["file", "mail"],
+                "current_only": True,
+                "lifecycle_states": [],
+                "include_suppressed": True,
+                "file_kinds": ["code"],
+                "languages": ["python"],
+                "symbol_kinds": ["method"],
+                "relationships": ["definition"],
+                "path_globs": ["src/*.py"],
+                "include_generated": False,
+            },
+        }
     assert calls["brief"] == {
         "query": "RFP",
         "token_budget": 900,
         "cwd": "E:/Repo",
         "root_name": "repo",
         "scope_mode": "local_only",
-        "filters": {
-            "logical_kinds": [],
-            "current_only": False,
-            "lifecycle_states": ["active"],
-            "include_suppressed": False,
-        },
-    }
+            "filters": {
+                "logical_kinds": [],
+                "current_only": False,
+                "lifecycle_states": ["active"],
+                "include_suppressed": False,
+                "include_generated": False,
+            },
+        }
 
 
 def test_get_and_post_explain_support_external_consumers(monkeypatch):
@@ -1076,6 +1096,7 @@ def test_get_and_post_explain_support_external_consumers(monkeypatch):
                 "current_only": True,
                 "lifecycle_states": [],
                 "include_suppressed": False,
+                "include_generated": False,
             },
         },
         {

@@ -55,6 +55,50 @@ def test_cli_search_uses_service_search(monkeypatch, capsys):
     assert payload == [{"kind": "corpus_chunk", "title": "dashboard", "limit": 2}]
 
 
+def test_cli_search_forwards_code_retrieval_filters(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    class FakeService:
+        def search(self, query, **kwargs):
+            return [{"query": query, "kwargs": kwargs}]
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "search",
+                "build_invoice",
+                "--root",
+                "app",
+                "--kind",
+                "file",
+                "--language",
+                "python",
+                "--relationship",
+                "call",
+                "--path-glob",
+                "src/*.py",
+                "--include-generated",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload[0]["kwargs"]["root_name"] == "app"
+    assert payload[0]["kwargs"]["filters"] == {
+        "logical_kinds": ["file"],
+        "current_only": False,
+        "lifecycle_states": [],
+        "include_suppressed": False,
+        "languages": ["python"],
+        "relationships": ["call"],
+        "path_globs": ["src/*.py"],
+        "include_generated": True,
+    }
+
+
 def test_cli_explain_uses_service_explain(monkeypatch, capsys):
     from flux_llm_kb import service
 
@@ -158,12 +202,14 @@ def test_cli_search_and_explain_forward_retrieval_filters(monkeypatch, capsys):
         "symbol_kinds": ["method"],
         "relationships": ["definition"],
         "path_globs": ["src/*.py"],
+        "include_generated": False,
     }
     assert explain_payload["filters"] == {
         "logical_kinds": ["file"],
         "current_only": False,
         "lifecycle_states": ["active"],
         "include_suppressed": False,
+        "include_generated": False,
     }
     assert calls[0][0] == "search"
     assert calls[0][3] == "repo"
@@ -349,7 +395,7 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
 
     assert cli.main(["code", "status", "--root", "app"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
-    assert cli.main(["code", "search", "OrderService", "--language", "python"]) == 0
+    assert cli.main(["code", "search", "OrderService", "--language", "python", "--relationship", "call", "--path-glob", "src/*.py", "--include-generated"]) == 0
     search_payload = json.loads(capsys.readouterr().out)
     assert cli.main(["code", "symbol", "OrderService", "--no-references"]) == 0
     symbol_payload = json.loads(capsys.readouterr().out)
@@ -374,7 +420,19 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
     assert backfill_payload["backfill"] == {"kind": "office", "limit": 4, "workers": 1, "root_name": "app"}
     assert calls == [
         ("code_status", {"root_name": "app"}),
-        ("code_search", {"query": "OrderService", "root_name": None, "language": "python", "symbol_kind": None, "relationship": None, "limit": 20}),
+        (
+            "code_search",
+            {
+                "query": "OrderService",
+                "root_name": None,
+                "language": "python",
+                "symbol_kind": None,
+                "relationship": "call",
+                "path_glob": "src/*.py",
+                "include_generated": True,
+                "limit": 20,
+            },
+        ),
         ("code_symbol", {"symbol": "OrderService", "root_name": None, "language": None, "include_references": False, "limit": 20}),
         (
             "code_feedback",

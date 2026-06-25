@@ -37,6 +37,7 @@ def test_code_status_report_summarizes_coverage_without_private_paths():
 
 
 def test_service_code_search_and_symbol_lookup_use_database_helpers(monkeypatch):
+    search_calls = []
     monkeypatch.setattr(
         database,
         "code_index_status",
@@ -48,7 +49,8 @@ def test_service_code_search_and_symbol_lookup_use_database_helpers(monkeypatch)
     monkeypatch.setattr(
         database,
         "search_code_symbols",
-        lambda **kwargs: [
+        lambda **kwargs: search_calls.append(kwargs)
+        or [
             {
                 "symbol": "OrderService.build_invoice",
                 "symbol_kind": "method",
@@ -58,6 +60,8 @@ def test_service_code_search_and_symbol_lookup_use_database_helpers(monkeypatch)
                 "line_end": 7,
                 "relationship": "definition",
                 "parser_status": "parsed",
+                "is_generated": False,
+                "target_symbol": "OrderService.build_invoice",
             }
         ],
     )
@@ -100,12 +104,43 @@ def test_service_code_search_and_symbol_lookup_use_database_helpers(monkeypatch)
             "totals": {"event_count": 2},
         },
     )
+    monkeypatch.setattr(
+        database,
+        "list_retrieval_benchmark_runs",
+        lambda **kwargs: [
+            {
+                "id": "retrieval-run-1",
+                "suite": "standard",
+                "failed_count": 2,
+                "case_results": [
+                    {
+                        "case_id": "code-route",
+                        "category": "code_route",
+                        "status": "failed",
+                        "reasons": ["top1_miss", "recall_miss"],
+                    },
+                    {
+                        "case_id": "code-generated",
+                        "category": "code_generated_suppression",
+                        "status": "failed",
+                        "reasons": ["top1_miss"],
+                    },
+                    {
+                        "case_id": "current-only",
+                        "category": "current_only",
+                        "status": "failed",
+                        "reasons": ["scope_miss"],
+                    },
+                ],
+            }
+        ],
+    )
     feedback_calls = []
     monkeypatch.setattr(database, "record_code_feedback_event", lambda **kwargs: feedback_calls.append(kwargs) or {"id": "feedback-1", "miss_category": kwargs["miss_category"]})
 
     service = KnowledgeService()
     status = service.code_status(root_name="app")
-    search = service.code_search("build_invoice", root_name="app", language="python", limit=5)
+    search = service.code_search("build_invoice", root_name="app", language="python", relationship="call", path_glob="src/*.py", include_generated=True, limit=5)
     symbol = service.code_symbol_lookup("OrderService.build_invoice", root_name="app", include_references=True)
     feedback = service.record_code_feedback(
         query="build invoice",
@@ -122,7 +157,14 @@ def test_service_code_search_and_symbol_lookup_use_database_helpers(monkeypatch)
     assert status["totals"]["symbol_count"] == 1
     assert status["feedback_summary"]["totals"]["event_count"] == 2
     assert status["gaps"][0]["category"] == "missing_symbol"
+    assert status["retrieval_benchmark_summary"]["failed_count"] == 2
+    assert any(gap["category"] == "benchmark_code_route" and gap["count"] == 1 for gap in status["gaps"])
+    assert any(gap["category"] == "benchmark_code_generated_suppression" and gap["count"] == 1 for gap in status["gaps"])
     assert search["results"][0]["symbol"] == "OrderService.build_invoice"
+    assert search["results"][0]["is_generated"] is False
+    assert search_calls[0]["path_glob"] == "src/*.py"
+    assert search_calls[0]["include_generated"] is True
+    assert search_calls[0]["relationship"] == "call"
     assert symbol["references"][0]["relationship"] == "call"
     assert feedback["id"] == "feedback-1"
     assert feedback_calls[0]["miss_category"] == "missing_symbol"

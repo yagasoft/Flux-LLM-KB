@@ -3278,6 +3278,8 @@ def search_code_symbols(
     language: str | None = None,
     symbol_kind: str | None = None,
     relationship: str | None = None,
+    path_glob: str | list[str] | None = None,
+    include_generated: bool = False,
     limit: int = 20,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -3305,13 +3307,23 @@ def search_code_symbols(
             """
         )
         params.append(relationship)
+    path_globs = _normalize_path_globs(path_glob)
+    if path_globs:
+        path_clauses = []
+        for pattern in path_globs:
+            path_clauses.append("a.path LIKE %s ESCAPE '\\'")
+            params.append(_glob_to_sql_like(pattern))
+        filters.append(f"({' OR '.join(path_clauses)})")
+    if not include_generated:
+        filters.append("COALESCE(cs.metadata->>'generated', 'false') <> 'true'")
     capped_limit = max(1, min(int(limit or 20), 100))
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT cs.qualified_name, cs.name, cs.symbol_kind, cs.language, cs.path,
-                       cs.line_start, cs.line_end, cs.parser_status, cs.confidence, r.name
+                       cs.line_start, cs.line_end, cs.parser_status, cs.confidence, r.name,
+                       cs.metadata
                 FROM code_symbols cs
                 JOIN source_assets a ON a.id = cs.source_asset_id
                 JOIN monitored_roots r ON r.id = a.root_id
@@ -3474,7 +3486,9 @@ def _lookup_code_references(
 
 
 def _code_symbol_row(row: tuple[Any, ...]) -> dict[str, Any]:
-    return {
+    metadata = row[10] if len(row) > 10 and isinstance(row[10], dict) else {}
+    routes = metadata.get("routes") if isinstance(metadata.get("routes"), list) else []
+    payload = {
         "symbol": row[0],
         "name": row[1],
         "symbol_kind": row[2],
@@ -3486,7 +3500,12 @@ def _code_symbol_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "confidence": row[8],
         "root_name": row[9],
         "relationship": "definition",
+        "is_generated": bool(metadata.get("generated")),
+        "target_symbol": row[0],
     }
+    if routes:
+        payload["route"] = routes[0]
+    return payload
 
 
 def _code_reference_row(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -6222,7 +6241,24 @@ def _corpus_code_filter_sql(filters: dict[str, Any] | None) -> tuple[str, list[A
             glob_clauses.append("a.path LIKE %s ESCAPE '\\'")
             params.append(_glob_to_sql_like(str(pattern)))
         clauses.append(f"AND ({' OR '.join(glob_clauses)})")
+    if filters.get("include_generated") is False:
+        clauses.append("AND COALESCE(c.metadata->'code'->>'generated', c.metadata->>'generated', a.metadata->'code'->>'generated', 'false') <> 'true'")
     return ("\n                  " + "\n                  ".join(clauses)) if clauses else "", params
+
+
+def _normalize_path_globs(value: str | list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    raw_values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_values:
+        text = str(item or "").strip().replace("\\", "/")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _glob_to_sql_like(pattern: str) -> str:

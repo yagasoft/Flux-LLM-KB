@@ -168,6 +168,8 @@ def main(argv: list[str] | None = None) -> int:
     code_search.add_argument("--language")
     code_search.add_argument("--symbol-kind")
     code_search.add_argument("--relationship")
+    code_search.add_argument("--path-glob")
+    code_search.add_argument("--include-generated", action="store_true")
     code_search.add_argument("--limit", type=int, default=20)
     code_symbol = code_subparsers.add_parser("symbol", help="Look up a code symbol and references")
     code_symbol.add_argument("symbol")
@@ -597,6 +599,7 @@ def _add_retrieval_filter_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--symbol-kind", action="append", dest="symbol_kinds")
     parser.add_argument("--relationship", action="append", dest="relationships")
     parser.add_argument("--path-glob", action="append", dest="path_globs")
+    parser.add_argument("--include-generated", action="store_true")
 
 
 def _retrieval_filters_from_args(args: argparse.Namespace) -> dict | None:
@@ -610,6 +613,7 @@ def _retrieval_filters_from_args(args: argparse.Namespace) -> dict | None:
         "symbol_kinds": getattr(args, "symbol_kinds", None) or [],
         "relationships": getattr(args, "relationships", None) or [],
         "path_globs": getattr(args, "path_globs", None) or [],
+        "include_generated": bool(getattr(args, "include_generated", False)),
     }
     if not any(filters.values()):
         return None
@@ -799,6 +803,8 @@ def _code(args: argparse.Namespace) -> int:
             language=args.language,
             symbol_kind=args.symbol_kind,
             relationship=args.relationship,
+            path_glob=args.path_glob,
+            include_generated=args.include_generated,
             limit=args.limit,
         )
     elif args.code_command == "symbol":

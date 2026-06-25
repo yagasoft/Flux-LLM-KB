@@ -806,6 +806,72 @@ def test_code_feedback_events_insert_summary_and_sanitize_private_values(monkeyp
     assert "e:/private" not in serialized
 
 
+def test_code_symbol_search_filters_path_glob_and_generated_defaults(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "OrderService.build_invoice",
+                    "build_invoice",
+                    "method",
+                    "python",
+                    "src/orders.py",
+                    5,
+                    7,
+                    "parsed",
+                    1.0,
+                    "app",
+                    {"generated": False, "routes": ["/orders/{order_id}"]},
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    rows = database.search_code_symbols(
+        query="build_invoice",
+        root_name="app",
+        language="python",
+        symbol_kind="method",
+        relationship="call",
+        path_glob="src/*.py",
+        include_generated=False,
+        limit=5,
+    )
+
+    sql, params = executed[0]
+    assert "a.path LIKE %s ESCAPE '\\'" in sql
+    assert "COALESCE(cs.metadata->>'generated', 'false') <> 'true'" in sql
+    assert "cr_filter.relationship_kind = %s" in sql
+    assert "src/%\\.py" not in params
+    assert rows[0]["is_generated"] is False
+    assert rows[0]["route"] == "/orders/{order_id}"
+
+
 def test_watcher_events_store_metadata_counts_and_sanitized_paths(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)

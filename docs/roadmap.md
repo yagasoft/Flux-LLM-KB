@@ -50,7 +50,7 @@ The detailed roadmap tables and queued work use the same priority labels:
 | V2.6 Mail Capture And Runtime Configuration | Make mail capture and runtime settings manageable from the local app instead of hidden scripts. | in progress | 88% | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, provider-specific post-processing, and consumer access exist; broader live-provider validation should continue. | Broaden live-provider validation and complete real-world Outlook catch-up proof. |
 | V2.7 Mail And Retrieval Production Hardening | Make search, mail handling, and file indexing reliable enough for daily use. | in progress | 87% | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, provider-specific mail post-processing, lock-tolerant indexing/watch states, query-aware snippets, retrieval/brief explainability, configurable retrieval filters, suppression/lifecycle diagnostics, filtered operational drill-downs, and confirmation-gated diagnostic remediation actions exist; automated-action rationale remains planned. | Finish automated-action rationale, cloud-sync proof, semantic media follow-through, and live validation of recovery flows. |
 | V2.8 Indexer Acceleration And Local Inference Optimization | Make large local indexing faster, observable, and easier to tune on one PC. | in progress | 86% | Dedicated acceleration lane foundations exist for local capability status, explicit watcher backend policy/probe, cache layout visibility, worker-family queues and caps, backpressure/debug status, bounded crawler hash parallelism, incremental scan manifest skips, throughput telemetry, cache-backed local OCR for image/image-only PDF jobs, cache-backed local ASR for audio/video jobs, recursive container telemetry, local vision cache telemetry, scene-transition video frame sampling, thumbnail cache reuse, embedding vector refresh jobs, durable deterministic scan/soak/watcher/model benchmark history with labeled comparisons, scenario diagnostics for reliability/host-cloud/cache/tuning, all-root full evidence runs, and operator evidence gates. | Run and compare live high-volume all-root evidence after deployment, tune defaults from observed hardware, and keep VSS/provider acceleration future-only until the gate justifies design work. |
-| V3 Scale And Evaluation | Prove Flux improves retrieval and memory quality before trusting more automation. | in progress | 52% | Code-aware corpus indexing, historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. Code-aware foundations, metadata-only retrieval benchmark calibration, and privacy-safe code retrieval feedback now exist; broader governance automation remains planned. | Use benchmark/live feedback to drive parser/ranking improvements, librarian shadow mode, governance automation, optional backend decisions, and historical backfill. |
+| V3 Scale And Evaluation | Prove Flux improves retrieval and memory quality before trusting more automation. | in progress | 55% | Code-aware corpus indexing, historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. Code-aware foundations, expanded parser/relationship coverage, metadata-only retrieval benchmark calibration, and privacy-safe code retrieval feedback now exist; broader governance automation remains planned. | Use live repository feedback and benchmark failures to drive the remaining parser/ranking work, librarian shadow mode, governance automation, optional backend decisions, and historical backfill. |
 | V4 Collaboration And Transfer | Explore sharing and transfer only after the personal local system is safe and stable. | planned | 0% | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. | Start only after single-user retrieval, diagnostics, governance, recovery, and privacy controls are stable. |
 
 ## V0: Foundation
@@ -152,9 +152,9 @@ The detailed roadmap tables and queued work use the same priority labels:
 
 | Piece | Priority | Plain-English Purpose | Roadmap Intent | Status | Progress % | Current Evidence / Remaining Gap | Remaining Work | Queued Next |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Code-aware corpus indexing | P0 | Help Codex answer code questions by understanding symbols, files, tests, and relationships. | Parser-backed code intelligence over opted-in repositories so Codex can find files, symbols, definitions, references, tests, routes, handlers, and implementation locations without treating code only as generic text. | in progress | 72% | The foundation and diagnostic surfaces are implemented: code-like files produce parser-aware `asset_chunks`, durable `code_symbols`, and `code_references`; code filters, exact-symbol ranking, generated markers, fallback metadata, privacy-safe coverage status, dedicated REST/CLI/MCP code status/search/symbol lookup, and dashboard code diagnostics exist. Deeper parser coverage and live retrieval feedback remain planned. | Use live retrieval feedback to prioritize deeper parsers, relationship filters, dashboard drill-downs, and ranking improvements without exposing raw private code. | Use code diagnostics and live retrieval feedback to choose deeper parser/ranking work; keep public docs/tests private-content-free. |
+| Code-aware corpus indexing | P0 | Help Codex answer code questions by understanding symbols, files, tests, and relationships. | Parser-backed code intelligence over opted-in repositories so Codex can find files, symbols, definitions, references, tests, routes, handlers, and implementation locations without treating code only as generic text. | in progress | 84% | Code-like files produce parser-aware `asset_chunks`, durable `code_symbols`, and `code_references`; Python tests/fixtures, JS/TS exports/routes/callers, SQL migrations, config files, notebooks, generated markers, and conservative Go/Rust/C#/PowerShell symbols are covered. Code/corpus filters include `relationship`, `path_glob`, and `include_generated`; exact-symbol/path ranking, generated suppression, privacy-safe status/search/symbol lookup, feedback-derived gaps, benchmark-derived code gaps, and dashboard code diagnostics/search inputs exist. | Validate on live opted-in repositories, tune ranking from repeated benchmark/live misses, add deeper parser drill-downs only where feedback shows value, and keep full IDE/static-analysis replacement out of scope. | Use benchmark/live feedback for targeted parser/ranking tuning; keep public docs/tests private-content-free. |
 | Historical Codex backfill | P2 | Safely import useful older Codex work without pulling in unsafe or noisy history. | Historical Codex backfill with redaction. | planned | 0% | Codex capture exists, but historical backfill is not production-ready. | Design redaction-first backfill after V1 lifecycle and V2 review workflows are stronger. | Design redaction-first backfill after V1 lifecycle and V2 review workflows are stronger. |
-| Retrieval benchmarks | P0 | Measure whether Flux search is actually finding the right things. | Retrieval benchmark suite. | in progress | 72% | The deterministic synthetic suite now seeds temporary public-safe retrieval cases, calls search/explain/brief paths, records metadata-only history in `retrieval_benchmark_runs`, and exposes REST, CLI, MCP, and dashboard surfaces. Metrics include top-1 accuracy, precision@3, recall@5, MRR, nDCG@5, brief recall, brief dilution, scope pass counts, suppression pass counts, elapsed time, metric deltas, confidence-band summaries, semantic-threshold advisory candidates, and sanitized case failures for mail/file filters, current-only, lifecycle-deprioritized, semantic duplicate/guardrail, and code-symbol miss cases. | Use benchmark/live feedback for librarian-worker shadow-mode evaluation. Do not mutate settings, thresholds, ranking, retention policy, or semantic clusters automatically. | Use benchmark/live feedback for librarian-worker shadow-mode evaluation. Do not mutate settings, thresholds, ranking, retention policy, or semantic clusters automatically. |
+| Retrieval benchmarks | P0 | Measure whether Flux search is actually finding the right things. | Retrieval benchmark suite. | in progress | 78% | The deterministic synthetic suite now seeds temporary public-safe retrieval cases, calls search/explain/brief paths, records metadata-only history in `retrieval_benchmark_runs`, and exposes REST, CLI, MCP, and dashboard surfaces. Metrics include top-1 accuracy, precision@3, recall@5, MRR, nDCG@5, brief recall, brief dilution, scope pass counts, suppression pass counts, elapsed time, metric deltas, confidence-band summaries, semantic-threshold advisory candidates, and sanitized case failures for mail/file filters, current-only, lifecycle-deprioritized, semantic duplicate/guardrail, code-symbol misses, callers, tests, routes, generated-file handling, config/migration lookup, fallback recovery, and cross-root disambiguation. | Use benchmark/live feedback for ranking/parser tuning and librarian-worker shadow-mode evaluation. Do not mutate settings, thresholds, ranking, retention policy, or semantic clusters automatically. | Use benchmark/live feedback for ranking/parser tuning and librarian-worker shadow-mode evaluation. Do not mutate settings, thresholds, ranking, retention policy, or semantic clusters automatically. |
 | Optional search backend | P3 | Consider a stronger search engine only after the current baseline is measured. | Optional ParadeDB/BM25 path. | planned | 0% | Not started. | Evaluate only after baseline retrieval benchmarks exist. | Evaluate only after baseline retrieval benchmarks exist. |
 | Librarian workers | P2 | Let Flux suggest cleanup candidates so memory does not become stale or cluttered. | Automation-first local librarian workers for derived-memory cleanup, consolidation, and linting. | planned | 0% | Not started. | Start with rule-based and model-assisted candidate generation for stale, redundant, low-utility, contradictory, unscoped, and low-confidence memories; run in shadow mode before broader auto-apply. | Start with rule-based and model-assisted candidate generation for stale, redundant, low-utility, contradictory, unscoped, and low-confidence memories; run in shadow mode before broader auto-apply. |
 | Automated memory governance | P2 | Allow safe routine cleanup only after tests prove it will not damage useful memory. | Policy-gated automation for routine memory lifecycle optimization. | planned | 15% | Retention quality reporting and lifecycle primitives exist, but automatic mutation is not implemented. | Automatically apply low-risk reversible actions such as duplicate suppression, retrieval deprioritization, stale tagging, canonical cluster presentation, and lifecycle updates after evaluation thresholds are met. | Automatically apply low-risk reversible actions such as duplicate suppression, retrieval deprioritization, stale tagging, canonical cluster presentation, and lifecycle updates after evaluation thresholds are met. |
@@ -179,9 +179,10 @@ Current behavior preserves the generic baseline: code results are still
 `source_assets` plus `asset_chunks`, embedded like other corpus chunks, and
 retrievable through `kb.search`, REST search, CLI search, and MCP wrappers.
 The foundation now adds parser-backed chunks, durable symbols/references,
-code-aware filters, exact-symbol ranking, generated-file markers, notebook
-cells, a public-safe `code-heavy` benchmark baseline, and sanitized parser
-fallback metadata for opted-in repositories.
+code-aware filters, exact-symbol ranking, generated-file suppression, notebook
+cells, a public-safe `code-heavy` benchmark baseline, benchmark-derived code
+gap priorities, and sanitized parser fallback metadata for opted-in
+repositories.
 
 Implemented foundation scope:
 
@@ -194,8 +195,9 @@ Implemented foundation scope:
 - Plain-English purpose: split code into meaningful pieces such as functions
   and classes so search lands on the right area.
   Parser-backed chunking now prefers stable semantic boundaries over fixed text
-  windows for modules, classes, functions, methods, route evidence, config
-  blocks, SQL objects, migrations, notebook cells, and test functions where
+  windows for modules, classes, functions, methods, Python tests/fixtures,
+  JS/TS route handlers/callers, config blocks, SQL objects and migrations,
+  notebook cells, and conservative Go/Rust/C#/PowerShell symbols where
   reliably detectable.
 - Plain-English purpose: remember where important code names live and what
   kind of thing they are.
@@ -214,9 +216,10 @@ Implemented foundation scope:
   corpus retrieval and provenance flows.
 - Plain-English purpose: show how code pieces relate so Codex can answer
   questions like "who calls this?" or "where are the tests?"
-  The foundation captures definitions, imports, calls, routes, SQL objects, and
-  config facts where the parser can produce reliable evidence. The roadmap does
-  not imply perfect static analysis across all languages or dynamic frameworks.
+  The foundation captures definitions, imports, calls, routes, tests, fixtures,
+  SQL migrations, notebooks, and config facts where the parser can produce
+  reliable evidence. The roadmap does not imply perfect static analysis across
+  all languages or dynamic frameworks.
 - Plain-English purpose: keep answers focused on the selected project instead
   of mixing unrelated code from elsewhere.
   Search now scopes code results by monitored root, repository/root name,
@@ -233,8 +236,9 @@ Codex-facing retrieval surfaces:
 - Plain-English purpose: let callers narrow searches by language, path, symbol
   type, or code relationship.
   Generic search filters now include `file_kind`, `language`, `symbol_kind`,
-  `path_glob`, `relationship`, and `repo`/`root_name` on the existing search
-  contract.
+  `path_glob`, `relationship`, `include_generated`, and `repo`/`root_name` on
+  the existing search contract. Generated code is excluded when
+  `include_generated=false` is present in the active filter set.
 - Plain-English purpose: add a clearer code-search command if generic search
   becomes too crowded.
   Consider dedicated MCP/CLI/REST surfaces such as `kb.code_search`,
@@ -242,10 +246,11 @@ Codex-facing retrieval surfaces:
   separate contract than overloading generic search.
 - Plain-English purpose: make code answers cite where they came from and why
   they matched.
-  Search results return enough structured metadata for Codex to cite the defining file, line
-  range, symbol kind, relationship type, parser/fallback status, and associated
-  chunk without exposing raw private code outside the normal private corpus
-  retrieval path.
+  Search results return enough structured metadata for Codex to cite the
+  defining file, line range, symbol kind, language, generated flag,
+  relationship type, target/source symbols, route/test target where available,
+  parser/fallback status, and associated chunk without exposing raw private code
+  outside the normal private corpus retrieval path.
 
 Ranking requirements:
 
@@ -292,7 +297,7 @@ Privacy and safety constraints:
 Out of scope for this slice:
 
 - Full IDE replacement.
-- Perfect cross-language static analysis.
+- Perfect cross-language static analysis or full IDE replacement behavior.
 - Runtime tracing or profiling.
 - Provider-specific accelerated embedding backends.
 - VSS snapshot extraction.
@@ -333,12 +338,14 @@ Foundation implementation breakdown:
    retrieval through the least-surprising MCP, CLI, and REST contract.
    Plain-English explanation: Tooling should be easy for Codex and scripts to
    call without breaking existing `kb.search` users.
-7. Priority: P1. Status: implemented for the first read-only diagnostic slice. Model-actionable item: add dashboard and diagnostic views for
+7. Priority: P1. Status: implemented. Model-actionable item: add dashboard and diagnostic views for
    code index coverage, parser failures, fallback rates, slow files, language
-   coverage, and privacy-safe per-repository status.
+   coverage, generated-file counts, top code gaps, direct code search/symbol
+   lookup, and privacy-safe per-repository status.
    Plain-English explanation: Operators need to see what indexed well and what
    fell back before trusting code-aware results on real projects. Deeper parser
-   drill-down and ranking-tuning work still depends on live retrieval feedback.
+   drill-down and ranking-tuning work now depends on repeated live retrieval
+   feedback rather than more evidence infrastructure.
 
 Acceptance criteria:
 
@@ -348,6 +355,9 @@ Acceptance criteria:
   imports, and callers in results.
 - Existing `kb.search`, REST search, CLI search, and corpus asset/chunk lookup
   remain backward compatible.
+- REST, CLI, MCP, and dashboard code-search surfaces accept `relationship`,
+  `path_glob`, and `include_generated` without requiring callers to change
+  existing requests.
 - Unsupported languages still index as text with clear fallback metadata.
 - Parser failures are visible as sanitized diagnostics in worker/status/debug
   surfaces.
@@ -377,11 +387,13 @@ keep each blocked P0 visible with its blocker and wake condition.
 
 Completed P0/P1 bundles: retrieval evaluation foundation, retrieval calibration
 follow-through, the operator evidence/diagnostics accelerator, and the first
-operator remediation/corpus completion slice. Flux now has
+operator remediation/corpus completion slice, plus expanded code-aware retrieval
+follow-through. Flux now has
 metadata-only synthetic retrieval benchmarks, indexer reliability gates,
 multi-root reliability readiness, full all-root evidence runs, operator evidence
 gate decisions, privacy-safe code diagnostics/search/symbol surfaces, code
-retrieval feedback summaries, read-only filtered operational diagnostics,
+retrieval feedback summaries, benchmark-derived code gap priorities,
+relationship/path/generated filters, read-only filtered operational diagnostics,
 dashboard evidence panels, confirmation-gated diagnostic remediation actions,
 comparison deltas, confidence-band summaries, semantic duplicate calibration candidates,
 richer suppression/deprioritization explanations, sample-first large
@@ -405,18 +417,20 @@ analysis replacement, and librarian-worker automation are still out of scope.
    Plain-English explanation: The read-only evidence gate exists, but VSS and
    provider-specific acceleration still need real workload proof before they
    deserve implementation time.
-2. Priority: P0. Progress: 76%. Plain-English purpose: make code-aware retrieval diagnosable after feedback exists.
-   Model-actionable item: use code coverage views, parser failure/fallback
-   summaries, privacy-safe per-repository status, relationship coverage,
-   dedicated code-search/symbol surfaces, and hashed code retrieval feedback to
-   collect live miss patterns.
-   Remaining Work: prioritize deeper parser coverage, relationship ranking,
-   parser-failure drill-downs, and code result tuning from benchmark/live
-   retrieval feedback without exposing raw private code or queries.
-   Plain-English explanation: Code-aware foundations, first diagnostics, and a
-   privacy-safe feedback loop are implemented; deeper ranking and parser
-   expansion remain blocked until retrieval benchmark/live feedback identifies
-   the highest-value misses.
+2. Priority: P0. Progress: 84%. Plain-English purpose: make code-aware retrieval diagnosable after feedback exists.
+   Model-actionable item: validate the expanded code-aware retrieval path on
+   live opted-in repositories using code coverage views, parser
+   failure/fallback summaries, privacy-safe per-repository status,
+   relationship coverage, direct code-search/symbol surfaces, hashed code
+   retrieval feedback, and retrieval benchmark code gaps.
+   Remaining Work: tune ranking and add only targeted deeper parsers from
+   repeated benchmark/live misses; keep raw private code/queries, automatic
+   ranking mutation, and full IDE/static-analysis replacement out of scope.
+   Plain-English explanation: Code-aware foundations, expanded parser coverage,
+   filters, diagnostics, dashboard affordances, benchmark cases, and the
+   privacy-safe feedback loop are implemented; further parser/ranking expansion
+   remains blocked until retrieval benchmark/live feedback identifies repeated
+   misses on real repositories.
 3. Priority: P1. Progress: 88%. Plain-English purpose: make daily operation inspectable and recoverable without raw logs.
    Model-actionable item: validate the operator diagnostics remediation and
    corpus completion bundle against live recurring failures: retrieval

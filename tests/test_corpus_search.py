@@ -17,6 +17,7 @@ def test_normalize_retrieval_filters_canonicalizes_contract():
             "symbol_kind": "Function",
             "relationship": "Definition",
             "path_glob": ["src/*.py", "src/*.py"],
+            "include_generated": True,
         }
     )
 
@@ -30,6 +31,7 @@ def test_normalize_retrieval_filters_canonicalizes_contract():
         "symbol_kinds": ["function"],
         "relationships": ["definition"],
         "path_globs": ["src/*.py"],
+        "include_generated": True,
     }
 
 
@@ -145,6 +147,7 @@ def test_service_search_forwards_code_filters_and_exposes_code_explanation(monke
             "symbol_kind": "method",
             "relationship": "definition",
             "path_glob": "src/*.py",
+            "include_generated": True,
         },
     )
 
@@ -158,6 +161,7 @@ def test_service_search_forwards_code_filters_and_exposes_code_explanation(monke
         "symbol_kinds": ["method"],
         "relationships": ["definition"],
         "path_globs": ["src/*.py"],
+        "include_generated": True,
     }
     assert results[0]["code"]["primary_symbol"] == "OrderService.build_invoice"
     assert results[0]["retrieval_explanation"]["code"] == results[0]["code"]
