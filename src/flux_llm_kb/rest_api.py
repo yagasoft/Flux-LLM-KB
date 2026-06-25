@@ -227,6 +227,7 @@ def create_app():
         path: str | None = None
         max_files: int | None = None
         deployment_label: str | None = None
+        scenario: str = "standard"
         include_model_probe: bool = False
 
     class SettingUpdateRequest(BaseModel):
@@ -331,6 +332,7 @@ def create_app():
                 path=request.path,
                 max_files=request.max_files,
                 deployment_label=request.deployment_label,
+                scenario=request.scenario,
                 include_model_probe=request.include_model_probe,
             )
         return service.run_benchmark(
@@ -347,6 +349,7 @@ def create_app():
             path=request.path,
             max_files=request.max_files,
             deployment_label=request.deployment_label,
+            scenario=request.scenario,
             include_model_probe=request.include_model_probe,
         )
 
@@ -1238,6 +1241,7 @@ def host_agent_benchmark(
     path: str | None = None,
     max_files: int | None = None,
     deployment_label: str | None = None,
+    scenario: str = "standard",
     include_model_probe: bool = False,
 ) -> dict:
     return remote_benchmark(
@@ -1254,6 +1258,7 @@ def host_agent_benchmark(
         path=path,
         max_files=max_files,
         deployment_label=deployment_label,
+        scenario=scenario,
         include_model_probe=include_model_probe,
     )
 

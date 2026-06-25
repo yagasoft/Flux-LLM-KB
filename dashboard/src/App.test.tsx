@@ -536,7 +536,25 @@ describe("Flux dashboard", () => {
       if (url === "/api/settings/apply") return json({ acknowledged: 1 });
       if (url === "/api/acceleration/benchmarks/run" && init?.method === "POST") {
         benchmarkRunPayload = JSON.parse(String(init.body));
-        return json({ fixture: "all", mode: "scan", runs: [] });
+        return json({
+          fixture: "all",
+          mode: "scan",
+          scenario: (benchmarkRunPayload as { scenario?: string }).scenario ?? "standard",
+          runs: [],
+          diagnostics: [{ check: "tuning", status: "ok", evidence: { warm_runs: 1 } }],
+          recommendations: {
+            settings_mutated: false,
+            candidates: [
+              {
+                setting: "crawler.hash_parallelism",
+                current: 1,
+                candidate: 4,
+                reason: "Warm scan improved with bounded parallel hashing.",
+                requires_manual_apply: true
+              }
+            ]
+          }
+        });
       }
       if (url === "/api/mail/profiles" && init?.method === "POST") return json({ ...JSON.parse(String(init.body)), enabled: true });
       if (url.startsWith("/api/mail/profiles/") && url.endsWith("/oauth-client-config") && init?.method === "PUT") {
@@ -702,8 +720,17 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Scan / warm / pass 2")).toBeInTheDocument();
     expect(screen.getByText("10 files/s; -250ms; +2 files/s")).toBeInTheDocument();
     expect(screen.getByText("after-deploy; desktop-after; Monitored Root; hash 4; workers 3; 8 manifest skips; model disabled; 2 blocked")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run reliability diagnostics" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run host/cloud calibration" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run cache readiness" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run tuning diagnostics" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
-    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic" });
+    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "standard" });
+    await user.click(screen.getByRole("button", { name: "Run tuning diagnostics" }));
+    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "tuning" });
+    expect(await screen.findByText("Manual candidates")).toBeInTheDocument();
+    expect(screen.getByText("crawler.hash_parallelism")).toBeInTheDocument();
+    expect(screen.getByText("current 1 -> candidate 4")).toBeInTheDocument();
     expect(screen.getByText("office")).toBeInTheDocument();
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });

@@ -81,7 +81,7 @@ def test_host_agent_benchmark_endpoint_routes_to_service(monkeypatch):
 
     response = client.post(
         "/acceleration/benchmarks/run",
-        json={"scope": "root", "root_name": "watch-test", "mode": "scan", "max_files": 20, "deployment_label": "after"},
+        json={"scope": "root", "root_name": "watch-test", "mode": "scan", "max_files": 20, "deployment_label": "after", "scenario": "host_cloud"},
     )
 
     assert response.status_code == 200
@@ -99,6 +99,7 @@ def test_host_agent_benchmark_endpoint_routes_to_service(monkeypatch):
         "path": None,
         "max_files": 20,
         "deployment_label": "after",
+        "scenario": "host_cloud",
         "include_model_probe": False,
     }
 
@@ -178,6 +179,7 @@ def test_remote_benchmark_routes_to_host_agent(monkeypatch):
         mode="scan",
         max_files=20,
         deployment_label="after",
+        scenario="host_cloud",
         agent_url="http://127.0.0.1:8799",
     )
 
@@ -200,6 +202,7 @@ def test_remote_benchmark_routes_to_host_agent(monkeypatch):
                 "path": None,
                 "max_files": 20,
                 "deployment_label": "after",
+                "scenario": "host_cloud",
                 "include_model_probe": False,
             },
         )

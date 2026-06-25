@@ -59,6 +59,7 @@ class BenchmarkRequest(BaseModel):
     path: str | None = None
     max_files: int | None = None
     deployment_label: str | None = None
+    scenario: str = "standard"
     include_model_probe: bool = False
 
 
@@ -419,6 +420,7 @@ def create_app(*, start_watcher: bool = False):
             path=req.path,
             max_files=req.max_files,
             deployment_label=req.deployment_label,
+            scenario=req.scenario,
             include_model_probe=req.include_model_probe,
         )
 
@@ -534,6 +536,7 @@ def remote_benchmark(
     path: str | None = None,
     max_files: int | None = None,
     deployment_label: str | None = None,
+    scenario: str = "standard",
     include_model_probe: bool = False,
     agent_url: str | None = None,
 ) -> dict[str, Any]:
@@ -551,6 +554,7 @@ def remote_benchmark(
         "path": path,
         "max_files": max_files,
         "deployment_label": deployment_label,
+        "scenario": scenario,
         "include_model_probe": include_model_probe,
     }
     try:

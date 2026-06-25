@@ -24,6 +24,12 @@ from .crawler import CorpusPolicy, scan_path
 from . import __version__, database
 from .glob_policy import effective_glob_policy
 from .extractors import extractor_availability
+from .indexer_diagnostics import (
+    build_benchmark_recommendations,
+    build_indexer_diagnostics,
+    normalize_benchmark_scenario,
+    scenario_recommendation_metadata,
+)
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
 from .retrieval_explain import enrich_search_result
@@ -626,9 +632,13 @@ class KnowledgeService:
         path: str | None = None,
         max_files: int | None = None,
         deployment_label: str | None = None,
+        scenario: str = "standard",
         include_model_probe: bool = False,
     ) -> dict[str, Any]:
+        normalized_scenario = normalize_benchmark_scenario(scenario)
         scope_descriptor = _benchmark_scope_descriptor(scope=scope, root_name=root_name, path=path)
+        if normalized_scenario == "host_cloud" and scope_descriptor["scope_type"] == "synthetic":
+            raise ValueError("host_cloud benchmark scenario requires root or path benchmark scope")
         fixture_names = [item["name"] for item in BENCHMARK_FIXTURES]
         requested = str(fixture or "all")
         real_scope = scope_descriptor["scope_type"] != "synthetic"
@@ -659,6 +669,7 @@ class KnowledgeService:
                                 compare_label=compare_label,
                                 worker_count=worker_count,
                                 deployment_label=deployment_label,
+                                scenario=normalized_scenario,
                             )
                         )
                     else:
@@ -672,6 +683,7 @@ class KnowledgeService:
                                 worker_count=worker_count,
                                 scope_descriptor=scope_descriptor,
                                 deployment_label=deployment_label,
+                                scenario=normalized_scenario,
                             )
                         )
                 elif selected_mode == "soak":
@@ -685,6 +697,7 @@ class KnowledgeService:
                             family=normalized_family,
                             scope_descriptor=scope_descriptor,
                             deployment_label=deployment_label,
+                            scenario=normalized_scenario,
                         )
                     )
                 elif selected_mode == "watcher":
@@ -697,6 +710,7 @@ class KnowledgeService:
                             worker_count=worker_count,
                             scope_descriptor=scope_descriptor,
                             deployment_label=deployment_label,
+                            scenario=normalized_scenario,
                         )
                     )
                 elif selected_mode == "model":
@@ -709,15 +723,38 @@ class KnowledgeService:
                             worker_count=worker_count,
                             scope_descriptor=scope_descriptor,
                             deployment_label=deployment_label,
+                            scenario=normalized_scenario,
                         )
                     )
+        settings_snapshot = _benchmark_settings_snapshot()
+        model_telemetry = _benchmark_model_telemetry() if normalized_scenario == "cache_readiness" else _latest_model_telemetry(runs)
+        acceleration_status = collect_acceleration_status() if normalized_scenario == "cache_readiness" else {}
+        scenario_evidence = _benchmark_scenario_evidence(normalized_scenario)
+        diagnostics = build_indexer_diagnostics(
+            scenario=normalized_scenario,
+            runs=runs,
+            scope_descriptor=scope_descriptor,
+            settings_snapshot=settings_snapshot,
+            acceleration_status=acceleration_status,
+            model_telemetry=model_telemetry,
+            lock_retry_cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
+            lock_max_attempts=_configured_lock_max_attempts(),
+            scenario_evidence=scenario_evidence,
+        )
+        recommendations = build_benchmark_recommendations(
+            scenario=normalized_scenario,
+            runs=runs,
+            settings_snapshot=settings_snapshot,
+        )
         return {
             "fixture": requested if requested != "all" else "all",
             "mode": normalized_mode,
+            "scenario": normalized_scenario,
             "scope_type": scope_descriptor["scope_type"],
             "files": file_count,
             "runs": runs,
-            "recommendations": _benchmark_recommendations(runs),
+            "diagnostics": diagnostics,
+            "recommendations": recommendations,
         }
 
     def _run_scan_benchmark(
@@ -731,6 +768,7 @@ class KnowledgeService:
         worker_count: int,
         scope_descriptor: dict[str, Any],
         deployment_label: str | None,
+        scenario: str,
     ) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(prefix="flux-kb-benchmark-") as temp_dir:
@@ -766,11 +804,12 @@ class KnowledgeService:
                     "path_scope": "temporary",
                     "watcher_backend": _configured_watcher_backend(),
                     "hash_parallelism": hash_parallelism,
+                    "scenario": scenario,
                 }
                 record_fields = _benchmark_record_fields(
                     scope_descriptor=scope_descriptor,
                     deployment_label=deployment_label,
-                    recommendation_metadata={"settings_mutated": False},
+                    recommendation_metadata=scenario_recommendation_metadata(scenario),
                 )
                 recorded = database.record_benchmark_run(
                     fixture=fixture,
@@ -828,6 +867,7 @@ class KnowledgeService:
         compare_label: str | None,
         worker_count: int,
         deployment_label: str | None,
+        scenario: str,
     ) -> list[dict[str, Any]]:
         root = scope_descriptor["root"]
         target_path = scope_descriptor.get("path")
@@ -876,11 +916,12 @@ class KnowledgeService:
                 "max_files": max_files,
                 "observed_files": len(plan.assets),
                 "errors": len(plan.errors),
+                "scenario": scenario,
             }
             record_fields = _benchmark_record_fields(
                 scope_descriptor=scope_descriptor,
                 deployment_label=deployment_label,
-                recommendation_metadata={"settings_mutated": False},
+                recommendation_metadata=scenario_recommendation_metadata(scenario),
             )
             recorded = database.record_benchmark_run(
                 fixture=scope_descriptor["fixture"],
@@ -939,6 +980,7 @@ class KnowledgeService:
         family: str,
         scope_descriptor: dict[str, Any],
         deployment_label: str | None,
+        scenario: str,
     ) -> dict[str, Any]:
         tag = hashlib.sha256(f"{fixture}:{label or ''}:{time.time_ns()}".encode("utf-8")).hexdigest()[:16]
         family_caps = _configured_worker_caps()
@@ -1002,11 +1044,12 @@ class KnowledgeService:
             "family": normalized_family,
             "worker_caps": family_caps,
             "purged": purged.get("purged"),
+            "scenario": scenario,
         }
         record_fields = _benchmark_record_fields(
             scope_descriptor=scope_descriptor,
             deployment_label=deployment_label,
-            recommendation_metadata={"settings_mutated": False},
+            recommendation_metadata=scenario_recommendation_metadata(scenario),
         )
         recorded = database.record_benchmark_run(
             fixture=fixture,
@@ -1059,6 +1102,7 @@ class KnowledgeService:
         worker_count: int,
         scope_descriptor: dict[str, Any],
         deployment_label: str | None,
+        scenario: str,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         probe = probe_watcher_backend(backend_policy=_configured_watcher_backend(), timeout_seconds=2.0)
@@ -1069,11 +1113,12 @@ class KnowledgeService:
             "watcher_backend": probe.get("backend") or {},
             "watcher_events": probe.get("events") or {},
             "latency_ms": elapsed_ms,
+            "scenario": scenario,
         }
         record_fields = _benchmark_record_fields(
             scope_descriptor=scope_descriptor,
             deployment_label=deployment_label,
-            recommendation_metadata={"settings_mutated": False},
+            recommendation_metadata=scenario_recommendation_metadata(scenario),
         )
         recorded = database.record_benchmark_run(
             fixture=fixture,
@@ -1126,6 +1171,7 @@ class KnowledgeService:
         worker_count: int,
         scope_descriptor: dict[str, Any],
         deployment_label: str | None,
+        scenario: str,
     ) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
         for pass_index in range(1, passes + 1):
@@ -1137,12 +1183,13 @@ class KnowledgeService:
                 scope_descriptor=scope_descriptor,
                 deployment_label=deployment_label,
                 model_telemetry=model_telemetry,
-                recommendation_metadata={"settings_mutated": False},
+                recommendation_metadata=scenario_recommendation_metadata(scenario),
             )
             metadata = {
                 "provider": "local_only",
                 "path_scope": "temporary",
                 "blocked_dependency_count": model_telemetry.get("blocked_dependency_count", 0),
+                "scenario": scenario,
             }
             recorded = database.record_benchmark_run(
                 fixture=fixture,
@@ -2279,23 +2326,79 @@ def _benchmark_run_payload(
     }
 
 
+def _latest_model_telemetry(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    for run in reversed(runs):
+        telemetry = run.get("model_telemetry")
+        if isinstance(telemetry, dict) and telemetry:
+            return telemetry
+    return {}
+
+
+def _benchmark_scenario_evidence(scenario: str) -> dict[str, Any]:
+    if scenario != "reliability":
+        return {}
+    try:
+        return {"file_churn": _benchmark_file_churn_probe()}
+    except Exception as exc:
+        return {"file_churn": {"probe_error": type(exc).__name__}}
+
+
+def _benchmark_file_churn_probe() -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="flux-kb-file-churn-") as temp_dir:
+        root = Path(temp_dir)
+        large_bytes = 1024 * 1024
+        (root / "large-write.bin").write_bytes(b"x" * large_bytes)
+        rename_temp = root / "rename-save.tmp"
+        rename_temp.write_text("rename-save draft", encoding="utf-8")
+        rename_temp.rename(root / "rename-save.md")
+        (root / "~$budget.xlsx").write_bytes(b"office temp")
+        (root / "transient.tmp").write_text("partial", encoding="utf-8")
+        pending = root / "pending-stable.md"
+        pending.write_text("still changing", encoding="utf-8")
+
+        pending_plan = scan_path(
+            root,
+            CorpusPolicy(
+                root_path=root,
+                stability_quiet_seconds=5.0,
+                clock=lambda target=pending: target.stat().st_mtime + 1.0,
+            ),
+        )
+        stable_plan = scan_path(root, CorpusPolicy(root_path=root, stability_quiet_seconds=0.0))
+        manifest = {
+            asset.relative_path: {
+                "path": asset.relative_path,
+                "size_bytes": asset.size_bytes,
+                "mtime_ns": asset.mtime_ns,
+                "quick_hash": asset.quick_hash,
+                "content_hash": asset.content_hash,
+            }
+            for asset in stable_plan.assets
+        }
+        warm_plan = scan_path(
+            root,
+            CorpusPolicy(
+                root_path=root,
+                stability_quiet_seconds=0.0,
+                manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
+            ),
+        )
+        stable_paths = {asset.relative_path for asset in stable_plan.assets}
+        return {
+            "large_write_bytes": large_bytes,
+            "rename_save_detected": "rename-save.md" in stable_paths,
+            "transient_skipped": int("~$budget.xlsx" not in stable_paths) + int("transient.tmp" not in stable_paths),
+            "pending_stable_count": sum(1 for asset in pending_plan.assets if asset.extraction_status == "pending_stable"),
+            "probe_warm_manifest_skips": sum(1 for asset in warm_plan.assets if asset.metadata.get("manifest_skipped_unchanged")),
+        }
+
+
 def _benchmark_recommendations(runs: list[dict[str, Any]]) -> dict[str, Any]:
-    best_scan = max(
-        (run for run in runs if run.get("mode") == "scan"),
-        key=lambda run: float(run.get("throughput_files_per_second") or 0.0),
-        default=None,
+    return build_benchmark_recommendations(
+        scenario="standard",
+        runs=runs,
+        settings_snapshot=_benchmark_settings_snapshot(),
     )
-    best_soak = max(
-        (run for run in runs if run.get("mode") == "soak"),
-        key=lambda run: int(run.get("jobs_completed") or 0),
-        default=None,
-    )
-    return {
-        "settings_mutated": False,
-        "observed_hash_parallelism": best_scan.get("hash_parallelism") if best_scan else None,
-        "observed_worker_count": best_soak.get("worker_count") if best_soak else None,
-        "basis": "diagnostic_observation_only",
-    }
 
 
 def _normalize_benchmark_mode(value: str | None, *, allow_all: bool = False) -> str:

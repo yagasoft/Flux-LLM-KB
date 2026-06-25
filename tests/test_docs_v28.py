@@ -73,6 +73,12 @@ def test_v28_docs_describe_indexer_reliability_and_benchmark_history():
     assert "soak" in combined
     assert "watcher" in combined
     assert "--passes" in combined
+    assert "--scenario reliability" in combined
+    assert "--scenario host_cloud" in combined
+    assert "--scenario cache_readiness" in combined
+    assert "--scenario tuning" in combined
+    assert "recommendations.candidates" in combined
+    assert "diagnostics[]" in combined
     assert "--compare-label" in combined
     assert "compare_label" in combined
     assert "settings_mutated: false" in combined

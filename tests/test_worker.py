@@ -427,6 +427,69 @@ def test_benchmark_scan_mode_records_cold_and_warm_passes(monkeypatch):
     assert recorded[1]["cache_hits"] == 2
 
 
+def test_benchmark_reliability_scenario_returns_diagnostics_and_persists_metadata(monkeypatch):
+    recorded = []
+    calls = {"created": [], "claimed": [], "completed": [], "blocked": [], "purged": []}
+    monkeypatch.setattr(service_module, "_configured_hash_parallelism", lambda: 2)
+    monkeypatch.setattr(service_module, "_configured_lock_max_attempts", lambda: 3)
+    monkeypatch.setattr(service_module, "_configured_lock_retry_cooldown_seconds", lambda: 45)
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": f"run-{len(recorded)}", "fixture": kwargs["fixture"]})
+    monkeypatch.setattr(service_module, "probe_watcher_backend", lambda **kwargs: {"backend": {"selected_backend": "polling"}, "events": {"created": 1, "modified": 1}, "latency_ms": 9})
+    monkeypatch.setattr(database, "create_benchmark_soak_jobs", lambda **kwargs: calls["created"].append(kwargs) or {"tag": kwargs["tag"], "created": kwargs["file_count"]})
+
+    def fake_claim(**kwargs):
+        calls["claimed"].append(kwargs)
+        return [
+            {"id": "job-1", "job_family": "office", "resource_class": "cpu", "payload": {"benchmark_outcome": "completed"}, "attempts": 1},
+            {"id": "job-2", "job_family": "office", "resource_class": "cpu", "payload": {"benchmark_outcome": "blocked"}, "attempts": 3},
+        ]
+
+    monkeypatch.setattr(database, "claim_corpus_jobs", fake_claim)
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "purge_benchmark_soak_jobs", lambda **kwargs: calls["purged"].append(kwargs) or {"purged": 2})
+
+    result = KnowledgeService().run_benchmark(fixture="text-heavy", files=2, mode="all", passes=2, scenario="reliability", workers=2)
+
+    assert result["scenario"] == "reliability"
+    diagnostics = {item["check"]: item for item in result["diagnostics"]}
+    assert {"file_churn", "lock_recovery", "watch_reconcile"} <= set(diagnostics)
+    assert diagnostics["file_churn"]["evidence"]["warm_manifest_skips"] == 2
+    assert diagnostics["file_churn"]["evidence"]["large_write_bytes"] >= 1024 * 1024
+    assert diagnostics["file_churn"]["evidence"]["rename_save_detected"] is True
+    assert diagnostics["file_churn"]["evidence"]["transient_skipped"] == 2
+    assert diagnostics["file_churn"]["evidence"]["pending_stable_count"] >= 1
+    assert diagnostics["file_churn"]["evidence"]["probe_warm_manifest_skips"] >= 1
+    assert diagnostics["lock_recovery"]["evidence"]["blocked_locked"] == 1
+    assert diagnostics["lock_recovery"]["evidence"]["retry_cooldown_seconds"] == 45
+    assert diagnostics["watch_reconcile"]["evidence"]["watcher_backend"] == "polling"
+    assert result["recommendations"]["settings_mutated"] is False
+    assert result["recommendations"]["scenario"] == "reliability"
+    assert recorded
+    assert {row["recommendation_metadata"]["scenario"] for row in recorded} == {"reliability"}
+    assert all(row["recommendation_metadata"]["settings_mutated"] is False for row in recorded)
+
+
+def test_benchmark_tuning_scenario_returns_manual_recommendation_candidates(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(service_module, "_configured_hash_parallelism", lambda: 1)
+    monkeypatch.setattr(service_module, "_configured_worker_caps", lambda: {"general": 1, "office": 1, "media": 1})
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-tuning", "fixture": kwargs["fixture"]})
+
+    result = KnowledgeService().run_benchmark(fixture="text-heavy", files=2, mode="scan", passes=2, scenario="tuning", workers=1)
+
+    assert result["scenario"] == "tuning"
+    assert result["recommendations"]["settings_mutated"] is False
+    assert result["recommendations"]["candidates"]
+    assert all(candidate["requires_manual_apply"] is True for candidate in result["recommendations"]["candidates"])
+    assert {candidate["setting"] for candidate in result["recommendations"]["candidates"]} >= {
+        "crawler.hash_parallelism",
+        "acceleration.worker_cap.general",
+    }
+    assert "tuning" in {item["check"] for item in result["diagnostics"]}
+    assert recorded[0]["recommendation_metadata"]["scenario"] == "tuning"
+
+
 def test_benchmark_real_root_scope_records_only_sanitized_aggregate_metadata(monkeypatch, tmp_path):
     root = tmp_path / "docs"
     root.mkdir()
@@ -466,6 +529,48 @@ def test_benchmark_real_root_scope_records_only_sanitized_aggregate_metadata(mon
     assert "root_path" not in serialized
 
 
+def test_benchmark_host_cloud_scenario_records_only_aggregate_scope_hash(monkeypatch, tmp_path):
+    root = tmp_path / "cloud-docs"
+    root.mkdir()
+    (root / "one.md").write_text("one", encoding="utf-8")
+    recorded = []
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {
+                "name": "cloud-docs",
+                "root_path": str(root),
+                "recursive": True,
+                "include_globs": [],
+                "exclude_globs": [],
+                "glob_mode": "extend",
+                "max_inline_bytes": 256 * 1024,
+                "heavy_threshold_bytes": 10 * 1024 * 1024,
+                "metadata": {"host_access": "host_agent"},
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-host", "fixture": kwargs["fixture"]})
+
+    result = KnowledgeService().run_benchmark(scope="root", root_name="cloud-docs", mode="scan", max_files=5, scenario="host_cloud")
+
+    assert result["scenario"] == "host_cloud"
+    assert result["scope_type"] == "monitored_root"
+    diagnostics = {item["check"]: item for item in result["diagnostics"]}
+    assert diagnostics["host_cloud"]["evidence"]["host_access"] == "host_agent"
+    assert diagnostics["host_cloud"]["evidence"]["scope_hash"].startswith("sha256:")
+    assert recorded[0]["recommendation_metadata"]["scenario"] == "host_cloud"
+    serialized = json.dumps(result, default=str)
+    assert str(root) not in serialized
+    assert "root_path" not in serialized
+
+
+def test_benchmark_host_cloud_scenario_rejects_synthetic_scope():
+    with pytest.raises(ValueError, match="host_cloud"):
+        KnowledgeService().run_benchmark(scenario="host_cloud")
+
+
 def test_benchmark_model_mode_records_local_readiness_without_private_content(monkeypatch):
     recorded = []
     monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-model", "fixture": kwargs["fixture"]})
@@ -498,6 +603,43 @@ def test_benchmark_model_mode_records_local_readiness_without_private_content(mo
     assert recorded[0]["model_telemetry"]["blocked_dependency_count"] == 2
     assert recorded[0]["deployment_label"] == "after-update"
     assert "private" not in json.dumps(recorded[0]["model_telemetry"]).lower()
+
+
+def test_benchmark_cache_readiness_scenario_reports_tool_blocks_without_private_paths(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-cache", "fixture": kwargs["fixture"]})
+    monkeypatch.setattr(
+        service_module,
+        "collect_acceleration_status",
+        lambda: {
+            "capabilities": {"local_model": {"ok": False, "state": "disabled", "provider": "ollama"}},
+            "cache": {"root": "E:/private/cache", "source": "env", "directories": {"ocr": "E:/private/cache/ocr"}},
+            "worker_families": [{"family": "media", "pending": 2, "retrying_locked": 1, "blocked_locked": 1}],
+            "benchmarks": {},
+        },
+    )
+    monkeypatch.setattr(
+        service_module,
+        "extractor_availability",
+        lambda: {
+            "tesseract": {"ok": True, "message": "available"},
+            "pdftoppm": {"ok": True, "message": "available"},
+            "ffmpeg": {"ok": False, "message": "ffmpeg command not found"},
+            "faster_whisper": {"ok": False, "message": "module not installed"},
+        },
+    )
+
+    result = KnowledgeService().run_benchmark(fixture="image-heavy", mode="model", scenario="cache_readiness", deployment_label="after-update")
+
+    assert result["scenario"] == "cache_readiness"
+    diagnostics = {item["check"]: item for item in result["diagnostics"]}
+    assert diagnostics["cache_readiness"]["evidence"]["cache_root_configured"] is True
+    assert diagnostics["cache_readiness"]["evidence"]["blocked_dependency_count"] == 2
+    assert diagnostics["cache_readiness"]["evidence"]["cache_directory_count"] == 1
+    assert recorded[0]["recommendation_metadata"]["scenario"] == "cache_readiness"
+    serialized = json.dumps({"diagnostics": result["diagnostics"], "recommendations": result["recommendations"]}, default=str).lower()
+    assert "private" not in serialized
+    assert "e:/private/cache" not in serialized
 
 
 def test_benchmark_soak_mode_claims_worker_family_jobs_and_purges(monkeypatch):

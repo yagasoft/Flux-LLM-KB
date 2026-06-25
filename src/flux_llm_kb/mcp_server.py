@@ -180,7 +180,7 @@ def create_server():
         return service.worker_status(family=family)
 
     @mcp.tool(name="kb.benchmark_run")
-    def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all", scope: str = "synthetic", root_name: str | None = None, path: str | None = None, max_files: int | None = None, deployment_label: str | None = None, include_model_probe: bool = False):
+    def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all", scope: str = "synthetic", root_name: str | None = None, path: str | None = None, max_files: int | None = None, deployment_label: str | None = None, scenario: str = "standard", include_model_probe: bool = False):
         """Run deterministic synthetic or aggregate-only scoped benchmarks and record metadata-only history."""
         return service.run_benchmark(
             fixture=fixture,
@@ -196,6 +196,7 @@ def create_server():
             path=path,
             max_files=max_files,
             deployment_label=deployment_label,
+            scenario=scenario,
             include_model_probe=include_model_probe,
         )
 

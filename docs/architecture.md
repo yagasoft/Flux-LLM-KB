@@ -274,9 +274,25 @@ timings, and sanitized summaries. Stored records contain fixture names, counts,
 mode, label, compare label, deployment label, pass index, timings, p50/p95/max,
 throughput, warm/cold state, cache hit/miss counters, hash parallelism, worker
 count, manifest skip counts, worker-family breakdowns, model/tool readiness
-telemetry, comparable elapsed and throughput deltas, and sanitized summaries
-only. `scan` mode creates temporary fixtures or aggregate real-root dry-runs and
-can run multiple passes; pass 1 is recorded as `cold`, later passes reuse an
+telemetry, comparable elapsed and throughput deltas, scenario metadata in
+existing JSON fields, and sanitized summaries only.
+
+Benchmark callers can pass `scenario=standard|reliability|host_cloud|
+cache_readiness|tuning` through REST, CLI, MCP, and the host-agent proxy. The
+response keeps the existing `runs[]` array and adds `scenario`, `diagnostics[]`,
+and `recommendations.candidates[]`. `standard` preserves the older benchmark
+shape with empty diagnostics and no automatic settings changes. `reliability`
+summarizes file churn, warm manifest-skip proof, lock retry/block evidence, and
+watcher reconciliation proof from the same scan/soak/watcher paths. `host_cloud`
+requires a monitored-root or path scope and stores only aggregate scope hashes,
+host access mode, and counts for Windows/OneDrive/SharePoint/Dropbox-style
+delayed availability checks. `cache_readiness` summarizes cache-root presence,
+cache directory count, local model readiness, and extractor/tool blocks without
+storing cache paths. `tuning` runs bounded comparisons for crawler hash
+parallelism and worker-family caps, returning manual candidates only.
+
+`scan` mode creates temporary fixtures or aggregate real-root dry-runs and can
+run multiple passes; pass 1 is recorded as `cold`, later passes reuse an
 in-memory manifest and are recorded as `warm`. `soak` mode creates
 benchmark-tagged synthetic corpus jobs by worker family, claims them through the
 same cap/backpressure logic as normal workers, completes or blocks them
@@ -286,11 +302,18 @@ fallback reason, event counts, and latency metadata. `model` mode records
 local-only model/tool readiness, warm/cold timings, and blocked dependency
 counts without running cloud providers. `all` mode runs scan, soak, and watcher
 modes for the selected fixtures, and can include model probing only when
-explicitly requested. Benchmark responses can include diagnostic recommendation
-candidates such as observed hash parallelism or worker counts with
-`settings_mutated: false`; they never call settings mutation APIs. They never
-store raw text, mail contents, credentials, embeddings, or private watched
-roots.
+explicitly requested. Benchmark responses always include `settings_mutated:
+false`; they never call settings mutation APIs. They never store raw text, mail
+contents, credentials, embeddings, private cache roots, or private watched roots.
+
+Example CLI diagnostics:
+
+```powershell
+flux-kb acceleration benchmark run --scenario reliability --mode all --passes 2
+flux-kb acceleration benchmark run --scenario host_cloud --scope root --root docs --max-files 100
+flux-kb acceleration benchmark run --scenario cache_readiness --mode model
+flux-kb acceleration benchmark run --scenario tuning --mode scan --passes 2
+```
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,

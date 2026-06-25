@@ -231,6 +231,7 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
             "path": None,
             "max_files": 12,
             "deployment_label": "desktop-after",
+            "scenario": "cache_readiness",
             "include_model_probe": True,
         },
     )
@@ -277,6 +278,7 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
                 "path": None,
                 "max_files": 12,
                 "deployment_label": "desktop-after",
+                "scenario": "cache_readiness",
                 "include_model_probe": True,
             },
         ),
@@ -308,7 +310,7 @@ def test_benchmark_route_proxies_host_agent_roots(monkeypatch):
 
     response = client.post(
         "/api/acceleration/benchmarks/run",
-        json={"scope": "root", "root_name": "docs", "mode": "scan", "deployment_label": "after"},
+        json={"scope": "root", "root_name": "docs", "mode": "scan", "deployment_label": "after", "scenario": "host_cloud"},
     )
 
     assert response.status_code == 200
@@ -328,6 +330,7 @@ def test_benchmark_route_proxies_host_agent_roots(monkeypatch):
             "path": None,
             "max_files": None,
             "deployment_label": "after",
+            "scenario": "host_cloud",
             "include_model_probe": False,
         }
     ]

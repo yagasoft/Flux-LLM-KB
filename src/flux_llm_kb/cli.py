@@ -285,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_run.add_argument("--path")
     benchmark_run.add_argument("--max-files", type=int)
     benchmark_run.add_argument("--deployment-label")
+    benchmark_run.add_argument("--scenario", choices=["standard", "reliability", "host_cloud", "cache_readiness", "tuning"], default="standard")
     benchmark_run.add_argument("--include-model-probe", action="store_true")
     benchmark_history = benchmark_subparsers.add_parser("history", help="List benchmark run history")
     benchmark_history.add_argument("--fixture", required=True)
@@ -873,6 +874,7 @@ def _acceleration(args: argparse.Namespace) -> int:
                 path=args.path,
                 max_files=args.max_files,
                 deployment_label=args.deployment_label,
+                scenario=args.scenario,
                 include_model_probe=args.include_model_probe,
             )
         elif args.benchmark_command == "history":

@@ -164,6 +164,7 @@ type AccelerationBenchmarkRun = {
   id?: string;
   fixture?: string;
   mode?: string;
+  scenario?: string;
   label?: string;
   compare_label?: string;
   status?: string;
@@ -185,7 +186,37 @@ type AccelerationBenchmarkRun = {
     local_model?: { state?: string; provider?: string };
     blocked_dependency_count?: number;
   };
+  recommendation_metadata?: Record<string, unknown>;
   created_at?: string | null;
+};
+
+type BenchmarkDiagnostic = {
+  scenario?: string;
+  check?: string;
+  status?: string;
+  summary?: string;
+  evidence?: Record<string, unknown>;
+};
+
+type BenchmarkCandidate = {
+  setting?: string;
+  current?: number | string;
+  candidate?: number | string;
+  reason?: string;
+  requires_manual_apply?: boolean;
+};
+
+type BenchmarkRunResponse = {
+  fixture?: string;
+  mode?: string;
+  scenario?: string;
+  runs?: AccelerationBenchmarkRun[];
+  diagnostics?: BenchmarkDiagnostic[];
+  recommendations?: {
+    settings_mutated?: boolean;
+    scenario?: string;
+    candidates?: BenchmarkCandidate[];
+  };
 };
 
 type ErrorDiagnostic = {
@@ -1356,6 +1387,7 @@ export default function App() {
         {activeTab === "health" && (
           <HealthTab
             state={state}
+            selectedRoot={selectedRoot}
             hostStatus={hostStatus}
             restartRows={restartRows}
             onErrorDetail={setErrorDetail}
@@ -1716,6 +1748,7 @@ function MailErrorsPanel({ mail, errors, onErrorDetail }: { mail: MailStatus; er
 
 function HealthTab({
   state,
+  selectedRoot,
   hostStatus,
   restartRows,
   onErrorDetail,
@@ -1724,6 +1757,7 @@ function HealthTab({
   onApplySettings
 }: {
   state: LoadState;
+  selectedRoot?: RootSummary | MonitoredRoot;
   hostStatus: string;
   restartRows: SettingRow[];
   onErrorDetail: (error: string) => void;
@@ -1753,7 +1787,7 @@ function HealthTab({
         </div>
       </Panel>
       <CodexHooksPanel codex={codex} />
-      <AccelerationPanel acceleration={state.health.acceleration} />
+      <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
       <Panel title="Deployment">
         <div className="status-grid">
           <StatusTile
@@ -1781,14 +1815,17 @@ function HealthTab({
   );
 }
 
-function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus }) {
+function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: AccelerationStatus; selectedRoot?: RootSummary | MonitoredRoot }) {
   const [benchmarkStatus, setBenchmarkStatus] = useState("");
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [benchmarkResult, setBenchmarkResult] = useState<BenchmarkRunResponse | null>(null);
   const capabilities = acceleration?.capabilities ?? {};
   const cache = acceleration?.cache ?? {};
   const families = acceleration?.worker_families ?? [];
   const watcherBackend = capabilities.watcher_backend;
   const benchmarkHistory = acceleration?.benchmarks?.history ?? [];
+  const benchmarkDiagnostics = benchmarkResult?.diagnostics ?? [];
+  const benchmarkCandidates = benchmarkResult?.recommendations?.candidates ?? [];
   const familyRows = families.slice(0, 8).map((family) => {
     const name = family.family ?? "general";
     const pending = family.pending ?? 0;
@@ -1873,12 +1910,22 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
       metadata
     ] as [string, string, string, string];
   });
-  async function runScanBenchmark() {
+  async function runBenchmarkScenario(scenario: "standard" | "reliability" | "host_cloud" | "cache_readiness" | "tuning") {
+    const base = { fixture: "all", files: 10, passes: 2, workers: 1, family: "all", scenario };
+    const request =
+      scenario === "reliability"
+        ? { ...base, mode: "all", scope: "synthetic" }
+        : scenario === "host_cloud"
+          ? { ...base, mode: "scan", scope: "root", root_name: selectedRoot?.name ?? null, max_files: 100 }
+          : scenario === "cache_readiness"
+            ? { ...base, mode: "model", scope: "synthetic", passes: 1 }
+            : { ...base, mode: "scan", scope: "synthetic" };
     try {
       setBenchmarkRunning(true);
-      setBenchmarkStatus("Benchmark queued...");
-      await sendJson("/api/acceleration/benchmarks/run", "POST", { fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic" });
-      setBenchmarkStatus("Benchmark run recorded.");
+      setBenchmarkStatus(`${humanizeIdentifier(scenario)} benchmark queued...`);
+      const result = await sendJson<BenchmarkRunResponse>("/api/acceleration/benchmarks/run", "POST", request);
+      setBenchmarkResult(result);
+      setBenchmarkStatus(`${humanizeIdentifier(result.scenario ?? scenario)} benchmark recorded.`);
     } catch (error) {
       setBenchmarkStatus(`Benchmark failed: ${errorMessage(error)}`);
     } finally {
@@ -1916,11 +1963,59 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
         <div className="settings-row">
           <strong>Benchmark History</strong>
           <span>{benchmarkRows.length} recent synthetic runs</span>
-          <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={runScanBenchmark}>
+          <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runBenchmarkScenario("standard")}>
             <Play size={15} /> Run scan benchmark
           </button>
         </div>
+        <div className="settings-row">
+          <strong>Scenario Runners</strong>
+          <span>{selectedRoot?.name ? `host/cloud root ${selectedRoot.name}` : "host/cloud needs one monitored root"}</span>
+          <div className="button-row">
+            <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runBenchmarkScenario("reliability")}>
+              <Play size={15} /> Run reliability diagnostics
+            </button>
+            <button className="ghost-action compact" type="button" disabled={benchmarkRunning || !selectedRoot?.name} onClick={() => void runBenchmarkScenario("host_cloud")}>
+              <Play size={15} /> Run host/cloud calibration
+            </button>
+            <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runBenchmarkScenario("cache_readiness")}>
+              <Play size={15} /> Run cache readiness
+            </button>
+            <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runBenchmarkScenario("tuning")}>
+              <Play size={15} /> Run tuning diagnostics
+            </button>
+          </div>
+        </div>
         {benchmarkRows.length > 0 ? <MiniTable rows={benchmarkRows} /> : <p className="panel-note">No synthetic benchmark history yet.</p>}
+        {benchmarkResult && (
+          <div className="settings-list">
+            <div className="settings-row">
+              <strong>Scenario Status</strong>
+              <span>{humanizeIdentifier(benchmarkResult.scenario ?? "standard")} / {humanizeIdentifier(benchmarkResult.mode ?? "scan")}</span>
+              <em>{benchmarkResult.recommendations?.settings_mutated ? "settings changed" : "settings_mutated false"}</em>
+            </div>
+            {benchmarkDiagnostics.slice(0, 4).map((diagnostic) => (
+              <div className="settings-row" key={`${diagnostic.scenario}-${diagnostic.check}`}>
+                <strong>{humanizeIdentifier(diagnostic.check ?? "diagnostic")}</strong>
+                <span>{diagnostic.summary ?? "diagnostic recorded"}</span>
+                <em>{humanizeIdentifier(diagnostic.status ?? "observed")}</em>
+              </div>
+            ))}
+            {benchmarkCandidates.length > 0 && (
+              <>
+                <div className="settings-row">
+                  <strong>Manual candidates</strong>
+                  <span>{benchmarkCandidates.length} setting candidate{benchmarkCandidates.length === 1 ? "" : "s"} from diagnostic evidence</span>
+                  <em>no auto-apply</em>
+                </div>
+                <MiniTable rows={benchmarkCandidates.slice(0, 4).map((candidate) => [
+                  String(candidate.setting ?? "setting"),
+                  `current ${candidate.current ?? "-"} -> candidate ${candidate.candidate ?? "-"}`,
+                  candidate.requires_manual_apply ? "manual apply" : "review"
+                ] as [string, string, string])} />
+              </>
+            )}
+          </div>
+        )}
         {benchmarkStatus && <p className="panel-note">{benchmarkStatus}</p>}
       </div>
     </Panel>
