@@ -214,6 +214,20 @@ if ($needsRepair) {
 }
 '@
 
+$CleanupWorktreeCommand = @'
+$MainRoot = $env:FLUX_KB_CLEANUP_MAIN_ROOT
+$FeatureWorktree = $env:FLUX_KB_CLEANUP_FEATURE_WORKTREE
+$Branch = $env:FLUX_KB_CLEANUP_BRANCH
+
+Set-Location $MainRoot
+git worktree remove "$FeatureWorktree"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git worktree prune
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+git branch -D $Branch
+exit $LASTEXITCODE
+'@
+
 $FeatureWorktree = (Resolve-Path $FeatureWorktree).Path
 if (-not $MainRoot) {
     $MainRoot = Get-MainWorktreePath -Worktree $FeatureWorktree
@@ -228,6 +242,7 @@ $script:LogRoot = Join-Path $MainRoot ".agents\run-logs"
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 $script:Steps = @()
 $script:FailedStep = $null
+Set-Location $MainRoot
 
 try {
     Invoke-FeatureStep -Name "verify-main-clean" -Cwd $MainRoot -Command 'if ((git status --porcelain) -ne $null) { git status --short; exit 1 }'
@@ -259,7 +274,19 @@ try {
         $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $previousRepairFeatureWorktree
     }
     if (-not $KeepWorktree) {
-        Invoke-FeatureStep -Name "cleanup-worktree" -Cwd $MainRoot -Command "git worktree remove '$FeatureWorktree'; git worktree prune; git branch -D $Branch"
+        $previousCleanupMainRoot = $env:FLUX_KB_CLEANUP_MAIN_ROOT
+        $previousCleanupFeatureWorktree = $env:FLUX_KB_CLEANUP_FEATURE_WORKTREE
+        $previousCleanupBranch = $env:FLUX_KB_CLEANUP_BRANCH
+        try {
+            $env:FLUX_KB_CLEANUP_MAIN_ROOT = $MainRoot
+            $env:FLUX_KB_CLEANUP_FEATURE_WORKTREE = $FeatureWorktree
+            $env:FLUX_KB_CLEANUP_BRANCH = $Branch
+            Invoke-FeatureStep -Name "cleanup-worktree" -Cwd $MainRoot -Command $CleanupWorktreeCommand
+        } finally {
+            $env:FLUX_KB_CLEANUP_MAIN_ROOT = $previousCleanupMainRoot
+            $env:FLUX_KB_CLEANUP_FEATURE_WORKTREE = $previousCleanupFeatureWorktree
+            $env:FLUX_KB_CLEANUP_BRANCH = $previousCleanupBranch
+        }
     }
     Write-SummaryAndExit -ExitCode 0
 } catch {

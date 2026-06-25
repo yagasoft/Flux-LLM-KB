@@ -29,7 +29,7 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
     deploy_index = script.index("scripts\\deploy\\update-flux.ps1")
     probe_index = script.index("http://127.0.0.1:8765/api/dashboard/health")
     repair_index = script.index('Invoke-FeatureStep -Name "repair-python-editable-install"')
-    cleanup_index = script.index("git worktree remove")
+    cleanup_index = script.index('Invoke-FeatureStep -Name "cleanup-worktree"')
 
     assert deploy_index < probe_index < repair_index < cleanup_index
 
@@ -91,6 +91,19 @@ def test_complete_feature_script_bounds_step_processes_without_powershell_stream
     assert "ProcessStreamReader_CliXmlError" in script
     assert "Start-Process" not in script
     assert "*> $logPath" not in script
+
+
+def test_complete_feature_script_releases_worktree_cwd_and_checks_cleanup_failures():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "Set-Location $MainRoot" in script
+    assert "$CleanupWorktreeCommand" in script
+    assert "FLUX_KB_CLEANUP_MAIN_ROOT" in script
+    assert "FLUX_KB_CLEANUP_FEATURE_WORKTREE" in script
+    assert "FLUX_KB_CLEANUP_BRANCH" in script
+    assert 'git worktree remove "$FeatureWorktree"' in script
+    assert 'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }' in script
+    assert 'Invoke-FeatureStep -Name "cleanup-worktree" -Cwd $MainRoot -Command $CleanupWorktreeCommand' in script
 
 
 def test_dev_flux_kb_wrapper_is_worktree_safe():
