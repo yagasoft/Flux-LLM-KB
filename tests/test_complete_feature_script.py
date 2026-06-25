@@ -106,6 +106,15 @@ def test_complete_feature_script_releases_worktree_cwd_and_checks_cleanup_failur
     assert 'Invoke-FeatureStep -Name "cleanup-worktree" -Cwd $MainRoot -Command $CleanupWorktreeCommand' in script
 
 
+def test_complete_feature_script_tolerates_empty_unregistered_cleanup_residue():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "Test-WorktreeRegistered" in script
+    assert "Test-DirectoryEmpty" in script
+    assert "worktree remove left an empty directory" in script
+    assert "$removeExit = $LASTEXITCODE" in script
+
+
 def test_dev_flux_kb_wrapper_is_worktree_safe():
     wrapper_path = ROOT / "scripts" / "dev" / "flux-kb.ps1"
     assert wrapper_path.exists()

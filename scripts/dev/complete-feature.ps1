@@ -219,9 +219,48 @@ $MainRoot = $env:FLUX_KB_CLEANUP_MAIN_ROOT
 $FeatureWorktree = $env:FLUX_KB_CLEANUP_FEATURE_WORKTREE
 $Branch = $env:FLUX_KB_CLEANUP_BRANCH
 
+function Normalize-CleanupPath {
+    param([string]$Path)
+    if (-not $Path) { return "" }
+    try {
+        $fullPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    } catch {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+    }
+    return $fullPath.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar).Replace([System.IO.Path]::AltDirectorySeparatorChar, [System.IO.Path]::DirectorySeparatorChar)
+}
+
+function Test-WorktreeRegistered {
+    param([string]$Worktree)
+    $target = Normalize-CleanupPath -Path $Worktree
+    $currentPath = $null
+    foreach ($line in (git worktree list --porcelain)) {
+        if ($line -like "worktree *") {
+            $currentPath = Normalize-CleanupPath -Path $line.Substring("worktree ".Length)
+            if ($currentPath.Equals($target, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Test-DirectoryEmpty {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    return -not [bool](Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop | Select-Object -First 1)
+}
+
 Set-Location $MainRoot
 git worktree remove "$FeatureWorktree"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$removeExit = $LASTEXITCODE
+if ($removeExit -ne 0) {
+    if ((-not (Test-WorktreeRegistered -Worktree $FeatureWorktree)) -and (Test-DirectoryEmpty -Path $FeatureWorktree)) {
+        "git worktree remove left an empty directory; continuing cleanup."
+    } else {
+        exit $removeExit
+    }
+}
 git worktree prune
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 git branch -D $Branch
