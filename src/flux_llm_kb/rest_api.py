@@ -126,6 +126,14 @@ def create_app():
         scope_mode: str = "local_first"
         filters: dict | None = None
 
+    class RetrievalBenchmarkRunRequest(BaseModel):
+        suite: str = "standard"
+        label: str | None = None
+        compare_label: str | None = None
+        limit_per_query: int = 5
+        token_budget: int | None = None
+        persist: bool = True
+
     class ClaimRequest(BaseModel):
         subject_type: str
         subject: str
@@ -507,6 +515,29 @@ def create_app():
             filters=filters,
         )
         return service.explain(query, **kwargs)
+
+    @app.post("/api/retrieval/benchmarks/run")
+    def retrieval_benchmark_run(request: RetrievalBenchmarkRunRequest = Body(...)):
+        return service.run_retrieval_benchmark(
+            suite=request.suite,
+            label=request.label,
+            compare_label=request.compare_label,
+            limit_per_query=request.limit_per_query,
+            token_budget=request.token_budget,
+            persist=request.persist,
+        )
+
+    @app.get("/api/retrieval/benchmarks")
+    def retrieval_benchmark_history(
+        suite: str | None = None,
+        label: str | None = None,
+        limit: int = 20,
+    ):
+        return service.retrieval_benchmark_history(
+            suite=suite,
+            label=label,
+            limit=limit,
+        )
 
     @app.post("/api/claims")
     def claim_upsert(request: ClaimRequest = Body(...)):

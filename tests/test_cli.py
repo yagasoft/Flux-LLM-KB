@@ -376,6 +376,72 @@ def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch,
     ]
 
 
+def test_cli_retrieval_benchmark_run_and_history_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def run_retrieval_benchmark(self, **kwargs):
+            calls.append(("retrieval_benchmark_run", kwargs))
+            return {"suite": kwargs["suite"], "metrics": {"top1_accuracy": 1.0}}
+
+        def retrieval_benchmark_history(self, **kwargs):
+            calls.append(("retrieval_benchmark_history", kwargs))
+            return {"suite": kwargs["suite"], "runs": [{"id": "retrieval-run-1"}]}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "retrieval",
+                "benchmark",
+                "run",
+                "--suite",
+                "standard",
+                "--label",
+                "nightly",
+                "--compare-label",
+                "baseline",
+                "--limit-per-query",
+                "7",
+                "--token-budget",
+                "900",
+            ]
+        )
+        == 0
+    )
+    run_payload = json.loads(capsys.readouterr().out)
+    assert run_payload["suite"] == "standard"
+
+    assert cli.main(["retrieval", "benchmark", "history", "--suite", "standard", "--label", "nightly", "--limit", "3"]) == 0
+    history_payload = json.loads(capsys.readouterr().out)
+
+    assert history_payload["runs"] == [{"id": "retrieval-run-1"}]
+    assert calls == [
+        (
+            "retrieval_benchmark_run",
+            {
+                "suite": "standard",
+                "label": "nightly",
+                "compare_label": "baseline",
+                "limit_per_query": 7,
+                "token_budget": 900,
+                "persist": True,
+            },
+        ),
+        (
+            "retrieval_benchmark_history",
+            {
+                "suite": "standard",
+                "label": "nightly",
+                "limit": 3,
+            },
+        ),
+    ]
+
+
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     from flux_llm_kb import service
 

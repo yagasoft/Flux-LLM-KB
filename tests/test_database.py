@@ -574,6 +574,95 @@ def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
     assert "raw_text" not in json.dumps(rows)
 
 
+def test_retrieval_benchmark_runs_insert_list_and_sanitize_metadata(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("retrieval-run-2", timestamp)
+
+        def fetchall(self):
+            return [
+                (
+                    "retrieval-run-2",
+                    "standard",
+                    "nightly",
+                    "baseline",
+                    "completed",
+                    5,
+                    4,
+                    1,
+                    {"top1_accuracy": 0.8, "raw_text": "nope"},
+                    [{"case_id": "case-1", "query_hash": "sha256:abc", "raw_query": "private"}],
+                    {"provider": "synthetic", "private_path": "E:/secret/root"},
+                    {"settings_mutated": False, "root_path": "E:/secret/root"},
+                    timestamp,
+                    {"top1_accuracy": 0.7},
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    inserted = database.record_retrieval_benchmark_run(
+        suite="standard",
+        label="nightly",
+        compare_label="baseline",
+        status="completed",
+        query_count=5,
+        passed_count=4,
+        failed_count=1,
+        metrics={"top1_accuracy": 0.8, "raw_text": "do not store"},
+        case_results=[{"case_id": "case-1", "query_hash": "sha256:abc", "raw_query": "do not store"}],
+        metadata={"provider": "synthetic", "private_path": "E:/secret/root"},
+        recommendation_metadata={"settings_mutated": False, "root_path": "E:/secret/root"},
+    )
+    rows = database.list_retrieval_benchmark_runs(suite="standard", label="nightly", limit=5)
+
+    insert_sql, insert_params = executed[0]
+    assert "INSERT INTO retrieval_benchmark_runs" in insert_sql
+    assert insert_params[:4] == ("standard", "nightly", "baseline", "completed")
+    assert json.loads(insert_params[7]) == {"top1_accuracy": 0.8}
+    assert json.loads(insert_params[8]) == [{"case_id": "case-1", "query_hash": "sha256:abc"}]
+    assert json.loads(insert_params[9]) == {"provider": "synthetic"}
+    assert json.loads(insert_params[10]) == {"settings_mutated": False}
+    list_sql, list_params = executed[1]
+    assert "suite = %s" in list_sql
+    assert "label = %s" in list_sql
+    assert "LEFT JOIN LATERAL" in list_sql
+    assert "prior.label = current_run.compare_label" in list_sql
+    assert list_params == ["standard", "nightly", 5]
+    assert inserted["id"] == "retrieval-run-2"
+    assert rows[0]["previous_metrics"] == {"top1_accuracy": 0.7}
+    assert rows[0]["case_results"] == [{"case_id": "case-1", "query_hash": "sha256:abc"}]
+    assert "private_path" not in json.dumps(rows)
+    assert "raw_query" not in json.dumps(rows)
+    assert "raw_text" not in json.dumps(rows)
+
+
 def test_watcher_events_store_metadata_counts_and_sanitized_paths(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)

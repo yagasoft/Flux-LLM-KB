@@ -41,6 +41,23 @@ def main(argv: list[str] | None = None) -> int:
     explain_parser.add_argument("--scope-mode", default="local_first")
     _add_retrieval_filter_args(explain_parser)
 
+    retrieval_parser = subparsers.add_parser("retrieval", help="Evaluate retrieval quality")
+    retrieval_subparsers = retrieval_parser.add_subparsers(dest="retrieval_command", required=True)
+    retrieval_benchmark = retrieval_subparsers.add_parser("benchmark", help="Run or inspect retrieval benchmark history")
+    retrieval_benchmark_subparsers = retrieval_benchmark.add_subparsers(dest="retrieval_benchmark_command", required=True)
+    retrieval_benchmark_run = retrieval_benchmark_subparsers.add_parser("run", help="Run the synthetic retrieval benchmark suite")
+    retrieval_benchmark_run.add_argument("--suite", default="standard")
+    retrieval_benchmark_run.add_argument("--label")
+    retrieval_benchmark_run.add_argument("--compare-label")
+    retrieval_benchmark_run.add_argument("--limit-per-query", type=int, default=5)
+    retrieval_benchmark_run.add_argument("--token-budget", type=int)
+    retrieval_benchmark_run.add_argument("--no-persist", action="store_false", dest="persist")
+    retrieval_benchmark_run.set_defaults(persist=True)
+    retrieval_benchmark_history = retrieval_benchmark_subparsers.add_parser("history", help="List retrieval benchmark history")
+    retrieval_benchmark_history.add_argument("--suite", default="standard")
+    retrieval_benchmark_history.add_argument("--label")
+    retrieval_benchmark_history.add_argument("--limit", type=int, default=20)
+
     remember_parser = subparsers.add_parser("remember", help="Store a manual memory")
     remember_parser.add_argument("title")
     remember_parser.add_argument("body")
@@ -379,6 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": _status,
         "search": _search,
         "explain": _explain,
+        "retrieval": _retrieval,
         "remember": _remember,
         "episodes": _episodes,
         "claim": _claim,
@@ -847,6 +865,33 @@ def _settings(args: argparse.Namespace) -> int:
         payload = service.apply(component=args.component, actor="cli")
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.settings_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _retrieval(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    if args.retrieval_command == "benchmark":
+        if args.retrieval_benchmark_command == "run":
+            payload = KnowledgeService().run_retrieval_benchmark(
+                suite=args.suite,
+                label=args.label,
+                compare_label=args.compare_label,
+                limit_per_query=args.limit_per_query,
+                token_budget=args.token_budget,
+                persist=args.persist,
+            )
+        elif args.retrieval_benchmark_command == "history":
+            payload = KnowledgeService().retrieval_benchmark_history(
+                suite=args.suite,
+                label=args.label,
+                limit=args.limit,
+            )
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.retrieval_benchmark_command)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.retrieval_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

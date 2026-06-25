@@ -35,6 +35,8 @@ Tools:
 | `kb.worker_status` | Return worker-family cap usage, backpressure, retry/lock, and slow-job status. |
 | `kb.benchmark_run` | Run deterministic synthetic scan, soak, watcher, or all-mode benchmarks and store metadata-only history. |
 | `kb.benchmark_history` | List metadata-only synthetic benchmark history with mode, label, warm-state, and previous-run delta filters. |
+| `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history. |
+| `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, and case-failure summaries. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
 | `kb.embeddings_enqueue` | Queue a local `corpus_embed` job for missing or stale vectors. |
 | `kb.embeddings_backfill` | Refresh missing or stale vectors immediately with the local deterministic provider. |
@@ -104,6 +106,8 @@ Endpoints:
 - `GET /api/brief?query=<q>&token_budget=<n>`
 - `POST /api/explain`
 - `GET /api/explain?query=<q>&limit=<n>&token_budget=<n>`
+- `POST /api/retrieval/benchmarks/run` with optional `suite`, `label`, `compare_label`, `limit_per_query`, `token_budget`, and `persist`
+- `GET /api/retrieval/benchmarks?suite=<standard>&label=<label>&limit=<n>`
 - `GET /api/claims?review=<all|needs_review|current>&state=<state>&q=<q>&limit=<n>`
 - `POST /api/claims`
 - `GET /api/claims/{claim_id}`
@@ -187,6 +191,8 @@ flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
 flux-kb acceleration benchmark run --scope root --root docs --max-files 1000 --mode scan --deployment-label after-update
 flux-kb acceleration benchmark run --fixture image-heavy --mode model --passes 2 --deployment-label after-update
 flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
+flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
+flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
 ```
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
@@ -277,6 +283,14 @@ dependencies, and `all` mode runs scan/soak/watcher unless model probing is
 explicitly requested. Recommendation payloads are diagnostic only and report
 `settings_mutated: false`; callers must change settings explicitly through the
 normal settings APIs.
+Retrieval benchmarks are separate from acceleration benchmarks. They seed
+temporary public-safe synthetic retrieval cases, call the same search, explain,
+and brief paths used by consumers, and persist metadata-only quality evidence:
+top-1 accuracy, precision@3, recall@5, MRR, nDCG@5, brief recall, brief
+dilution, scope and suppression pass counts, elapsed time, sanitized case ids,
+query hashes, ranks, result ids, stream/kind labels, and failure reasons. They
+also report `settings_mutated: false`; benchmark output is advisory evidence for
+later calibration, not automatic ranking or policy mutation.
 Embedding status, enqueue, and immediate backfill are also exposed through
 `GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
 `POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,

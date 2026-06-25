@@ -3478,6 +3478,128 @@ def list_benchmark_runs(
             return [_benchmark_run_row(row) for row in cur.fetchall()]
 
 
+def record_retrieval_benchmark_run(
+    *,
+    suite: str,
+    status: str = "completed",
+    label: str | None = None,
+    compare_label: str | None = None,
+    query_count: int = 0,
+    passed_count: int = 0,
+    failed_count: int = 0,
+    metrics: dict[str, Any] | None = None,
+    case_results: list[dict[str, Any]] | None = None,
+    metadata: dict[str, Any] | None = None,
+    recommendation_metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    safe_suite = _normalize_retrieval_benchmark_suite(suite)
+    safe_query_count = max(0, int(query_count or 0))
+    safe_passed = max(0, int(passed_count or 0))
+    safe_failed = max(0, int(failed_count or 0))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO retrieval_benchmark_runs (
+                    suite, label, compare_label, status, query_count,
+                    passed_count, failed_count, metrics, case_results,
+                    metadata, recommendation_metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
+                RETURNING id::text, created_at
+                """,
+                (
+                    safe_suite,
+                    _blank_to_none(label),
+                    _blank_to_none(compare_label),
+                    status,
+                    safe_query_count,
+                    safe_passed,
+                    safe_failed,
+                    _json(_sanitize_operational_metadata(metrics or {})),
+                    _json_list(_sanitize_retrieval_case_results(case_results or [])),
+                    _json(_sanitize_operational_metadata(metadata or {})),
+                    _json(_sanitize_operational_metadata(recommendation_metadata or {})),
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "suite": safe_suite,
+                "label": _blank_to_none(label),
+                "compare_label": _blank_to_none(compare_label),
+                "status": status,
+                "query_count": safe_query_count,
+                "passed_count": safe_passed,
+                "failed_count": safe_failed,
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def list_retrieval_benchmark_runs(
+    *,
+    suite: str | None = None,
+    label: str | None = None,
+    limit: int = 20,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    filters: list[str] = []
+    params: list[Any] = []
+    if suite:
+        filters.append("suite = %s")
+        params.append(_normalize_retrieval_benchmark_suite(suite))
+    if label:
+        filters.append("label = %s")
+        params.append(label)
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(max(1, min(limit, 200)))
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH ordered AS (
+                    SELECT current_run.id::text, current_run.suite, current_run.label,
+                           current_run.compare_label, current_run.status,
+                           current_run.query_count, current_run.passed_count,
+                           current_run.failed_count, current_run.metrics,
+                           current_run.case_results, current_run.metadata,
+                           current_run.recommendation_metadata, current_run.created_at,
+                           COALESCE(
+                               label_baseline.metrics,
+                               lead(current_run.metrics) OVER (
+                                   PARTITION BY current_run.suite
+                                   ORDER BY current_run.created_at DESC
+                               )
+                           ) AS previous_metrics
+                    FROM retrieval_benchmark_runs current_run
+                    LEFT JOIN LATERAL (
+                        SELECT prior.metrics
+                        FROM retrieval_benchmark_runs prior
+                        WHERE current_run.compare_label IS NOT NULL
+                          AND prior.suite = current_run.suite
+                          AND prior.label = current_run.compare_label
+                          AND prior.created_at < current_run.created_at
+                        ORDER BY prior.created_at DESC
+                        LIMIT 1
+                    ) label_baseline ON TRUE
+                )
+                SELECT id, suite, label, compare_label, status, query_count,
+                       passed_count, failed_count, metrics, case_results,
+                       metadata, recommendation_metadata, created_at,
+                       previous_metrics
+                FROM ordered
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            return [_retrieval_benchmark_run_row(row) for row in cur.fetchall()]
+
+
 def upsert_scan_manifest(
     *,
     root_name: str,
@@ -7915,6 +8037,25 @@ def _benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+def _retrieval_benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "suite": _normalize_retrieval_benchmark_suite(row[1]),
+        "label": row[2],
+        "compare_label": row[3],
+        "status": row[4],
+        "query_count": int(row[5] or 0),
+        "passed_count": int(row[6] or 0),
+        "failed_count": int(row[7] or 0),
+        "metrics": _sanitize_operational_metadata(row[8] or {}),
+        "case_results": _sanitize_retrieval_case_results(row[9] or []),
+        "metadata": _sanitize_operational_metadata(row[10] or {}),
+        "recommendation_metadata": _sanitize_operational_metadata(row[11] or {}),
+        "created_at": row[12].isoformat() if row[12] else None,
+        "previous_metrics": _sanitize_operational_metadata(row[13] or {}),
+    }
+
+
 def _percentile_disc(values: list[int], percentile: float) -> int | None:
     if not values:
         return None
@@ -7940,6 +8081,13 @@ def _normalize_benchmark_scope_type(value: str | None) -> str:
         normalized = "monitored_root"
     if normalized not in {"synthetic", "monitored_root", "path"}:
         raise ValueError("benchmark scope_type must be synthetic, monitored_root, or path")
+    return normalized
+
+
+def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
+    normalized = str(value or "standard").strip().lower().replace("_", "-")
+    if normalized not in {"standard"}:
+        raise ValueError("retrieval benchmark suite must be standard")
     return normalized
 
 
@@ -8001,6 +8149,40 @@ def _sanitize_operational_value(value: Any) -> Any:
         sanitized = [_sanitize_operational_value(item) for item in value[:20]]
         return [item for item in sanitized if item is not None]
     return str(value)[:200]
+
+
+def _sanitize_retrieval_case_results(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in value[:100]:
+        if not isinstance(item, dict):
+            continue
+        sanitized = _sanitize_retrieval_case_result(item)
+        if sanitized:
+            rows.append(sanitized)
+    return rows
+
+
+def _sanitize_retrieval_case_result(value: dict[str, Any]) -> dict[str, Any]:
+    blocked_keys = {
+        "query",
+        "raw_query",
+        "snippet",
+        "summary",
+        "excerpt",
+        "text",
+        "body",
+        "content",
+    }
+    sanitized: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        lowered = key_text.lower()
+        if lowered in blocked_keys or any(fragment in lowered for fragment in _SENSITIVE_METADATA_FRAGMENTS):
+            continue
+        sanitized_item = _sanitize_operational_value(item)
+        if sanitized_item is not None:
+            sanitized[key_text] = sanitized_item
+    return sanitized
 
 
 def _find_canonical_asset_id(cur: Any, content_hash: str | None, current_id: str | None) -> str | None:

@@ -46,7 +46,7 @@ The detailed roadmap tables and queued work use the same priority labels:
 | V2.6 Mail Capture And Runtime Configuration | Make mail capture and runtime settings manageable from the local app instead of hidden scripts. | in progress | Settings catalog, production deployment, Gmail OAuth, IMAP capture, claimable IMAP scheduler state, Outlook host split, dashboard controls, provider-specific post-processing, and consumer access exist; broader live-provider validation should continue. |
 | V2.7 Mail And Retrieval Production Hardening | Make search, mail handling, and file indexing reliable enough for daily use. | in progress | Search result actions, in-app mail/file detail views, host-agent file actions, logical mail grouping, structured diagnostics, claimable IMAP sync runs, provider-specific mail post-processing, lock-tolerant indexing/watch states, query-aware snippets, retrieval/brief explainability, configurable retrieval filters, and suppression/lifecycle diagnostics exist; automated-action rationale remains planned. |
 | V2.8 Indexer Acceleration And Local Inference Optimization | Make large local indexing faster, observable, and easier to tune on one PC. | in progress | Dedicated acceleration lane foundations exist for local capability status, explicit watcher backend policy/probe, cache layout visibility, worker-family queues and caps, backpressure/debug status, bounded crawler hash parallelism, incremental scan manifest skips, throughput telemetry, cache-backed local OCR for image/image-only PDF jobs, cache-backed local ASR for audio/video jobs, recursive container telemetry, local vision cache telemetry, scene-transition video frame sampling, thumbnail cache reuse, embedding vector refresh jobs, durable deterministic scan/soak/watcher/model benchmark history with labeled comparisons, and scenario diagnostics for reliability, host/cloud calibration, cache readiness, and manual tuning recommendations. |
-| V3 Scale And Evaluation | Prove Flux improves retrieval and memory quality before trusting more automation. | planned | Code-aware corpus indexing, historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. |
+| V3 Scale And Evaluation | Prove Flux improves retrieval and memory quality before trusting more automation. | in progress | Code-aware corpus indexing, historical backfill, retrieval benchmarks, automated memory governance, optional ParadeDB/BM25, and local-only librarian workers. Code-aware foundations and the first metadata-only retrieval benchmark suite now exist; broader governance automation remains planned. |
 | V4 Collaboration And Transfer | Explore sharing and transfer only after the personal local system is safe and stable. | planned | Shared vault mode, sync/export policy, optional Apache AGE, and synthetic-data/fine-tuning pipeline. |
 
 ## V0: Foundation
@@ -150,7 +150,7 @@ The detailed roadmap tables and queued work use the same priority labels:
 | --- | --- | --- | --- | --- | --- | --- |
 | Code-aware corpus indexing | P0 | Help Codex answer code questions by understanding symbols, files, tests, and relationships. | Parser-backed code intelligence over opted-in repositories so Codex can find files, symbols, definitions, references, tests, routes, handlers, and implementation locations without treating code only as generic text. | in progress | The foundation bundle is implemented: code-like files now produce parser-aware `asset_chunks` plus durable `code_symbols` and `code_references`; Python `ast`, SQL/config, notebook, generated-marker, and conservative JS/TS parsers provide definitions, imports, calls, routes, fallback metadata, code filters, exact-symbol ranking, and code metadata through `kb.search`, REST search, and CLI search. A public-safe `code-heavy` benchmark fixture covers Python service/test code, TS routes, SQL migrations, manifests, generated code, notebooks, unsupported syntax, parser failures, and duplicate files. Deeper parser coverage, dashboard code diagnostics, and dedicated code-search tools remain future work. | Add operator diagnostics, code coverage views, parser failure/fallback summaries, richer relationship coverage, and dedicated code surfaces only after the foundation has live retrieval feedback. |
 | Historical Codex backfill | P2 | Safely import useful older Codex work without pulling in unsafe or noisy history. | Historical Codex backfill with redaction. | planned | Codex capture exists, but historical backfill is not production-ready. | Design redaction-first backfill after V1 lifecycle and V2 review workflows are stronger. |
-| Retrieval benchmarks | P0 | Measure whether Flux search is actually finding the right things. | Retrieval benchmark suite. | planned | Benchmarks are planned; V2.8 indexing benchmarks should land first for corpus throughput. | Define query sets and quality metrics for retrieval precision, recall loss, contradiction reduction, brief dilution, and librarian-worker shadow-mode evaluation after retrieval explainability work starts. |
+| Retrieval benchmarks | P0 | Measure whether Flux search is actually finding the right things. | Retrieval benchmark suite. | in progress | A first deterministic synthetic suite now seeds temporary public-safe retrieval cases, calls search/explain/brief paths, records metadata-only history in `retrieval_benchmark_runs`, and exposes REST, CLI, MCP, and dashboard surfaces. Metrics include top-1 accuracy, precision@3, recall@5, MRR, nDCG@5, brief recall, brief dilution, scope pass counts, suppression pass counts, elapsed time, and sanitized case failures. | Use benchmark/live feedback to calibrate score-confidence separation, semantic duplicate thresholds, deeper explainability, and librarian-worker shadow-mode evaluation. Do not mutate settings or ranking automatically. |
 | Optional search backend | P3 | Consider a stronger search engine only after the current baseline is measured. | Optional ParadeDB/BM25 path. | planned | Not started. | Evaluate only after baseline retrieval benchmarks exist. |
 | Librarian workers | P2 | Let Flux suggest cleanup candidates so memory does not become stale or cluttered. | Automation-first local librarian workers for derived-memory cleanup, consolidation, and linting. | planned | Not started. | Start with rule-based and model-assisted candidate generation for stale, redundant, low-utility, contradictory, unscoped, and low-confidence memories; run in shadow mode before broader auto-apply. |
 | Automated memory governance | P2 | Allow safe routine cleanup only after tests prove it will not damage useful memory. | Policy-gated automation for routine memory lifecycle optimization. | planned | Retention quality reporting and lifecycle primitives exist, but automatic mutation is not implemented. | Automatically apply low-risk reversible actions such as duplicate suppression, retrieval deprioritization, stale tagging, canonical cluster presentation, and lifecycle updates after evaluation thresholds are met. |
@@ -368,36 +368,53 @@ Queued items are intentionally larger related slices so one model run can spend
 more tokens on implementation and verification instead of repeated planning,
 branch setup, and context rebuilding.
 
-Completed P0 bundle: make indexing reliable under real file churn. The V2.8
-indexer reliability and tuning bundle now has service-level scenarios,
-REST/CLI/MCP/host-agent/dashboard runners, metadata-only diagnostics, cache/tool
-readiness summaries, and manual tuning candidates with `settings_mutated:
-false`. It remains conservative: VSS snapshot extraction, provider-specific
-acceleration, retrieval-quality benchmarks, and automatic settings mutation are
-still out of scope.
+Queue policy: chip away at roadmap items in priority order from P0 to Pn. Do not force blocked P0 items into the active queue ahead of their prerequisites;
+keep each blocked P0 visible with its blocker and wake condition.
 
-1. Priority: P1. Plain-English purpose: make daily operation inspectable without raw logs. Model-actionable item: ship an operator diagnostics and basic
-   corpus completion bundle that completes code-aware MCP/CLI/REST contracts,
-   code result metadata, dashboard code coverage views, parser failure views,
-   fallback-rate summaries, privacy-safe per-repository status, retrieval
-   explanation drill-downs, watcher event views, worker heartbeat views, mail
-   sync/post-process views, blocked dependency views, slow-job history, and
-   sample-first indexing for large tabular and structured data files.
-   Plain-English explanation: After the core retrieval and indexer bundles,
-   users need stable tool calls, dashboard evidence, and basic large-data
-   coverage so daily operation does not require reading raw logs or forcing huge
-   files through full extraction.
-2. Priority: P2. Plain-English purpose: improve memory quality with reversible evaluated automation. Model-actionable item: ship an evaluated memory-governance
-   automation bundle that implements librarian-worker shadow mode, benchmarked
-   thresholds, reversible lifecycle actions, duplicate suppression, retrieval
+Completed P0 bundle: retrieval evaluation foundation. Flux now has a
+metadata-only synthetic retrieval benchmark suite with REST/CLI/MCP/dashboard
+surfaces and `settings_mutated: false`. It remains conservative: live private
+query sets, automatic ranking/threshold/settings mutation, VSS extraction,
+provider-specific acceleration, and librarian-worker automation are still out of
+scope.
+
+1. Priority: P0. Plain-English purpose: measure retrieval quality before tuning search. Model-actionable item: ship the retrieval calibration follow-through
+   bundle using benchmark/live feedback for score-confidence separation,
+   semantic duplicate threshold calibration, deeper suppression/deprioritization
+   explanations, and comparison reporting against `retrieval_benchmark_runs`.
+   Plain-English explanation: The benchmark foundation creates evidence; the
+   next unblocked P0 should use that evidence to make ranking and explanations
+   more trustworthy without automatic mutation.
+2. Priority: P0. Plain-English purpose: prove indexer and filesystem reliability on real workloads before adding snapshot extraction. Model-actionable item:
+   validate live high-volume roots, cloud-sync delayed availability, open Office
+   files, large writes, rename-save patterns, watcher reconciliation, worker cap
+   telemetry, and default-cap tuning from observed hardware evidence.
+   Plain-English explanation: This remains P0, but VSS snapshot extraction and
+   provider-specific acceleration are blocked until real telemetry shows which
+   gaps remain after current lock-tolerant indexing and benchmark foundations.
+3. Priority: P0. Plain-English purpose: make code-aware retrieval diagnosable after feedback exists. Model-actionable item: add code coverage views, parser
+   failure/fallback summaries, privacy-safe per-repository status, richer code
+   relationship coverage, and dedicated code-search surfaces blocked until retrieval benchmark/live feedback confirms which code paths miss.
+   Plain-English explanation: Code-aware foundations are implemented, but the
+   roadmap explicitly gates deeper surfaces on live retrieval feedback so this
+   should follow evaluation and calibration instead of jumping ahead.
+4. Priority: P1. Plain-English purpose: make daily operation inspectable without raw logs. Model-actionable item: ship the remaining operator diagnostics and
+   basic corpus completion bundle: retrieval drill-downs, watcher event views,
+   worker heartbeat/history views, mail sync/post-process views, blocked
+   dependency views, slow-job history, and sample-first indexing for large
+   tabular and structured data files.
+   Plain-English explanation: Once P0 evaluation and calibration are underway,
+   operators need stable dashboard evidence and basic large-data coverage for
+   daily operation.
+5. Priority: P2. Plain-English purpose: improve memory quality with reversible evaluated automation. Model-actionable item: ship evaluated memory-governance
+   automation with librarian-worker shadow mode, benchmarked thresholds,
+   reversible lifecycle actions, duplicate suppression, retrieval
    deprioritization, stale tagging, canonical cluster presentation, recovery
    views, audit records, operator digests, and optional loopback-only local model
-   routing for proposals, semantic clustering, contradiction checks,
-   canonical-summary drafts, and rationale generation with rule-based fallback.
-   Plain-English explanation: Automation should arrive as one evaluated system,
-   not as scattered cleanup mutations. This keeps memory quality improvements
-   measurable, reversible, and private.
-3. Priority: P3. Plain-English purpose: keep optional scale-outs behind proven local value. Model-actionable item: defer optional ParadeDB/BM25,
+   routing with rule-based fallback.
+   Plain-English explanation: Automation waits for retrieval benchmarks and
+   calibration so routine cleanup is measurable, reversible, and private.
+6. Priority: P3. Plain-English purpose: keep optional scale-outs behind proven local value. Model-actionable item: defer optional ParadeDB/BM25,
    shared-vault collaboration, sync/export governance, Apache AGE, and
    synthetic-data/fine-tuning until single-user retrieval, code indexing,
    indexer reliability, diagnostics, evaluation, and recovery flows are stable.

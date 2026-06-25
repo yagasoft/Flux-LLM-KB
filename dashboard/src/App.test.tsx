@@ -335,6 +335,8 @@ let retentionPoliciesPayload: unknown;
 let retentionQualityPayload: unknown;
 let retentionPolicyUpdatePayload: unknown;
 let benchmarkRunPayload: unknown;
+let retrievalBenchmarkRunPayload: unknown;
+let retrievalBenchmarkHistoryPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -502,6 +504,39 @@ describe("Flux dashboard", () => {
     };
     retentionPolicyUpdatePayload = undefined;
     benchmarkRunPayload = undefined;
+    retrievalBenchmarkRunPayload = undefined;
+    retrievalBenchmarkHistoryPayload = {
+      suite: "standard",
+      runs: [
+        {
+          id: "retrieval-run-1",
+          suite: "standard",
+          label: "baseline",
+          status: "completed",
+          query_count: 5,
+          passed_count: 4,
+          failed_count: 1,
+          metrics: {
+            top1_accuracy: 0.8,
+            precision_at_3: 0.9,
+            recall_at_5: 0.85,
+            brief_dilution: 0.2,
+            scope_pass_count: 5,
+            suppression_pass_count: 4
+          },
+          case_results: [
+            {
+              case_id: "scope-filter",
+              status: "failed",
+              expected_ids: ["chunk-scope"],
+              observed_ids: ["chunk-other"],
+              reasons: ["top1_miss", "scope_miss"]
+            }
+          ],
+          recommendations: { settings_mutated: false }
+        }
+      ]
+    };
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -554,6 +589,34 @@ describe("Flux dashboard", () => {
               }
             ]
           }
+        });
+      }
+      if (url === "/api/retrieval/benchmarks") return json(retrievalBenchmarkHistoryPayload);
+      if (url === "/api/retrieval/benchmarks/run" && init?.method === "POST") {
+        retrievalBenchmarkRunPayload = JSON.parse(String(init.body));
+        return json({
+          suite: "standard",
+          label: "nightly",
+          status: "completed",
+          query_count: 5,
+          passed_count: 4,
+          failed_count: 1,
+          metrics: {
+            top1_accuracy: 0.8,
+            precision_at_3: 0.9,
+            recall_at_5: 0.85,
+            brief_dilution: 0.2
+          },
+          case_results: [
+            {
+              case_id: "scope-filter",
+              status: "failed",
+              expected_ids: ["chunk-scope"],
+              observed_ids: ["chunk-other"],
+              reasons: ["top1_miss", "scope_miss"]
+            }
+          ],
+          recommendations: { settings_mutated: false }
         });
       }
       if (url === "/api/mail/profiles" && init?.method === "POST") return json({ ...JSON.parse(String(init.body)), enabled: true });
@@ -1532,6 +1595,36 @@ describe("Flux dashboard", () => {
         include_suppressed: true
       }
     });
+  });
+
+  test("retrieval tab runs and displays retrieval benchmark history", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Retrieval" }));
+
+    expect(await screen.findByRole("heading", { name: "Retrieval Benchmarks" })).toBeInTheDocument();
+    expect(screen.getAllByText("baseline").length).toBeGreaterThan(0);
+    expect(screen.getByText("top1 80.0%")).toBeInTheDocument();
+    expect(screen.getByText("brief dilution 20.0%")).toBeInTheDocument();
+    expect(screen.getByText("scope-filter")).toBeInTheDocument();
+    expect(screen.getByText("top1 miss, scope miss")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Run retrieval benchmark" }));
+
+    await waitFor(() => {
+      expect(retrievalBenchmarkRunPayload).toEqual({
+        suite: "standard",
+        label: "dashboard",
+        limit_per_query: 5,
+        persist: true
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("nightly").length).toBeGreaterThan(0);
+    });
+    expect(screen.getByText("settings_mutated false")).toBeInTheDocument();
   });
 
   test("health renders structured diagnostics with details, copy, and target navigation", async () => {

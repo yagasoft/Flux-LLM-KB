@@ -110,3 +110,24 @@ def test_roadmap_tables_and_queue_have_plain_english_purpose():
     future_slice = roadmap.split("### Future Slice: Code-Aware Corpus Indexing", 1)[1].split("## V4:", 1)[0]
     assert "Plain-English overview:" in future_slice
     assert "Plain-English purpose:" in future_slice
+
+
+def test_docs_describe_p0_retrieval_benchmark_queue_policy_and_interfaces():
+    roadmap = (ROOT / "docs" / "roadmap.md").read_text(encoding="utf-8").lower()
+    architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8").lower()
+    integrations = (ROOT / "docs" / "integrations.md").read_text(encoding="utf-8").lower()
+    combined = "\n".join([roadmap, architecture, integrations])
+
+    assert "retrieval_benchmark_runs" in architecture
+    assert "flux-kb retrieval benchmark run" in integrations
+    assert "kb.retrieval_benchmark_run" in integrations
+    assert "post /api/retrieval/benchmarks/run" in integrations
+    assert "brief dilution" in combined
+    assert "precision@3" in combined
+    assert "settings_mutated: false" in combined
+    assert "queue policy" in roadmap
+    assert "p0 to pn" in roadmap
+    assert "do not force blocked p0 items" in roadmap
+    queue_section = roadmap.split("## queued work in roadmap order", 1)[1].split("## update rules", 1)[0]
+    assert "priority: p0. plain-english purpose: measure retrieval quality" in queue_section
+    assert "blocked until retrieval benchmark/live feedback" in queue_section

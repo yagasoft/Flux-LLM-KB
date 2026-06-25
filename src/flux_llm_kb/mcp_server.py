@@ -213,6 +213,27 @@ def create_server():
             limit=limit,
         )
 
+    @mcp.tool(name="kb.retrieval_benchmark_run")
+    def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True):
+        """Run the synthetic retrieval-quality benchmark suite and store metadata-only history."""
+        return service.run_retrieval_benchmark(
+            suite=suite,
+            label=label,
+            compare_label=compare_label,
+            limit_per_query=limit_per_query,
+            token_budget=token_budget,
+            persist=persist,
+        )
+
+    @mcp.tool(name="kb.retrieval_benchmark_history")
+    def retrieval_benchmark_history(suite: str | None = None, label: str | None = None, limit: int = 20):
+        """List metadata-only retrieval benchmark history and metric deltas."""
+        return service.retrieval_benchmark_history(
+            suite=suite,
+            label=label,
+            limit=limit,
+        )
+
     @mcp.tool(name="kb.embeddings_status")
     def embeddings_status(root_name: str | None = None):
         """Return embedding vector coverage and missing/stale metadata counts."""

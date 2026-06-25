@@ -336,6 +336,55 @@ def test_benchmark_route_proxies_host_agent_roots(monkeypatch):
     ]
 
 
+def test_retrieval_benchmark_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def run_retrieval_benchmark(self, **kwargs):
+            calls.append(("retrieval_run", kwargs))
+            return {"suite": kwargs["suite"], "metrics": {"top1_accuracy": 1.0}}
+
+        def retrieval_benchmark_history(self, **kwargs):
+            calls.append(("retrieval_history", kwargs))
+            return {"suite": kwargs["suite"], "runs": [{"id": "retrieval-run-1"}]}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post(
+        "/api/retrieval/benchmarks/run",
+        json={
+            "suite": "standard",
+            "label": "nightly",
+            "compare_label": "baseline",
+            "limit_per_query": 7,
+            "token_budget": 900,
+        },
+    )
+    history = client.get("/api/retrieval/benchmarks?suite=standard&label=nightly&limit=3")
+
+    assert response.status_code == 200
+    assert response.json()["metrics"]["top1_accuracy"] == 1.0
+    assert history.status_code == 200
+    assert history.json()["runs"] == [{"id": "retrieval-run-1"}]
+    assert calls == [
+        (
+            "retrieval_run",
+            {
+                "suite": "standard",
+                "label": "nightly",
+                "compare_label": "baseline",
+                "limit_per_query": 7,
+                "token_budget": 900,
+                "persist": True,
+            },
+        ),
+        ("retrieval_history", {"suite": "standard", "label": "nightly", "limit": 3}),
+    ]
+
+
 def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_path):
     from flux_llm_kb.rest_api import create_app
 

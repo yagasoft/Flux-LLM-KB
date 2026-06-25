@@ -11,6 +11,7 @@ import re
 import tempfile
 import time
 from typing import Any
+from uuid import uuid4
 
 from .acceleration import (
     BENCHMARK_FIXTURES,
@@ -32,6 +33,7 @@ from .indexer_diagnostics import (
 )
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
+from .retrieval_benchmark import evaluate_retrieval_cases, metric_deltas
 from .retrieval_explain import enrich_search_result
 from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
 from .scoring import ContextCandidate, pack_context, pack_context_with_trace
@@ -288,6 +290,202 @@ class KnowledgeService:
             if normalized_filters.get("include_suppressed"):
                 payload["suppression"] = _suppression_trace(raw_results)
         return payload
+
+    def run_retrieval_benchmark(
+        self,
+        *,
+        suite: str = "standard",
+        label: str | None = None,
+        compare_label: str | None = None,
+        limit_per_query: int = 5,
+        token_budget: int | None = None,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        normalized_suite = _normalize_retrieval_benchmark_suite(suite)
+        bounded_limit = max(1, min(int(limit_per_query or 5), 50))
+        if token_budget is None:
+            token_budget = _configured_token_budget()
+        cases, cleanup = self._prepare_retrieval_benchmark_cases(normalized_suite)
+        try:
+            observations: dict[str, dict[str, Any]] = {}
+            for case in cases:
+                started = time.perf_counter()
+                explain_payload = self.explain(
+                    str(case["query"]),
+                    limit=bounded_limit,
+                    token_budget=token_budget,
+                    root_name=case.get("root_name"),
+                    scope_mode=str(case.get("scope_mode") or "local_first"),
+                    filters=case.get("filters"),
+                )
+                observations[str(case["id"])] = {
+                    "results": explain_payload.get("results") or [],
+                    "brief": explain_payload.get("brief") or {},
+                    "elapsed_ms": max(0, int((time.perf_counter() - started) * 1000)),
+                }
+            report = evaluate_retrieval_cases(cases, observations, limit_per_query=bounded_limit)
+            recommendations = {
+                "settings_mutated": False,
+                "purpose": "retrieval_evaluation",
+            }
+            recorded: dict[str, Any] | None = None
+            if persist:
+                recorded = database.record_retrieval_benchmark_run(
+                    suite=normalized_suite,
+                    label=label,
+                    compare_label=compare_label,
+                    status="completed",
+                    query_count=report["query_count"],
+                    passed_count=report["passed_count"],
+                    failed_count=report["failed_count"],
+                    metrics=report["metrics"],
+                    case_results=report["case_results"],
+                    metadata={
+                        "provider": "synthetic",
+                        "suite_version": "v1",
+                        "limit_per_query": bounded_limit,
+                    },
+                    recommendation_metadata=recommendations,
+                )
+            return {
+                "id": recorded.get("id") if recorded else None,
+                "suite": normalized_suite,
+                "label": label,
+                "compare_label": compare_label,
+                "status": "completed",
+                "query_count": report["query_count"],
+                "passed_count": report["passed_count"],
+                "failed_count": report["failed_count"],
+                "metrics": report["metrics"],
+                "metric_deltas": metric_deltas(report["metrics"], None),
+                "case_results": report["case_results"],
+                "recommendations": recommendations,
+                "created_at": recorded.get("created_at") if recorded else None,
+            }
+        finally:
+            cleanup()
+
+    def retrieval_benchmark_history(
+        self,
+        *,
+        suite: str | None = None,
+        label: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        normalized_suite = None if suite in {None, "", "all"} else _normalize_retrieval_benchmark_suite(suite)
+        return {
+            "suite": normalized_suite or "all",
+            "runs": database.list_retrieval_benchmark_runs(
+                suite=normalized_suite,
+                label=label or None,
+                limit=limit,
+            ),
+        }
+
+    def _prepare_retrieval_benchmark_cases(self, suite: str) -> tuple[list[dict[str, Any]], Any]:
+        if _normalize_retrieval_benchmark_suite(suite) != "standard":
+            raise ValueError("retrieval benchmark suite must be standard")
+        temp_dir = tempfile.TemporaryDirectory(prefix="flux-kb-retrieval-benchmark-")
+        root = Path(temp_dir.name)
+        root_name = f"__retrieval_benchmark_{uuid4().hex[:12]}"
+        episode_id: str | None = None
+        root_created = False
+
+        def cleanup() -> None:
+            if episode_id:
+                database.forget_episode(episode_id)
+            if root_created:
+                database.delete_monitored_root(root_id=root_name, purge_index=True, actor="retrieval_benchmark")
+            temp_dir.cleanup()
+
+        try:
+            marker = uuid4().hex
+            files = {
+                "alpha-decision.md": (
+                    f"alpha-{marker} retrieval benchmark decision. "
+                    "Flux should find scoped corpus evidence before broad fallback results."
+                ),
+                "duplicate-canonical.md": (
+                    f"duplicate-{marker} duplicate benchmark note. "
+                    "Exact duplicate suppression should keep one canonical searchable result."
+                ),
+                "duplicate-copy.md": (
+                    f"duplicate-{marker} duplicate benchmark note. "
+                    "Exact duplicate suppression should keep one canonical searchable result."
+                ),
+                "service_impl.py": (
+                    f"# code-{marker} retrieval benchmark fixture\n\n"
+                    "def benchmark_handler(request):\n"
+                    "    return {'status': 'ok', 'source': request}\n"
+                ),
+                "contradiction-review.md": (
+                    f"contradiction-{marker} benchmark evidence says the older statement was superseded "
+                    "by a newer local review note."
+                ),
+            }
+            for relative_path, content in files.items():
+                (root / relative_path).write_text(content, encoding="utf-8")
+            database.add_monitored_root(
+                name=root_name,
+                root_path=root,
+                include_globs=["**/*"],
+                exclude_globs=[],
+                trust_rank=850,
+                metadata={"benchmark_tag": root_name, "provider": "synthetic"},
+            )
+            root_created = True
+            self.sync_corpus(root_name=root_name)
+            episode_id = database.insert_episode(
+                title=f"episode-{marker} retrieval benchmark memory",
+                summary="Synthetic benchmark episode for brief packing and workspace-scoped memory retrieval.",
+                metadata={"root_name": root_name, "workspace_key": f"root:{root_name}", "benchmark_tag": root_name},
+            )
+            cases = [
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="scoped-corpus",
+                    query=f"alpha-{marker} scoped corpus evidence",
+                    root_name=root_name,
+                    source_path="alpha-decision.md",
+                ),
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="duplicate-suppression",
+                    query=f"duplicate-{marker} exact duplicate suppression",
+                    root_name=root_name,
+                    source_path="duplicate-canonical.md",
+                    expect_suppression=True,
+                ),
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="code-symbol",
+                    query=f"code-{marker} benchmark_handler",
+                    root_name=root_name,
+                    source_path="service_impl.py",
+                    filters={"logical_kinds": ["file"], "current_only": True},
+                ),
+                {
+                    "id": "episode-brief",
+                    "query": f"episode-{marker} benchmark memory",
+                    "root_name": root_name,
+                    "scope_mode": "local_only",
+                    "expected_ids": [episode_id],
+                    "expected_brief_ids": [episode_id],
+                    "expected_scope": "local",
+                    "expect_suppression": False,
+                },
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="contradiction-review",
+                    query=f"contradiction-{marker} superseded older statement",
+                    root_name=root_name,
+                    source_path="contradiction-review.md",
+                ),
+            ]
+            return cases, cleanup
+        except Exception:
+            cleanup()
+            raise
 
     def audit(self, limit: int = 50) -> list[dict[str, Any]]:
         return database.list_audit_events(limit=limit)
@@ -1573,6 +1771,60 @@ def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[s
     }
     normalized.update({key: value for key, value in code_filters.items() if value})
     return normalized
+
+
+def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
+    normalized = str(value or "standard").strip().lower().replace("_", "-")
+    if normalized not in {"standard"}:
+        raise ValueError("retrieval benchmark suite must be standard")
+    return normalized
+
+
+def _retrieval_benchmark_case(
+    service: KnowledgeService,
+    *,
+    case_id: str,
+    query: str,
+    root_name: str,
+    source_path: str,
+    expect_suppression: bool = False,
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    expected_id = _retrieval_benchmark_expected_id(
+        service,
+        query=query,
+        root_name=root_name,
+        source_path=source_path,
+        filters=filters,
+    )
+    return {
+        "id": case_id,
+        "query": query,
+        "root_name": root_name,
+        "scope_mode": "local_only",
+        "filters": filters,
+        "expected_ids": [expected_id] if expected_id else [],
+        "expected_brief_ids": [expected_id] if expected_id else [],
+        "expected_scope": "local",
+        "expect_suppression": expect_suppression,
+    }
+
+
+def _retrieval_benchmark_expected_id(
+    service: KnowledgeService,
+    *,
+    query: str,
+    root_name: str,
+    source_path: str,
+    filters: dict[str, Any] | None,
+) -> str | None:
+    results = service.search(query, limit=10, root_name=root_name, scope_mode="local_only", filters=filters)
+    normalized_source = source_path.replace("\\", "/")
+    for item in results:
+        item_path = str(item.get("source_path") or "").replace("\\", "/")
+        if item_path == normalized_source:
+            return str(item.get("id") or "") or None
+    return str(results[0].get("id") or "") if results else None
 
 
 def _normalize_filter_values(value: Any) -> list[str]:

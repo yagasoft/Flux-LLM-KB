@@ -219,6 +219,40 @@ type BenchmarkRunResponse = {
   };
 };
 
+type RetrievalBenchmarkCaseResult = {
+  case_id?: string;
+  status?: string;
+  expected_ids?: string[];
+  observed_ids?: string[];
+  reasons?: string[];
+};
+
+type RetrievalBenchmarkRun = {
+  id?: string;
+  suite?: string;
+  label?: string | null;
+  compare_label?: string | null;
+  status?: string;
+  query_count?: number;
+  passed_count?: number;
+  failed_count?: number;
+  metrics?: Record<string, number>;
+  metric_deltas?: Record<string, number>;
+  case_results?: RetrievalBenchmarkCaseResult[];
+  recommendations?: {
+    settings_mutated?: boolean;
+  };
+  recommendation_metadata?: {
+    settings_mutated?: boolean;
+  };
+  created_at?: string | null;
+};
+
+type RetrievalBenchmarkHistory = {
+  suite?: string;
+  runs?: RetrievalBenchmarkRun[];
+};
+
 type ErrorDiagnostic = {
   code?: string;
   message?: string;
@@ -2602,6 +2636,43 @@ function RetrievalTab({
   onOpenResult: (result: SearchResult) => void;
 }) {
   const retrieval = state.retrieval.retrieval ?? state.health.retrieval ?? {};
+  const [benchmarkHistory, setBenchmarkHistory] = useState<RetrievalBenchmarkHistory>({ suite: "standard", runs: [] });
+  const [benchmarkResult, setBenchmarkResult] = useState<RetrievalBenchmarkRun | null>(null);
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [benchmarkStatus, setBenchmarkStatus] = useState("");
+  const benchmarkRuns = benchmarkResult ? [benchmarkResult, ...(benchmarkHistory.runs ?? [])] : benchmarkHistory.runs ?? [];
+  const latestBenchmark = benchmarkRuns[0];
+  const failedBenchmarkCases = (latestBenchmark?.case_results ?? []).filter((item) => item.status === "failed").slice(0, 3);
+
+  useEffect(() => {
+    let cancelled = false;
+    getJson<RetrievalBenchmarkHistory>("/api/retrieval/benchmarks", { suite: "standard", runs: [] }).then((payload) => {
+      if (!cancelled) setBenchmarkHistory(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function runRetrievalBenchmark() {
+    setBenchmarkRunning(true);
+    setBenchmarkStatus("Retrieval benchmark queued...");
+    try {
+      const result = await sendJson<RetrievalBenchmarkRun>("/api/retrieval/benchmarks/run", "POST", {
+        suite: "standard",
+        label: "dashboard",
+        limit_per_query: 5,
+        persist: true
+      });
+      setBenchmarkResult(result);
+      setBenchmarkStatus("Retrieval benchmark recorded.");
+    } catch (error) {
+      setBenchmarkStatus(errorMessage(error));
+    } finally {
+      setBenchmarkRunning(false);
+    }
+  }
+
   return (
     <section className="tab-grid">
       <Panel title="Retrieval Console" action={searchOpen ? <button className="ghost-action compact" type="button" onClick={onClear}>Clear results</button> : undefined}>
@@ -2654,6 +2725,44 @@ function RetrievalTab({
         ) : (
           <p className="muted">Use the top search box to query episodes, corpus chunks, mail bodies, and attachments.</p>
         )}
+      </Panel>
+      <Panel
+        title="Retrieval Benchmarks"
+        action={
+          <button className="ghost-action compact" type="button" disabled={benchmarkRunning} onClick={() => void runRetrievalBenchmark()}>
+            <Play size={15} /> Run retrieval benchmark
+          </button>
+        }
+      >
+        {benchmarkRuns.length > 0 ? (
+          <MiniTable
+            rows={benchmarkRuns.slice(0, 5).map((run) => [
+              run.label ?? run.id ?? "unlabeled",
+              `${run.passed_count ?? 0}/${run.query_count ?? 0} passed`,
+              `top1 ${formatPercentMetric(run.metrics?.top1_accuracy)}`,
+              `brief dilution ${formatPercentMetric(run.metrics?.brief_dilution)}`
+            ])}
+          />
+        ) : (
+          <p className="panel-note">No retrieval benchmark history yet.</p>
+        )}
+        {latestBenchmark && (
+          <div className="diagnostic-list">
+            <div className="diagnostic-item">
+              <strong>{latestBenchmark.label ?? latestBenchmark.id ?? "latest run"}</strong>
+              <span>{humanizeIdentifier(latestBenchmark.status ?? "observed")}</span>
+              <em>{benchmarkSettingsMutated(latestBenchmark) ? "settings changed" : "settings_mutated false"}</em>
+            </div>
+            {failedBenchmarkCases.map((item) => (
+              <div className="diagnostic-item" key={item.case_id ?? item.observed_ids?.join(",") ?? "case"}>
+                <strong>{item.case_id ?? "case"}</strong>
+                <span>{formatReasonList(item.reasons)}</span>
+                <em>{(item.observed_ids ?? []).length} observed</em>
+              </div>
+            ))}
+          </div>
+        )}
+        {benchmarkStatus && <p className="panel-note">{benchmarkStatus}</p>}
       </Panel>
       <Panel title="Consumer Access">
         <p className="panel-note">External tools can query Flux through local REST, MCP tools, or the CLI. Keep the API bound to localhost unless you explicitly configure access controls.</p>
@@ -3664,6 +3773,20 @@ function humanizeIdentifier(value: string) {
     .filter(Boolean)
     .map((word) => formatIdentifierWord(word))
     .join(" ");
+}
+
+function formatPercentMetric(value: number | undefined) {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return `${(numeric * 100).toFixed(1)}%`;
+}
+
+function formatReasonList(values?: string[]) {
+  const rows = values?.length ? values : ["observed"];
+  return rows.map((value) => value.replace(/[_-]+/g, " ").toLowerCase()).join(", ");
+}
+
+function benchmarkSettingsMutated(run: RetrievalBenchmarkRun) {
+  return Boolean(run.recommendations?.settings_mutated ?? run.recommendation_metadata?.settings_mutated);
 }
 
 function formatIdentifierWord(word: string) {

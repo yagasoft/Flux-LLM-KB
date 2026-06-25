@@ -218,6 +218,28 @@ def test_postgres_semantic_duplicate_refresh_suppresses_corpus_and_episode_resul
                 cur.execute("DELETE FROM semantic_duplicate_clusters WHERE root_name = %s", (name,))
 
 
+def test_postgres_retrieval_benchmark_seeds_searches_persists_and_cleans_up(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_DATABASE_URL", TEST_DATABASE_URL)
+    run_migrations(TEST_DATABASE_URL)
+    label = f"retrieval-benchmark-{uuid4()}"
+
+    result = KnowledgeService().run_retrieval_benchmark(suite="standard", label=label, limit_per_query=5)
+    history = database.list_retrieval_benchmark_runs(suite="standard", label=label, url=TEST_DATABASE_URL)
+    psycopg = database._load_psycopg()
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM monitored_roots WHERE name LIKE '__retrieval_benchmark_%'")
+            synthetic_roots = cur.fetchone()[0]
+
+    assert result["status"] == "completed"
+    assert result["query_count"] >= 4
+    assert result["metrics"]["top1_accuracy"] >= 0.5
+    assert result["metrics"]["brief_dilution"] >= 0.0
+    assert history
+    assert history[0]["label"] == label
+    assert synthetic_roots == 0
+
+
 def test_postgres_claim_lifecycle_and_graph_traversal_are_migration_backed():
     run_migrations(TEST_DATABASE_URL)
     marker = f"graph-lifecycle-{uuid4()}"

@@ -37,6 +37,12 @@ system rather than a large prompt-injected memory file.
   parallelism, worker counts, manifest skip counts, timings, throughput, cache
   counters, warm/cold state, worker-family breakdowns, watcher probe summaries,
   and previous-run deltas.
+- `retrieval_benchmark_runs`: metadata-only retrieval-quality benchmark history
+  for synthetic suite names, labels, comparison labels, query counts,
+  passed/failed case counts, aggregate metrics, sanitized case ids, stable query
+  hashes, ranks, result ids, stream/kind labels, reasons, and previous-run
+  metrics. It must not store raw query text, snippets, private content,
+  credentials, embeddings, or private watched roots.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -81,6 +87,12 @@ new active metadata clusters from local embeddings; they do not delete or modify
 the underlying memories. Retrieval suppresses only noncanonical members of
 active semantic clusters and exposes sanitized cluster counts, paths, and
 canonical identifiers when callers request suppressed metadata.
+Retrieval evaluation uses deterministic public-safe synthetic cases to exercise
+search, explain, brief packing, scope filters, duplicate suppression, and code
+retrieval. The first suite records top-1 accuracy, precision@3, recall@5, MRR,
+nDCG@5, brief recall, brief dilution, scope pass counts, suppression pass
+counts, and elapsed time. Benchmark outputs are evidence for later calibration;
+they do not mutate ranking, thresholds, retention policy, or settings.
 
 ## Corpus Monitoring
 
