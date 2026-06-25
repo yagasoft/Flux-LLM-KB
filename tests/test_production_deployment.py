@@ -97,7 +97,14 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
 
     assert "[int]$DockerComposeTimeoutSeconds" in update
     assert "Invoke-FluxDockerComposeUp" in update
+    assert "[System.Diagnostics.ProcessStartInfo]" in update
+    assert "UseShellExecute = $false" in update
+    assert "CreateNoWindow = $true" in update
+    assert "RedirectStandardOutput = $true" in update
+    assert "RedirectStandardError = $true" in update
+    assert "ReadToEndAsync()" in update
     assert "WaitForExit($TimeoutSeconds * 1000)" in update
+    assert "ExitCode" in update
     assert "Stop-FluxProcessTree" in update
     assert "Start-FluxCreatedContainers" in update
     assert "docker inspect" in update
@@ -105,6 +112,7 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     assert "docker start" in update
     assert "flux-llm-kb-api" in update
     assert "flux-llm-kb-worker" in update
+    assert 'Start-Process -FilePath "docker"' not in update
 
 
 def test_docs_describe_production_runtime_boundary():

@@ -212,6 +212,19 @@ function ConvertTo-FluxCommandArgument {
     return $Value
 }
 
+function Get-FluxTaskResult {
+    param($Task)
+    if ($null -eq $Task) { return "" }
+    if ($Task.Wait(5000)) { return $Task.Result }
+    return "[log stream did not close within 5 seconds]"
+}
+
+function Write-FluxProcessOutput {
+    param([string]$Stdout, [string]$Stderr)
+    if ($Stdout) { $Stdout | Out-Host }
+    if ($Stderr) { $Stderr | Out-Host }
+}
+
 function Stop-FluxProcessTree {
     param([int]$ProcessId)
     $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue)
@@ -279,23 +292,31 @@ function Invoke-FluxDockerComposeUp {
         "postgres", "api", "worker"
     )
     $argumentText = ($arguments | ForEach-Object { ConvertTo-FluxCommandArgument $_ }) -join " "
-    $stdoutPath = Join-Path ([System.IO.Path]::GetTempPath()) ("flux-compose-up-{0}-out.log" -f ([Guid]::NewGuid().ToString("N")))
-    $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ("flux-compose-up-{0}-err.log" -f ([Guid]::NewGuid().ToString("N")))
-    $process = Start-Process -FilePath "docker" -ArgumentList $argumentText -WorkingDirectory $AppRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+    $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = "docker"
+    $processInfo.Arguments = $argumentText
+    $processInfo.WorkingDirectory = $AppRoot
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         Write-Warning "docker compose up did not exit within $TimeoutSeconds seconds; stopping compose process tree and checking container state."
         Stop-FluxProcessTree -ProcessId $process.Id
+        $process.WaitForExit(5000) | Out-Null
+        Write-FluxProcessOutput -Stdout (Get-FluxTaskResult -Task $stdoutTask) -Stderr (Get-FluxTaskResult -Task $stderrTask)
         Start-FluxCreatedContainers -ContainerNames $recoverableContainers
         Wait-FluxContainersRunning -ContainerNames $containers
         return
     }
 
-    if (Test-Path $stdoutPath) {
-        Get-Content -Path $stdoutPath | Out-Host
-    }
-    if (Test-Path $stderrPath) {
-        Get-Content -Path $stderrPath | Out-Host
-    }
+    $process.WaitForExit()
+    Write-FluxProcessOutput -Stdout (Get-FluxTaskResult -Task $stdoutTask) -Stderr (Get-FluxTaskResult -Task $stderrTask)
     if ($process.ExitCode -ne 0) {
         Start-FluxCreatedContainers -ContainerNames $recoverableContainers
         try {
