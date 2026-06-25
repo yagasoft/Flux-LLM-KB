@@ -60,7 +60,13 @@ const health = {
           worker_count: 3,
           manifest_skipped_unchanged: 8,
           cache_hits: 7,
-          cache_misses: 3
+          cache_misses: 3,
+          scope_type: "monitored_root",
+          deployment_label: "desktop-after",
+          model_telemetry: {
+            local_model: { state: "disabled", provider: "ollama" },
+            blocked_dependency_count: 2
+          }
         }
       ]
     }
@@ -695,9 +701,9 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("image-heavy")).toBeInTheDocument();
     expect(screen.getByText("Scan / warm / pass 2")).toBeInTheDocument();
     expect(screen.getByText("10 files/s; -250ms; +2 files/s")).toBeInTheDocument();
-    expect(screen.getByText("after-deploy; hash 4; workers 3; 8 manifest skips")).toBeInTheDocument();
+    expect(screen.getByText("after-deploy; desktop-after; Monitored Root; hash 4; workers 3; 8 manifest skips; model disabled; 2 blocked")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
-    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all" });
+    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic" });
     expect(screen.getByText("office")).toBeInTheDocument();
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });

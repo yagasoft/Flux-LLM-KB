@@ -24,6 +24,7 @@ DEFAULT_HOST_AGENT_PORT = 8799
 HOST_AGENT_REQUEST_TIMEOUT_SECONDS = 3
 HOST_AGENT_BROWSE_TIMEOUT_SECONDS = 300
 HOST_AGENT_BACKFILL_TIMEOUT_SECONDS = 600
+HOST_AGENT_BENCHMARK_TIMEOUT_SECONDS = 600
 
 
 class ValidateRequest(BaseModel):
@@ -42,6 +43,23 @@ class BackfillRequest(BaseModel):
     limit: int = 10
     workers: int = 1
     root_name: str | None = None
+
+
+class BenchmarkRequest(BaseModel):
+    fixture: str = "all"
+    files: int = 10
+    mode: str = "scan"
+    passes: int = 1
+    label: str | None = None
+    compare_label: str | None = None
+    workers: int = 1
+    family: str = "all"
+    scope: str = "synthetic"
+    root_name: str | None = None
+    path: str | None = None
+    max_files: int | None = None
+    deployment_label: str | None = None
+    include_model_probe: bool = False
 
 
 class FileActionRequest(BaseModel):
@@ -385,6 +403,25 @@ def create_app(*, start_watcher: bool = False):
             root_name=req.root_name,
         )
 
+    @app.post("/acceleration/benchmarks/run")
+    def benchmark_run(req: BenchmarkRequest = Body(...)):
+        return _service().run_benchmark(
+            fixture=req.fixture,
+            files=req.files,
+            mode=req.mode,
+            passes=req.passes,
+            label=req.label,
+            compare_label=req.compare_label,
+            workers=req.workers,
+            family=req.family,
+            scope=req.scope,
+            root_name=req.root_name,
+            path=req.path,
+            max_files=req.max_files,
+            deployment_label=req.deployment_label,
+            include_model_probe=req.include_model_probe,
+        )
+
     return app
 
 
@@ -480,6 +517,51 @@ def remote_backfill(
         )
     except HostAgentClientError as exc:
         return {"status": "host_agent_offline", "message": str(exc), "root_name": root_name}
+
+
+def remote_benchmark(
+    *,
+    fixture: str = "all",
+    files: int = 10,
+    mode: str = "scan",
+    passes: int = 1,
+    label: str | None = None,
+    compare_label: str | None = None,
+    workers: int = 1,
+    family: str = "all",
+    scope: str = "synthetic",
+    root_name: str | None = None,
+    path: str | None = None,
+    max_files: int | None = None,
+    deployment_label: str | None = None,
+    include_model_probe: bool = False,
+    agent_url: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "fixture": fixture,
+        "files": files,
+        "mode": mode,
+        "passes": passes,
+        "label": label,
+        "compare_label": compare_label,
+        "workers": workers,
+        "family": family,
+        "scope": scope,
+        "root_name": root_name,
+        "path": path,
+        "max_files": max_files,
+        "deployment_label": deployment_label,
+        "include_model_probe": include_model_probe,
+    }
+    try:
+        return _request_json(
+            "POST",
+            f"{_agent_url(agent_url)}/acceleration/benchmarks/run",
+            payload,
+            timeout=HOST_AGENT_BENCHMARK_TIMEOUT_SECONDS,
+        )
+    except HostAgentClientError as exc:
+        return {"status": "host_agent_offline", "message": str(exc), "root_name": root_name, "path": path}
 
 
 def remote_file_action(

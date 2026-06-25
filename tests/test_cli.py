@@ -262,6 +262,17 @@ def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch,
                 "3",
                 "--family",
                 "media",
+                "--scope",
+                "root",
+                "--root",
+                "docs",
+                "--path",
+                "E:\\Docs",
+                "--max-files",
+                "12",
+                "--deployment-label",
+                "desktop-after",
+                "--include-model-probe",
             ]
         )
         == 0
@@ -285,6 +296,10 @@ def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch,
                 "after-deploy",
                 "--warm-state",
                 "warm",
+                "--scope-type",
+                "monitored_root",
+                "--deployment-label",
+                "desktop-after",
             ]
         )
         == 0
@@ -305,9 +320,26 @@ def test_cli_watcher_probe_worker_status_and_benchmarks_use_service(monkeypatch,
                 "compare_label": "before-deploy",
                 "workers": 3,
                 "family": "media",
+                "scope": "root",
+                "root_name": "docs",
+                "path": "E:\\Docs",
+                "max_files": 12,
+                "deployment_label": "desktop-after",
+                "include_model_probe": True,
             },
         ),
-        ("benchmark_history", {"fixture": "image-heavy", "mode": "soak", "label": "after-deploy", "warm_state": "warm", "limit": 3}),
+        (
+            "benchmark_history",
+            {
+                "fixture": "image-heavy",
+                "mode": "soak",
+                "label": "after-deploy",
+                "warm_state": "warm",
+                "scope_type": "monitored_root",
+                "deployment_label": "desktop-after",
+                "limit": 3,
+            },
+        ),
     ]
 
 

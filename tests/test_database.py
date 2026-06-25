@@ -465,6 +465,13 @@ def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
                     9,
                     {"image": {"completed": 10}},
                     {"provider": "synthetic", "private_path": "E:/secret/root"},
+                    "monitored_root",
+                    "sha256:scope",
+                    "after-update",
+                    {"version": "0.1.0"},
+                    {"hash_parallelism": 4, "private_path": "E:/secret/root"},
+                    {"local_model": {"state": "disabled"}, "raw_text": "nope"},
+                    {"settings_mutated": False, "root_path": "E:/secret/root"},
                     timestamp,
                     1250,
                     8.0,
@@ -504,24 +511,47 @@ def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
         cache_misses=3,
         worker_family_breakdown={"image": {"completed": 10}},
         metadata={"private_path": "E:/secret/root", "provider": "synthetic", "raw_text": "do not store"},
+        scope_type="monitored_root",
+        scope_hash="sha256:scope",
+        deployment_label="after-update",
+        build_metadata={"version": "0.1.0"},
+        settings_snapshot={"hash_parallelism": 4, "private_path": "E:/secret/root"},
+        model_telemetry={"local_model": {"state": "disabled"}, "raw_text": "do not store"},
+        recommendation_metadata={"settings_mutated": False, "root_path": "E:/secret/root"},
     )
-    rows = database.list_benchmark_runs(fixture="image-heavy", mode="scan", label="nightly", warm_state="warm", limit=5)
+    rows = database.list_benchmark_runs(
+        fixture="image-heavy",
+        mode="scan",
+        label="nightly",
+        warm_state="warm",
+        scope_type="monitored_root",
+        deployment_label="after-update",
+        limit=5,
+    )
 
     insert_sql, insert_params = executed[0]
     assert "INSERT INTO acceleration_benchmark_runs" in insert_sql
     assert "mode" in insert_sql
     assert "label" in insert_sql
     assert "manifest_skipped_unchanged" in insert_sql
+    assert "scope_type" in insert_sql
+    assert "deployment_label" in insert_sql
+    assert "model_telemetry" in insert_sql
     assert insert_params[0:5] == ("image-heavy", "scan", "nightly", "baseline", "completed")
-    assert json.loads(insert_params[-2]) == {"image": {"completed": 10}}
-    assert json.loads(insert_params[-1]) == {"provider": "synthetic"}
+    assert json.loads(insert_params[-9]) == {"image": {"completed": 10}}
+    assert json.loads(insert_params[-8]) == {"provider": "synthetic"}
+    assert json.loads(insert_params[-3]) == {"hash_parallelism": 4}
+    assert json.loads(insert_params[-2]) == {"local_model": {"state": "disabled"}}
+    assert json.loads(insert_params[-1]) == {"settings_mutated": False}
     list_sql, list_params = executed[1]
     assert "mode = %s" in list_sql
     assert "label = %s" in list_sql
     assert "warm_state = %s" in list_sql
+    assert "scope_type = %s" in list_sql
+    assert "deployment_label = %s" in list_sql
     assert "LEFT JOIN LATERAL" in list_sql
     assert "prior.label = current_run.compare_label" in list_sql
-    assert list_params[:4] == ("image-heavy", "scan", "nightly", "warm")
+    assert list_params[:6] == ("image-heavy", "scan", "nightly", "warm", "monitored_root", "after-update")
     assert inserted["id"] == "run-2"
     assert inserted["mode"] == "scan"
     assert rows[0]["previous_elapsed_delta_ms"] == -250
@@ -533,6 +563,13 @@ def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
     assert rows[0]["hash_parallelism"] == 4
     assert rows[0]["worker_count"] == 3
     assert rows[0]["manifest_skipped_unchanged"] == 9
+    assert rows[0]["scope_type"] == "monitored_root"
+    assert rows[0]["scope_hash"] == "sha256:scope"
+    assert rows[0]["deployment_label"] == "after-update"
+    assert rows[0]["build_metadata"] == {"version": "0.1.0"}
+    assert rows[0]["settings_snapshot"] == {"hash_parallelism": 4}
+    assert rows[0]["model_telemetry"] == {"local_model": {"state": "disabled"}}
+    assert rows[0]["recommendation_metadata"] == {"settings_mutated": False}
     assert "private_path" not in json.dumps(rows)
     assert "raw_text" not in json.dumps(rows)
 

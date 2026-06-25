@@ -68,6 +68,44 @@ def test_host_agent_backfill_endpoint_routes_to_service(monkeypatch):
 @pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
 )
+def test_host_agent_benchmark_endpoint_routes_to_service(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    class FakeService:
+        def run_benchmark(self, **kwargs):
+            return {"benchmark": kwargs, "runs": []}
+
+    monkeypatch.setattr("flux_llm_kb.service.KnowledgeService", lambda: FakeService())
+
+    client = TestClient(host_agent.create_app())
+
+    response = client.post(
+        "/acceleration/benchmarks/run",
+        json={"scope": "root", "root_name": "watch-test", "mode": "scan", "max_files": 20, "deployment_label": "after"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["benchmark"] == {
+        "fixture": "all",
+        "files": 10,
+        "mode": "scan",
+        "passes": 1,
+        "label": None,
+        "compare_label": None,
+        "workers": 1,
+        "family": "all",
+        "scope": "root",
+        "root_name": "watch-test",
+        "path": None,
+        "max_files": 20,
+        "deployment_label": "after",
+        "include_model_probe": False,
+    }
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
 def test_host_agent_startup_runs_watcher_and_worker_loops(monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -121,6 +159,49 @@ def test_remote_backfill_allows_host_root_processing(monkeypatch):
             "POST",
             "http://127.0.0.1:8799/crawl/backfill",
             {"kind": "all", "limit": 10, "workers": 1, "root_name": "watch-test"},
+        )
+    ]
+
+
+def test_remote_benchmark_routes_to_host_agent(monkeypatch):
+    requests: list[tuple[str, str, dict]] = []
+
+    def fake_request_json(method, url, payload=None, **_kwargs):
+        requests.append((method, url, payload or {}))
+        return {"status": "ok", "runs": []}
+
+    monkeypatch.setattr(host_agent, "_request_json", fake_request_json)
+
+    result = host_agent.remote_benchmark(
+        scope="root",
+        root_name="watch-test",
+        mode="scan",
+        max_files=20,
+        deployment_label="after",
+        agent_url="http://127.0.0.1:8799",
+    )
+
+    assert result["status"] == "ok"
+    assert requests == [
+        (
+            "POST",
+            "http://127.0.0.1:8799/acceleration/benchmarks/run",
+            {
+                "fixture": "all",
+                "files": 10,
+                "mode": "scan",
+                "passes": 1,
+                "label": None,
+                "compare_label": None,
+                "workers": 1,
+                "family": "all",
+                "scope": "root",
+                "root_name": "watch-test",
+                "path": None,
+                "max_files": 20,
+                "deployment_label": "after",
+                "include_model_probe": False,
+            },
         )
     ]
 

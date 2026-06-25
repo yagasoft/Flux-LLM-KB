@@ -79,8 +79,8 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def acceleration_status()" in source
     assert "def watch_probe(timeout_seconds: float = 2.0)" in source
     assert "def worker_status(family: str = \"all\")" in source
-    assert 'def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all")' in source
-    assert "def benchmark_history(fixture: str | None = None, mode: str | None = None, label: str | None = None, warm_state: str | None = None, limit: int = 20)" in source
+    assert 'def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all", scope: str = "synthetic", root_name: str | None = None, path: str | None = None, max_files: int | None = None, deployment_label: str | None = None, include_model_probe: bool = False)' in source
+    assert "def benchmark_history(fixture: str | None = None, mode: str | None = None, label: str | None = None, warm_state: str | None = None, scope_type: str | None = None, deployment_label: str | None = None, limit: int = 20)" in source
     assert "review_capture_job(" in source
 
 

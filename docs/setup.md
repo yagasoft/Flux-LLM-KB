@@ -140,6 +140,8 @@ flux-kb crawl worker status --family all
 flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
 flux-kb acceleration benchmark run --fixture image-heavy --files 20 --mode soak --workers 2 --family media
 flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
+flux-kb acceleration benchmark run --scope root --root docs --max-files 1000 --mode scan --deployment-label after-update
+flux-kb acceleration benchmark run --fixture image-heavy --mode model --passes 2 --deployment-label after-update
 flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
@@ -216,20 +218,27 @@ The acceleration status also includes deterministic benchmark fixture summaries
 and durable benchmark history for text-heavy, Office/PDF-heavy,
 archive/container-heavy, image-heavy, and audio/video-heavy synthetic roots.
 Run `flux-kb acceleration benchmark run --fixture <name|all> --files <n>
---mode <scan|soak|watcher|all>` and
+--mode <scan|soak|watcher|model|all>` and
 inspect prior metadata-only runs with `flux-kb acceleration benchmark history
 --fixture <name> --mode <scan|soak|watcher> --label <label> --warm-state
-<cold|warm> --limit <n>`. Scan mode supports `--passes`; pass 1 is cold and
-later passes reuse an in-memory manifest as warm scans. Soak mode supports
+<cold|warm> --scope-type <synthetic|monitored_root|path>
+--deployment-label <label> --limit <n>`. Scan mode supports `--passes`; pass 1
+is cold and later passes reuse an in-memory manifest as warm scans. Add
+`--scope root --root <name>` or `--scope path --path <path>` to record
+aggregate-only calibration for opted-in monitored roots; host-agent roots are
+handled by the host agent. Add `--deployment-label <label>` to compare before
+and after updates without storing private paths. Soak mode supports
 `--workers` and `--family`, creates benchmark-tagged synthetic jobs through the
 normal worker cap logic, and purges them after the run. Watcher mode runs the
 temporary watcher probe and records backend policy, selected backend, fallback
-reason, event counts, and latency. Labels and `--compare-label` support
-before/after comparisons without changing runtime settings. Benchmark storage
-records fixture names, mode, labels, counts, timings, cache counters,
-hash-parallelism, worker-count, manifest-skip, backend/provider metadata, and
-sanitized summaries only; it does not store raw text, mail contents, private
-watched roots, credentials, or embeddings.
+reason, event counts, and latency. Model mode records local-only model/tool
+readiness, warm/cold timings, cache signals, and blocked dependency counts.
+Labels, deployment labels, and `--compare-label` support before/after
+comparisons without changing runtime settings. Benchmark storage records fixture
+names, mode, labels, scope type, stable scope hashes, counts, timings, cache
+counters, hash-parallelism, worker-count, manifest-skip, model/tool telemetry,
+backend/provider metadata, and sanitized summaries only; it does not store raw
+text, mail contents, private watched roots, credentials, or embeddings.
 Worker-family status is available with `flux-kb crawl worker status --family
 <name|all>` and reports configured caps, cap pressure, worker-family
 backpressure, oldest pending age, slow recent jobs, retry/lock transitions,

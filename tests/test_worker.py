@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -424,6 +425,79 @@ def test_benchmark_scan_mode_records_cold_and_warm_passes(monkeypatch):
     assert recorded[1]["warm_state"] == "warm"
     assert recorded[1]["manifest_skipped_unchanged"] == 2
     assert recorded[1]["cache_hits"] == 2
+
+
+def test_benchmark_real_root_scope_records_only_sanitized_aggregate_metadata(monkeypatch, tmp_path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "one.md").write_text("one", encoding="utf-8")
+    recorded = []
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {
+                "name": "docs",
+                "root_path": str(root),
+                "recursive": True,
+                "include_globs": [],
+                "exclude_globs": [],
+                "glob_mode": "extend",
+                "max_inline_bytes": 256 * 1024,
+                "heavy_threshold_bytes": 10 * 1024 * 1024,
+                "metadata": {"host_access": "direct"},
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-root", "fixture": kwargs["fixture"]})
+
+    result = KnowledgeService().run_benchmark(scope="root", root_name="docs", mode="scan", max_files=5, deployment_label="after-update")
+
+    assert result["scope_type"] == "monitored_root"
+    assert result["runs"][0]["scope_type"] == "monitored_root"
+    assert result["runs"][0]["deployment_label"] == "after-update"
+    assert recorded[0]["scope_type"] == "monitored_root"
+    assert recorded[0]["scope_hash"].startswith("sha256:")
+    assert recorded[0]["deployment_label"] == "after-update"
+    assert recorded[0]["settings_snapshot"]["hash_parallelism"] >= 1
+    assert recorded[0]["recommendation_metadata"]["settings_mutated"] is False
+    serialized = json.dumps(recorded[0], default=str)
+    assert str(root) not in serialized
+    assert "root_path" not in serialized
+
+
+def test_benchmark_model_mode_records_local_readiness_without_private_content(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-model", "fixture": kwargs["fixture"]})
+    monkeypatch.setattr(
+        service_module,
+        "collect_acceleration_status",
+        lambda: {
+            "capabilities": {"local_model": {"ok": False, "state": "disabled", "provider": "ollama"}},
+            "cache": {"root": "E:/private/cache"},
+            "worker_families": [],
+            "benchmarks": {},
+        },
+    )
+    monkeypatch.setattr(
+        service_module,
+        "extractor_availability",
+        lambda: {
+            "tesseract": {"ok": True, "message": "available"},
+            "ffmpeg": {"ok": False, "message": "ffmpeg command not found"},
+            "faster_whisper": {"ok": False, "message": "module not installed"},
+        },
+    )
+
+    result = KnowledgeService().run_benchmark(fixture="image-heavy", mode="model", passes=2, deployment_label="after-update")
+
+    assert result["mode"] == "model"
+    assert [run["warm_state"] for run in result["runs"]] == ["cold", "warm"]
+    assert result["runs"][0]["model_telemetry"]["local_model"]["state"] == "disabled"
+    assert result["runs"][0]["model_telemetry"]["tools"]["ffmpeg"]["ok"] is False
+    assert recorded[0]["model_telemetry"]["blocked_dependency_count"] == 2
+    assert recorded[0]["deployment_label"] == "after-update"
+    assert "private" not in json.dumps(recorded[0]["model_telemetry"]).lower()
 
 
 def test_benchmark_soak_mode_claims_worker_family_jobs_and_purges(monkeypatch):

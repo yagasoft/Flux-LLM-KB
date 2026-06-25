@@ -179,6 +179,12 @@ type AccelerationBenchmarkRun = {
   manifest_skipped_unchanged?: number;
   cache_hits?: number;
   cache_misses?: number;
+  scope_type?: string;
+  deployment_label?: string | null;
+  model_telemetry?: {
+    local_model?: { state?: string; provider?: string };
+    blocked_dependency_count?: number;
+  };
   created_at?: string | null;
 };
 
@@ -1852,9 +1858,13 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
     const modeText = `${humanizeIdentifier(run.mode ?? "scan")} / ${run.warm_state ?? "cold"} / pass ${run.pass_index ?? 1}`;
     const metadata = [
       run.label,
+      run.deployment_label,
+      run.scope_type ? humanizeIdentifier(run.scope_type) : null,
       run.hash_parallelism != null ? `hash ${run.hash_parallelism}` : null,
       run.worker_count != null ? `workers ${run.worker_count}` : null,
-      (run.manifest_skipped_unchanged ?? 0) > 0 ? `${run.manifest_skipped_unchanged} manifest skips` : null
+      (run.manifest_skipped_unchanged ?? 0) > 0 ? `${run.manifest_skipped_unchanged} manifest skips` : null,
+      run.model_telemetry?.local_model?.state ? `model ${run.model_telemetry.local_model.state}` : null,
+      (run.model_telemetry?.blocked_dependency_count ?? 0) > 0 ? `${run.model_telemetry?.blocked_dependency_count} blocked` : null
     ].filter(Boolean).join("; ") || "metadata only";
     return [
       run.fixture ?? "fixture",
@@ -1867,7 +1877,7 @@ function AccelerationPanel({ acceleration }: { acceleration?: AccelerationStatus
     try {
       setBenchmarkRunning(true);
       setBenchmarkStatus("Benchmark queued...");
-      await sendJson("/api/acceleration/benchmarks/run", "POST", { fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all" });
+      await sendJson("/api/acceleration/benchmarks/run", "POST", { fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic" });
       setBenchmarkStatus("Benchmark run recorded.");
     } catch (error) {
       setBenchmarkStatus(`Benchmark failed: ${errorMessage(error)}`);

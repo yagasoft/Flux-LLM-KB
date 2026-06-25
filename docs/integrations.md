@@ -69,8 +69,8 @@ Endpoints:
 
 - `GET /api/health`
 - `GET /api/acceleration/status`
-- `POST /api/acceleration/benchmarks/run` with optional `fixture`, `files`, `mode`, `passes`, `label`, `compare_label`, `workers`, and `family`
-- `GET /api/acceleration/benchmarks?fixture=<name>&mode=<scan|soak|watcher>&label=<label>&warm_state=<cold|warm>&limit=<n>`
+- `POST /api/acceleration/benchmarks/run` with optional `fixture`, `files`, `mode`, `passes`, `label`, `compare_label`, `workers`, `family`, `scope`, `root_name`, `path`, `max_files`, `deployment_label`, and `include_model_probe`
+- `GET /api/acceleration/benchmarks?fixture=<name>&mode=<scan|soak|watcher|model>&label=<label>&warm_state=<cold|warm>&scope_type=<synthetic|monitored_root|path>&deployment_label=<label>&limit=<n>`
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -184,6 +184,8 @@ flux-kb crawl worker status --family all
 flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
 flux-kb acceleration benchmark run --fixture image-heavy --files 20 --mode soak --workers 2 --family media
 flux-kb acceleration benchmark run --fixture all --files 5 --mode watcher
+flux-kb acceleration benchmark run --scope root --root docs --max-files 1000 --mode scan --deployment-label after-update
+flux-kb acceleration benchmark run --fixture image-heavy --mode model --passes 2 --deployment-label after-update
 flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-state warm --label after-change --limit 10
 ```
 
@@ -257,20 +259,24 @@ backpressure, cap usage, retry/lock transitions, `manifest_skipped_unchanged`
 counters, and deterministic benchmark fixture summaries for text-heavy,
 Office/PDF-heavy, archive/container-heavy, image-heavy, and audio/video-heavy
 roots.
-Watcher probes and benchmark runs are metadata-only operational checks. They
-use temporary synthetic files and must not touch private watched roots or store
-raw text, mail contents, private paths, credentials, or embeddings. Benchmark
-history is metadata only and is exposed through CLI, REST, and MCP as fixture
-names, modes, labels, compare labels, pass indexes, counts, timings,
-p50/p95/max, throughput, warm/cold state, cache hit/miss counters,
-hash-parallelism, worker-count, manifest-skip fields, worker-family breakdowns,
-watcher backend summaries, comparable elapsed and throughput deltas, and
-sanitized summaries. Benchmark `scan` mode supports cold/warm passes, `soak`
-mode exercises benchmark-tagged synthetic worker-family jobs through existing
+Watcher probes and benchmark runs are metadata-only operational checks.
+Synthetic runs use temporary files; scoped runs dry-run opted-in monitored roots
+and store only aggregate counts, stable scope hashes, and sanitized labels. They
+must not store raw text, mail contents, private paths, credentials, or
+embeddings. Benchmark history is metadata only and is exposed through CLI, REST,
+and MCP as fixture names, modes, labels, compare labels, deployment labels,
+scope types, pass indexes, counts, timings, p50/p95/max, throughput, warm/cold
+state, cache hit/miss counters, hash-parallelism, worker-count, manifest-skip
+fields, model/tool readiness telemetry, worker-family breakdowns, watcher
+backend summaries, comparable elapsed and throughput deltas, and sanitized
+summaries. Benchmark `scan` mode supports cold/warm passes, `soak` mode
+exercises benchmark-tagged synthetic worker-family jobs through existing
 cap/backpressure logic and purges them, `watcher` mode stores temporary probe
-metadata, and `all` mode runs all three. Recommendation payloads are diagnostic
-only and report `settings_mutated: false`; callers must change settings
-explicitly through the normal settings APIs.
+metadata, `model` mode records local-only model/tool readiness and blocked
+dependencies, and `all` mode runs scan/soak/watcher unless model probing is
+explicitly requested. Recommendation payloads are diagnostic only and report
+`settings_mutated: false`; callers must change settings explicitly through the
+normal settings APIs.
 Embedding status, enqueue, and immediate backfill are also exposed through
 `GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
 `POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,

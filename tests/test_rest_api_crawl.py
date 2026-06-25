@@ -226,11 +226,25 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
             "compare_label": "before-deploy",
             "workers": 3,
             "family": "media",
+            "scope": "synthetic",
+            "root_name": None,
+            "path": None,
+            "max_files": 12,
+            "deployment_label": "desktop-after",
+            "include_model_probe": True,
         },
     )
     history = client.get(
         "/api/acceleration/benchmarks",
-        params={"fixture": "image-heavy", "mode": "soak", "label": "after-deploy", "warm_state": "warm", "limit": 3},
+        params={
+            "fixture": "image-heavy",
+            "mode": "soak",
+            "label": "after-deploy",
+            "warm_state": "warm",
+            "scope_type": "monitored_root",
+            "deployment_label": "desktop-after",
+            "limit": 3,
+        },
     )
 
     assert probe.status_code == 200
@@ -258,9 +272,64 @@ def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
                 "compare_label": "before-deploy",
                 "workers": 3,
                 "family": "media",
+                "scope": "synthetic",
+                "root_name": None,
+                "path": None,
+                "max_files": 12,
+                "deployment_label": "desktop-after",
+                "include_model_probe": True,
             },
         ),
-        ("benchmark_history", {"fixture": "image-heavy", "mode": "soak", "label": "after-deploy", "warm_state": "warm", "limit": 3}),
+        (
+            "benchmark_history",
+            {
+                "fixture": "image-heavy",
+                "mode": "soak",
+                "label": "after-deploy",
+                "warm_state": "warm",
+                "scope_type": "monitored_root",
+                "deployment_label": "desktop-after",
+                "limit": 3,
+            },
+        ),
+    ]
+
+
+def test_benchmark_route_proxies_host_agent_roots(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    monkeypatch.setattr(
+        "flux_llm_kb.rest_api.database.get_monitored_root",
+        lambda root_name: {"name": root_name, "root_path": "E:\\Docs", "metadata": {"host_access": "host_agent"}},
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.host_agent_benchmark", lambda **kwargs: calls.append(kwargs) or {"status": "host_agent", "runs": []})
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post(
+        "/api/acceleration/benchmarks/run",
+        json={"scope": "root", "root_name": "docs", "mode": "scan", "deployment_label": "after"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "host_agent"
+    assert calls == [
+        {
+            "fixture": "all",
+            "files": 10,
+            "mode": "scan",
+            "passes": 1,
+            "label": None,
+            "compare_label": None,
+            "workers": 1,
+            "family": "all",
+            "scope": "root",
+            "root_name": "docs",
+            "path": None,
+            "max_files": None,
+            "deployment_label": "after",
+            "include_model_probe": False,
+        }
     ]
 
 

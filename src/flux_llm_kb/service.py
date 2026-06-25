@@ -20,8 +20,9 @@ from .acceleration import (
     kind_to_job_families,
 )
 from .crawler import CorpusPolicy, scan_path
-from . import database
+from . import __version__, database
 from .glob_policy import effective_glob_policy
+from .extractors import extractor_availability
 from .processes import run_no_window
 from .redaction import RedactionFinding, redact_text
 from .retrieval_explain import enrich_search_result
@@ -585,6 +586,8 @@ class KnowledgeService:
         mode: str | None = None,
         label: str | None = None,
         warm_state: str | None = None,
+        scope_type: str | None = None,
+        deployment_label: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
         normalized = None if fixture in {None, "", "all"} else str(fixture)
@@ -597,6 +600,8 @@ class KnowledgeService:
                 mode=normalized_mode,
                 label=label or None,
                 warm_state=warm_state or None,
+                scope_type=scope_type or None,
+                deployment_label=deployment_label or None,
                 limit=limit,
             ),
         }
@@ -612,33 +617,59 @@ class KnowledgeService:
         compare_label: str | None = None,
         workers: int = 1,
         family: str = "all",
+        scope: str = "synthetic",
+        root_name: str | None = None,
+        path: str | None = None,
+        max_files: int | None = None,
+        deployment_label: str | None = None,
+        include_model_probe: bool = False,
     ) -> dict[str, Any]:
+        scope_descriptor = _benchmark_scope_descriptor(scope=scope, root_name=root_name, path=path)
         fixture_names = [item["name"] for item in BENCHMARK_FIXTURES]
         requested = str(fixture or "all")
-        names = fixture_names if requested == "all" else [requested]
+        real_scope = scope_descriptor["scope_type"] != "synthetic"
+        names = [scope_descriptor["fixture"]] if real_scope and requested == "all" else (fixture_names if requested == "all" else [requested])
         unknown = [name for name in names if name not in fixture_names]
-        if unknown:
+        if unknown and not real_scope:
             raise ValueError(f"unknown benchmark fixture: {unknown[0]}")
         normalized_mode = _normalize_benchmark_mode(mode, allow_all=True)
         modes = ["scan", "soak", "watcher"] if normalized_mode == "all" else [normalized_mode]
+        if normalized_mode == "all" and include_model_probe:
+            modes.append("model")
         normalized_family = _normalize_benchmark_family(family)
         file_count = max(1, min(int(files or 10), 500))
+        real_file_count = max(1, min(int(max_files or file_count), 10_000))
         pass_count = max(1, min(int(passes or 1), 10))
         worker_count = max(1, min(int(workers or 1), 32))
         runs: list[dict[str, Any]] = []
         for name in names:
             for selected_mode in modes:
                 if selected_mode == "scan":
-                    runs.extend(
-                        self._run_scan_benchmark(
-                            name,
-                            file_count,
-                            passes=pass_count,
-                            label=label,
-                            compare_label=compare_label,
-                            worker_count=worker_count,
+                    if real_scope:
+                        runs.extend(
+                            self._run_real_scope_scan_benchmark(
+                                scope_descriptor,
+                                real_file_count,
+                                passes=pass_count,
+                                label=label,
+                                compare_label=compare_label,
+                                worker_count=worker_count,
+                                deployment_label=deployment_label,
+                            )
                         )
-                    )
+                    else:
+                        runs.extend(
+                            self._run_scan_benchmark(
+                                name,
+                                file_count,
+                                passes=pass_count,
+                                label=label,
+                                compare_label=compare_label,
+                                worker_count=worker_count,
+                                scope_descriptor=scope_descriptor,
+                                deployment_label=deployment_label,
+                            )
+                        )
                 elif selected_mode == "soak":
                     runs.append(
                         self._run_soak_benchmark(
@@ -648,6 +679,8 @@ class KnowledgeService:
                             compare_label=compare_label,
                             worker_count=worker_count,
                             family=normalized_family,
+                            scope_descriptor=scope_descriptor,
+                            deployment_label=deployment_label,
                         )
                     )
                 elif selected_mode == "watcher":
@@ -658,11 +691,26 @@ class KnowledgeService:
                             label=label,
                             compare_label=compare_label,
                             worker_count=worker_count,
+                            scope_descriptor=scope_descriptor,
+                            deployment_label=deployment_label,
+                        )
+                    )
+                elif selected_mode == "model":
+                    runs.extend(
+                        self._run_model_benchmark(
+                            name,
+                            passes=pass_count,
+                            label=label,
+                            compare_label=compare_label,
+                            worker_count=worker_count,
+                            scope_descriptor=scope_descriptor,
+                            deployment_label=deployment_label,
                         )
                     )
         return {
             "fixture": requested if requested != "all" else "all",
             "mode": normalized_mode,
+            "scope_type": scope_descriptor["scope_type"],
             "files": file_count,
             "runs": runs,
             "recommendations": _benchmark_recommendations(runs),
@@ -677,6 +725,8 @@ class KnowledgeService:
         label: str | None,
         compare_label: str | None,
         worker_count: int,
+        scope_descriptor: dict[str, Any],
+        deployment_label: str | None,
     ) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
         with tempfile.TemporaryDirectory(prefix="flux-kb-benchmark-") as temp_dir:
@@ -713,6 +763,11 @@ class KnowledgeService:
                     "watcher_backend": _configured_watcher_backend(),
                     "hash_parallelism": hash_parallelism,
                 }
+                record_fields = _benchmark_record_fields(
+                    scope_descriptor=scope_descriptor,
+                    deployment_label=deployment_label,
+                    recommendation_metadata={"settings_mutated": False},
+                )
                 recorded = database.record_benchmark_run(
                     fixture=fixture,
                     mode="scan",
@@ -733,6 +788,7 @@ class KnowledgeService:
                     jobs_blocked=len(plan.errors),
                     worker_family_breakdown=family_breakdown,
                     metadata=metadata,
+                    **record_fields,
                 )
                 runs.append(
                     _benchmark_run_payload(
@@ -753,8 +809,119 @@ class KnowledgeService:
                         cache_hits=manifest_skipped,
                         cache_misses=max(0, len(plan.assets) - manifest_skipped),
                         metadata=metadata,
+                        **record_fields,
                     )
                 )
+        return runs
+
+    def _run_real_scope_scan_benchmark(
+        self,
+        scope_descriptor: dict[str, Any],
+        max_files: int,
+        *,
+        passes: int,
+        label: str | None,
+        compare_label: str | None,
+        worker_count: int,
+        deployment_label: str | None,
+    ) -> list[dict[str, Any]]:
+        root = scope_descriptor["root"]
+        target_path = scope_descriptor.get("path")
+        runs: list[dict[str, Any]] = []
+        hash_parallelism = _configured_hash_parallelism()
+        manifest: dict[str, dict[str, Any]] = {}
+        for pass_index in range(1, passes + 1):
+            started = time.perf_counter()
+            plan = scan_path(
+                root["root_path"],
+                CorpusPolicy(
+                    root_path=Path(root["root_path"]),
+                    recursive=root["recursive"],
+                    include_globs=tuple(root.get("include_globs") or ()),
+                    exclude_globs=tuple(root.get("exclude_globs") or ()),
+                    max_inline_bytes=root["max_inline_bytes"],
+                    heavy_threshold_bytes=root["heavy_threshold_bytes"],
+                    **_configured_container_limits(),
+                    hash_parallelism=hash_parallelism,
+                    manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
+                ),
+                target_path=target_path,
+            )
+            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+            selected_assets = plan.assets[:max_files]
+            for asset in selected_assets:
+                manifest[asset.relative_path] = {
+                    "path": asset.relative_path,
+                    "size_bytes": asset.size_bytes,
+                    "mtime_ns": asset.mtime_ns,
+                    "quick_hash": asset.quick_hash,
+                    "content_hash": asset.content_hash,
+                }
+            manifest_skipped = sum(1 for asset in selected_assets if asset.metadata.get("manifest_skipped_unchanged"))
+            file_count = len(selected_assets)
+            per_file_ms = max(0, int(elapsed_ms / max(1, file_count)))
+            family_breakdown = _benchmark_family_breakdown_for_assets(selected_assets)
+            warm_state = "cold" if pass_index == 1 else "warm"
+            metadata = {
+                "provider": "real_root",
+                "path_scope": scope_descriptor["scope_type"],
+                "scope_label": scope_descriptor.get("scope_label"),
+                "host_access": scope_descriptor.get("host_access"),
+                "watcher_backend": _configured_watcher_backend(),
+                "hash_parallelism": hash_parallelism,
+                "max_files": max_files,
+                "observed_files": len(plan.assets),
+                "errors": len(plan.errors),
+            }
+            record_fields = _benchmark_record_fields(
+                scope_descriptor=scope_descriptor,
+                deployment_label=deployment_label,
+                recommendation_metadata={"settings_mutated": False},
+            )
+            recorded = database.record_benchmark_run(
+                fixture=scope_descriptor["fixture"],
+                mode="scan",
+                label=label,
+                compare_label=compare_label,
+                file_count=file_count,
+                elapsed_ms=elapsed_ms,
+                timings_ms=[per_file_ms for _asset in selected_assets],
+                warm_state=warm_state,
+                pass_index=pass_index,
+                hash_parallelism=hash_parallelism,
+                worker_count=worker_count,
+                manifest_skipped_unchanged=manifest_skipped,
+                cache_hits=manifest_skipped,
+                cache_misses=max(0, file_count - manifest_skipped),
+                jobs_queued=len(plan.deferred_jobs),
+                jobs_completed=max(0, file_count - len(plan.deferred_jobs)),
+                jobs_blocked=len(plan.errors),
+                worker_family_breakdown=family_breakdown,
+                metadata=metadata,
+                **record_fields,
+            )
+            runs.append(
+                _benchmark_run_payload(
+                    recorded=recorded,
+                    fixture=scope_descriptor["fixture"],
+                    mode="scan",
+                    file_count=file_count,
+                    elapsed_ms=elapsed_ms,
+                    jobs_queued=len(plan.deferred_jobs),
+                    jobs_completed=max(0, file_count - len(plan.deferred_jobs)),
+                    jobs_blocked=len(plan.errors),
+                    worker_family_breakdown=family_breakdown,
+                    warm_state=warm_state,
+                    pass_index=pass_index,
+                    hash_parallelism=hash_parallelism,
+                    worker_count=worker_count,
+                    manifest_skipped_unchanged=manifest_skipped,
+                    cache_hits=manifest_skipped,
+                    cache_misses=max(0, file_count - manifest_skipped),
+                    metadata=metadata,
+                    **record_fields,
+                )
+            )
         return runs
 
     def _run_soak_benchmark(
@@ -766,6 +933,8 @@ class KnowledgeService:
         compare_label: str | None,
         worker_count: int,
         family: str,
+        scope_descriptor: dict[str, Any],
+        deployment_label: str | None,
     ) -> dict[str, Any]:
         tag = hashlib.sha256(f"{fixture}:{label or ''}:{time.time_ns()}".encode("utf-8")).hexdigest()[:16]
         family_caps = _configured_worker_caps()
@@ -830,6 +999,11 @@ class KnowledgeService:
             "worker_caps": family_caps,
             "purged": purged.get("purged"),
         }
+        record_fields = _benchmark_record_fields(
+            scope_descriptor=scope_descriptor,
+            deployment_label=deployment_label,
+            recommendation_metadata={"settings_mutated": False},
+        )
         recorded = database.record_benchmark_run(
             fixture=fixture,
             mode="soak",
@@ -849,6 +1023,7 @@ class KnowledgeService:
             jobs_blocked=blocked,
             worker_family_breakdown=family_breakdown,
             metadata=metadata,
+            **record_fields,
         )
         return _benchmark_run_payload(
             recorded=recorded,
@@ -867,6 +1042,7 @@ class KnowledgeService:
             cache_hits=0,
             cache_misses=int(created.get("created") or files),
             metadata=metadata,
+            **record_fields,
         )
 
     def _run_watcher_benchmark(
@@ -877,6 +1053,8 @@ class KnowledgeService:
         label: str | None,
         compare_label: str | None,
         worker_count: int,
+        scope_descriptor: dict[str, Any],
+        deployment_label: str | None,
     ) -> dict[str, Any]:
         started = time.perf_counter()
         probe = probe_watcher_backend(backend_policy=_configured_watcher_backend(), timeout_seconds=2.0)
@@ -888,6 +1066,11 @@ class KnowledgeService:
             "watcher_events": probe.get("events") or {},
             "latency_ms": elapsed_ms,
         }
+        record_fields = _benchmark_record_fields(
+            scope_descriptor=scope_descriptor,
+            deployment_label=deployment_label,
+            recommendation_metadata={"settings_mutated": False},
+        )
         recorded = database.record_benchmark_run(
             fixture=fixture,
             mode="watcher",
@@ -907,6 +1090,7 @@ class KnowledgeService:
             jobs_blocked=0,
             worker_family_breakdown={},
             metadata=metadata,
+            **record_fields,
         )
         return _benchmark_run_payload(
             recorded=recorded,
@@ -925,7 +1109,80 @@ class KnowledgeService:
             cache_hits=0,
             cache_misses=0,
             metadata=metadata,
+            **record_fields,
         )
+
+    def _run_model_benchmark(
+        self,
+        fixture: str,
+        *,
+        passes: int,
+        label: str | None,
+        compare_label: str | None,
+        worker_count: int,
+        scope_descriptor: dict[str, Any],
+        deployment_label: str | None,
+    ) -> list[dict[str, Any]]:
+        runs: list[dict[str, Any]] = []
+        for pass_index in range(1, passes + 1):
+            started = time.perf_counter()
+            model_telemetry = _benchmark_model_telemetry()
+            elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+            warm_state = "cold" if pass_index == 1 else "warm"
+            record_fields = _benchmark_record_fields(
+                scope_descriptor=scope_descriptor,
+                deployment_label=deployment_label,
+                model_telemetry=model_telemetry,
+                recommendation_metadata={"settings_mutated": False},
+            )
+            metadata = {
+                "provider": "local_only",
+                "path_scope": "temporary",
+                "blocked_dependency_count": model_telemetry.get("blocked_dependency_count", 0),
+            }
+            recorded = database.record_benchmark_run(
+                fixture=fixture,
+                mode="model",
+                label=label,
+                compare_label=compare_label,
+                file_count=0,
+                elapsed_ms=elapsed_ms,
+                timings_ms=[elapsed_ms],
+                warm_state=warm_state,
+                pass_index=pass_index,
+                hash_parallelism=_configured_hash_parallelism(),
+                worker_count=worker_count,
+                cache_hits=0,
+                cache_misses=0,
+                jobs_queued=0,
+                jobs_completed=0,
+                jobs_blocked=int(model_telemetry.get("blocked_dependency_count") or 0),
+                worker_family_breakdown={},
+                metadata=metadata,
+                **record_fields,
+            )
+            runs.append(
+                _benchmark_run_payload(
+                    recorded=recorded,
+                    fixture=fixture,
+                    mode="model",
+                    file_count=0,
+                    elapsed_ms=elapsed_ms,
+                    jobs_queued=0,
+                    jobs_completed=0,
+                    jobs_blocked=int(model_telemetry.get("blocked_dependency_count") or 0),
+                    worker_family_breakdown={},
+                    warm_state=warm_state,
+                    pass_index=pass_index,
+                    hash_parallelism=_configured_hash_parallelism(),
+                    worker_count=worker_count,
+                    cache_hits=0,
+                    cache_misses=0,
+                    metadata=metadata,
+                    **record_fields,
+                )
+            )
+        return runs
 
     def backfill_episode_workspace_scope(
         self,
@@ -1909,8 +2166,12 @@ def _watch_event_path_hash(event: WatchEvent) -> str:
 
 
 def _benchmark_family_breakdown(plan: Any) -> dict[str, dict[str, int]]:
+    return _benchmark_family_breakdown_for_assets(plan.assets)
+
+
+def _benchmark_family_breakdown_for_assets(assets: list[Any]) -> dict[str, dict[str, int]]:
     breakdown: dict[str, dict[str, int]] = {}
-    for asset in plan.assets:
+    for asset in assets:
         family = job_family_for_type(f"corpus_extract_{asset.file_kind}")
         row = breakdown.setdefault(family, {"files": 0, "deferred": 0, "inline": 0, "metadata_only": 0})
         row["files"] += 1
@@ -1942,6 +2203,13 @@ def _benchmark_run_payload(
     cache_hits: int,
     cache_misses: int,
     metadata: dict[str, Any],
+    scope_type: str = "synthetic",
+    scope_hash: str | None = None,
+    deployment_label: str | None = None,
+    build_metadata: dict[str, Any] | None = None,
+    settings_snapshot: dict[str, Any] | None = None,
+    model_telemetry: dict[str, Any] | None = None,
+    recommendation_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": recorded.get("id"),
@@ -1962,6 +2230,13 @@ def _benchmark_run_payload(
         "cache_hits": cache_hits,
         "cache_misses": cache_misses,
         "metadata": metadata,
+        "scope_type": scope_type,
+        "scope_hash": scope_hash,
+        "deployment_label": deployment_label,
+        "build_metadata": build_metadata or {},
+        "settings_snapshot": settings_snapshot or {},
+        "model_telemetry": model_telemetry or {},
+        "recommendation_metadata": recommendation_metadata or {},
     }
 
 
@@ -1986,9 +2261,9 @@ def _benchmark_recommendations(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _normalize_benchmark_mode(value: str | None, *, allow_all: bool = False) -> str:
     normalized = str(value or "scan").strip().lower()
-    allowed = {"scan", "soak", "watcher"} | ({"all"} if allow_all else set())
+    allowed = {"scan", "soak", "watcher", "model"} | ({"all"} if allow_all else set())
     if normalized not in allowed:
-        raise ValueError("benchmark mode must be scan, soak, watcher, or all")
+        raise ValueError("benchmark mode must be scan, soak, watcher, model, or all")
     return normalized
 
 
@@ -2045,6 +2320,102 @@ def _write_media_fixture(root: Path, files: int) -> None:
     extensions = [".mp3", ".wav", ".mp4", ".webm"]
     for index in range(files):
         (root / f"media-{index:04d}{extensions[index % len(extensions)]}").write_bytes(b"synthetic media")
+
+
+def _benchmark_scope_descriptor(*, scope: str | None, root_name: str | None, path: str | None) -> dict[str, Any]:
+    normalized = str(scope or "synthetic").strip().lower().replace("-", "_")
+    if normalized in {"synthetic", "fixture", "fixtures"}:
+        return {
+            "scope_type": "synthetic",
+            "scope_hash": None,
+            "fixture": "synthetic",
+            "scope_label": "Synthetic fixtures",
+            "host_access": "temporary",
+        }
+    if normalized in {"root", "monitored_root"}:
+        root = _select_root(root_name=root_name, path=path)
+        return {
+            "scope_type": "monitored_root",
+            "scope_hash": _benchmark_scope_hash("monitored_root", str(root.get("name") or ""), str(root.get("root_path") or "")),
+            "fixture": "monitored-root",
+            "scope_label": str(root.get("name") or "monitored root"),
+            "host_access": (root.get("metadata") or {}).get("host_access", "direct"),
+            "root": root,
+            "path": path,
+        }
+    if normalized == "path":
+        if not path:
+            raise ValueError("path benchmark scope requires path")
+        root = _select_root(root_name=root_name, path=path)
+        return {
+            "scope_type": "path",
+            "scope_hash": _benchmark_scope_hash("path", str(root.get("name") or ""), str(path)),
+            "fixture": "monitored-path",
+            "scope_label": str(root.get("name") or "monitored path"),
+            "host_access": (root.get("metadata") or {}).get("host_access", "direct"),
+            "root": root,
+            "path": path,
+        }
+    raise ValueError("benchmark scope must be synthetic, root, or path")
+
+
+def _benchmark_scope_hash(*parts: str) -> str:
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8", errors="ignore")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _benchmark_record_fields(
+    *,
+    scope_descriptor: dict[str, Any],
+    deployment_label: str | None,
+    model_telemetry: dict[str, Any] | None = None,
+    recommendation_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "scope_type": scope_descriptor["scope_type"],
+        "scope_hash": scope_descriptor.get("scope_hash"),
+        "deployment_label": deployment_label,
+        "build_metadata": {"version": __version__},
+        "settings_snapshot": _benchmark_settings_snapshot(),
+        "model_telemetry": model_telemetry or {},
+        "recommendation_metadata": recommendation_metadata or {"settings_mutated": False},
+    }
+
+
+def _benchmark_settings_snapshot() -> dict[str, Any]:
+    return {
+        "hash_parallelism": _configured_hash_parallelism(),
+        "worker_caps": _configured_worker_caps(),
+        "watcher_backend": _configured_watcher_backend(),
+    }
+
+
+def _benchmark_model_telemetry() -> dict[str, Any]:
+    status = collect_acceleration_status()
+    availability = extractor_availability()
+    tool_names = ("tesseract", "pdftoppm", "ffprobe", "ffmpeg", "faster_whisper")
+    tools: dict[str, dict[str, Any]] = {}
+    blocked = 0
+    for name in tool_names:
+        item = availability.get(name)
+        if not isinstance(item, dict):
+            continue
+        ok = bool(item.get("ok"))
+        tools[name] = {"ok": ok, "message": str(item.get("message") or "")[:200]}
+        if not ok:
+            blocked += 1
+    capabilities = status.get("capabilities") if isinstance(status, dict) else {}
+    local_model = capabilities.get("local_model") if isinstance(capabilities, dict) else {}
+    local_model_payload = {
+        key: value
+        for key, value in (local_model or {}).items()
+        if key in {"ok", "state", "provider", "models", "message"}
+    }
+    return {
+        "local_model": local_model_payload,
+        "tools": tools,
+        "blocked_dependency_count": blocked,
+    }
 
 
 def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:

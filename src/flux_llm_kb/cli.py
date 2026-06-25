@@ -273,17 +273,25 @@ def main(argv: list[str] | None = None) -> int:
     benchmark_run = benchmark_subparsers.add_parser("run", help="Run synthetic indexing benchmarks")
     benchmark_run.add_argument("--fixture", default="all")
     benchmark_run.add_argument("--files", type=int, default=10)
-    benchmark_run.add_argument("--mode", choices=["scan", "soak", "watcher", "all"], default="scan")
+    benchmark_run.add_argument("--mode", choices=["scan", "soak", "watcher", "model", "all"], default="scan")
     benchmark_run.add_argument("--passes", type=int, default=1)
     benchmark_run.add_argument("--label")
     benchmark_run.add_argument("--compare-label")
     benchmark_run.add_argument("--workers", type=int, default=1)
     benchmark_run.add_argument("--family", default="all")
+    benchmark_run.add_argument("--scope", choices=["synthetic", "root", "path"], default="synthetic")
+    benchmark_run.add_argument("--root", dest="root_name")
+    benchmark_run.add_argument("--path")
+    benchmark_run.add_argument("--max-files", type=int)
+    benchmark_run.add_argument("--deployment-label")
+    benchmark_run.add_argument("--include-model-probe", action="store_true")
     benchmark_history = benchmark_subparsers.add_parser("history", help="List benchmark run history")
     benchmark_history.add_argument("--fixture", required=True)
     benchmark_history.add_argument("--mode")
     benchmark_history.add_argument("--label")
     benchmark_history.add_argument("--warm-state")
+    benchmark_history.add_argument("--scope-type")
+    benchmark_history.add_argument("--deployment-label")
     benchmark_history.add_argument("--limit", type=int, default=20)
 
     mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
@@ -846,6 +854,12 @@ def _acceleration(args: argparse.Namespace) -> int:
                 compare_label=args.compare_label,
                 workers=args.workers,
                 family=args.family,
+                scope=args.scope,
+                root_name=args.root_name,
+                path=args.path,
+                max_files=args.max_files,
+                deployment_label=args.deployment_label,
+                include_model_probe=args.include_model_probe,
             )
         elif args.benchmark_command == "history":
             payload = KnowledgeService().benchmark_history(
@@ -853,6 +867,8 @@ def _acceleration(args: argparse.Namespace) -> int:
                 mode=args.mode,
                 label=args.label,
                 warm_state=args.warm_state,
+                scope_type=args.scope_type,
+                deployment_label=args.deployment_label,
                 limit=args.limit,
             )
         else:  # pragma: no cover - argparse prevents this

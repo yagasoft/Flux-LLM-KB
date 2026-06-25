@@ -27,11 +27,13 @@ system rather than a large prompt-injected memory file.
   crawler statistics, per-root/path scan fingerprints, watcher heartbeat,
   event counters, sanitized event rows, and error state for dashboard
   monitoring.
-- `acceleration_benchmark_runs`: metadata-only synthetic benchmark history for
-  fixture names, benchmark modes, labels, comparison labels, pass indexes,
-  hash parallelism, worker counts, manifest skip counts, timings, throughput,
-  cache counters, warm/cold state, worker-family breakdowns, watcher probe
-  summaries, and previous-run deltas.
+- `acceleration_benchmark_runs`: metadata-only synthetic and aggregate scoped
+  benchmark history for fixture names, benchmark modes, labels, comparison
+  labels, scope type, stable scope hashes, deployment labels, sanitized build
+  and settings snapshots, model/tool readiness telemetry, pass indexes, hash
+  parallelism, worker counts, manifest skip counts, timings, throughput, cache
+  counters, warm/cold state, worker-family breakdowns, watcher probe summaries,
+  and previous-run deltas.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -247,26 +249,32 @@ and accepts only loopback HTTP(S) URLs. The permanent cache layout is resolved f
 user cache, and exposes named directories for models, OCR, ASR, vision,
 thumbnails, parser output, embeddings, and temp files.
 
-Synthetic benchmark history is durable and public-safe. Runs are generated from
+Benchmark history is durable and public-safe. Synthetic runs are generated from
 temporary fixture trees (`text-heavy`, `office-pdf-heavy`,
-`archive-container-heavy`, `image-heavy`, and `audio-video-heavy`) and stored in
-`acceleration_benchmark_runs`. Stored records contain fixture names, counts,
-mode, label, compare label, pass index, timings, p50/p95/max, throughput,
-warm/cold state, cache hit/miss counters, hash parallelism, worker count,
-manifest skip counts, worker-family breakdowns, comparable elapsed and
-throughput deltas, and sanitized summaries only. `scan` mode creates temporary
-fixtures and can run multiple passes; pass 1 is recorded as `cold`, later passes
-reuse an in-memory manifest and are recorded as `warm`. `soak` mode creates
+`archive-container-heavy`, `image-heavy`, and `audio-video-heavy`). Aggregate
+real-root calibration can also dry-run opted-in monitored roots or paths and
+stores only scope type, a stable scope hash, optional operator labels, counts,
+timings, and sanitized summaries. Stored records contain fixture names, counts,
+mode, label, compare label, deployment label, pass index, timings, p50/p95/max,
+throughput, warm/cold state, cache hit/miss counters, hash parallelism, worker
+count, manifest skip counts, worker-family breakdowns, model/tool readiness
+telemetry, comparable elapsed and throughput deltas, and sanitized summaries
+only. `scan` mode creates temporary fixtures or aggregate real-root dry-runs and
+can run multiple passes; pass 1 is recorded as `cold`, later passes reuse an
+in-memory manifest and are recorded as `warm`. `soak` mode creates
 benchmark-tagged synthetic corpus jobs by worker family, claims them through the
 same cap/backpressure logic as normal workers, completes or blocks them
 deterministically, and purges the tagged jobs in cleanup. `watcher` mode runs
 the temporary watcher probe and stores backend policy, selected backend,
-fallback reason, event counts, and latency metadata. `all` mode runs scan, soak,
-and watcher modes for the selected fixtures. Benchmark responses can include
-diagnostic recommendation candidates such as observed hash parallelism or worker
-counts with `settings_mutated: false`; they never call settings mutation APIs.
-They never store raw text, mail contents, credentials, embeddings, or private
-watched roots.
+fallback reason, event counts, and latency metadata. `model` mode records
+local-only model/tool readiness, warm/cold timings, and blocked dependency
+counts without running cloud providers. `all` mode runs scan, soak, and watcher
+modes for the selected fixtures, and can include model probing only when
+explicitly requested. Benchmark responses can include diagnostic recommendation
+candidates such as observed hash parallelism or worker counts with
+`settings_mutated: false`; they never call settings mutation APIs. They never
+store raw text, mail contents, credentials, embeddings, or private watched
+roots.
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,

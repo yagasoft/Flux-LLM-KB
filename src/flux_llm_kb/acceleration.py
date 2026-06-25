@@ -626,6 +626,13 @@ def _benchmark_history_row(row: dict[str, Any]) -> dict[str, Any]:
         "worker_count": _int_or_none(payload.get("worker_count")),
         "manifest_skipped_unchanged": int(payload.get("manifest_skipped_unchanged") or 0),
         "worker_family_breakdown": payload.get("worker_family_breakdown") if isinstance(payload.get("worker_family_breakdown"), dict) else {},
+        "scope_type": str(payload.get("scope_type") or "synthetic"),
+        "scope_hash": payload.get("scope_hash"),
+        "deployment_label": payload.get("deployment_label"),
+        "build_metadata": payload.get("build_metadata") if isinstance(payload.get("build_metadata"), dict) else {},
+        "settings_snapshot": payload.get("settings_snapshot") if isinstance(payload.get("settings_snapshot"), dict) else {},
+        "model_telemetry": payload.get("model_telemetry") if isinstance(payload.get("model_telemetry"), dict) else {},
+        "recommendation_metadata": payload.get("recommendation_metadata") if isinstance(payload.get("recommendation_metadata"), dict) else {},
         "created_at": payload.get("created_at"),
     }
     return {key: value for key, value in normalized.items() if value is not None and value != ""}

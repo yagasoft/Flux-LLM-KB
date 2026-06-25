@@ -87,6 +87,12 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "ADD COLUMN IF NOT EXISTS worker_count" in benchmark_migration.sql
     assert "ADD COLUMN IF NOT EXISTS manifest_skipped_unchanged" in benchmark_migration.sql
     assert "idx_acceleration_benchmark_runs_compare" in benchmark_migration.sql
+    calibration_migration = next(item for item in migrations if item.name == "0018_operational_benchmark_calibration")
+    assert "ADD COLUMN IF NOT EXISTS scope_type" in calibration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS scope_hash" in calibration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS deployment_label" in calibration_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS model_telemetry" in calibration_migration.sql
+    assert "idx_acceleration_benchmark_runs_scope_deployment" in calibration_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

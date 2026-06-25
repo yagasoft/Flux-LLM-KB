@@ -3,9 +3,11 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
+from . import database
 from .host_agent import (
     path_requires_host_agent,
     remote_backfill,
+    remote_benchmark,
     remote_browse_folder,
     remote_status,
     remote_sync,
@@ -200,6 +202,12 @@ def create_app():
         compare_label: str | None = None
         workers: int = 1
         family: str = "all"
+        scope: str = "synthetic"
+        root_name: str | None = None
+        path: str | None = None
+        max_files: int | None = None
+        deployment_label: str | None = None
+        include_model_probe: bool = False
 
     class SettingUpdateRequest(BaseModel):
         value: object
@@ -288,6 +296,23 @@ def create_app():
 
     @app.post("/api/acceleration/benchmarks/run")
     def acceleration_benchmark_run(request: BenchmarkRunRequest = Body(...)):
+        if _should_proxy_benchmark(request.scope, request.root_name, request.path):
+            return host_agent_benchmark(
+                fixture=request.fixture,
+                files=request.files,
+                mode=request.mode,
+                passes=request.passes,
+                label=request.label,
+                compare_label=request.compare_label,
+                workers=request.workers,
+                family=request.family,
+                scope=request.scope,
+                root_name=request.root_name,
+                path=request.path,
+                max_files=request.max_files,
+                deployment_label=request.deployment_label,
+                include_model_probe=request.include_model_probe,
+            )
         return service.run_benchmark(
             fixture=request.fixture,
             files=request.files,
@@ -297,6 +322,12 @@ def create_app():
             compare_label=request.compare_label,
             workers=request.workers,
             family=request.family,
+            scope=request.scope,
+            root_name=request.root_name,
+            path=request.path,
+            max_files=request.max_files,
+            deployment_label=request.deployment_label,
+            include_model_probe=request.include_model_probe,
         )
 
     @app.get("/api/acceleration/benchmarks")
@@ -305,9 +336,19 @@ def create_app():
         mode: str | None = None,
         label: str | None = None,
         warm_state: str | None = None,
+        scope_type: str | None = None,
+        deployment_label: str | None = None,
         limit: int = 20,
     ):
-        return service.benchmark_history(fixture=fixture, mode=mode, label=label, warm_state=warm_state, limit=limit)
+        return service.benchmark_history(
+            fixture=fixture,
+            mode=mode,
+            label=label,
+            warm_state=warm_state,
+            scope_type=scope_type,
+            deployment_label=deployment_label,
+            limit=limit,
+        )
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
@@ -1152,6 +1193,41 @@ def host_agent_backfill(
     return remote_backfill(kind=kind, limit=limit, workers=workers, root_name=root_name)
 
 
+def host_agent_benchmark(
+    *,
+    fixture: str = "all",
+    files: int = 10,
+    mode: str = "scan",
+    passes: int = 1,
+    label: str | None = None,
+    compare_label: str | None = None,
+    workers: int = 1,
+    family: str = "all",
+    scope: str = "synthetic",
+    root_name: str | None = None,
+    path: str | None = None,
+    max_files: int | None = None,
+    deployment_label: str | None = None,
+    include_model_probe: bool = False,
+) -> dict:
+    return remote_benchmark(
+        fixture=fixture,
+        files=files,
+        mode=mode,
+        passes=passes,
+        label=label,
+        compare_label=compare_label,
+        workers=workers,
+        family=family,
+        scope=scope,
+        root_name=root_name,
+        path=path,
+        max_files=max_files,
+        deployment_label=deployment_label,
+        include_model_probe=include_model_probe,
+    )
+
+
 def host_agent_file_action(*, asset_id: str, action: str) -> dict:
     return remote_file_action(asset_id=asset_id, action=action)
 
@@ -1227,8 +1303,18 @@ def _mail_oauth_callback_html(payload: dict) -> str:
 
 
 def _should_proxy_crawl_sync(root_name: str | None, path: str | None) -> bool:
-    from . import database
+    if path and path_requires_host_agent(path):
+        return True
+    if not root_name:
+        return False
+    root = database.get_monitored_root(root_name)
+    return bool(root and _root_requires_host_agent(root))
 
+
+def _should_proxy_benchmark(scope: str | None, root_name: str | None, path: str | None) -> bool:
+    normalized = str(scope or "synthetic").strip().lower().replace("-", "_")
+    if normalized in {"", "synthetic", "fixture", "fixtures"}:
+        return False
     if path and path_requires_host_agent(path):
         return True
     if not root_name:
@@ -1238,8 +1324,6 @@ def _should_proxy_crawl_sync(root_name: str | None, path: str | None) -> bool:
 
 
 def _should_proxy_host_root(root_name: str) -> bool:
-    from . import database
-
     root = database.get_monitored_root(root_name)
     return bool(root and _root_requires_host_agent(root))
 

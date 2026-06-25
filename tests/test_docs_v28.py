@@ -79,3 +79,28 @@ def test_v28_docs_describe_indexer_reliability_and_benchmark_history():
     assert "metadata only" in combined
     assert "raw text" in combined
     assert "private watched roots" in combined
+
+
+def test_roadmap_tables_and_queue_have_plain_english_purpose():
+    roadmap = (ROOT / "docs" / "roadmap.md").read_text(encoding="utf-8")
+    table_headers = [line for line in roadmap.splitlines() if line.startswith("| ") and " | " in line]
+    roadmap_table_headers = [
+        line
+        for line in table_headers
+        if (
+            ("Version" in line and "Summary" in line)
+            or ("Piece" in line and "Roadmap Intent" in line)
+        )
+    ]
+
+    assert roadmap_table_headers
+    assert all("Plain-English Purpose" in header for header in roadmap_table_headers)
+
+    queue_section = roadmap.split("## Queued Work In Roadmap Order", 1)[1].split("## Update Rules", 1)[0]
+    queued_items = [line for line in queue_section.splitlines() if line.startswith("1.") or line.startswith("2.") or line.startswith("3.") or line.startswith("4.") or line.startswith("5.") or line.startswith("6.")]
+    assert queued_items
+    assert all("Plain-English purpose:" in item for item in queued_items)
+
+    future_slice = roadmap.split("### Future Slice: Code-Aware Corpus Indexing", 1)[1].split("## V4:", 1)[0]
+    assert "Plain-English overview:" in future_slice
+    assert "Plain-English purpose:" in future_slice

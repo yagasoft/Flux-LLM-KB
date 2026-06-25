@@ -3214,6 +3214,13 @@ def record_benchmark_run(
     jobs_blocked: int = 0,
     worker_family_breakdown: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
+    scope_type: str = "synthetic",
+    scope_hash: str | None = None,
+    deployment_label: str | None = None,
+    build_metadata: dict[str, Any] | None = None,
+    settings_snapshot: dict[str, Any] | None = None,
+    model_telemetry: dict[str, Any] | None = None,
+    recommendation_metadata: dict[str, Any] | None = None,
     url: str | None = None,
 ) -> dict[str, Any]:
     normalized_timings = sorted(int(value) for value in (timings_ms or []) if value is not None)
@@ -3232,9 +3239,11 @@ def record_benchmark_run(
                     fixture, mode, label, compare_label, status, file_count, elapsed_ms, throughput_files_per_second,
                     p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
                     jobs_queued, jobs_completed, jobs_blocked, pass_index, hash_parallelism,
-                    worker_count, manifest_skipped_unchanged, worker_family_breakdown, metadata
+                    worker_count, manifest_skipped_unchanged, worker_family_breakdown, metadata,
+                    scope_type, scope_hash, deployment_label, build_metadata, settings_snapshot,
+                    model_telemetry, recommendation_metadata
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb)
                 RETURNING id::text, created_at
                 """,
                 (
@@ -3261,6 +3270,13 @@ def record_benchmark_run(
                     max(0, int(manifest_skipped_unchanged or 0)),
                     _json(worker_family_breakdown or {}),
                     _json(_sanitize_operational_metadata(metadata or {})),
+                    _normalize_benchmark_scope_type(scope_type),
+                    _blank_to_none(scope_hash),
+                    _blank_to_none(deployment_label),
+                    _json(_sanitize_operational_metadata(build_metadata or {})),
+                    _json(_sanitize_operational_metadata(settings_snapshot or {})),
+                    _json(_sanitize_operational_metadata(model_telemetry or {})),
+                    _json(_sanitize_operational_metadata(recommendation_metadata or {})),
                 ),
             )
             row = cur.fetchone()
@@ -3271,6 +3287,9 @@ def record_benchmark_run(
                 "label": _blank_to_none(label),
                 "compare_label": _blank_to_none(compare_label),
                 "status": status,
+                "scope_type": _normalize_benchmark_scope_type(scope_type),
+                "scope_hash": _blank_to_none(scope_hash),
+                "deployment_label": _blank_to_none(deployment_label),
                 "file_count": safe_file_count,
                 "elapsed_ms": safe_elapsed_ms,
                 "throughput_files_per_second": throughput,
@@ -3288,6 +3307,8 @@ def list_benchmark_runs(
     mode: str | None = None,
     label: str | None = None,
     warm_state: str | None = None,
+    scope_type: str | None = None,
+    deployment_label: str | None = None,
     limit: int = 20,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -3306,6 +3327,12 @@ def list_benchmark_runs(
     if warm_state:
         filters.append("warm_state = %s")
         params.append(warm_state)
+    if scope_type:
+        filters.append("scope_type = %s")
+        params.append(_normalize_benchmark_scope_type(scope_type))
+    if deployment_label:
+        filters.append("deployment_label = %s")
+        params.append(deployment_label)
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
     params.append(max(1, min(limit, 200)))
     with psycopg.connect(url or database_url()) as conn:
@@ -3321,7 +3348,10 @@ def list_benchmark_runs(
                            current_run.jobs_completed, current_run.jobs_blocked, current_run.pass_index,
                            current_run.hash_parallelism, current_run.worker_count,
                            current_run.manifest_skipped_unchanged, current_run.worker_family_breakdown,
-                           current_run.metadata, current_run.created_at,
+                           current_run.metadata, current_run.scope_type, current_run.scope_hash,
+                           current_run.deployment_label, current_run.build_metadata,
+                           current_run.settings_snapshot, current_run.model_telemetry,
+                           current_run.recommendation_metadata, current_run.created_at,
                            COALESCE(
                                label_baseline.elapsed_ms,
                                lead(current_run.elapsed_ms) OVER (
@@ -3356,7 +3386,9 @@ def list_benchmark_runs(
                        p50_ms, p95_ms, max_ms, warm_state, cache_hits, cache_misses,
                        jobs_queued, jobs_completed, jobs_blocked, pass_index,
                        hash_parallelism, worker_count, manifest_skipped_unchanged, worker_family_breakdown,
-                       metadata, created_at, previous_elapsed_ms, previous_throughput_files_per_second
+                       metadata, scope_type, scope_hash, deployment_label, build_metadata,
+                       settings_snapshot, model_telemetry, recommendation_metadata,
+                       created_at, previous_elapsed_ms, previous_throughput_files_per_second
                 FROM ordered
                 {where_clause}
                 ORDER BY created_at DESC
@@ -7613,8 +7645,8 @@ def _root_id_for_name(cur: Any, root_name: str) -> str:
 
 
 def _benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
-    previous_elapsed_ms = row[25]
-    previous_throughput = row[26]
+    previous_elapsed_ms = row[32]
+    previous_throughput = row[33]
     elapsed_ms = int(row[7] or 0)
     throughput = float(row[8] or 0.0)
     previous_delta = None if previous_elapsed_ms is None else elapsed_ms - int(previous_elapsed_ms or 0)
@@ -7644,7 +7676,14 @@ def _benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
         "manifest_skipped_unchanged": row[21],
         "worker_family_breakdown": row[22] or {},
         "metadata": _sanitize_operational_metadata(row[23] or {}),
-        "created_at": row[24].isoformat() if row[24] else None,
+        "scope_type": _normalize_benchmark_scope_type(row[24] or "synthetic"),
+        "scope_hash": row[25],
+        "deployment_label": row[26],
+        "build_metadata": _sanitize_operational_metadata(row[27] or {}),
+        "settings_snapshot": _sanitize_operational_metadata(row[28] or {}),
+        "model_telemetry": _sanitize_operational_metadata(row[29] or {}),
+        "recommendation_metadata": _sanitize_operational_metadata(row[30] or {}),
+        "created_at": row[31].isoformat() if row[31] else None,
         "previous_elapsed_delta_ms": previous_delta,
         "previous_throughput_delta": throughput_delta,
     }
@@ -7664,8 +7703,17 @@ def _blank_to_none(value: str | None) -> str | None:
 
 def _normalize_benchmark_mode(value: str | None) -> str:
     normalized = str(value or "scan").strip().lower()
-    if normalized not in {"scan", "soak", "watcher"}:
-        raise ValueError("benchmark mode must be scan, soak, or watcher")
+    if normalized not in {"scan", "soak", "watcher", "model"}:
+        raise ValueError("benchmark mode must be scan, soak, watcher, or model")
+    return normalized
+
+
+def _normalize_benchmark_scope_type(value: str | None) -> str:
+    normalized = str(value or "synthetic").strip().lower().replace("-", "_")
+    if normalized == "root":
+        normalized = "monitored_root"
+    if normalized not in {"synthetic", "monitored_root", "path"}:
+        raise ValueError("benchmark scope_type must be synthetic, monitored_root, or path")
     return normalized
 
 
