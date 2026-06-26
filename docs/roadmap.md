@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-06-25
+Last reviewed: 2026-06-26
 
 This file is the canonical public roadmap and implementation-status tracker for
 Flux-LLM-KB. It is intentionally separate from live runtime state. Do not add
@@ -396,74 +396,116 @@ retrieval feedback summaries, benchmark-derived code gap priorities,
 relationship/path/generated filters, read-only filtered operational diagnostics,
 dashboard evidence panels, confirmation-gated diagnostic remediation actions,
 comparison deltas, confidence-band summaries, semantic duplicate calibration candidates,
-richer suppression/deprioritization explanations, sample-first large
-structured-file indexing including converted legacy/OpenDocument spreadsheets,
-and
-`settings_mutated: false`. It remains
-conservative: live private query sets, automatic ranking/threshold/settings
-mutation, VSS extraction, provider-specific acceleration, full IDE/static
-analysis replacement, and librarian-worker automation are still out of scope.
+richer suppression/deprioritization explanations, sample-first
+large structured-file indexing including converted legacy/OpenDocument
+spreadsheets, and `settings_mutated: false`. It remains conservative: live
+private query sets, automatic ranking/threshold/settings mutation, VSS
+extraction, provider-specific acceleration, full IDE/static-analysis
+replacement, and automatic librarian-worker mutation are still out of scope.
 
-1. Priority: P0. Plain-English purpose: prove indexer and filesystem reliability on real workloads before adding snapshot extraction. Progress: 90%.
-   Model-actionable item: use `flux-kb acceleration evidence` and
+Queue triage found several P0/P1 rows that were not represented directly in the
+active queue. The unblocked P0/P1 work is approved-capture ingestion,
+governance/librarian shadow-mode evaluation, review UX closure across
+graph/lifecycle/capture/retention flows, and lower-priority corpus coverage
+completion. The live-evidence-only P0/P1 work remains visible below with its
+blocker and wake condition instead of blocking executable roadmap progress.
+
+1. Priority: P0/P1. Plain-English purpose: close the memory review loop before adding automatic
+   memory governance. Bundle: Memory Review Closure And Governance Evaluation
+   Gate. Progress: review workflows 75-85%, retrieval benchmarks 78%.
+   memory governance.
+   Model-actionable item: build the approved-capture ingestion path and
+   governance shadow-mode benchmark gate before any automatic lifecycle
+   mutation. Include approved `codex_backfill` processing, redaction and
+   relevance checks, audit records, review dashboard status, graph/lifecycle
+   review continuity, retention-quality context, and retrieval benchmark suite
+   support for librarian/governance evaluation.
+   Remaining Work: ingest approved review jobs into durable redacted memory,
+   expose sanitized ingestion status in REST/CLI/MCP/dashboard flows, add
+   metadata-only governance-shadow benchmark cases, and keep automatic lifecycle
+   mutation, apply/recover, operator digests, and local-model rationale for the
+   later P2 automation bundle.
+   Plain-English explanation: approved review and evaluation are the missing
+   safety gate between today's manual review tools and tomorrow's automation.
+2. Priority: P0. Plain-English purpose: prove indexer and filesystem reliability
+   on real workloads before adding snapshot extraction. Progress: 90%.
+   Model-actionable item: keep using `flux-kb acceleration evidence` and
    `flux-kb acceleration reliability run --scope all-roots --full` with labels
-   and compare labels to validate live high-volume roots, cloud-sync delayed
+   and comparisons to validate high-volume roots, cloud-sync delayed
    availability, open Office files, large writes, rename-save patterns, watcher
-   reconciliation, lock/churn evidence, worker cap telemetry, and default-cap
+   reconciliation, lock/churn evidence, worker-cap telemetry, and default-cap
    tuning from observed hardware evidence.
+   Blocker: this is live validation, not an implementation slice.
+   Wake condition: comparable full all-root runs show repeated reliability gaps
+   or provide enough evidence to justify VSS/provider-specific design work.
    Remaining Work: run and compare live all-root evidence after deployments,
    decide whether any gaps justify a later VSS design, and keep
    provider-specific acceleration blocked until telemetry justifies design work.
-   Plain-English explanation: The read-only evidence gate exists, but VSS and
-   provider-specific acceleration still need real workload proof before they
-   deserve implementation time.
-2. Priority: P0. Progress: 84%. Plain-English purpose: make code-aware retrieval diagnosable after feedback exists.
+3. Priority: P0. Progress: 84%. Plain-English purpose: make code-aware
+   retrieval diagnosable after feedback exists.
    Model-actionable item: validate the expanded code-aware retrieval path on
    live opted-in repositories using code coverage views, parser
    failure/fallback summaries, privacy-safe per-repository status,
    relationship coverage, direct code-search/symbol surfaces, hashed code
    retrieval feedback, and retrieval benchmark code gaps.
+   Blocker: code-aware foundations are implemented; further parser/ranking
+   expansion is blocked until retrieval benchmark/live feedback identifies
+   repeated miss evidence.
+   Wake condition: privacy-safe feedback or retrieval benchmark gaps recur
+   around the same symbol, relationship, parser, path, or ranking failure.
    Remaining Work: tune ranking and add only targeted deeper parsers from
    repeated benchmark/live misses; keep raw private code/queries, automatic
    ranking mutation, and full IDE/static-analysis replacement out of scope.
-   Plain-English explanation: Code-aware foundations, expanded parser coverage,
-   filters, diagnostics, dashboard affordances, benchmark cases, and the
-   privacy-safe feedback loop are implemented; further parser/ranking expansion
-   remains blocked until retrieval benchmark/live feedback identifies repeated
-   misses on real repositories.
-3. Priority: P1. Progress: 88%. Plain-English purpose: make daily operation inspectable and recoverable without raw logs.
-   Model-actionable item: validate the operator diagnostics remediation and
-   corpus completion bundle against live recurring failures: retrieval
-   drill-downs, watcher event summaries, worker heartbeat/history, mail
-   sync/post-process evidence, filtered blocked dependency views, slow-job
-   history, retry/scoped-backfill/root-cleanup actions, and sample-first
-   indexing for large tabular and converted legacy/OpenDocument spreadsheet
-   files.
+4. Priority: P1. Progress: 88%. Plain-English purpose: make daily operation
+   inspectable and recoverable without raw logs.
+   Model-actionable item: validate operator diagnostics remediation against
+   recurring live failures: retrieval drill-downs, watcher event summaries,
+   worker heartbeat/history, mail sync/post-process evidence, filtered blocked
+   dependency views, slow-job history, retry/scoped-backfill/root-cleanup
+   actions, and sample-first indexing for large tabular and converted
+   legacy/OpenDocument spreadsheet files.
+   Blocker: the recovery surfaces exist; more mutation/recovery links need
+   repeated operator evidence rather than speculative expansion.
+   Wake condition: recurring live failures show which deeper recovery link,
+   diagnostic page, or remediation action would reduce repeated operator work.
    Remaining Work: run live validation, add only higher-value recovery links
    discovered from repeated operator use, and keep optional full structured
    backfill behind trusted sample-first metadata.
-   Plain-English explanation: Operators now have filtered evidence panels plus
-   scoped remediation actions; the next work should prove them on real
-   workloads before adding more mutation surfaces.
-4. Priority: P2. Progress: 15%. Plain-English purpose: improve memory quality with reversible evaluated automation.
-   Model-actionable item: ship evaluated memory-governance automation with
-   librarian-worker shadow mode, benchmarked thresholds, reversible lifecycle
-   actions, duplicate suppression, retrieval deprioritization, stale tagging,
-   canonical cluster presentation, recovery views, audit records, operator
-   digests, and optional loopback-only local model routing with rule-based
-   fallback.
-   Remaining Work: define evaluation thresholds, shadow-mode workers, reversible
-   apply/recover flows, operator digests, and local-model fallback behavior.
-   Plain-English explanation: Automation waits for retrieval benchmarks and
+5. Priority: P1. Plain-English purpose: finish practical corpus coverage where local extractors already have safe
+   metadata-first fallback paths. Bundle: Corpus Coverage Completion Bundle.
+   Progress: corpus expansion 78-85%.
+   Model-actionable item: add optional-tool validation and remaining
+   metadata-first local-tool coverage as one cohesive extractor/worker/docs
+   bundle. Keep the slice tied to extractor availability, worker telemetry,
+   `file-type-coverage.md`, and related-evidence grouping for embedded or
+   converted assets.
+   Remaining Work: prioritize specialized local-tool stages and optional full
+   structured backfill only where sample-first diagnostics show value; avoid
+   mixing this with governance automation, VSS/provider acceleration, or code
+   parser tuning.
+6. Priority: P2. Plain-English purpose: improve memory quality with reversible evaluated
+   automation. Bundle: Evaluated Memory Governance Automation. Progress: 15%.
+   automation.
+   Model-actionable item: after the review/evaluation gate above exists, ship
+   evaluated memory-governance automation with librarian-worker shadow mode,
+   benchmarked thresholds, reversible lifecycle actions, duplicate suppression,
+   retrieval deprioritization, stale tagging, canonical cluster presentation,
+   recovery views, audit records, operator digests, and optional loopback-only
+   local model routing with rule-based fallback.
+   Remaining Work: define evaluation thresholds, shadow-mode workers,
+   reversible apply/recover flows, operator digests, and local-model fallback
+   behavior.
+   Plain-English explanation: automation waits for retrieval benchmarks and
    calibration so routine cleanup is measurable, reversible, and private.
-5. Priority: P3. Progress: 0%. Plain-English purpose: keep optional scale-outs behind proven local value.
+7. Priority: P3. Progress: 0%. Plain-English purpose: keep optional scale-outs
+   behind proven local value.
    Model-actionable item: defer optional ParadeDB/BM25, shared-vault
    collaboration, sync/export governance, Apache AGE, and
    synthetic-data/fine-tuning until single-user retrieval, code indexing,
    indexer reliability, diagnostics, evaluation, and recovery flows are stable.
    Remaining Work: revisit only after the local single-user system is correct,
    inspectable, recoverable, and useful under real workloads.
-   Plain-English explanation: These may matter later, but they should not spend
+   Plain-English explanation: these may matter later, but they should not spend
    roadmap or model context before the local single-user knowledge system is
    correct, inspectable, and useful.
 
