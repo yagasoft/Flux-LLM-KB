@@ -1090,7 +1090,7 @@ def test_scan_manifest_upsert_and_lookup_are_metadata_only(monkeypatch):
                 return ("root-1",)
             if "RETURNING" in executed[-1][0]:
                 return ("docs/readme.md",)
-            return ("docs/readme.md", 12, 42, "quick", "content", {"fixture": "text-heavy"})
+            return ("docs/readme.md", 12, 42, "quick", "content", {"fixture": "text-heavy"}, "indexed", 2)
 
     class FakeConnection:
         def __enter__(self):
@@ -1121,10 +1121,23 @@ def test_scan_manifest_upsert_and_lookup_are_metadata_only(monkeypatch):
 
     sql = "\n".join(statement for statement, _params in executed)
     assert "INSERT INTO crawl_path_manifests" in sql
-    assert "SELECT path, size_bytes, mtime_ns, quick_hash, content_hash, metadata" in sql
+    assert "SELECT m.path, m.size_bytes, m.mtime_ns, m.quick_hash, m.content_hash" in sql
+    assert "count(c.id)::integer AS chunk_count" in sql
     manifest_params = next(params for statement, params in executed if "INSERT INTO crawl_path_manifests" in statement)
     assert json.loads(manifest_params[-1]) == {"fixture": "text-heavy"}
     assert row["content_hash"] == "content"
+    assert row["source_asset_status"] == "indexed"
+    assert row["chunk_count"] == 2
+
+
+def test_persist_crawl_plan_replaces_chunks_for_manifest_missing_chunk_repair():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    function = source.split("def persist_crawl_plan", 1)[1].split("def crawl_status", 1)[0]
+
+    assert "repaired_missing_chunks" in function
+    assert 'asset.metadata.get("manifest_repaired_missing_chunks")' in function
+    assert "or repaired_missing_chunks" in function
+    assert "_replace_asset_chunks" in function
 
 
 def test_search_corpus_chunks_includes_freshness_stream():

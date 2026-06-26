@@ -1,10 +1,11 @@
 import base64
 from pathlib import Path
+from types import SimpleNamespace
 import threading
 import time
 
 from flux_llm_kb import crawler
-from flux_llm_kb.crawler import CorpusPolicy, classify_file, scan_path
+from flux_llm_kb.crawler import AssetChunk, CorpusPolicy, classify_file, scan_path
 
 
 def test_policy_honors_marker_ignores(tmp_path):
@@ -466,6 +467,56 @@ def test_scan_path_reuses_manifest_hash_for_unchanged_file(monkeypatch, tmp_path
 
     assert plan.assets[0].content_hash == "previous-content-hash"
     assert plan.assets[0].metadata["manifest_skipped_unchanged"] is True
+
+
+def test_scan_path_repairs_unchanged_indexed_file_when_chunks_are_missing(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "keep.md"
+    target.write_text("stable content", encoding="utf-8")
+    stat = target.stat()
+    quick_hash = crawler._quick_hash(target.resolve(), stat.st_size, stat.st_mtime_ns)
+
+    monkeypatch.setattr(crawler, "_sha256_file", lambda _path: (_ for _ in ()).throw(AssertionError("unchanged repair should reuse manifest hash")))
+
+    def fake_extract_file(path, _policy):
+        return SimpleNamespace(
+            status="indexed",
+            metadata={"extractor": "text"},
+            chunks=(
+                AssetChunk(
+                    chunk_index=0,
+                    title=path.name,
+                    body="stable content",
+                    modality="text",
+                    locator="char:0-14",
+                    token_estimate=2,
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("flux_llm_kb.extractors.extract_file", fake_extract_file)
+
+    plan = scan_path(
+        root,
+        CorpusPolicy(
+            root_path=root,
+            manifest_lookup=lambda relative_path: {
+                "path": relative_path,
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "quick_hash": quick_hash,
+                "content_hash": "previous-content-hash",
+                "source_asset_status": "indexed",
+                "chunk_count": 0,
+            },
+        ),
+    )
+
+    assert plan.assets[0].content_hash == "previous-content-hash"
+    assert plan.assets[0].metadata["manifest_skipped_unchanged"] is True
+    assert plan.assets[0].metadata["manifest_repaired_missing_chunks"] is True
+    assert plan.assets[0].chunks[0].body == "stable content"
 
 
 def test_scan_path_hashes_files_concurrently_without_reordering(monkeypatch, tmp_path):

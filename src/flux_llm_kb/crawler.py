@@ -331,9 +331,13 @@ def discover_asset(
     extraction_status: str | None = None
     manifest = policy.manifest_lookup(relative_path) if policy.manifest_lookup else None
     manifest_unchanged = _manifest_matches(manifest, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns, quick_hash=quick_hash)
+    repair_missing_chunks = False
     if manifest_unchanged:
         content_hash = str(manifest.get("content_hash") or "") or None
         metadata["manifest_skipped_unchanged"] = True
+        repair_missing_chunks = _manifest_reports_missing_chunks(manifest, extraction_tier=classification.extraction_tier)
+        if repair_missing_chunks:
+            metadata["manifest_repaired_missing_chunks"] = True
     elif content_hash_precomputed:
         content_hash = content_hash_override
     else:
@@ -343,7 +347,7 @@ def discover_asset(
         from .extractors import image_metadata
 
         metadata.update(image_metadata(resolved))
-    elif classification.extraction_tier == "inline" and not manifest_unchanged:
+    elif classification.extraction_tier == "inline" and (not manifest_unchanged or repair_missing_chunks):
         from .extractors import extract_file
 
         extraction = extract_file(resolved, policy)
@@ -372,6 +376,19 @@ def discover_asset(
         chunks=chunks,
         metadata=metadata,
     )
+
+
+def _manifest_reports_missing_chunks(manifest: dict[str, object] | None, *, extraction_tier: str) -> bool:
+    if extraction_tier != "inline" or not manifest:
+        return False
+    if str(manifest.get("source_asset_status") or "") != "indexed":
+        return False
+    if "chunk_count" not in manifest:
+        return False
+    try:
+        return int(manifest.get("chunk_count") or 0) <= 0
+    except (TypeError, ValueError):
+        return False
 
 
 def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
