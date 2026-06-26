@@ -5,6 +5,7 @@ from flux_llm_kb import retrieval_benchmark
 from flux_llm_kb.retrieval_benchmark import evaluate_retrieval_cases
 from flux_llm_kb.retrieval_benchmark import build_governance_shadow_proposals
 from flux_llm_kb.service import KnowledgeService
+from flux_llm_kb.service import _retrieval_benchmark_expected_id
 
 
 def test_retrieval_benchmark_metrics_cover_search_brief_scope_and_suppression():
@@ -251,6 +252,41 @@ def test_service_retrieval_benchmark_history_uses_database(monkeypatch):
     assert calls == [{"suite": "standard", "label": "nightly", "limit": 5}]
 
 
+def test_retrieval_benchmark_expected_id_uses_source_path_without_search_fallback(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "list_source_assets",
+        lambda **kwargs: [
+            {
+                "id": "asset-target",
+                "path": "target.md",
+                "canonical_asset_id": None,
+            }
+        ]
+        if kwargs["root_name"] == "docs" and kwargs["path"] == "target.md"
+        else [],
+    )
+    monkeypatch.setattr(
+        database,
+        "get_source_asset",
+        lambda asset_id: {"id": asset_id, "chunks": [{"id": "chunk-target", "chunk_index": 0}]},
+    )
+
+    class FakeService(KnowledgeService):
+        def search(self, query, limit=10, **_kwargs):
+            return [{"id": "chunk-unrelated", "source_path": "other.md"}]
+
+    expected_id = _retrieval_benchmark_expected_id(
+        FakeService(),
+        query="query that misses target",
+        root_name="docs",
+        source_path="target.md",
+        filters=None,
+    )
+
+    assert expected_id == "chunk-target"
+
+
 def test_governance_shadow_proposals_are_metadata_only_and_non_mutating():
     report = {
         "candidates": [
@@ -413,6 +449,21 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     monkeypatch.setattr(database, "insert_episode", lambda **kwargs: next(episode_ids))
     monkeypatch.setattr(database, "upsert_claim", lambda **kwargs: {"id": "claim-stale"})
     monkeypatch.setattr(database, "transition_claim", lambda **kwargs: calls.append(("transition", kwargs)))
+    monkeypatch.setattr(
+        database,
+        "refresh_semantic_duplicate_clusters",
+        lambda **kwargs: calls.append(("refresh_semantic", kwargs)) or {"created_clusters": 1, "created_members": 2},
+    )
+    monkeypatch.setattr(
+        database,
+        "list_source_assets",
+        lambda **kwargs: [{"id": f"asset-{kwargs['path']}", "path": kwargs["path"], "canonical_asset_id": None}],
+    )
+    monkeypatch.setattr(
+        database,
+        "get_source_asset",
+        lambda asset_id: {"id": asset_id, "chunks": [{"id": f"chunk-{asset_id}", "chunk_index": 0}]},
+    )
 
     class FakeService(KnowledgeService):
         def sync_corpus(self, **_kwargs):
@@ -451,4 +502,10 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     assert by_category["code_test"]["filters"]["relationships"] == ["test"]
     assert by_category["code_generated_suppression"]["filters"]["include_generated"] is True
     assert by_category["code_cross_root"]["filters"]["path_globs"] == ["app/*"]
+    add_root_calls = [call for call in calls if call[0] == "add_root"]
+    assert add_root_calls[0][1]["include_globs"] == ["*", "**/*"]
+    refresh_calls = [call for call in calls if call[0] == "refresh_semantic"]
+    assert refresh_calls
+    assert refresh_calls[0][1]["memory_class"] == "corpus"
+    assert refresh_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
     assert any(call[0] == "delete_root" for call in calls)

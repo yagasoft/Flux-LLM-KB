@@ -142,6 +142,82 @@ def test_local_only_never_returns_global_fallback(monkeypatch):
     assert results == []
 
 
+def test_root_name_scope_searches_root_workspace_episode(monkeypatch):
+    calls = []
+
+    def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None):
+        calls.append({"cwd": cwd, "root_path": root_path, "workspace_key": workspace_key})
+        if workspace_key == "root:docs":
+            return [_episode("root-episode", "Root-scoped memory", ["lexical"], score=0.9)]
+        return []
+
+    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, url=None):
+        if root_name == "docs":
+            return [_chunk("root-corpus", "Root corpus note", ["corpus_lexical"], score=0.4)]
+        return []
+
+    monkeypatch.setattr(database, "search_episodes", fake_search_episodes)
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    results = KnowledgeService().search(
+        "root scoped memory",
+        root_name="docs",
+        scope_mode="local_only",
+    )
+
+    assert [item["id"] for item in results] == ["root-episode", "root-corpus"]
+    assert all(item["retrieval_scope"] == "local" for item in results)
+    assert calls == [{"cwd": None, "root_path": None, "workspace_key": "root:docs"}]
+
+
+def test_episode_logical_kind_filter_prefilters_local_raw_search(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "search_episodes",
+        lambda query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None: [
+            _episode("root-episode", "Root-scoped memory", ["lexical"], score=0.9)
+        ],
+    )
+
+    def fail_corpus_search(*_args, **_kwargs):
+        raise AssertionError("episode-only searches should not query corpus chunks")
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fail_corpus_search)
+
+    results = KnowledgeService().search(
+        "root scoped memory",
+        root_name="docs",
+        scope_mode="local_only",
+        filters={"logical_kinds": ["episode"]},
+    )
+
+    assert [item["id"] for item in results] == ["root-episode"]
+
+
+def test_explain_passes_filters_into_raw_search_before_trace_filtering(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "search_episodes",
+        lambda query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None: [
+            _episode("root-episode", "Root-scoped memory", ["lexical"], score=0.9)
+        ],
+    )
+
+    def fail_corpus_search(*_args, **_kwargs):
+        raise AssertionError("explain should pass logical kind filters into raw search")
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fail_corpus_search)
+
+    payload = KnowledgeService().explain(
+        "root scoped memory",
+        root_name="docs",
+        scope_mode="local_only",
+        filters={"logical_kinds": ["episode"]},
+    )
+
+    assert [item["id"] for item in payload["results"]] == ["root-episode"]
+
+
 def test_workspace_boosted_blends_local_and_strong_cross_workspace_results(monkeypatch):
     monkeypatch.setattr(
         database,

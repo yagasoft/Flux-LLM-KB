@@ -177,21 +177,25 @@ class KnowledgeService:
     ) -> list[dict[str, Any]]:
         corpus_limit = max(limit * 4, 20)
         is_local = label == "local"
+        logical_kinds = set(filters.get("logical_kinds") or []) if isinstance(filters, dict) else set()
+        include_episodes = not logical_kinds or "episode" in logical_kinds
+        include_corpus = not logical_kinds or bool(logical_kinds.intersection({"file", "mail"}))
+        episode_workspace_key = scope.workspace_key or (f"root:{scope.root_name}" if scope.root_name else None)
         episode_items = (
             database.search_episodes(
                 query,
                 limit=limit,
                 cwd=scope.cwd,
                 root_path=scope.root_path,
-                workspace_key=scope.workspace_key,
+                workspace_key=episode_workspace_key,
             )
-            if not is_local or scope.cwd or scope.root_path or scope.workspace_key
+            if include_episodes and (not is_local or scope.cwd or scope.root_path or episode_workspace_key)
             else []
         )
         corpus_kwargs: dict[str, Any] = {"limit": corpus_limit, "root_name": scope.root_name}
         if filters is not None:
             corpus_kwargs["filters"] = filters
-        corpus_items = database.search_corpus_chunks(query, **corpus_kwargs) if not is_local or scope.root_name else []
+        corpus_items = database.search_corpus_chunks(query, **corpus_kwargs) if include_corpus and (not is_local or scope.root_name) else []
         episodes = [
             {
                 "kind": "episode",
@@ -282,6 +286,7 @@ class KnowledgeService:
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,
+            filters=normalized_filters,
         )
         filtered_results, excluded = _apply_retrieval_filters(raw_results, normalized_filters)
         search_results = _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
@@ -969,17 +974,25 @@ class KnowledgeService:
 
         try:
             marker = uuid4().hex
+            alpha_token = f"alphabench{marker}"
+            duplicate_token = f"duplicatebench{marker}"
+            current_token = f"currentbench{marker}"
+            guardrail_token = f"guardrailbench{marker}"
+            fallback_token = f"fallbackbench{marker}"
+            contradiction_token = f"contradictionbench{marker}"
+            mail_token = f"mailbench{marker}"
+            episode_token = f"episodebench{marker}"
             files = {
                 "alpha-decision.md": (
-                    f"alpha-{marker} retrieval benchmark decision. "
+                    f"{alpha_token} retrieval benchmark decision. "
                     "Flux should find scoped corpus evidence before broad fallback results."
                 ),
                 "duplicate-canonical.md": (
-                    f"duplicate-{marker} duplicate benchmark note. "
+                    f"{duplicate_token} duplicate benchmark note. "
                     "Exact duplicate suppression should keep one canonical searchable result."
                 ),
                 "duplicate-copy.md": (
-                    f"duplicate-{marker} duplicate benchmark note. "
+                    f"{duplicate_token} duplicate benchmark note. "
                     "Exact duplicate suppression should keep one canonical searchable result."
                 ),
                 "service_impl.py": (
@@ -1032,25 +1045,25 @@ class KnowledgeService:
                     "    return {'status': 'other', 'source': request}\n"
                 ),
                 "contradiction-review.md": (
-                    f"contradiction-{marker} benchmark evidence says the older statement was superseded "
+                    f"{contradiction_token} benchmark evidence says the older statement was superseded "
                     "by a newer local review note."
                 ),
                 "current-note.md": (
-                    f"current-{marker} current-only benchmark evidence. "
+                    f"{current_token} current-only benchmark evidence. "
                     "This current file should remain after stale memory filtering."
                 ),
                 "semantic-guardrail.md": (
-                    f"semantic-guardrail-{marker} benchmark note. "
+                    f"{guardrail_token} benchmark note. "
                     "This similar-looking note should not be treated as a semantic duplicate."
                 ),
                 "code_fallback.py": (
-                    f"# fallback-{marker} code-symbol miss benchmark fixture\n\n"
+                    f"# {fallback_token} code-symbol miss benchmark fixture\n\n"
                     "def unrelated_handler(request):\n"
                     "    return {'status': 'fallback'}\n"
                 ),
                 "mail-alpha/manifest.json": json.dumps(
                     {
-                        "subject": f"mail-{marker} benchmark message",
+                        "subject": f"{mail_token} benchmark message",
                         "sender": "synthetic@example.invalid",
                         "recipients": ["operator@example.invalid"],
                         "source_type": "synthetic",
@@ -1067,30 +1080,31 @@ class KnowledgeService:
             database.add_monitored_root(
                 name=root_name,
                 root_path=root,
-                include_globs=["**/*"],
+                include_globs=["*", "**/*"],
                 exclude_globs=[],
                 trust_rank=850,
                 metadata={"benchmark_tag": root_name, "provider": "synthetic"},
             )
             root_created = True
             self.sync_corpus(root_name=root_name)
+            database.refresh_semantic_duplicate_clusters(memory_class="corpus", root_name=root_name, limit=1000)
             episode_id = database.insert_episode(
-                title=f"episode-{marker} retrieval benchmark memory",
-                summary="Synthetic benchmark episode for brief packing and workspace-scoped memory retrieval.",
+                title=f"{episode_token} retrieval benchmark memory",
+                summary=f"{episode_token} synthetic benchmark episode for brief packing and workspace-scoped memory retrieval.",
                 metadata={"root_name": root_name, "workspace_key": f"root:{root_name}", "benchmark_tag": root_name},
             )
             episode_ids.append(episode_id)
             stale_episode_id = database.insert_episode(
                 title=f"stale-{marker} retrieval benchmark memory",
-                summary=f"current-{marker} stale memory should be excluded by current_only filtering.",
+                summary=f"{current_token} stale memory should be excluded by current_only filtering.",
                 metadata={"root_name": root_name, "workspace_key": f"root:{root_name}", "benchmark_tag": root_name},
             )
             episode_ids.append(stale_episode_id)
             stale_claim = database.upsert_claim(
                 subject_type="benchmark",
-                subject_name=f"current-{marker}",
+                subject_name=current_token,
                 predicate="mentions",
-                object_text=f"current-{marker} stale memory should be deprioritized.",
+                object_text=f"{current_token} stale memory should be deprioritized.",
                 confidence=0.7,
                 episode_id=stale_episode_id,
                 metadata={"benchmark_tag": root_name},
@@ -1105,7 +1119,7 @@ class KnowledgeService:
                     self,
                     case_id="scoped-corpus",
                     category="scoped_corpus",
-                    query=f"alpha-{marker} scoped corpus evidence",
+                    query=f"{alpha_token} scoped corpus evidence",
                     root_name=root_name,
                     source_path="alpha-decision.md",
                 ),
@@ -1113,7 +1127,7 @@ class KnowledgeService:
                     self,
                     case_id="duplicate-suppression",
                     category="semantic_duplicate",
-                    query=f"duplicate-{marker} exact duplicate suppression",
+                    query=f"{duplicate_token} exact duplicate suppression",
                     root_name=root_name,
                     source_path="duplicate-canonical.md",
                     expect_suppression=True,
@@ -1236,7 +1250,7 @@ class KnowledgeService:
                     self,
                     case_id="mail-filter",
                     category="mail_filter",
-                    query=f"mail-{marker} benchmark message",
+                    query=f"{mail_token} benchmark message",
                     root_name=root_name,
                     source_path="mail-alpha/manifest.json",
                     filters={"logical_kinds": ["mail"], "current_only": True},
@@ -1245,7 +1259,7 @@ class KnowledgeService:
                     self,
                     case_id="current-only",
                     category="current_only",
-                    query=f"current-{marker} current-only benchmark evidence",
+                    query=f"{current_token} current-only benchmark evidence",
                     root_name=root_name,
                     source_path="current-note.md",
                     filters={"current_only": True},
@@ -1254,7 +1268,7 @@ class KnowledgeService:
                     self,
                     case_id="semantic-guardrail",
                     category="semantic_guardrail",
-                    query=f"semantic-guardrail-{marker} benchmark note",
+                    query=f"{guardrail_token} benchmark note",
                     root_name=root_name,
                     source_path="semantic-guardrail.md",
                     semantic_similarity=0.81,
@@ -1264,7 +1278,7 @@ class KnowledgeService:
                     self,
                     case_id="code-symbol-miss",
                     category="code_symbol_miss",
-                    query=f"fallback-{marker} missing symbol fallback note",
+                    query=f"{fallback_token} missing symbol fallback note",
                     root_name=root_name,
                     source_path="code_fallback.py",
                     filters={"logical_kinds": ["file"], "current_only": True},
@@ -1272,9 +1286,10 @@ class KnowledgeService:
                 {
                     "id": "episode-brief",
                     "category": "brief_packing",
-                    "query": f"episode-{marker} benchmark memory",
+                    "query": f"{episode_token} benchmark memory",
                     "root_name": root_name,
                     "scope_mode": "local_only",
+                    "filters": {"logical_kinds": ["episode"], "current_only": True},
                     "expected_ids": [episode_id],
                     "expected_brief_ids": [episode_id],
                     "expected_scope": "local",
@@ -1284,7 +1299,7 @@ class KnowledgeService:
                     self,
                     case_id="contradiction-review",
                     category="lifecycle_review",
-                    query=f"contradiction-{marker} superseded older statement",
+                    query=f"{contradiction_token} superseded older statement",
                     root_name=root_name,
                     source_path="contradiction-review.md",
                 ),
@@ -3873,7 +3888,34 @@ def _retrieval_benchmark_expected_id(
         item_path = str(item.get("source_path") or "").replace("\\", "/")
         if item_path == normalized_source:
             return str(item.get("id") or "") or None
-    return str(results[0].get("id") or "") if results else None
+    resolved_id = _retrieval_benchmark_source_chunk_id(root_name=root_name, source_path=source_path)
+    if resolved_id:
+        return resolved_id
+    return None
+
+
+def _retrieval_benchmark_source_chunk_id(*, root_name: str, source_path: str) -> str | None:
+    normalized_source = source_path.replace("\\", "/").strip("/")
+    assets = database.list_source_assets(root_name=root_name, path=normalized_source, limit=20)
+    for asset in assets:
+        item_path = str(asset.get("path") or "").replace("\\", "/").strip("/")
+        if item_path != normalized_source:
+            continue
+        asset_id = str(asset.get("canonical_asset_id") or asset.get("id") or "")
+        if not asset_id:
+            continue
+        detail = database.get_source_asset(asset_id)
+        chunks = detail.get("chunks") if isinstance(detail, dict) else []
+        if not isinstance(chunks, list):
+            continue
+        for chunk in sorted(
+            [item for item in chunks if isinstance(item, dict)],
+            key=lambda item: int(item.get("chunk_index") or 0),
+        ):
+            chunk_id = str(chunk.get("id") or "")
+            if chunk_id:
+                return chunk_id
+    return None
 
 
 def _normalize_filter_values(value: Any) -> list[str]:
