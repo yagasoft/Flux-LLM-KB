@@ -71,6 +71,17 @@ CODE_LANGUAGE_EXTENSIONS: dict[str, str] = {
     ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".sass": "sass",
+    ".less": "less",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".astro": "astro",
+    ".razor": "razor",
+    ".cshtml": "razor",
     ".sql": "sql",
     ".go": "go",
     ".rs": "rust",
@@ -121,6 +132,8 @@ CODE_LANGUAGE_EXTENSIONS: dict[str, str] = {
     ".csproj": "xml",
     ".fsproj": "xml",
     ".vbproj": "xml",
+    ".props": "xml",
+    ".targets": "xml",
     ".sln": "solution",
 }
 
@@ -152,6 +165,7 @@ DEVELOPER_ARTIFACT_NAMES: dict[str, str] = {
     "openapi.yml": "yaml",
     "openapi.json": "json",
     "swagger.json": "json",
+    ".editorconfig": "config",
 }
 
 SQL_SYMBOL_RE = re.compile(
@@ -186,6 +200,32 @@ COMMON_LANGUAGE_SYMBOL_PATTERNS: dict[str, tuple[tuple[str, str, re.Pattern[str]
 }
 JS_CALL_RE = re.compile(r"\b(?P<target>[A-Za-z_$][A-Za-z0-9_$]*)\s*\(")
 JS_CALL_SKIP = {"if", "for", "while", "switch", "catch", "function", "return", "router", "app", "express"}
+CS_TYPE_RE = re.compile(
+    r"\b(?:public|internal|private|protected|sealed|abstract|partial|static|\s)*"
+    r"(?P<kind>class|interface|record|struct|enum)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+)
+CS_METHOD_RE = re.compile(
+    r"\b(?:public|internal|private|protected|static|async|virtual|override|sealed|partial|\s)+"
+    r"(?P<return_type>[A-Za-z_][A-Za-z0-9_<>,?.\[\]]*)\s+"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+CS_NAMESPACE_RE = re.compile(r"\bnamespace\s+(?P<name>[A-Za-z_][A-Za-z0-9_.]*)\s*[;{]")
+CS_USING_RE = re.compile(r"^\s*using\s+(?P<target>[A-Za-z_][A-Za-z0-9_.]*)\s*;", re.MULTILINE)
+CS_ROUTE_ATTR_RE = re.compile(r"\[(?P<attr>Route|HttpGet|HttpPost|HttpPut|HttpPatch|HttpDelete)(?:\s*\(\s*\"(?P<route>[^\"]*)\"\s*\))?", re.IGNORECASE)
+CS_TEST_ATTR_RE = re.compile(r"\[(?:Fact|Theory|Test|TestMethod)\b", re.IGNORECASE)
+CS_CALL_RE = re.compile(r"\b(?P<target>(?:[A-Za-z_][A-Za-z0-9_]*\.)?[A-Za-z_][A-Za-z0-9_]*)\s*\(")
+CS_CALL_SKIP = {"if", "for", "foreach", "while", "switch", "catch", "return", "new", "typeof", "nameof", "using"}
+FRONTEND_COMPONENT_TAG_RE = re.compile(r"<(?P<name>[A-Z][A-Za-z0-9_]*)\b")
+FRONTEND_IMPORT_RE = re.compile(r"\bimport\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+['\"](?P<target>[^'\"]+)['\"]")
+FRONTEND_EVENT_RE = re.compile(r"@(?P<event>[A-Za-z0-9_:-]+)\s*=\s*['\"](?P<handler>[^'\"]+)['\"]")
+FRONTEND_ACTION_RE = re.compile(r"<form\b[^>]*\baction\s*=\s*['\"](?P<target>[^'\"]+)['\"]", re.IGNORECASE)
+HTML_CLASS_RE = re.compile(r"\bclass\s*=\s*['\"](?P<value>[^'\"]+)['\"]", re.IGNORECASE)
+HTML_ID_RE = re.compile(r"\bid\s*=\s*['\"](?P<value>[^'\"]+)['\"]", re.IGNORECASE)
+CSS_CLASS_RE = re.compile(r"(?<![\w-])\.(?P<name>[A-Za-z_-][A-Za-z0-9_-]*)\b")
+CSS_ID_RE = re.compile(r"(?<![\w-])#(?P<name>[A-Za-z_-][A-Za-z0-9_-]*)\b")
+CSS_CUSTOM_PROPERTY_RE = re.compile(r"(?P<name>--[A-Za-z0-9_-]+)\s*:")
+CSS_KEYFRAMES_RE = re.compile(r"@keyframes\s+(?P<name>[A-Za-z_][A-Za-z0-9_-]*)", re.IGNORECASE)
+CSS_MEDIA_RE = re.compile(r"@media\s+(?P<query>[^{]+)\{", re.IGNORECASE)
 
 
 def is_code_like_path(path: str | Path) -> bool:
@@ -211,6 +251,12 @@ def parse_code_file(path: str | Path, *, root: str | Path | None = None) -> Code
         return _parse_sql(raw_text, relative_path=relative_path, language=language)
     if language in {"javascript", "typescript"}:
         return _parse_javascript_like(raw_text, relative_path=relative_path, language=language)
+    if language == "csharp":
+        return _parse_csharp(raw_text, relative_path=relative_path, language=language)
+    if language in {"html", "vue", "svelte", "astro", "razor"}:
+        return _parse_frontend_markup(raw_text, relative_path=relative_path, language=language)
+    if language in {"css", "scss", "sass", "less"}:
+        return _parse_stylesheet(raw_text, relative_path=relative_path, language=language)
     if language == "notebook":
         return _parse_notebook(raw_text, relative_path=relative_path, language=language)
     if language in COMMON_LANGUAGE_SYMBOL_PATTERNS:
@@ -262,6 +308,7 @@ def _parse_python(raw_text: str, *, relative_path: str, language: str) -> CodeIn
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
             class_name = node.name
+            class_metadata = _python_class_metadata(node)
             chunk_index = len(chunks)
             chunks.append(
                 _chunk_from_lines(
@@ -275,6 +322,7 @@ def _parse_python(raw_text: str, *, relative_path: str, language: str) -> CodeIn
                     line_start=node.lineno,
                     line_end=getattr(node, "end_lineno", node.lineno),
                     chunk_index=chunk_index,
+                    extra=class_metadata or None,
                 )
             )
             symbols.append(
@@ -288,6 +336,16 @@ def _parse_python(raw_text: str, *, relative_path: str, language: str) -> CodeIn
                     getattr(node, "end_lineno", node.lineno),
                     chunk_index,
                     exported=not node.name.startswith("_"),
+                    metadata=class_metadata or None,
+                )
+            )
+            references.extend(
+                _python_class_references(
+                    node,
+                    language=language,
+                    relative_path=relative_path,
+                    chunk_index=chunk_index,
+                    source_symbol=class_name,
                 )
             )
             references.extend(_python_references(node, language=language, relative_path=relative_path, chunk_index=chunk_index, source_symbol=class_name))
@@ -482,6 +540,305 @@ def _parse_javascript_like(raw_text: str, *, relative_path: str, language: str) 
     return _result(chunks, symbols, references, language=language, parser_status="parsed", generated=_is_generated_file(raw_text))
 
 
+def _parse_csharp(raw_text: str, *, relative_path: str, language: str) -> CodeIndexResult:
+    lines = raw_text.splitlines()
+    line_offsets = _line_offsets(raw_text)
+    chunks: list[CodeChunk] = [
+        _chunk(
+            raw_text,
+            title=f"{relative_path}::module",
+            relative_path=relative_path,
+            language=language,
+            symbol_kind="module",
+            primary_symbol="module",
+            relationship="definition",
+            line_start=1,
+            line_end=max(1, len(lines)),
+            chunk_index=0,
+        )
+    ]
+    symbols: list[CodeSymbol] = []
+    references: list[CodeReference] = []
+
+    namespace_match = CS_NAMESPACE_RE.search(raw_text)
+    namespace_name = namespace_match.group("name") if namespace_match else ""
+    if namespace_match:
+        namespace_line = _line_for_offset(line_offsets, namespace_match.start())
+        symbols.append(
+            _symbol(
+                namespace_name,
+                namespace_name,
+                "namespace",
+                language,
+                relative_path,
+                namespace_line,
+                namespace_line,
+                0,
+                exported=True,
+            )
+        )
+
+    for using in CS_USING_RE.finditer(raw_text):
+        line = _line_for_offset(line_offsets, using.start())
+        references.append(
+            CodeReference(
+                relationship_kind="using",
+                target=using.group("target"),
+                language=language,
+                path=relative_path,
+                line_start=line,
+                line_end=line,
+                chunk_index=0,
+                confidence=0.95,
+            )
+        )
+
+    class_infos: list[dict[str, Any]] = []
+    for match in CS_TYPE_RE.finditer(raw_text):
+        name = match.group("name")
+        kind = match.group("kind").lower()
+        line_start = _line_for_offset(line_offsets, match.start())
+        line_end = _csharp_symbol_line_end(lines, line_start)
+        qualified = f"{namespace_name}.{name}" if namespace_name else name
+        attrs = _csharp_attributes_before(lines, line_start)
+        route_prefixes = _csharp_routes_from_attrs(attrs, class_route=True)
+        chunk_index = len(chunks)
+        chunks.append(
+            _chunk_from_lines(
+                lines,
+                title=f"{relative_path}::{qualified}",
+                relative_path=relative_path,
+                language=language,
+                symbol_kind=kind,
+                primary_symbol=qualified,
+                relationship="definition",
+                line_start=line_start,
+                line_end=line_end,
+                chunk_index=chunk_index,
+                extra={"routes": route_prefixes} if route_prefixes else None,
+            )
+        )
+        symbols.append(
+            _symbol(
+                name,
+                qualified,
+                kind,
+                language,
+                relative_path,
+                line_start,
+                line_end,
+                chunk_index,
+                parent_symbol=namespace_name or None,
+                exported=_common_symbol_exported(raw_text, match.start(), name),
+                metadata={"routes": route_prefixes} if route_prefixes else None,
+            )
+        )
+        class_infos.append(
+            {
+                "name": name,
+                "qualified": qualified,
+                "line_start": line_start,
+                "line_end": line_end,
+                "routes": route_prefixes,
+            }
+        )
+
+    for match in CS_METHOD_RE.finditer(raw_text):
+        name = match.group("name")
+        if name in {"if", "for", "foreach", "while", "switch", "catch"}:
+            continue
+        line_start = _line_for_offset(line_offsets, match.start())
+        parent = _csharp_parent_class(class_infos, line_start)
+        attrs = _csharp_attributes_before(lines, line_start)
+        symbol_kind = "test" if CS_TEST_ATTR_RE.search("\n".join(attrs)) else "method"
+        qualified = f"{parent['qualified']}.{name}" if parent else f"{namespace_name}.{name}" if namespace_name else name
+        routes = _combine_csharp_routes(parent.get("routes", []) if parent else [], _csharp_routes_from_attrs(attrs, class_route=False))
+        line_end = _csharp_symbol_line_end(lines, line_start)
+        chunk_index = len(chunks)
+        chunks.append(
+            _chunk_from_lines(
+                lines,
+                title=f"{relative_path}::{qualified}",
+                relative_path=relative_path,
+                language=language,
+                symbol_kind=symbol_kind,
+                primary_symbol=qualified,
+                relationship="route" if routes else "test" if symbol_kind == "test" else "definition",
+                line_start=line_start,
+                line_end=line_end,
+                chunk_index=chunk_index,
+                extra={"routes": routes} if routes else None,
+            )
+        )
+        symbols.append(
+            _symbol(
+                name,
+                qualified,
+                symbol_kind,
+                language,
+                relative_path,
+                line_start,
+                line_end,
+                chunk_index,
+                parent_symbol=parent["qualified"] if parent else namespace_name or None,
+                exported=_common_symbol_exported(raw_text, match.start(), name),
+                metadata={"routes": routes} if routes else None,
+            )
+        )
+        for route in routes:
+            references.append(
+                CodeReference(
+                    relationship_kind="route",
+                    target=route,
+                    language=language,
+                    path=relative_path,
+                    line_start=line_start,
+                    line_end=line_start,
+                    chunk_index=chunk_index,
+                    source_symbol=qualified,
+                    confidence=0.95,
+                    metadata={"framework": "aspnet"},
+                )
+            )
+        method_body = "\n".join(lines[max(0, line_start - 1) : max(line_start, line_end)])
+        for call in CS_CALL_RE.finditer(method_body):
+            target = call.group("target")
+            if target == name or target in CS_CALL_SKIP or target == match.group("return_type"):
+                continue
+            references.append(
+                CodeReference(
+                    relationship_kind="call",
+                    target=target,
+                    language=language,
+                    path=relative_path,
+                    line_start=line_start + method_body[: call.start()].count("\n"),
+                    line_end=line_start + method_body[: call.start()].count("\n"),
+                    chunk_index=chunk_index,
+                    source_symbol=qualified,
+                    confidence=0.7,
+                )
+            )
+
+    if not symbols:
+        return _fallback_result(raw_text, relative_path=relative_path, language=language)
+    return _result(chunks, symbols, references, language=language, parser_status="parsed", generated=_is_generated_file(raw_text))
+
+
+def _parse_frontend_markup(raw_text: str, *, relative_path: str, language: str) -> CodeIndexResult:
+    lines = raw_text.splitlines()
+    component_name = _frontend_component_name(raw_text, relative_path, language)
+    chunks = [
+        _chunk(
+            raw_text,
+            title=f"{relative_path}::{component_name}",
+            relative_path=relative_path,
+            language=language,
+            symbol_kind="component",
+            primary_symbol=component_name,
+            relationship="definition",
+            line_start=1,
+            line_end=max(1, len(lines)),
+            chunk_index=0,
+        )
+    ]
+    symbols = [
+        _symbol(
+            component_name,
+            component_name,
+            "component",
+            language,
+            relative_path,
+            1,
+            max(1, len(lines)),
+            0,
+            exported=True,
+        )
+    ]
+    references: list[CodeReference] = []
+    for pattern, relationship, target_group in (
+        (FRONTEND_IMPORT_RE, "import", "target"),
+        (FRONTEND_COMPONENT_TAG_RE, "component", "name"),
+        (FRONTEND_ACTION_RE, "form_action", "target"),
+    ):
+        for match in pattern.finditer(raw_text):
+            references.append(
+                CodeReference(
+                    relationship_kind=relationship,
+                    target=match.group(target_group),
+                    language=language,
+                    path=relative_path,
+                    line_start=raw_text[: match.start()].count("\n") + 1,
+                    line_end=raw_text[: match.start()].count("\n") + 1,
+                    chunk_index=0,
+                    source_symbol=component_name,
+                )
+            )
+    for match in FRONTEND_EVENT_RE.finditer(raw_text):
+        references.append(
+            CodeReference(
+                relationship_kind="event",
+                target=match.group("handler"),
+                language=language,
+                path=relative_path,
+                line_start=raw_text[: match.start()].count("\n") + 1,
+                line_end=raw_text[: match.start()].count("\n") + 1,
+                chunk_index=0,
+                source_symbol=component_name,
+                metadata={"event": match.group("event")},
+            )
+        )
+    references.extend(_html_selector_references(raw_text, language=language, relative_path=relative_path, source_symbol=component_name))
+    return _result(chunks, symbols, references, language=language, parser_status="parsed", generated=_is_generated_file(raw_text))
+
+
+def _parse_stylesheet(raw_text: str, *, relative_path: str, language: str) -> CodeIndexResult:
+    lines = raw_text.splitlines()
+    chunk = _chunk(
+        raw_text,
+        title=f"{relative_path}::stylesheet",
+        relative_path=relative_path,
+        language=language,
+        symbol_kind="stylesheet",
+        primary_symbol=Path(relative_path).name,
+        relationship="definition",
+        line_start=1,
+        line_end=max(1, len(lines)),
+        chunk_index=0,
+    )
+    symbols: list[CodeSymbol] = []
+    references: list[CodeReference] = []
+    seen_symbols: set[tuple[str, str]] = set()
+    for pattern, symbol_kind, prefix in (
+        (CSS_CLASS_RE, "selector", "."),
+        (CSS_ID_RE, "selector", "#"),
+        (CSS_CUSTOM_PROPERTY_RE, "custom_property", ""),
+        (CSS_KEYFRAMES_RE, "keyframes", ""),
+    ):
+        for match in pattern.finditer(raw_text):
+            name = f"{prefix}{match.group('name')}"
+            key = (symbol_kind, name)
+            if key in seen_symbols:
+                continue
+            seen_symbols.add(key)
+            line = raw_text[: match.start()].count("\n") + 1
+            symbols.append(_symbol(name, name, symbol_kind, language, relative_path, line, line, 0, exported=True))
+    for media in CSS_MEDIA_RE.finditer(raw_text):
+        line = raw_text[: media.start()].count("\n") + 1
+        references.append(
+            CodeReference(
+                relationship_kind="media_query",
+                target=media.group("query").strip(),
+                language=language,
+                path=relative_path,
+                line_start=line,
+                line_end=line,
+                chunk_index=0,
+                source_symbol=Path(relative_path).name,
+            )
+        )
+    return _result([chunk], symbols, references, language=language, parser_status="parsed", generated=_is_generated_file(raw_text))
+
+
 def _parse_common_language(raw_text: str, *, relative_path: str, language: str) -> CodeIndexResult:
     lines = raw_text.splitlines()
     line_offsets = _line_offsets(raw_text)
@@ -639,6 +996,120 @@ def _fallback_result(
 def _is_migration_path(relative_path: str) -> bool:
     normalized = relative_path.replace("\\", "/").lower()
     return "/migrations/" in f"/{normalized}" or "migration" in Path(normalized).name
+
+
+def _csharp_attributes_before(lines: list[str], line_start: int) -> list[str]:
+    attrs: list[str] = []
+    index = max(0, line_start - 2)
+    while index >= 0:
+        stripped = lines[index].strip()
+        if not stripped:
+            index -= 1
+            continue
+        if stripped.startswith("["):
+            attrs.insert(0, stripped)
+            index -= 1
+            continue
+        break
+    return attrs
+
+
+def _csharp_routes_from_attrs(attrs: list[str], *, class_route: bool) -> list[str]:
+    routes: list[str] = []
+    for attr in attrs:
+        for match in CS_ROUTE_ATTR_RE.finditer(attr):
+            attr_name = match.group("attr").lower()
+            route = str(match.group("route") or "").strip("/")
+            if class_route and attr_name == "route" and route:
+                routes.append(route)
+            elif not class_route and attr_name.startswith("http"):
+                routes.append(route)
+    return routes
+
+
+def _combine_csharp_routes(prefixes: list[str], routes: list[str]) -> list[str]:
+    if not routes:
+        return []
+    if not prefixes:
+        return [route.strip("/") for route in routes]
+    combined: list[str] = []
+    for prefix in prefixes:
+        for route in routes:
+            combined.append("/".join(part.strip("/") for part in (prefix, route) if part.strip("/")))
+    return combined
+
+
+def _csharp_parent_class(class_infos: list[dict[str, Any]], line_start: int) -> dict[str, Any] | None:
+    candidates = [item for item in class_infos if int(item["line_start"]) <= line_start <= int(item["line_end"])]
+    if candidates:
+        return sorted(candidates, key=lambda item: int(item["line_start"]), reverse=True)[0]
+    previous = [item for item in class_infos if int(item["line_start"]) <= line_start]
+    return sorted(previous, key=lambda item: int(item["line_start"]), reverse=True)[0] if previous else None
+
+
+def _csharp_symbol_line_end(lines: list[str], line_start: int) -> int:
+    if not lines:
+        return 1
+    balance = 0
+    seen_open = False
+    for index in range(max(0, line_start - 1), len(lines)):
+        line = lines[index]
+        balance += line.count("{")
+        if "{" in line:
+            seen_open = True
+        balance -= line.count("}")
+        if seen_open and balance <= 0:
+            return index + 1
+    return min(len(lines), max(line_start, line_start + 20))
+
+
+def _frontend_component_name(raw_text: str, relative_path: str, language: str) -> str:
+    if language == "vue":
+        match = re.search(r"\bname\s*:\s*['\"](?P<name>[A-Za-z_][A-Za-z0-9_]*)['\"]", raw_text)
+        if match:
+            return match.group("name")
+    return Path(relative_path).stem.replace(".module", "")
+
+
+def _html_selector_references(raw_text: str, *, language: str, relative_path: str, source_symbol: str) -> list[CodeReference]:
+    references: list[CodeReference] = []
+    seen: set[str] = set()
+    for match in HTML_CLASS_RE.finditer(raw_text):
+        for value in str(match.group("value") or "").split():
+            target = f".{value}"
+            if target in seen:
+                continue
+            seen.add(target)
+            references.append(
+                CodeReference(
+                    relationship_kind="selector",
+                    target=target,
+                    language=language,
+                    path=relative_path,
+                    line_start=raw_text[: match.start()].count("\n") + 1,
+                    line_end=raw_text[: match.start()].count("\n") + 1,
+                    chunk_index=0,
+                    source_symbol=source_symbol,
+                )
+            )
+    for match in HTML_ID_RE.finditer(raw_text):
+        target = f"#{match.group('value')}"
+        if target in seen:
+            continue
+        seen.add(target)
+        references.append(
+            CodeReference(
+                relationship_kind="selector",
+                target=target,
+                language=language,
+                path=relative_path,
+                line_start=raw_text[: match.start()].count("\n") + 1,
+                line_end=raw_text[: match.start()].count("\n") + 1,
+                chunk_index=0,
+                source_symbol=source_symbol,
+            )
+        )
+    return references
 
 
 def _result(
@@ -867,6 +1338,63 @@ def _python_function_symbol_kind(node: ast.FunctionDef | ast.AsyncFunctionDef) -
     return "function"
 
 
+def _python_class_metadata(node: ast.ClassDef) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    bases = [_python_target_name(base) for base in node.bases]
+    decorators = [_python_target_name(decorator.func if isinstance(decorator, ast.Call) else decorator) for decorator in node.decorator_list]
+    bases = [base for base in bases if base]
+    decorators = [decorator for decorator in decorators if decorator]
+    if bases:
+        metadata["bases"] = bases
+    if decorators:
+        metadata["decorators"] = decorators
+    return metadata
+
+
+def _python_class_references(
+    node: ast.ClassDef,
+    *,
+    language: str,
+    relative_path: str,
+    chunk_index: int,
+    source_symbol: str,
+) -> list[CodeReference]:
+    references: list[CodeReference] = []
+    for base in node.bases:
+        target = _python_target_name(base)
+        if target:
+            references.append(
+                CodeReference(
+                    relationship_kind="inherits",
+                    target=target,
+                    language=language,
+                    path=relative_path,
+                    line_start=getattr(base, "lineno", node.lineno),
+                    line_end=getattr(base, "end_lineno", getattr(base, "lineno", node.lineno)),
+                    chunk_index=chunk_index,
+                    source_symbol=source_symbol,
+                    confidence=1.0,
+                )
+            )
+    for decorator in node.decorator_list:
+        target = _python_target_name(decorator.func if isinstance(decorator, ast.Call) else decorator)
+        if target:
+            references.append(
+                CodeReference(
+                    relationship_kind="decorator",
+                    target=target,
+                    language=language,
+                    path=relative_path,
+                    line_start=getattr(decorator, "lineno", node.lineno),
+                    line_end=getattr(decorator, "end_lineno", getattr(decorator, "lineno", node.lineno)),
+                    chunk_index=chunk_index,
+                    source_symbol=source_symbol,
+                    confidence=1.0,
+                )
+            )
+    return _dedupe_references(references)
+
+
 def _has_pytest_fixture_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     for decorator in node.decorator_list:
         func = decorator.func if isinstance(decorator, ast.Call) else decorator
@@ -936,6 +1464,19 @@ def _python_references(
                     )
                 )
     return _dedupe_references(references)
+
+
+def _python_target_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _python_target_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    if isinstance(node, ast.Call):
+        return _python_target_name(node.func)
+    if isinstance(node, ast.Subscript):
+        return _python_target_name(node.value)
+    return None
 
 
 def _python_fixture_references(

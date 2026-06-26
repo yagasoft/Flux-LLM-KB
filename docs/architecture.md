@@ -91,6 +91,13 @@ Corpus chunks use the same `embeddings` table as episodes with
 `owner_table = 'asset_chunks'`. Corpus retrieval fuses PostgreSQL full-text,
 trigram fuzzy matching, pgvector similarity, source trust rank, and freshness.
 Deleted assets and non-canonical duplicate assets are suppressed from retrieval.
+For managed IMAP/Outlook mail exports, `asset_chunks.body` is intentionally
+blank for canonical `body.txt` and attachment chunks. The extracted plaintext is
+stored in private disk sidecars under the cache root, while PostgreSQL stores
+only metadata, sidecar reference hashes, and vectors. Mail search and detail
+views hydrate sidecar content from disk when needed, and vector refresh reads
+the same sidecars before embedding so the database does not become the plaintext
+mail body/attachment store.
 Code-aware retrieval adds an exact symbol stream over `code_symbols`, preserves
 the normal corpus chunk result shape, and exposes code metadata in retrieval
 explanations. Callers can keep using `kb.search`, REST search, and CLI search
@@ -259,11 +266,13 @@ or exclude that file family with glob policy before treating the root as ready.
 
 Code-like files use parser-backed chunking when a reliable local parser exists.
 The first parser layer uses Python `ast` for modules, classes, functions,
-methods, imports, calls, and common route decorators; conservative local pattern
-parsers cover SQL objects, JavaScript/TypeScript symbols/routes, notebook
-cells, generated-code markers, and common configuration/manifests. Parser
-failures and unsupported code-like files still index as redacted fallback
-chunks with sanitized parser status metadata.
+methods, imports, calls, route decorators, class decorators, and inheritance;
+conservative local pattern parsers cover SQL objects, JavaScript/TypeScript
+symbols/routes/callers, C# namespaces/controllers/routes/tests/calls, frontend
+markup components/events/form actions/selectors, stylesheet selectors/custom
+properties/keyframes/media queries, notebook cells, generated-code markers, and
+common configuration/manifests. Parser failures and unsupported code-like files
+still index as redacted fallback chunks with sanitized parser status metadata.
 
 Large structured files use sample-first indexing before any full-file backfill.
 For CSV, TSV, PSV, SSV, JSON, JSONL, NDJSON, JSON-LD, and
@@ -422,7 +431,8 @@ and optional local model servers. Local model probing is disabled by default
 and accepts only loopback HTTP(S) URLs. The permanent cache layout is resolved from
 `acceleration.cache_root`, `FLUX_KB_CACHE_ROOT`, `FLUX_KB_INSTALL_ROOT`, or the
 user cache, and exposes named directories for models, OCR, ASR, vision,
-thumbnails, parser output, embeddings, and temp files.
+thumbnails, parser output, embeddings, private mail content sidecars, and temp
+files.
 
 Benchmark history is durable and public-safe. Synthetic runs are generated from
 temporary fixture trees (`text-heavy`, `code-heavy`, `office-pdf-heavy`,
@@ -606,11 +616,15 @@ move completed exports to `ready/<export_id>`. Flux monitors only `ready`, so
 partial messages and attachments are not indexed. Each export contains a
 manifest, message body files, the original `.eml` or `.msg` where available, and
 attachments.
-The searchable corpus indexes the export manifest, one canonical `body.txt`, and
-attachment files under `attachments/`. Raw message backups (`message.eml` and
-`message.msg`) and duplicate `body.html` artifacts remain in the private spool
-for operator inspection/re-export but are skipped by normal crawl and repair
-paths so they do not create duplicate chunks or vectors.
+The searchable corpus indexes the export manifest as normal metadata, and it
+indexes canonical `body.txt` plus attachment files under `attachments/` through
+private disk content sidecars. For those managed mail body/attachment chunks,
+PostgreSQL `asset_chunks.body` is blank; chunk metadata contains a sidecar
+reference and content hash, and embeddings contain only vector/provider/source
+hash metadata. Raw message backups (`message.eml` and `message.msg`) and
+duplicate `body.html` artifacts remain in the private spool for operator
+inspection/re-export but are skipped by normal crawl and repair paths so they do
+not create duplicate chunks or vectors.
 
 IMAP profiles are the preferred ongoing capture mechanism. They connect over
 TLS, use Gmail installed-app OAuth plus XOAUTH2 when configured, refresh access

@@ -484,6 +484,11 @@ host-side crawl sync endpoints. It stores no private content in Git.
 
 IMAP is the preferred ongoing capture path. Configure a Gmail label or IMAP
 folder as the capture queue, then export into a private spool that Flux indexes.
+For managed IMAP/Outlook mail, canonical body and attachment plaintext is kept
+in private disk content sidecars and hydrated from disk for search, previews,
+and embedding refresh. PostgreSQL stores blank chunk bodies plus sidecar
+references, hashes, metadata, and vectors, not plaintext body/attachment chunk
+text.
 
 ```powershell
 flux-kb mail profile add-imap `
@@ -547,8 +552,8 @@ Docker-hosted worker. It reports that the Windows Outlook host is required. Run
 `flux-kb outlook-host run` in the logged-in Windows session for scheduled pulls,
 or queue a one-off request with `flux-kb outlook-host sync --profile <name>`.
 
-Mailbox credentials, OAuth tokens, raw messages, and attachments stay local and
-must remain outside Git.
+Mailbox credentials, OAuth tokens, raw messages, attachments, and private mail
+content sidecars stay local and must remain outside Git.
 
 ## Codex Plugin
 

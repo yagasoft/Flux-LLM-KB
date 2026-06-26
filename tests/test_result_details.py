@@ -180,6 +180,98 @@ def test_mail_chunk_detail_groups_spool_files_and_sanitizes_body(monkeypatch):
     }
 
 
+def test_mail_detail_hydrates_body_from_private_content_ref(monkeypatch):
+    assets = [
+        {
+            "id": "asset-manifest",
+            "path": "export-1/manifest.json",
+            "root_path": "E:/FluxMail/ready",
+            "root_name": "mail-gmail",
+            "file_kind": "text",
+            "mime_type": "application/json",
+            "extension": ".json",
+            "size_bytes": 100,
+            "status": "indexed",
+            "deleted_at": None,
+            "metadata": {},
+            "chunks": [
+                {
+                    "id": "chunk-manifest",
+                    "chunk_index": 0,
+                    "title": "manifest.json",
+                    "body": '{"export_id":"export-1","profile_name":"gmail","subject":"Customer RFP","sender":"Sender <sender@example.com>","recipients":["me@example.com"],"attachment_count":0}',
+                }
+            ],
+        },
+        {
+            "id": "asset-body",
+            "path": "export-1/body.txt",
+            "root_path": "E:/FluxMail/ready",
+            "root_name": "mail-gmail",
+            "file_kind": "text",
+            "mime_type": "text/plain",
+            "extension": ".txt",
+            "size_bytes": 40,
+            "status": "indexed",
+            "deleted_at": None,
+            "metadata": {},
+            "chunks": [
+                {
+                    "id": "chunk-body",
+                    "chunk_index": 0,
+                    "title": "body.txt",
+                    "body": "",
+                    "metadata": {
+                        "mail_content": {
+                            "storage": "disk_sidecar",
+                            "sha256": "abc123",
+                            "relative_path": "mail/chunks/abc123.json",
+                            "redacted_from_db": True,
+                        }
+                    },
+                }
+            ],
+        },
+    ]
+
+    monkeypatch.setattr(
+        database,
+        "get_asset_chunk_detail",
+        lambda chunk_id: {
+            "id": chunk_id,
+            "asset_id": "asset-body",
+            "chunk_index": 0,
+            "title": "body.txt",
+            "body": "",
+            "asset_path": "export-1/body.txt",
+            "root_name": "mail-gmail",
+            "metadata": {
+                "mail_content": {
+                    "storage": "disk_sidecar",
+                    "sha256": "abc123",
+                    "relative_path": "mail/chunks/abc123.json",
+                    "redacted_from_db": True,
+                }
+            },
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(database, "get_source_asset_detail", lambda asset_id: next(item for item in assets if item["id"] == asset_id), raising=False)
+    monkeypatch.setattr(database, "list_mail_export_assets", lambda export_id, root_name=None: assets, raising=False)
+    monkeypatch.setattr(database, "get_mail_message_by_export_id", lambda export_id, profile_name=None: None, raising=False)
+    monkeypatch.setattr(
+        result_details.mail_content_store,
+        "read_mail_content",
+        lambda ref: "Please review the private mail body.",
+    )
+
+    detail = result_details.result_detail("corpus_chunk", "chunk-body")
+
+    assert detail["logical_kind"] == "mail"
+    assert detail["body"]["text"] == "Please review the private mail body."
+    assert detail["provenance"][1]["asset_id"] == "asset-body"
+
+
 def test_related_evidence_uses_parent_metadata(monkeypatch):
     monkeypatch.setattr(
         database,

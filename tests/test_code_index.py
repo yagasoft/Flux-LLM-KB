@@ -188,6 +188,48 @@ def test_parse_python_tests_emits_test_and_fixture_relationships(tmp_path):
     )
 
 
+def test_parse_python_classes_emit_decorator_and_inheritance_relationships(tmp_path):
+    root = tmp_path / "repo"
+    src = root / "src"
+    src.mkdir(parents=True)
+    path = src / "models.py"
+    path.write_text(
+        "\n".join(
+            [
+                "from dataclasses import dataclass",
+                "from pydantic import BaseModel",
+                "",
+                "class OrderDto(BaseModel):",
+                "    id: str",
+                "",
+                "@dataclass(slots=True)",
+                "class OrderRecord:",
+                "    id: str",
+                "",
+                "class SpecialOrder(OrderRecord):",
+                "    pass",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_code_file(path, root=root)
+
+    assert any(
+        symbol.qualified_name == "OrderDto"
+        and symbol.metadata.get("bases") == ["BaseModel"]
+        for symbol in result.symbols
+    )
+    assert any(
+        symbol.qualified_name == "OrderRecord"
+        and symbol.metadata.get("decorators") == ["dataclass"]
+        for symbol in result.symbols
+    )
+    assert any(reference.relationship_kind == "inherits" and reference.target == "BaseModel" for reference in result.references)
+    assert any(reference.relationship_kind == "inherits" and reference.target == "OrderRecord" for reference in result.references)
+    assert any(reference.relationship_kind == "decorator" and reference.target == "dataclass" for reference in result.references)
+
+
 def test_parse_javascript_exports_callers_and_route_handlers(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -241,3 +283,127 @@ def test_parse_common_language_symbols_instead_of_fallback(tmp_path):
         assert result.metadata["language"] == language
         assert result.metadata["parser_status"] == "parsed"
         assert any(symbol.name == symbol_name and symbol.symbol_kind == symbol_kind for symbol in result.symbols)
+
+
+def test_parse_csharp_controller_routes_tests_and_references(tmp_path):
+    root = tmp_path / "repo"
+    controllers = root / "src" / "Controllers"
+    controllers.mkdir(parents=True)
+    path = controllers / "OrdersController.cs"
+    path.write_text(
+        "\n".join(
+            [
+                "using Microsoft.AspNetCore.Mvc;",
+                "using Xunit;",
+                "",
+                "namespace Demo.Api.Controllers;",
+                "",
+                "[ApiController]",
+                "[Route(\"api/orders\")]",
+                "public class OrdersController : ControllerBase",
+                "{",
+                "    private readonly OrderService _service;",
+                "    public OrdersController(OrderService service) { _service = service; }",
+                "",
+                "    [HttpGet(\"{orderId}\")]",
+                "    public ActionResult<OrderDto> GetOrder(string orderId)",
+                "    {",
+                "        return Ok(_service.GetOrder(orderId));",
+                "    }",
+                "}",
+                "",
+                "public class OrdersControllerTests",
+                "{",
+                "    [Fact]",
+                "    public void GetOrder_returns_order()",
+                "    {",
+                "        Assert.NotNull(new OrdersController(new OrderService()));",
+                "    }",
+                "}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = parse_code_file(path, root=root)
+
+    assert result.metadata["language"] == "csharp"
+    assert result.metadata["parser_status"] == "parsed"
+    assert any(symbol.symbol_kind == "namespace" and symbol.qualified_name == "Demo.Api.Controllers" for symbol in result.symbols)
+    assert any(symbol.symbol_kind == "class" and symbol.qualified_name == "Demo.Api.Controllers.OrdersController" for symbol in result.symbols)
+    assert any(
+        symbol.symbol_kind == "method"
+        and symbol.qualified_name == "Demo.Api.Controllers.OrdersController.GetOrder"
+        and symbol.metadata.get("routes") == ["api/orders/{orderId}"]
+        for symbol in result.symbols
+    )
+    assert any(symbol.symbol_kind == "test" and symbol.name == "GetOrder_returns_order" for symbol in result.symbols)
+    assert any(reference.relationship_kind == "using" and reference.target == "Microsoft.AspNetCore.Mvc" for reference in result.references)
+    assert any(
+        reference.relationship_kind == "route"
+        and reference.target == "api/orders/{orderId}"
+        and reference.source_symbol == "Demo.Api.Controllers.OrdersController.GetOrder"
+        for reference in result.references
+    )
+    assert any(
+        reference.relationship_kind == "call"
+        and reference.target == "_service.GetOrder"
+        and reference.source_symbol == "Demo.Api.Controllers.OrdersController.GetOrder"
+        for reference in result.references
+    )
+
+
+def test_parse_frontend_markup_components_and_styles(tmp_path):
+    root = tmp_path / "repo"
+    web = root / "web"
+    web.mkdir(parents=True)
+    vue = web / "OrderCard.vue"
+    vue.write_text(
+        "\n".join(
+            [
+                "<template>",
+                "  <article class=\"order-card\" @click=\"selectOrder\">",
+                "    <OrderStatus :status=\"order.status\" />",
+                "    <form action=\"/orders/search\"><input id=\"order-search\" /></form>",
+                "  </article>",
+                "</template>",
+                "<script setup lang=\"ts\">",
+                "import OrderStatus from './OrderStatus.vue';",
+                "defineProps<{ order: Order }>();",
+                "function selectOrder() {}",
+                "</script>",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    scss = web / "orders.module.scss"
+    scss.write_text(
+        "\n".join(
+            [
+                ":root { --status-color: #127a5b; }",
+                ".order-card { color: var(--status-color); }",
+                "#order-search { border: 1px solid currentColor; }",
+                "@keyframes orderPulse { from { opacity: 0; } to { opacity: 1; } }",
+                "@media (min-width: 640px) { .order-card { display: grid; } }",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    vue_result = parse_code_file(vue, root=root)
+    scss_result = parse_code_file(scss, root=root)
+
+    assert vue_result.metadata["language"] == "vue"
+    assert any(symbol.symbol_kind == "component" and symbol.name == "OrderCard" for symbol in vue_result.symbols)
+    assert any(reference.relationship_kind == "component" and reference.target == "OrderStatus" for reference in vue_result.references)
+    assert any(reference.relationship_kind == "event" and reference.target == "selectOrder" for reference in vue_result.references)
+    assert any(reference.relationship_kind == "form_action" and reference.target == "/orders/search" for reference in vue_result.references)
+    assert any(reference.relationship_kind == "selector" and reference.target == ".order-card" for reference in vue_result.references)
+    assert any(reference.relationship_kind == "selector" and reference.target == "#order-search" for reference in vue_result.references)
+
+    assert scss_result.metadata["language"] == "scss"
+    assert any(symbol.symbol_kind == "selector" and symbol.name == ".order-card" for symbol in scss_result.symbols)
+    assert any(symbol.symbol_kind == "selector" and symbol.name == "#order-search" for symbol in scss_result.symbols)
+    assert any(symbol.symbol_kind == "custom_property" and symbol.name == "--status-color" for symbol in scss_result.symbols)
+    assert any(symbol.symbol_kind == "keyframes" and symbol.name == "orderPulse" for symbol in scss_result.symbols)
+    assert any(reference.relationship_kind == "media_query" and "(min-width: 640px)" in reference.target for reference in scss_result.references)

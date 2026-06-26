@@ -401,9 +401,12 @@ a processed folder or removes the capture label; permanent trash/delete is not
 the default.
 Completed exports live under `ready\<export_id>` with `manifest.json`,
 `body.txt`, optional `body.html`, the original `.eml` or `.msg`, and
-`attachments\*`. Flux indexes the canonical `body.txt`, the manifest metadata,
-and attachment files; raw message backups and duplicate HTML bodies stay on disk
-as spool artifacts and are skipped by the searchable corpus index.
+`attachments\*`. Flux indexes the manifest metadata normally. It makes the
+canonical `body.txt` and attachment files searchable through private disk
+content sidecars: PostgreSQL keeps blank chunk bodies plus sidecar
+references/hashes and vectors, not plaintext mail body or attachment chunk
+text. Raw message backups and duplicate HTML bodies stay on disk as spool
+artifacts and are skipped by the searchable corpus index.
 
 Profile post-processing supports `none`, `move_to_processed`, `remove_label`,
 and `trash`. Gmail profiles use Gmail IMAP label commands for label operations
@@ -419,6 +422,9 @@ content.
 During rollout, start mail profiles with `none`, `remove_label`, or
 `move_to_processed`. Do not use `trash` for important mailboxes until a dry-run,
 post-process event review, and a small pilot label/folder have all succeeded.
+Before adding important mailboxes, run diagnostics and the managed-mail repair
+path so any legacy plaintext mail chunks are converted to sidecar-backed chunks
+and embedding backfill can rebuild vectors from disk sidecars.
 
 Outlook COM profiles are for catch-up from selected classic Outlook folder
 paths. They use local Outlook automation and write into the same spool shape as

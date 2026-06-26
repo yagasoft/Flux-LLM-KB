@@ -4939,6 +4939,140 @@ def _write_code_fixture(root: Path, files: int) -> None:
             ),
         ),
         (
+            "src/Controllers/OrdersController.cs",
+            "\n".join(
+                [
+                    "using Microsoft.AspNetCore.Mvc;",
+                    "",
+                    "namespace Synthetic.Orders.Api;",
+                    "",
+                    "[ApiController]",
+                    "[Route(\"api/orders\")]",
+                    "public class OrdersController : ControllerBase",
+                    "{",
+                    "  private readonly OrderService _service;",
+                    "  public OrdersController(OrderService service) { _service = service; }",
+                    "",
+                    "  [HttpGet(\"{orderId}\")]",
+                    "  public ActionResult<string> GetOrder(string orderId)",
+                    "  {",
+                    "    return Ok(_service.BuildInvoice(orderId));",
+                    "  }",
+                    "}",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "tests/OrderServiceTests.cs",
+            "\n".join(
+                [
+                    "using Xunit;",
+                    "using Synthetic.Orders;",
+                    "",
+                    "public class OrderServiceTests",
+                    "{",
+                    "  [Fact]",
+                    "  public void BuildInvoice_returns_ready_status()",
+                    "  {",
+                    "    Assert.Equal(\"order-1\", new OrderService().BuildInvoice(\"order-1\"));",
+                    "  }",
+                    "}",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/components/OrderCard.tsx",
+            "\n".join(
+                [
+                    "import OrderStatus from './OrderStatus';",
+                    "",
+                    "export function OrderCard({ order }) {",
+                    "  return <article className=\"order-card\"><OrderStatus status={order.status} /></article>;",
+                    "}",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/components/OrderCard.vue",
+            "\n".join(
+                [
+                    "<template>",
+                    "  <article class=\"order-card\" @click=\"selectOrder\">",
+                    "    <OrderStatus :status=\"order.status\" />",
+                    "    <form action=\"/orders/search\"><input id=\"order-search\" /></form>",
+                    "  </article>",
+                    "</template>",
+                    "<script setup lang=\"ts\">",
+                    "import OrderStatus from './OrderStatus.vue';",
+                    "defineProps<{ order: Order }>();",
+                    "function selectOrder() {}",
+                    "</script>",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/components/OrderPanel.svelte",
+            "\n".join(
+                [
+                    "<script>",
+                    "  import OrderCard from './OrderCard.svelte';",
+                    "  export let orders = [];",
+                    "</script>",
+                    "<section class=\"order-panel\"><OrderCard order={orders[0]} /></section>",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/pages/order-details.astro",
+            "\n".join(
+                [
+                    "---",
+                    "import OrderCard from '../components/OrderCard.vue';",
+                    "const { order } = Astro.props;",
+                    "---",
+                    "<OrderCard order={order} />",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/Pages/Orders.cshtml",
+            "\n".join(
+                [
+                    "@page \"/orders\"",
+                    "@model OrdersModel",
+                    "<section class=\"orders-page\"><form action=\"/orders/search\"></form></section>",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/index.html",
+            "<main id=\"orders-app\" class=\"order-shell\"><form action=\"/orders/search\"></form></main>\n",
+        ),
+        (
+            "web/styles/orders.module.scss",
+            "\n".join(
+                [
+                    ":root { --status-color: #127a5b; }",
+                    ".order-card { color: var(--status-color); }",
+                    "#order-search { border: 1px solid currentColor; }",
+                    "@keyframes orderPulse { from { opacity: 0; } to { opacity: 1; } }",
+                    "@media (min-width: 640px) { .order-card { display: grid; } }",
+                    "",
+                ]
+            ),
+        ),
+        (
+            "web/styles/orders.css",
+            ".orders-page { display: grid; }\n#orders-app { min-height: 100vh; }\n",
+        ),
+        (
             "tools/orders.ps1",
             "\n".join(
                 [

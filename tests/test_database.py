@@ -1391,6 +1391,80 @@ def test_refresh_embeddings_batches_candidates_and_replaces_vectors(monkeypatch)
     assert [item.owner_id for item in replaced] == ["chunk-1", "claim-1"]
 
 
+def test_corpus_embedding_rows_hydrate_managed_mail_sidecar(monkeypatch):
+    class FakeCursor:
+        def execute(self, _sql, _params=()):
+            return None
+
+        def fetchall(self):
+            return [
+                (
+                    "chunk-mail",
+                    "body.txt",
+                    "",
+                    {
+                        "sidecar_ref": {
+                            "source": "managed_mail",
+                            "storage": "disk_sidecar",
+                            "sha256": "abc123",
+                            "relative_path": "mail/chunks/abc123.json",
+                            "redacted_from_db": True,
+                        }
+                    },
+                    None,
+                ),
+                ("chunk-file", "plan.txt", "Plain file body", {}, "old-hash"),
+            ]
+
+    monkeypatch.setattr(database.mail_content_store, "read_mail_content", lambda _ref: "Private mail body")
+
+    rows = database._fetch_corpus_embedding_rows(FakeCursor(), root_name=None, limit=10)
+
+    assert rows == [
+        ("chunk-mail", "body.txt\nPrivate mail body", None),
+        ("chunk-file", "plan.txt\nPlain file body", "old-hash"),
+    ]
+
+
+def test_search_managed_mail_sidecar_rows_hydrates_private_text(monkeypatch):
+    class FakeCursor:
+        def execute(self, _sql, _params=()):
+            return None
+
+        def fetchall(self):
+            return [
+                (
+                    "chunk-mail",
+                    "asset-mail",
+                    "body.txt",
+                    "",
+                    "export-1/body.txt",
+                    0,
+                    450,
+                    "mail-gmail",
+                    "text",
+                    {
+                        "sidecar_ref": {
+                            "source": "managed_mail",
+                            "storage": "disk_sidecar",
+                            "sha256": "abc123",
+                            "relative_path": "mail/chunks/abc123.json",
+                            "redacted_from_db": True,
+                        }
+                    },
+                )
+            ]
+
+    monkeypatch.setattr(database.mail_content_store, "read_mail_content", lambda _ref: "Customer RFP private body")
+
+    rows = database._search_mail_sidecar_rows(FakeCursor(), query="customer rfp", root_name=None, filters=None, limit=5)
+
+    assert rows[0][0] == "chunk-mail"
+    assert rows[0][3] == "Customer RFP private body"
+    assert rows[0][4] == "export-1/body.txt"
+    assert rows[0][8] > 0
+
+
 def test_codex_hook_capture_exists_checks_session_and_turn_metadata(monkeypatch):
     executed = []
 
@@ -1640,6 +1714,9 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
             self.count += 1
             return ({1: 7, 2: 2, 3: 3, 4: 4}[self.count],)
 
+        def fetchall(self):
+            return []
+
     class FakeConnection:
         def __enter__(self):
             return self
@@ -1665,6 +1742,7 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
         "internal_mail_artifacts_deleted": 2,
         "embeddings_purged": 3,
         "chunks_purged": 4,
+        "mail_plaintext_chunks_repaired": 0,
     }
     assert "EXISTS" in sql
     assert "asset_chunks" in sql
@@ -2222,6 +2300,61 @@ def test_corpus_search_filters_metadata_only_assets():
     assert "a.extraction_status <> 'metadata_only'" not in search_function
 
 
+def test_managed_mail_chunks_store_private_text_off_db(monkeypatch):
+    from flux_llm_kb import mail_content_store
+
+    executed = []
+    writes = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT a.path" in sql and "JOIN monitored_roots" in sql:
+                return ("export-1/body.txt", "mail-gmail", "E:/FluxMail/ready", {"mail_profile": "gmail"})
+            if "INSERT INTO asset_chunks" in sql:
+                return ("chunk-1",)
+            return None
+
+    def fake_write_mail_content(**kwargs):
+        writes.append(kwargs)
+        return {
+            "storage": "disk_sidecar",
+            "sha256": "abc123",
+            "relative_path": "mail/chunks/abc123.json",
+            "redacted_from_db": True,
+        }
+
+    monkeypatch.setattr(mail_content_store, "write_mail_content", fake_write_mail_content)
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
+
+    inserted = database._replace_asset_chunks(
+        FakeCursor(),
+        "asset-1",
+        (
+            AssetChunk(
+                chunk_index=0,
+                title="body.txt",
+                body="Please review the private mail body.",
+                token_estimate=7,
+            ),
+        ),
+    )
+
+    insert_params = next(params for sql, params in executed if "INSERT INTO asset_chunks" in sql)
+    metadata = json.loads(insert_params[7])
+    assert inserted == 1
+    assert insert_params[3] == ""
+    assert writes[0]["text"] == "Please review the private mail body."
+    assert metadata["sidecar_ref"]["source"] == "managed_mail"
+    assert metadata["sidecar_ref"]["storage"] == "disk_sidecar"
+    assert metadata["sidecar_ref"]["sha256"] == "abc123"
+    assert metadata["sidecar_ref"]["redacted_from_db"] is True
+
+
 def test_corpus_embedding_and_semantic_candidates_require_indexed_assets():
     source = Path(database.__file__).read_text(encoding="utf-8")
     embedding_function = source.split("def _fetch_corpus_embedding_rows", 1)[1].split("def _fetch_episode_embedding_rows", 1)[0]
@@ -2244,6 +2377,9 @@ def test_repair_extracted_corpus_asset_statuses_purges_stale_chunks_and_mail_int
     assert "message.eml" in repair_function
     assert "message.msg" in repair_function
     assert "body.html" in repair_function
+    assert "mail_plaintext_chunks_repaired" in repair_function
+    assert "c.body <> ''" in repair_function
+    assert "body = ''" in repair_function
 
 
 def test_corpus_status_queries_include_lock_tolerant_states():

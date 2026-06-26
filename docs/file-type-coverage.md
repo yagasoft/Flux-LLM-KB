@@ -119,8 +119,10 @@ installed.
 
 - Code and developer artifacts are indexed through normal corpus chunks plus
   parser metadata. Python files use local `ast` chunking for modules, classes,
-  functions, methods, imports, calls, and route decorators. SQL, JavaScript,
-  TypeScript, notebooks, generated-code markers, and common config/manifests use
+  functions, methods, imports, calls, route decorators, class decorators, and
+  inheritance. SQL, JavaScript, TypeScript, C#, frontend markup (`html`, `vue`,
+  `svelte`, `astro`, `razor`), stylesheets (`css`, `scss`, `sass`, `less`),
+  notebooks, generated-code markers, and common config/manifests use
   conservative local pattern parsing. Parser failures and unsupported code-like
   files fall back to redacted text chunks with sanitized `parser_status`
   metadata; they do not block crawl/watch loops.
@@ -161,10 +163,12 @@ installed.
   are cleaned into transcript chunks without cue IDs or timestamps. `eml` and
   `mbox` mail exports summarize subjects, plain bodies, message counts, and
   attachment counts without indexing attachment bytes or raw addressing headers.
-  Managed IMAP/Outlook spool exports index `manifest.json`, canonical
-  `body.txt`, and files under `attachments/`; raw `message.eml`, `message.msg`,
-  and duplicate `body.html` artifacts stay on disk and are skipped by corpus
-  retrieval.
+  Managed IMAP/Outlook spool exports index `manifest.json` as ordinary metadata.
+  Canonical `body.txt` and files under `attachments/` are searchable through
+  private disk sidecars: PostgreSQL stores blank chunk bodies plus sidecar
+  references/hashes and vectors, not plaintext mail body or attachment chunk
+  text. Raw `message.eml`, `message.msg`, and duplicate `body.html` artifacts
+  stay on disk and are skipped by corpus retrieval.
   `ics` and `vcf` files extract conservative event/contact summaries while
   omitting contact email addresses from chunks.
 - Security, test, coverage, and browser capture reports use bounded summaries

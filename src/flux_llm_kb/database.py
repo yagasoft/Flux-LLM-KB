@@ -28,6 +28,7 @@ from .embeddings import (
     embedding_source_hash,
     to_pgvector_literal,
 )
+from . import mail_content_store
 from .migrations import load_migrations
 from .scoring import LifecycleScoreInput, lifecycle_score, reciprocal_rank_fusion
 
@@ -591,6 +592,12 @@ def search_corpus_chunks(
                 ),
             )
             _add_ranked_corpus_rows("corpus_vector", cur.fetchall(), streams, details)
+            _add_ranked_corpus_rows(
+                "mail_sidecar",
+                _search_mail_sidecar_rows(cur, query=query, root_name=root_name, filters=filters, limit=candidate_limit),
+                streams,
+                details,
+            )
 
             if query.strip() or _has_code_filters(filters):
                 cur.execute(
@@ -3437,12 +3444,84 @@ def repair_extracted_corpus_asset_statuses(
                 params,
             )
             chunks_purged = int(cur.fetchone()[0] or 0)
+            cur.execute(
+                f"""
+                SELECT c.id::text, c.chunk_index, c.title, c.body, c.metadata,
+                       a.path, r.name
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.enabled
+                  AND r.metadata ? 'mail_profile'
+                  AND a.deleted_at IS NULL
+                  AND a.extraction_status = 'indexed'
+                  AND c.body <> ''
+                  AND (
+                      (
+                          array_length(string_to_array(a.path, '/'), 1) = 2
+                          AND lower(split_part(a.path, '/', 2)) = 'body.txt'
+                      )
+                      OR (
+                          array_length(string_to_array(a.path, '/'), 1) >= 3
+                          AND lower(split_part(a.path, '/', 2)) = 'attachments'
+                      )
+                  )
+                  {root_filter}
+                ORDER BY c.updated_at DESC
+                LIMIT 1000
+                """,
+                params,
+            )
+            repaired_mail_chunk_ids: list[str] = []
+            mail_plaintext_chunks_repaired = 0
+            for chunk_id, chunk_index, title, body, _metadata, asset_path, row_root_name in cur.fetchall():
+                kind = mail_content_store.managed_mail_content_kind(str(asset_path or ""))
+                if not kind:
+                    continue
+                content_ref = mail_content_store.write_mail_content(
+                    root_name=str(row_root_name or ""),
+                    asset_path=str(asset_path or ""),
+                    chunk_index=int(chunk_index or 0),
+                    title=str(title or ""),
+                    text=str(body or ""),
+                    kind=kind,
+                )
+                cur.execute(
+                    """
+                    UPDATE asset_chunks
+                    SET body = '',
+                        metadata = metadata || %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (
+                        _json(
+                            _sanitize_operational_metadata(
+                                {"sidecar_ref": {"source": "managed_mail", **content_ref}}
+                            )
+                        ),
+                        chunk_id,
+                    ),
+                )
+                repaired_mail_chunk_ids.append(str(chunk_id))
+                mail_plaintext_chunks_repaired += 1
+            if repaired_mail_chunk_ids:
+                cur.execute(
+                    """
+                    DELETE FROM embeddings
+                    WHERE owner_table = 'asset_chunks'
+                      AND owner_id = ANY(%s::uuid[])
+                    """,
+                    (repaired_mail_chunk_ids,),
+                )
+                embeddings_purged += int(getattr(cur, "rowcount", 0) or 0)
             return {
                 "root_name": root_name,
                 "repaired": repaired,
                 "internal_mail_artifacts_deleted": internal_deleted,
                 "chunks_purged": chunks_purged,
                 "embeddings_purged": embeddings_purged,
+                "mail_plaintext_chunks_repaired": mail_plaintext_chunks_repaired,
             }
 
 
@@ -5307,7 +5386,7 @@ def get_asset_chunk(chunk_id: str, *, url: str | None = None) -> dict[str, Any] 
             cur.execute(
                 """
                 SELECT c.id::text, c.asset_id::text, c.chunk_index, c.title, c.body,
-                       c.modality, c.locator, c.token_estimate,
+                       c.modality, c.locator, c.token_estimate, c.metadata,
                        a.path, r.name
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
@@ -5328,8 +5407,9 @@ def get_asset_chunk(chunk_id: str, *, url: str | None = None) -> dict[str, Any] 
                 "modality": row[5],
                 "locator": row[6],
                 "token_estimate": row[7],
-                "asset_path": row[8],
-                "root_name": row[9],
+                "metadata": row[8] or {},
+                "asset_path": row[9],
+                "root_name": row[10],
             }
 
 
@@ -5340,7 +5420,7 @@ def get_asset_chunk_detail(chunk_id: str, *, url: str | None = None) -> dict[str
             cur.execute(
                 """
                 SELECT c.id::text, c.asset_id::text, c.chunk_index, c.title, c.body,
-                       c.modality, c.locator, c.token_estimate,
+                       c.modality, c.locator, c.token_estimate, c.metadata,
                        a.path, a.extraction_status, a.deleted_at, r.name, r.root_path
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
@@ -5361,11 +5441,12 @@ def get_asset_chunk_detail(chunk_id: str, *, url: str | None = None) -> dict[str
                 "modality": row[5],
                 "locator": row[6],
                 "token_estimate": row[7],
-                "asset_path": row[8],
-                "asset_status": "deleted" if row[10] else row[9],
-                "deleted_at": row[10].isoformat() if row[10] else None,
-                "root_name": row[11],
-                "root_path": row[12],
+                "metadata": row[8] or {},
+                "asset_path": row[9],
+                "asset_status": "deleted" if row[11] else row[10],
+                "deleted_at": row[11].isoformat() if row[11] else None,
+                "root_name": row[12],
+                "root_path": row[13],
             }
 
 
@@ -7193,6 +7274,70 @@ def _add_ranked_corpus_rows(
             detail["code"] = row[10]
 
 
+def _search_mail_sidecar_rows(
+    cur: Any,
+    *,
+    query: str,
+    root_name: str | None,
+    filters: dict[str, Any] | None,
+    limit: int,
+) -> list[tuple[Any, ...]]:
+    if _has_code_filters(filters):
+        return []
+    root_name_sql = "AND r.name = %s" if root_name else ""
+    root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    cur.execute(
+        f"""
+        SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
+               (
+                   SELECT count(*)
+                   FROM source_assets duplicate
+                   WHERE duplicate.canonical_asset_id = a.id
+               ) AS duplicate_count,
+               r.trust_rank,
+               r.name AS root_name,
+               a.file_kind,
+               c.metadata
+        FROM asset_chunks c
+        JOIN source_assets a ON a.id = c.asset_id
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE r.enabled
+          AND r.metadata ? 'mail_profile'
+          AND a.deleted_at IS NULL
+          AND a.canonical_asset_id IS NULL
+          AND a.extraction_status = 'indexed'
+          AND c.metadata ? 'sidecar_ref'
+          {root_name_sql}
+        ORDER BY c.updated_at DESC
+        LIMIT %s
+        """,
+        (*root_name_params, max(1, min(int(limit or 12), 200))),
+    )
+    rows: list[tuple[Any, ...]] = []
+    for row in cur.fetchall():
+        metadata = row[9] if isinstance(row[9], dict) else {}
+        body = mail_content_store.hydrate_chunk_body({"body": row[3], "metadata": metadata})
+        score = mail_content_store.score_mail_text(query, str(row[2] or ""), body)
+        if score <= 0:
+            continue
+        rows.append(
+            (
+                row[0],
+                row[1],
+                row[2],
+                body,
+                row[4],
+                row[5],
+                row[6],
+                row[7],
+                score,
+                row[8],
+                None,
+            )
+        )
+    return sorted(rows, key=lambda item: (-float(item[8] or 0.0), str(item[4] or ""), str(item[0] or "")))[:limit]
+
+
 def _has_code_filters(filters: dict[str, Any] | None) -> bool:
     if not isinstance(filters, dict):
         return False
@@ -8964,6 +9109,7 @@ def _replace_container_child_assets(
 
 
 def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> int:
+    mail_context = _managed_mail_asset_context(cur, asset_id)
     cur.execute("DELETE FROM code_references WHERE source_asset_id = %s", (asset_id,))
     cur.execute("DELETE FROM code_symbols WHERE source_asset_id = %s", (asset_id,))
     cur.execute(
@@ -8977,6 +9123,20 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
     cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s", (asset_id,))
     inserted = 0
     for chunk in chunks:
+        chunk_body = str(chunk.body)
+        chunk_metadata = dict(getattr(chunk, "metadata", {}) or {})
+        db_body = chunk_body
+        if mail_context is not None:
+            content_ref = mail_content_store.write_mail_content(
+                root_name=mail_context["root_name"],
+                asset_path=mail_context["asset_path"],
+                chunk_index=int(chunk.chunk_index),
+                title=str(chunk.title),
+                text=chunk_body,
+                kind=mail_context["kind"],
+            )
+            chunk_metadata["sidecar_ref"] = {"source": "managed_mail", **content_ref}
+            db_body = ""
         cur.execute(
             """
             INSERT INTO asset_chunks (
@@ -8989,11 +9149,11 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
                 asset_id,
                 chunk.chunk_index,
                 chunk.title,
-                chunk.body,
+                db_body,
                 chunk.modality,
                 chunk.locator,
                 chunk.token_estimate,
-                _json(_sanitize_operational_metadata(dict(getattr(chunk, "metadata", {}) or {}))),
+                _json(_sanitize_operational_metadata(chunk_metadata)),
             ),
         )
         chunk_id = cur.fetchone()[0]
@@ -9003,11 +9163,37 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
             _embedding_result_for_text(
                 owner_table="asset_chunks",
                 owner_id=chunk_id,
-                text=f"{chunk.title}\n{chunk.body}",
+                text=f"{chunk.title}\n{chunk_body}",
             ),
         )
         inserted += 1
     return inserted
+
+
+def _managed_mail_asset_context(cur: Any, asset_id: str) -> dict[str, str] | None:
+    cur.execute(
+        """
+        SELECT a.path, r.name, r.root_path, r.metadata
+        FROM source_assets a
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE a.id = %s
+        """,
+        (asset_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    asset_path = str(row[0] or "")
+    root_metadata = row[3] if isinstance(row[3], dict) else {}
+    kind = mail_content_store.managed_mail_content_kind(asset_path)
+    if not kind or not mail_content_store.is_managed_mail_content(asset_path, root_metadata):
+        return None
+    return {
+        "asset_path": asset_path,
+        "root_name": str(row[1] or ""),
+        "root_path": str(row[2] or ""),
+        "kind": kind,
+    }
 
 
 def _insert_code_metadata_for_chunk(cur: Any, *, asset_id: str, chunk_id: str, chunk: Any) -> None:
@@ -9342,7 +9528,7 @@ def _fetch_corpus_embedding_rows(cur: Any, *, root_name: str | None, limit: int)
     params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
     cur.execute(
         f"""
-        SELECT c.id::text, concat_ws(E'\n', c.title, c.body) AS text,
+        SELECT c.id::text, c.title, c.body, c.metadata,
                emb.metadata->>'source_hash' AS existing_source_hash
         FROM asset_chunks c
         JOIN source_assets a ON a.id = c.asset_id
@@ -9359,7 +9545,13 @@ def _fetch_corpus_embedding_rows(cur: Any, *, root_name: str | None, limit: int)
         """,
         (DEFAULT_EMBEDDING_MODEL, *params),
     )
-    return list(cur.fetchall())
+    rows: list[tuple[Any, Any, Any]] = []
+    for owner_id, title, body, metadata, existing_source_hash in cur.fetchall():
+        chunk = {"title": title, "body": body, "metadata": metadata or {}}
+        hydrated_body = mail_content_store.hydrate_chunk_body(chunk)
+        text = "\n".join(part for part in (str(title or ""), hydrated_body) if part).strip()
+        rows.append((owner_id, text, existing_source_hash))
+    return rows
 
 
 def _fetch_episode_embedding_rows(cur: Any, *, root_name: str | None, limit: int) -> list[tuple[Any, Any, Any]]:

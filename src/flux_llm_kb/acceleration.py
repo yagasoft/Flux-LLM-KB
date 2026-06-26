@@ -188,7 +188,7 @@ def resolve_cache_layout(cache_root: str | None = None) -> dict[str, Any]:
     else:
         root = Path.home() / ".flux-llm-kb" / "cache"
         source = "user_cache"
-    names = ("models", "ocr", "asr", "vision", "thumbnails", "parser", "embeddings", "temp")
+    names = ("models", "ocr", "asr", "vision", "thumbnails", "parser", "embeddings", "mail_content", "temp")
     return {
         "root": str(root),
         "source": source,

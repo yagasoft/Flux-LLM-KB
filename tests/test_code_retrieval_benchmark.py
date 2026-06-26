@@ -8,12 +8,12 @@ from flux_llm_kb.service import KnowledgeService
 
 def test_code_heavy_benchmark_fixture_covers_code_indexing_paths(tmp_path):
     root = tmp_path / "code-heavy"
-    service_module._write_benchmark_fixture(root, "code-heavy", 15)
+    service_module._write_benchmark_fixture(root, "code-heavy", 25)
 
     plan = scan_path(root, CorpusPolicy(root_path=root))
     assets = {asset.relative_path: asset for asset in plan.assets}
 
-    assert len(assets) == 15
+    assert len(assets) == 25
     assert set(assets) == {
         "db/migrations/0001_create_orders.sql",
         "duplicates/orders_copy.py",
@@ -21,15 +21,25 @@ def test_code_heavy_benchmark_fixture_covers_code_indexing_paths(tmp_path):
         "notebooks/orders.ipynb",
         "openapi.yaml",
         "pyproject.toml",
+        "src/Controllers/OrdersController.cs",
         "src/OrderService.cs",
         "src/broken.py",
         "src/lib.rs",
         "src/main.go",
         "src/orders.py",
         "src/unsupported.go",
+        "tests/OrderServiceTests.cs",
         "tests/test_orders.py",
+        "web/components/OrderCard.tsx",
+        "web/components/OrderCard.vue",
+        "web/components/OrderPanel.svelte",
+        "web/index.html",
+        "web/pages/Orders.cshtml",
+        "web/pages/order-details.astro",
         "tools/orders.ps1",
         "web/routes.ts",
+        "web/styles/orders.css",
+        "web/styles/orders.module.scss",
     }
     assert all(asset.file_kind == "code" for asset in assets.values())
 
@@ -74,6 +84,8 @@ def test_code_heavy_benchmark_fixture_covers_code_indexing_paths(tmp_path):
         "src/main.go": ("go", "BuildInvoice"),
         "src/lib.rs": ("rust", "build_invoice"),
         "src/OrderService.cs": ("csharp", "OrderService"),
+        "src/Controllers/OrdersController.cs": ("csharp", "OrdersController"),
+        "tests/OrderServiceTests.cs": ("csharp", "BuildInvoice_returns_ready_status"),
         "tools/orders.ps1": ("powershell", "Invoke-BuildInvoice"),
     }
     for path, (language, symbol_name) in language_symbols.items():
@@ -81,6 +93,18 @@ def test_code_heavy_benchmark_fixture_covers_code_indexing_paths(tmp_path):
         assert code["language"] == language
         assert code["parser_status"] == "parsed"
         assert any(symbol["name"] == symbol_name for symbol in code["symbols"])
+
+    controller = assets["src/Controllers/OrdersController.cs"].metadata["code"]
+    assert any(symbol["qualified_name"].endswith("OrdersController.GetOrder") and symbol["metadata"]["routes"] == ["api/orders/{orderId}"] for symbol in controller["symbols"])
+    assert any(reference["relationship_kind"] == "route" and reference["target"] == "api/orders/{orderId}" for reference in controller["references"])
+
+    vue = assets["web/components/OrderCard.vue"].metadata["code"]
+    assert any(symbol["symbol_kind"] == "component" and symbol["name"] == "OrderCard" for symbol in vue["symbols"])
+    assert any(reference["relationship_kind"] == "component" and reference["target"] == "OrderStatus" for reference in vue["references"])
+
+    scss = assets["web/styles/orders.module.scss"].metadata["code"]
+    assert any(symbol["symbol_kind"] == "selector" and symbol["name"] == ".order-card" for symbol in scss["symbols"])
+    assert any(symbol["symbol_kind"] == "custom_property" and symbol["name"] == "--status-color" for symbol in scss["symbols"])
 
     notebook = assets["notebooks/orders.ipynb"]
     assert [chunk.metadata["cell_type"] for chunk in notebook.chunks] == ["markdown", "code"]
@@ -94,11 +118,11 @@ def test_code_heavy_benchmark_runs_through_public_service_surface(monkeypatch):
     recorded = []
     monkeypatch.setattr(database, "record_benchmark_run", lambda **kwargs: recorded.append(kwargs) or {"id": "run-code", "fixture": kwargs["fixture"]})
 
-    result = KnowledgeService().run_benchmark(fixture="code-heavy", files=15, mode="scan")
+    result = KnowledgeService().run_benchmark(fixture="code-heavy", files=25, mode="scan")
 
     assert result["fixture"] == "code-heavy"
     assert result["runs"][0]["fixture"] == "code-heavy"
     assert recorded[0]["fixture"] == "code-heavy"
-    assert recorded[0]["file_count"] == 15
-    assert recorded[0]["worker_family_breakdown"]["text"]["files"] == 15
+    assert recorded[0]["file_count"] == 25
+    assert recorded[0]["worker_family_breakdown"]["text"]["files"] == 25
     assert "root_path" not in recorded[0]["metadata"]

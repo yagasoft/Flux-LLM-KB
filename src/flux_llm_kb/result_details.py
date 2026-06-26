@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import database
+from . import mail_content_store
 
 
 MAIL_IMPLEMENTATION_FILES = {"manifest.json", "body.txt", "body.html", "message.eml", "message.msg"}
@@ -248,7 +249,10 @@ def _file_actions(asset: dict[str, Any], canonical_path: str) -> dict[str, Any]:
 
 
 def _preview_text(chunks: list[dict[str, Any]]) -> str:
-    text = "\n\n".join(str(chunk.get("body") or "") for chunk in sorted(chunks, key=lambda item: int(item.get("chunk_index") or 0))).strip()
+    text = "\n\n".join(
+        mail_content_store.hydrate_chunk_body(chunk)
+        for chunk in sorted(chunks, key=lambda item: int(item.get("chunk_index") or 0))
+    ).strip()
     return text[:DETAIL_PREVIEW_LIMIT]
 
 
