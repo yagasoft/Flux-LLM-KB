@@ -21,6 +21,83 @@ def test_normalize_root_path_preserves_absolute_posix_container_path():
     )
 
 
+def test_update_monitored_root_blocks_existing_metadata_only_assets_when_strict(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, name FROM monitored_roots" in sql:
+                return ("root-1", "docs")
+            if "UPDATE monitored_roots" in sql:
+                return (
+                    "root-1",
+                    "docs",
+                    "/app/private/docs",
+                    True,
+                    True,
+                    False,
+                    500,
+                    [],
+                    [],
+                    "extend",
+                    1024,
+                    2048,
+                    {"strict_indexing": True},
+                )
+            return None
+
+        def fetchall(self):
+            if "SELECT id::text" in executed[-1][0] and "FROM source_assets" in executed[-1][0]:
+                return [("asset-1",), ("asset-2",)]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.update_monitored_root(
+        root_id="docs",
+        name="docs",
+        root_path="/app/private/docs",
+        metadata={"strict_indexing": True},
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result["metadata"]["strict_indexing"] is True
+    assert "extraction_status = 'metadata_only'" in sql
+    assert "DELETE FROM asset_chunks WHERE asset_id = ANY(%s::uuid[])" in sql
+    assert "SET extraction_status = 'blocked_missing_dependency'" in sql
+    update_params = next(
+        params
+        for statement, params in executed
+        if "SET extraction_status = 'blocked_missing_dependency'" in statement
+    )
+    assert update_params[1] == ["asset-1", "asset-2"]
+    assert json.loads(update_params[0])["metadata_only_blocked"] is True
+
+
 def test_backfill_episode_workspace_scope_updates_explicit_episode_ids(monkeypatch):
     executed = []
 

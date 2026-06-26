@@ -1918,6 +1918,8 @@ def add_monitored_root(
                 ),
             )
             row = cur.fetchone()
+            if _metadata_strict_indexing_enabled(row[12]):
+                _block_metadata_only_assets_for_strict_root(cur, root_id=row[0])
             _upsert_watcher_state(cur, row[0], "enabled" if watch_enabled else "disabled")
             return _root_row(row)
 
@@ -2042,6 +2044,8 @@ def update_monitored_root(
                 ),
             )
             row = cur.fetchone()
+            if _metadata_strict_indexing_enabled(row[12]):
+                _block_metadata_only_assets_for_strict_root(cur, root_id=actual_root_id)
             if previous_name != name:
                 cur.execute(
                     """
@@ -8646,6 +8650,72 @@ def _normalize_root_path(root_path: str | Path) -> str:
 
 def _looks_like_absolute_posix_path(value: str) -> bool:
     return value.startswith("/") and not value.startswith("//")
+
+
+def _metadata_strict_indexing_enabled(metadata: dict[str, Any] | None) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    value = metadata.get("strict_indexing")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "strict"}
+    return False
+
+
+def _block_metadata_only_assets_for_strict_root(cur: Any, *, root_id: str) -> int:
+    cur.execute(
+        """
+        SELECT id::text
+        FROM source_assets
+        WHERE root_id = %s
+          AND extraction_status = 'metadata_only'
+          AND deleted_at IS NULL
+        """,
+        (root_id,),
+    )
+    asset_ids = [row[0] for row in cur.fetchall()]
+    if not asset_ids:
+        return 0
+    cur.execute("DELETE FROM code_references WHERE source_asset_id = ANY(%s::uuid[])", (asset_ids,))
+    cur.execute("DELETE FROM code_symbols WHERE source_asset_id = ANY(%s::uuid[])", (asset_ids,))
+    cur.execute(
+        """
+        DELETE FROM embeddings
+        WHERE owner_table = 'asset_chunks'
+          AND owner_id IN (
+              SELECT id
+              FROM asset_chunks
+              WHERE asset_id = ANY(%s::uuid[])
+          )
+        """,
+        (asset_ids,),
+    )
+    cur.execute("DELETE FROM asset_chunks WHERE asset_id = ANY(%s::uuid[])", (asset_ids,))
+    cur.execute(
+        """
+        UPDATE source_assets
+        SET extraction_status = 'blocked_missing_dependency',
+            metadata = metadata || %s::jsonb,
+            updated_at = now()
+        WHERE id = ANY(%s::uuid[])
+        """,
+        (
+            _json(
+                {
+                    "strict_indexing": True,
+                    "metadata_only_blocked": True,
+                    "readiness_status": "blocked_missing_dependency",
+                    "readiness_reason": "Strict indexing root does not allow metadata-only assets.",
+                    "original_status": "metadata_only",
+                }
+            ),
+            asset_ids,
+        ),
+    )
+    return len(asset_ids)
 
 
 def _replace_container_child_assets(
