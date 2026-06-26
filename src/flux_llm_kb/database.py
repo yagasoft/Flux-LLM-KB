@@ -2316,6 +2316,13 @@ def persist_crawl_plan(
                     and status == "indexed"
                     and canonical_id is None
                 )
+                recovered_deferred_asset = (
+                    previous is not None
+                    and not changed_asset
+                    and previous[2] in {"metadata_only", "blocked_missing_dependency"}
+                    and status == "queued"
+                    and canonical_id is None
+                )
                 cur.execute(
                     """
                     INSERT INTO source_assets (
@@ -2350,7 +2357,7 @@ def persist_crawl_plan(
                                  AND EXCLUDED.extraction_status = 'queued'
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status IN ('metadata_only', 'blocked_missing_dependency')
-                                 AND EXCLUDED.extraction_status = 'indexed'
+                                 AND EXCLUDED.extraction_status IN ('indexed', 'queued')
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')
                                 THEN source_assets.extraction_status
@@ -2415,7 +2422,7 @@ def persist_crawl_plan(
                         _json({"source": "corpus_crawler", **_sanitize_operational_metadata(dict(asset.metadata))}),
                     ),
                 )
-                if changed_asset or legacy_metadata_requeue or recovered_indexed_asset:
+                if changed_asset or legacy_metadata_requeue or recovered_indexed_asset or recovered_deferred_asset:
                     chunks_indexed += _replace_asset_chunks(cur, asset_id, () if canonical_id else asset.chunks)
                     if asset.extraction_tier == "deferred" and not canonical_id:
                         job_type = f"corpus_extract_{asset.file_kind}"

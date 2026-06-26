@@ -2045,6 +2045,79 @@ def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypa
     assert "INSERT INTO asset_chunks" in sql
 
 
+def test_persist_crawl_plan_requeues_unchanged_blocked_deferred_asset(monkeypatch, tmp_path):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text FROM monitored_roots" in sql:
+                return ("root-1",)
+            if "INSERT INTO crawl_runs" in sql:
+                return ("run-1",)
+            if "SELECT id::text, quick_hash, extraction_status, extension" in sql:
+                return ("asset-1", "quick", "blocked_missing_dependency", ".eml")
+            if "SELECT id::text" in sql and "WHERE content_hash" in sql:
+                return None
+            if "INSERT INTO source_assets" in sql:
+                return ("asset-1",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    mail_path = tmp_path / "message.eml"
+    mail_path.write_text("Subject: Ready\n\nBody", encoding="utf-8")
+    plan = CrawlPlan(
+        root_path=tmp_path,
+        assets=[
+            DiscoveredAsset(
+                path=mail_path,
+                relative_path="message.eml",
+                file_kind="mail",
+                mime_type="message/rfc822",
+                extension=".eml",
+                size_bytes=20,
+                mtime_ns=100,
+                quick_hash="quick",
+                content_hash="content",
+                extraction_tier="deferred",
+            )
+        ],
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.persist_crawl_plan(root_name="mail-root", plan=plan)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result["files_changed"] == 0
+    assert result["jobs_queued"] == 1
+    assert "EXCLUDED.extraction_status IN ('indexed', 'queued')" in sql
+    assert "INSERT INTO capture_jobs" in sql
+
+
 def test_persist_crawl_plan_requeues_legacy_metadata_only_documents():
     source = Path(database.__file__).read_text(encoding="utf-8")
     expected_extensions = {
