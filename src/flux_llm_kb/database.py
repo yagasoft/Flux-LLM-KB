@@ -8632,6 +8632,8 @@ def _mail_oauth_token_row(row: tuple[Any, ...], *, profile_name: str) -> dict[st
 
 def _normalize_root_path(root_path: str | Path) -> str:
     value = str(root_path)
+    if _looks_like_absolute_posix_path(value):
+        return value
     try:
         from .host_agent import path_requires_host_agent
 
@@ -8640,6 +8642,10 @@ def _normalize_root_path(root_path: str | Path) -> str:
     except Exception:
         pass
     return str(Path(value).expanduser().resolve())
+
+
+def _looks_like_absolute_posix_path(value: str) -> bool:
+    return value.startswith("/") and not value.startswith("//")
 
 
 def _replace_container_child_assets(

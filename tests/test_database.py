@@ -15,6 +15,12 @@ def test_forget_episode_rejects_invalid_uuid_without_database():
     assert forget_episode("not-a-uuid") is False
 
 
+def test_normalize_root_path_preserves_absolute_posix_container_path():
+    assert database._normalize_root_path("/app/private/mail-spool/gmail-capture/ready") == (
+        "/app/private/mail-spool/gmail-capture/ready"
+    )
+
+
 def test_backfill_episode_workspace_scope_updates_explicit_episode_ids(monkeypatch):
     executed = []
 
