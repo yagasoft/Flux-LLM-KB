@@ -156,6 +156,11 @@ def create_app():
         decision: str
         rationale: str
 
+    class CaptureReviewIngestRequest(BaseModel):
+        job_id: str | None = None
+        limit: int = 25
+        dry_run: bool = False
+
     class RetentionPolicyRequest(BaseModel):
         half_life_days: int
         min_confidence: float
@@ -839,8 +844,38 @@ def create_app():
         )
 
     @app.get("/api/capture/review")
-    def capture_review(limit: int = 50):
-        return service.list_capture_review_jobs(limit=limit)
+    def capture_review(status: str = "pending_review", limit: int = 50):
+        return service.list_capture_review_jobs(status=status, limit=limit)
+
+    @app.post("/api/capture/review/ingest")
+    def capture_review_ingest(request: CaptureReviewIngestRequest = Body(...)):
+        try:
+            return service.ingest_capture_review_jobs(
+                job_id=request.job_id,
+                limit=request.limit,
+                dry_run=request.dry_run,
+                actor="api",
+            )
+        except LookupError as exc:
+            raise FluxApiError(
+                code="capture_review.ingest_not_found",
+                message=str(exc),
+                status_code=404,
+                component="review",
+                retryable=False,
+                user_action="Refresh approved capture review jobs before retrying ingestion.",
+                target={"type": "capture_review_job", "id": request.job_id},
+            ) from exc
+        except ValueError as exc:
+            raise FluxApiError(
+                code="capture_review.ingest_invalid",
+                message=str(exc),
+                status_code=400,
+                component="review",
+                retryable=False,
+                user_action="Use a positive limit and an approved capture review job id when scoping ingestion.",
+                target={"type": "capture_review_job", "id": request.job_id},
+            ) from exc
 
     @app.post("/api/capture/review/{job_id}/decision")
     def capture_review_decision(job_id: str, request: CaptureReviewDecisionRequest = Body(...)):

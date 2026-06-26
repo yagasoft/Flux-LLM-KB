@@ -109,11 +109,20 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
     )
     capture_review_list = capture_review_subparsers.add_parser("list", help="List pending capture review jobs")
+    capture_review_list.add_argument(
+        "--status",
+        choices=["pending_review", "approved", "rejected", "completed", "failed", "blocked_missing_dependency", "all"],
+        default="pending_review",
+    )
     capture_review_list.add_argument("--limit", type=int, default=50)
     capture_review_decide = capture_review_subparsers.add_parser("decide", help="Approve or reject a capture review job")
     capture_review_decide.add_argument("job_id")
     capture_review_decide.add_argument("--decision", required=True, choices=["approve", "reject"])
     capture_review_decide.add_argument("--rationale", required=True)
+    capture_review_ingest = capture_review_subparsers.add_parser("ingest", help="Ingest approved capture review jobs")
+    capture_review_ingest.add_argument("--job-id")
+    capture_review_ingest.add_argument("--limit", type=int, default=25)
+    capture_review_ingest.add_argument("--dry-run", action="store_true")
 
     retention_parser = subparsers.add_parser("retention", help="Inspect and tune retention quality")
     retention_subparsers = retention_parser.add_subparsers(dest="retention_command", required=True)
@@ -701,12 +710,19 @@ def _capture_review(args: argparse.Namespace) -> int:
 
     service = KnowledgeService()
     if args.capture_review_command == "list":
-        payload = service.list_capture_review_jobs(limit=args.limit)
+        payload = service.list_capture_review_jobs(status=args.status, limit=args.limit)
     elif args.capture_review_command == "decide":
         payload = service.review_capture_job(
             job_id=args.job_id,
             decision=args.decision,
             rationale=args.rationale,
+            actor="cli",
+        )
+    elif args.capture_review_command == "ingest":
+        payload = service.ingest_capture_review_jobs(
+            job_id=args.job_id,
+            limit=args.limit,
+            dry_run=args.dry_run,
             actor="cli",
         )
     else:  # pragma: no cover - argparse prevents this

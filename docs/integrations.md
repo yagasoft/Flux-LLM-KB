@@ -24,7 +24,8 @@ Tools:
 | `kb.claim_upsert` | Create or update an atomic claim. |
 | `kb.claim_transition` | Move a claim through lifecycle states with audit-visible rationale. |
 | `kb.graph_traverse` | Traverse typed knowledge graph relations from an entity. |
-| `kb.capture_review` | List pending capture-review jobs without raw capture payloads. |
+| `kb.capture_review` | List capture-review jobs by sanitized lifecycle status without raw capture payloads. |
+| `kb.capture_review_ingest` | Ingest approved Codex backfill review jobs in bounded dry-run or active batches. |
 | `kb.capture_review_decide` | Approve or reject a capture-review job with rationale. |
 | `kb.retention_policies` | List retention policies for claims, episodes, and corpus assets. |
 | `kb.retention_quality` | Report retention and memory-quality candidates without raw content. |
@@ -131,14 +132,15 @@ Endpoints:
 - `GET /api/brief?query=<q>&token_budget=<n>`
 - `POST /api/explain`
 - `GET /api/explain?query=<q>&limit=<n>&token_budget=<n>`
-- `POST /api/retrieval/benchmarks/run` with optional `suite`, `label`, `compare_label`, `limit_per_query`, `token_budget`, and `persist`
-- `GET /api/retrieval/benchmarks?suite=<standard>&label=<label>&limit=<n>`
+- `POST /api/retrieval/benchmarks/run` with optional `suite` (`standard` or `governance-shadow`), `label`, `compare_label`, `limit_per_query`, `token_budget`, and `persist`
+- `GET /api/retrieval/benchmarks?suite=<standard|governance-shadow>&label=<label>&limit=<n>`
 - `GET /api/claims?review=<all|needs_review|current>&state=<state>&q=<q>&limit=<n>`
 - `POST /api/claims`
 - `GET /api/claims/{claim_id}`
 - `POST /api/claims/{claim_id}/transitions`
 - `GET /api/graph/traverse?entity_id=<id>&relation_type=<type>&max_depth=<n>`
-- `GET /api/capture/review?limit=<n>`
+- `GET /api/capture/review?status=<pending_review|approved|rejected|completed|failed|blocked_missing_dependency|all>&limit=<n>`
+- `POST /api/capture/review/ingest` with optional `job_id`, `limit`, and `dry_run`
 - `POST /api/capture/review/{job_id}/decision`
 - `POST /api/semantic-duplicates/refresh`
 - `GET /api/semantic-duplicates?memory_class=<corpus|episode|claim>&root_name=<name>&limit=<n>`
@@ -208,8 +210,10 @@ kernel-level automation:
 flux-kb claim upsert --subject-type project --subject Flux --predicate uses --object PostgreSQL --confidence 0.8
 flux-kb claim transition <claim-id> confirm --reason "verified"
 flux-kb graph traverse <entity-id> --relation-type depends_on --max-depth 2
-flux-kb capture review list --limit 50
+flux-kb capture review list --status approved --limit 50
 flux-kb capture review decide <job-id> --decision approve --rationale "Verified metadata and source."
+flux-kb capture review ingest --job-id <job-id> --dry-run
+flux-kb capture review ingest --limit 25
 flux-kb semantic-duplicates refresh --memory-class all --limit 1000
 flux-kb semantic-duplicates list --memory-class corpus --limit 50
 flux-kb acceleration status
@@ -233,6 +237,7 @@ flux-kb diagnostics all --root docs --status blocked_missing_dependency --family
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
 flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
+flux-kb retrieval benchmark run --suite governance-shadow --label before-automation
 flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
 ```
 
@@ -248,12 +253,19 @@ The dashboard Review tab uses `GET /api/claims` and `GET /api/graph/traverse`
 to browse lifecycle review work and selected-entity graph edges. The
 `needs_review` filter includes stale, contradicted, superseded, and retired
 claims, plus claims with non-`keep` retention actions. `GET /api/capture/review`
-returns pending capture-review job metadata only. Operators can approve or reject
-pending review jobs with `POST /api/capture/review/{job_id}/decision` and a
-required `rationale`; decisions update job status, store `payload.review`, keep
-raw capture payload fields out of responses, and append audit-visible
-`capture.review_approved` or `capture.review_rejected` events. Approved Codex
-backfill ingestion remains future work.
+returns capture-review job metadata only and accepts status filters for
+`pending_review`, `approved`, `rejected`, `completed`, `failed`,
+`blocked_missing_dependency`, and `all`; raw capture text is never returned.
+Operators can approve or reject pending review jobs with
+`POST /api/capture/review/{job_id}/decision` and a required `rationale`;
+decisions update job status, store `payload.review`, keep raw capture payload
+fields out of responses, and append audit-visible `capture.review_approved` or
+`capture.review_rejected` events. Approved Codex backfill jobs can then be
+ingested through `POST /api/capture/review/ingest`, `flux-kb capture review
+ingest`, or `kb.capture_review_ingest`; ingestion records sanitized status,
+skip reasons, created memory ids, and `capture.ingested`,
+`capture.ingestion_skipped`, or `capture.ingestion_failed` audit events under
+`capture_jobs.payload.ingestion`.
 
 Lookup endpoints are read-only and return stable JSON payloads for asset and
 chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a
@@ -380,14 +392,18 @@ and brief paths used by consumers, and persist metadata-only quality evidence:
 top-1 accuracy, precision@3, recall@5, MRR, nDCG@5, brief recall, brief
 dilution, scope and suppression pass counts, elapsed time, sanitized case ids,
 query hashes, ranks, result ids, stream/kind labels, case categories, confidence
-bands, score evidence, and failure reasons. Suite v2 includes code cases for
-callers, tests, routes, generated-file handling, config/migration lookup,
-fallback recovery, and cross-root disambiguation, and also reports
+bands, score evidence, and failure reasons. The `standard` suite includes code
+cases for callers, tests, routes, generated-file handling, config/migration
+lookup, fallback recovery, and cross-root disambiguation, and also reports
 `metric_deltas`, `calibration_summary`, semantic duplicate
 `recommendations.candidates[]`, richer sanitized `case_results[]`, and
-`settings_mutated: false`; benchmark output is advisory evidence for later
-calibration, not automatic ranking, threshold, semantic-cluster, settings, or
-policy mutation.
+`settings_mutated: false`. The `governance-shadow` suite adds read-only,
+metadata-only stale, duplicate, contradicted, low-confidence, protected/current,
+and false-positive guardrail cases. Its output includes proposal categories,
+candidate counts, guardrail pass/fail counts, precision-style summaries,
+sanitized failed cases, and `settings_mutated: false`; benchmark output is
+advisory evidence for later calibration, not automatic ranking, threshold,
+semantic-cluster, lifecycle, settings, or policy mutation.
 Embedding status, enqueue, and immediate backfill are also exposed through
 `GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
 `POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,

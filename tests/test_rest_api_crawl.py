@@ -1291,6 +1291,16 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
                 ]
             }
 
+        def ingest_capture_review_jobs(self, **kwargs):
+            calls["ingest_capture_review_jobs"] = kwargs
+            return {
+                "dry_run": kwargs["dry_run"],
+                "processed": 1,
+                "ingested": 1,
+                "settings_mutated": False,
+                "jobs": [{"id": kwargs["job_id"], "status": "completed"}],
+            }
+
         def review_capture_job(self, **kwargs):
             calls["review_capture_job"] = kwargs
             return {
@@ -1329,7 +1339,11 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
         "/api/claims",
         params={"review": "needs_review", "state": "stale", "q": "postgres", "limit": 500},
     )
-    capture = client.get("/api/capture/review", params={"limit": 500})
+    capture = client.get("/api/capture/review", params={"status": "approved", "limit": 500})
+    ingest = client.post(
+        "/api/capture/review/ingest",
+        json={"job_id": "job-1", "limit": 10, "dry_run": True},
+    )
     decision = client.post(
         "/api/capture/review/job-1/decision",
         json={"decision": "approve", "rationale": "verified enough"},
@@ -1345,7 +1359,15 @@ def test_claim_review_and_capture_review_routes_are_exposed(monkeypatch):
     }
     assert capture.status_code == 200
     assert capture.json()["jobs"][0]["payload"] == {"status": "pending_review", "path": "sessions/session.json"}
-    assert calls["list_capture_review_jobs"] == {"limit": 500}
+    assert calls["list_capture_review_jobs"] == {"status": "approved", "limit": 500}
+    assert ingest.status_code == 200
+    assert ingest.json()["settings_mutated"] is False
+    assert calls["ingest_capture_review_jobs"] == {
+        "job_id": "job-1",
+        "limit": 10,
+        "dry_run": True,
+        "actor": "api",
+    }
     assert decision.status_code == 200
     assert decision.json()["audit_event"]["event_type"] == "capture.review_approved"
     assert decision.json()["audit_event_id"] == "audit-1"

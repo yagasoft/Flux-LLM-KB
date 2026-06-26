@@ -3,6 +3,7 @@ import json
 from flux_llm_kb import database
 from flux_llm_kb import retrieval_benchmark
 from flux_llm_kb.retrieval_benchmark import evaluate_retrieval_cases
+from flux_llm_kb.retrieval_benchmark import build_governance_shadow_proposals
 from flux_llm_kb.service import KnowledgeService
 
 
@@ -248,6 +249,124 @@ def test_service_retrieval_benchmark_history_uses_database(monkeypatch):
         "runs": [{"id": "retrieval-run-1", "suite": "standard", "metrics": {"top1_accuracy": 1.0}}],
     }
     assert calls == [{"suite": "standard", "label": "nightly", "limit": 5}]
+
+
+def test_governance_shadow_proposals_are_metadata_only_and_non_mutating():
+    report = {
+        "candidates": [
+            {
+                "id": "claim-stale",
+                "memory_class": "claim",
+                "quality_bucket": "review",
+                "reason": "stale",
+                "label": "Private claim text should not be copied",
+                "confidence": 0.21,
+                "lifecycle_state": "stale",
+            },
+            {
+                "id": "cluster-1",
+                "memory_class": "corpus",
+                "quality_bucket": "deprioritize",
+                "reason": "semantic_duplicate",
+                "metadata": {"root_name": "docs", "suppressed_count": 3},
+            },
+            {
+                "id": "claim-current",
+                "memory_class": "claim",
+                "quality_bucket": "healthy",
+                "reason": "current",
+                "lifecycle_state": "active",
+            },
+        ]
+    }
+
+    proposals = build_governance_shadow_proposals(report)
+
+    assert proposals["settings_mutated"] is False
+    assert proposals["candidate_count"] == 2
+    assert proposals["proposal_categories"] == {"review": 1, "deprioritize": 1}
+    assert proposals["candidates"] == [
+        {
+            "target_id": "claim-stale",
+            "memory_class": "claim",
+            "proposal": "review",
+            "reason": "stale",
+            "evidence": {"confidence": 0.21, "lifecycle_state": "stale", "quality_bucket": "review"},
+        },
+        {
+            "target_id": "cluster-1",
+            "memory_class": "corpus",
+            "proposal": "deprioritize",
+            "reason": "semantic_duplicate",
+            "evidence": {"quality_bucket": "deprioritize", "suppressed_count": 3},
+        },
+    ]
+    assert "Private claim text" not in json.dumps(proposals)
+
+
+def test_service_retrieval_benchmark_governance_shadow_suite_records_metadata(monkeypatch):
+    recorded = []
+
+    class FakeService(KnowledgeService):
+        def _prepare_retrieval_benchmark_cases(self, suite):
+            assert suite == "governance-shadow"
+            return [
+                {
+                    "id": "governance-stale",
+                    "category": "governance_stale",
+                    "query": "stale governance evidence",
+                    "expected_ids": ["claim-stale"],
+                    "expected_brief_ids": ["claim-stale"],
+                },
+                {
+                    "id": "governance-current-guardrail",
+                    "category": "governance_guardrail_current",
+                    "query": "current protected governance guardrail",
+                    "expected_ids": ["claim-current"],
+                    "expected_brief_ids": ["claim-current"],
+                },
+            ], lambda: None
+
+        def explain(self, query, limit=5, token_budget=None, **_kwargs):
+            item_id = "claim-current" if "current" in query else "claim-stale"
+            return {
+                "results": [
+                    {
+                        "id": item_id,
+                        "kind": "claim",
+                        "logical_kind": "claim",
+                        "score": 0.9,
+                        "streams": ["claim_lifecycle"],
+                        "retrieval_scope": "local",
+                        "retrieval_explanation": {"confidence": {"band": "high"}},
+                    }
+                ],
+                "brief": {"packed": [{"id": item_id, "tokens": 6}], "excluded": []},
+            }
+
+    monkeypatch.setattr(
+        database,
+        "record_retrieval_benchmark_run",
+        lambda **kwargs: recorded.append(kwargs)
+        or {
+            "id": "retrieval-run-1",
+            "suite": kwargs["suite"],
+            "status": kwargs["status"],
+            "query_count": kwargs["query_count"],
+            "created_at": "2026-06-25T10:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(database, "list_retrieval_benchmark_runs", lambda **_kwargs: [])
+
+    result = FakeService().run_retrieval_benchmark(suite="governance-shadow", label="shadow")
+
+    assert result["suite"] == "governance-shadow"
+    assert result["recommendations"]["settings_mutated"] is False
+    assert result["recommendations"]["purpose"] == "governance_shadow_evaluation"
+    assert result["recommendations"]["governance_shadow"]["proposal_case_count"] == 1
+    assert result["recommendations"]["governance_shadow"]["guardrail_pass_count"] == 1
+    assert recorded[0]["suite"] == "governance-shadow"
+    assert recorded[0]["metadata"]["governance_shadow"]["guardrail_case_count"] == 1
 
 
 def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases(monkeypatch):

@@ -331,6 +331,14 @@ class KnowledgeService:
             recommendations = build_retrieval_recommendations(report)
             recorded: dict[str, Any] | None = None
             if persist:
+                metadata = {
+                    "provider": "synthetic",
+                    "suite_version": "v2",
+                    "limit_per_query": bounded_limit,
+                    "calibration_summary": report["calibration_summary"],
+                }
+                if isinstance(recommendations.get("governance_shadow"), dict):
+                    metadata["governance_shadow"] = recommendations["governance_shadow"]
                 recorded = database.record_retrieval_benchmark_run(
                     suite=normalized_suite,
                     label=label,
@@ -341,12 +349,7 @@ class KnowledgeService:
                     failed_count=report["failed_count"],
                     metrics=report["metrics"],
                     case_results=report["case_results"],
-                    metadata={
-                        "provider": "synthetic",
-                        "suite_version": "v2",
-                        "limit_per_query": bounded_limit,
-                        "calibration_summary": report["calibration_summary"],
-                    },
+                    metadata=metadata,
                     recommendation_metadata=recommendations,
                 )
                 history_rows = database.list_retrieval_benchmark_runs(
@@ -393,8 +396,11 @@ class KnowledgeService:
         }
 
     def _prepare_retrieval_benchmark_cases(self, suite: str) -> tuple[list[dict[str, Any]], Any]:
-        if _normalize_retrieval_benchmark_suite(suite) != "standard":
-            raise ValueError("retrieval benchmark suite must be standard")
+        normalized_suite = _normalize_retrieval_benchmark_suite(suite)
+        if normalized_suite == "governance-shadow":
+            return self._prepare_governance_shadow_benchmark_cases()
+        if normalized_suite != "standard":
+            raise ValueError("retrieval benchmark suite must be standard or governance-shadow")
         temp_dir = tempfile.TemporaryDirectory(prefix="flux-kb-retrieval-benchmark-")
         root = Path(temp_dir.name)
         root_name = f"__retrieval_benchmark_{uuid4().hex[:12]}"
@@ -735,6 +741,148 @@ class KnowledgeService:
             cleanup()
             raise
 
+    def _prepare_governance_shadow_benchmark_cases(self) -> tuple[list[dict[str, Any]], Any]:
+        marker = uuid4().hex
+        episode_ids: list[str] = []
+
+        def cleanup() -> None:
+            for episode_id in episode_ids:
+                database.forget_episode(episode_id)
+
+        try:
+            stale_episode = database.insert_episode(
+                title=f"governance stale {marker}",
+                summary=f"governance-stale-{marker} stale claim should be proposed for review in shadow mode.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": False},
+            )
+            episode_ids.append(stale_episode)
+            stale_claim = database.upsert_claim(
+                subject_type="benchmark",
+                subject_name=f"governance-stale-{marker}",
+                predicate="needs",
+                object_text="shadow review",
+                confidence=0.42,
+                episode_id=stale_episode,
+                metadata={"benchmark_tag": f"governance-shadow:{marker}"},
+            )
+            database.transition_claim(
+                claim_id=stale_claim["id"],
+                transition="stale",
+                reason="synthetic governance shadow stale evidence",
+            )
+
+            low_conf_episode = database.insert_episode(
+                title=f"governance low confidence {marker}",
+                summary=f"governance-low-confidence-{marker} low confidence memory needs human review.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": False},
+            )
+            episode_ids.append(low_conf_episode)
+            low_conf_claim = database.upsert_claim(
+                subject_type="benchmark",
+                subject_name=f"governance-low-confidence-{marker}",
+                predicate="needs",
+                object_text="confidence review",
+                confidence=0.18,
+                episode_id=low_conf_episode,
+                metadata={"benchmark_tag": f"governance-shadow:{marker}"},
+            )
+
+            duplicate_episode = database.insert_episode(
+                title=f"governance duplicate canonical {marker}",
+                summary=f"governance-duplicate-{marker} canonical duplicate evidence should be preserved.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": False},
+            )
+            duplicate_copy = database.insert_episode(
+                title=f"governance duplicate copy {marker}",
+                summary=f"governance-duplicate-{marker} canonical duplicate evidence should be preserved.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": False},
+            )
+            episode_ids.extend([duplicate_episode, duplicate_copy])
+
+            current_episode = database.insert_episode(
+                title=f"governance current protected {marker}",
+                summary=f"governance-current-{marker} current protected memory must not be proposed for cleanup.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": True},
+            )
+            episode_ids.append(current_episode)
+            current_claim = database.upsert_claim(
+                subject_type="benchmark",
+                subject_name=f"governance-current-{marker}",
+                predicate="remains",
+                object_text="current",
+                confidence=0.95,
+                episode_id=current_episode,
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": True},
+            )
+
+            contradiction_episode = database.insert_episode(
+                title=f"governance contradiction {marker}",
+                summary=f"governance-contradiction-{marker} contradiction should require review before automation.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": False},
+            )
+            episode_ids.append(contradiction_episode)
+            contradiction_claim = database.upsert_claim(
+                subject_type="benchmark",
+                subject_name=f"governance-contradiction-{marker}",
+                predicate="conflicts",
+                object_text="old statement",
+                confidence=0.55,
+                episode_id=contradiction_episode,
+                metadata={"benchmark_tag": f"governance-shadow:{marker}"},
+            )
+            database.transition_claim(
+                claim_id=contradiction_claim["id"],
+                transition="contradict",
+                related_claim_id=current_claim["id"],
+                reason="synthetic governance shadow contradiction",
+            )
+
+            return [
+                {
+                    "id": "governance-stale",
+                    "category": "governance_stale",
+                    "query": f"governance-stale-{marker} shadow review",
+                    "expected_ids": [stale_claim["id"], stale_episode],
+                    "expected_brief_ids": [stale_claim["id"], stale_episode],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-low-confidence",
+                    "category": "governance_low_confidence",
+                    "query": f"governance-low-confidence-{marker} confidence review",
+                    "expected_ids": [low_conf_claim["id"], low_conf_episode],
+                    "expected_brief_ids": [low_conf_claim["id"], low_conf_episode],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-duplicate",
+                    "category": "governance_duplicate",
+                    "query": f"governance-duplicate-{marker} canonical duplicate",
+                    "expected_ids": [duplicate_episode, duplicate_copy],
+                    "expected_brief_ids": [duplicate_episode, duplicate_copy],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-contradiction",
+                    "category": "governance_contradiction",
+                    "query": f"governance-contradiction-{marker} contradiction review",
+                    "expected_ids": [contradiction_claim["id"], contradiction_episode],
+                    "expected_brief_ids": [contradiction_claim["id"], contradiction_episode],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-current-guardrail",
+                    "category": "governance_guardrail_current",
+                    "query": f"governance-current-{marker} current protected",
+                    "expected_ids": [current_claim["id"], current_episode],
+                    "expected_brief_ids": [current_claim["id"], current_episode],
+                    "expect_suppression": False,
+                },
+            ], cleanup
+        except Exception:
+            cleanup()
+            raise
+
     def audit(self, limit: int = 50) -> list[dict[str, Any]]:
         return database.list_audit_events(limit=limit)
 
@@ -880,8 +1028,8 @@ class KnowledgeService:
             limit=limit,
         )
 
-    def list_capture_review_jobs(self, *, limit: int = 50) -> dict[str, Any]:
-        return {"jobs": database.list_capture_review_jobs(limit=limit)}
+    def list_capture_review_jobs(self, *, status: str = "pending_review", limit: int = 50) -> dict[str, Any]:
+        return {"status": status, "jobs": database.list_capture_review_jobs(status=status, limit=limit)}
 
     def review_capture_job(
         self,
@@ -913,6 +1061,137 @@ class KnowledgeService:
             rationale=rationale if rationale is not None else reason or "",
             actor=actor,
         )
+
+    def ingest_capture_review_jobs(
+        self,
+        *,
+        job_id: str | None = None,
+        limit: int = 25,
+        dry_run: bool = False,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        jobs = database.list_capture_ingestion_jobs(job_id=job_id, limit=limit)
+        if job_id and not jobs:
+            raise LookupError(f"approved capture review job not found: {job_id}")
+        totals = {
+            "dry_run": bool(dry_run),
+            "requested": len(jobs),
+            "processed": 0,
+            "ingested": 0,
+            "skipped": 0,
+            "failed": 0,
+            "blocked": 0,
+            "settings_mutated": False,
+            "jobs": [],
+        }
+        for job in jobs:
+            outcome = self._ingest_capture_review_job(job, dry_run=dry_run, actor=actor)
+            totals["processed"] += 1
+            status = str(outcome.get("ingestion", {}).get("status") or "")
+            if status == "ingested":
+                totals["ingested"] += 1
+            elif status in {"skipped", "would_skip"}:
+                totals["skipped"] += 1
+            elif status == "blocked_missing_dependency":
+                totals["blocked"] += 1
+            elif status == "failed":
+                totals["failed"] += 1
+            totals["jobs"].append(outcome)
+        return totals
+
+    def _ingest_capture_review_job(self, job: dict[str, Any], *, dry_run: bool, actor: str) -> dict[str, Any]:
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        source_path = _capture_backfill_source_path(payload)
+        job_id = str(job.get("id") or "")
+        base = {
+            "job_id": job_id,
+            "job_type": str(job.get("job_type") or ""),
+            "source_leaf": _source_leaf(source_path) if source_path else None,
+            "dry_run": bool(dry_run),
+        }
+        if str(job.get("job_type") or "") != "codex_backfill":
+            ingestion = {**base, "status": "skipped", "skip_reasons": ["unsupported_job_type"], "episode_ids": []}
+            return _capture_ingestion_response(job, ingestion)
+        if source_path is None:
+            ingestion = {**base, "status": "blocked_missing_dependency", "error": "source_missing", "episode_ids": []}
+            return self._finalize_capture_ingestion(job_id, "blocked_missing_dependency", ingestion, actor, "capture.ingestion_failed", dry_run)
+        if not source_path.exists() or not source_path.is_file():
+            ingestion = {**base, "status": "blocked_missing_dependency", "error": "source_missing", "episode_ids": []}
+            return self._finalize_capture_ingestion(job_id, "blocked_missing_dependency", ingestion, actor, "capture.ingestion_failed", dry_run)
+        source_hash = _file_source_hash(source_path)
+        ingestion_base = {**base, "source_hash": source_hash, "source_leaf": _source_leaf(source_path)}
+        if database.codex_backfill_source_hash_exists(source_hash=source_hash):
+            status = "would_skip" if dry_run else "skipped"
+            ingestion = {**ingestion_base, "status": status, "skip_reasons": ["duplicate_source_hash"], "episode_ids": []}
+            return self._finalize_capture_ingestion(job_id, "completed", ingestion, actor, "capture.ingestion_skipped", dry_run)
+        try:
+            records = _normalize_codex_backfill_records(source_path)
+        except Exception as exc:
+            ingestion = {**ingestion_base, "status": "failed", "error": "parse_failed", "error_type": type(exc).__name__, "episode_ids": []}
+            return self._finalize_capture_ingestion(job_id, "failed", ingestion, actor, "capture.ingestion_failed", dry_run)
+        valid_records = [record for record in records if len(str(record.get("body") or "").strip()) >= 32]
+        if not valid_records:
+            status = "would_skip" if dry_run else "skipped"
+            ingestion = {**ingestion_base, "status": status, "skip_reasons": ["empty_or_too_short"], "record_count": len(records), "episode_ids": []}
+            return self._finalize_capture_ingestion(job_id, "completed", ingestion, actor, "capture.ingestion_skipped", dry_run)
+        if dry_run:
+            ingestion = {
+                **ingestion_base,
+                "status": "would_ingest",
+                "record_count": len(valid_records),
+                "episode_ids": [],
+            }
+            return _capture_ingestion_response(job, ingestion)
+        episode_ids: list[str] = []
+        for index, record in enumerate(valid_records):
+            metadata = _codex_backfill_metadata(
+                record,
+                job=job,
+                source_path=source_path,
+                source_hash=source_hash,
+                record_index=index,
+            )
+            result = self.remember(
+                str(record.get("title") or source_path.stem),
+                str(record.get("body") or ""),
+                metadata=metadata,
+                cwd=record.get("cwd"),
+                root_name=record.get("root_name"),
+            )
+            episode_ids.append(result.id)
+        ingestion = {
+            **ingestion_base,
+            "status": "ingested",
+            "record_count": len(valid_records),
+            "episode_ids": episode_ids,
+        }
+        return self._finalize_capture_ingestion(job_id, "completed", ingestion, actor, "capture.ingested", dry_run)
+
+    def _finalize_capture_ingestion(
+        self,
+        job_id: str,
+        status: str,
+        ingestion: dict[str, Any],
+        actor: str,
+        event_type: str,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        if dry_run:
+            return {"id": job_id, "status": status, "ingestion": ingestion}
+        job = database.update_capture_job_ingestion(job_id=job_id, status=status, ingestion=ingestion)
+        database.record_audit_event(
+            event_type=event_type,
+            target_table="capture_jobs",
+            target_id=job_id,
+            details={
+                "status": ingestion.get("status"),
+                "source_leaf": ingestion.get("source_leaf"),
+                "source_hash": ingestion.get("source_hash"),
+                "episode_count": len(ingestion.get("episode_ids") or []),
+                "actor": actor,
+            },
+        )
+        return _capture_ingestion_response(job, ingestion)
 
     def transition_claim(
         self,
@@ -2488,9 +2767,173 @@ def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[s
 
 def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
     normalized = str(value or "standard").strip().lower().replace("_", "-")
-    if normalized not in {"standard"}:
-        raise ValueError("retrieval benchmark suite must be standard")
+    if normalized not in {"standard", "governance-shadow"}:
+        raise ValueError("retrieval benchmark suite must be standard or governance-shadow")
     return normalized
+
+
+_CAPTURE_BACKFILL_MAX_BYTES = 1024 * 1024
+_CAPTURE_BACKFILL_MAX_BODY_CHARS = 8000
+_CAPTURE_BACKFILL_TEXT_KEYS = ("body", "summary", "text", "content", "message", "last_assistant_message")
+_CAPTURE_BACKFILL_TITLE_KEYS = ("title", "name", "subject")
+_CAPTURE_BACKFILL_METADATA_KEYS = ("session_id", "turn_id", "cwd", "root_name", "workspace_key", "model")
+_CAPTURE_BACKFILL_RAW_KEYS = {"body", "content", "html", "message", "raw", "raw_text", "summary", "text", "transcript"}
+_CAPTURE_BACKFILL_PATH_KEYS = {"file", "path", "source", "source_dir"}
+
+
+def _capture_backfill_source_path(payload: dict[str, Any]) -> Path | None:
+    for key in ("path", "source", "file"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return Path(value).expanduser()
+    return None
+
+
+def _file_source_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _normalize_codex_backfill_records(path: Path) -> list[dict[str, Any]]:
+    text, truncated = _read_bounded_backfill_text(path)
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        value = json.loads(text)
+        values = value if isinstance(value, list) else [value]
+        return [_normalize_codex_backfill_record(item, path=path, truncated=truncated) for item in values]
+    if suffix == ".jsonl":
+        records: list[dict[str, Any]] = []
+        for index, line in enumerate(text.splitlines()):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            records.append(_normalize_codex_backfill_record(json.loads(stripped), path=path, truncated=truncated, index=index))
+        return records
+    title = _markdown_title(text) if suffix in {".md", ".markdown"} else path.stem
+    return [{"title": title or path.stem, "body": _truncate_body(text), "truncated": truncated, "source_format": suffix.lstrip(".") or "text"}]
+
+
+def _read_bounded_backfill_text(path: Path) -> tuple[str, bool]:
+    data = path.read_bytes()
+    truncated = len(data) > _CAPTURE_BACKFILL_MAX_BYTES
+    return data[:_CAPTURE_BACKFILL_MAX_BYTES].decode("utf-8", errors="replace"), truncated
+
+
+def _normalize_codex_backfill_record(
+    value: Any,
+    *,
+    path: Path,
+    truncated: bool,
+    index: int = 0,
+) -> dict[str, Any]:
+    if isinstance(value, str):
+        return {
+            "title": path.stem,
+            "body": _truncate_body(value),
+            "truncated": truncated or len(value) > _CAPTURE_BACKFILL_MAX_BODY_CHARS,
+            "source_format": path.suffix.lower().lstrip(".") or "text",
+            "record_index": index,
+        }
+    if not isinstance(value, dict):
+        return {"title": path.stem, "body": "", "truncated": truncated, "source_format": path.suffix.lower().lstrip(".") or "json", "record_index": index}
+    title = next((str(value.get(key)).strip() for key in _CAPTURE_BACKFILL_TITLE_KEYS if str(value.get(key) or "").strip()), "")
+    body = next((str(value.get(key)).strip() for key in _CAPTURE_BACKFILL_TEXT_KEYS if str(value.get(key) or "").strip()), "")
+    record = {
+        "title": title or _codex_backfill_fallback_title(value, path),
+        "body": _truncate_body(body),
+        "truncated": truncated or len(body) > _CAPTURE_BACKFILL_MAX_BODY_CHARS,
+        "source_format": path.suffix.lower().lstrip(".") or "json",
+        "record_index": index,
+    }
+    for key in _CAPTURE_BACKFILL_METADATA_KEYS:
+        if str(value.get(key) or "").strip():
+            record[key] = str(value[key]).strip()
+    return record
+
+
+def _truncate_body(value: str) -> str:
+    if len(value) <= _CAPTURE_BACKFILL_MAX_BODY_CHARS:
+        return value
+    return f"{value[:_CAPTURE_BACKFILL_MAX_BODY_CHARS].rstrip()}\n\n[truncated]"
+
+
+def _codex_backfill_fallback_title(value: dict[str, Any], path: Path) -> str:
+    turn = str(value.get("turn_id") or "").strip()
+    if turn:
+        return f"Codex turn {turn}"
+    session = str(value.get("session_id") or "").strip()
+    if session:
+        return f"Codex session {session}"
+    return path.stem
+
+
+def _markdown_title(text: str) -> str | None:
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            return stripped.lstrip("#").strip() or None
+    return None
+
+
+def _codex_backfill_metadata(
+    record: dict[str, Any],
+    *,
+    job: dict[str, Any],
+    source_path: Path,
+    source_hash: str,
+    record_index: int,
+) -> dict[str, Any]:
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    review = payload.get("review") if isinstance(payload.get("review"), dict) else {}
+    metadata = {
+        "source": "codex_backfill",
+        "capture_review_job_id": str(job.get("id") or ""),
+        "review_audit_event_id": review.get("audit_event_id"),
+        "source_hash": source_hash,
+        "source_leaf": _source_leaf(source_path),
+        "record_index": record.get("record_index", record_index),
+        "source_format": record.get("source_format"),
+        "truncated": bool(record.get("truncated")),
+    }
+    for key in _CAPTURE_BACKFILL_METADATA_KEYS:
+        if str(record.get(key) or "").strip():
+            metadata[key] = str(record[key]).strip()
+    return {key: value for key, value in metadata.items() if value not in {None, ""}}
+
+
+def _capture_ingestion_response(job: dict[str, Any], ingestion: dict[str, Any]) -> dict[str, Any]:
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    return {
+        "id": job.get("id"),
+        "job_type": job.get("job_type"),
+        "status": job.get("status"),
+        "payload": {**_sanitize_capture_payload(payload), "ingestion": ingestion, "status": job.get("status")},
+        "ingestion": ingestion,
+    }
+
+
+def _sanitize_capture_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, value in payload.items():
+        lowered = key.lower()
+        if lowered in _CAPTURE_BACKFILL_RAW_KEYS:
+            continue
+        if lowered in _CAPTURE_BACKFILL_PATH_KEYS and isinstance(value, str):
+            sanitized[key] = _source_leaf(Path(value))
+        elif isinstance(value, dict):
+            sanitized[key] = _sanitize_capture_payload(value)
+        else:
+            sanitized[key] = value
+    return sanitized
+
+
+def _source_leaf(path: Path) -> str:
+    value = str(path)
+    normalized = value.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] or normalized
 
 
 def _retrieval_benchmark_case(

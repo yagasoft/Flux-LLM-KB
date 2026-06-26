@@ -2472,7 +2472,60 @@ def test_list_capture_review_jobs_returns_pending_review_metadata_only(monkeypat
     assert "status = 'pending_review'" in sql
     assert "payload->>'status' = 'pending_review'" in sql
     assert params == (200,)
-    assert jobs[0]["payload"] == {"status": "pending_review", "path": "sessions/session.json"}
+    assert jobs[0]["payload"] == {"status": "pending_review", "path": "session.json"}
+
+
+def test_list_capture_review_jobs_filters_explicit_status(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+            return [
+                (
+                    "job-1",
+                    "codex_backfill",
+                    "approved",
+                    {"status": "approved", "path": "E:\\Private\\session.json", "content": "raw text"},
+                    0,
+                    None,
+                    timestamp,
+                    timestamp,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    jobs = database.list_capture_review_jobs(status="approved", limit=25)
+
+    sql, params = executed[0]
+    assert "payload->>'status' = %s" in sql
+    assert "status = %s" in sql
+    assert params == ("approved", "approved", 25)
+    assert jobs[0]["payload"] == {"status": "approved", "path": "session.json"}
 
 
 def test_review_capture_job_updates_payload_sanitizes_and_audits(monkeypatch):
@@ -2554,7 +2607,7 @@ def test_review_capture_job_updates_payload_sanitizes_and_audits(monkeypatch):
     assert result["job"]["status"] == "approved"
     assert result["job"]["payload"] == {
         "status": "approved",
-        "path": "sessions/session.json",
+        "path": "session.json",
         "review": result["review"],
     }
     assert result["review"]["decision"] == "approve"
@@ -2615,3 +2668,148 @@ def test_review_capture_job_conflicts_when_job_is_not_pending(monkeypatch):
             rationale="not useful",
             actor="dashboard",
         )
+
+
+def test_service_ingests_approved_codex_backfill_with_redaction_and_provenance(monkeypatch, tmp_path):
+    from flux_llm_kb.service import KnowledgeService
+
+    source = tmp_path / "turn.json"
+    source.write_text(
+        json.dumps(
+            {
+                "title": "Session decision",
+                "body": "Use PostgreSQL for durable storage. password=secret",
+                "session_id": "session-1",
+                "turn_id": "turn-1",
+                "cwd": "E:\\LLM KB",
+                "root_name": "llm-kb",
+            }
+        ),
+        encoding="utf-8",
+    )
+    inserted = []
+    updates = []
+    audits = []
+
+    monkeypatch.setattr(
+        database,
+        "list_capture_ingestion_jobs",
+        lambda **kwargs: [
+            {
+                "id": "job-1",
+                "job_type": "codex_backfill",
+                "status": "approved",
+                "payload": {
+                    "status": "approved",
+                    "path": str(source),
+                    "review": {"audit_event_id": "audit-review-1"},
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "codex_backfill_source_hash_exists", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        database,
+        "insert_episode",
+        lambda **kwargs: inserted.append(kwargs) or "episode-1",
+    )
+    monkeypatch.setattr(
+        database,
+        "update_capture_job_ingestion",
+        lambda **kwargs: updates.append(kwargs)
+        or {
+            "id": kwargs["job_id"],
+            "job_type": "codex_backfill",
+            "status": kwargs["status"],
+            "payload": {"status": kwargs["status"], "ingestion": kwargs["ingestion"]},
+        },
+    )
+    monkeypatch.setattr(database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    result = KnowledgeService().ingest_capture_review_jobs(limit=5, actor="tester")
+
+    assert result["processed"] == 1
+    assert result["ingested"] == 1
+    assert result["settings_mutated"] is False
+    assert inserted[0]["title"] == "Session decision"
+    assert inserted[0]["summary"] == "Use PostgreSQL for durable storage. password=[REDACTED:password_assignment]"
+    metadata = inserted[0]["metadata"]
+    assert metadata["source"] == "codex_backfill"
+    assert metadata["capture_review_job_id"] == "job-1"
+    assert metadata["review_audit_event_id"] == "audit-review-1"
+    assert metadata["source_leaf"] == "turn.json"
+    assert metadata["session_id"] == "session-1"
+    assert metadata["turn_id"] == "turn-1"
+    assert metadata["redactions"] == ["password_assignment"]
+    assert updates[0]["status"] == "completed"
+    assert updates[0]["ingestion"]["episode_ids"] == ["episode-1"]
+    assert updates[0]["ingestion"]["status"] == "ingested"
+    assert audits[0]["event_type"] == "capture.ingested"
+
+
+def test_service_capture_ingestion_dry_run_and_duplicate_skip(monkeypatch, tmp_path):
+    from flux_llm_kb.service import KnowledgeService
+
+    source = tmp_path / "turn.md"
+    source.write_text("# Session decision\n\nUse PostgreSQL for durable storage.", encoding="utf-8")
+    inserted = []
+    updates = []
+
+    monkeypatch.setattr(
+        database,
+        "list_capture_ingestion_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-1",
+                "job_type": "codex_backfill",
+                "status": "approved",
+                "payload": {"status": "approved", "path": str(source)},
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "codex_backfill_source_hash_exists", lambda **_kwargs: True)
+    monkeypatch.setattr(database, "insert_episode", lambda **kwargs: inserted.append(kwargs) or "episode-1")
+    monkeypatch.setattr(database, "update_capture_job_ingestion", lambda **kwargs: updates.append(kwargs) or {})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    dry_run = KnowledgeService().ingest_capture_review_jobs(limit=5, dry_run=True)
+    result = KnowledgeService().ingest_capture_review_jobs(limit=5)
+
+    assert dry_run["dry_run"] is True
+    assert dry_run["jobs"][0]["ingestion"]["status"] == "would_skip"
+    assert result["skipped"] == 1
+    assert inserted == []
+    assert updates[0]["status"] == "completed"
+    assert updates[0]["ingestion"]["status"] == "skipped"
+    assert updates[0]["ingestion"]["skip_reasons"] == ["duplicate_source_hash"]
+
+
+def test_service_capture_ingestion_blocks_missing_source(monkeypatch, tmp_path):
+    from flux_llm_kb.service import KnowledgeService
+
+    missing = tmp_path / "missing.json"
+    updates = []
+    audits = []
+
+    monkeypatch.setattr(
+        database,
+        "list_capture_ingestion_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-1",
+                "job_type": "codex_backfill",
+                "status": "approved",
+                "payload": {"status": "approved", "path": str(missing)},
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "update_capture_job_ingestion", lambda **kwargs: updates.append(kwargs) or {})
+    monkeypatch.setattr(database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    result = KnowledgeService().ingest_capture_review_jobs(limit=5)
+
+    assert result["blocked"] == 1
+    assert updates[0]["status"] == "blocked_missing_dependency"
+    assert updates[0]["ingestion"]["status"] == "blocked_missing_dependency"
+    assert updates[0]["ingestion"]["error"] == "source_missing"
+    assert audits[0]["event_type"] == "capture.ingestion_failed"

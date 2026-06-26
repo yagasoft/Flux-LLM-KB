@@ -13,9 +13,10 @@ system rather than a large prompt-injected memory file.
   caused, fixed, and mentions.
 - `embeddings`: vector representations for semantic retrieval.
 - `audit_events`: append-only record of memory writes, deletes, redactions, and queries.
-- `capture_jobs`: asynchronous ingestion and consolidation jobs, including
-  corpus worker-family metadata, resource class, priority, time budget, and
-  duration telemetry.
+- `capture_jobs`: asynchronous ingestion, review, and consolidation jobs,
+  including corpus worker-family metadata, resource class, priority, time
+  budget, duration telemetry, capture-review lifecycle state, and metadata-only
+  approved-ingestion status.
 - `workspace_scopes`: workspace/project identity and visibility boundaries.
 - `retention_policies`: decay and forgetting configuration by memory class.
 - `monitored_roots`: opt-in local paths for recursive corpus crawling and watch mode.
@@ -46,8 +47,9 @@ system rather than a large prompt-injected memory file.
   passed/failed case counts, aggregate metrics, sanitized case ids, stable query
   hashes, ranks, result ids, stream/kind labels, reasons, case categories,
   confidence bands, score evidence, calibration summaries, advisory threshold
-  candidates, and previous-run metrics/deltas. It must not store raw query text,
-  snippets, private content, credentials, embeddings, or private watched roots.
+  candidates, governance-shadow proposal counts, guardrail summaries, and
+  previous-run metrics/deltas. It must not store raw query text, snippets,
+  private content, credentials, embeddings, or private watched roots.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -103,14 +105,48 @@ is surfaced alongside exact duplicate and version-family suppression without
 returning raw suppressed content.
 
 Retrieval evaluation uses deterministic public-safe synthetic cases to exercise
-search, explain, brief packing, scope filters, duplicate suppression, current-only
-retrieval, lifecycle-deprioritized evidence, semantic duplicate guardrails, and
-code retrieval. The suite records top-1 accuracy, precision@3, recall@5, MRR,
-nDCG@5, brief recall, brief dilution, scope pass counts, suppression pass
-counts, elapsed time, metric deltas, confidence-band summaries, sanitized failed
-case evidence, and semantic duplicate threshold candidates. Benchmark outputs
-are evidence for later calibration; they do not mutate ranking, thresholds,
-retention policy, semantic clusters, or settings.
+search, explain, brief packing, scope filters, duplicate suppression,
+current-only retrieval, lifecycle-deprioritized evidence, semantic duplicate
+guardrails, and code retrieval. The standard suite records top-1 accuracy,
+precision@3, recall@5, MRR, nDCG@5, brief recall, brief dilution, scope pass
+counts, suppression pass counts, elapsed time, metric deltas, confidence-band
+summaries, sanitized failed case evidence, and semantic duplicate threshold
+candidates. The `governance-shadow` suite adds metadata-only synthetic cases for
+stale, duplicate, contradicted, low-confidence, protected/current, and
+false-positive guardrail scenarios. It runs a read-only proposal evaluator over
+retention-quality, lifecycle, contradiction, and duplicate evidence and stores
+candidate counts, categories, guardrail pass/fail counts, precision-style
+summary metrics, and sanitized failed cases with `settings_mutated: false`.
+Benchmark outputs are evidence for later calibration; they do not mutate
+ranking, thresholds, retention policy, semantic clusters, lifecycle state, or
+settings.
+
+## Capture Review And Backfill
+
+Capture review responses are metadata-only. Review listing supports
+`pending_review`, `approved`, `rejected`, `completed`, `failed`,
+`blocked_missing_dependency`, and `all`; the default remains `pending_review` so
+existing operator workflows stay conservative. Review decisions store sanitized
+decision metadata in `capture_jobs.payload.review`, update the job lifecycle,
+and append audit-visible `capture.review_approved` or
+`capture.review_rejected` events without returning raw capture text.
+
+Approved Codex backfill ingestion is an explicit operator action. It processes
+approved `codex_backfill` review jobs in bounded batches, with dry-run,
+single-job, and limit-based modes. Inputs are bounded before parsing and may be
+`.json`, `.jsonl`, `.md`, or `.txt`; each parsed record normalizes to a title,
+body, source leaf, stable source hash, optional session/turn/workspace metadata,
+and truncation flags. Flux redacts before persistence, skips empty or noisy
+records, skips duplicate source hashes, and marks missing or unreadable sources
+as `blocked_missing_dependency`.
+
+Successful approved ingestions write durable episodes through
+`KnowledgeService.remember` with provenance metadata for `source=codex_backfill`,
+the review job id, review audit id when present, source hash, source leaf,
+workspace/cwd/root hints, and redaction/truncation counts. Ingestion outcomes are
+stored under `capture_jobs.payload.ingestion` and surfaced as sanitized status,
+skip reasons, created memory ids, and recent audit events. Raw backfill text is
+never exposed in review, dashboard, REST, CLI, or MCP status responses.
 
 ## Corpus Monitoring
 

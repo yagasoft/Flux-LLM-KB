@@ -90,10 +90,37 @@ def build_retrieval_recommendations(report: dict[str, Any]) -> dict[str, Any]:
                     "rationale": f"Synthetic semantic duplicate calibration passed for {passed}/{evaluated} cases at threshold {threshold:.2f}.",
                 }
             )
-    return {
+    recommendations = {
         "settings_mutated": False,
         "purpose": "retrieval_evaluation",
         "candidates": candidates,
+    }
+    governance_shadow = _governance_shadow_summary(report)
+    if governance_shadow:
+        recommendations["purpose"] = "governance_shadow_evaluation"
+        recommendations["governance_shadow"] = governance_shadow
+    return recommendations
+
+
+def build_governance_shadow_proposals(report: dict[str, Any]) -> dict[str, Any]:
+    candidates = report.get("candidates") if isinstance(report.get("candidates"), list) else []
+    proposals: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        proposal = _governance_proposal(candidate)
+        if proposal is not None:
+            proposals.append(proposal)
+    categories: dict[str, int] = {}
+    for proposal in proposals:
+        category = str(proposal.get("proposal") or "review")
+        categories[category] = categories.get(category, 0) + 1
+    return {
+        "settings_mutated": False,
+        "purpose": "governance_shadow",
+        "candidate_count": len(proposals),
+        "proposal_categories": categories,
+        "candidates": proposals,
     }
 
 
@@ -105,6 +132,66 @@ def metric_deltas(current: dict[str, Any], previous: dict[str, Any] | None) -> d
         if isinstance(value, (int, float)) and isinstance(previous.get(key), (int, float)):
             deltas[key] = round(float(value) - float(previous[key]), 6)
     return deltas
+
+
+def _governance_proposal(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    bucket = str(candidate.get("quality_bucket") or "").strip().lower()
+    reason = str(candidate.get("reason") or "").strip().lower()
+    lifecycle_state = str(candidate.get("lifecycle_state") or "").strip().lower()
+    memory_class = str(candidate.get("memory_class") or "").strip().lower()
+    if bucket in {"", "healthy", "keep"} and lifecycle_state in {"", "active", "confirmed", "reinforced"}:
+        return None
+    if reason == "semantic_duplicate" or bucket == "deprioritize":
+        proposal = "deprioritize"
+    else:
+        proposal = "review"
+    evidence: dict[str, Any] = {}
+    if bucket:
+        evidence["quality_bucket"] = bucket
+    confidence = candidate.get("confidence")
+    if isinstance(confidence, (int, float)):
+        evidence["confidence"] = round(float(confidence), 4)
+    if lifecycle_state:
+        evidence["lifecycle_state"] = lifecycle_state
+    metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
+    suppressed = metadata.get("suppressed_count")
+    if isinstance(suppressed, int):
+        evidence["suppressed_count"] = suppressed
+    return {
+        "target_id": str(candidate.get("id") or ""),
+        "memory_class": memory_class,
+        "proposal": proposal,
+        "reason": reason or bucket or lifecycle_state,
+        "evidence": evidence,
+    }
+
+
+def _governance_shadow_summary(report: dict[str, Any]) -> dict[str, Any] | None:
+    case_results = report.get("case_results") if isinstance(report.get("case_results"), list) else []
+    governance_cases = [
+        item
+        for item in case_results
+        if isinstance(item, dict) and str(item.get("category") or "").startswith("governance_")
+    ]
+    if not governance_cases:
+        return None
+    proposal_cases = [item for item in governance_cases if "guardrail" not in str(item.get("category") or "")]
+    guardrail_cases = [item for item in governance_cases if "guardrail" in str(item.get("category") or "")]
+    proposal_pass = sum(1 for item in proposal_cases if item.get("status") == "passed")
+    guardrail_pass = sum(1 for item in guardrail_cases if item.get("status") == "passed")
+    categories: dict[str, int] = {}
+    for item in proposal_cases:
+        category = str(item.get("category") or "governance")
+        categories[category] = categories.get(category, 0) + 1
+    return {
+        "proposal_case_count": len(proposal_cases),
+        "proposal_pass_count": proposal_pass,
+        "proposal_precision": round(proposal_pass / len(proposal_cases), 6) if proposal_cases else 1.0,
+        "guardrail_case_count": len(guardrail_cases),
+        "guardrail_pass_count": guardrail_pass,
+        "guardrail_fail_count": len(guardrail_cases) - guardrail_pass,
+        "proposal_categories": categories,
+    }
 
 
 def _evaluate_case(case: dict[str, Any], observation: dict[str, Any], *, limit_per_query: int) -> dict[str, Any]:

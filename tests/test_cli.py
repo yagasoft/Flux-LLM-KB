@@ -1050,6 +1050,10 @@ def test_cli_capture_review_list_and_decide_use_service(monkeypatch, capsys):
             calls["list"] = kwargs
             return {"jobs": [{"id": "job-1", "status": "pending_review"}]}
 
+        def ingest_capture_review_jobs(self, **kwargs):
+            calls["ingest"] = kwargs
+            return {"processed": 1, "ingested": 1, "dry_run": kwargs["dry_run"], "jobs": [{"id": "job-1"}]}
+
         def review_capture_job(self, **kwargs):
             calls["decide"] = kwargs
             return {
@@ -1060,11 +1064,11 @@ def test_cli_capture_review_list_and_decide_use_service(monkeypatch, capsys):
 
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
-    assert cli.main(["capture", "review", "list", "--limit", "25"]) == 0
+    assert cli.main(["capture", "review", "list", "--status", "approved", "--limit", "25"]) == 0
     list_payload = json.loads(capsys.readouterr().out)
 
     assert list_payload["jobs"][0]["id"] == "job-1"
-    assert calls["list"] == {"limit": 25}
+    assert calls["list"] == {"status": "approved", "limit": 25}
 
     assert (
         cli.main(
@@ -1090,6 +1094,26 @@ def test_cli_capture_review_list_and_decide_use_service(monkeypatch, capsys):
         "rationale": "not useful",
         "actor": "cli",
     }
+
+    assert (
+        cli.main(
+            [
+                "capture",
+                "review",
+                "ingest",
+                "--job-id",
+                "job-1",
+                "--limit",
+                "10",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    ingest_payload = json.loads(capsys.readouterr().out)
+
+    assert ingest_payload["processed"] == 1
+    assert calls["ingest"] == {"job_id": "job-1", "limit": 10, "dry_run": True, "actor": "cli"}
 
 
 def test_cli_retention_policy_and_quality_use_service(monkeypatch, capsys):

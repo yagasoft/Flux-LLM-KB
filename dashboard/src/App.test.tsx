@@ -326,7 +326,9 @@ let jobsPayload: unknown;
 let crawlSyncErrorPayload: unknown;
 let reviewPayload: unknown;
 let captureReviewPayload: unknown;
+let captureReviewRequestUrl: string | undefined;
 let captureReviewDecisionPayload: unknown;
+let captureReviewIngestPayload: unknown;
 let auditPayload: unknown;
 let graphPayload: unknown;
 let claimTransitionPayload: unknown;
@@ -440,6 +442,8 @@ describe("Flux dashboard", () => {
       ]
     };
     captureReviewDecisionPayload = undefined;
+    captureReviewIngestPayload = undefined;
+    captureReviewRequestUrl = undefined;
     auditPayload = {
       events: [
         {
@@ -823,8 +827,9 @@ describe("Flux dashboard", () => {
       if (url === "/api/retrieval/benchmarks") return json(retrievalBenchmarkHistoryPayload);
       if (url === "/api/retrieval/benchmarks/run" && init?.method === "POST") {
         retrievalBenchmarkRunPayload = JSON.parse(String(init.body));
+        const suite = (retrievalBenchmarkRunPayload as { suite?: string }).suite ?? "standard";
         return json({
-          suite: "standard",
+          suite,
           label: "nightly",
           status: "completed",
           query_count: 5,
@@ -863,6 +868,18 @@ describe("Flux dashboard", () => {
           ],
           recommendations: {
             settings_mutated: false,
+            purpose: suite === "governance-shadow" ? "governance_shadow_evaluation" : "retrieval_evaluation",
+            governance_shadow: suite === "governance-shadow"
+              ? {
+                  proposal_case_count: 4,
+                  proposal_pass_count: 3,
+                  proposal_precision: 0.75,
+                  guardrail_case_count: 1,
+                  guardrail_pass_count: 1,
+                  guardrail_fail_count: 0,
+                  proposal_categories: { governance_stale: 1, governance_duplicate: 1, governance_low_confidence: 1, governance_contradiction: 1 }
+                }
+              : undefined,
             candidates: [
               {
                 kind: "semantic_duplicate_threshold",
@@ -951,7 +968,41 @@ describe("Flux dashboard", () => {
           audit_event: { id: "audit-approved", event_type: "capture.review_approved" }
         });
       }
-      if (url.startsWith("/api/capture/review")) return json(captureReviewPayload);
+      if (url === "/api/capture/review/ingest" && init?.method === "POST") {
+        captureReviewIngestPayload = JSON.parse(String(init.body));
+        captureReviewPayload = {
+          jobs: [
+            {
+              id: "job-review",
+              job_type: "codex_backfill",
+              status: "completed",
+              payload: {
+                status: "completed",
+                path: "session.json",
+                ingestion: { status: "ingested", episode_ids: ["episode-1"], source_leaf: "session.json" }
+              },
+              updated_at: "2026-06-23T10:10:00+00:00"
+            }
+          ]
+        };
+        auditPayload = {
+          events: [
+            {
+              id: "audit-ingested",
+              event_type: "capture.ingested",
+              actor: "api",
+              target_id: "job-review",
+              details: { status: "ingested", source_leaf: "session.json", episode_count: 1 },
+              created_at: "2026-06-23T10:11:00+00:00"
+            }
+          ]
+        };
+        return json({ processed: 1, ingested: 1, skipped: 0, failed: 0, blocked: 0, settings_mutated: false, jobs: captureReviewPayload.jobs });
+      }
+      if (url.startsWith("/api/capture/review")) {
+        captureReviewRequestUrl = url;
+        return json(captureReviewPayload);
+      }
       if (url.startsWith("/api/audit")) return json(auditPayload);
       if (url.startsWith("/api/graph/traverse")) return json(graphPayload);
       if (url === "/api/outlook-host/request-sync") {
@@ -1298,6 +1349,39 @@ describe("Flux dashboard", () => {
     expect(await screen.findByText("No pending capture review jobs.")).toBeInTheDocument();
     expect(await screen.findByText("capture.review_approved")).toBeInTheDocument();
     expect(screen.getByText("Verified source summary")).toBeInTheDocument();
+  });
+
+  test("capture review status filters and ingests approved jobs", async () => {
+    const user = userEvent.setup();
+    captureReviewPayload = {
+      jobs: [
+        {
+          id: "job-review",
+          job_type: "codex_backfill",
+          status: "approved",
+          payload: { status: "approved", path: "session.json", ingestion: { status: "approved" } },
+          updated_at: "2026-06-23T10:05:00+00:00"
+        }
+      ]
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Review" }));
+
+    await user.selectOptions(await screen.findByLabelText("Capture status"), "approved");
+    await waitFor(() => {
+      expect(captureReviewRequestUrl).toContain("status=approved");
+    });
+
+    await user.click(screen.getByRole("button", { name: "Ingest approved" }));
+
+    await waitFor(() => {
+      expect(captureReviewIngestPayload).toEqual({ limit: 25, dry_run: false });
+    });
+    expect(await screen.findByText("capture.ingested")).toBeInTheDocument();
+    expect(screen.getByText("session.json")).toBeInTheDocument();
+    expect(screen.getByText("episode-1")).toBeInTheDocument();
   });
 
   test("job queue renders readable rows and expandable details instead of primary raw JSON", async () => {
@@ -1961,6 +2045,28 @@ describe("Flux dashboard", () => {
     });
     expect(screen.getByText("settings_mutated false")).toBeInTheDocument();
     expect(screen.getByText("Synthetic semantic duplicate calibration passed for 3/4 cases at threshold 0.86.")).toBeInTheDocument();
+  });
+
+  test("retrieval tab runs governance-shadow benchmark and displays shadow evidence", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Retrieval" }));
+    await user.selectOptions(await screen.findByLabelText("Benchmark suite"), "governance-shadow");
+    await user.click(screen.getByRole("button", { name: "Run retrieval benchmark" }));
+
+    await waitFor(() => {
+      expect(retrievalBenchmarkRunPayload).toEqual({
+        suite: "governance-shadow",
+        label: "dashboard",
+        limit_per_query: 5,
+        persist: true
+      });
+    });
+    expect(await screen.findByText("Governance shadow evaluation")).toBeInTheDocument();
+    expect(screen.getByText("proposal precision 75.0%")).toBeInTheDocument();
+    expect(screen.getByText("guardrails 1/1 passed")).toBeInTheDocument();
   });
 
   test("health renders structured diagnostics with details, copy, and target navigation", async () => {

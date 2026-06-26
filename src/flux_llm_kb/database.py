@@ -2557,22 +2557,139 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
             ]
 
 
-def list_capture_review_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+_CAPTURE_REVIEW_STATUSES = {
+    "pending_review",
+    "approved",
+    "rejected",
+    "completed",
+    "failed",
+    "blocked_missing_dependency",
+    "all",
+}
+
+
+def list_capture_review_jobs(
+    *,
+    status: str = "pending_review",
+    limit: int = 50,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    normalized_status = _normalize_capture_review_status(status)
+    where_sql = "TRUE"
+    params: list[Any] = []
+    if normalized_status == "pending_review":
+        where_sql = "status = 'pending_review' OR payload->>'status' = 'pending_review'"
+    elif normalized_status != "all":
+        where_sql = "status = %s OR payload->>'status' = %s"
+        params.extend([normalized_status, normalized_status])
+    params.append(max(1, min(limit, 200)))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
+                FROM capture_jobs
+                WHERE {where_sql}
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            return [_capture_job_row(row, metadata_only=True) for row in cur.fetchall()]
+
+
+def list_capture_ingestion_jobs(
+    *,
+    job_id: str | None = None,
+    limit: int = 25,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    clauses = ["job_type = 'codex_backfill'", "(status = 'approved' OR payload->>'status' = 'approved')"]
+    params: list[Any] = []
+    if job_id:
+        clauses.append("id::text = %s")
+        params.append(job_id)
+    params.append(max(1, min(limit, 100)))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
+                FROM capture_jobs
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            return [_capture_job_row(row, metadata_only=False) for row in cur.fetchall()]
+
+
+def codex_backfill_source_hash_exists(*, source_hash: str, url: str | None = None) -> bool:
+    safe_hash = (source_hash or "").strip()
+    if not safe_hash:
+        return False
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
-                FROM capture_jobs
-                WHERE status = 'pending_review'
-                   OR payload->>'status' = 'pending_review'
-                ORDER BY updated_at DESC, created_at DESC
-                LIMIT %s
+                SELECT 1
+                FROM episodes
+                WHERE metadata->>'source' = 'codex_backfill'
+                  AND metadata->>'source_hash' = %s
+                LIMIT 1
                 """,
-                (max(1, min(limit, 200)),),
+                (safe_hash,),
             )
-            return [_capture_job_row(row, metadata_only=True) for row in cur.fetchall()]
+            return cur.fetchone() is not None
+
+
+def update_capture_job_ingestion(
+    *,
+    job_id: str,
+    status: str,
+    ingestion: dict[str, Any],
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_status = _normalize_capture_review_status(status)
+    if normalized_status == "all":
+        raise ValueError("capture job status cannot be all")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = %s,
+                    payload = jsonb_set(
+                        jsonb_set(COALESCE(payload, '{}'::jsonb), '{ingestion}', %s::jsonb, true),
+                        '{status}',
+                        to_jsonb(%s::text),
+                        true
+                    ),
+                    last_error = CASE WHEN %s IN ('failed', 'blocked_missing_dependency') THEN COALESCE(%s, last_error) ELSE NULL END,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id::text = %s
+                RETURNING id::text, job_type, status, payload, attempts, last_error, created_at, updated_at
+                """,
+                (
+                    normalized_status,
+                    _json(ingestion),
+                    normalized_status,
+                    normalized_status,
+                    ingestion.get("error") if isinstance(ingestion, dict) else None,
+                    job_id,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"capture review job not found: {job_id}")
+            return _capture_job_row(row, metadata_only=True)
 
 
 def review_capture_job(
@@ -7171,16 +7288,29 @@ _RAW_CAPTURE_PAYLOAD_KEYS = {
     "transcript",
 }
 
+_CAPTURE_PAYLOAD_PATH_KEYS = {"file", "path", "source", "source_dir"}
 
-def _metadata_only_payload(value: Any) -> Any:
+
+def _normalize_capture_review_status(value: str | None) -> str:
+    normalized = str(value or "pending_review").strip().lower().replace("-", "_")
+    if normalized not in _CAPTURE_REVIEW_STATUSES:
+        raise ValueError(
+            "capture review status must be one of: all, approved, blocked_missing_dependency, completed, failed, pending_review, rejected"
+        )
+    return normalized
+
+
+def _metadata_only_payload(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, dict):
         return {
-            key: _metadata_only_payload(item)
-            for key, item in value.items()
-            if key.lower() not in _RAW_CAPTURE_PAYLOAD_KEYS
+            item_key: _metadata_only_payload(item, key=item_key)
+            for item_key, item in value.items()
+            if item_key.lower() not in _RAW_CAPTURE_PAYLOAD_KEYS
         }
     if isinstance(value, list):
         return [_metadata_only_payload(item) for item in value[:50]]
+    if key and key.lower() in _CAPTURE_PAYLOAD_PATH_KEYS and isinstance(value, str):
+        return _path_leaf(value)
     return value
 
 
@@ -7198,6 +7328,14 @@ def _capture_job_row(row: tuple[Any, ...], *, metadata_only: bool = False) -> di
         "created_at": row[6].isoformat(),
         "updated_at": row[7].isoformat(),
     }
+
+
+def _path_leaf(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return cleaned
+    normalized = cleaned.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] or normalized
 
 
 def _claim_lifecycle_events(cur: Any, claim_id: str) -> list[dict[str, Any]]:
@@ -8605,8 +8743,8 @@ def _normalize_benchmark_scope_type(value: str | None) -> str:
 
 def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
     normalized = str(value or "standard").strip().lower().replace("_", "-")
-    if normalized not in {"standard"}:
-        raise ValueError("retrieval benchmark suite must be standard")
+    if normalized not in {"standard", "governance-shadow"}:
+        raise ValueError("retrieval benchmark suite must be standard or governance-shadow")
     return normalized
 
 

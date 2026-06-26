@@ -119,9 +119,9 @@ def create_server():
         )
 
     @mcp.tool(name="kb.capture_review")
-    def capture_review(limit: int = 50):
-        """List pending capture-review jobs without raw capture payloads."""
-        return service.list_capture_review_jobs(limit=limit)
+    def capture_review(status: str = "pending_review", limit: int = 50):
+        """List capture-review jobs by status without raw capture payloads."""
+        return service.list_capture_review_jobs(status=status, limit=limit)
 
     @mcp.tool(name="kb.capture_review_decide")
     def capture_review_decide(job_id: str, decision: str, rationale: str):
@@ -130,6 +130,16 @@ def create_server():
             job_id=job_id,
             decision=decision,
             rationale=rationale,
+            actor="mcp",
+        )
+
+    @mcp.tool(name="kb.capture_review_ingest")
+    def capture_review_ingest(job_id: str | None = None, limit: int = 25, dry_run: bool = False):
+        """Ingest approved Codex backfill capture-review jobs with redaction and audit metadata."""
+        return service.ingest_capture_review_jobs(
+            job_id=job_id,
+            limit=limit,
+            dry_run=dry_run,
             actor="mcp",
         )
 

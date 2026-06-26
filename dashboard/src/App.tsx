@@ -386,6 +386,16 @@ type RetrievalBenchmarkCandidate = {
   rationale?: string;
 };
 
+type GovernanceShadowSummary = {
+  proposal_case_count?: number;
+  proposal_pass_count?: number;
+  proposal_precision?: number;
+  guardrail_case_count?: number;
+  guardrail_pass_count?: number;
+  guardrail_fail_count?: number;
+  proposal_categories?: Record<string, number>;
+};
+
 type RetrievalBenchmarkRun = {
   id?: string;
   suite?: string;
@@ -401,10 +411,14 @@ type RetrievalBenchmarkRun = {
   case_results?: RetrievalBenchmarkCaseResult[];
   recommendations?: {
     settings_mutated?: boolean;
+    purpose?: string;
+    governance_shadow?: GovernanceShadowSummary;
     candidates?: RetrievalBenchmarkCandidate[];
   };
   recommendation_metadata?: {
     settings_mutated?: boolean;
+    purpose?: string;
+    governance_shadow?: GovernanceShadowSummary;
     candidates?: RetrievalBenchmarkCandidate[];
   };
   created_at?: string | null;
@@ -765,6 +779,8 @@ type CaptureReviewPayload = {
   jobs?: CaptureReviewJob[];
 };
 
+type CaptureReviewStatus = "pending_review" | "approved" | "rejected" | "completed" | "failed" | "blocked_missing_dependency" | "all";
+
 type RetentionPolicy = {
   memory_class: string;
   half_life_days?: number;
@@ -943,6 +959,7 @@ export default function App() {
   const [resultDetailLoading, setResultDetailLoading] = useState(false);
   const [reviewFilter, setReviewFilter] = useState<ClaimReviewFilter>("needs_review");
   const [reviewStateFilter, setReviewStateFilter] = useState("");
+  const [captureReviewStatus, setCaptureReviewStatus] = useState<CaptureReviewStatus>("pending_review");
   const [claimReview, setClaimReview] = useState<ClaimReviewPayload>({ claims: [], counts: {} });
   const [captureReview, setCaptureReview] = useState<CaptureReviewPayload>({ jobs: [] });
   const [captureReviewAudit, setCaptureReviewAudit] = useState<AuditEvent[]>([]);
@@ -1017,7 +1034,7 @@ export default function App() {
     if (activeTab === "review") {
       void loadReview();
     }
-  }, [activeTab, reviewFilter, reviewStateFilter]);
+  }, [activeTab, reviewFilter, reviewStateFilter, captureReviewStatus]);
 
   useEffect(() => {
     if (activeTab !== "review" || !selectedClaim?.subject_entity_id) {
@@ -1289,9 +1306,12 @@ export default function App() {
       params.set("review", reviewFilter);
       if (reviewStateFilter) params.set("state", reviewStateFilter);
       params.set("limit", "50");
+      const captureParams = new URLSearchParams();
+      captureParams.set("status", captureReviewStatus);
+      captureParams.set("limit", "50");
       const [claims, capture, audit, policies, quality] = await Promise.all([
         fetchRequiredJson<ClaimReviewPayload>(`/api/claims?${params.toString()}`),
-        getJson<CaptureReviewPayload>("/api/capture/review?limit=50", { jobs: [] }),
+        getJson<CaptureReviewPayload>(`/api/capture/review?${captureParams.toString()}`, { jobs: [] }),
         getJson<AuditPayload>("/api/audit?limit=50", []),
         getJson<RetentionPolicyPayload>("/api/retention/policies", { policies: [] }),
         getJson<RetentionQualityPayload>("/api/retention/quality?limit=25", { summary: {}, candidates: [] })
@@ -1367,6 +1387,20 @@ export default function App() {
       await loadReview();
     } catch (error) {
       setToast(`Capture review decision failed for ${captureDecision.job.id}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function ingestApprovedCaptureJobs() {
+    try {
+      await sendJson("/api/capture/review/ingest", "POST", {
+        limit: 25,
+        dry_run: false
+      });
+      setCaptureReviewStatus("completed");
+      setToast("Approved capture review jobs ingested.");
+      await loadReview();
+    } catch (error) {
+      setToast(`Capture ingestion failed: ${errorMessage(error)}`);
     }
   }
 
@@ -1653,11 +1687,14 @@ export default function App() {
             loading={reviewLoading}
             reviewFilter={reviewFilter}
             stateFilter={reviewStateFilter}
+            captureStatus={captureReviewStatus}
             onReviewFilter={(value) => setReviewFilter(value)}
             onStateFilter={setReviewStateFilter}
+            onCaptureStatus={(value) => setCaptureReviewStatus(value)}
             onSelectClaim={(claim) => setSelectedClaimId(claim.id)}
             onTransition={(claim, transition) => void transitionReviewClaim(claim, transition)}
             onCaptureDecision={openCaptureDecision}
+            onCaptureIngest={() => void ingestApprovedCaptureJobs()}
             onRetentionPolicySave={(policy, update) => void saveRetentionPolicy(policy, update)}
             onRefresh={() => void loadReview()}
           />
@@ -3264,6 +3301,7 @@ function RetrievalTab({
   const [benchmarkResult, setBenchmarkResult] = useState<RetrievalBenchmarkRun | null>(null);
   const [benchmarkRunning, setBenchmarkRunning] = useState(false);
   const [benchmarkStatus, setBenchmarkStatus] = useState("");
+  const [benchmarkSuite, setBenchmarkSuite] = useState("standard");
   const benchmarkRuns = benchmarkResult ? [benchmarkResult, ...(benchmarkHistory.runs ?? [])] : benchmarkHistory.runs ?? [];
   const latestBenchmark = benchmarkRuns[0];
   const failedBenchmarkCases = (latestBenchmark?.case_results ?? []).filter((item) => item.status === "failed").slice(0, 3);
@@ -3286,7 +3324,7 @@ function RetrievalTab({
     setBenchmarkStatus("Retrieval benchmark queued...");
     try {
       const result = await sendJson<RetrievalBenchmarkRun>("/api/retrieval/benchmarks/run", "POST", {
-        suite: "standard",
+        suite: benchmarkSuite,
         label: "dashboard",
         limit_per_query: 5,
         persist: true
@@ -3361,6 +3399,14 @@ function RetrievalTab({
           </button>
         }
       >
+        <div className="review-controls">
+          <label>Benchmark suite
+            <select value={benchmarkSuite} onChange={(event) => setBenchmarkSuite(event.target.value)}>
+              <option value="standard">Standard</option>
+              <option value="governance-shadow">Governance shadow</option>
+            </select>
+          </label>
+        </div>
         {benchmarkRuns.length > 0 ? (
           <MiniTable
             rows={benchmarkRuns.slice(0, 5).map((run) => [
@@ -3403,6 +3449,7 @@ function RetrievalTab({
                 <em>{candidate.threshold !== undefined ? `threshold ${formatDecimal(candidate.threshold, 2)}` : "advisory"}</em>
               </div>
             ))}
+            <GovernanceShadowEvidence run={latestBenchmark} />
             {failedBenchmarkCases.map((item) => (
               <div className="diagnostic-item" key={item.case_id ?? item.observed_ids?.join(",") ?? "case"}>
                 <strong>{item.case_id ?? "case"}</strong>
@@ -3542,11 +3589,14 @@ function ReviewTab({
   loading,
   reviewFilter,
   stateFilter,
+  captureStatus,
   onReviewFilter,
   onStateFilter,
+  onCaptureStatus,
   onSelectClaim,
   onTransition,
   onCaptureDecision,
+  onCaptureIngest,
   onRetentionPolicySave,
   onRefresh
 }: {
@@ -3560,16 +3610,21 @@ function ReviewTab({
   loading: boolean;
   reviewFilter: ClaimReviewFilter;
   stateFilter: string;
+  captureStatus: CaptureReviewStatus;
   onReviewFilter: (value: ClaimReviewFilter) => void;
   onStateFilter: (value: string) => void;
+  onCaptureStatus: (value: CaptureReviewStatus) => void;
   onSelectClaim: (claim: ClaimReviewClaim) => void;
   onTransition: (claim: ClaimReviewClaim, transition: string) => void;
   onCaptureDecision: (job: CaptureReviewJob, decision: "approve" | "reject") => void;
+  onCaptureIngest: () => void;
   onRetentionPolicySave: (policy: RetentionPolicy, update: RetentionPolicyUpdate) => void;
   onRefresh: () => void;
 }) {
   const claims = payload.claims ?? [];
   const counts = payload.counts ?? {};
+  const captureJobs = capture.jobs ?? [];
+  const captureCounts = captureStatusCounts(captureJobs);
   return (
     <section className="tab-grid review-grid">
       <Panel title="Claim Review" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
@@ -3617,7 +3672,29 @@ function ReviewTab({
         <RetentionQualityReport payload={retentionQuality} />
       </Panel>
       <Panel title="Capture Review Queue">
-        <CaptureReviewTable jobs={capture.jobs ?? []} onDecision={onCaptureDecision} />
+        <div className="review-summary">
+          <Stat label="Pending" value={String(captureCounts.pending_review ?? 0)} />
+          <Stat label="Approved" value={String(captureCounts.approved ?? 0)} />
+          <Stat label="Ingested" value={String(captureCounts.completed ?? 0)} />
+          <Stat label="Failed" value={String((captureCounts.failed ?? 0) + (captureCounts.blocked_missing_dependency ?? 0))} />
+        </div>
+        <div className="review-controls">
+          <label>Capture status
+            <select value={captureStatus} onChange={(event) => onCaptureStatus(event.target.value as CaptureReviewStatus)}>
+              <option value="pending_review">Pending review</option>
+              <option value="approved">Approved</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="blocked_missing_dependency">Blocked dependency</option>
+              <option value="rejected">Rejected</option>
+              <option value="all">All capture jobs</option>
+            </select>
+          </label>
+          <button className="ghost-action compact" type="button" onClick={onCaptureIngest}>
+            <Play size={15} /> Ingest approved
+          </button>
+        </div>
+        <CaptureReviewTable jobs={captureJobs} onDecision={onCaptureDecision} />
       </Panel>
       <Panel title="Capture Review Decisions">
         <CaptureReviewAuditList events={captureAudit} />
@@ -3909,6 +3986,7 @@ function CaptureReviewTable({
             <th>Type</th>
             <th>Status</th>
             <th>Target</th>
+            <th>Ingestion</th>
             <th>Updated</th>
             <th>Actions</th>
           </tr>
@@ -3920,6 +3998,7 @@ function CaptureReviewTable({
               <td>{jobTypeLabel(job.job_type)}</td>
               <td><JobStatusBadge status={job.status ?? "pending_review"} /></td>
               <td className="claim-object" title={captureReviewTarget(job)}>{captureReviewTarget(job)}</td>
+              <td className="claim-object" title={captureReviewIngestionLabel(job)}>{captureReviewIngestionLabel(job)}</td>
               <td>{formatDate(job.updated_at)}</td>
               <td>
                 <div className="row-actions">
@@ -4035,15 +4114,37 @@ function entityLabel(entity?: { type?: string; name?: string }) {
 function captureReviewTarget(job: CaptureReviewJob) {
   const payload = job.payload ?? {};
   return stringFromUnknown(payload.path)
+    ?? stringFromUnknown(payload.source_leaf)
     ?? stringFromUnknown(payload.source)
     ?? stringFromUnknown(payload.source_dir)
     ?? stringFromUnknown(payload.file)
     ?? "-";
 }
 
+function captureReviewIngestionLabel(job: CaptureReviewJob) {
+  const ingestion = job.payload?.ingestion;
+  if (!isRecord(ingestion)) return "-";
+  const episodeIds = Array.isArray(ingestion.episode_ids) ? ingestion.episode_ids.map(String).filter(Boolean) : [];
+  return episodeIds.length > 0
+    ? episodeIds.join(", ")
+    : stringFromUnknown(ingestion.status) ?? stringFromUnknown(ingestion.error) ?? "-";
+}
+
+function captureStatusCounts(jobs: CaptureReviewJob[]) {
+  const counts: Record<string, number> = {};
+  for (const job of jobs) {
+    const status = stringFromUnknown(job.payload?.status) ?? job.status ?? "pending_review";
+    counts[status] = (counts[status] ?? 0) + 1;
+  }
+  return counts;
+}
+
 function captureReviewAuditEvents(payload: AuditPayload): AuditEvent[] {
   const events = Array.isArray(payload) ? payload : payload.events ?? [];
-  return events.filter((event) => (event.event_type ?? "").startsWith("capture.review_")).slice(0, 8);
+  return events.filter((event) => {
+    const type = event.event_type ?? "";
+    return type.startsWith("capture.review_") || type.startsWith("capture.ingestion") || type === "capture.ingested";
+  }).slice(0, 8);
 }
 
 function captureReviewAuditReason(event: AuditEvent) {
@@ -4460,6 +4561,18 @@ function formatReasonList(values?: string[]) {
 
 function benchmarkSettingsMutated(run: RetrievalBenchmarkRun) {
   return Boolean(run.recommendations?.settings_mutated ?? run.recommendation_metadata?.settings_mutated);
+}
+
+function GovernanceShadowEvidence({ run }: { run?: RetrievalBenchmarkRun }) {
+  const summary = run?.recommendations?.governance_shadow ?? run?.recommendation_metadata?.governance_shadow;
+  if (!summary) return null;
+  return (
+    <div className="diagnostic-item">
+      <strong>Governance shadow evaluation</strong>
+      <span>proposal precision {formatPercentMetric(summary.proposal_precision)}</span>
+      <em>guardrails {summary.guardrail_pass_count ?? 0}/{summary.guardrail_case_count ?? 0} passed</em>
+    </div>
+  );
 }
 
 function retrievalConfidenceBandRows(run?: RetrievalBenchmarkRun) {
@@ -5122,6 +5235,10 @@ function uniqueActionReasons(detail: ResultDetail) {
 
 function stringFromUnknown(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function numberFromUnknown(value: unknown): number | undefined {
