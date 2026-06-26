@@ -156,6 +156,9 @@ flux-kb diagnostics all --root docs --status blocked_missing_dependency --family
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
 flux-kb diagnostics remediate repair_asset_statuses --target-type root --root docs --reason "operator cleanup"
 flux-kb diagnostics remediate clear_completed_errors --target-type root --root docs --reason "operator cleanup"
+flux-kb automation status
+flux-kb automation run --mode guarded --limit 25
+flux-kb automation actions --status all --limit 25
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
 flux-kb embeddings backfill --owner-class all --limit 100
@@ -197,7 +200,7 @@ Override it in `.env` or the shell when you want a different local database.
 ## Runtime Settings
 
 Most operational values are exposed through `flux-kb settings` and the dashboard
-settings tab. Configuration is settings catalog-backed and cross-platform; it
+Settings tab. Configuration is settings catalog-backed and cross-platform; it
 does not use the Windows Registry. Environment variables override database
 settings and appear as read-only effective values. Settings that require reload,
 component restart, or embedding reindex require confirmation and create runtime
@@ -210,7 +213,7 @@ entirely. The Corpus dashboard shows the effective policy for each root.
 V2.8 acceleration foundation settings are also catalog-backed. The default cache
 root resolves under the production install root when `FLUX_KB_INSTALL_ROOT` is
 set, otherwise under the local user cache. `flux-kb acceleration status` and the
-dashboard Health tab show CPU/disk hints, optional NVIDIA and ONNX Runtime
+dashboard Performance tab show CPU/disk hints, optional NVIDIA and ONNX Runtime
 availability, local model-server state, cache directories, and worker-family
 queue counts. Local model probing is disabled by default and accepts only
 loopback HTTP(S) URLs such as `http://127.0.0.1:11434`.
@@ -287,6 +290,16 @@ failed or dependency-blocked corpus jobs, `run_backfill` for scoped root/family
 backfill, and `repair_asset_statuses` or `clear_completed_errors` for
 root-scoped cleanup. These actions append audit events and do not mutate runtime
 settings.
+Guarded operator automation is available with `flux-kb automation
+status|run|actions` and the dashboard Automation tab. Recurring automation is
+default disabled through `operator.automation.enabled=false`; the default mode is
+`operator.automation.mode=guarded`. The allowlist is intentionally narrow:
+evidence refreshes, already-approved capture ingestion, safe diagnostic
+recovery, embedding refresh enqueue/backfill, and governance shadow proposal
+runs. Deletes, destructive mail policies, OAuth, host startup, restart or
+reindex settings, capture approve/reject decisions, high-risk governance, local
+file open/reveal, and ambiguous actions remain manual. Guarded automation audit
+rows store sanitized evidence and report `settings_mutated: false`.
 Evaluated memory governance is available with `flux-kb governance run`,
 `flux-kb governance actions list`, `flux-kb governance actions apply`,
 `flux-kb governance actions recover`, `flux-kb governance digest`, and
@@ -313,7 +326,7 @@ default. New vectors keep source hashes and cache keys in embedding metadata
 without raw source text. Use `flux-kb embeddings status` to inspect coverage,
 `flux-kb embeddings enqueue` to queue `corpus_embed` jobs, or `flux-kb
 embeddings backfill` for an immediate bounded refresh. The same counters appear
-in the dashboard Health acceleration panel as vectors processed, unchanged
+in the dashboard Performance tab as vectors processed, unchanged
 items skipped, batches, and cache hits/misses.
 
 Governance librarian settings are catalog-backed and default conservative:
@@ -393,8 +406,13 @@ dashboard shows `host_offline` and the command above.
 ## Dashboard Development
 
 The dashboard is a React/Vite app under `dashboard/` and is served by FastAPI at
-`http://127.0.0.1:8765/dashboard`. Use the helper script whenever dashboard code
-changes; it rebuilds assets and refreshes the running deployment:
+`http://127.0.0.1:8765/dashboard`. Overview is a friendly read-only status page,
+Automation shows guarded run state and manual-required work, Diagnostics owns
+structured errors and safe remediation, Performance owns acceleration and
+reliability evidence, Retrieval owns code diagnostics, and Settings owns Codex
+hooks, deployment, runtime actions, restart, and reindex settings. Use the
+helper script whenever dashboard code changes; it rebuilds assets and refreshes
+the running deployment:
 
 The Review tab includes Governance Automation, Digest, Guardrails, and Recovery
 panels for proposal review, shadow runs, confirmed apply/recover actions, and

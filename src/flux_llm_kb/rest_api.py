@@ -141,6 +141,11 @@ def create_app():
         mode: str = "shadow"
         limit: int = 25
 
+    class AutomationRunRequest(BaseModel):
+        mode: str = "guarded"
+        limit: int = 25
+        dry_run: bool = False
+
     class GovernanceActionRequest(BaseModel):
         rationale: str
         confirm: bool = False
@@ -755,6 +760,18 @@ def create_app():
             label=label,
             limit=limit,
         )
+
+    @app.get("/api/automation/status")
+    def automation_status():
+        return service.operator_automation_status()
+
+    @app.post("/api/automation/run")
+    def automation_run(request: AutomationRunRequest = Body(...)):
+        return service.run_operator_automation(mode=request.mode, actor="api", trigger="manual", limit=request.limit, dry_run=request.dry_run)
+
+    @app.get("/api/automation/actions")
+    def automation_actions(status: str = "all", run_id: str | None = None, action: str | None = None, limit: int = 50):
+        return service.operator_automation_actions(status=status, run_id=run_id, action=action, limit=limit)
 
     @app.get("/api/governance/runs")
     def governance_runs(limit: int = 20):

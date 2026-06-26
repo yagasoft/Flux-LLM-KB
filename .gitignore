@@ -13,6 +13,7 @@ node_modules/
 dashboard/node_modules/
 dashboard/.vite/
 dashboard/coverage/
+docs/user-guide/rendered-pages/
 
 # Local config and secrets
 .env

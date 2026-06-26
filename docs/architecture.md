@@ -58,6 +58,12 @@ system rather than a large prompt-injected memory file.
   available, `settings_mutated: false`, and whether memory lifecycle state was
   actually mutated. They must not store raw memory text, private paths, raw
   queries, snippets, embeddings, local model prompts, or local model outputs.
+- `operator_automation_runs` and `operator_automation_actions`: durable
+  guarded automation run/action history for safe recurring dashboard actions.
+  Rows store actor, trigger, mode, dry-run state, status, sanitized evidence,
+  planned/executed action names, and `settings_mutated: false`. They must not
+  store raw memory text, private paths, mail bodies, credentials, embeddings, or
+  local file-open/reveal targets.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -525,17 +531,24 @@ flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <jo
 flux-kb crawl backfill --root docs --family office --limit 20
 ```
 
-The dashboard is the single UI surface for health, watcher status, crawler stats,
-backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,
-and graph/review/governance workflows. The UI is a React/Vite operations console
+The dashboard is the single UI surface for overview status, guarded automation,
+diagnostics, performance evidence, watcher status, crawler stats, backlog,
+errors, retrieval/index stats, runtime settings, mail ingestion status, and
+graph/review/governance workflows. The UI is a React/Vite operations console
 bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
-The Health tab includes the operator evidence gate panel, acceleration all-root
-reliability matrix, code diagnostics with feedback capture, top code gaps,
-parser/fallback hotspots, generated-file counts, direct code search/symbol
-lookup controls, and filtered operational diagnostics panels. Diagnostic rows expose bounded evidence,
-follow-up commands, and confirmation-gated remediation buttons where the service
-has a safe scoped recovery action.
+Overview is read-only and friendly: system status, attention items, work Flux
+handled automatically, and the next recommended safe action. Automation shows
+Guarded Auto posture, eligible actions, manual-required work, last/next run, a
+run-now control, and durable sanitized audit history. Diagnostics owns
+structured operational errors, filters, copy/detail/navigation actions, and
+confirmation-gated remediation buttons where the service has a safe scoped
+recovery action. Performance owns operator evidence gates, acceleration
+capability, all-root reliability, benchmark history, cache/model readiness, and
+worker-family telemetry. Retrieval owns code diagnostics with feedback capture,
+top code gaps, parser/fallback hotspots, generated-file counts, and direct code
+search/symbol lookup controls. Settings owns Codex hooks, deployment, runtime
+actions, restart requests, and reindex-required settings.
 The Review tab includes claim/capture review plus Governance Automation,
 Digest, Guardrails, and Recovery panels for high-risk proposals, blocked
 guardrails, stale proposals, recoverable actions, and recent governance action
@@ -568,6 +581,13 @@ runtime control requests and require confirmation before mutation.
 Governance settings are catalog-backed and follow the same precedence, but
 governance apply/recover never mutates runtime settings; it mutates only memory
 lifecycle state through reversible audited actions.
+Operator automation settings are catalog-backed under `operator.automation.*`
+and default to disabled guarded mode. Worker-scheduled guarded passes only run
+when `operator.automation.enabled=true`; manual dashboard, CLI, REST, or MCP
+runs can still execute the same bounded allowlist. Automation never mutates
+runtime settings and records blocked/manual-required work instead of attempting
+deletes, OAuth, host startup, restart/reindex settings, capture decisions,
+high-risk governance, local file open/reveal, or ambiguous actions.
 
 ## Mail Ingestion
 

@@ -4476,6 +4476,243 @@ def update_memory_governance_action(
             return _memory_governance_action_row(row)
 
 
+def record_operator_automation_run(
+    *,
+    mode: str = "guarded",
+    trigger: str = "manual",
+    status: str = "running",
+    policy_snapshot: dict[str, Any] | None = None,
+    summary: dict[str, Any] | None = None,
+    actor: str = "system",
+    memory_mutated: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    safe_policy = _sanitize_governance_metadata(policy_snapshot or {})
+    safe_summary = _sanitize_governance_metadata(summary or {})
+    normalized_mode = _normalize_operator_automation_mode(mode)
+    normalized_status = _normalize_operator_automation_run_status(status)
+    clean_actor = str(actor or "system")[:80]
+    clean_trigger = str(trigger or "manual")[:80]
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO operator_automation_runs (
+                    mode, trigger, status, actor, policy_snapshot, summary,
+                    settings_mutated, memory_mutated
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, false, %s)
+                RETURNING id::text, started_at
+                """,
+                (
+                    normalized_mode,
+                    clean_trigger,
+                    normalized_status,
+                    clean_actor,
+                    _json(safe_policy),
+                    _json(safe_summary),
+                    bool(memory_mutated),
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "mode": normalized_mode,
+                "trigger": clean_trigger,
+                "status": normalized_status,
+                "actor": clean_actor,
+                "policy_snapshot": safe_policy,
+                "summary": safe_summary,
+                "settings_mutated": False,
+                "memory_mutated": bool(memory_mutated),
+                "started_at": row[1].isoformat() if row[1] else None,
+                "completed_at": None,
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def update_operator_automation_run(
+    *,
+    run_id: str,
+    status: str | None = None,
+    summary: dict[str, Any] | None = None,
+    memory_mutated: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    safe_summary = _sanitize_governance_metadata(summary or {})
+    normalized_status = _normalize_operator_automation_run_status(status) if status else None
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE operator_automation_runs
+                SET status = COALESCE(%s, status),
+                    summary = CASE WHEN %s THEN summary ELSE %s::jsonb END,
+                    memory_mutated = %s,
+                    completed_at = now(),
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text, mode, trigger, status, actor, policy_snapshot,
+                          summary, settings_mutated, memory_mutated, started_at,
+                          completed_at, created_at, updated_at
+                """,
+                (
+                    normalized_status,
+                    summary is None,
+                    _json(safe_summary),
+                    bool(memory_mutated),
+                    run_id,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"operator automation run not found: {run_id}")
+            return _operator_automation_run_row(row)
+
+
+def list_operator_automation_runs(*, limit: int = 20, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, mode, trigger, status, actor, policy_snapshot,
+                       summary, settings_mutated, memory_mutated, started_at,
+                       completed_at, created_at, updated_at
+                FROM operator_automation_runs
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (max(1, min(limit, 200)),),
+            )
+            return [_operator_automation_run_row(row) for row in cur.fetchall()]
+
+
+def record_operator_automation_action(
+    *,
+    run_id: str | None,
+    action: str,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    risk: str = "low",
+    status: str = "proposed",
+    source: str = "automation",
+    rationale: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+    actor: str = "system",
+    memory_mutated: bool = False,
+    audit_event_id: str | None = None,
+    error: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    normalized_action = _normalize_operator_automation_action(action)
+    normalized_status = _normalize_operator_automation_action_status(status)
+    safe_rationale = _sanitize_governance_metadata(rationale or {})
+    safe_evidence = _sanitize_governance_metadata(evidence or {})
+    safe_result = _sanitize_governance_metadata(result or {})
+    clean_actor = str(actor or "system")[:80]
+    clean_source = str(source or "automation")[:80]
+    clean_target_type = str(target_type or "")[:80] or None
+    clean_target_id = str(target_id or "")[:160] or None
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO operator_automation_actions (
+                    run_id, action, target_type, target_id, risk, status, source,
+                    actor, rationale, evidence, result, settings_mutated,
+                    memory_mutated, audit_event_id, error
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s::jsonb, %s::jsonb, %s::jsonb, false, %s, %s, %s
+                )
+                RETURNING id::text, created_at
+                """,
+                (
+                    run_id,
+                    normalized_action,
+                    clean_target_type,
+                    clean_target_id,
+                    _normalize_governance_risk(risk),
+                    normalized_status,
+                    clean_source,
+                    clean_actor,
+                    _json(safe_rationale),
+                    _json(safe_evidence),
+                    _json(safe_result),
+                    bool(memory_mutated),
+                    audit_event_id,
+                    str(error)[:300] if error else None,
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "run_id": run_id,
+                "action": normalized_action,
+                "target_type": clean_target_type,
+                "target_id": clean_target_id,
+                "risk": _normalize_governance_risk(risk),
+                "status": normalized_status,
+                "source": clean_source,
+                "actor": clean_actor,
+                "rationale": safe_rationale,
+                "evidence": safe_evidence,
+                "result": safe_result,
+                "settings_mutated": False,
+                "memory_mutated": bool(memory_mutated),
+                "audit_event_id": audit_event_id,
+                "error": str(error)[:300] if error else None,
+                "created_at": row[1].isoformat() if row[1] else None,
+                "updated_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def list_operator_automation_actions(
+    *,
+    status: str | None = None,
+    run_id: str | None = None,
+    action: str | None = None,
+    limit: int = 50,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    filters: list[str] = []
+    params: list[Any] = []
+    if status and status != "all":
+        filters.append("status = %s")
+        params.append(_normalize_operator_automation_action_status(status))
+    if run_id:
+        filters.append("run_id = %s")
+        params.append(run_id)
+    if action:
+        filters.append("action = %s")
+        params.append(_normalize_operator_automation_action(action))
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(max(1, min(limit, 200)))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id::text, run_id::text, action, target_type, target_id,
+                       risk, status, source, actor, rationale, evidence, result,
+                       settings_mutated, memory_mutated, audit_event_id::text,
+                       error, created_at, updated_at
+                FROM operator_automation_actions
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            return [_operator_automation_action_row(row) for row in cur.fetchall()]
+
+
 def record_memory_governance_digest(
     *,
     run_id: str | None,
@@ -9209,6 +9446,47 @@ def _memory_governance_action_row(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+def _operator_automation_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "mode": _normalize_operator_automation_mode(row[1]),
+        "trigger": row[2],
+        "status": _normalize_operator_automation_run_status(row[3]),
+        "actor": row[4],
+        "policy_snapshot": _sanitize_governance_metadata(row[5] or {}),
+        "summary": _sanitize_governance_metadata(row[6] or {}),
+        "settings_mutated": bool(row[7]),
+        "memory_mutated": bool(row[8]),
+        "started_at": row[9].isoformat() if row[9] else None,
+        "completed_at": row[10].isoformat() if row[10] else None,
+        "created_at": row[11].isoformat() if row[11] else None,
+        "updated_at": row[12].isoformat() if row[12] else None,
+    }
+
+
+def _operator_automation_action_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "run_id": row[1],
+        "action": _normalize_operator_automation_action(row[2]),
+        "target_type": row[3],
+        "target_id": row[4],
+        "risk": _normalize_governance_risk(row[5]),
+        "status": _normalize_operator_automation_action_status(row[6]),
+        "source": row[7],
+        "actor": row[8],
+        "rationale": _sanitize_governance_metadata(row[9] or {}),
+        "evidence": _sanitize_governance_metadata(row[10] or {}),
+        "result": _sanitize_governance_metadata(row[11] or {}),
+        "settings_mutated": bool(row[12]),
+        "memory_mutated": bool(row[13]),
+        "audit_event_id": row[14],
+        "error": row[15],
+        "created_at": row[16].isoformat() if row[16] else None,
+        "updated_at": row[17].isoformat() if row[17] else None,
+    }
+
+
 def _metric_deltas(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, float]:
     deltas: dict[str, float] = {}
     for key, value in current.items():
@@ -9312,6 +9590,41 @@ def _normalize_governance_memory_class(value: str | None) -> str | None:
         return None
     normalized = str(value or "").strip().lower()
     return normalized if normalized in {"claim", "episode", "corpus"} else None
+
+
+def _normalize_operator_automation_mode(value: str | None) -> str:
+    normalized = str(value or "guarded").strip().lower().replace("-", "_")
+    if normalized not in {"guarded", "suggest_only"}:
+        raise ValueError("operator automation mode must be guarded or suggest_only")
+    return normalized
+
+
+def _normalize_operator_automation_run_status(value: str | None) -> str:
+    normalized = str(value or "completed").strip().lower().replace("-", "_")
+    if normalized not in {"running", "completed", "blocked", "failed"}:
+        raise ValueError("operator automation run status must be running, completed, blocked, or failed")
+    return normalized
+
+
+def _normalize_operator_automation_action(value: str | None) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    allowed = {
+        "refresh_retrieval_evidence",
+        "ingest_approved_capture",
+        "safe_diagnostic_recovery",
+        "enqueue_embedding_refresh",
+        "run_governance_shadow",
+    }
+    if normalized not in allowed:
+        raise ValueError(f"unsupported operator automation action: {value}")
+    return normalized
+
+
+def _normalize_operator_automation_action_status(value: str | None) -> str:
+    normalized = str(value or "proposed").strip().lower().replace("-", "_")
+    if normalized not in {"proposed", "applied", "skipped", "blocked", "failed"}:
+        raise ValueError(f"unsupported operator automation action status: {value}")
+    return normalized
 
 
 def _normalize_code_feedback_category(value: str | None) -> str:

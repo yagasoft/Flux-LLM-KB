@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import base64
 import fnmatch
 import hashlib
@@ -23,7 +24,7 @@ from .acceleration import (
     kind_to_job_families,
 )
 from .crawler import CorpusPolicy, scan_path
-from . import __version__, database, governance
+from . import __version__, database, governance, operator_automation
 from .glob_policy import effective_glob_policy
 from .extractors import extractor_availability
 from .indexer_diagnostics import (
@@ -544,6 +545,285 @@ class KnowledgeService:
             "settings_mutated": False,
             "policy": governance.normalized_policy(_governance_policy_from_settings()),
         }
+
+    def operator_automation_status(self) -> dict[str, Any]:
+        policy = operator_automation.normalized_policy(_operator_automation_policy_from_settings())
+        try:
+            runs = database.list_operator_automation_runs(limit=5)
+        except Exception:
+            runs = []
+        try:
+            actions = database.list_operator_automation_actions(status="all", limit=25)
+        except Exception:
+            actions = []
+        eligible = self._operator_automation_plan(policy, limit=int(policy.get("max_actions_per_run") or 25))
+        last_run = runs[0] if runs else None
+        recurring = _operator_automation_recurring_state(policy, last_run)
+        return {
+            "settings_mutated": False,
+            "policy": {
+                **policy,
+                "next_run_after_seconds": int(policy.get("interval_seconds") or 1800),
+            },
+            "recurring": recurring,
+            "last_run": last_run,
+            "eligible_actions": eligible,
+            "manual_required": operator_automation.manual_required_items(),
+            "recent_actions": actions,
+            "runs": runs,
+        }
+
+    def operator_automation_actions(
+        self,
+        *,
+        status: str = "all",
+        run_id: str | None = None,
+        action: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        actions = database.list_operator_automation_actions(status=status, run_id=run_id, action=action, limit=limit)
+        return {
+            "settings_mutated": False,
+            "status": status,
+            "run_id": run_id,
+            "action": action,
+            "actions": actions,
+            "telemetry": _automation_action_telemetry(actions),
+        }
+
+    def run_operator_automation(
+        self,
+        *,
+        mode: str | None = None,
+        trigger: str = "manual",
+        actor: str = "system",
+        limit: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        settings_policy = _operator_automation_policy_from_settings()
+        requested = {**settings_policy}
+        if mode:
+            requested["mode"] = mode
+        if limit is not None:
+            requested["max_actions_per_run"] = limit
+        policy = operator_automation.normalized_policy(requested)
+        bounded_limit = max(1, min(int(limit or policy.get("max_actions_per_run") or 25), 200))
+        plan = self._operator_automation_plan(policy, limit=bounded_limit)
+        run = database.record_operator_automation_run(
+            mode=str(policy.get("mode") or "guarded"),
+            trigger=trigger,
+            status="running",
+            policy_snapshot=policy,
+            summary={"eligible": len(plan), "dry_run": bool(dry_run), "settings_mutated": False},
+            actor=actor,
+            memory_mutated=False,
+        )
+        recorded_actions: list[dict[str, Any]] = []
+        applied = skipped = blocked = failed = 0
+        memory_mutated = False
+        execute = str(policy.get("mode") or "guarded") == "guarded" and not dry_run
+        for item in plan[:bounded_limit]:
+            result: dict[str, Any] = {}
+            status = "proposed"
+            error: str | None = None
+            item_memory_mutated = False
+            if not execute:
+                status = "skipped"
+                skipped += 1
+            else:
+                try:
+                    result = self._execute_operator_automation_action(item, actor=actor, limit=bounded_limit)
+                    if bool(result.get("settings_mutated")):
+                        status = "blocked"
+                        blocked += 1
+                        result = {**result, "blocked_reason": "underlying action reported settings_mutated"}
+                    else:
+                        status = "applied"
+                        applied += 1
+                    item_memory_mutated = bool(result.get("memory_mutated"))
+                    memory_mutated = memory_mutated or item_memory_mutated
+                except Exception as exc:
+                    status = "failed"
+                    failed += 1
+                    error = str(exc)
+                    result = {"settings_mutated": False, "error": error}
+            recorded = database.record_operator_automation_action(
+                run_id=run["id"],
+                action=str(item["action"]),
+                target_type=item.get("target_type"),
+                target_id=item.get("target_id"),
+                risk=str(item.get("risk") or "low"),
+                status=status,
+                source=str(item.get("source") or "automation"),
+                rationale=item.get("rationale") if isinstance(item.get("rationale"), dict) else {},
+                evidence=item.get("evidence") if isinstance(item.get("evidence"), dict) else {},
+                result={**result, "settings_mutated": bool(result.get("settings_mutated", False))},
+                actor=actor,
+                memory_mutated=item_memory_mutated,
+                error=error,
+            )
+            recorded_actions.append({**recorded, "settings_mutated": bool(recorded.get("settings_mutated", False))})
+        if failed:
+            run_status = "failed" if applied == 0 and skipped == 0 and blocked == 0 else "blocked"
+        elif blocked:
+            run_status = "blocked"
+        else:
+            run_status = "completed"
+        summary = {
+            "eligible": len(plan),
+            "applied": applied,
+            "skipped": skipped,
+            "blocked": blocked,
+            "failed": failed,
+            "dry_run": bool(dry_run),
+            "settings_mutated": False,
+        }
+        run = database.update_operator_automation_run(
+            run_id=str(run["id"]),
+            status=run_status,
+            summary=summary,
+            memory_mutated=memory_mutated,
+        )
+        return {
+            "settings_mutated": False,
+            "memory_mutated": memory_mutated,
+            "policy": policy,
+            "run": run,
+            "summary": summary,
+            "actions": recorded_actions,
+            "manual_required": operator_automation.manual_required_items(),
+        }
+
+    def _operator_automation_plan(self, policy: dict[str, Any], *, limit: int = 25) -> list[dict[str, Any]]:
+        labels = operator_automation.guarded_action_labels()
+        plan: list[dict[str, Any]] = []
+        if bool(policy.get("auto_refresh_evidence")):
+            plan.append(
+                _automation_plan_action(
+                    action="refresh_retrieval_evidence",
+                    label=labels["refresh_retrieval_evidence"],
+                    source="evidence",
+                    target_type="benchmark",
+                    target_id="standard",
+                    reason="Refresh retrieval and reliability evidence without changing settings.",
+                    evidence={"suite": "standard", "scenario": "reliability"},
+                )
+            )
+        if bool(policy.get("auto_ingest_approved_capture")):
+            try:
+                capture_jobs = database.list_capture_ingestion_jobs(limit=limit)
+            except Exception:
+                capture_jobs = []
+            if capture_jobs:
+                plan.append(
+                    _automation_plan_action(
+                        action="ingest_approved_capture",
+                        label=labels["ingest_approved_capture"],
+                        source="capture",
+                        target_type="capture_review_job",
+                        target_id=str(capture_jobs[0].get("id") or "approved_capture"),
+                        reason=f"{len(capture_jobs)} approved capture job(s) are eligible for ingestion.",
+                        evidence={"approved_count": len(capture_jobs), "job_ids": [str(job.get("id") or "") for job in capture_jobs[:10]]},
+                    )
+                )
+        if bool(policy.get("auto_remediate_diagnostics")):
+            diagnostic_action = self._first_safe_diagnostic_action(limit=limit)
+            if diagnostic_action:
+                plan.append(diagnostic_action)
+        if bool(policy.get("auto_refresh_embeddings")):
+            try:
+                embedding_status = self.embedding_status()
+            except Exception:
+                embedding_status = {}
+            summary = embedding_status.get("summary") if isinstance(embedding_status.get("summary"), dict) else {}
+            stale = int(summary.get("stale_vectors") or summary.get("stale") or 0)
+            missing = int(summary.get("missing_vectors") or summary.get("missing") or 0)
+            if stale or missing:
+                plan.append(
+                    _automation_plan_action(
+                        action="enqueue_embedding_refresh",
+                        label=labels["enqueue_embedding_refresh"],
+                        source="embeddings",
+                        target_type="embedding_queue",
+                        target_id="stale_or_missing",
+                        reason=f"{stale + missing} embedding vector(s) need refresh.",
+                        evidence={"stale_vectors": stale, "missing_vectors": missing},
+                    )
+                )
+        if bool(policy.get("auto_run_governance_shadow")):
+            plan.append(
+                _automation_plan_action(
+                    action="run_governance_shadow",
+                    label=labels["run_governance_shadow"],
+                    source="governance",
+                    target_type="governance",
+                    target_id="shadow",
+                    reason="Generate governance proposals in shadow mode only.",
+                    evidence={"mode": "shadow"},
+                )
+            )
+        return plan[: max(1, min(int(limit or 25), 200))]
+
+    def _first_safe_diagnostic_action(self, *, limit: int = 25) -> dict[str, Any] | None:
+        try:
+            diagnostics = self.operational_diagnostics(section="all", limit=limit, include_details=True)
+        except Exception:
+            return None
+        labels = operator_automation.guarded_action_labels()
+        for item in diagnostics.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            for action in item.get("remediation_actions") or []:
+                if not isinstance(action, dict):
+                    continue
+                payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+                action_id = str(payload.get("action") or action.get("id") or "")
+                if action_id not in {"retry_corpus_job", "run_backfill", "repair_asset_statuses", "clear_completed_errors"}:
+                    continue
+                if bool(action.get("destructive")) or bool(action.get("settings_mutated")):
+                    continue
+                target = action.get("target") if isinstance(action.get("target"), dict) else {}
+                return _automation_plan_action(
+                    action="safe_diagnostic_recovery",
+                    label=labels["safe_diagnostic_recovery"],
+                    source="diagnostics",
+                    target_type=str(payload.get("target_type") or target.get("type") or "diagnostic"),
+                    target_id=str(payload.get("target_id") or target.get("id") or action_id),
+                    reason=str(action.get("label") or item.get("summary") or "Run safe diagnostic remediation."),
+                    evidence={"diagnostic": item, "payload": payload},
+                    risk="low",
+                )
+        return None
+
+    def _execute_operator_automation_action(self, item: dict[str, Any], *, actor: str, limit: int) -> dict[str, Any]:
+        action = str(item.get("action") or "")
+        if action == "refresh_retrieval_evidence":
+            retrieval = self.run_retrieval_benchmark(suite="standard", label="operator-automation", limit_per_query=5, persist=True)
+            reliability = self.run_indexer_reliability(scope="all_roots", label="operator-automation", evidence_level="standard")
+            return {
+                "settings_mutated": bool(retrieval.get("settings_mutated") or reliability.get("settings_mutated")),
+                "retrieval": retrieval,
+                "reliability": reliability,
+            }
+        if action == "ingest_approved_capture":
+            return self.ingest_capture_review_jobs(limit=limit, dry_run=False, actor=actor)
+        if action == "safe_diagnostic_recovery":
+            evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+            payload = evidence.get("payload") if isinstance(evidence.get("payload"), dict) else {}
+            return self.remediate_diagnostic(
+                action=str(payload.get("action") or ""),
+                target_type=str(payload.get("target_type") or ""),
+                target_id=payload.get("target_id"),
+                root_name=payload.get("root_name"),
+                family=payload.get("family"),
+                reason=str(payload.get("reason") or "operator automation diagnostic remediation"),
+                actor=actor,
+            )
+        if action == "enqueue_embedding_refresh":
+            return self.enqueue_embedding_jobs(owner_class="all", stale_only=True, limit=limit)
+        if action == "run_governance_shadow":
+            return self.run_governance(mode="shadow", actor=actor, limit=limit)
+        raise ValueError(f"unsupported operator automation action: {action}")
 
     def governance_apply(
         self,
@@ -2967,6 +3247,7 @@ class KnowledgeService:
         runs = 0
         last_result: dict[str, Any] | None = None
         last_governance_at = 0.0
+        last_automation_at = 0.0
         while True:
             runs += 1
             database.record_runtime_component_heartbeat(
@@ -2995,8 +3276,24 @@ class KnowledgeService:
                     last_result["mail_sync"] = mail_ingestion.sync_due_mail_profiles(limit=limit, worker_id=component_name)
                 except Exception as exc:
                     last_result["mail_sync"] = {"status": "failed", "error": str(exc)}
+            automation_policy = operator_automation.normalized_policy(_operator_automation_policy_from_settings())
+            if bool(automation_policy.get("enabled")) and (time.monotonic() - last_automation_at) >= float(automation_policy.get("interval_seconds") or 1800):
+                try:
+                    last_result["automation"] = self.run_operator_automation(
+                        mode=str(automation_policy.get("mode") or "guarded"),
+                        trigger="worker",
+                        actor=component_name,
+                        limit=int(automation_policy.get("max_actions_per_run") or 25),
+                    )
+                    last_automation_at = time.monotonic()
+                except Exception as exc:
+                    last_result["automation"] = {"status": "failed", "error": str(exc), "settings_mutated": False}
             policy = governance.normalized_policy(_governance_policy_from_settings())
-            if bool(policy.get("librarian_enabled")) and (time.monotonic() - last_governance_at) >= float(policy.get("interval_seconds") or 3600):
+            if (
+                not bool(automation_policy.get("enabled"))
+                and bool(policy.get("librarian_enabled"))
+                and (time.monotonic() - last_governance_at) >= float(policy.get("interval_seconds") or 3600)
+            ):
                 governance_mode = str(policy.get("mode") or "shadow")
                 if not bool(policy.get("auto_apply_enabled")):
                     governance_mode = "shadow"
@@ -3184,6 +3481,126 @@ def _governance_policy_from_settings() -> dict[str, Any]:
             "protect_reinforced_confidence": float(protected_rules.get("protect_reinforced_confidence", 0.75)),
             "protect_active_capture_review": bool(protected_rules.get("protect_active_capture_review", True)),
         },
+    }
+
+
+def _operator_automation_policy_from_settings() -> dict[str, Any]:
+    settings = SettingsService()
+
+    def resolve(key: str, default: Any) -> Any:
+        try:
+            return settings.resolve(key).raw_value
+        except Exception:
+            return default
+
+    return {
+        "enabled": resolve("operator.automation.enabled", operator_automation.DEFAULT_POLICY["enabled"]),
+        "mode": resolve("operator.automation.mode", operator_automation.DEFAULT_POLICY["mode"]),
+        "interval_seconds": resolve("operator.automation.interval_seconds", operator_automation.DEFAULT_POLICY["interval_seconds"]),
+        "evidence_freshness_hours": resolve(
+            "operator.automation.evidence_freshness_hours",
+            operator_automation.DEFAULT_POLICY["evidence_freshness_hours"],
+        ),
+        "max_actions_per_run": resolve("operator.automation.max_actions_per_run", operator_automation.DEFAULT_POLICY["max_actions_per_run"]),
+        "auto_refresh_evidence": resolve("operator.automation.auto_refresh_evidence", operator_automation.DEFAULT_POLICY["auto_refresh_evidence"]),
+        "auto_ingest_approved_capture": resolve(
+            "operator.automation.auto_ingest_approved_capture",
+            operator_automation.DEFAULT_POLICY["auto_ingest_approved_capture"],
+        ),
+        "auto_remediate_diagnostics": resolve(
+            "operator.automation.auto_remediate_diagnostics",
+            operator_automation.DEFAULT_POLICY["auto_remediate_diagnostics"],
+        ),
+        "auto_refresh_embeddings": resolve(
+            "operator.automation.auto_refresh_embeddings",
+            operator_automation.DEFAULT_POLICY["auto_refresh_embeddings"],
+        ),
+        "auto_run_governance_shadow": resolve(
+            "operator.automation.auto_run_governance_shadow",
+            operator_automation.DEFAULT_POLICY["auto_run_governance_shadow"],
+        ),
+    }
+
+
+def _operator_automation_recurring_state(policy: dict[str, Any], last_run: dict[str, Any] | None) -> dict[str, Any]:
+    interval_seconds = int(policy.get("interval_seconds") or operator_automation.DEFAULT_POLICY["interval_seconds"])
+    state: dict[str, Any] = {
+        "enabled": bool(policy.get("enabled")),
+        "interval_seconds": interval_seconds,
+        "last_run_at": None,
+        "next_run_at": None,
+        "remaining_seconds": 0,
+        "due": True,
+        "settings_mutated": False,
+    }
+    if not last_run:
+        return state
+    last_run_at = _parse_operator_automation_time(
+        last_run.get("completed_at") or last_run.get("updated_at") or last_run.get("created_at")
+    )
+    if last_run_at is None:
+        return state
+    next_run_at = last_run_at + timedelta(seconds=interval_seconds)
+    now = datetime.now(timezone.utc)
+    remaining = max(0, int((next_run_at - now).total_seconds()))
+    return {
+        **state,
+        "last_run_at": last_run_at.isoformat(),
+        "next_run_at": next_run_at.isoformat(),
+        "remaining_seconds": remaining,
+        "due": remaining == 0,
+    }
+
+
+def _parse_operator_automation_time(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _automation_plan_action(
+    *,
+    action: str,
+    label: str,
+    source: str,
+    target_type: str,
+    target_id: str,
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+    risk: str = "low",
+) -> dict[str, Any]:
+    return {
+        "action": action,
+        "label": label,
+        "status": "eligible",
+        "risk": risk,
+        "source": source,
+        "target_type": target_type,
+        "target_id": target_id,
+        "reason": reason,
+        "rationale": {"summary": reason, "guardrails": {"settings_mutated": False, "allowlisted": True}},
+        "evidence": evidence or {},
+        "settings_mutated": False,
+    }
+
+
+def _automation_action_telemetry(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "total": len(actions),
+        "by_action": dict(Counter(str(item.get("action") or "unknown") for item in actions)),
+        "by_status": dict(Counter(str(item.get("status") or "unknown") for item in actions)),
+        "by_risk": dict(Counter(str(item.get("risk") or "unknown") for item in actions)),
+        "by_source": dict(Counter(str(item.get("source") or "automation") for item in actions)),
+        "settings_mutated": any(bool(item.get("settings_mutated")) for item in actions),
     }
 
 

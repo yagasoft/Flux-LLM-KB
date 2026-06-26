@@ -344,6 +344,9 @@ let codeSymbolRequestUrl: string | undefined;
 let retrievalBenchmarkRunPayload: unknown;
 let retrievalBenchmarkHistoryPayload: unknown;
 let diagnosticsActionPayload: unknown;
+let automationStatusPayload: unknown;
+let automationRunPayload: unknown;
+let automationActionsPayload: unknown;
 let governanceActionsPayload: unknown;
 let governanceDigestPayload: unknown;
 let governancePolicyPayload: unknown;
@@ -582,6 +585,69 @@ describe("Flux dashboard", () => {
     codeSymbolRequestUrl = undefined;
     retrievalBenchmarkRunPayload = undefined;
     diagnosticsActionPayload = undefined;
+    automationRunPayload = undefined;
+    automationStatusPayload = {
+      settings_mutated: false,
+      policy: {
+        enabled: false,
+        mode: "guarded",
+        interval_seconds: 1800,
+        next_run_at: "2026-06-26T11:00:00+00:00"
+      },
+      last_run: {
+        id: "automation-run-1",
+        status: "completed",
+        started_at: "2026-06-26T10:00:00+00:00",
+        completed_at: "2026-06-26T10:01:00+00:00",
+        summary: { eligible: 5, applied: 3, blocked: 2, settings_mutated: false }
+      },
+      eligible_actions: [
+        {
+          action: "refresh_retrieval_evidence",
+          label: "Refresh retrieval evidence",
+          status: "eligible",
+          risk: "low",
+          reason: "Benchmark evidence is stale."
+        },
+        {
+          action: "ingest_approved_capture",
+          label: "Ingest approved captures",
+          status: "eligible",
+          risk: "low",
+          reason: "Approved captures are waiting."
+        }
+      ],
+      manual_required: [
+        { action: "delete", label: "Delete or purge data", reason: "Destructive actions require a person." },
+        { action: "oauth", label: "OAuth setup", reason: "OAuth consent must stay manual." }
+      ],
+      recent_actions: [
+        {
+          id: "automation-action-1",
+          action: "refresh_retrieval_evidence",
+          status: "applied",
+          risk: "low",
+          source: "retrieval",
+          evidence: { suite: "standard" },
+          result: { settings_mutated: false }
+        }
+      ]
+    };
+    automationActionsPayload = {
+      settings_mutated: false,
+      status: "all",
+      actions: [
+        {
+          id: "automation-action-1",
+          action: "refresh_retrieval_evidence",
+          status: "applied",
+          risk: "low",
+          source: "retrieval",
+          evidence: { suite: "standard" },
+          result: { settings_mutated: false }
+        }
+      ]
+    };
     retrievalBenchmarkHistoryPayload = {
       suite: "standard",
       runs: [
@@ -886,6 +952,19 @@ describe("Flux dashboard", () => {
         diagnosticsActionPayload = JSON.parse(String(init.body));
         return json({ settings_mutated: false, action: "retry_corpus_job", result: { status: "pending" } });
       }
+      if (url === "/api/automation/status") return json(automationStatusPayload);
+      if (url === "/api/automation/actions") return json(automationActionsPayload);
+      if (url === "/api/automation/run" && init?.method === "POST") {
+        automationRunPayload = JSON.parse(String(init.body));
+        return json({
+          settings_mutated: false,
+          run: { id: "automation-run-2", status: "completed" },
+          summary: { eligible: 5, applied: 4, blocked: 1, settings_mutated: false },
+          actions: [
+            { id: "automation-action-2", action: "run_governance_shadow", status: "applied", risk: "low", source: "governance" }
+          ]
+        });
+      }
       if (url === "/api/retrieval/benchmarks") return json(retrievalBenchmarkHistoryPayload);
       if (url === "/api/retrieval/benchmarks/run" && init?.method === "POST") {
         retrievalBenchmarkRunPayload = JSON.parse(String(init.body));
@@ -1136,11 +1215,15 @@ describe("Flux dashboard", () => {
     vi.useRealTimers();
   });
 
-  test("defaults to health and renders the operations console without primary raw JSON panels", async () => {
+  test("defaults to overview and renders a friendly read-only status console", async () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "System Health" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("active");
+    expect(screen.getByRole("heading", { name: "System Overview" })).toBeInTheDocument();
+    expect(screen.getByText("What needs attention")).toBeInTheDocument();
+    expect(screen.getByText("Flux handled automatically")).toBeInTheDocument();
+    expect(screen.getByText("Next safe action")).toBeInTheDocument();
     expect(screen.getByText("PostgreSQL")).toBeInTheDocument();
     expect(screen.getByText("Outlook Host")).toBeInTheDocument();
     expect(screen.getByText("Host Agent")).toBeInTheDocument();
@@ -1151,30 +1234,33 @@ describe("Flux dashboard", () => {
     expect(screen.queryByText(/"database"/)).not.toBeInTheDocument();
   });
 
-  test("health shows Codex hook policy status and settings expose hook controls", async () => {
+  test("settings system section exposes Codex hooks deployment and runtime controls", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByRole("heading", { name: "Codex Hooks" })).toBeInTheDocument();
     expect(screen.getByText("Preflight brief")).toBeInTheDocument();
     expect(screen.getByText("Turn capture")).toBeInTheDocument();
     expect(screen.getByText("codex_hook.preflight_injected")).toBeInTheDocument();
     expect(screen.getByText("MCP tools")).toBeInTheDocument();
     expect(screen.getByText("kb.brief ready")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Deployment" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Runtime Actions/ })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Settings" }));
     await waitFor(() => {
       expect(screen.getAllByText("codex.hooks.enabled").length).toBeGreaterThan(0);
     });
     expect(screen.getByText("Enable Flux Codex hook policy evaluation.")).toBeInTheDocument();
   });
 
-  test("health shows acceleration capabilities, cache layout, and family telemetry", async () => {
+  test("performance shows acceleration capabilities, cache layout, and family telemetry", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Performance" }));
     expect(screen.getByRole("heading", { name: "Acceleration" })).toBeInTheDocument();
     expect(screen.getByText("NVIDIA")).toBeInTheDocument();
     expect(screen.getByText("nvidia-smi not found")).toBeInTheDocument();
@@ -1205,19 +1291,6 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Provider Acceleration")).toBeInTheDocument();
     expect(screen.getByText("Run scoped host/cloud reliability evidence.")).toBeInTheDocument();
     expect(screen.getByText("Code feedback reported misses.")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Code Diagnostics" })).toBeInTheDocument();
-    expect(screen.getByText("Code Assets")).toBeInTheDocument();
-    expect(screen.getByText("7 symbols / 9 refs")).toBeInTheDocument();
-    expect(screen.getByText("python 4; typescript 3; Parsed 6; Fallback 1")).toBeInTheDocument();
-    expect(screen.getByText("Code Feedback")).toBeInTheDocument();
-    expect(screen.getByText("2 feedback events")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Run code search" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Lookup code symbol" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Operational Diagnostics" })).toBeInTheDocument();
-    expect(screen.getByText("Blocked jobs")).toBeInTheDocument();
-    expect(screen.getByText("1 blocked locks")).toBeInTheDocument();
-    expect(screen.getByText("Job job-1 is blocked.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry corpus job" })).toBeInTheDocument();
     expect(screen.getAllByText("Partial").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Synthetic reliability evidence is current.")).toBeInTheDocument();
     expect(screen.getByText("Run scoped host/cloud calibration for the selected root.")).toBeInTheDocument();
@@ -1234,6 +1307,31 @@ describe("Flux dashboard", () => {
     expect(reliabilityRunPayload).toEqual({ scope: "root", root_name: "docs", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true });
     await user.click(screen.getByRole("button", { name: "Run all roots" }));
     expect(reliabilityRunPayload).toEqual({ scope: "all_roots", max_files: 1000, passes: 2, include_cache_readiness: false, include_tuning: true, evidence_level: "full" });
+    await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
+    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "standard" });
+    await user.click(screen.getByRole("button", { name: "Run tuning diagnostics" }));
+    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "tuning" });
+    expect(await screen.findByText("Manual candidates")).toBeInTheDocument();
+    expect(screen.getByText("crawler.hash_parallelism")).toBeInTheDocument();
+    expect(screen.getByText("current 1 -> candidate 4")).toBeInTheDocument();
+    expect(screen.getAllByText("office").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("3 pending")).toBeInTheDocument();
+  });
+
+  test("retrieval tab owns code diagnostics and code-search quality controls", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Retrieval" }));
+
+    expect(screen.getByRole("heading", { name: "Code Diagnostics" })).toBeInTheDocument();
+    expect(screen.getByText("Code Assets")).toBeInTheDocument();
+    expect(screen.getByText("7 symbols / 9 refs")).toBeInTheDocument();
+    expect(screen.getByText("python 4; typescript 3; Parsed 6; Fallback 1")).toBeInTheDocument();
+    expect(screen.getByText("Code Feedback")).toBeInTheDocument();
+    expect(screen.getByText("2 feedback events")).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Submit code feedback" }));
     expect(codeFeedbackPayload).toMatchObject({ surface: "dashboard", miss_category: "missing_symbol" });
     await user.clear(screen.getByLabelText("Code search query"));
@@ -1253,6 +1351,20 @@ describe("Flux dashboard", () => {
     expect(codeSymbolRequestUrl).toContain("/api/code/symbols?");
     expect(codeSymbolRequestUrl).toContain("symbol=OrderService.build_invoice");
     expect(await screen.findByText("test_build_invoice_returns_ready_status")).toBeInTheDocument();
+  });
+
+  test("diagnostics tab owns operational diagnostics and safe remediation controls", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Diagnostics" }));
+
+    expect(screen.getByRole("heading", { name: "Operational Diagnostics" })).toBeInTheDocument();
+    expect(screen.getByText("Blocked jobs")).toBeInTheDocument();
+    expect(screen.getByText("1 blocked locks")).toBeInTheDocument();
+    expect(screen.getByText("Job job-1 is blocked.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry corpus job" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Apply diagnostic filters" }));
     expect(fetch).toHaveBeenCalledWith("/api/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
     vi.spyOn(window, "confirm").mockReturnValueOnce(true);
@@ -1265,15 +1377,27 @@ describe("Flux dashboard", () => {
       family: "office",
       reason: "operator diagnostic remediation"
     });
-    await user.click(screen.getByRole("button", { name: "Run scan benchmark" }));
-    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "standard" });
-    await user.click(screen.getByRole("button", { name: "Run tuning diagnostics" }));
-    expect(benchmarkRunPayload).toEqual({ fixture: "all", files: 10, mode: "scan", passes: 2, workers: 1, family: "all", scope: "synthetic", scenario: "tuning" });
-    expect(await screen.findByText("Manual candidates")).toBeInTheDocument();
-    expect(screen.getByText("crawler.hash_parallelism")).toBeInTheDocument();
-    expect(screen.getByText("current 1 -> candidate 4")).toBeInTheDocument();
-    expect(screen.getAllByText("office").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("3 pending")).toBeInTheDocument();
+  });
+
+  test("automation tab lists guarded actions manual blocks audit trail and can run a guarded pass", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Automation" }));
+
+    expect(await screen.findByRole("heading", { name: "Guarded Automation" })).toBeInTheDocument();
+    expect(screen.getByText("Guarded Auto")).toBeInTheDocument();
+    expect(screen.getByText("Refresh retrieval evidence")).toBeInTheDocument();
+    expect(screen.getByText("Ingest approved captures")).toBeInTheDocument();
+    expect(screen.getByText("Delete or purge data")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Automation Audit Trail" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Run guarded pass now" }));
+
+    await waitFor(() => {
+      expect(automationRunPayload).toEqual({ mode: "guarded", dry_run: false, limit: 25 });
+    });
+    expect(screen.getByText(/Guarded automation completed/i)).toBeInTheDocument();
   });
 
   test("restores the last tab and selected root after refresh", async () => {
@@ -2228,7 +2352,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("guardrails 1/1 passed")).toBeInTheDocument();
   });
 
-  test("health renders structured diagnostics with details, copy, and target navigation", async () => {
+  test("diagnostics renders structured errors with details, copy, and target navigation", async () => {
     const writeText = vi.fn(async () => undefined);
     const user = userEvent.setup();
     Object.defineProperty(window.navigator, "clipboard", {
@@ -2274,6 +2398,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Diagnostics" }));
     const panel = screen.getByRole("heading", { name: "Actionable Diagnostics" }).closest(".panel");
     expect(panel).not.toBeNull();
     expect(within(panel as HTMLElement).getByText("OAuth database unavailable")).toBeInTheDocument();
@@ -2292,7 +2417,7 @@ describe("Flux dashboard", () => {
     expect(await screen.findByRole("heading", { name: "Mail Profiles" })).toBeInTheDocument();
     expect(screen.getAllByText("gmail-capture").length).toBeGreaterThan(0);
 
-    await user.click(screen.getByRole("button", { name: "Health" }));
+    await user.click(screen.getByRole("button", { name: "Diagnostics" }));
     await user.click(screen.getByRole("button", { name: "Open Jobs for corpus.job_failed" }));
     expect(await screen.findByRole("heading", { name: "Job Queue" })).toBeInTheDocument();
   });

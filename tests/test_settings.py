@@ -62,6 +62,16 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "governance.librarian.protected_memory_rules" in keys
     assert "governance.local_model_rationale.enabled" in keys
     assert "governance.local_model_rationale.model" in keys
+    assert "operator.automation.enabled" in keys
+    assert "operator.automation.mode" in keys
+    assert "operator.automation.interval_seconds" in keys
+    assert "operator.automation.evidence_freshness_hours" in keys
+    assert "operator.automation.max_actions_per_run" in keys
+    assert "operator.automation.auto_refresh_evidence" in keys
+    assert "operator.automation.auto_ingest_approved_capture" in keys
+    assert "operator.automation.auto_remediate_diagnostics" in keys
+    assert "operator.automation.auto_refresh_embeddings" in keys
+    assert "operator.automation.auto_run_governance_shadow" in keys
 
 
 def test_governance_settings_defaults_and_env_overrides(monkeypatch):
@@ -89,6 +99,32 @@ def test_governance_settings_defaults_and_env_overrides(monkeypatch):
     assert service.resolve("governance.librarian.mode").raw_value == "auto"
     assert service.resolve("governance.librarian.min_shadow_precision").raw_value == 0.91
     assert service.resolve("governance.local_model_rationale.model").raw_value == "llama3.1:8b"
+
+
+def test_operator_automation_settings_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("operator.automation.enabled").raw_value is False
+    assert service.resolve("operator.automation.mode").raw_value == "guarded"
+    assert service.resolve("operator.automation.interval_seconds").raw_value == 1800
+    assert service.resolve("operator.automation.evidence_freshness_hours").raw_value == 336
+    assert service.resolve("operator.automation.max_actions_per_run").raw_value == 25
+    assert service.resolve("operator.automation.auto_refresh_evidence").raw_value is True
+    assert service.resolve("operator.automation.auto_ingest_approved_capture").raw_value is True
+    assert service.resolve("operator.automation.auto_remediate_diagnostics").raw_value is True
+    assert service.resolve("operator.automation.auto_refresh_embeddings").raw_value is True
+    assert service.resolve("operator.automation.auto_run_governance_shadow").raw_value is True
+
+    monkeypatch.setenv("FLUX_KB_OPERATOR_AUTOMATION_ENABLED", "true")
+    monkeypatch.setenv("FLUX_KB_OPERATOR_AUTOMATION_MODE", "suggest_only")
+    monkeypatch.setenv("FLUX_KB_OPERATOR_AUTOMATION_INTERVAL_SECONDS", "2400")
+    monkeypatch.setenv("FLUX_KB_OPERATOR_AUTOMATION_MAX_ACTIONS_PER_RUN", "9")
+
+    assert service.resolve("operator.automation.enabled").raw_value is True
+    assert service.resolve("operator.automation.mode").raw_value == "suggest_only"
+    assert service.resolve("operator.automation.interval_seconds").raw_value == 2400
+    assert service.resolve("operator.automation.max_actions_per_run").raw_value == 9
 
 
 def test_codex_hook_settings_are_enabled_by_default(monkeypatch):

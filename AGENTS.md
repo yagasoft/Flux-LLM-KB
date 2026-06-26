@@ -33,3 +33,4 @@
 - After each roadmap-significant session or turn, update `docs/roadmap.md`
   `Progress %` and `Remaining Work` entries for affected roadmap items before
   closeout.
+- When dashboard UI, automation behavior, operator APIs, setup docs, or screenshots change, update `docs/user-guide/dashboard-user-manual.md`, regenerate DOCX/screenshots, and visually verify the rendered manual before closeout.

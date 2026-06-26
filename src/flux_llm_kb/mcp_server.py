@@ -387,6 +387,21 @@ def create_server():
             limit=limit,
         )
 
+    @mcp.tool(name="kb.automation_status")
+    def automation_status():
+        """Read guarded operator automation status, eligible allowlisted actions, and manual-required items."""
+        return service.operator_automation_status()
+
+    @mcp.tool(name="kb.automation_run")
+    def automation_run(mode: str = "guarded", limit: int = 25, dry_run: bool = False):
+        """Run one guarded operator automation pass; never mutates runtime settings."""
+        return service.run_operator_automation(mode=mode, trigger="manual", actor="mcp", limit=limit, dry_run=dry_run)
+
+    @mcp.tool(name="kb.automation_actions")
+    def automation_actions(status: str = "all", run_id: str | None = None, action: str | None = None, limit: int = 50):
+        """List sanitized guarded automation action history with settings_mutated=false evidence."""
+        return service.operator_automation_actions(status=status, run_id=run_id, action=action, limit=limit)
+
     @mcp.tool(name="kb.governance_run")
     def governance_run(mode: str = "shadow", limit: int = 25):
         """Generate a memory governance proposal run; defaults to shadow mode and never mutates runtime settings."""

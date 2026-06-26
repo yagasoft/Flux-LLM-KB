@@ -885,7 +885,52 @@ type CaptureDecisionState = {
   decision: "approve" | "reject";
 };
 
-type TabId = "health" | "corpus" | "mail" | "settings" | "retrieval" | "review" | "jobs";
+type TabId = "overview" | "automation" | "diagnostics" | "performance" | "corpus" | "mail" | "settings" | "retrieval" | "review" | "jobs";
+
+type AutomationAction = {
+  id?: string;
+  action?: string;
+  label?: string;
+  status?: string;
+  risk?: string;
+  source?: string;
+  target_type?: string | null;
+  target_id?: string | null;
+  reason?: string;
+  evidence?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  created_at?: string | null;
+};
+
+type AutomationRun = {
+  id?: string;
+  status?: string;
+  mode?: string;
+  trigger?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  summary?: Record<string, unknown>;
+};
+
+type AutomationRecurring = {
+  enabled?: boolean;
+  interval_seconds?: number;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  remaining_seconds?: number;
+  due?: boolean;
+};
+
+type AutomationStatus = {
+  settings_mutated?: boolean;
+  policy?: Record<string, unknown>;
+  recurring?: AutomationRecurring;
+  last_run?: AutomationRun | null;
+  eligible_actions?: AutomationAction[];
+  manual_required?: AutomationAction[];
+  recent_actions?: AutomationAction[];
+  runs?: AutomationRun[];
+};
 
 type ProfileForm = {
   name: string;
@@ -957,7 +1002,10 @@ const emptyState: LoadState = {
 };
 
 const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
-  { id: "health", label: "Health", icon: <HeartPulse size={20} /> },
+  { id: "overview", label: "Overview", icon: <HeartPulse size={20} /> },
+  { id: "automation", label: "Automation", icon: <ShieldCheck size={20} /> },
+  { id: "diagnostics", label: "Diagnostics", icon: <Wrench size={20} /> },
+  { id: "performance", label: "Performance", icon: <Gauge size={20} /> },
   { id: "corpus", label: "Corpus", icon: <Folder size={20} /> },
   { id: "mail", label: "Mail", icon: <Mail size={20} /> },
   { id: "settings", label: "Settings", icon: <Settings size={20} /> },
@@ -977,7 +1025,7 @@ type SavedDashboardState = {
 export default function App() {
   const initialDashboardState = readDashboardState();
   const [state, setState] = useState<LoadState>(emptyState);
-  const [activeTab, setActiveTab] = useState<TabId>(initialDashboardState.activeTab ?? "health");
+  const [activeTab, setActiveTab] = useState<TabId>(initialDashboardState.activeTab ?? "overview");
   const [selectedName, setSelectedName] = useState<string>(initialDashboardState.selectedName ?? "");
   const [selectedRootName, setSelectedRootName] = useState<string>(initialDashboardState.selectedRootName ?? "");
   const [loading, setLoading] = useState(true);
@@ -1567,11 +1615,12 @@ export default function App() {
   }
 
   function navigateDiagnostic(diagnostic: ErrorDiagnostic) {
-    const link = diagnostic.links?.find((item) => item.tab && navItems.some((nav) => nav.id === item.tab));
-    if (!link?.tab) return;
+    const link = diagnostic.links?.find((item) => normalizeTabId(item.tab));
+    const tab = normalizeTabId(link?.tab);
+    if (!tab) return;
     if (link.profile) setSelectedName(link.profile);
     if (link.root) setSelectedRootName(link.root);
-    setActiveTab(link.tab as TabId);
+    setActiveTab(tab);
   }
 
   async function runResultFileAction(detail: ResultDetail, action: "open" | "reveal") {
@@ -1709,17 +1758,29 @@ export default function App() {
           />
         )}
 
-        {activeTab === "health" && (
-          <HealthTab
+        {activeTab === "overview" && (
+          <OverviewTab
             state={state}
-            selectedRoot={selectedRoot}
             hostStatus={hostStatus}
-            restartRows={restartRows}
+            onErrorDetail={setErrorDetail}
+          />
+        )}
+
+        {activeTab === "automation" && (
+          <AutomationTab />
+        )}
+
+        {activeTab === "diagnostics" && (
+          <DiagnosticsTab
+            state={state}
             onErrorDetail={setErrorDetail}
             onCopyDiagnostic={(diagnostic) => void copyDiagnostic(diagnostic)}
             onNavigateDiagnostic={navigateDiagnostic}
-            onApplySettings={() => void applySettings()}
           />
+        )}
+
+        {activeTab === "performance" && (
+          <PerformanceTab state={state} selectedRoot={selectedRoot} />
         )}
 
         {activeTab === "corpus" && (
@@ -1742,6 +1803,8 @@ export default function App() {
         {activeTab === "settings" && (
           <SettingsTab
             settings={state.settings}
+            health={state.health}
+            hostStatus={hostStatus}
             restartRows={restartRows}
             onEdit={setSettingEditor}
             onReset={(setting) => void resetSetting(setting)}
@@ -2080,33 +2143,25 @@ function MailErrorsPanel({ mail, errors, onErrorDetail }: { mail: MailStatus; er
   );
 }
 
-function HealthTab({
+function OverviewTab({
   state,
-  selectedRoot,
   hostStatus,
-  restartRows,
-  onErrorDetail,
-  onCopyDiagnostic,
-  onNavigateDiagnostic,
-  onApplySettings
+  onErrorDetail
 }: {
   state: LoadState;
-  selectedRoot?: RootSummary | MonitoredRoot;
   hostStatus: string;
-  restartRows: SettingRow[];
   onErrorDetail: (error: string) => void;
-  onCopyDiagnostic: (diagnostic: ErrorDiagnostic) => void;
-  onNavigateDiagnostic: (diagnostic: ErrorDiagnostic) => void;
-  onApplySettings: () => void;
 }) {
   const runtimeRows = Object.entries(state.health.runtime ?? {});
   const hostAgent = state.health.host_agent;
   const codex = state.health.codex;
   const workers = state.health.workers;
-  const deployment = state.health.deployment;
+  const attentionItems = overviewAttentionItems(state, hostStatus);
+  const handledItems = overviewAutomationItems(state);
+  const nextAction = overviewNextAction(attentionItems);
   return (
     <section className="tab-grid">
-      <Panel title="System Health">
+      <Panel title="System Overview">
         <div className="status-grid">
           <StatusTile label="Database" ok={state.health.database?.ok} message={state.health.database?.message} />
           {runtimeRows.map(([key, value]) => <StatusTile key={key} label={key} ok={value.ok} message={value.message} />)}
@@ -2120,34 +2175,158 @@ function HealthTab({
           />
         </div>
       </Panel>
-      <CodexHooksPanel codex={codex} />
-      <OperatorEvidencePanel />
-      <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
-      <CodeDiagnosticsPanel />
-      <OperationalDiagnosticsPanel />
-      <Panel title="Deployment">
-        <div className="status-grid">
-          <StatusTile
-            label="Runtime Mode"
-            ok={deployment?.mode === "production" && !deployment?.repo_coupled}
-            message={deployment?.mode ?? "development"}
-          />
-          <StatusTile
-            label="Repo Coupled"
-            ok={!deployment?.repo_coupled}
-            message={deployment?.repo_coupled ? "runtime is repo-coupled" : "runtime is separated"}
-          />
-          <StatusTile label="Install Root" ok={Boolean(deployment?.install_root)} message={deployment?.install_root ?? "not deployed"} />
-          <StatusTile label="Image Tag" ok={Boolean(deployment?.image_tag)} message={deployment?.image_tag ?? "local/dev"} />
-          <StatusTile label="Private Dir" ok={Boolean(deployment?.private_dir)} message={deployment?.private_dir ?? "not configured"} />
-          <StatusTile label="Data Dir" ok={Boolean(deployment?.data_dir)} message={deployment?.data_dir ?? "not configured"} />
+      <Panel title="What needs attention">
+        <div className="friendly-list">
+          {attentionItems.map((item) => (
+            <div className="friendly-item" key={`${item.label}-${item.detail}`}>
+              <strong>{item.label}</strong>
+              <span>{item.detail}</span>
+            </div>
+          ))}
         </div>
       </Panel>
-      <ActionableDiagnostics diagnostics={state.health.recent_error_details ?? []} onCopy={onCopyDiagnostic} onNavigate={onNavigateDiagnostic} />
-      <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
-      <Panel title={`Runtime Actions (${restartRows.length})`} action={<button className="small-primary" type="button" onClick={onApplySettings}>Apply acknowledged</button>}>
-        <SettingsPreview rows={restartRows} />
+      <Panel title="Flux handled automatically">
+        <div className="friendly-list">
+          {handledItems.map((item) => (
+            <div className="friendly-item" key={`${item.label}-${item.detail}`}>
+              <strong>{item.label}</strong>
+              <span>{item.detail}</span>
+            </div>
+          ))}
+        </div>
       </Panel>
+      <Panel title="Next safe action">
+        <p className="panel-note">{nextAction}</p>
+      </Panel>
+      <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
+    </section>
+  );
+}
+
+function AutomationTab() {
+  const [status, setStatus] = useState<AutomationStatus>({ eligible_actions: [], manual_required: [], recent_actions: [] });
+  const [runStatus, setRunStatus] = useState("");
+  const [running, setRunning] = useState(false);
+  const loadAutomation = useCallback(() => {
+    return getJson<AutomationStatus>("/api/automation/status", { eligible_actions: [], manual_required: [], recent_actions: [] }).then((payload) => {
+      setStatus(payload);
+    });
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    getJson<AutomationStatus>("/api/automation/status", { eligible_actions: [], manual_required: [], recent_actions: [] }).then((payload) => {
+      if (!cancelled) setStatus(payload);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  async function runGuardedPass() {
+    setRunning(true);
+    setRunStatus("Running guarded automation...");
+    try {
+      const result = await sendJson<{ summary?: Record<string, unknown>; actions?: AutomationAction[] }>("/api/automation/run", "POST", {
+        mode: "guarded",
+        dry_run: false,
+        limit: 25
+      });
+      const applied = Number(result.summary?.applied ?? result.actions?.filter((action) => action.status === "applied").length ?? 0);
+      setRunStatus(`Guarded automation completed: ${applied} action${applied === 1 ? "" : "s"} applied.`);
+      await loadAutomation();
+    } catch (error) {
+      setRunStatus(`Guarded automation failed: ${errorMessage(error)}`);
+    } finally {
+      setRunning(false);
+    }
+  }
+  const policy = status.policy ?? {};
+  const recurring = status.recurring ?? {};
+  const lastRun = status.last_run;
+  const eligible = status.eligible_actions ?? [];
+  const manual = status.manual_required ?? [];
+  const recent = status.recent_actions ?? [];
+  const recurringEnabled = recurring.enabled ?? Boolean(policy.enabled);
+  return (
+    <section className="tab-grid">
+      <Panel
+        title="Guarded Automation"
+        action={<button className="small-primary" type="button" disabled={running} onClick={() => void runGuardedPass()}>Run guarded pass now</button>}
+      >
+        <div className="summary-cards">
+          <Stat label="Mode" value="Guarded Auto" />
+          <Stat label="Recurring" value={recurringEnabled ? "Enabled" : "Disabled"} />
+          <Stat label="Last Run" value={lastRun?.status ? humanizeIdentifier(lastRun.status) : "Not run"} />
+          <Stat label="Next Window" value={automationNextWindow(recurring, policy)} />
+        </div>
+        <p className="panel-note">Guarded automation runs only allowlisted, reversible or non-destructive actions. Settings changes, deletes, OAuth, host startup, and ambiguous work stay manual.</p>
+        {runStatus && <p className="muted">{runStatus}</p>}
+      </Panel>
+      <Panel title="Eligible Actions">
+        {eligible.length > 0 ? (
+          <MiniTable rows={eligible.map((action) => [
+            action.label ?? humanizeIdentifier(action.action ?? "action"),
+            humanizeIdentifier(action.risk ?? "low"),
+            action.reason ?? action.source ?? "Eligible guarded action"
+          ])} />
+        ) : (
+          <p className="muted">No guarded action is currently eligible.</p>
+        )}
+      </Panel>
+      <Panel title="Manual Required">
+        {manual.length > 0 ? (
+          <MiniTable rows={manual.slice(0, 10).map((action) => [
+            action.label ?? humanizeIdentifier(action.action ?? "manual"),
+            "manual",
+            action.reason ?? "Operator decision required"
+          ])} />
+        ) : (
+          <p className="muted">No manual-only items are queued.</p>
+        )}
+      </Panel>
+      <Panel title="Automation Audit Trail">
+        {recent.length > 0 ? (
+          <div className="diagnostic-list">
+            {recent.slice(0, 8).map((action) => (
+              <div className="diagnostic-item" key={action.id ?? `${action.action}-${action.created_at}`}>
+                <strong>{humanizeIdentifier(action.action ?? "automation action")}</strong>
+                <span>{humanizeIdentifier(action.status ?? "observed")} / {humanizeIdentifier(action.risk ?? "low")}</span>
+                <em>{action.source ?? "automation"}</em>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">No automation actions have been recorded yet.</p>
+        )}
+      </Panel>
+    </section>
+  );
+}
+
+function DiagnosticsTab({
+  state,
+  onErrorDetail,
+  onCopyDiagnostic,
+  onNavigateDiagnostic
+}: {
+  state: LoadState;
+  onErrorDetail: (error: string) => void;
+  onCopyDiagnostic: (diagnostic: ErrorDiagnostic) => void;
+  onNavigateDiagnostic: (diagnostic: ErrorDiagnostic) => void;
+}) {
+  return (
+    <section className="tab-grid">
+      <ActionableDiagnostics diagnostics={state.health.recent_error_details ?? []} onCopy={onCopyDiagnostic} onNavigate={onNavigateDiagnostic} />
+      <OperationalDiagnosticsPanel />
+      <RecentErrors errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
+    </section>
+  );
+}
+
+function PerformanceTab({ state, selectedRoot }: { state: LoadState; selectedRoot?: RootSummary | MonitoredRoot }) {
+  return (
+    <section className="tab-grid">
+      <OperatorEvidencePanel />
+      <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
     </section>
   );
 }
@@ -3308,10 +3487,54 @@ function CrawlRootDialog({ root, onClose, onSave }: { root?: RootSummary; onClos
   );
 }
 
-function SettingsTab({ settings, restartRows, onEdit, onReset, onApply }: { settings: SettingRow[]; restartRows: SettingRow[]; onEdit: (setting: SettingRow) => void; onReset: (setting: SettingRow) => void; onApply: (component?: string) => void }) {
+function DeploymentPanel({ deployment }: { deployment?: HealthPayload["deployment"] }) {
+  return (
+    <Panel title="Deployment">
+      <div className="status-grid">
+        <StatusTile
+          label="Runtime Mode"
+          ok={deployment?.mode === "production" && !deployment?.repo_coupled}
+          message={deployment?.mode ?? "development"}
+        />
+        <StatusTile
+          label="Repo Coupled"
+          ok={!deployment?.repo_coupled}
+          message={deployment?.repo_coupled ? "runtime is repo-coupled" : "runtime is separated"}
+        />
+        <StatusTile label="Install Root" ok={Boolean(deployment?.install_root)} message={deployment?.install_root ?? "not deployed"} />
+        <StatusTile label="Image Tag" ok={Boolean(deployment?.image_tag)} message={deployment?.image_tag ?? "local/dev"} />
+        <StatusTile label="Private Dir" ok={Boolean(deployment?.private_dir)} message={deployment?.private_dir ?? "not configured"} />
+        <StatusTile label="Data Dir" ok={Boolean(deployment?.data_dir)} message={deployment?.data_dir ?? "not configured"} />
+      </div>
+    </Panel>
+  );
+}
+
+function SettingsTab({
+  settings,
+  health,
+  hostStatus,
+  restartRows,
+  onEdit,
+  onReset,
+  onApply
+}: {
+  settings: SettingRow[];
+  health: HealthPayload;
+  hostStatus: string;
+  restartRows: SettingRow[];
+  onEdit: (setting: SettingRow) => void;
+  onReset: (setting: SettingRow) => void;
+  onApply: (component?: string) => void;
+}) {
   const categories = [...new Set(settings.map((setting) => setting.category))].sort();
   return (
     <section className="tab-grid">
+      <CodexHooksPanel codex={health.codex} />
+      <DeploymentPanel deployment={health.deployment} />
+      <Panel title={`Runtime Actions (${restartRows.length})`} action={<button className="small-primary" type="button" onClick={() => onApply()}>Apply acknowledged</button>}>
+        <SettingsPreview rows={restartRows} />
+      </Panel>
       <Panel title="Runtime Settings" action={<button className="small-primary" type="button" onClick={() => onApply()}>Apply pending</button>}>
         <p className="panel-note">Settings are catalog-backed and cross-platform. Environment values override database values, and sensitive values stay masked.</p>
         <div className="settings-table-wrap">
@@ -3357,6 +3580,7 @@ function SettingsTab({ settings, restartRows, onEdit, onReset, onApply }: { sett
       <Panel title="Categories">
         <div className="category-list">
           {categories.map((category) => <span key={category}>{category}</span>)}
+          <span>system: {hostStatusLabel(hostStatus)}</span>
         </div>
       </Panel>
     </section>
@@ -3491,6 +3715,7 @@ function RetrievalTab({
           <p className="muted">Use the top search box to query episodes, corpus chunks, mail bodies, and attachments.</p>
         )}
       </Panel>
+      <CodeDiagnosticsPanel />
       <Panel
         title="Retrieval Benchmarks"
         action={
@@ -5306,19 +5531,50 @@ function DataRows({ rows, empty }: { rows: Array<Record<string, unknown>>; empty
   );
 }
 
+function overviewAttentionItems(state: LoadState, hostStatus: string) {
+  const items: Array<{ label: string; detail: string }> = [];
+  const blockedJobs = state.health.jobs?.blocked ?? 0;
+  const failedJobs = state.health.jobs?.failed ?? 0;
+  const mailErrors = state.mail.errored_messages ?? 0;
+  if (blockedJobs > 0) items.push({ label: "Blocked jobs", detail: `${blockedJobs} job${blockedJobs === 1 ? "" : "s"} need Diagnostics review.` });
+  if (failedJobs > 0) items.push({ label: "Failed jobs", detail: `${failedJobs} job${failedJobs === 1 ? "" : "s"} failed recently.` });
+  if (mailErrors > 0) items.push({ label: "Mail errors", detail: `${mailErrors} message or profile issue${mailErrors === 1 ? "" : "s"} need Mail review.` });
+  if (hostStatus !== "running") items.push({ label: "Outlook host", detail: hostStatusLabel(hostStatus) });
+  if (state.health.codex?.restart_required) items.push({ label: "Codex integration", detail: "Restart Codex after reviewing Settings/System." });
+  if (items.length === 0) items.push({ label: "No urgent attention", detail: "Core services look healthy from the latest dashboard refresh." });
+  return items.slice(0, 5);
+}
+
+function overviewAutomationItems(state: LoadState) {
+  const items: Array<{ label: string; detail: string }> = [];
+  const pending = state.health.jobs?.pending ?? 0;
+  const workers = state.health.workers?.active ?? 0;
+  items.push({ label: "Worker processing", detail: `${workers} worker${workers === 1 ? "" : "s"} active; ${pending} pending job${pending === 1 ? "" : "s"}.` });
+  items.push({ label: "Safe recoveries", detail: "Diagnostics can run only non-destructive recovery buttons." });
+  items.push({ label: "Governance", detail: "Automation proposes shadow governance actions before any manual apply." });
+  return items;
+}
+
+function overviewNextAction(items: Array<{ label: string; detail: string }>) {
+  const first = items[0];
+  if (!first || first.label === "No urgent attention") return "No immediate action is required. Review Automation for optional guarded evidence refreshes.";
+  if (/blocked|failed/i.test(first.label)) return "Open Diagnostics and run only the suggested non-destructive remediation buttons.";
+  if (/mail/i.test(first.label)) return "Open Mail and inspect the affected profile before changing any mailbox policy.";
+  if (/codex/i.test(first.label)) return "Open Settings, review Codex hook status, then restart Codex manually if needed.";
+  return first.detail;
+}
+
 function readDashboardState(): SavedDashboardState {
   const params = new URLSearchParams(window.location.search);
-  const tab = params.get("tab") as TabId | null;
+  const tab = normalizeTabId(params.get("tab"));
   const root = params.get("root");
   const profile = params.get("profile");
-  if (tab && navItems.some((item) => item.id === tab)) {
+  if (tab) {
     return { activeTab: tab, selectedRootName: root ?? "", selectedName: profile ?? "" };
   }
   try {
     const saved = JSON.parse(localStorage.getItem(DASHBOARD_STATE_KEY) ?? "{}") as SavedDashboardState;
-    if (saved.activeTab && !navItems.some((item) => item.id === saved.activeTab)) {
-      saved.activeTab = "health";
-    }
+    saved.activeTab = normalizeTabId(saved.activeTab) ?? "overview";
     return saved;
   } catch {
     return {};
@@ -5328,7 +5584,7 @@ function readDashboardState(): SavedDashboardState {
 function writeDashboardState(value: SavedDashboardState) {
   localStorage.setItem(DASHBOARD_STATE_KEY, JSON.stringify(value));
   const params = new URLSearchParams();
-  if (value.activeTab && value.activeTab !== "health") params.set("tab", value.activeTab);
+  if (value.activeTab && value.activeTab !== "overview") params.set("tab", value.activeTab);
   if (value.selectedRootName) params.set("root", value.selectedRootName);
   if (value.selectedName) params.set("profile", value.selectedName);
   const query = params.toString();
@@ -5336,6 +5592,12 @@ function writeDashboardState(value: SavedDashboardState) {
   if (`${window.location.pathname}${window.location.search}` !== nextUrl) {
     window.history.replaceState(null, "", nextUrl);
   }
+}
+
+function normalizeTabId(value: unknown): TabId | undefined {
+  const raw = String(value ?? "").trim().toLowerCase();
+  const normalized = raw === "health" ? "overview" : raw;
+  return navItems.some((item) => item.id === normalized) ? normalized as TabId : undefined;
 }
 
 function dashboardPollSeconds(settings: SettingRow[]) {
@@ -5681,6 +5943,17 @@ function intervalLabel(seconds?: number) {
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   if (seconds % 86400 === 0) return `${seconds / 86400}d`;
   return `${Math.round(seconds / 3600)}h`;
+}
+
+function automationNextWindow(recurring: AutomationRecurring, policy: Record<string, unknown>) {
+  if (recurring.due === true) return "Due now";
+  if (typeof recurring.remaining_seconds === "number" && recurring.remaining_seconds > 0) {
+    return `in ${intervalLabel(recurring.remaining_seconds)}`;
+  }
+  if (recurring.next_run_at) return formatDate(recurring.next_run_at);
+  if (typeof policy.next_run_at === "string") return formatDate(policy.next_run_at);
+  if (typeof policy.next_run_after_seconds === "number") return intervalLabel(policy.next_run_after_seconds);
+  return "-";
 }
 
 function hostStatusLabel(status: string) {

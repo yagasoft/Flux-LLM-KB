@@ -49,6 +49,9 @@ Tools:
 | `kb.code_feedback_summary` | Summarize code retrieval feedback by category and root. |
 | `kb.operational_diagnostics` | Return read-only retrieval, watcher, worker, job, and mail diagnostics with optional filters. |
 | `kb.diagnostics_remediate` | Run a confirmation-worthy diagnostic remediation action such as retrying a corpus job, scoped backfill, or root cleanup; responses always report `settings_mutated: false`. |
+| `kb.automation_status` | Return default-off guarded automation posture, eligible safe actions, manual-required items, recent runs, and next-run metadata. |
+| `kb.automation_run` | Run a bounded guarded automation pass for allowlisted low-risk actions without mutating settings. |
+| `kb.automation_actions` | List durable sanitized guarded automation action history by status, action, or run. |
 | `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history with metric deltas, calibration summaries, and advisory candidates. |
 | `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, deltas, calibration summaries, and case-failure evidence. |
 | `kb.governance_run` | Run evaluated memory governance in shadow, manual, or explicitly configured auto mode and persist sanitized proposals. |
@@ -105,6 +108,9 @@ Endpoints:
 - `GET /api/code/feedback/summary?root_name=<name>&limit=<n>`
 - `GET /api/diagnostics/{section}` where `section` is `all`, `retrieval`, `watcher`, `workers`, `jobs`, or `mail`, with optional `root_name`, `status`, `family`, `since_hours`, and `include_details`
 - `POST /api/diagnostics/actions` with `action`, `target_type`, optional `target_id`, `root_name`, `family`, and `reason`; supported actions are confirmation-gated and never mutate settings
+- `GET /api/automation/status`
+- `POST /api/automation/run` with optional `mode`, `limit`, and `dry_run`
+- `GET /api/automation/actions?run_id=<id>&status=<proposed|applied|skipped|blocked|failed|all>&action=<name>&limit=<n>`
 - `GET /api/settings`
 - `GET /api/settings/{key}`
 - `PUT /api/settings/{key}`
@@ -248,6 +254,9 @@ flux-kb code feedback add --query "redacted local query" --root app --miss-categ
 flux-kb code feedback summary --root app
 flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
+flux-kb automation status
+flux-kb automation run --mode guarded --limit 25
+flux-kb automation actions --status all --limit 25
 flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
 flux-kb retrieval benchmark run --suite governance-shadow --label before-automation
@@ -342,7 +351,7 @@ localhost-only local model probing, per-family worker caps, hash parallelism,
 and recursive container caps. Local inference probing is disabled by default and
 rejects non-loopback URLs. The read-only acceleration status is available
 through `flux-kb acceleration status`, `GET /api/acceleration/status`,
-`kb.acceleration_status`, and the dashboard Health tab. The payload includes
+`kb.acceleration_status`, and the dashboard Performance tab. The payload includes
 selected watcher backend, native/fallback state, fallback reason,
 worker-family OCR/ASR/container/parser/embedding telemetry, worker-family
 backpressure, cap usage, retry/lock transitions, `manifest_skipped_unchanged`
@@ -416,6 +425,18 @@ corpus jobs, running scoped backfill, repairing root-scoped asset statuses, or
 clearing stale completed-job errors. Those actions run through `flux-kb
 diagnostics remediate`, `POST /api/diagnostics/actions`, or
 `kb.diagnostics_remediate`, append audit events, and always return
+`settings_mutated: false`.
+Guarded operator automation is available through `flux-kb automation
+status|run|actions`, `GET /api/automation/status`, `POST
+/api/automation/run`, `GET /api/automation/actions`, and
+`kb.automation_status`, `kb.automation_run`, and `kb.automation_actions`.
+Recurring automation is controlled by default-off `operator.automation.*`
+settings. A manually triggered guarded pass may refresh retrieval evidence,
+ingest already-approved capture jobs, run safe diagnostic recovery, enqueue or
+backfill embeddings, and run governance in shadow mode. Deletes, destructive
+mail policies, OAuth, host startup, restart/reindex settings, capture decisions,
+high-risk governance, opening/revealing files, and ambiguous actions remain
+manual. Automation history stores sanitized evidence and reports
 `settings_mutated: false`.
 Retrieval benchmarks are separate from acceleration benchmarks. They seed
 temporary public-safe synthetic retrieval cases, call the same search, explain,

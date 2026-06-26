@@ -59,6 +59,19 @@ def main(argv: list[str] | None = None) -> int:
     retrieval_benchmark_history.add_argument("--label")
     retrieval_benchmark_history.add_argument("--limit", type=int, default=20)
 
+    automation_parser = subparsers.add_parser("automation", help="Inspect or run guarded operator automation")
+    automation_subparsers = automation_parser.add_subparsers(dest="automation_command", required=True)
+    automation_subparsers.add_parser("status", help="Show guarded automation status and eligible actions")
+    automation_run = automation_subparsers.add_parser("run", help="Run one guarded automation pass now")
+    automation_run.add_argument("--mode", default="guarded", choices=["guarded", "suggest_only"])
+    automation_run.add_argument("--limit", type=int, default=25)
+    automation_run.add_argument("--dry-run", action="store_true")
+    automation_actions = automation_subparsers.add_parser("actions", help="List recent guarded automation actions")
+    automation_actions.add_argument("--status", default="all")
+    automation_actions.add_argument("--run-id")
+    automation_actions.add_argument("--action")
+    automation_actions.add_argument("--limit", type=int, default=50)
+
     governance_parser = subparsers.add_parser("governance", help="Run and review evaluated memory governance automation")
     governance_subparsers = governance_parser.add_subparsers(dest="governance_command", required=True)
     governance_run = governance_subparsers.add_parser("run", help="Generate a governance proposal run")
@@ -521,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
         "search": _search,
         "explain": _explain,
         "retrieval": _retrieval,
+        "automation": _automation,
         "governance": _governance,
         "remember": _remember,
         "episodes": _episodes,
@@ -900,6 +914,28 @@ def _diagnostics(args: argparse.Namespace) -> int:
             since_hours=args.since_hours,
             include_details=args.include_details,
         )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _automation(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.automation_command == "status":
+        payload = service.operator_automation_status()
+    elif args.automation_command == "run":
+        payload = service.run_operator_automation(
+            mode=args.mode,
+            trigger="manual",
+            actor="cli",
+            limit=args.limit,
+            dry_run=args.dry_run,
+        )
+    elif args.automation_command == "actions":
+        payload = service.operator_automation_actions(status=args.status, run_id=args.run_id, action=args.action, limit=args.limit)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.automation_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

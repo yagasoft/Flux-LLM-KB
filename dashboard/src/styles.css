@@ -414,6 +414,28 @@ kbd {
   font-size: 13px;
 }
 
+.friendly-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 16px;
+}
+
+.friendly-item {
+  display: grid;
+  gap: 3px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.friendly-item:last-child {
+  border-bottom: 0;
+}
+
+.friendly-item span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 .small-primary {
   min-height: 34px;
   padding: 0 18px;
