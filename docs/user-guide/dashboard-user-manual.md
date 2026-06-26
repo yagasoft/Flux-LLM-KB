@@ -343,13 +343,15 @@ The main panels are:
 | stale | The watcher heartbeat or crawl evidence is old. | Run sync or inspect Diagnostics. |
 | indexed | Asset has been extracted and indexed. | Search should be able to use it. |
 | queued | Asset or job is waiting for a worker. | Check Jobs if queue stays high. |
-| blocked_missing_dependency | A job needs a dependency. | Install/configure manually, then retry. |
-| duplicate_suppressed | Flux detected duplicate content and suppressed duplicate evidence. | Usually no action. |
-| include_globs | File patterns allowed for this root. | Use to limit what Flux sees. |
-| exclude_globs | File patterns excluded from this root. | Use to avoid private, generated, or noisy paths. |
-| glob_mode inherit | Use global policy. | Good default. |
-| glob_mode extend | Add root-specific globs to global policy. | Use for normal root customization. |
-| glob_mode override | Replace global policy for this root. | Use carefully. |
+| `metadata_only` | Flux has only operational file metadata, not searchable extracted content. | Accept only for limited pilot roots; for go-live roots, exclude the file type or install the extractor. |
+| blocked missing dependency | A job needs a dependency. | Install/configure manually, then retry. |
+| `duplicate_suppressed` | Flux detected duplicate content and suppressed duplicate evidence. | Usually no action. |
+| `strict_indexing` | Root policy blocks metadata-only indexing. | Use for broad or important go-live roots. |
+| `include_globs` | File patterns allowed for this root. | Use to limit what Flux sees. |
+| `exclude_globs` | File patterns excluded from this root. | Use to avoid private, generated, or noisy paths. |
+| `glob_mode inherit` | Use global policy. | Good default. |
+| `glob_mode extend` | Add root-specific globs to global policy. | Use for normal root customization. |
+| `glob_mode override` | Replace global policy for this root. | Use carefully. |
 
 ### What the actions do
 
@@ -369,7 +371,7 @@ The main panels are:
 
 Corpus controls the boundary between your local files and Flux memory. The main safety principle is simple: adding and syncing are powerful, but deleting, purging, broad rescans, and overly broad globs deserve careful manual attention.
 
-Use include/exclude globs to avoid indexing private exports, generated folders, caches, build outputs, or credentials. Use dry run when you are unsure what a sync will touch. Use backfill when jobs are known-safe and queued. Use Diagnostics when a job is blocked.
+Use include/exclude globs to avoid indexing private exports, generated folders, caches, build outputs, or credentials. Use strict indexing for go-live roots so unsupported files become visible `blocked_missing_dependency` work instead of silent metadata-only discovery. Use dry run when you are unsure what a sync will touch. Use backfill when jobs are known-safe and queued. Use Diagnostics when a job is blocked.
 
 ### Add or edit watched path fields
 
@@ -383,6 +385,7 @@ Use include/exclude globs to avoid indexing private exports, generated folders, 
 | Trust rank | Relative evidence trust score. | Keep default unless you have a policy reason. |
 | Include globs | Allowed file patterns. | Prefer explicit patterns for code or sensitive roots. |
 | Exclude globs | Blocked patterns. | Always exclude private, cache, build, and temp folders when relevant. |
+| Strict indexing | Root metadata that blocks metadata-only retrieval behavior. | On for broad or important roots; off only for limited pilots. |
 | Max inline bytes | Maximum small-file inline read threshold. | Keep default unless advised by Performance evidence. |
 | Heavy threshold bytes | Size threshold for heavier extraction paths. | Keep default unless advised by benchmark evidence. |
 

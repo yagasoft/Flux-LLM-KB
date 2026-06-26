@@ -79,6 +79,25 @@ def test_scan_path_classifies_heavy_media_as_deferred(tmp_path):
     ]
 
 
+def test_scan_path_blocks_metadata_only_files_when_strict_indexing_enabled(tmp_path):
+    root = tmp_path / "strict"
+    root.mkdir()
+    (root / "unknown.bin").write_bytes(b"\x00\x01\x02")
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, strict_indexing=True))
+
+    assert len(plan.assets) == 1
+    asset = plan.assets[0]
+    assert asset.file_kind == "binary"
+    assert asset.extraction_tier == "metadata_only"
+    assert asset.extraction_status == "blocked_missing_dependency"
+    assert asset.chunks == ()
+    assert asset.metadata["strict_indexing"] is True
+    assert asset.metadata["metadata_only_blocked"] is True
+    assert "Strict indexing" in asset.metadata["readiness_reason"]
+    assert plan.deferred_jobs == []
+
+
 def test_scan_path_records_image_metadata_without_ocr(monkeypatch, tmp_path):
     root = tmp_path / "images"
     root.mkdir()

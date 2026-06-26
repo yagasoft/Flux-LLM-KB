@@ -55,6 +55,7 @@ def test_crawl_root_create_endpoint_validates_and_adds_root(tmp_path, monkeypatc
             "exclude_globs": kwargs["exclude_globs"],
             "max_inline_bytes": kwargs["max_inline_bytes"],
             "heavy_threshold_bytes": kwargs["heavy_threshold_bytes"],
+            "metadata": kwargs["metadata"],
         }
 
     class FakeService:
@@ -78,6 +79,7 @@ def test_crawl_root_create_endpoint_validates_and_adds_root(tmp_path, monkeypatc
             "exclude_globs": ["private/**"],
             "max_inline_bytes": 131072,
             "heavy_threshold_bytes": 5242880,
+            "strict_indexing": True,
         },
     )
 
@@ -88,6 +90,7 @@ def test_crawl_root_create_endpoint_validates_and_adds_root(tmp_path, monkeypatc
     assert captured["watch_enabled"] is True
     assert captured["include_globs"] == ["**/*.md"]
     assert captured["exclude_globs"] == ["private/**"]
+    assert captured["metadata"]["strict_indexing"] is True
 
 
 def test_crawl_root_create_accepts_windows_host_path_via_host_agent(monkeypatch):
@@ -813,6 +816,11 @@ def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path
         }
 
     monkeypatch.setattr(database, "update_monitored_root", fake_update_monitored_root)
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root_by_identifier",
+        lambda _root_id: {"metadata": {"owner": "ops", "strict_indexing": True}},
+    )
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
     client = fastapi_testclient.TestClient(create_app())
@@ -829,6 +837,7 @@ def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path
             "glob_mode": "override",
             "max_inline_bytes": 262144,
             "heavy_threshold_bytes": 10485760,
+            "strict_indexing": False,
         },
     )
 
@@ -837,6 +846,8 @@ def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path
     assert captured["root_id"] == "root-1"
     assert captured["watch_enabled"] is False
     assert captured["metadata"]["source"] == "dashboard"
+    assert captured["metadata"]["owner"] == "ops"
+    assert captured["metadata"]["strict_indexing"] is False
 
 
 def test_crawl_root_delete_endpoint_purges_index(monkeypatch):

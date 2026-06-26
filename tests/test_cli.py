@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from flux_llm_kb import cli
 
@@ -97,6 +98,56 @@ def test_cli_search_forwards_code_retrieval_filters(monkeypatch, capsys):
         "path_globs": ["src/*.py"],
         "include_generated": True,
     }
+
+
+def test_crawl_edit_preserves_root_metadata_and_strict_indexing(monkeypatch):
+    from flux_llm_kb import database
+
+    captured = {}
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root_by_identifier",
+        lambda _root: {
+            "id": "root-1",
+            "name": "docs",
+            "root_path": "E:/docs",
+            "enabled": True,
+            "recursive": True,
+            "watch_enabled": False,
+            "trust_rank": 500,
+            "include_globs": ["*.md"],
+            "exclude_globs": ["private/**"],
+            "glob_mode": "extend",
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"owner": "ops", "strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "update_monitored_root", lambda **kwargs: captured.setdefault("kwargs", kwargs))
+
+    payload = cli._crawl_edit(
+        SimpleNamespace(
+            root="docs",
+            name=None,
+            path=None,
+            enable=False,
+            disable=False,
+            enable_watch=False,
+            disable_watch=False,
+            recursive=False,
+            no_recursive=False,
+            trust_rank=None,
+            include_glob=None,
+            exclude_glob=None,
+            glob_mode=None,
+            max_inline_bytes=None,
+            heavy_threshold_bytes=None,
+            strict_indexing=None,
+        )
+    )
+
+    assert payload is captured["kwargs"]
+    assert captured["kwargs"]["metadata"] == {"owner": "ops", "strict_indexing": True, "source": "cli"}
 
 
 def test_cli_explain_uses_service_explain(monkeypatch, capsys):

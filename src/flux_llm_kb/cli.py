@@ -270,6 +270,11 @@ def main(argv: list[str] | None = None) -> int:
     crawl_add.add_argument("--watch", action="store_true", help="Enable watch mode for this root")
     crawl_add.add_argument("--no-recursive", action="store_false", dest="recursive")
     crawl_add.add_argument("--glob-mode", choices=["inherit", "extend", "override"], default="extend")
+    crawl_add.add_argument(
+        "--strict-indexing",
+        action="store_true",
+        help="Block metadata-only assets for this root instead of treating them as indexed knowledge",
+    )
     crawl_add.set_defaults(recursive=True)
 
     crawl_edit = crawl_subparsers.add_parser("edit", help="Edit a monitored root")
@@ -289,6 +294,19 @@ def main(argv: list[str] | None = None) -> int:
     crawl_edit.add_argument("--glob-mode", choices=["inherit", "extend", "override"])
     crawl_edit.add_argument("--max-inline-bytes", type=int)
     crawl_edit.add_argument("--heavy-threshold-bytes", type=int)
+    crawl_edit_strict = crawl_edit.add_mutually_exclusive_group()
+    crawl_edit_strict.add_argument(
+        "--strict-indexing",
+        action="store_true",
+        default=None,
+        help="Block metadata-only assets for this root instead of treating them as indexed knowledge",
+    )
+    crawl_edit_strict.add_argument(
+        "--allow-metadata-only",
+        action="store_false",
+        dest="strict_indexing",
+        help="Allow metadata-only asset rows for this pilot root",
+    )
 
     crawl_delete = crawl_subparsers.add_parser("delete", help="Delete a monitored root and purge indexed files")
     crawl_delete.add_argument("root")
@@ -977,6 +995,7 @@ def _crawl(args: argparse.Namespace) -> int:
             glob_mode=args.glob_mode,
             max_inline_bytes=int(settings.resolve("crawler.max_inline_bytes").raw_value),
             heavy_threshold_bytes=int(settings.resolve("crawler.heavy_threshold_bytes").raw_value),
+            metadata={"source": "cli", "strict_indexing": True} if args.strict_indexing else {"source": "cli"},
         )
     elif args.crawl_command == "list":
         payload = database.list_monitored_roots()
@@ -1057,6 +1076,10 @@ def _crawl_edit(args: argparse.Namespace) -> dict:
         recursive = True
     if args.no_recursive:
         recursive = False
+    metadata = dict(existing.get("metadata") or {})
+    if getattr(args, "strict_indexing", None) is not None:
+        metadata["strict_indexing"] = bool(args.strict_indexing)
+    metadata["source"] = "cli"
     return database.update_monitored_root(
         root_id=existing["id"],
         name=args.name or existing["name"],
@@ -1072,7 +1095,7 @@ def _crawl_edit(args: argparse.Namespace) -> dict:
         heavy_threshold_bytes=(
             args.heavy_threshold_bytes if args.heavy_threshold_bytes is not None else existing["heavy_threshold_bytes"]
         ),
-        metadata={"source": "cli"},
+        metadata=metadata,
     )
 
 

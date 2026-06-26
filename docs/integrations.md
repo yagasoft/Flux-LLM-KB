@@ -108,6 +108,7 @@ Endpoints:
 - `GET /api/code/feedback/summary?root_name=<name>&limit=<n>`
 - `GET /api/diagnostics/{section}` where `section` is `all`, `retrieval`, `watcher`, `workers`, `jobs`, or `mail`, with optional `root_name`, `status`, `family`, `since_hours`, and `include_details`
 - `POST /api/diagnostics/actions` with `action`, `target_type`, optional `target_id`, `root_name`, `family`, and `reason`; supported actions are confirmation-gated and never mutate settings
+- `POST /api/crawl/roots` and `PATCH /api/crawl/roots/{root_id}` accept `strict_indexing` to block metadata-only indexing behavior for go-live roots
 - `GET /api/automation/status`
 - `POST /api/automation/run` with optional `mode`, `limit`, and `dry_run`
 - `GET /api/automation/actions?run_id=<id>&status=<proposed|applied|skipped|blocked|failed|all>&action=<name>&limit=<n>`
@@ -236,6 +237,8 @@ flux-kb capture review ingest --limit 25
 flux-kb semantic-duplicates refresh --memory-class all --limit 1000
 flux-kb semantic-duplicates list --memory-class corpus --limit 50
 flux-kb acceleration status
+flux-kb crawl add E:\Projects --name projects --strict-indexing
+flux-kb crawl edit projects --strict-indexing
 flux-kb crawl watch probe --timeout 2
 flux-kb crawl worker status --family all
 flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
@@ -397,9 +400,10 @@ remain outside these gates.
 `GET /api/acceleration/reliability/roots`, and
 `kb.indexer_reliability_roots` summarize enabled monitored roots as sanitized
 readiness cards with stale/missing scoped evidence, blocked job/asset counts,
-latest benchmark references, and manual tuning candidates. `--scope all-roots`
-on the reliability run executes the read-only evidence workflow across enabled
-roots without mutating settings.
+strict-indexing state, latest benchmark references, and manual tuning
+candidates. Strict roots treat metadata-only asset leftovers as blockers.
+`--scope all-roots` on the reliability run executes the read-only evidence
+workflow across enabled roots without mutating settings.
 Code diagnostics use the existing `source_assets`, `asset_chunks`,
 `code_symbols`, `code_references`, and `code_retrieval_feedback_events` tables.
 `flux-kb code status|search|symbol`, `GET /api/code/status`,

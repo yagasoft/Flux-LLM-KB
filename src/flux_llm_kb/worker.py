@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from . import database
-from .crawler import CorpusPolicy
-from .extractors import extract_file
+from .crawler import CorpusPolicy, strict_indexing_enabled, strict_metadata_only_message
+from .extractors import ExtractionResult, extract_file
 from .settings import SettingsService
 
 
@@ -32,11 +32,14 @@ def process_corpus_job(job: dict) -> JobProcessResult:
     if not path.exists():
         return JobProcessResult(status="failed", message=f"file not found: {relative_path}")
 
+    root_metadata = root.get("metadata") if isinstance(root.get("metadata"), dict) else {}
+    strict_indexing = strict_indexing_enabled(root_metadata)
     policy = CorpusPolicy(
         root_path=Path(root["root_path"]),
         recursive=root["recursive"],
         include_globs=tuple(root["include_globs"]),
         exclude_globs=tuple(root["exclude_globs"]),
+        strict_indexing=strict_indexing,
         max_inline_bytes=root["max_inline_bytes"],
         heavy_threshold_bytes=root["heavy_threshold_bytes"],
         **_configured_container_limits(),
@@ -47,6 +50,7 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         if _is_locked_error(exc):
             return JobProcessResult(status="retrying_locked", message=str(exc))
         raise
+    result = _enforce_strict_indexing_result(result, strict_indexing=strict_indexing)
     if result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
         database.apply_extraction_result(root_name=root_name, relative_path=relative_path, result=result)
     return JobProcessResult(status=result.status, message=result.message, telemetry=_telemetry_from_extraction_result(result))
@@ -79,6 +83,23 @@ def process_embedding_job(job: dict) -> JobProcessResult:
 def _is_locked_error(exc: OSError) -> bool:
     text = str(exc).lower()
     return isinstance(exc, PermissionError) or "locked" in text or "being used by another process" in text
+
+
+def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) -> object:
+    if not strict_indexing or getattr(result, "status", None) != "metadata_only":
+        return result
+    metadata = dict(getattr(result, "metadata", {}) or {})
+    message = strict_metadata_only_message(getattr(result, "message", None))
+    metadata.update(
+        {
+            "strict_indexing": True,
+            "metadata_only_blocked": True,
+            "readiness_status": "blocked_missing_dependency",
+            "readiness_reason": message,
+            "original_status": "metadata_only",
+        }
+    )
+    return ExtractionResult(status="blocked_missing_dependency", chunks=(), child_assets=(), metadata=metadata, message=message)
 
 
 def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:

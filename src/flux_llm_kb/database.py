@@ -482,6 +482,7 @@ def search_corpus_chunks(
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
+                  AND a.extraction_status <> 'metadata_only'
                   AND c.search_vector @@ plainto_tsquery('english', %s)
                   AND NOT EXISTS (
                       SELECT 1
@@ -520,6 +521,7 @@ def search_corpus_chunks(
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
+                  AND a.extraction_status <> 'metadata_only'
                   AND (similarity(c.title, %s) > 0.10 OR similarity(c.body, %s) > 0.15)
                   AND NOT EXISTS (
                       SELECT 1
@@ -561,6 +563,7 @@ def search_corpus_chunks(
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
+                  AND a.extraction_status <> 'metadata_only'
                   AND emb.model = %s
                   AND 1 - (emb.embedding <=> %s::vector) > 0.25
                   AND NOT EXISTS (
@@ -616,6 +619,7 @@ def search_corpus_chunks(
                     WHERE r.enabled
                       AND a.deleted_at IS NULL
                       AND a.canonical_asset_id IS NULL
+                      AND a.extraction_status <> 'metadata_only'
                       AND (
                           cs.qualified_name ILIKE %s
                           OR cs.name ILIKE %s
@@ -663,6 +667,7 @@ def search_corpus_chunks(
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
+                      AND a.extraction_status <> 'metadata_only'
                       {root_name_sql}
                       {code_filter_sql}
                     ORDER BY r.trust_rank ASC, c.updated_at DESC
@@ -693,6 +698,7 @@ def search_corpus_chunks(
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
+                      AND a.extraction_status <> 'metadata_only'
                       {root_name_sql}
                       {code_filter_sql}
                     ORDER BY score DESC, c.updated_at DESC
@@ -2323,6 +2329,9 @@ def persist_crawl_plan(
                         extraction_status = CASE
                             WHEN EXCLUDED.extraction_status = 'duplicate_suppressed'
                                 THEN EXCLUDED.extraction_status
+                            WHEN EXCLUDED.extraction_status = 'blocked_missing_dependency'
+                                 AND EXCLUDED.metadata ? 'metadata_only_blocked'
+                                THEN EXCLUDED.extraction_status
                             WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status = 'metadata_only'
@@ -3562,7 +3571,7 @@ def recent_retrieval_explain_diagnostics(*, limit: int = 25, url: str | None = N
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT query_hashes, aggregate_metrics, failed_cases, created_at
+                SELECT query_count, metrics, case_results, created_at
                 FROM retrieval_benchmark_runs
                 ORDER BY created_at DESC
                 LIMIT %s
@@ -3571,15 +3580,25 @@ def recent_retrieval_explain_diagnostics(*, limit: int = 25, url: str | None = N
             )
             rows = []
             for row in cur.fetchall():
-                hashes = row[0] if isinstance(row[0], list) else []
+                query_count = int(row[0] or 0)
                 metrics = row[1] if isinstance(row[1], dict) else {}
-                failures = row[2] if isinstance(row[2], list) else []
+                cases = row[2] if isinstance(row[2], list) else []
+                hashes = [case.get("query_hash") for case in cases if isinstance(case, dict) and case.get("query_hash")]
+                failures = [
+                    case
+                    for case in cases
+                    if isinstance(case, dict)
+                    and (
+                        case.get("passed") is False
+                        or str(case.get("status") or "").lower() in {"failed", "failure", "error"}
+                    )
+                ]
                 rows.append(
                     {
                         "query_hash": hashes[0] if hashes else None,
-                        "result_count": int(metrics.get("query_count") or metrics.get("case_count") or 0),
-                        "confidence": metrics.get("confidence_band") or "metadata_only",
-                        "failed_case_count": len(failures),
+                        "result_count": query_count or int(metrics.get("query_count") or metrics.get("case_count") or 0),
+                        "confidence": metrics.get("confidence_band") or "unknown",
+                        "failed_case_count": len(failures) or int(metrics.get("failed_count") or 0),
                         "created_at": row[3].isoformat() if row[3] else None,
                     }
                 )
@@ -5767,7 +5786,7 @@ def claim_due_imap_sync_runs(
             cur.execute(
                 """
                 WITH claimable AS (
-                    SELECT r.id
+                    SELECT r.id, r.profile_id
                     FROM mail_sync_runs r
                     JOIN mail_profiles p ON p.id = r.profile_id
                     WHERE p.source_type = 'imap'
@@ -5788,7 +5807,7 @@ def claim_due_imap_sync_runs(
                     attempt_count = r.attempt_count + 1,
                     updated_at = now()
                 FROM claimable
-                JOIN mail_profiles p ON p.id = r.profile_id
+                JOIN mail_profiles p ON p.id = claimable.profile_id
                 WHERE r.id = claimable.id
                 RETURNING r.id::text, p.name, r.status, r.trigger, r.requested_by,
                           r.claimed_by, r.claimed_at, r.worker_id, r.attempt_count,

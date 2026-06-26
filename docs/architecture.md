@@ -229,7 +229,8 @@ documents, diagrams, images, audio, video, subtitles, mail exports,
 calendar/contact files, structured data, reports, SQLite databases, and
 metadata-first domain formats through the same local extractor chain from
 temporary private files. Embedded media sidecar transcripts inside archives are
-used before media probing or ASR. Unknown binaries remain metadata-only.
+used before media probing or ASR. Unknown binaries remain metadata-only only for
+pilot roots that explicitly allow metadata-only discovery.
 
 File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
@@ -247,6 +248,14 @@ publication, mail, calendar/contact, image, diagram, audio, video, subtitle,
 archive, database/export, notebook, CAD/BIM/GIS/design,
 security scan, operations log, and unknown-binary families without requiring
 cloud services or blocking normal watch/crawl loops.
+
+Go-live roots should set `strict_indexing=true` in root metadata, usually via
+`flux-kb crawl add <path> --name <root> --strict-indexing` or `flux-kb crawl edit
+<root> --strict-indexing`. Under strict indexing, foreground scans and deferred
+workers convert metadata-only extraction outcomes to `blocked_missing_dependency`
+with diagnostic metadata, and corpus retrieval excludes any remaining legacy
+`metadata_only` assets. Operators must either install the missing local extractor
+or exclude that file family with glob policy before treating the root as ready.
 
 Code-like files use parser-backed chunking when a reliable local parser exists.
 The first parser layer uses Python `ast` for modules, classes, functions,

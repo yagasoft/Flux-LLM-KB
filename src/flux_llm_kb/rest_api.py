@@ -215,6 +215,7 @@ def create_app():
         glob_mode: str = "extend"
         max_inline_bytes: int | None = None
         heavy_threshold_bytes: int | None = None
+        strict_indexing: bool = False
 
     class CrawlRootUpdateRequest(BaseModel):
         name: str
@@ -228,6 +229,7 @@ def create_app():
         glob_mode: str = "extend"
         max_inline_bytes: int | None = None
         heavy_threshold_bytes: int | None = None
+        strict_indexing: bool | None = None
 
     class WatchRequest(BaseModel):
         root_name: str | None = None
@@ -1230,6 +1232,13 @@ def create_app():
         if max_inline_bytes <= 0 or heavy_threshold_bytes <= 0:
             raise _crawl_root_error("size thresholds must be positive", root_name=name, root_path=root_path_text)
 
+        metadata = {
+            "source": "dashboard",
+            "host_access": "host_agent" if validation.get("host_agent") else "direct",
+            "host_validation": validation,
+        }
+        if request.strict_indexing:
+            metadata["strict_indexing"] = True
         root = database.add_monitored_root(
             name=name,
             root_path=root_path_text,
@@ -1242,11 +1251,7 @@ def create_app():
             glob_mode=request.glob_mode,
             max_inline_bytes=max_inline_bytes,
             heavy_threshold_bytes=heavy_threshold_bytes,
-            metadata={
-                "source": "dashboard",
-                "host_access": "host_agent" if validation.get("host_agent") else "direct",
-                "host_validation": validation,
-            },
+            metadata=metadata,
         )
         payload: dict[str, object] = {"root": root}
         if request.initial_crawl:
@@ -1281,6 +1286,17 @@ def create_app():
             raise _crawl_root_error("size thresholds must be positive", root_name=name, root_path=root_path_text)
 
         try:
+            existing = database.get_monitored_root_by_identifier(root_id)
+            metadata = dict((existing or {}).get("metadata") or {})
+            metadata.update(
+                {
+                    "source": "dashboard",
+                    "host_access": "host_agent" if validation.get("host_agent") else "direct",
+                    "host_validation": validation,
+                }
+            )
+            if request.strict_indexing is not None:
+                metadata["strict_indexing"] = bool(request.strict_indexing)
             return database.update_monitored_root(
                 root_id=root_id,
                 name=name,
@@ -1294,11 +1310,7 @@ def create_app():
                 glob_mode=request.glob_mode,
                 max_inline_bytes=max_inline_bytes,
                 heavy_threshold_bytes=heavy_threshold_bytes,
-                metadata={
-                    "source": "dashboard",
-                    "host_access": "host_agent" if validation.get("host_agent") else "direct",
-                    "host_validation": validation,
-                },
+                metadata=metadata,
             )
         except ValueError as exc:
             raise FluxApiError(

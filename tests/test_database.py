@@ -725,6 +725,71 @@ def test_retrieval_benchmark_runs_insert_list_and_sanitize_metadata(monkeypatch)
     assert "raw_text" not in json.dumps(rows)
 
 
+def test_recent_retrieval_explain_diagnostics_reads_current_run_schema(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    3,
+                    {"confidence_band": "high", "case_count": 3},
+                    [
+                        {"query_hash": "sha256:first", "passed": True},
+                        {"query_hash": "sha256:failed", "passed": False},
+                        {"case_id": "missing-hash", "passed": False},
+                    ],
+                    timestamp,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    rows = database.recent_retrieval_explain_diagnostics(limit=1)
+
+    sql, params = executed[0]
+    assert "query_count" in sql
+    assert "metrics" in sql
+    assert "case_results" in sql
+    assert "query_hashes" not in sql
+    assert "aggregate_metrics" not in sql
+    assert "failed_cases" not in sql
+    assert params == (1,)
+    assert rows == [
+        {
+            "query_hash": "sha256:first",
+            "result_count": 3,
+            "confidence": "high",
+            "failed_case_count": 2,
+            "created_at": timestamp.isoformat(),
+        }
+    ]
+
+
 def test_code_feedback_events_insert_summary_and_sanitize_private_values(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 25, 10, 0, tzinfo=timezone.utc)
@@ -1846,6 +1911,13 @@ def test_persist_crawl_plan_requeues_legacy_metadata_only_documents():
     assert database.REQUEUE_DOCUMENT_EXTENSIONS == expected_extensions
 
 
+def test_corpus_search_filters_metadata_only_assets():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    search_function = source.split("def search_corpus_chunks", 1)[1].split("def insert_memory", 1)[0]
+
+    assert "a.extraction_status <> 'metadata_only'" in search_function
+
+
 def test_corpus_status_queries_include_lock_tolerant_states():
     source = Path(database.__file__).read_text(encoding="utf-8")
 
@@ -1868,6 +1940,16 @@ def test_imap_mail_schedule_has_due_query_and_advances_after_sync_run():
     assert "UPDATE mail_profiles" in record_function
     assert "last_sync_at = now()" in record_function
     assert "make_interval(secs => sync_interval_seconds)" in record_function
+
+
+def test_imap_mail_claim_query_does_not_reference_update_alias_inside_from_join():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    claim_function = source.split("def claim_due_imap_sync_runs", 1)[1].split("def mark_mail_sync_run_running", 1)[0]
+
+    assert "SELECT r.id, r.profile_id" in claim_function
+    assert "JOIN mail_profiles p ON p.id = claimable.profile_id" in claim_function
+    update_from = claim_function.split("FROM claimable", 1)[1]
+    assert "JOIN mail_profiles p ON p.id = r.profile_id" not in update_from
 
 
 def test_mail_post_process_event_helpers_persist_events_and_update_messages(monkeypatch):

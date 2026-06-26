@@ -6,6 +6,12 @@ or signature, hashes, trust rank, deletion state, duplicate/version-family state
 and extraction status. Content extraction then escalates only when a safe local
 parser or local tool exists.
 
+For broad or important go-live roots, enable strict indexing. In that mode,
+metadata-only outcomes are not treated as searchable indexed knowledge:
+unsupported files must be excluded by glob policy or recorded as visible
+`blocked_missing_dependency` work until the required local extractor is
+installed.
+
 ## Support Tiers
 
 - `metadata`: record file identity, provenance, hashes, MIME/signature, size,

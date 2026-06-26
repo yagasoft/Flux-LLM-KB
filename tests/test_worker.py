@@ -362,6 +362,53 @@ def test_process_corpus_job_uses_container_policy_and_merges_container_telemetry
     assert applied[0]["relative_path"] == "bundle.zip"
 
 
+def test_process_corpus_job_blocks_metadata_only_for_strict_roots(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "unknown.bin").write_bytes(b"\x00\x01\x02")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="metadata_only",
+            message="no local extractor",
+            chunks=(),
+            child_assets=(),
+            metadata={"extractor": "binary"},
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "unknown.bin"}})
+
+    assert result.status == "blocked_missing_dependency"
+    assert "Strict indexing" in result.message
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "blocked_missing_dependency"
+    assert applied_result.chunks == ()
+    assert applied_result.metadata["strict_indexing"] is True
+    assert applied_result.metadata["metadata_only_blocked"] is True
+    assert applied_result.metadata["original_status"] == "metadata_only"
+
+
 def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
     from flux_llm_kb import service as service_module
 
@@ -478,7 +525,9 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
     )
     assert calls[1][0] == "audit"
     assert calls[1][1]["event_type"] == "diagnostics.remediation"
+    assert calls[1][1]["target_id"] is None
     assert calls[1][1]["details"]["action"] == "retry_corpus_job"
+    assert calls[1][1]["details"]["target_id"] == "job-1"
 
     monkeypatch.setattr(KnowledgeService, "run_corpus_backfill", lambda self, **kwargs: {"backfill": kwargs})
     backfill = KnowledgeService().remediate_diagnostic(
@@ -491,6 +540,9 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
     )
 
     assert backfill["result"] == {"backfill": {"kind": "office", "limit": 10, "workers": 1, "root_name": "docs"}}
+    assert calls[2][0] == "audit"
+    assert calls[2][1]["target_id"] is None
+    assert calls[2][1]["details"]["target_id"] == "office"
 
 
 def test_service_remediate_diagnostic_requires_scoped_backfill_and_cleanup():

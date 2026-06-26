@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .crawler import strict_indexing_enabled
+
 
 def build_indexer_reliability_report(
     *,
@@ -83,9 +85,11 @@ def build_root_reliability_card(
 ) -> dict[str, Any]:
     assets = {key: int(value or 0) for key, value in (asset_counts or {}).items()}
     jobs = {key: int(value or 0) for key, value in (job_counts or {}).items()}
+    strict_indexing = strict_indexing_enabled(root.get("metadata") if isinstance(root.get("metadata"), dict) else {})
     blockers = {
         "blocked_assets": int(assets.get("blocked", 0) + assets.get("blocked_locked", 0)),
         "failed_assets": int(assets.get("failed", 0)),
+        "metadata_only_assets": int(assets.get("metadata_only", 0)) if strict_indexing else 0,
         "pending_jobs": int(jobs.get("pending", 0)),
         "retrying_locked_jobs": int(jobs.get("retrying_locked", 0)),
         "blocked_jobs": int(jobs.get("blocked", 0) + jobs.get("blocked_locked", 0)),
@@ -95,7 +99,7 @@ def build_root_reliability_card(
         readiness = "blocked"
     elif any(value > 0 for key, value in blockers.items() if key.startswith("failed") or key.startswith("blocked")):
         readiness = "partial"
-    elif blockers["pending_jobs"] > 0 or blockers["retrying_locked_jobs"] > 0:
+    elif blockers["metadata_only_assets"] > 0 or blockers["pending_jobs"] > 0 or blockers["retrying_locked_jobs"] > 0:
         readiness = "partial"
     elif latest_benchmark:
         readiness = "ready"
@@ -106,6 +110,7 @@ def build_root_reliability_card(
         "enabled": bool(root.get("enabled")),
         "watch_enabled": bool(root.get("watch_enabled")),
         "readiness": readiness,
+        "strict_indexing": strict_indexing,
         "scope_hash": scope_hash,
         "asset_counts": assets,
         "job_counts": jobs,
@@ -160,6 +165,7 @@ def _safe_root_card(root: dict[str, Any]) -> dict[str, Any]:
         "blockers",
         "latest_crawl",
         "latest_benchmark",
+        "strict_indexing",
         "required_action",
     }
     return {key: root.get(key) for key in allowed if key in root}

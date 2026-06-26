@@ -168,6 +168,7 @@ class CorpusPolicy:
     recursive: bool = True
     include_globs: tuple[str, ...] = ()
     exclude_globs: tuple[str, ...] = ()
+    strict_indexing: bool = False
     max_inline_bytes: int = 256 * 1024
     heavy_threshold_bytes: int = 10 * 1024 * 1024
     hash_max_bytes: int = 512 * 1024 * 1024
@@ -323,6 +324,7 @@ def discover_asset(
     relative_path = resolved.relative_to(root.resolve()).as_posix()
     quick_hash = _quick_hash(resolved, stat.st_size, stat.st_mtime_ns)
     metadata: dict[str, object] = {}
+    extraction_status: str | None = None
     manifest = policy.manifest_lookup(relative_path) if policy.manifest_lookup else None
     manifest_unchanged = _manifest_matches(manifest, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns, quick_hash=quick_hash)
     if manifest_unchanged:
@@ -343,6 +345,14 @@ def discover_asset(
         extraction = extract_file(resolved, policy)
         metadata.update(extraction.metadata)
         chunks = extraction.chunks
+        if extraction.status != "indexed":
+            extraction_status = extraction.status
+            if policy.strict_indexing and extraction.status == "metadata_only":
+                extraction_status = "blocked_missing_dependency"
+                metadata.update(_strict_metadata_only_metadata(extraction.message))
+    if policy.strict_indexing and classification.extraction_tier == "metadata_only":
+        extraction_status = "blocked_missing_dependency"
+        metadata.update(_strict_metadata_only_metadata())
     return DiscoveredAsset(
         path=resolved,
         relative_path=relative_path,
@@ -354,6 +364,7 @@ def discover_asset(
         quick_hash=quick_hash,
         content_hash=content_hash,
         extraction_tier=classification.extraction_tier,
+        extraction_status=extraction_status,
         chunks=chunks,
         metadata=metadata,
     )
@@ -547,6 +558,54 @@ def _status_asset(
         chunks=(),
         metadata=metadata,
     )
+
+
+def strict_indexing_enabled(metadata: dict[str, Any] | None) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    direct = metadata.get("strict_indexing")
+    if _truthy_policy_value(direct):
+        return True
+    policy = metadata.get("metadata_only_policy")
+    if _blocking_policy_value(policy):
+        return True
+    indexing = metadata.get("indexing")
+    if isinstance(indexing, dict):
+        return _blocking_policy_value(indexing.get("metadata_only"))
+    return False
+
+
+def strict_metadata_only_message(message: str | None = None) -> str:
+    suffix = f" Original extractor message: {message}" if message else ""
+    return f"Strict indexing requires full content extraction; metadata-only result blocked.{suffix}"
+
+
+def _strict_metadata_only_metadata(message: str | None = None) -> dict[str, object]:
+    return {
+        "strict_indexing": True,
+        "metadata_only_blocked": True,
+        "readiness_status": "blocked_missing_dependency",
+        "readiness_reason": strict_metadata_only_message(message),
+        "original_status": "metadata_only",
+    }
+
+
+def _truthy_policy_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "strict", "block", "blocked"}
+
+
+def _blocking_policy_value(value: object) -> bool:
+    return str(value or "").strip().lower() in {
+        "block",
+        "blocked",
+        "strict",
+        "error",
+        "fail",
+        "fail_closed",
+        "blocked_missing_dependency",
+    }
 
 
 def _is_locked_error(exc: BaseException) -> bool:

@@ -13,7 +13,7 @@ import re
 import tempfile
 import time
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .acceleration import (
     BENCHMARK_FIXTURES,
@@ -23,7 +23,7 @@ from .acceleration import (
     job_family_for_type,
     kind_to_job_families,
 )
-from .crawler import CorpusPolicy, scan_path
+from .crawler import CorpusPolicy, scan_path, strict_indexing_enabled
 from . import __version__, database, governance, operator_automation
 from .glob_policy import effective_glob_policy
 from .extractors import extractor_availability
@@ -1891,6 +1891,7 @@ class KnowledgeService:
             recursive=root["recursive"],
             include_globs=tuple(glob_policy["include_globs"]),
             exclude_globs=tuple(glob_policy["exclude_globs"]),
+            strict_indexing=strict_indexing_enabled(root.get("metadata") if isinstance(root.get("metadata"), dict) else {}),
             max_inline_bytes=root["max_inline_bytes"],
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
             **_configured_container_limits(),
@@ -2615,6 +2616,7 @@ class KnowledgeService:
                     recursive=root["recursive"],
                     include_globs=tuple(root.get("include_globs") or ()),
                     exclude_globs=tuple(root.get("exclude_globs") or ()),
+                    strict_indexing=strict_indexing_enabled(root.get("metadata") if isinstance(root.get("metadata"), dict) else {}),
                     max_inline_bytes=root["max_inline_bytes"],
                     heavy_threshold_bytes=root["heavy_threshold_bytes"],
                     **_configured_container_limits(),
@@ -3207,10 +3209,11 @@ class KnowledgeService:
             result = database.clear_completed_corpus_job_errors(root_name=root_name)
         else:
             raise ValueError("diagnostic remediation action must be retry_corpus_job, run_backfill, repair_asset_statuses, or clear_completed_errors")
+        audit_target_id = target_id if _is_uuid_like(target_id) else None
         audit_event = database.record_audit_event(
             event_type="diagnostics.remediation",
             target_table=normalized_target_type or None,
-            target_id=target_id,
+            target_id=audit_target_id,
             details={
                 "action": normalized_action,
                 "actor": actor,
@@ -4165,6 +4168,14 @@ def _normalize_scope_mode(scope_mode: str) -> str:
 def _clean_optional_text(value: str | None) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _is_uuid_like(value: Any) -> bool:
+    try:
+        UUID(str(value or ""))
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _retrieval_root(root_name: str | None, cwd: str | None) -> dict[str, Any] | None:

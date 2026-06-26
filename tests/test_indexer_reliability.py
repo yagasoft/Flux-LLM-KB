@@ -198,6 +198,31 @@ def test_root_reliability_card_combines_counts_and_latest_scoped_run():
     assert "root_path" not in card
 
 
+def test_root_reliability_card_blocks_metadata_only_assets_for_strict_roots():
+    now = datetime(2026, 6, 25, 12, 0, tzinfo=UTC)
+    latest_run = _run(
+        run_id="root-run",
+        scenario="host_cloud",
+        mode="scan",
+        created_at=now,
+        scope_type="monitored_root",
+        scope_hash="sha256:root",
+    )
+
+    card = build_root_reliability_card(
+        root={"name": "docs", "enabled": True, "watch_enabled": True, "metadata": {"strict_indexing": True}},
+        asset_counts={"total": 10, "indexed": 9, "metadata_only": 1, "blocked": 0, "failed": 0},
+        job_counts={"pending": 0, "retrying_locked": 0, "blocked": 0, "failed": 0},
+        latest_crawl={"id": "crawl-1", "status": "completed"},
+        latest_benchmark=latest_run,
+        scope_hash="sha256:root",
+    )
+
+    assert card["readiness"] == "partial"
+    assert card["blockers"]["metadata_only_assets"] == 1
+    assert card["strict_indexing"] is True
+
+
 def test_roots_reliability_report_summarizes_readiness_and_remaining_actions():
     roots = [
         {

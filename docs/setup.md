@@ -92,6 +92,16 @@ Install optional local corpus extractors when you want richer file processing:
 python -m pip install -e .[dev,corpus]
 ```
 
+Before adding broad private folders, install and verify the local extractor
+families you expect to rely on. Common go-live dependencies are LibreOffice for
+legacy/OpenDocument Office conversion, Poppler plus Tesseract for image-only
+PDF/OCR, `ffmpeg`/`ffprobe` plus a local faster-whisper model for media, Calibre
+`ebook-convert` for MOBI/AZW/LIT, archive tools such as 7-Zip/bsdtar/unar/unrar,
+DuckDB/PyArrow for columnar data, and mail export helpers such as `readpst` or
+`msgconvert` when you plan to index exported mail stores. Missing dependencies
+leave the affected jobs in `blocked_missing_dependency` instead of silently
+pretending content was indexed.
+
 Install Outlook COM support on Windows when you want local Outlook catch-up:
 
 ```powershell
@@ -126,7 +136,7 @@ flux-kb audit --limit 20
 flux-kb forget <memory-id> --reason user_request
 flux-kb backfill-codex --source "$HOME\.codex" --dry-run
 flux-kb export-wiki --output private\wiki-export
-flux-kb crawl add E:\Projects --name projects
+flux-kb crawl add E:\Projects --name projects --strict-indexing
 flux-kb crawl sync --root projects
 flux-kb crawl sync --path E:\Projects\README.md
 flux-kb crawl watch enable --root projects
@@ -183,6 +193,13 @@ flux-kb outlook-host run
 flux-kb mail status
 flux-kb mail sync --profile gmail-capture
 ```
+
+Use `--strict-indexing` for go-live roots. Strict roots do not treat
+`metadata_only` files as indexed knowledge: unsupported or dependency-missing
+files are blocked visibly as `blocked_missing_dependency` or excluded by glob
+policy, and retrieval filters out any remaining legacy metadata-only chunks.
+Use `flux-kb crawl edit <root> --allow-metadata-only` only for a limited pilot
+root where metadata-only discovery is intentional.
 
 `private/` is ignored by Git. Review any wiki export before sharing it outside
 the machine.
@@ -389,6 +406,10 @@ post-process dry-run --profile <name>` before enabling a new policy, then review
 recent command outcomes with `flux-kb mail post-process events --profile
 <name>`. Event views show operational metadata and errors, not raw mail body
 content.
+
+During rollout, start mail profiles with `none`, `remove_label`, or
+`move_to_processed`. Do not use `trash` for important mailboxes until a dry-run,
+post-process event review, and a small pilot label/folder have all succeeded.
 
 Outlook COM profiles are for catch-up from selected classic Outlook folder
 paths. They use local Outlook automation and write into the same spool shape as
