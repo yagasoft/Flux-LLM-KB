@@ -26,7 +26,7 @@ def process_corpus_job(job: dict) -> JobProcessResult:
 
     root = database.get_monitored_root(root_name)
     if root is None:
-        return JobProcessResult(status="failed", message=f"monitored root not found: {root_name}")
+        return JobProcessResult(status="cancelled_orphaned_root", message=f"monitored root not found: {root_name}")
 
     path = Path(root["root_path"]) / relative_path
     if not path.exists():

@@ -1707,6 +1707,54 @@ def test_complete_corpus_job_clears_previous_error(monkeypatch):
     assert "last_error = NULL" in sql
 
 
+def test_cancel_orphaned_corpus_job_records_terminal_state(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.cancel_orphaned_corpus_job(
+        job_id="job-1",
+        error="monitored root not found: smoke",
+        duration_ms=12,
+        telemetry={"result_status": "cancelled_orphaned_root"},
+    )
+
+    sql = "\n".join(item[0] for item in executed)
+    assert "status = 'cancelled_orphaned_root'" in sql
+    assert "completed_at = now()" in sql
+    assert "locked_at = NULL" in sql
+    assert executed[0][1] == (
+        "monitored root not found: smoke",
+        12,
+        '{"result_status": "cancelled_orphaned_root"}',
+        "job-1",
+    )
+
+
 def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch):
     executed = []
 

@@ -62,6 +62,52 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     assert calls["cleared_errors"] == [{"root_name": None}]
 
 
+def test_backfill_cancels_orphaned_root_jobs_without_retrying(monkeypatch):
+    calls = {"cancelled": [], "completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
+            {
+                "id": "job-orphan",
+                "job_type": "corpus_extract_video",
+                "job_family": "media",
+                "payload": {"path": "clip.mp4", "root_name": "smoke-deleted"},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "cancel_orphaned_corpus_job", lambda **kwargs: calls["cancelled"].append(kwargs))
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda job: worker.JobProcessResult(
+            status="cancelled_orphaned_root",
+            message="monitored root not found: smoke-deleted",
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="media", limit=1, workers=1)
+
+    assert result["cancelled_orphaned"] == 1
+    assert calls["completed"] == []
+    assert calls["blocked"] == []
+    assert calls["retried"] == []
+    assert calls["cancelled"][0]["job_id"] == "job-orphan"
+    assert calls["cancelled"][0]["error"] == "monitored root not found: smoke-deleted"
+    assert calls["cancelled"][0]["telemetry"]["result_status"] == "cancelled_orphaned_root"
+
+
 def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(
@@ -105,6 +151,23 @@ def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
     assert telemetry["resource_class"] == "gpu"
     assert telemetry["ocr_cache_hits"] == 1
     assert telemetry["ocr_cache_misses"] == 0
+
+
+def test_process_corpus_job_marks_missing_root_as_orphaned(monkeypatch):
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(database, "get_monitored_root", lambda _root_name: None)
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-orphan",
+            "job_type": "corpus_extract_video",
+            "payload": {"path": "clip.mp4", "root_name": "smoke-deleted"},
+        }
+    )
+
+    assert result.status == "cancelled_orphaned_root"
+    assert result.message == "monitored root not found: smoke-deleted"
 
 
 def test_process_corpus_job_merges_asr_telemetry(monkeypatch, tmp_path):

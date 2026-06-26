@@ -3091,6 +3091,7 @@ class KnowledgeService:
         completed = 0
         blocked = 0
         retried = 0
+        cancelled_orphaned = 0
         for job in claimed:
             started = time.perf_counter()
             if job.get("job_type") == "corpus_embed":
@@ -3107,6 +3108,14 @@ class KnowledgeService:
             if process_result.status in {"indexed", "metadata_only"}:
                 database.complete_corpus_job(job_id=job["id"], duration_ms=duration_ms, telemetry=telemetry)
                 completed += 1
+            elif process_result.status == "cancelled_orphaned_root":
+                database.cancel_orphaned_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or "monitored root not found",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                cancelled_orphaned += 1
             elif process_result.status == "blocked_missing_dependency":
                 database.block_corpus_job(
                     job_id=job["id"],
@@ -3157,6 +3166,7 @@ class KnowledgeService:
                 "completed": completed,
                 "blocked": blocked,
                 "retried": retried,
+                "cancelled_orphaned": cancelled_orphaned,
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
                 "cleared_completed_errors": cleared_errors["cleared"],
@@ -3172,6 +3182,7 @@ class KnowledgeService:
             "completed": completed,
             "blocked": blocked,
             "retried": retried,
+            "cancelled_orphaned": cancelled_orphaned,
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],
             "cleared_completed_errors": cleared_errors["cleared"],
