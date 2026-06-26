@@ -99,6 +99,37 @@ def test_manual_imap_sync_creates_explicit_run_request(monkeypatch, tmp_path):
     assert result["profiles"][0]["status"] == "completed"
 
 
+def test_manual_imap_sync_retries_due_backoff_run(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion, mail_oauth
+
+    profile = _profile(tmp_path)
+    calls = {"running": [], "complete": []}
+
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile])
+    monkeypatch.setattr(
+        database,
+        "create_imap_sync_run",
+        lambda **_kwargs: {
+            "id": "run-backoff",
+            "status": "backoff",
+            "next_attempt_at": "2000-01-01T00:00:00+00:00",
+            "attempt_count": 2,
+        },
+    )
+    monkeypatch.setattr(database, "mark_mail_sync_run_running", lambda **kwargs: calls["running"].append(kwargs))
+    monkeypatch.setattr(database, "complete_mail_sync_run", lambda **kwargs: calls["complete"].append(kwargs) or {"id": kwargs["run_id"], "status": kwargs["status"]})
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: profile | {"metadata": kwargs["metadata"]})
+    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: {"profiles": [], "count": 0})
+    monkeypatch.setattr(mail_oauth, "access_token_for_profile", lambda profile_name: "fresh-access-token")
+
+    result = mail_ingestion.sync_mail_profile(profile_name="gmail", imap_client_factory=EmptyImapClient)
+
+    assert calls["running"] == [{"run_id": "run-backoff", "worker_id": "manual"}]
+    assert calls["complete"][0]["run_id"] == "run-backoff"
+    assert result["profiles"][0]["run_id"] == "run-backoff"
+    assert result["profiles"][0]["status"] == "completed"
+
+
 def test_auth_required_completes_claimed_run_as_blocked_without_fetching(monkeypatch, tmp_path):
     from flux_llm_kb import mail_ingestion, mail_oauth
 
@@ -123,6 +154,41 @@ def test_auth_required_completes_claimed_run_as_blocked_without_fetching(monkeyp
     assert completed[0]["status"] == "blocked_auth_required"
     assert completed[0]["backoff_seconds"] >= 3600
     assert result["profiles"][0]["status"] == "blocked_auth_required"
+
+
+def test_mail_scheduler_flags_stale_running_sync_diagnostic():
+    run = {
+        "id": "run-stale",
+        "profile_name": "gmail",
+        "status": "running",
+        "started_at": "2000-01-01T00:00:00+00:00",
+        "last_error": None,
+    }
+
+    assert database._mail_run_needs_action(run)
+
+    diagnostic = database._mail_scheduler_diagnostic(run)
+
+    assert diagnostic["code"] == "mail.imap_sync_stale"
+    assert diagnostic["retryable"] is True
+    assert "stale" in diagnostic["message"].lower()
+    assert diagnostic["target"] == {"type": "mail_profile", "id": "gmail"}
+
+
+def test_database_imap_scheduler_expires_stale_active_runs_before_claim_or_manual_creation():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "def _expire_stale_imap_sync_runs" in source
+    create_function = source.split("def create_imap_sync_run", 1)[1].split("def claim_due_imap_sync_runs", 1)[0]
+    claim_function = source.split("def claim_due_imap_sync_runs", 1)[1].split("def mark_mail_sync_run_running", 1)[0]
+    expire_function = source.split("def _expire_stale_imap_sync_runs", 1)[1].split("def ", 1)[0]
+
+    assert "_expire_stale_imap_sync_runs(cur)" in create_function
+    assert "_expire_stale_imap_sync_runs(cur)" in claim_function
+    assert "status IN ('claimed', 'running')" in expire_function
+    assert "status = 'backoff'" in expire_function
+    assert "next_attempt_at = now()" in expire_function
+    assert "stale_imap_sync" in expire_function
 
 
 def test_database_imap_scheduler_state_machine_uses_atomic_claims_and_run_history():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from email import policy
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
@@ -290,7 +291,7 @@ def sync_mail_profile(
             continue
         if profile["source_type"] == "imap":
             run = database.create_imap_sync_run(profile_name=profile["name"], trigger="manual", requested_by=requested_by)
-            if run.get("status") in {"running", "claimed", "backoff"}:
+            if run.get("status") in {"running", "claimed"} or (run.get("status") == "backoff" and not _mail_sync_run_due_for_retry(run)):
                 result = {
                     "profile": profile["name"],
                     "status": run["status"],
@@ -324,6 +325,28 @@ def sync_mail_profile(
         result["spool_sync"] = spool_result
         results.append(result)
     return {"profiles": results, "count": len(results)}
+
+
+def _mail_sync_run_due_for_retry(run: dict[str, Any]) -> bool:
+    if run.get("status") != "backoff":
+        return True
+    next_attempt = _parse_mail_sync_datetime(run.get("next_attempt_at"))
+    return next_attempt is None or next_attempt <= datetime.now(UTC)
+
+
+def _parse_mail_sync_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
 
 
 def sync_due_mail_profiles(

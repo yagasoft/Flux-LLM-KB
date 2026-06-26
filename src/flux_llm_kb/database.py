@@ -35,6 +35,7 @@ from .scoring import LifecycleScoreInput, lifecycle_score, reciprocal_rank_fusio
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
 _MIGRATION_ADVISORY_LOCK_ID = 570_221_876_500_815
+DEFAULT_IMAP_SYNC_STALE_AFTER_SECONDS = 3600
 _RETENTION_MEMORY_CLASSES = {"episode", "claim", "corpus"}
 _RETENTION_ACTIONS = {"review", "deprioritize", "retire"}
 _SEMANTIC_DUPLICATE_MEMORY_CLASSES = {"corpus", "episode", "claim"}
@@ -5912,6 +5913,7 @@ def create_imap_sync_run(
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
+            _expire_stale_imap_sync_runs(cur)
             cur.execute(
                 """
                 WITH profile AS (
@@ -5980,6 +5982,7 @@ def claim_due_imap_sync_runs(
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
+            _expire_stale_imap_sync_runs(cur)
             cur.execute(
                 """
                 WITH due_profiles AS (
@@ -8846,17 +8849,85 @@ def _mail_last_error(errors: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _expire_stale_imap_sync_runs(cur: Any, *, stale_after_seconds: int | None = None) -> int:
+    seconds = _imap_sync_stale_after_seconds(stale_after_seconds)
+    error = f"stale_imap_sync: IMAP sync exceeded {seconds} seconds without completion"
+    event = [{"stage": "imap_scheduler", "error": error}]
+    cur.execute(
+        """
+        UPDATE mail_sync_runs
+        SET status = 'backoff',
+            finished_at = COALESCE(finished_at, now()),
+            last_error = COALESCE(last_error, %s),
+            errors = CASE
+                WHEN errors IS NULL OR jsonb_typeof(errors) <> 'array' THEN %s::jsonb
+                ELSE errors || %s::jsonb
+            END,
+            next_attempt_at = now(),
+            updated_at = now()
+        WHERE status IN ('claimed', 'running')
+          AND COALESCE(updated_at, started_at, claimed_at) < now() - make_interval(secs => %s::integer)
+        """,
+        (error, _json_list(event), _json_list(event), seconds),
+    )
+    return int(getattr(cur, "rowcount", 0) or 0)
+
+
+def _imap_sync_stale_after_seconds(value: int | None = None) -> int:
+    if value is not None:
+        return max(300, min(int(value), 86_400))
+    raw = os.getenv("FLUX_MAIL_SYNC_STALE_AFTER_SECONDS")
+    if raw:
+        try:
+            return max(300, min(int(raw), 86_400))
+        except ValueError:
+            pass
+    return DEFAULT_IMAP_SYNC_STALE_AFTER_SECONDS
+
+
+def _mail_run_is_stale(run: dict[str, Any], *, stale_after_seconds: int | None = None) -> bool:
+    if run.get("status") not in {"claimed", "running"}:
+        return False
+    timestamp = _mail_run_timestamp(run.get("started_at") or run.get("claimed_at"))
+    if timestamp is None:
+        return False
+    return (datetime.now(UTC) - timestamp.astimezone(UTC)).total_seconds() > _imap_sync_stale_after_seconds(stale_after_seconds)
+
+
+def _mail_run_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
 def _mail_run_needs_action(run: dict[str, Any]) -> bool:
-    return run.get("status") in {"failed", "backoff", "blocked_auth_required", "auth_expired", "auth_failed"}
+    return run.get("status") in {"failed", "backoff", "blocked_auth_required", "auth_expired", "auth_failed"} or _mail_run_is_stale(run)
 
 
 def _mail_scheduler_diagnostic(run: dict[str, Any]) -> dict[str, Any]:
     status = str(run.get("status") or "unknown")
     profile_name = str(run.get("profile_name") or "unknown")
-    message = str(run.get("last_error") or status)
+    stale = _mail_run_is_stale(run)
+    message = str(
+        run.get("last_error")
+        or (
+            f"stale_imap_sync: IMAP sync has been {status} longer than {_imap_sync_stale_after_seconds()} seconds"
+            if stale
+            else status
+        )
+    )
     auth_blocked = status in {"blocked_auth_required", "auth_expired", "auth_failed"}
     return {
-        "code": "mail.imap_auth_blocked" if auth_blocked else f"mail.imap_sync_{status}",
+        "code": "mail.imap_sync_stale" if stale else "mail.imap_auth_blocked" if auth_blocked else f"mail.imap_sync_{status}",
         "message": message,
         "severity": "warning" if auth_blocked or status == "backoff" else "error",
         "component": "mail",
@@ -8865,6 +8936,8 @@ def _mail_scheduler_diagnostic(run: dict[str, Any]) -> dict[str, Any]:
         "user_action": (
             "Open Mail and reconnect Gmail OAuth for this profile."
             if auth_blocked
+            else "Wait for the scheduler to retry, or run the mail sync after confirming no worker is still processing this profile."
+            if stale
             else "Open Mail, inspect the run history, and retry after the backoff window or fixing the IMAP error."
         ),
         "technical_detail": f"IMAP scheduler run {run.get('id')} for {profile_name} ended with {status}: {message}",
