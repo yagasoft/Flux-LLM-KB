@@ -89,7 +89,7 @@ flux-kb doctor
 Install optional local corpus extractors when you want richer file processing:
 
 ```powershell
-python -m pip install -e .[dev,corpus]
+python -m pip install -e .[dev,corpus,processors]
 ```
 
 Before adding broad private folders, install and verify the local extractor
@@ -101,6 +101,10 @@ DuckDB/PyArrow for columnar data, and mail export helpers such as `readpst` or
 `msgconvert` when you plan to index exported mail stores. Missing dependencies
 leave the affected jobs in `blocked_missing_dependency` instead of silently
 pretending content was indexed.
+The production Docker image installs this practical processor pack. Windows
+host-agent installs use the `processors` Python extra and still depend on host
+tools such as Office COM, LibreOffice, archive tools, and media utilities being
+available on the host PATH.
 
 Install Outlook COM support on Windows when you want local Outlook catch-up:
 
@@ -395,6 +399,11 @@ token. Flux refreshes short-lived access tokens before IMAP login and reports
 token health in the dashboard. The default post-process policy moves messages to
 a processed folder or removes the capture label; permanent trash/delete is not
 the default.
+Completed exports live under `ready\<export_id>` with `manifest.json`,
+`body.txt`, optional `body.html`, the original `.eml` or `.msg`, and
+`attachments\*`. Flux indexes the canonical `body.txt`, the manifest metadata,
+and attachment files; raw message backups and duplicate HTML bodies stay on disk
+as spool artifacts and are skipped by the searchable corpus index.
 
 Profile post-processing supports `none`, `move_to_processed`, `remove_label`,
 and `trash`. Gmail profiles use Gmail IMAP label commands for label operations

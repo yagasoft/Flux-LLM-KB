@@ -482,7 +482,7 @@ def search_corpus_chunks(
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
-                  AND a.extraction_status <> 'metadata_only'
+                  AND a.extraction_status = 'indexed'
                   AND c.search_vector @@ plainto_tsquery('english', %s)
                   AND NOT EXISTS (
                       SELECT 1
@@ -521,7 +521,7 @@ def search_corpus_chunks(
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
-                  AND a.extraction_status <> 'metadata_only'
+                  AND a.extraction_status = 'indexed'
                   AND (similarity(c.title, %s) > 0.10 OR similarity(c.body, %s) > 0.15)
                   AND NOT EXISTS (
                       SELECT 1
@@ -563,7 +563,7 @@ def search_corpus_chunks(
                 WHERE r.enabled
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
-                  AND a.extraction_status <> 'metadata_only'
+                  AND a.extraction_status = 'indexed'
                   AND emb.model = %s
                   AND 1 - (emb.embedding <=> %s::vector) > 0.25
                   AND NOT EXISTS (
@@ -619,7 +619,7 @@ def search_corpus_chunks(
                     WHERE r.enabled
                       AND a.deleted_at IS NULL
                       AND a.canonical_asset_id IS NULL
-                      AND a.extraction_status <> 'metadata_only'
+                      AND a.extraction_status = 'indexed'
                       AND (
                           cs.qualified_name ILIKE %s
                           OR cs.name ILIKE %s
@@ -667,7 +667,7 @@ def search_corpus_chunks(
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
-                      AND a.extraction_status <> 'metadata_only'
+                      AND a.extraction_status = 'indexed'
                       {root_name_sql}
                       {code_filter_sql}
                     ORDER BY r.trust_rank ASC, c.updated_at DESC
@@ -698,7 +698,7 @@ def search_corpus_chunks(
                     JOIN source_assets a ON a.id = c.asset_id
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE c.id = ANY(%s::uuid[])
-                      AND a.extraction_status <> 'metadata_only'
+                      AND a.extraction_status = 'indexed'
                       {root_name_sql}
                       {code_filter_sql}
                     ORDER BY score DESC, c.updated_at DESC
@@ -3329,7 +3329,92 @@ def repair_extracted_corpus_asset_statuses(
                 """,
                 params,
             )
-            return {"root_name": root_name, "repaired": int(cur.fetchone()[0] or 0)}
+            repaired = int(cur.fetchone()[0] or 0)
+            cur.execute(
+                f"""
+                WITH marked AS (
+                    UPDATE source_assets a
+                    SET extraction_status = 'deleted',
+                        deleted_at = COALESCE(a.deleted_at, now()),
+                        metadata = a.metadata || '{{"internal_mail_artifact": true, "readiness_status": "skipped_internal"}}'::jsonb,
+                        updated_at = now()
+                    FROM monitored_roots r
+                    WHERE r.id = a.root_id
+                      {root_filter}
+                      AND a.deleted_at IS NULL
+                      AND array_length(string_to_array(a.path, '/'), 1) = 2
+                      AND lower(split_part(a.path, '/', 2)) IN ('message.eml', 'message.msg', 'body.html')
+                    RETURNING 1
+                )
+                SELECT count(*) FROM marked
+                """,
+                params,
+            )
+            internal_deleted = int(cur.fetchone()[0] or 0)
+            cur.execute(
+                f"""
+                WITH stale_chunks AS (
+                    SELECT c.id
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE (
+                        a.deleted_at IS NOT NULL
+                        OR a.extraction_status <> 'indexed'
+                        OR (
+                            array_length(string_to_array(a.path, '/'), 1) = 2
+                            AND lower(split_part(a.path, '/', 2)) IN ('message.eml', 'message.msg', 'body.html')
+                        )
+                    )
+                      {root_filter}
+                ),
+                deleted AS (
+                    DELETE FROM embeddings e
+                    USING stale_chunks s
+                    WHERE e.owner_table = 'asset_chunks'
+                      AND e.owner_id = s.id
+                    RETURNING 1
+                )
+                SELECT count(*) FROM deleted
+                """,
+                params,
+            )
+            embeddings_purged = int(cur.fetchone()[0] or 0)
+            cur.execute(
+                f"""
+                WITH stale_chunks AS (
+                    SELECT c.id
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE (
+                        a.deleted_at IS NOT NULL
+                        OR a.extraction_status <> 'indexed'
+                        OR (
+                            array_length(string_to_array(a.path, '/'), 1) = 2
+                            AND lower(split_part(a.path, '/', 2)) IN ('message.eml', 'message.msg', 'body.html')
+                        )
+                    )
+                      {root_filter}
+                ),
+                deleted AS (
+                    DELETE FROM asset_chunks c
+                    USING stale_chunks s
+                    WHERE c.id = s.id
+                    RETURNING 1
+                )
+                SELECT count(*) FROM deleted
+                """,
+                params,
+            )
+            chunks_purged = int(cur.fetchone()[0] or 0)
+            return {
+                "root_name": root_name,
+                "repaired": repaired,
+                "internal_mail_artifacts_deleted": internal_deleted,
+                "chunks_purged": chunks_purged,
+                "embeddings_purged": embeddings_purged,
+            }
 
 
 def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
@@ -7210,6 +7295,7 @@ def _fetch_semantic_duplicate_candidates(
             WHERE r.enabled
               AND a.deleted_at IS NULL
               AND a.canonical_asset_id IS NULL
+              AND a.extraction_status = 'indexed'
               {root_sql}
             ORDER BY r.name, c.updated_at DESC, c.id
             LIMIT %s
@@ -9123,6 +9209,7 @@ def embedding_status(*, root_name: str | None = None, url: str | None = None) ->
                                         AND emb.model = %s
                 WHERE a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
+                  AND a.extraction_status = 'indexed'
                   {corpus_filter}
                 """,
                 (DEFAULT_EMBEDDING_MODEL, *corpus_params),
@@ -9236,6 +9323,7 @@ def _fetch_corpus_embedding_rows(cur: Any, *, root_name: str | None, limit: int)
                                 AND emb.model = %s
         WHERE a.deleted_at IS NULL
           AND a.canonical_asset_id IS NULL
+          AND a.extraction_status = 'indexed'
           {root_sql}
         ORDER BY c.updated_at DESC, c.id
         LIMIT %s

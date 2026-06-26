@@ -1625,6 +1625,8 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
     executed = []
 
     class FakeCursor:
+        count = 0
+
         def __enter__(self):
             return self
 
@@ -1635,7 +1637,8 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
             executed.append((sql, params))
 
         def fetchone(self):
-            return (7,)
+            self.count += 1
+            return ({1: 7, 2: 2, 3: 3, 4: 4}[self.count],)
 
     class FakeConnection:
         def __enter__(self):
@@ -1656,7 +1659,13 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
     result = database.repair_extracted_corpus_asset_statuses(root_name="watch-test")
 
     sql = "\n".join(item[0] for item in executed)
-    assert result == {"root_name": "watch-test", "repaired": 7}
+    assert result == {
+        "root_name": "watch-test",
+        "repaired": 7,
+        "internal_mail_artifacts_deleted": 2,
+        "embeddings_purged": 3,
+        "chunks_purged": 4,
+    }
     assert "EXISTS" in sql
     assert "asset_chunks" in sql
     assert "extraction_status = 'queued'" in sql
@@ -2160,7 +2169,32 @@ def test_corpus_search_filters_metadata_only_assets():
     source = Path(database.__file__).read_text(encoding="utf-8")
     search_function = source.split("def search_corpus_chunks", 1)[1].split("def insert_memory", 1)[0]
 
-    assert "a.extraction_status <> 'metadata_only'" in search_function
+    assert "a.extraction_status = 'indexed'" in search_function
+    assert "a.extraction_status <> 'metadata_only'" not in search_function
+
+
+def test_corpus_embedding_and_semantic_candidates_require_indexed_assets():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    embedding_function = source.split("def _fetch_corpus_embedding_rows", 1)[1].split("def _fetch_episode_embedding_rows", 1)[0]
+    status_function = source.split("def embedding_status", 1)[1].split("def _fetch_embedding_inputs", 1)[0]
+    semantic_function = source.split("def _fetch_semantic_duplicate_candidates", 1)[1].split("elif memory_class == \"episode\"", 1)[0]
+
+    assert "a.extraction_status = 'indexed'" in embedding_function
+    assert "a.extraction_status = 'indexed'" in status_function
+    assert "a.extraction_status = 'indexed'" in semantic_function
+
+
+def test_repair_extracted_corpus_asset_statuses_purges_stale_chunks_and_mail_internals():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    repair_function = source.split("def repair_extracted_corpus_asset_statuses", 1)[1].split("def worker_family_stats", 1)[0]
+
+    assert "stale_chunks" in repair_function
+    assert "DELETE FROM embeddings" in repair_function
+    assert "DELETE FROM asset_chunks" in repair_function
+    assert "a.extraction_status <> 'indexed'" in repair_function
+    assert "message.eml" in repair_function
+    assert "message.msg" in repair_function
+    assert "body.html" in repair_function
 
 
 def test_corpus_status_queries_include_lock_tolerant_states():

@@ -606,6 +606,11 @@ move completed exports to `ready/<export_id>`. Flux monitors only `ready`, so
 partial messages and attachments are not indexed. Each export contains a
 manifest, message body files, the original `.eml` or `.msg` where available, and
 attachments.
+The searchable corpus indexes the export manifest, one canonical `body.txt`, and
+attachment files under `attachments/`. Raw message backups (`message.eml` and
+`message.msg`) and duplicate `body.html` artifacts remain in the private spool
+for operator inspection/re-export but are skipped by normal crawl and repair
+paths so they do not create duplicate chunks or vectors.
 
 IMAP profiles are the preferred ongoing capture mechanism. They connect over
 TLS, use Gmail installed-app OAuth plus XOAUTH2 when configured, refresh access

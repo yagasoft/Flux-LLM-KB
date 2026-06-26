@@ -1899,6 +1899,7 @@ class KnowledgeService:
             manifest_lookup=_manifest_lookup(root["name"]),
             stability_quiet_seconds=_configured_stability_quiet_seconds() if reason == "watch_event" else 0.0,
             large_file_stability_quiet_seconds=_configured_large_file_stability_quiet_seconds() if reason == "watch_event" else 0.0,
+            mail_spool=bool((root.get("metadata") or {}).get("mail_profile")) if isinstance(root.get("metadata"), dict) else False,
         )
         plan = scan_path(root["root_path"], policy, target_path=path)
         return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run, reason=reason)
@@ -2622,6 +2623,7 @@ class KnowledgeService:
                     **_configured_container_limits(),
                     hash_parallelism=hash_parallelism,
                     manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
+                    mail_spool=bool((root.get("metadata") or {}).get("mail_profile")) if isinstance(root.get("metadata"), dict) else False,
                 ),
                 target_path=target_path,
             )

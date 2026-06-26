@@ -84,7 +84,7 @@ def test_scan_path_blocks_metadata_only_files_when_strict_indexing_enabled(tmp_p
     root.mkdir()
     (root / "unknown.bin").write_bytes(b"\x00\x01\x02")
 
-    plan = scan_path(root, CorpusPolicy(root_path=root, strict_indexing=True))
+    plan = scan_path(root, CorpusPolicy(root_path=root, strict_indexing=True, mail_spool=True))
 
     assert len(plan.assets) == 1
     asset = plan.assets[0]
@@ -96,6 +96,52 @@ def test_scan_path_blocks_metadata_only_files_when_strict_indexing_enabled(tmp_p
     assert asset.metadata["metadata_only_blocked"] is True
     assert "Strict indexing" in asset.metadata["readiness_reason"]
     assert plan.deferred_jobs == []
+
+
+def test_scan_path_skips_mail_spool_internal_raw_artifacts(tmp_path):
+    root = tmp_path / "ready"
+    export = root / "export-1"
+    attachments = export / "attachments"
+    attachments.mkdir(parents=True)
+    (export / "manifest.json").write_text('{"subject":"Customer RFP"}', encoding="utf-8")
+    (export / "body.txt").write_text("Please review the customer RFP.", encoding="utf-8")
+    (export / "body.html").write_text("<p>Please review the customer RFP.</p>", encoding="utf-8")
+    (export / "message.eml").write_text("Subject: Customer RFP\n\nPlease review", encoding="utf-8")
+    (attachments / "rfp.txt").write_text("Attachment requirements", encoding="utf-8")
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, strict_indexing=True, mail_spool=True))
+
+    assert [asset.relative_path for asset in plan.assets] == [
+        "export-1/attachments/rfp.txt",
+        "export-1/body.txt",
+        "export-1/manifest.json",
+    ]
+    assert {asset.relative_path: asset.extraction_status for asset in plan.assets} == {
+        "export-1/attachments/rfp.txt": None,
+        "export-1/body.txt": None,
+        "export-1/manifest.json": None,
+    }
+    assert all(asset.chunks for asset in plan.assets)
+    assert plan.deferred_jobs == []
+
+
+def test_scan_path_indexes_two_level_eml_outside_managed_mail_spool(tmp_path):
+    root = tmp_path / "docs"
+    export = root / "export-1"
+    export.mkdir(parents=True)
+    (export / "message.eml").write_text("Subject: Customer RFP\n\nPlease review", encoding="utf-8")
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert [asset.relative_path for asset in plan.assets] == ["export-1/message.eml"]
+    assert plan.assets[0].file_kind == "mail"
+    assert plan.deferred_jobs == [
+        {
+            "job_type": "corpus_extract_mail",
+            "relative_path": "export-1/message.eml",
+            "reason": "deferred_extractor",
+        }
+    ]
 
 
 def test_scan_path_records_image_metadata_without_ocr(monkeypatch, tmp_path):

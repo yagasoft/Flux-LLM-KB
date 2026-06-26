@@ -120,7 +120,8 @@ def export_email_to_spool(
     (spool / "error").mkdir(parents=True, exist_ok=True)
 
     (inflight / "message.eml").write_bytes(raw_message)
-    (inflight / "body.txt").write_text(parsed.text_body, encoding="utf-8")
+    text_body = parsed.text_body or _strip_html(parsed.html_body)
+    (inflight / "body.txt").write_text(text_body, encoding="utf-8")
     if parsed.html_body:
         (inflight / "body.html").write_text(parsed.html_body, encoding="utf-8")
     attachments_dir = inflight / "attachments"
@@ -216,7 +217,7 @@ def add_mail_profile(
         watch_enabled=False,
         enabled=True,
         trust_rank=trust_rank,
-        metadata={"mail_profile": name, "source_type": source_type},
+        metadata={"mail_profile": name, "source_type": source_type, "strict_indexing": True},
     )
     return profile
 
@@ -952,7 +953,7 @@ def _save_outlook_attachments(item: Any, attachments_dir: Path) -> None:
 
 
 def _strip_html(value: str) -> str:
-    return re.sub(r"<[^>]+>", " ", value)
+    return " ".join(re.sub(r"<[^>]+>", " ", value).split())
 
 
 def _split_addresses(value: str) -> list[str]:

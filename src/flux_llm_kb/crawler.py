@@ -160,6 +160,7 @@ CONTAINER_EXTENSIONS = {
 }
 ARCHIVE_COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4")
 TRANSIENT_SUFFIXES = {".tmp", ".partial", ".crdownload", ".download", ".part"}
+MAIL_SPOOL_INTERNAL_FILES = {"body.html", "message.eml", "message.msg"}
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,7 @@ class CorpusPolicy:
     hash_parallelism: int = 1
     manifest_lookup: Callable[[str], dict[str, Any] | None] | None = None
     clock: Callable[[], float] | None = None
+    mail_spool: bool = False
 
 
 @dataclass(frozen=True)
@@ -254,6 +256,8 @@ def scan_path(
         try:
             relative_path = path.relative_to(root).as_posix()
             if not _is_included(relative_path, active_policy, marker_patterns):
+                continue
+            if active_policy.mail_spool and _is_mail_spool_internal_artifact(relative_path):
                 continue
             if _should_wait_for_stability(path, root, active_policy):
                 entries.append(("asset", _status_asset(path, root, "pending_stable", "mtime_not_stable", active_policy)))
@@ -429,6 +433,11 @@ def _precompute_content_hashes(paths: list[Path], root: Path, policy: CorpusPoli
         for path, content_hash in zip(targets, executor.map(lambda item: _sha256_file(item.resolve()), targets)):
             hashes[path] = content_hash
     return hashes
+
+
+def _is_mail_spool_internal_artifact(relative_path: str) -> bool:
+    parts = [part for part in relative_path.replace("\\", "/").split("/") if part]
+    return len(parts) == 2 and parts[1].lower() in MAIL_SPOOL_INTERNAL_FILES
 
 
 def _iter_files(root: Path, *, recursive: bool, target: Path | None = None) -> Iterable[Path]:

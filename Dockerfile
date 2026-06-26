@@ -8,6 +8,31 @@ ENV PIP_ROOT_USER_ACTION=ignore
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        antiword \
+        binutils \
+        calibre \
+        catdoc \
+        cpio \
+        ffmpeg \
+        libarchive-tools \
+        libemail-outlook-message-perl \
+        libimage-exiftool-perl \
+        libreoffice \
+        lz4 \
+        pandoc \
+        p7zip-full \
+        poppler-utils \
+        pst-utils \
+        rpm2cpio \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        unar \
+        wv \
+        zstd \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml ./
 
 RUN python - <<'PY' > /tmp/requirements-docker.txt
@@ -17,7 +42,7 @@ from pathlib import Path
 config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 requirements = list(config["project"]["dependencies"])
 optional = config["project"].get("optional-dependencies", {})
-for extra in ("api", "corpus"):
+for extra in ("api", "corpus", "processors"):
     requirements.extend(optional.get(extra, []))
 Path("/tmp/requirements-docker.txt").write_text(
     "\n".join(requirements) + "\n",

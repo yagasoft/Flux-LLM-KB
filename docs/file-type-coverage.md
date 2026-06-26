@@ -161,6 +161,10 @@ installed.
   are cleaned into transcript chunks without cue IDs or timestamps. `eml` and
   `mbox` mail exports summarize subjects, plain bodies, message counts, and
   attachment counts without indexing attachment bytes or raw addressing headers.
+  Managed IMAP/Outlook spool exports index `manifest.json`, canonical
+  `body.txt`, and files under `attachments/`; raw `message.eml`, `message.msg`,
+  and duplicate `body.html` artifacts stay on disk and are skipped by corpus
+  retrieval.
   `ics` and `vcf` files extract conservative event/contact summaries while
   omitting contact email addresses from chunks.
 - Security, test, coverage, and browser capture reports use bounded summaries

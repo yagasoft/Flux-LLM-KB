@@ -70,6 +70,26 @@ def test_export_email_to_spool_writes_ready_manifest_and_ignores_inflight(tmp_pa
     assert json.loads((result.ready_path / "manifest.json").read_text(encoding="utf-8"))["attachment_count"] == 1
 
 
+def test_export_email_to_spool_writes_text_body_from_html_fallback(tmp_path):
+    message = EmailMessage()
+    message["Subject"] = "HTML only"
+    message["From"] = "sender@example.com"
+    message["To"] = "receiver@example.com"
+    message.set_content("<p>Please <strong>review</strong> this update.</p>", subtype="html")
+
+    result = export_email_to_spool(
+        raw_message=message.as_bytes(),
+        spool_path=tmp_path,
+        profile_name="gmail-capture",
+        source_type="imap",
+        source_folder="FluxCapture",
+        source_message_id="uid:43",
+    )
+
+    assert (result.ready_path / "body.txt").read_text(encoding="utf-8") == "Please review this update."
+    assert (result.ready_path / "body.html").exists()
+
+
 def test_normalize_outlook_folder_path_splits_mailbox_and_nested_folders():
     path = normalize_outlook_folder_path("Mailbox - Me/Inbox/Flux Capture")
 
@@ -96,6 +116,7 @@ def test_mail_profile_registers_ready_spool_root(monkeypatch, tmp_path):
     assert calls[0]["name"] == "mail-gmail-capture"
     assert calls[0]["root_path"] == tmp_path / "ready"
     assert calls[0]["metadata"]["mail_profile"] == "gmail-capture"
+    assert calls[0]["metadata"]["strict_indexing"] is True
 
 
 def test_sync_imap_folder_resets_cursor_when_uidvalidity_changes(monkeypatch, tmp_path):
