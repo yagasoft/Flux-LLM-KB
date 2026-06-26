@@ -1,28 +1,43 @@
 [CmdletBinding()]
 param(
-    [string]$Python = ""
+    [string]$Node = "",
+    [string]$Npm = "",
+    [switch]$SkipBrowserInstall
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
-$bundledPython = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
-if ([string]::IsNullOrWhiteSpace($Python)) {
-    if (Test-Path -LiteralPath $bundledPython) {
-        $Python = $bundledPython
-    } elseif (-not [string]::IsNullOrWhiteSpace($env:PYTHON)) {
-        $Python = $env:PYTHON
+$bundledNode = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe"
+if ([string]::IsNullOrWhiteSpace($Node)) {
+    if (Test-Path -LiteralPath $bundledNode) {
+        $Node = $bundledNode
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:NODE)) {
+        $Node = $env:NODE
     } else {
-        $Python = "python"
+        $Node = "node"
+    }
+}
+if ([string]::IsNullOrWhiteSpace($Npm)) {
+    if (-not [string]::IsNullOrWhiteSpace($env:NPM)) {
+        $Npm = $env:NPM
+    } else {
+        $Npm = "npm"
     }
 }
 
 Push-Location $repoRoot
 try {
-    & $Python "scripts\docs\build_dashboard_user_guide.py" --capture-screens
+    if (-not $SkipBrowserInstall) {
+        & $Npm --prefix "dashboard" exec playwright install chromium
+        if ($LASTEXITCODE -ne 0) {
+            throw "Playwright Chromium install failed with exit code $LASTEXITCODE"
+        }
+    }
+    & $Node "scripts\docs\capture_dashboard_user_guide_screens.mjs"
     if ($LASTEXITCODE -ne 0) {
-        throw "Screenshot generation failed with exit code $LASTEXITCODE"
+        throw "Real dashboard screenshot capture failed with exit code $LASTEXITCODE"
     }
 } finally {
     Pop-Location

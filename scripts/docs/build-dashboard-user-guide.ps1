@@ -28,7 +28,11 @@ try {
     if ($SkipScreens) {
         & $Python "scripts\docs\build_dashboard_user_guide.py" --build-docx
     } else {
-        & $Python "scripts\docs\build_dashboard_user_guide.py" --all
+        & (Join-Path $PSScriptRoot "capture-dashboard-user-guide-screens.ps1")
+        if ($LASTEXITCODE -ne 0) {
+            throw "Screenshot generation failed with exit code $LASTEXITCODE"
+        }
+        & $Python "scripts\docs\build_dashboard_user_guide.py" --build-docx
     }
     if ($LASTEXITCODE -ne 0) {
         throw "Manual build failed with exit code $LASTEXITCODE"
@@ -42,10 +46,16 @@ try {
             throw "DOCX renderer not found: $Renderer"
         }
         New-Item -ItemType Directory -Force -Path $renderDir | Out-Null
-        $primaryOutput = & $Python $Renderer $docxPath --output_dir $renderDir --width 1200 --height 1600 2>&1
-        $primaryExit = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $primaryOutput = & $Python $Renderer $docxPath --output_dir $renderDir --width 1200 --height 1600 2>&1
+            $primaryExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($primaryExit -ne 0) {
-            Write-Warning "Primary DOCX renderer failed with exit code $primaryExit; trying Word/Poppler fallback."
+            Write-Host "Primary DOCX renderer unavailable or failed with exit code $primaryExit; trying Word/Poppler fallback."
             & "python" "scripts\docs\render_docx_with_word.py" $docxPath --output_dir $renderDir
             if ($LASTEXITCODE -ne 0) {
                 throw "Manual render failed with exit code $LASTEXITCODE"
