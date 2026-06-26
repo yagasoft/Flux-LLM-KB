@@ -1748,6 +1748,7 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert "next_attempt_at = now()" in sql
     assert "last_error = NULL" in sql
     assert "locked_at = NULL" in sql
+    assert "jsonb_build_object('remediation_reason', %s::text)" in sql
     assert "status IN ('failed', 'blocked_missing_dependency', 'blocked_locked', 'retrying_locked')" in sql
     assert executed[0][1] == ("operator retry", "job-1")
 

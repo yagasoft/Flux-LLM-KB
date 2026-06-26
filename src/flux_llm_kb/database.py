@@ -3253,7 +3253,7 @@ def requeue_corpus_job(
                     next_attempt_at = now(),
                     locked_at = NULL,
                     locked_by = NULL,
-                    telemetry = telemetry || jsonb_build_object('remediation_reason', %s),
+                    telemetry = telemetry || jsonb_build_object('remediation_reason', %s::text),
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
