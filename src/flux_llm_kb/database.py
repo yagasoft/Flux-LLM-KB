@@ -2331,12 +2331,21 @@ def persist_crawl_plan(
                     and status == "queued"
                     and canonical_id is None
                 )
+                existing_chunk_count: int | None = None
+                if previous is not None and not changed_asset and status == "indexed" and canonical_id is None:
+                    cur.execute("SELECT count(*) FROM asset_chunks WHERE asset_id = %s", (previous[0],))
+                    count_row = cur.fetchone()
+                    existing_chunk_count = int(count_row[0] if count_row else 0)
                 repaired_missing_chunks = (
                     previous is not None
                     and not changed_asset
                     and status == "indexed"
                     and canonical_id is None
-                    and bool(asset.metadata.get("manifest_repaired_missing_chunks"))
+                    and tuple(asset.chunks)
+                    and (
+                        bool(asset.metadata.get("manifest_repaired_missing_chunks"))
+                        or (existing_chunk_count is not None and existing_chunk_count <= 0)
+                    )
                 )
                 cur.execute(
                     """
@@ -5209,17 +5218,17 @@ def lookup_scan_manifest(*, root_name: str, path: str, url: str | None = None) -
             cur.execute(
                 """
                 SELECT m.path, m.size_bytes, m.mtime_ns, m.quick_hash, m.content_hash,
-                       m.metadata, a.extraction_status, count(c.id)::integer AS chunk_count
+                       m.metadata, a.extraction_status, (a.deleted_at IS NOT NULL) AS source_asset_deleted,
+                       count(c.id)::integer AS chunk_count
                 FROM crawl_path_manifests m
                 LEFT JOIN source_assets a
                   ON a.root_id = m.root_id
                  AND a.path = m.path
-                 AND a.deleted_at IS NULL
                 LEFT JOIN asset_chunks c ON c.asset_id = a.id
                 WHERE m.root_id = %s
                   AND m.path = %s
                 GROUP BY m.path, m.size_bytes, m.mtime_ns, m.quick_hash, m.content_hash,
-                         m.metadata, a.extraction_status
+                         m.metadata, a.extraction_status, a.deleted_at
                 """,
                 (root_id, path),
             )
@@ -5234,7 +5243,8 @@ def lookup_scan_manifest(*, root_name: str, path: str, url: str | None = None) -
                 "content_hash": row[4],
                 "metadata": _sanitize_operational_metadata(row[5] or {}),
                 "source_asset_status": row[6],
-                "chunk_count": int(row[7] or 0),
+                "source_asset_deleted": bool(row[7]),
+                "chunk_count": int(row[8] or 0),
             }
 
 
