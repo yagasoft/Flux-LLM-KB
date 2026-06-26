@@ -392,9 +392,42 @@ def sync_mail_spool(profile_name: str | None = None) -> dict[str, Any]:
     synced: list[dict[str, Any]] = []
     for profile in profiles:
         root_name = f"mail-{profile['name']}"
+        unavailable_reason = _mail_spool_root_unavailable_reason(root_name)
+        if unavailable_reason:
+            synced.append(
+                {
+                    "profile": profile["name"],
+                    "root_name": root_name,
+                    "status": "blocked_spool_unavailable",
+                    "error": unavailable_reason,
+                    "files_seen": 0,
+                    "files_changed": 0,
+                    "files_deleted": 0,
+                    "jobs_queued": 0,
+                    "chunks_indexed": 0,
+                    "manifest_skipped_unchanged": 0,
+                }
+            )
+            continue
         result = KnowledgeService().sync_corpus(root_name=root_name)
         synced.append({"profile": profile["name"], **result})
     return {"profiles": synced, "count": len(synced)}
+
+
+def _mail_spool_root_unavailable_reason(root_name: str) -> str | None:
+    root = database.get_monitored_root(root_name)
+    if not root:
+        return f"mail monitored root is not configured: {root_name}"
+    root_path = root.get("root_path")
+    if not root_path:
+        return f"mail monitored root has no path configured: {root_name}"
+    path = Path(str(root_path)).expanduser()
+    try:
+        if path.exists():
+            return None
+    except OSError as exc:
+        return f"mail spool root is not accessible from this runtime: {path} ({exc})"
+    return f"mail spool root is not accessible from this runtime: {path}"
 
 
 def render_outlook_config(profile_name: str, *, spool_path: str | Path, folder_paths: Iterable[str]) -> str:

@@ -512,3 +512,47 @@ def test_sync_due_mail_profiles_runs_due_imap_profiles(monkeypatch, tmp_path):
     assert result["profiles"][0]["run_id"] == "run-1"
     assert auth_calls == [("me@gmail.com", "fresh-access-token")]
     assert runs[0]["status"] == "completed"
+
+
+def test_sync_mail_spool_blocks_when_mail_root_unavailable(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+    from flux_llm_kb.service import KnowledgeService
+
+    missing_root = tmp_path / "missing-spool"
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "list_mail_profiles",
+        lambda name=None: [
+            {
+                "name": "gmail",
+                "source_type": "imap",
+                "enabled": True,
+                "spool_path": str(missing_root.parent),
+                "metadata": {},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda root_name: {
+            "name": root_name,
+            "root_path": str(missing_root),
+            "metadata": {"mail_profile": "gmail", "strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(
+        KnowledgeService,
+        "sync_corpus",
+        lambda self, **kwargs: calls.append(kwargs) or {"files_deleted": 99},
+    )
+
+    result = mail_ingestion.sync_mail_spool(profile_name="gmail")
+
+    assert calls == []
+    assert result["count"] == 1
+    assert result["profiles"][0]["profile"] == "gmail"
+    assert result["profiles"][0]["status"] == "blocked_spool_unavailable"
+    assert result["profiles"][0]["files_deleted"] == 0
+    assert "not accessible" in result["profiles"][0]["error"]
