@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from flux_llm_kb import database
-from flux_llm_kb.crawler import AssetChunk
+from flux_llm_kb.crawler import AssetChunk, CrawlPlan, DiscoveredAsset
 from flux_llm_kb.database import forget_episode
 from flux_llm_kb.embeddings import EmbeddingInput
 
@@ -1956,6 +1956,93 @@ def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
 
     assert "source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash" in source
     assert "source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')" in source
+
+
+def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypatch, tmp_path):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text FROM monitored_roots" in sql:
+                return ("root-1",)
+            if "INSERT INTO crawl_runs" in sql:
+                return ("run-1",)
+            if "SELECT id::text, quick_hash, extraction_status, extension" in sql:
+                return ("asset-1", "quick", "blocked_missing_dependency", ".eml")
+            if "SELECT id::text" in sql and "WHERE content_hash" in sql:
+                return None
+            if "INSERT INTO source_assets" in sql:
+                return ("asset-1",)
+            if "INSERT INTO asset_chunks" in sql:
+                return ("chunk-1",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    mail_path = tmp_path / "message.eml"
+    mail_path.write_text("Subject: Ready\n\nBody", encoding="utf-8")
+    plan = CrawlPlan(
+        root_path=tmp_path,
+        assets=[
+            DiscoveredAsset(
+                path=mail_path,
+                relative_path="message.eml",
+                file_kind="mail",
+                mime_type="message/rfc822",
+                extension=".eml",
+                size_bytes=20,
+                mtime_ns=100,
+                quick_hash="quick",
+                content_hash="content",
+                extraction_tier="inline",
+                extraction_status="indexed",
+                chunks=(
+                    AssetChunk(
+                        chunk_index=0,
+                        title="Ready",
+                        body="Body",
+                        token_estimate=1,
+                    ),
+                ),
+            )
+        ],
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
+
+    result = database.persist_crawl_plan(root_name="mail-root", plan=plan)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result["chunks_indexed"] == 1
+    assert result["files_changed"] == 0
+    assert "EXCLUDED.extraction_status = 'indexed'" in sql
+    assert "DELETE FROM asset_chunks WHERE asset_id = %s" in sql
+    assert "INSERT INTO asset_chunks" in sql
 
 
 def test_persist_crawl_plan_requeues_legacy_metadata_only_documents():
