@@ -159,6 +159,12 @@ flux-kb diagnostics remediate clear_completed_errors --target-type root --root d
 flux-kb embeddings status
 flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
 flux-kb embeddings backfill --owner-class all --limit 100
+flux-kb governance run --mode shadow --limit 25
+flux-kb governance actions list --status proposed --limit 25
+flux-kb governance actions apply <action-id> --rationale "reviewed sanitized evidence" --confirm
+flux-kb governance actions recover <action-id> --rationale "operator rollback" --confirm
+flux-kb governance digest
+flux-kb governance policy
 flux-kb crawl doctor
 flux-kb settings list
 flux-kb settings set retrieval.token_budget 1600
@@ -281,6 +287,16 @@ failed or dependency-blocked corpus jobs, `run_backfill` for scoped root/family
 backfill, and `repair_asset_statuses` or `clear_completed_errors` for
 root-scoped cleanup. These actions append audit events and do not mutate runtime
 settings.
+Evaluated memory governance is available with `flux-kb governance run`,
+`flux-kb governance actions list`, `flux-kb governance actions apply`,
+`flux-kb governance actions recover`, `flux-kb governance digest`, and
+`flux-kb governance policy`. Run `flux-kb retrieval benchmark run --suite
+governance-shadow` before applying proposals; apply is blocked until the latest
+persisted benchmark has zero guardrail failures and proposal precision meets
+`governance.librarian.min_shadow_precision` (default `0.80`). Governance
+responses are sanitized, include `settings_mutated: false`, and never expose raw
+memory text, private paths, raw queries, snippets, embeddings, local model
+prompts, or local model outputs.
 Worker-family status is available with `flux-kb crawl worker status --family
 <name|all>` and reports configured caps, cap pressure, worker-family
 backpressure, oldest pending age, slow recent jobs, retry/lock transitions,
@@ -299,6 +315,24 @@ without raw source text. Use `flux-kb embeddings status` to inspect coverage,
 embeddings backfill` for an immediate bounded refresh. The same counters appear
 in the dashboard Health acceleration panel as vectors processed, unchanged
 items skipped, batches, and cache hits/misses.
+
+Governance librarian settings are catalog-backed and default conservative:
+`governance.librarian.enabled=false`,
+`governance.librarian.interval_seconds=3600`,
+`governance.librarian.mode=shadow`,
+`governance.librarian.max_actions_per_run=25`,
+`governance.librarian.min_shadow_precision=0.8`,
+`governance.librarian.auto_apply_enabled=false`,
+`governance.librarian.auto_apply_risk_ceiling=low`,
+`governance.librarian.digest_retention_days=30`, and
+`governance.librarian.protected_memory_rules` for rule-based protected-memory
+thresholds. Optional local rationale settings
+`governance.local_model_rationale.enabled` and
+`governance.local_model_rationale.model` are loopback-only and fall back to
+deterministic rule-based rationales when unavailable. The corpus worker runs the
+librarian only when enabled, stays shadow-only unless auto mode and auto-apply
+are explicitly configured, and auto-applies only low-risk claim `mark_review`,
+`stale_tag`, and `deprioritize` actions that pass the benchmark gate.
 
 ## Host Filesystem Agent
 
@@ -361,6 +395,10 @@ dashboard shows `host_offline` and the command above.
 The dashboard is a React/Vite app under `dashboard/` and is served by FastAPI at
 `http://127.0.0.1:8765/dashboard`. Use the helper script whenever dashboard code
 changes; it rebuilds assets and refreshes the running deployment:
+
+The Review tab includes Governance Automation, Digest, Guardrails, and Recovery
+panels for proposal review, shadow runs, confirmed apply/recover actions, and
+bounded local digest status.
 
 ```powershell
 .\scripts\start-dashboard-dev.ps1

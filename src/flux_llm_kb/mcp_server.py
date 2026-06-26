@@ -387,6 +387,36 @@ def create_server():
             limit=limit,
         )
 
+    @mcp.tool(name="kb.governance_run")
+    def governance_run(mode: str = "shadow", limit: int = 25):
+        """Generate a memory governance proposal run; defaults to shadow mode and never mutates runtime settings."""
+        return service.run_governance(mode=mode, actor="mcp", limit=limit)
+
+    @mcp.tool(name="kb.governance_actions")
+    def governance_actions(status: str = "proposed", limit: int = 50):
+        """List sanitized memory governance actions with telemetry by source, action, risk, status, and mutation result."""
+        return service.governance_actions(status=status, limit=limit)
+
+    @mcp.tool(name="kb.governance_apply")
+    def governance_apply(action_id: str, rationale: str, confirm: bool = False):
+        """Apply a confirmed governance action when benchmark and protection guardrails allow it."""
+        return service.governance_apply(action_id, rationale=rationale, confirm=confirm, actor="mcp")
+
+    @mcp.tool(name="kb.governance_recover")
+    def governance_recover(action_id: str, rationale: str, confirm: bool = False):
+        """Recover a previously applied governance action using its captured before-state."""
+        return service.governance_recover(action_id, rationale=rationale, confirm=confirm, actor="mcp")
+
+    @mcp.tool(name="kb.governance_digest")
+    def governance_digest():
+        """Read the latest bounded governance digest for operator review."""
+        return service.governance_digest()
+
+    @mcp.tool(name="kb.governance_policy")
+    def governance_policy():
+        """Read the effective local governance automation policy and guardrail defaults."""
+        return service.governance_policy()
+
     @mcp.tool(name="kb.embeddings_status")
     def embeddings_status(root_name: str | None = None):
         """Return embedding vector coverage and missing/stale metadata counts."""

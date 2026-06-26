@@ -344,6 +344,12 @@ let codeSymbolRequestUrl: string | undefined;
 let retrievalBenchmarkRunPayload: unknown;
 let retrievalBenchmarkHistoryPayload: unknown;
 let diagnosticsActionPayload: unknown;
+let governanceActionsPayload: unknown;
+let governanceDigestPayload: unknown;
+let governancePolicyPayload: unknown;
+let governanceRunPayload: unknown;
+let governanceApplyPayload: unknown;
+let governanceRecoverPayload: unknown;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -512,6 +518,62 @@ describe("Flux dashboard", () => {
         }
       ]
     };
+    governanceActionsPayload = {
+      telemetry: {
+        total: 3,
+        by_status: { proposed: 1, blocked: 1, applied: 1 },
+        by_risk: { low: 1, high: 1, medium: 1 },
+        by_mutation: { mutated: 1, not_mutated: 2 }
+      },
+      actions: [
+        {
+          id: "gov-action-1",
+          action: "stale_tag",
+          target_type: "claim",
+          target_id: "claim-stale",
+          memory_class: "claim",
+          risk: "low",
+          status: "proposed",
+          source: "retention_quality",
+          rationale: { summary: "stale evidence", guardrails: { gate_status: "ready", protected: false } },
+          evidence: { lifecycle_state: "stale" }
+        },
+        {
+          id: "gov-blocked-1",
+          action: "retire",
+          target_type: "claim",
+          target_id: "claim-current",
+          risk: "high",
+          status: "blocked",
+          source: "retention_quality",
+          rationale: { summary: "protected memory", guardrails: { protected: true } }
+        },
+        {
+          id: "gov-applied-1",
+          action: "deprioritize",
+          target_type: "claim",
+          target_id: "claim-old",
+          risk: "low",
+          status: "applied",
+          source: "retention_quality",
+          rationale: { summary: "low confidence", guardrails: { gate_status: "ready" } }
+        }
+      ]
+    };
+    governanceDigestPayload = {
+      digest: {
+        summary: { new_proposals: 1, blocked_proposals: 1, recoverable_actions: 1, gate_status: "ready" },
+        recommendations: [{ action: "inspect_blocked_governance", count: 1 }]
+      },
+      settings_mutated: false
+    };
+    governancePolicyPayload = {
+      policy: { min_shadow_precision: 0.8, auto_apply_enabled: false, auto_apply_risk_ceiling: "low" },
+      settings_mutated: false
+    };
+    governanceRunPayload = undefined;
+    governanceApplyPayload = undefined;
+    governanceRecoverPayload = undefined;
     retentionPolicyUpdatePayload = undefined;
     benchmarkRunPayload = undefined;
     reliabilityRunPayload = undefined;
@@ -925,6 +987,47 @@ describe("Flux dashboard", () => {
       }
       if (url.startsWith("/api/results/")) return json(resultDetailPayload);
       if (url.startsWith("/api/corpus/assets/") && url.endsWith("/actions")) return json(fileActionPayload);
+      if (url === "/api/governance/run" && init?.method === "POST") {
+        governanceRunPayload = JSON.parse(String(init.body));
+        return json({ run: { id: "gov-run-1" }, actions: [], settings_mutated: false, memory_mutated: false });
+      }
+      if (url === "/api/governance/actions/gov-action-1/apply" && init?.method === "POST") {
+        governanceApplyPayload = JSON.parse(String(init.body));
+        governanceActionsPayload = {
+          ...(governanceActionsPayload as Record<string, unknown>),
+          actions: [
+            {
+              id: "gov-action-1",
+              action: "stale_tag",
+              target_type: "claim",
+              target_id: "claim-stale",
+              risk: "low",
+              status: "applied",
+              source: "retention_quality",
+              rationale: { summary: "stale evidence" }
+            },
+            {
+              id: "gov-applied-1",
+              action: "deprioritize",
+              target_type: "claim",
+              target_id: "claim-old",
+              risk: "low",
+              status: "applied",
+              source: "retention_quality",
+              rationale: { summary: "low confidence" }
+            }
+          ],
+          telemetry: { total: 2, by_status: { applied: 2 }, by_risk: { low: 2 }, by_mutation: { mutated: 2 } }
+        };
+        return json({ action: { id: "gov-action-1", status: "applied" }, memory_mutated: true, settings_mutated: false });
+      }
+      if (url === "/api/governance/actions/gov-applied-1/recover" && init?.method === "POST") {
+        governanceRecoverPayload = JSON.parse(String(init.body));
+        return json({ action: { id: "gov-applied-1", status: "recovered" }, memory_mutated: true, settings_mutated: false });
+      }
+      if (url.startsWith("/api/governance/actions")) return json(governanceActionsPayload);
+      if (url === "/api/governance/digest") return json(governanceDigestPayload);
+      if (url === "/api/governance/policy") return json(governancePolicyPayload);
       if (url.startsWith("/api/claims/") && url.endsWith("/transitions")) return json(claimTransitionPayload);
       if (url.startsWith("/api/claims")) return json(reviewPayload);
       if (url === "/api/retention/policies" && init?.method !== "PUT") return json(retentionPoliciesPayload);
@@ -1314,6 +1417,62 @@ describe("Flux dashboard", () => {
       action: "deprioritize",
       reason: "live review"
     });
+  });
+
+  test("review tab shows governance automation digest guardrails and recovery actions", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, "prompt").mockReturnValue("Reviewed governance evidence");
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Review" }));
+
+    expect(await screen.findByRole("heading", { name: "Governance Automation" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Governance Digest" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Guardrails" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Recovery" })).toBeInTheDocument();
+    const table = await screen.findByRole("table", { name: "Governance actions" });
+    expect(within(table).getByText("Stale Tag")).toBeInTheDocument();
+    expect(within(table).getByText("protected memory")).toBeInTheDocument();
+    expect(screen.getByText("Inspect Blocked Governance")).toBeInTheDocument();
+    expect(screen.getAllByText("claim:claim-old").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "Run shadow" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/governance/run",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ mode: "shadow", limit: 25 })
+        })
+      );
+    });
+    expect(governanceRunPayload).toEqual({ mode: "shadow", limit: 25 });
+
+    await user.click(within(table).getByRole("button", { name: "Apply governance action gov-action-1" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/governance/actions/gov-action-1/apply",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ rationale: "Reviewed governance evidence", confirm: true })
+        })
+      );
+    });
+    expect(governanceApplyPayload).toEqual({ rationale: "Reviewed governance evidence", confirm: true });
+
+    await user.click(screen.getByRole("button", { name: "Recover governance action gov-applied-1" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/governance/actions/gov-applied-1/recover",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ rationale: "Reviewed governance evidence", confirm: true })
+        })
+      );
+    });
+    expect(governanceRecoverPayload).toEqual({ rationale: "Reviewed governance evidence", confirm: true });
   });
 
   test("capture review queue requires rationale, posts decisions, refreshes, and shows audit decisions", async () => {

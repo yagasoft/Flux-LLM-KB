@@ -1579,6 +1579,85 @@ def transition_claim(
     return claim
 
 
+def restore_claim_lifecycle_state(
+    *,
+    claim_id: str,
+    lifecycle_state: str,
+    retention_action: str = "keep",
+    actor: str = "system",
+    reason: str,
+    url: str | None = None,
+) -> dict[str, Any]:
+    restored_state = str(lifecycle_state or "active").strip().lower()
+    restored_action = str(retention_action or "keep").strip().lower()
+    if restored_state not in {"active", "confirmed", "reinforced", "stale", "contradicted", "superseded", "retired"}:
+        raise ValueError(f"unsupported claim lifecycle state: {lifecycle_state}")
+    if restored_action not in {"keep", "review", "deprioritize", "retire"}:
+        raise ValueError(f"unsupported retention action: {retention_action}")
+    clean_reason = str(reason or "").strip()
+    if not clean_reason:
+        raise ValueError("recovery reason is required")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT lifecycle_state, retention_action
+                FROM claims
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (claim_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"claim not found: {claim_id}")
+            from_state = row[0]
+            from_action = row[1]
+            cur.execute(
+                """
+                UPDATE claims
+                SET lifecycle_state = %s,
+                    retention_action = %s,
+                    stale_at = CASE WHEN %s = 'stale' THEN COALESCE(stale_at, now()) ELSE stale_at END,
+                    retired_at = CASE WHEN %s = 'retired' THEN COALESCE(retired_at, now()) ELSE retired_at END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (restored_state, restored_action, restored_state, restored_state, claim_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO claim_lifecycle_events (
+                    claim_id, transition_type, actor, from_state, to_state, details
+                )
+                VALUES (%s, 'governance_recover', %s, %s, %s, %s::jsonb)
+                """,
+                (
+                    claim_id,
+                    actor,
+                    from_state,
+                    restored_state,
+                    _json({"reason": clean_reason, "from_retention_action": from_action, "to_retention_action": restored_action}),
+                ),
+            )
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, actor, target_table, target_id, details)
+                VALUES ('governance.action_recovered', %s, 'claims', %s, %s::jsonb)
+                """,
+                (
+                    actor,
+                    claim_id,
+                    _json({"reason": clean_reason, "from_state": from_state, "to_state": restored_state, "settings_mutated": False}),
+                ),
+            )
+    claim = get_claim(claim_id, url=url)
+    if claim is None:
+        raise LookupError(f"claim not found: {claim_id}")
+    return claim
+
+
 def traverse_entity_graph(
     *,
     entity_id: str,
@@ -1757,7 +1836,7 @@ def record_audit_event(
     target_id: str | None = None,
     details: dict[str, Any] | None = None,
     url: str | None = None,
-) -> None:
+) -> dict[str, Any]:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -1765,9 +1844,12 @@ def record_audit_event(
                 """
                 INSERT INTO audit_events (event_type, target_table, target_id, details)
                 VALUES (%s, %s, %s, %s::jsonb)
+                RETURNING id::text, event_type
                 """,
                 (event_type, target_table, target_id, _json(details or {})),
             )
+            row = cur.fetchone()
+            return {"id": row[0], "event_type": row[1]}
 
 
 def add_monitored_root(
@@ -4085,6 +4167,384 @@ def list_retrieval_benchmark_runs(
                 params,
             )
             return [_retrieval_benchmark_run_row(row) for row in cur.fetchall()]
+
+
+def record_memory_governance_run(
+    *,
+    mode: str = "shadow",
+    trigger: str = "manual",
+    status: str = "completed",
+    policy_snapshot: dict[str, Any] | None = None,
+    gate: dict[str, Any] | None = None,
+    summary: dict[str, Any] | None = None,
+    actor: str = "system",
+    memory_mutated: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    safe_policy = _sanitize_governance_metadata(policy_snapshot or {})
+    safe_gate = _sanitize_governance_metadata(gate or {})
+    safe_summary = _sanitize_governance_metadata(summary or {})
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_governance_runs (
+                    mode, trigger, status, actor, policy_snapshot, gate,
+                    summary, settings_mutated, memory_mutated
+                )
+                VALUES (%s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, false, %s)
+                RETURNING id::text, created_at
+                """,
+                (
+                    _normalize_governance_mode(mode),
+                    str(trigger or "manual")[:80],
+                    _normalize_governance_run_status(status),
+                    str(actor or "system")[:80],
+                    _json(safe_policy),
+                    _json(safe_gate),
+                    _json(safe_summary),
+                    bool(memory_mutated),
+                ),
+            )
+            row = cur.fetchone()
+            run_id = row[0]
+            cur.execute(
+                """
+                INSERT INTO memory_governance_policy_snapshots (
+                    run_id, policy, settings_mutated
+                )
+                VALUES (%s, %s::jsonb, false)
+                """,
+                (run_id, _json(safe_policy)),
+            )
+            return {
+                "id": run_id,
+                "mode": _normalize_governance_mode(mode),
+                "trigger": str(trigger or "manual")[:80],
+                "status": _normalize_governance_run_status(status),
+                "actor": str(actor or "system")[:80],
+                "policy_snapshot": safe_policy,
+                "gate": safe_gate,
+                "summary": safe_summary,
+                "settings_mutated": False,
+                "memory_mutated": bool(memory_mutated),
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def list_memory_governance_runs(*, limit: int = 20, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, mode, trigger, status, actor, policy_snapshot,
+                       gate, summary, settings_mutated, memory_mutated, created_at, updated_at
+                FROM memory_governance_runs
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (max(1, min(limit, 200)),),
+            )
+            return [_memory_governance_run_row(row) for row in cur.fetchall()]
+
+
+def update_memory_governance_run(
+    *,
+    run_id: str,
+    status: str | None = None,
+    summary: dict[str, Any] | None = None,
+    memory_mutated: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    safe_summary = _sanitize_governance_metadata(summary or {})
+    normalized_status = _normalize_governance_run_status(status) if status else None
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE memory_governance_runs
+                SET status = COALESCE(%s, status),
+                    summary = CASE WHEN %s THEN summary ELSE %s::jsonb END,
+                    memory_mutated = %s,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text, mode, trigger, status, actor, policy_snapshot,
+                          gate, summary, settings_mutated, memory_mutated, created_at, updated_at
+                """,
+                (
+                    normalized_status,
+                    summary is None,
+                    _json(safe_summary),
+                    bool(memory_mutated),
+                    run_id,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"governance run not found: {run_id}")
+            return _memory_governance_run_row(row)
+
+
+def record_memory_governance_action(
+    *,
+    run_id: str | None,
+    action: str,
+    target_type: str,
+    target_id: str,
+    memory_class: str | None = None,
+    risk: str = "medium",
+    status: str = "proposed",
+    source: str = "governance",
+    rationale: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+    before_state: dict[str, Any] | None = None,
+    after_state: dict[str, Any] | None = None,
+    actor: str = "system",
+    memory_mutated: bool = False,
+    audit_event_id: str | None = None,
+    error: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    safe_rationale = _sanitize_governance_metadata(rationale or {})
+    safe_evidence = _sanitize_governance_metadata(evidence or {})
+    safe_before = _sanitize_governance_metadata(before_state or {})
+    safe_after = _sanitize_governance_metadata(after_state or {})
+    normalized_status = _normalize_governance_action_status(status)
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_governance_actions (
+                    run_id, action, target_type, target_id, memory_class, risk,
+                    status, source, actor, rationale, evidence, before_state,
+                    after_state, settings_mutated, memory_mutated, audit_event_id, error
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s::jsonb, %s::jsonb, %s::jsonb, %s::jsonb,
+                    false, %s, %s, %s
+                )
+                RETURNING id::text, created_at
+                """,
+                (
+                    run_id,
+                    _normalize_governance_action(action),
+                    str(target_type or "memory")[:80],
+                    str(target_id or "")[:160],
+                    _normalize_governance_memory_class(memory_class),
+                    _normalize_governance_risk(risk),
+                    normalized_status,
+                    str(source or "governance")[:80],
+                    str(actor or "system")[:80],
+                    _json(safe_rationale),
+                    _json(safe_evidence),
+                    _json(safe_before),
+                    _json(safe_after),
+                    bool(memory_mutated),
+                    audit_event_id,
+                    str(error)[:300] if error else None,
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "run_id": run_id,
+                "action": _normalize_governance_action(action),
+                "target_type": str(target_type or "memory")[:80],
+                "target_id": str(target_id or "")[:160],
+                "memory_class": _normalize_governance_memory_class(memory_class),
+                "risk": _normalize_governance_risk(risk),
+                "status": normalized_status,
+                "source": str(source or "governance")[:80],
+                "actor": str(actor or "system")[:80],
+                "rationale": safe_rationale,
+                "evidence": safe_evidence,
+                "before_state": safe_before,
+                "after_state": safe_after,
+                "settings_mutated": False,
+                "memory_mutated": bool(memory_mutated),
+                "audit_event_id": audit_event_id,
+                "error": str(error)[:300] if error else None,
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def list_memory_governance_actions(
+    *,
+    status: str | None = None,
+    limit: int = 50,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    filters: list[str] = []
+    params: list[Any] = []
+    if status and status != "all":
+        filters.append("status = %s")
+        params.append(_normalize_governance_action_status(status))
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params.append(max(1, min(limit, 200)))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id::text, run_id::text, action, target_type, target_id,
+                       memory_class, risk, status, source, actor, rationale,
+                       evidence, before_state, after_state, settings_mutated,
+                       memory_mutated, audit_event_id::text, error, created_at,
+                       updated_at, applied_at, recovered_at
+                FROM memory_governance_actions
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                params,
+            )
+            return [_memory_governance_action_row(row) for row in cur.fetchall()]
+
+
+def get_memory_governance_action(action_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, run_id::text, action, target_type, target_id,
+                       memory_class, risk, status, source, actor, rationale,
+                       evidence, before_state, after_state, settings_mutated,
+                       memory_mutated, audit_event_id::text, error, created_at,
+                       updated_at, applied_at, recovered_at
+                FROM memory_governance_actions
+                WHERE id = %s
+                """,
+                (action_id,),
+            )
+            row = cur.fetchone()
+            return _memory_governance_action_row(row) if row else None
+
+
+def update_memory_governance_action(
+    *,
+    action_id: str,
+    status: str,
+    after_state: dict[str, Any] | None = None,
+    memory_mutated: bool = False,
+    audit_event_id: str | None = None,
+    error: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_status = _normalize_governance_action_status(status)
+    safe_after = _sanitize_governance_metadata(after_state or {})
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE memory_governance_actions
+                SET status = %s,
+                    after_state = memory_governance_actions.after_state || %s::jsonb,
+                    memory_mutated = %s,
+                    audit_event_id = COALESCE(%s::uuid, audit_event_id),
+                    error = %s,
+                    applied_at = CASE WHEN %s = 'applied' THEN now() ELSE applied_at END,
+                    recovered_at = CASE WHEN %s = 'recovered' THEN now() ELSE recovered_at END,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id::text, run_id::text, action, target_type, target_id,
+                          memory_class, risk, status, source, actor, rationale,
+                          evidence, before_state, after_state, settings_mutated,
+                          memory_mutated, audit_event_id::text, error, created_at,
+                          updated_at, applied_at, recovered_at
+                """,
+                (
+                    normalized_status,
+                    _json(safe_after),
+                    bool(memory_mutated),
+                    audit_event_id,
+                    str(error)[:300] if error else None,
+                    normalized_status,
+                    normalized_status,
+                    action_id,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"governance action not found: {action_id}")
+            return _memory_governance_action_row(row)
+
+
+def record_memory_governance_digest(
+    *,
+    run_id: str | None,
+    summary: dict[str, Any] | None = None,
+    recommendations: list[dict[str, Any]] | None = None,
+    actor: str = "system",
+    memory_mutated: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    safe_summary = _sanitize_governance_metadata(summary or {})
+    safe_recommendations = [_sanitize_governance_metadata(item) for item in (recommendations or [])[:20] if isinstance(item, dict)]
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO memory_governance_digests (
+                    run_id, actor, summary, recommendations, settings_mutated, memory_mutated
+                )
+                VALUES (%s, %s, %s::jsonb, %s::jsonb, false, %s)
+                RETURNING id::text, created_at
+                """,
+                (
+                    run_id,
+                    str(actor or "system")[:80],
+                    _json(safe_summary),
+                    _json_any(safe_recommendations),
+                    bool(memory_mutated),
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "run_id": run_id,
+                "actor": str(actor or "system")[:80],
+                "summary": safe_summary,
+                "recommendations": safe_recommendations,
+                "settings_mutated": False,
+                "memory_mutated": bool(memory_mutated),
+                "created_at": row[1].isoformat() if row[1] else None,
+            }
+
+
+def latest_memory_governance_digest(*, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, run_id::text, actor, summary, recommendations,
+                       settings_mutated, memory_mutated, created_at
+                FROM memory_governance_digests
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "run_id": row[1],
+                "actor": row[2],
+                "summary": _sanitize_governance_metadata(row[3] or {}),
+                "recommendations": [_sanitize_governance_metadata(item) for item in row[4] or [] if isinstance(item, dict)],
+                "settings_mutated": bool(row[5]),
+                "memory_mutated": bool(row[6]),
+                "created_at": row[7].isoformat() if row[7] else None,
+            }
 
 
 CODE_FEEDBACK_CATEGORIES = {
@@ -8705,6 +9165,50 @@ def _retrieval_benchmark_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
     }
 
 
+def _memory_governance_run_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "mode": _normalize_governance_mode(row[1]),
+        "trigger": row[2],
+        "status": _normalize_governance_run_status(row[3]),
+        "actor": row[4],
+        "policy_snapshot": _sanitize_governance_metadata(row[5] or {}),
+        "gate": _sanitize_governance_metadata(row[6] or {}),
+        "summary": _sanitize_governance_metadata(row[7] or {}),
+        "settings_mutated": bool(row[8]),
+        "memory_mutated": bool(row[9]),
+        "created_at": row[10].isoformat() if row[10] else None,
+        "updated_at": row[11].isoformat() if row[11] else None,
+    }
+
+
+def _memory_governance_action_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "run_id": row[1],
+        "action": _normalize_governance_action(row[2]),
+        "target_type": row[3],
+        "target_id": row[4],
+        "memory_class": _normalize_governance_memory_class(row[5]),
+        "risk": _normalize_governance_risk(row[6]),
+        "status": _normalize_governance_action_status(row[7]),
+        "source": row[8],
+        "actor": row[9],
+        "rationale": _sanitize_governance_metadata(row[10] or {}),
+        "evidence": _sanitize_governance_metadata(row[11] or {}),
+        "before_state": _sanitize_governance_metadata(row[12] or {}),
+        "after_state": _sanitize_governance_metadata(row[13] or {}),
+        "settings_mutated": bool(row[14]),
+        "memory_mutated": bool(row[15]),
+        "audit_event_id": row[16],
+        "error": row[17],
+        "created_at": row[18].isoformat() if row[18] else None,
+        "updated_at": row[19].isoformat() if row[19] else None,
+        "applied_at": row[20].isoformat() if row[20] else None,
+        "recovered_at": row[21].isoformat() if row[21] else None,
+    }
+
+
 def _metric_deltas(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, float]:
     deltas: dict[str, float] = {}
     for key, value in current.items():
@@ -8746,6 +9250,68 @@ def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
     if normalized not in {"standard", "governance-shadow"}:
         raise ValueError("retrieval benchmark suite must be standard or governance-shadow")
     return normalized
+
+
+def _normalize_governance_mode(value: str | None) -> str:
+    normalized = str(value or "shadow").strip().lower().replace("_", "-")
+    if normalized not in {"shadow", "manual", "auto"}:
+        raise ValueError("governance mode must be shadow, manual, or auto")
+    return normalized
+
+
+def _normalize_governance_run_status(value: str | None) -> str:
+    normalized = str(value or "completed").strip().lower().replace("-", "_")
+    if normalized not in {"completed", "blocked", "failed"}:
+        raise ValueError("governance run status must be completed, blocked, or failed")
+    return normalized
+
+
+def _normalize_governance_action(value: str | None) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    allowed = {
+        "mark_review",
+        "stale_tag",
+        "deprioritize",
+        "retire",
+        "semantic_cluster_apply",
+        "canonical_cluster_promote",
+        "capture_ingestion_recheck",
+        "feedback_gap_escalate",
+        "recover",
+    }
+    if normalized not in allowed:
+        raise ValueError(f"unsupported governance action: {value}")
+    return normalized
+
+
+def _normalize_governance_action_status(value: str | None) -> str:
+    normalized = str(value or "proposed").strip().lower().replace("-", "_")
+    allowed = {
+        "proposed",
+        "blocked",
+        "skipped_duplicate",
+        "skipped_conflict",
+        "applied",
+        "recovered",
+        "failed",
+    }
+    if normalized not in allowed:
+        raise ValueError(f"unsupported governance action status: {value}")
+    return normalized
+
+
+def _normalize_governance_risk(value: str | None) -> str:
+    normalized = str(value or "medium").strip().lower()
+    if normalized not in {"low", "medium", "high"}:
+        return "medium"
+    return normalized
+
+
+def _normalize_governance_memory_class(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"claim", "episode", "corpus"} else None
 
 
 def _normalize_code_feedback_category(value: str | None) -> str:
@@ -8823,6 +9389,35 @@ def _sanitize_operational_value(value: Any) -> Any:
         sanitized = [_sanitize_operational_value(item) for item in value[:20]]
         return [item for item in sanitized if item is not None]
     return str(value)[:200]
+
+
+def _sanitize_governance_metadata(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:200]
+    if isinstance(value, list):
+        sanitized = [_sanitize_governance_metadata(item) for item in value[:50]]
+        return [item for item in sanitized if item is not None]
+    if not isinstance(value, dict):
+        return str(value)[:200]
+    sanitized: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        lowered = key_text.lower()
+        if lowered in {"raw", "body", "content", "text", "prompt", "query", "snippet", "error"}:
+            continue
+        if any(fragment in lowered for fragment in ("private_path", "embedding", "secret", "token", "credential", "password")):
+            continue
+        if lowered in {"path", "source_path", "file_path"}:
+            leaf = _safe_path_leaf(str(item or ""))
+            if leaf:
+                sanitized["source_leaf"] = leaf
+            continue
+        sanitized_item = _sanitize_governance_metadata(item)
+        if sanitized_item is not None:
+            sanitized[key_text] = sanitized_item
+    return sanitized
 
 
 def _sanitize_retrieval_case_results(value: list[dict[str, Any]]) -> list[dict[str, Any]]:

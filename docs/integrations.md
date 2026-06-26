@@ -51,6 +51,12 @@ Tools:
 | `kb.diagnostics_remediate` | Run a confirmation-worthy diagnostic remediation action such as retrying a corpus job, scoped backfill, or root cleanup; responses always report `settings_mutated: false`. |
 | `kb.retrieval_benchmark_run` | Run the synthetic retrieval-quality benchmark suite and store metadata-only history with metric deltas, calibration summaries, and advisory candidates. |
 | `kb.retrieval_benchmark_history` | List metadata-only retrieval benchmark history with suite, label, metrics, deltas, calibration summaries, and case-failure evidence. |
+| `kb.governance_run` | Run evaluated memory governance in shadow, manual, or explicitly configured auto mode and persist sanitized proposals. |
+| `kb.governance_actions` | List governance actions with telemetry by source, action, risk, status, and mutation result. |
+| `kb.governance_apply` | Apply one confirmed governance action with rationale, benchmark-gate checks, conflict detection, and audit evidence. |
+| `kb.governance_recover` | Recover one applied governance action from captured before-state with rationale and audit evidence. |
+| `kb.governance_digest` | Return the latest bounded local governance digest. |
+| `kb.governance_policy` | Return the effective sanitized governance policy and defaults. |
 | `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
 | `kb.embeddings_enqueue` | Queue a local `corpus_embed` job for missing or stale vectors. |
 | `kb.embeddings_backfill` | Refresh missing or stale vectors immediately with the local deterministic provider. |
@@ -134,6 +140,13 @@ Endpoints:
 - `GET /api/explain?query=<q>&limit=<n>&token_budget=<n>`
 - `POST /api/retrieval/benchmarks/run` with optional `suite` (`standard` or `governance-shadow`), `label`, `compare_label`, `limit_per_query`, `token_budget`, and `persist`
 - `GET /api/retrieval/benchmarks?suite=<standard|governance-shadow>&label=<label>&limit=<n>`
+- `GET /api/governance/runs?limit=<n>`
+- `POST /api/governance/run` with optional `mode` (`shadow`, `manual`, or `auto`) and `limit`
+- `GET /api/governance/actions?status=<proposed|blocked|applied|recovered|skipped_conflict|failed|all>&limit=<n>`
+- `POST /api/governance/actions/{action_id}/apply` with required `rationale` and `confirm=true`
+- `POST /api/governance/actions/{action_id}/recover` with required `rationale` and `confirm=true`
+- `GET /api/governance/digest`
+- `GET /api/governance/policy`
 - `GET /api/claims?review=<all|needs_review|current>&state=<state>&q=<q>&limit=<n>`
 - `POST /api/claims`
 - `GET /api/claims/{claim_id}`
@@ -239,6 +252,12 @@ flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
 flux-kb retrieval benchmark run --suite governance-shadow --label before-automation
 flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
+flux-kb governance run --mode shadow --limit 25
+flux-kb governance actions list --status proposed --limit 25
+flux-kb governance actions apply <action-id> --rationale "reviewed sanitized evidence" --confirm
+flux-kb governance actions recover <action-id> --rationale "operator rollback" --confirm
+flux-kb governance digest
+flux-kb governance policy
 ```
 
 Lifecycle transitions append audit-visible events. Superseded, contradicted,
@@ -266,6 +285,18 @@ ingest`, or `kb.capture_review_ingest`; ingestion records sanitized status,
 skip reasons, created memory ids, and `capture.ingested`,
 `capture.ingestion_skipped`, or `capture.ingestion_failed` audit events under
 `capture_jobs.payload.ingestion`.
+
+Evaluated memory governance is exposed through REST, CLI, MCP, and the
+dashboard Review tab. `POST /api/governance/run`, `flux-kb governance run`, and
+`kb.governance_run` persist sanitized proposal runs sourced from retention
+quality, claim lifecycle state, active semantic duplicate clusters, capture
+ingestion outcomes, code retrieval feedback summaries, and the latest
+`governance-shadow` benchmark. Apply and recover require explicit confirmation
+and rationale. They are blocked unless the latest persisted
+`governance-shadow` evidence has no guardrail failures and meets the configured
+precision threshold. Responses expose action ids, guardrail status, telemetry,
+and before/after state, but never raw memory text, private paths, raw queries,
+snippets, embeddings, local model prompts, or local model outputs.
 
 Lookup endpoints are read-only and return stable JSON payloads for asset and
 chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a
@@ -398,12 +429,14 @@ lookup, fallback recovery, and cross-root disambiguation, and also reports
 `metric_deltas`, `calibration_summary`, semantic duplicate
 `recommendations.candidates[]`, richer sanitized `case_results[]`, and
 `settings_mutated: false`. The `governance-shadow` suite adds read-only,
-metadata-only stale, duplicate, contradicted, low-confidence, protected/current,
-and false-positive guardrail cases. Its output includes proposal categories,
-candidate counts, guardrail pass/fail counts, precision-style summaries,
-sanitized failed cases, and `settings_mutated: false`; benchmark output is
-advisory evidence for later calibration, not automatic ranking, threshold,
-semantic-cluster, lifecycle, settings, or policy mutation.
+metadata-only stale, apply/recover, stale-proposal conflict, duplicate-cluster,
+capture-ingestion, feedback-gap, contradicted, low-confidence,
+protected/current, and false-positive guardrail cases. Its output includes
+proposal categories, candidate counts, guardrail pass/fail counts,
+precision-style summaries, sanitized failed cases, and `settings_mutated:
+false`; benchmark output is advisory evidence for later calibration and
+governance apply gates, not automatic ranking, threshold, semantic-cluster,
+lifecycle, settings, or policy mutation.
 Embedding status, enqueue, and immediate backfill are also exposed through
 `GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
 `POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,

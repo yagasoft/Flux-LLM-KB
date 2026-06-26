@@ -369,6 +369,40 @@ def test_service_retrieval_benchmark_governance_shadow_suite_records_metadata(mo
     assert recorded[0]["metadata"]["governance_shadow"]["guardrail_case_count"] == 1
 
 
+def test_governance_shadow_suite_includes_expanded_governance_cases(monkeypatch):
+    episode_ids = iter(
+        [
+            "episode-stale",
+            "episode-low-confidence",
+            "episode-duplicate-a",
+            "episode-duplicate-b",
+            "episode-current",
+            "episode-contradiction",
+            "episode-capture",
+            "episode-feedback",
+        ]
+    )
+    claim_ids = iter(["claim-stale", "claim-low-confidence", "claim-current", "claim-contradiction"])
+
+    monkeypatch.setattr(database, "insert_episode", lambda **_kwargs: next(episode_ids))
+    monkeypatch.setattr(database, "upsert_claim", lambda **_kwargs: {"id": next(claim_ids)})
+    monkeypatch.setattr(database, "transition_claim", lambda **_kwargs: None)
+    monkeypatch.setattr(database, "forget_episode", lambda _episode_id: None)
+
+    cases, cleanup = KnowledgeService()._prepare_governance_shadow_benchmark_cases()
+    cleanup()
+
+    categories = {case["category"] for case in cases}
+    assert {
+        "governance_apply_recover",
+        "governance_stale_proposal_conflict",
+        "governance_duplicate_cluster",
+        "governance_capture_ingestion",
+        "governance_feedback_gap",
+        "governance_guardrail_current",
+    } <= categories
+
+
 def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases(monkeypatch):
     calls = []
     episode_ids = iter(["episode-current", "episode-stale"])

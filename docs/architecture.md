@@ -50,6 +50,14 @@ system rather than a large prompt-injected memory file.
   candidates, governance-shadow proposal counts, guardrail summaries, and
   previous-run metrics/deltas. It must not store raw query text, snippets,
   private content, credentials, embeddings, or private watched roots.
+- `memory_governance_runs`, `memory_governance_actions`,
+  `memory_governance_digests`, and `memory_governance_policy_snapshots`:
+  sanitized governance proposal runs, reversible action records, local digest
+  read models, and effective policy snapshots. They store guardrail evidence,
+  rationale, before/after state, actor, status, risk, source, audit ids when
+  available, `settings_mutated: false`, and whether memory lifecycle state was
+  actually mutated. They must not store raw memory text, private paths, raw
+  queries, snippets, embeddings, local model prompts, or local model outputs.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
@@ -112,14 +120,57 @@ precision@3, recall@5, MRR, nDCG@5, brief recall, brief dilution, scope pass
 counts, suppression pass counts, elapsed time, metric deltas, confidence-band
 summaries, sanitized failed case evidence, and semantic duplicate threshold
 candidates. The `governance-shadow` suite adds metadata-only synthetic cases for
-stale, duplicate, contradicted, low-confidence, protected/current, and
-false-positive guardrail scenarios. It runs a read-only proposal evaluator over
-retention-quality, lifecycle, contradiction, and duplicate evidence and stores
-candidate counts, categories, guardrail pass/fail counts, precision-style
-summary metrics, and sanitized failed cases with `settings_mutated: false`.
-Benchmark outputs are evidence for later calibration; they do not mutate
+stale, apply/recover, stale-proposal conflict, duplicate-cluster,
+capture-ingestion, feedback-gap, contradicted, low-confidence,
+protected/current, and false-positive guardrail scenarios. It runs a read-only
+proposal evaluator over retention-quality, lifecycle, contradiction, duplicate,
+capture-ingestion, and feedback-gap evidence and stores candidate counts,
+categories, guardrail pass/fail counts, precision-style summary metrics, and
+sanitized failed cases with `settings_mutated: false`. Benchmark outputs are
+evidence for later calibration and governance apply gates; they do not mutate
 ranking, thresholds, retention policy, semantic clusters, lifecycle state, or
 settings.
+
+## Memory Governance Automation
+
+Governance automation is an evaluated proposal layer over existing memory
+quality signals. A governance run persists sanitized proposals from retention
+quality, claim lifecycle state, active semantic duplicate clusters,
+capture-ingestion outcomes, code retrieval feedback summaries, and the latest
+`governance-shadow` benchmark evidence. Proposal de-duplication uses
+target/action keys so repeated runs do not spam the operator with the same open
+work.
+
+Actions are deliberately narrow: `mark_review`, `stale_tag`, `deprioritize`,
+`retire`, `semantic_cluster_apply`, `canonical_cluster_promote`,
+`capture_ingestion_recheck`, `feedback_gap_escalate`, and recovery. Hard delete
+is not a governance action. Apply is blocked unless the latest persisted
+`governance-shadow` benchmark has zero guardrail failures and proposal precision
+meets `governance.librarian.min_shadow_precision` (default `0.80`). Protected
+memories, high-risk actions, retire, contradiction handling, canonical cluster
+promotion, and local-model-only recommendations require manual confirmation.
+
+Apply and recover are idempotent. Claim lifecycle actions capture before-state,
+mutate only through existing lifecycle transition/restore paths, append
+audit-visible events, and can be recovered from stored before-state. Non-claim
+governance actions are presentation or operator-workflow records until a later
+explicit implementation mutates their target subsystem; they still append audit
+events when applied or recovered. If the target state changed since proposal,
+the action is marked `skipped_conflict` and a new shadow run is required.
+
+The librarian worker integration is default-off. When enabled it runs
+governance on cadence through `run_corpus_worker`; it remains shadow-only unless
+settings explicitly request auto mode and enable auto-apply. Even then,
+auto-apply is limited to low-risk `mark_review`, `stale_tag`, and
+`deprioritize` claim actions that pass the benchmark gate and protected-memory
+rules. Governance actions never mutate runtime settings, and every response
+reports `settings_mutated: false`.
+
+Optional local-model rationale settings are loopback-only and advisory. When a
+local model is unavailable or disabled, deterministic rule-based rationale and
+canonical-summary drafts are used instead. Digests are local read models for the
+dashboard/API/CLI/MCP only; this layer does not send outbound email, webhooks,
+or notifications.
 
 ## Capture Review And Backfill
 
@@ -476,7 +527,7 @@ flux-kb crawl backfill --root docs --family office --limit 20
 
 The dashboard is the single UI surface for health, watcher status, crawler stats,
 backlog, errors, retrieval/index stats, runtime settings, mail ingestion status,
-and future graph/review workflows. The UI is a React/Vite operations console
+and graph/review/governance workflows. The UI is a React/Vite operations console
 bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
 The Health tab includes the operator evidence gate panel, acceleration all-root
@@ -485,6 +536,10 @@ parser/fallback hotspots, generated-file counts, direct code search/symbol
 lookup controls, and filtered operational diagnostics panels. Diagnostic rows expose bounded evidence,
 follow-up commands, and confirmation-gated remediation buttons where the service
 has a safe scoped recovery action.
+The Review tab includes claim/capture review plus Governance Automation,
+Digest, Guardrails, and Recovery panels for high-risk proposals, blocked
+guardrails, stale proposals, recoverable actions, and recent governance action
+state.
 
 REST errors preserve a readable `detail`/`message` string for existing clients
 and also include a structured `error` envelope for operators. Envelopes carry a
@@ -510,6 +565,9 @@ does not use the Windows Registry.
 Settings that affect live behavior are picked up on the next service call.
 Settings that require reload, component restart, or embedding reindex create
 runtime control requests and require confirmation before mutation.
+Governance settings are catalog-backed and follow the same precedence, but
+governance apply/recover never mutates runtime settings; it mutates only memory
+lifecycle state through reversible audited actions.
 
 ## Mail Ingestion
 

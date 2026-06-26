@@ -704,6 +704,60 @@ def test_cli_retrieval_benchmark_run_and_history_use_service(monkeypatch, capsys
     ]
 
 
+def test_cli_governance_commands_use_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def run_governance(self, **kwargs):
+            calls.append(("run", kwargs))
+            return {"run": {"id": "run-1"}, "settings_mutated": False, "memory_mutated": False}
+
+        def governance_actions(self, **kwargs):
+            calls.append(("actions", kwargs))
+            return {"actions": [{"id": "action-1", "status": "proposed"}], "telemetry": {"by_status": {"proposed": 1}}}
+
+        def governance_apply(self, action_id, **kwargs):
+            calls.append(("apply", {"action_id": action_id, **kwargs}))
+            return {"action": {"id": action_id, "status": "applied"}, "settings_mutated": False, "memory_mutated": True}
+
+        def governance_recover(self, action_id, **kwargs):
+            calls.append(("recover", {"action_id": action_id, **kwargs}))
+            return {"action": {"id": action_id, "status": "recovered"}, "settings_mutated": False, "memory_mutated": True}
+
+        def governance_digest(self):
+            calls.append(("digest", {}))
+            return {"digest": {"summary": {"new_proposals": 1}}, "settings_mutated": False}
+
+        def governance_policy(self):
+            calls.append(("policy", {}))
+            return {"policy": {"min_shadow_precision": 0.8}, "settings_mutated": False}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["governance", "run", "--mode", "shadow", "--limit", "5"]) == 0
+    assert json.loads(capsys.readouterr().out)["run"]["id"] == "run-1"
+    assert cli.main(["governance", "actions", "list", "--status", "proposed", "--limit", "2"]) == 0
+    assert json.loads(capsys.readouterr().out)["telemetry"]["by_status"]["proposed"] == 1
+    assert cli.main(["governance", "actions", "apply", "action-1", "--rationale", "reviewed", "--confirm"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"]["status"] == "applied"
+    assert cli.main(["governance", "actions", "recover", "action-1", "--rationale", "rollback", "--confirm"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"]["status"] == "recovered"
+    assert cli.main(["governance", "digest"]) == 0
+    assert json.loads(capsys.readouterr().out)["digest"]["summary"]["new_proposals"] == 1
+    assert cli.main(["governance", "policy"]) == 0
+    assert json.loads(capsys.readouterr().out)["policy"]["min_shadow_precision"] == 0.8
+    assert calls == [
+        ("run", {"mode": "shadow", "actor": "cli", "limit": 5}),
+        ("actions", {"status": "proposed", "limit": 2}),
+        ("apply", {"action_id": "action-1", "rationale": "reviewed", "confirm": True, "actor": "cli"}),
+        ("recover", {"action_id": "action-1", "rationale": "rollback", "confirm": True, "actor": "cli"}),
+        ("digest", {}),
+        ("policy", {}),
+    ]
+
+
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     from flux_llm_kb import service
 

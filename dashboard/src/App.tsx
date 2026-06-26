@@ -824,6 +824,51 @@ type RetentionQualityPayload = {
   candidates?: RetentionQualityCandidate[];
 };
 
+type GovernanceAction = {
+  id?: string;
+  action?: string;
+  target_type?: string;
+  target_id?: string;
+  memory_class?: string | null;
+  risk?: string;
+  status?: string;
+  source?: string;
+  rationale?: { summary?: string; guardrails?: Record<string, unknown> };
+  evidence?: Record<string, unknown>;
+  before_state?: Record<string, unknown>;
+  after_state?: Record<string, unknown>;
+  settings_mutated?: boolean;
+  memory_mutated?: boolean;
+  created_at?: string | null;
+  applied_at?: string | null;
+  recovered_at?: string | null;
+};
+
+type GovernanceActionsPayload = {
+  actions?: GovernanceAction[];
+  telemetry?: {
+    total?: number;
+    by_source?: Record<string, number>;
+    by_action?: Record<string, number>;
+    by_risk?: Record<string, number>;
+    by_status?: Record<string, number>;
+    by_mutation?: Record<string, number>;
+  };
+};
+
+type GovernanceDigestPayload = {
+  digest?: {
+    summary?: Record<string, unknown>;
+    recommendations?: Array<Record<string, unknown>>;
+  };
+  settings_mutated?: boolean;
+};
+
+type GovernancePolicyPayload = {
+  policy?: Record<string, unknown>;
+  settings_mutated?: boolean;
+};
+
 type AuditEvent = {
   id?: string;
   event_type?: string;
@@ -965,6 +1010,9 @@ export default function App() {
   const [captureReviewAudit, setCaptureReviewAudit] = useState<AuditEvent[]>([]);
   const [retentionPolicies, setRetentionPolicies] = useState<RetentionPolicyPayload>({ policies: [] });
   const [retentionQuality, setRetentionQuality] = useState<RetentionQualityPayload>({ summary: {}, candidates: [] });
+  const [governanceActions, setGovernanceActions] = useState<GovernanceActionsPayload>({ actions: [], telemetry: {} });
+  const [governanceDigest, setGovernanceDigest] = useState<GovernanceDigestPayload>({ digest: { summary: {}, recommendations: [] } });
+  const [governancePolicy, setGovernancePolicy] = useState<GovernancePolicyPayload>({ policy: {} });
   const [captureDecision, setCaptureDecision] = useState<CaptureDecisionState | null>(null);
   const [captureDecisionReason, setCaptureDecisionReason] = useState("");
   const [selectedClaimId, setSelectedClaimId] = useState("");
@@ -1309,12 +1357,15 @@ export default function App() {
       const captureParams = new URLSearchParams();
       captureParams.set("status", captureReviewStatus);
       captureParams.set("limit", "50");
-      const [claims, capture, audit, policies, quality] = await Promise.all([
+      const [claims, capture, audit, policies, quality, govActions, govDigest, govPolicy] = await Promise.all([
         fetchRequiredJson<ClaimReviewPayload>(`/api/claims?${params.toString()}`),
         getJson<CaptureReviewPayload>(`/api/capture/review?${captureParams.toString()}`, { jobs: [] }),
         getJson<AuditPayload>("/api/audit?limit=50", []),
         getJson<RetentionPolicyPayload>("/api/retention/policies", { policies: [] }),
-        getJson<RetentionQualityPayload>("/api/retention/quality?limit=25", { summary: {}, candidates: [] })
+        getJson<RetentionQualityPayload>("/api/retention/quality?limit=25", { summary: {}, candidates: [] }),
+        getJson<GovernanceActionsPayload>("/api/governance/actions?status=all&limit=50", { actions: [], telemetry: {} }),
+        getJson<GovernanceDigestPayload>("/api/governance/digest", { digest: { summary: {}, recommendations: [] }, settings_mutated: false }),
+        getJson<GovernancePolicyPayload>("/api/governance/policy", { policy: {}, settings_mutated: false })
       ]);
       const nextClaims = claims.claims ?? [];
       setClaimReview({ claims: nextClaims, counts: claims.counts ?? {} });
@@ -1322,6 +1373,9 @@ export default function App() {
       setCaptureReviewAudit(captureReviewAuditEvents(audit));
       setRetentionPolicies(policies);
       setRetentionQuality(quality);
+      setGovernanceActions(govActions);
+      setGovernanceDigest(govDigest);
+      setGovernancePolicy(govPolicy);
       setSelectedClaimId((current) => nextClaims.some((claim) => claim.id === current) ? current : nextClaims[0]?.id ?? "");
     } catch (error) {
       setToast(`Could not load claim review queue: ${errorMessage(error)}`);
@@ -1364,6 +1418,46 @@ export default function App() {
       await loadReview();
     } catch (error) {
       setToast(`Retention policy update failed for ${policy.memory_class}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function runGovernanceAutomation() {
+    try {
+      await sendJson("/api/governance/run", "POST", { mode: "shadow", limit: 25 });
+      setToast("Governance shadow run completed.");
+      await loadReview();
+    } catch (error) {
+      setToast(`Governance run failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async function applyGovernanceAction(action: GovernanceAction) {
+    const actionId = action.id;
+    if (!actionId) return;
+    const rationale = window.prompt(`Rationale for applying ${action.action ?? "governance action"} ${actionId}`);
+    if (!rationale?.trim()) return;
+    if (!window.confirm(`Apply governance action ${actionId}?`)) return;
+    try {
+      await sendJson(`/api/governance/actions/${encodeURIComponent(actionId)}/apply`, "POST", { rationale: rationale.trim(), confirm: true });
+      setToast(`Governance action ${actionId} applied.`);
+      await loadReview();
+    } catch (error) {
+      setToast(`Governance apply failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async function recoverGovernanceAction(action: GovernanceAction) {
+    const actionId = action.id;
+    if (!actionId) return;
+    const rationale = window.prompt(`Rationale for recovering ${actionId}`);
+    if (!rationale?.trim()) return;
+    if (!window.confirm(`Recover governance action ${actionId}?`)) return;
+    try {
+      await sendJson(`/api/governance/actions/${encodeURIComponent(actionId)}/recover`, "POST", { rationale: rationale.trim(), confirm: true });
+      setToast(`Governance action ${actionId} recovered.`);
+      await loadReview();
+    } catch (error) {
+      setToast(`Governance recovery failed: ${errorMessage(error)}`);
     }
   }
 
@@ -1682,6 +1776,9 @@ export default function App() {
             captureAudit={captureReviewAudit}
             retentionPolicies={retentionPolicies}
             retentionQuality={retentionQuality}
+            governanceActions={governanceActions}
+            governanceDigest={governanceDigest}
+            governancePolicy={governancePolicy}
             graph={claimGraph}
             selectedClaim={selectedClaim}
             loading={reviewLoading}
@@ -1696,6 +1793,9 @@ export default function App() {
             onCaptureDecision={openCaptureDecision}
             onCaptureIngest={() => void ingestApprovedCaptureJobs()}
             onRetentionPolicySave={(policy, update) => void saveRetentionPolicy(policy, update)}
+            onGovernanceRun={() => void runGovernanceAutomation()}
+            onGovernanceApply={(action) => void applyGovernanceAction(action)}
+            onGovernanceRecover={(action) => void recoverGovernanceAction(action)}
             onRefresh={() => void loadReview()}
           />
         )}
@@ -3584,6 +3684,9 @@ function ReviewTab({
   captureAudit,
   retentionPolicies,
   retentionQuality,
+  governanceActions,
+  governanceDigest,
+  governancePolicy,
   graph,
   selectedClaim,
   loading,
@@ -3598,6 +3701,9 @@ function ReviewTab({
   onCaptureDecision,
   onCaptureIngest,
   onRetentionPolicySave,
+  onGovernanceRun,
+  onGovernanceApply,
+  onGovernanceRecover,
   onRefresh
 }: {
   payload: ClaimReviewPayload;
@@ -3605,6 +3711,9 @@ function ReviewTab({
   captureAudit: AuditEvent[];
   retentionPolicies: RetentionPolicyPayload;
   retentionQuality: RetentionQualityPayload;
+  governanceActions: GovernanceActionsPayload;
+  governanceDigest: GovernanceDigestPayload;
+  governancePolicy: GovernancePolicyPayload;
   graph: GraphPayload;
   selectedClaim?: ClaimReviewClaim;
   loading: boolean;
@@ -3619,12 +3728,17 @@ function ReviewTab({
   onCaptureDecision: (job: CaptureReviewJob, decision: "approve" | "reject") => void;
   onCaptureIngest: () => void;
   onRetentionPolicySave: (policy: RetentionPolicy, update: RetentionPolicyUpdate) => void;
+  onGovernanceRun: () => void;
+  onGovernanceApply: (action: GovernanceAction) => void;
+  onGovernanceRecover: (action: GovernanceAction) => void;
   onRefresh: () => void;
 }) {
   const claims = payload.claims ?? [];
   const counts = payload.counts ?? {};
   const captureJobs = capture.jobs ?? [];
   const captureCounts = captureStatusCounts(captureJobs);
+  const actions = governanceActions.actions ?? [];
+  const recoverableActions = actions.filter((action) => action.status === "applied");
   return (
     <section className="tab-grid review-grid">
       <Panel title="Claim Review" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
@@ -3670,6 +3784,22 @@ function ReviewTab({
       </Panel>
       <Panel title="Memory Quality">
         <RetentionQualityReport payload={retentionQuality} />
+      </Panel>
+      <Panel
+        title="Governance Automation"
+        action={<button className="small-primary" type="button" onClick={onGovernanceRun}><Play size={15} /> Run shadow</button>}
+      >
+        <GovernanceActionSummary payload={governanceActions} />
+        <GovernanceActionTable actions={actions} onApply={onGovernanceApply} onRecover={onGovernanceRecover} />
+      </Panel>
+      <Panel title="Governance Digest">
+        <GovernanceDigestPanel payload={governanceDigest} />
+      </Panel>
+      <Panel title="Guardrails">
+        <GovernanceGuardrailsPanel policy={governancePolicy} actions={actions} />
+      </Panel>
+      <Panel title="Recovery">
+        <GovernanceRecoveryPanel actions={recoverableActions} onRecover={onGovernanceRecover} />
       </Panel>
       <Panel title="Capture Review Queue">
         <div className="review-summary">
@@ -3966,6 +4096,160 @@ function RetentionQualityReport({ payload }: { payload: RetentionQualityPayload 
         </div>
       )}
     </>
+  );
+}
+
+function GovernanceActionSummary({ payload }: { payload: GovernanceActionsPayload }) {
+  const telemetry = payload.telemetry ?? {};
+  return (
+    <>
+      <div className="review-summary">
+        <Stat label="Total" value={String(telemetry.total ?? payload.actions?.length ?? 0)} />
+        <Stat label="Proposed" value={String(telemetry.by_status?.proposed ?? 0)} />
+        <Stat label="Blocked" value={String(telemetry.by_status?.blocked ?? 0)} />
+        <Stat label="Recoverable" value={String(telemetry.by_status?.applied ?? 0)} />
+      </div>
+      <div className="review-inline-status">
+        {telemetry.by_risk?.high ?? 0} high risk - {telemetry.by_mutation?.mutated ?? 0} mutating actions
+      </div>
+    </>
+  );
+}
+
+function GovernanceActionTable({
+  actions,
+  onApply,
+  onRecover
+}: {
+  actions: GovernanceAction[];
+  onApply: (action: GovernanceAction) => void;
+  onRecover: (action: GovernanceAction) => void;
+}) {
+  const visible = actions.slice(0, 12);
+  if (visible.length === 0) return <p className="muted padded">No governance proposals.</p>;
+  return (
+    <div className="review-table-wrap">
+      <table className="profile-table review-table" aria-label="Governance actions">
+        <thead>
+          <tr>
+            <th>Action</th>
+            <th>Target</th>
+            <th>Risk</th>
+            <th>Status</th>
+            <th>Source</th>
+            <th>Rationale</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visible.map((action) => (
+            <tr key={action.id ?? `${action.action}-${action.target_id}`}>
+              <td>{titleCase((action.action ?? "governance").replace(/_/g, " "))}</td>
+              <td className="claim-object" title={action.target_id ?? ""}>{action.target_type ?? "-"}:{action.target_id ?? "-"}</td>
+              <td><RootStateBadge state={action.risk ?? "medium"} /></td>
+              <td><RootStateBadge state={action.status ?? "proposed"} /></td>
+              <td>{titleCase((action.source ?? "governance").replace(/_/g, " "))}</td>
+              <td className="claim-object" title={action.rationale?.summary ?? ""}>{action.rationale?.summary ?? "-"}</td>
+              <td>
+                <div className="row-actions">
+                  <button
+                    type="button"
+                    aria-label={`Apply governance action ${action.id ?? action.target_id ?? "unknown"}`}
+                    title="Apply governance action"
+                    disabled={action.status !== "proposed"}
+                    onClick={() => onApply(action)}
+                  >
+                    <CheckCircle2 size={15} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Recover governance action ${action.id ?? action.target_id ?? "unknown"}`}
+                    title="Recover governance action"
+                    disabled={action.status !== "applied"}
+                    onClick={() => onRecover(action)}
+                  >
+                    <RotateCcw size={15} />
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function GovernanceDigestPanel({ payload }: { payload: GovernanceDigestPayload }) {
+  const summary = payload.digest?.summary ?? {};
+  const recommendations = payload.digest?.recommendations ?? [];
+  return (
+    <>
+      <div className="review-summary">
+        <Stat label="New" value={String(summary.new_proposals ?? 0)} />
+        <Stat label="Blocked" value={String(summary.blocked_proposals ?? 0)} />
+        <Stat label="Recoverable" value={String(summary.recoverable_actions ?? 0)} />
+        <Stat label="Gate" value={String(summary.gate_status ?? "unknown")} />
+      </div>
+      {recommendations.length === 0 ? (
+        <p className="muted padded">No governance recommendations.</p>
+      ) : (
+        <ul className="audit-list">
+          {recommendations.slice(0, 6).map((item, index) => (
+            <li key={`${item.action ?? "recommendation"}-${index}`}>
+              <strong>{titleCase(String(item.action ?? "recommendation").replace(/_/g, " "))}</strong>
+              <span>{String(item.reason ?? item.count ?? "")}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+function GovernanceGuardrailsPanel({ policy, actions }: { policy: GovernancePolicyPayload; actions: GovernanceAction[] }) {
+  const blocked = actions.filter((action) => action.status === "blocked");
+  const stale = actions.filter((action) => action.status === "skipped_conflict");
+  const effectivePolicy = policy.policy ?? {};
+  return (
+    <>
+      <div className="review-summary">
+        <Stat label="Precision Gate" value={String(effectivePolicy.min_shadow_precision ?? "0.8")} />
+        <Stat label="Auto Apply" value={String(effectivePolicy.auto_apply_enabled ?? false)} />
+        <Stat label="Risk Ceiling" value={String(effectivePolicy.auto_apply_risk_ceiling ?? "low")} />
+        <Stat label="Stale" value={String(stale.length)} />
+      </div>
+      {blocked.length === 0 ? (
+        <p className="muted padded">No blocked governance guardrails.</p>
+      ) : (
+        <div className="diagnostic-list">
+          {blocked.slice(0, 5).map((action) => (
+            <div className="diagnostic-item" key={action.id ?? action.target_id}>
+              <strong>{titleCase((action.action ?? "blocked").replace(/_/g, " "))}</strong>
+              <span>{action.target_type ?? "target"}:{action.target_id ?? "-"}</span>
+              <em>{action.rationale?.summary ?? "blocked by guardrail"}</em>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function GovernanceRecoveryPanel({ actions, onRecover }: { actions: GovernanceAction[]; onRecover: (action: GovernanceAction) => void }) {
+  if (actions.length === 0) return <p className="muted padded">No recoverable governance actions.</p>;
+  return (
+    <div className="diagnostic-list">
+      {actions.slice(0, 8).map((action) => (
+        <div className="diagnostic-item" key={action.id ?? action.target_id}>
+          <strong>{titleCase((action.action ?? "applied").replace(/_/g, " "))}</strong>
+          <span>{action.target_type ?? "target"}:{action.target_id ?? "-"}</span>
+          <button className="ghost-action compact" type="button" onClick={() => onRecover(action)}>
+            <RotateCcw size={15} /> Recover
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 

@@ -59,6 +59,27 @@ def main(argv: list[str] | None = None) -> int:
     retrieval_benchmark_history.add_argument("--label")
     retrieval_benchmark_history.add_argument("--limit", type=int, default=20)
 
+    governance_parser = subparsers.add_parser("governance", help="Run and review evaluated memory governance automation")
+    governance_subparsers = governance_parser.add_subparsers(dest="governance_command", required=True)
+    governance_run = governance_subparsers.add_parser("run", help="Generate a governance proposal run")
+    governance_run.add_argument("--mode", default="shadow")
+    governance_run.add_argument("--limit", type=int, default=25)
+    governance_actions = governance_subparsers.add_parser("actions", help="List, apply, or recover governance actions")
+    governance_actions_subparsers = governance_actions.add_subparsers(dest="governance_actions_command", required=True)
+    governance_actions_list = governance_actions_subparsers.add_parser("list", help="List governance actions")
+    governance_actions_list.add_argument("--status", default="proposed")
+    governance_actions_list.add_argument("--limit", type=int, default=50)
+    governance_actions_apply = governance_actions_subparsers.add_parser("apply", help="Apply a confirmed governance action")
+    governance_actions_apply.add_argument("action_id")
+    governance_actions_apply.add_argument("--rationale", required=True)
+    governance_actions_apply.add_argument("--confirm", action="store_true")
+    governance_actions_recover = governance_actions_subparsers.add_parser("recover", help="Recover a previously applied governance action")
+    governance_actions_recover.add_argument("action_id")
+    governance_actions_recover.add_argument("--rationale", required=True)
+    governance_actions_recover.add_argument("--confirm", action="store_true")
+    governance_subparsers.add_parser("digest", help="Show the latest governance digest")
+    governance_subparsers.add_parser("policy", help="Show effective governance policy")
+
     remember_parser = subparsers.add_parser("remember", help="Store a manual memory")
     remember_parser.add_argument("title")
     remember_parser.add_argument("body")
@@ -500,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
         "search": _search,
         "explain": _explain,
         "retrieval": _retrieval,
+        "governance": _governance,
         "remember": _remember,
         "episodes": _episodes,
         "claim": _claim,
@@ -1084,6 +1106,41 @@ def _retrieval(args: argparse.Namespace) -> int:
             raise ValueError(args.retrieval_benchmark_command)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.retrieval_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _governance(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.governance_command == "run":
+        payload = service.run_governance(mode=args.mode, actor="cli", limit=args.limit)
+    elif args.governance_command == "actions":
+        if args.governance_actions_command == "list":
+            payload = service.governance_actions(status=args.status, limit=args.limit)
+        elif args.governance_actions_command == "apply":
+            payload = service.governance_apply(
+                args.action_id,
+                rationale=args.rationale,
+                confirm=args.confirm,
+                actor="cli",
+            )
+        elif args.governance_actions_command == "recover":
+            payload = service.governance_recover(
+                args.action_id,
+                rationale=args.rationale,
+                confirm=args.confirm,
+                actor="cli",
+            )
+        else:  # pragma: no cover - argparse prevents this
+            raise ValueError(args.governance_actions_command)
+    elif args.governance_command == "digest":
+        payload = service.governance_digest()
+    elif args.governance_command == "policy":
+        payload = service.governance_policy()
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.governance_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

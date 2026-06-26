@@ -112,6 +112,15 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "query_hash" in feedback_migration.sql
     assert "expected_symbol_hash" in feedback_migration.sql
     assert "idx_code_feedback_category_created" in feedback_migration.sql
+    governance_migration = next(item for item in migrations if item.name == "0023_memory_governance_actions")
+    assert "CREATE TABLE IF NOT EXISTS memory_governance_runs" in governance_migration.sql
+    assert "CREATE TABLE IF NOT EXISTS memory_governance_actions" in governance_migration.sql
+    assert "CREATE TABLE IF NOT EXISTS memory_governance_digests" in governance_migration.sql
+    assert "CREATE TABLE IF NOT EXISTS memory_governance_policy_snapshots" in governance_migration.sql
+    assert "settings_mutated boolean NOT NULL DEFAULT false" in governance_migration.sql
+    assert "memory_mutated boolean NOT NULL DEFAULT false" in governance_migration.sql
+    assert "idx_memory_governance_actions_status" in governance_migration.sql
+    assert "idx_memory_governance_actions_target" in governance_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

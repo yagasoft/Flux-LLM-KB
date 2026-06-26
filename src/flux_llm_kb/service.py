@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 import base64
 import fnmatch
@@ -22,7 +23,7 @@ from .acceleration import (
     kind_to_job_families,
 )
 from .crawler import CorpusPolicy, scan_path
-from . import __version__, database
+from . import __version__, database, governance
 from .glob_policy import effective_glob_policy
 from .extractors import extractor_availability
 from .indexer_diagnostics import (
@@ -394,6 +395,278 @@ class KnowledgeService:
                 limit=limit,
             ),
         }
+
+    def run_governance(
+        self,
+        *,
+        mode: str = "shadow",
+        actor: str = "system",
+        limit: int = 25,
+    ) -> dict[str, Any]:
+        bounded_limit = max(1, min(int(limit or 25), 200))
+        policy = governance.normalized_policy({**_governance_policy_from_settings(), "mode": mode, "max_actions_per_run": bounded_limit})
+        quality_report = database.retention_quality_report(limit=bounded_limit)
+        benchmark_runs = database.list_retrieval_benchmark_runs(suite="governance-shadow", limit=1)
+        capture_jobs = database.list_capture_review_jobs(status="all", limit=bounded_limit)
+        code_feedback = database.code_feedback_summary(limit=bounded_limit)
+        semantic_clusters = database.list_semantic_duplicate_clusters(limit=bounded_limit)
+        existing_actions = database.list_memory_governance_actions(status="all", limit=200)
+        proposal_payload = governance.build_governance_proposals(
+            quality_report=quality_report,
+            benchmark_runs=benchmark_runs,
+            capture_jobs=capture_jobs,
+            code_feedback=code_feedback,
+            semantic_clusters=semantic_clusters,
+            existing_actions=existing_actions,
+            policy=policy,
+        )
+        run_status = "completed" if proposal_payload["gate"].get("status") == "ready" else "blocked"
+        run = database.record_memory_governance_run(
+            mode=proposal_payload["policy"].get("mode") or "shadow",
+            trigger="manual",
+            status=run_status,
+            policy_snapshot=proposal_payload["policy"],
+            gate=proposal_payload["gate"],
+            summary=proposal_payload["summary"],
+            actor=actor,
+            memory_mutated=False,
+        )
+        actions = [
+            database.record_memory_governance_action(
+                run_id=run["id"],
+                action=action["action"],
+                target_type=action["target_type"],
+                target_id=action["target_id"],
+                memory_class=action.get("memory_class"),
+                risk=action["risk"],
+                status=action["status"],
+                source=action["source"],
+                rationale=action.get("rationale") or {},
+                evidence=action.get("evidence") or {},
+                before_state=action.get("before_state") or {},
+                after_state=action.get("after_state") or {},
+                actor=actor,
+                memory_mutated=False,
+            )
+            for action in proposal_payload["actions"]
+        ]
+        applied_actions: list[dict[str, Any]] = []
+        if _governance_should_auto_apply(proposal_payload["policy"], proposal_payload["gate"]):
+            updated_actions: list[dict[str, Any]] = []
+            for action in actions:
+                if not _governance_auto_apply_allowed(action):
+                    updated_actions.append(action)
+                    continue
+                try:
+                    applied = self.governance_apply(
+                        str(action["id"]),
+                        rationale="guarded low-risk governance auto-apply after passing governance-shadow gate",
+                        confirm=True,
+                        actor=actor,
+                    )
+                    applied_action = applied["action"]
+                    applied_actions.append(applied_action)
+                    updated_actions.append(applied_action)
+                except Exception as exc:
+                    updated_actions.append(
+                        database.update_memory_governance_action(
+                            action_id=str(action["id"]),
+                            status="failed",
+                            after_state={"auto_apply_error": str(exc), "settings_mutated": False},
+                            memory_mutated=False,
+                            error=str(exc),
+                        )
+                    )
+            actions = updated_actions
+            if applied_actions:
+                proposal_payload["summary"] = {
+                    **proposal_payload["summary"],
+                    "auto_applied": len(applied_actions),
+                }
+                run = database.update_memory_governance_run(
+                    run_id=str(run["id"]),
+                    status=run.get("status") or run_status,
+                    summary=proposal_payload["summary"],
+                    memory_mutated=True,
+                )
+        digest_payload = governance.build_governance_digest(run=run, actions=actions, gate=proposal_payload["gate"])
+        digest = database.record_memory_governance_digest(
+            run_id=run["id"],
+            summary=digest_payload["summary"],
+            recommendations=digest_payload["recommendations"],
+            actor=actor,
+            memory_mutated=bool(applied_actions),
+        )
+        return {
+            "settings_mutated": False,
+            "memory_mutated": bool(applied_actions),
+            "run": run,
+            "actions": actions,
+            "digest": digest,
+            "gate": proposal_payload["gate"],
+            "summary": proposal_payload["summary"],
+            "policy": proposal_payload["policy"],
+        }
+
+    def governance_runs(self, *, limit: int = 20) -> dict[str, Any]:
+        return {
+            "settings_mutated": False,
+            "runs": database.list_memory_governance_runs(limit=limit),
+        }
+
+    def governance_actions(self, *, status: str = "proposed", limit: int = 50) -> dict[str, Any]:
+        actions = database.list_memory_governance_actions(status=status, limit=limit)
+        return {
+            "settings_mutated": False,
+            "status": status,
+            "actions": actions,
+            "telemetry": _governance_action_telemetry(actions),
+        }
+
+    def governance_digest(self) -> dict[str, Any]:
+        digest = database.latest_memory_governance_digest()
+        return {
+            "settings_mutated": False,
+            "digest": digest or {
+                "summary": {
+                    "new_proposals": 0,
+                    "blocked_proposals": 0,
+                    "recoverable_actions": 0,
+                    "high_risk": 0,
+                    "gate_status": "unknown",
+                },
+                "recommendations": [{"action": "run_governance", "reason": "no_digest_recorded"}],
+            },
+        }
+
+    def governance_policy(self) -> dict[str, Any]:
+        return {
+            "settings_mutated": False,
+            "policy": governance.normalized_policy(_governance_policy_from_settings()),
+        }
+
+    def governance_apply(
+        self,
+        action_id: str,
+        *,
+        rationale: str,
+        confirm: bool = False,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        clean_rationale = str(rationale or "").strip()
+        if not confirm:
+            raise ValueError("governance apply requires confirmation")
+        if not clean_rationale:
+            raise ValueError("governance apply rationale is required")
+        action = database.get_memory_governance_action(action_id)
+        if action is None:
+            raise LookupError(f"governance action not found: {action_id}")
+        if action.get("status") == "applied":
+            return {"settings_mutated": False, "memory_mutated": bool(action.get("memory_mutated")), "action": action}
+        if action.get("status") == "blocked" or (action.get("rationale") or {}).get("guardrails", {}).get("protected"):
+            raise ValueError("governance action is blocked by guardrails")
+        if action.get("status") != "proposed":
+            raise ValueError(f"governance action is not proposed: {action.get('status')}")
+        gate = governance.evaluate_governance_gate(
+            database.list_retrieval_benchmark_runs(suite="governance-shadow", limit=1),
+            policy=self.governance_policy()["policy"],
+        )
+        if gate.get("status") != "ready":
+            raise ValueError(f"governance apply blocked by benchmark gate: {','.join(gate.get('reasons') or [])}")
+
+        conflict = _governance_conflict(action)
+        if conflict:
+            updated = database.update_memory_governance_action(
+                action_id=action_id,
+                status="skipped_conflict",
+                after_state={"conflict": conflict, "rationale": clean_rationale},
+                memory_mutated=False,
+            )
+            return {"settings_mutated": False, "memory_mutated": False, "action": updated, "gate": gate}
+
+        after_state: dict[str, Any] = {"rationale": clean_rationale}
+        memory_mutated = False
+        transition = _governance_claim_transition(action)
+        if transition:
+            claim = database.transition_claim(
+                claim_id=str(action.get("target_id")),
+                transition=transition,
+                reason=f"governance:{clean_rationale}",
+                actor=actor,
+            )
+            after_state["claim"] = _claim_lifecycle_snapshot(claim)
+            memory_mutated = True
+        else:
+            audit_event = database.record_audit_event(
+                event_type="governance.action_applied",
+                target_table=str(action.get("target_type") or "memory_governance_actions"),
+                target_id=str(action.get("target_id") or action_id),
+                details={"action_id": action_id, "action": action.get("action"), "actor": actor, "rationale": clean_rationale},
+            )
+            if isinstance(audit_event, dict) and audit_event.get("id"):
+                after_state["audit_event_id"] = audit_event["id"]
+            after_state["applied"] = True
+        updated = database.update_memory_governance_action(
+            action_id=action_id,
+            status="applied",
+            after_state=after_state,
+            memory_mutated=memory_mutated,
+            audit_event_id=after_state.get("audit_event_id"),
+        )
+        return {"settings_mutated": False, "memory_mutated": memory_mutated, "action": updated, "gate": gate}
+
+    def governance_recover(
+        self,
+        action_id: str,
+        *,
+        rationale: str,
+        confirm: bool = False,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        clean_rationale = str(rationale or "").strip()
+        if not confirm:
+            raise ValueError("governance recovery requires confirmation")
+        if not clean_rationale:
+            raise ValueError("governance recovery rationale is required")
+        action = database.get_memory_governance_action(action_id)
+        if action is None:
+            raise LookupError(f"governance action not found: {action_id}")
+        if action.get("status") == "recovered":
+            return {"settings_mutated": False, "memory_mutated": bool(action.get("memory_mutated")), "action": action}
+        if action.get("status") != "applied":
+            raise ValueError(f"governance action is not applied: {action.get('status')}")
+
+        before = action.get("before_state") if isinstance(action.get("before_state"), dict) else {}
+        after_state: dict[str, Any] = {"recovery_rationale": clean_rationale}
+        memory_mutated = False
+        if _governance_claim_transition(action) and before.get("lifecycle_state"):
+            restored = database.restore_claim_lifecycle_state(
+                claim_id=str(action.get("target_id")),
+                lifecycle_state=str(before.get("lifecycle_state")),
+                retention_action=str(before.get("retention_action") or "keep"),
+                actor=actor,
+                reason=clean_rationale,
+            )
+            after_state["restored_claim"] = _claim_lifecycle_snapshot(restored)
+            memory_mutated = True
+        else:
+            audit_event = database.record_audit_event(
+                event_type="governance.action_recovered",
+                target_table=str(action.get("target_type") or "memory_governance_actions"),
+                target_id=str(action.get("target_id") or action_id),
+                details={"action_id": action_id, "action": action.get("action"), "actor": actor, "rationale": clean_rationale},
+            )
+            if isinstance(audit_event, dict) and audit_event.get("id"):
+                after_state["audit_event_id"] = audit_event["id"]
+            after_state["recovered"] = True
+        updated = database.update_memory_governance_action(
+            action_id=action_id,
+            status="recovered",
+            after_state=after_state,
+            memory_mutated=memory_mutated,
+            audit_event_id=after_state.get("audit_event_id"),
+        )
+        return {"settings_mutated": False, "memory_mutated": memory_mutated, "action": updated}
 
     def _prepare_retrieval_benchmark_cases(self, suite: str) -> tuple[list[dict[str, Any]], Any]:
         normalized_suite = _normalize_retrieval_benchmark_suite(suite)
@@ -836,6 +1109,17 @@ class KnowledgeService:
                 related_claim_id=current_claim["id"],
                 reason="synthetic governance shadow contradiction",
             )
+            capture_episode = database.insert_episode(
+                title=f"governance capture ingestion {marker}",
+                summary=f"governance-capture-{marker} approved capture ingestion failure needs sanitized recheck.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": False},
+            )
+            feedback_episode = database.insert_episode(
+                title=f"governance feedback gap {marker}",
+                summary=f"governance-feedback-{marker} repeated code retrieval miss needs escalation.",
+                metadata={"benchmark_tag": f"governance-shadow:{marker}", "protected": False},
+            )
+            episode_ids.extend([capture_episode, feedback_episode])
 
             return [
                 {
@@ -844,6 +1128,22 @@ class KnowledgeService:
                     "query": f"governance-stale-{marker} shadow review",
                     "expected_ids": [stale_claim["id"], stale_episode],
                     "expected_brief_ids": [stale_claim["id"], stale_episode],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-apply-recover",
+                    "category": "governance_apply_recover",
+                    "query": f"governance-stale-{marker} apply recover",
+                    "expected_ids": [stale_claim["id"], stale_episode],
+                    "expected_brief_ids": [stale_claim["id"], stale_episode],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-stale-proposal-conflict",
+                    "category": "governance_stale_proposal_conflict",
+                    "query": f"governance-low-confidence-{marker} stale proposal conflict",
+                    "expected_ids": [low_conf_claim["id"], low_conf_episode],
+                    "expected_brief_ids": [low_conf_claim["id"], low_conf_episode],
                     "expect_suppression": False,
                 },
                 {
@@ -863,6 +1163,14 @@ class KnowledgeService:
                     "expect_suppression": False,
                 },
                 {
+                    "id": "governance-duplicate-cluster",
+                    "category": "governance_duplicate_cluster",
+                    "query": f"governance-duplicate-{marker} cluster canonical",
+                    "expected_ids": [duplicate_episode, duplicate_copy],
+                    "expected_brief_ids": [duplicate_episode, duplicate_copy],
+                    "expect_suppression": False,
+                },
+                {
                     "id": "governance-contradiction",
                     "category": "governance_contradiction",
                     "query": f"governance-contradiction-{marker} contradiction review",
@@ -876,6 +1184,22 @@ class KnowledgeService:
                     "query": f"governance-current-{marker} current protected",
                     "expected_ids": [current_claim["id"], current_episode],
                     "expected_brief_ids": [current_claim["id"], current_episode],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-capture-ingestion",
+                    "category": "governance_capture_ingestion",
+                    "query": f"governance-capture-{marker} ingestion recheck",
+                    "expected_ids": [capture_episode],
+                    "expected_brief_ids": [capture_episode],
+                    "expect_suppression": False,
+                },
+                {
+                    "id": "governance-feedback-gap",
+                    "category": "governance_feedback_gap",
+                    "query": f"governance-feedback-{marker} retrieval escalation",
+                    "expected_ids": [feedback_episode],
+                    "expected_brief_ids": [feedback_episode],
                     "expect_suppression": False,
                 },
             ], cleanup
@@ -2642,6 +2966,7 @@ class KnowledgeService:
     ) -> dict[str, Any]:
         runs = 0
         last_result: dict[str, Any] | None = None
+        last_governance_at = 0.0
         while True:
             runs += 1
             database.record_runtime_component_heartbeat(
@@ -2670,6 +2995,20 @@ class KnowledgeService:
                     last_result["mail_sync"] = mail_ingestion.sync_due_mail_profiles(limit=limit, worker_id=component_name)
                 except Exception as exc:
                     last_result["mail_sync"] = {"status": "failed", "error": str(exc)}
+            policy = governance.normalized_policy(_governance_policy_from_settings())
+            if bool(policy.get("librarian_enabled")) and (time.monotonic() - last_governance_at) >= float(policy.get("interval_seconds") or 3600):
+                governance_mode = str(policy.get("mode") or "shadow")
+                if not bool(policy.get("auto_apply_enabled")):
+                    governance_mode = "shadow"
+                try:
+                    last_result["governance"] = self.run_governance(
+                        mode=governance_mode,
+                        actor=component_name,
+                        limit=int(policy.get("max_actions_per_run") or 25),
+                    )
+                    last_governance_at = time.monotonic()
+                except Exception as exc:
+                    last_result["governance"] = {"status": "failed", "error": str(exc), "settings_mutated": False}
             database.record_runtime_component_heartbeat(
                 name=component_name,
                 status="running",
@@ -2770,6 +3109,121 @@ def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
     if normalized not in {"standard", "governance-shadow"}:
         raise ValueError("retrieval benchmark suite must be standard or governance-shadow")
     return normalized
+
+
+def _governance_action_telemetry(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "total": len(actions),
+        "by_source": dict(Counter(str(item.get("source") or "governance") for item in actions)),
+        "by_action": dict(Counter(str(item.get("action") or "unknown") for item in actions)),
+        "by_risk": dict(Counter(str(item.get("risk") or "medium") for item in actions)),
+        "by_status": dict(Counter(str(item.get("status") or "unknown") for item in actions)),
+        "by_mutation": dict(Counter("mutated" if item.get("memory_mutated") else "not_mutated" for item in actions)),
+    }
+
+
+def _governance_should_auto_apply(policy: dict[str, Any], gate: dict[str, Any]) -> bool:
+    return (
+        str(policy.get("mode") or "shadow") == "auto"
+        and bool(policy.get("auto_apply_enabled"))
+        and str(gate.get("status") or "") == "ready"
+    )
+
+
+def _governance_auto_apply_allowed(action: dict[str, Any]) -> bool:
+    rationale = action.get("rationale") if isinstance(action.get("rationale"), dict) else {}
+    guardrails = rationale.get("guardrails") if isinstance(rationale.get("guardrails"), dict) else {}
+    return (
+        action.get("status") == "proposed"
+        and str(action.get("action") or "") in governance.LOW_RISK_AUTO_ACTIONS
+        and str(action.get("risk") or "") == "low"
+        and str(action.get("target_type") or "") == "claim"
+        and bool(guardrails.get("apply_allowed"))
+        and not bool(guardrails.get("protected"))
+    )
+
+
+def _governance_policy_from_settings() -> dict[str, Any]:
+    settings = SettingsService()
+
+    def resolve(key: str, default: Any) -> Any:
+        try:
+            return settings.resolve(key).raw_value
+        except Exception:
+            return default
+
+    protected_rules = governance.DEFAULT_POLICY["protected_memory_rules"]
+    configured_rules = resolve("governance.librarian.protected_memory_rules", "")
+    if isinstance(configured_rules, str) and configured_rules.strip():
+        try:
+            parsed_rules = json.loads(configured_rules)
+            if isinstance(parsed_rules, dict):
+                protected_rules = {**protected_rules, **parsed_rules}
+        except JSONDecodeError:
+            pass
+    return {
+        "librarian_enabled": resolve("governance.librarian.enabled", False),
+        "interval_seconds": resolve("governance.librarian.interval_seconds", 3600),
+        "mode": resolve("governance.librarian.mode", governance.DEFAULT_POLICY["mode"]),
+        "max_actions_per_run": resolve("governance.librarian.max_actions_per_run", governance.DEFAULT_POLICY["max_actions_per_run"]),
+        "min_shadow_precision": resolve("governance.librarian.min_shadow_precision", governance.DEFAULT_POLICY["min_shadow_precision"]),
+        "auto_apply_enabled": resolve("governance.librarian.auto_apply_enabled", governance.DEFAULT_POLICY["auto_apply_enabled"]),
+        "auto_apply_risk_ceiling": resolve("governance.librarian.auto_apply_risk_ceiling", governance.DEFAULT_POLICY["auto_apply_risk_ceiling"]),
+        "digest_retention_days": resolve("governance.librarian.digest_retention_days", governance.DEFAULT_POLICY["digest_retention_days"]),
+        "local_model_rationale_enabled": resolve(
+            "governance.local_model_rationale.enabled",
+            governance.DEFAULT_POLICY["local_model_rationale_enabled"],
+        ),
+        "local_model_rationale_model": resolve(
+            "governance.local_model_rationale.model",
+            governance.DEFAULT_POLICY["local_model_rationale_model"],
+        ),
+        "protected_memory_rules": {
+            "protect_metadata_flag": bool(protected_rules.get("protect_metadata_flag", True)),
+            "protect_confirmed_confidence": float(protected_rules.get("protect_confirmed_confidence", 0.85)),
+            "protect_reinforced_confidence": float(protected_rules.get("protect_reinforced_confidence", 0.75)),
+            "protect_active_capture_review": bool(protected_rules.get("protect_active_capture_review", True)),
+        },
+    }
+
+
+def _governance_claim_transition(action: dict[str, Any]) -> str | None:
+    if action.get("memory_class") != "claim" and action.get("target_type") != "claim":
+        return None
+    return {
+        "mark_review": "stale",
+        "stale_tag": "stale",
+        "deprioritize": "deprioritize",
+        "retire": "retire",
+    }.get(str(action.get("action") or ""))
+
+
+def _governance_conflict(action: dict[str, Any]) -> dict[str, Any] | None:
+    if not _governance_claim_transition(action):
+        return None
+    before = action.get("before_state") if isinstance(action.get("before_state"), dict) else {}
+    expected_state = before.get("lifecycle_state")
+    if not expected_state:
+        return None
+    current = database.get_claim(str(action.get("target_id")))
+    if current is None:
+        return {"reason": "target_missing", "expected_lifecycle_state": expected_state}
+    current_state = current.get("lifecycle_state")
+    if current_state != expected_state:
+        return {
+            "reason": "target_state_changed",
+            "expected_lifecycle_state": expected_state,
+            "current_lifecycle_state": current_state,
+        }
+    return None
+
+
+def _claim_lifecycle_snapshot(claim: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": claim.get("id"),
+        "lifecycle_state": claim.get("lifecycle_state"),
+        "retention_action": claim.get("retention_action"),
+    }
 
 
 _CAPTURE_BACKFILL_MAX_BYTES = 1024 * 1024

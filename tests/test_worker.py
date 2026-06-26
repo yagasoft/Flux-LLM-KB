@@ -1261,3 +1261,31 @@ def test_host_agent_corpus_worker_does_not_process_imap_mail_profiles(monkeypatc
 
     assert mail_sync_limits == []
     assert "mail_sync" not in result["last_result"]
+
+
+def test_corpus_worker_governance_librarian_is_disabled_by_default(monkeypatch):
+    governance_calls = []
+
+    monkeypatch.setattr(database, "record_runtime_component_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(KnowledgeService, "run_corpus_backfill", lambda self, **kwargs: {"claimed": 0, "completed": 0, "jobs": []})
+    monkeypatch.setattr(service_module, "_governance_policy_from_settings", lambda: {"librarian_enabled": False, "interval_seconds": 1, "mode": "auto", "auto_apply_enabled": True, "max_actions_per_run": 3})
+    monkeypatch.setattr(KnowledgeService, "run_governance", lambda self, **kwargs: governance_calls.append(kwargs) or {"run": {"id": "run-1"}})
+
+    result = KnowledgeService().run_corpus_worker(once=True, limit=2)
+
+    assert governance_calls == []
+    assert "governance" not in result["last_result"]
+
+
+def test_corpus_worker_governance_librarian_runs_shadow_without_auto_apply(monkeypatch):
+    governance_calls = []
+
+    monkeypatch.setattr(database, "record_runtime_component_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(KnowledgeService, "run_corpus_backfill", lambda self, **kwargs: {"claimed": 0, "completed": 0, "jobs": []})
+    monkeypatch.setattr(service_module, "_governance_policy_from_settings", lambda: {"librarian_enabled": True, "interval_seconds": 1, "mode": "auto", "auto_apply_enabled": False, "max_actions_per_run": 3})
+    monkeypatch.setattr(KnowledgeService, "run_governance", lambda self, **kwargs: governance_calls.append(kwargs) or {"run": {"id": "run-1"}, "memory_mutated": False})
+
+    result = KnowledgeService().run_corpus_worker(once=True, limit=2, component_name="corpus-worker:test")
+
+    assert governance_calls == [{"mode": "shadow", "actor": "corpus-worker:test", "limit": 3}]
+    assert result["last_result"]["governance"]["run"]["id"] == "run-1"

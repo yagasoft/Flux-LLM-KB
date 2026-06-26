@@ -85,6 +85,12 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.diagnostics_remediate")' in source
     assert '@mcp.tool(name="kb.retrieval_benchmark_run")' in source
     assert '@mcp.tool(name="kb.retrieval_benchmark_history")' in source
+    assert '@mcp.tool(name="kb.governance_run")' in source
+    assert '@mcp.tool(name="kb.governance_actions")' in source
+    assert '@mcp.tool(name="kb.governance_apply")' in source
+    assert '@mcp.tool(name="kb.governance_recover")' in source
+    assert '@mcp.tool(name="kb.governance_digest")' in source
+    assert '@mcp.tool(name="kb.governance_policy")' in source
     assert '@mcp.tool(name="kb.embeddings_status")' in source
     assert '@mcp.tool(name="kb.embeddings_enqueue")' in source
     assert '@mcp.tool(name="kb.embeddings_backfill")' in source
@@ -114,6 +120,12 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "def diagnostics_remediate(action: str, target_type: str, target_id: str | None = None, root_name: str | None = None, family: str | None = None, reason: str = \"operator diagnostic remediation\")" in source
     assert 'def retrieval_benchmark_run(suite: str = "standard", label: str | None = None, compare_label: str | None = None, limit_per_query: int = 5, token_budget: int | None = None, persist: bool = True)' in source
     assert 'def retrieval_benchmark_history(suite: str | None = None, label: str | None = None, limit: int = 20)' in source
+    assert 'def governance_run(mode: str = "shadow", limit: int = 25)' in source
+    assert 'def governance_actions(status: str = "proposed", limit: int = 50)' in source
+    assert "def governance_apply(action_id: str, rationale: str, confirm: bool = False)" in source
+    assert "def governance_recover(action_id: str, rationale: str, confirm: bool = False)" in source
+    assert "def governance_digest()" in source
+    assert "def governance_policy()" in source
     assert "confidence bands, calibration candidates, and metric deltas" in source
     assert "review_capture_job(" in source
 

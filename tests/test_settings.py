@@ -51,6 +51,44 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "acceleration.video.frame_sample_count" in keys
     assert "acceleration.video.scene_threshold" in keys
     assert "acceleration.video.frame_max_duration_seconds" in keys
+    assert "governance.librarian.enabled" in keys
+    assert "governance.librarian.interval_seconds" in keys
+    assert "governance.librarian.mode" in keys
+    assert "governance.librarian.max_actions_per_run" in keys
+    assert "governance.librarian.min_shadow_precision" in keys
+    assert "governance.librarian.auto_apply_enabled" in keys
+    assert "governance.librarian.auto_apply_risk_ceiling" in keys
+    assert "governance.librarian.digest_retention_days" in keys
+    assert "governance.librarian.protected_memory_rules" in keys
+    assert "governance.local_model_rationale.enabled" in keys
+    assert "governance.local_model_rationale.model" in keys
+
+
+def test_governance_settings_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("governance.librarian.enabled").raw_value is False
+    assert service.resolve("governance.librarian.mode").raw_value == "shadow"
+    assert service.resolve("governance.librarian.interval_seconds").raw_value == 3600
+    assert service.resolve("governance.librarian.max_actions_per_run").raw_value == 25
+    assert service.resolve("governance.librarian.min_shadow_precision").raw_value == 0.8
+    assert service.resolve("governance.librarian.auto_apply_enabled").raw_value is False
+    assert service.resolve("governance.librarian.auto_apply_risk_ceiling").raw_value == "low"
+    assert service.resolve("governance.librarian.digest_retention_days").raw_value == 30
+    assert "protect_confirmed_confidence" in service.resolve("governance.librarian.protected_memory_rules").raw_value
+    assert service.resolve("governance.local_model_rationale.enabled").raw_value is False
+    assert service.resolve("governance.local_model_rationale.model").raw_value == ""
+
+    monkeypatch.setenv("FLUX_KB_GOVERNANCE_LIBRARIAN_ENABLED", "true")
+    monkeypatch.setenv("FLUX_KB_GOVERNANCE_LIBRARIAN_MODE", "auto")
+    monkeypatch.setenv("FLUX_KB_GOVERNANCE_MIN_SHADOW_PRECISION", "0.91")
+    monkeypatch.setenv("FLUX_KB_GOVERNANCE_LOCAL_MODEL_RATIONALE_MODEL", "llama3.1:8b")
+
+    assert service.resolve("governance.librarian.enabled").raw_value is True
+    assert service.resolve("governance.librarian.mode").raw_value == "auto"
+    assert service.resolve("governance.librarian.min_shadow_precision").raw_value == 0.91
+    assert service.resolve("governance.local_model_rationale.model").raw_value == "llama3.1:8b"
 
 
 def test_codex_hook_settings_are_enabled_by_default(monkeypatch):

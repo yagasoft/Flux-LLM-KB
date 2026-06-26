@@ -137,6 +137,14 @@ def create_app():
         token_budget: int | None = None
         persist: bool = True
 
+    class GovernanceRunRequest(BaseModel):
+        mode: str = "shadow"
+        limit: int = 25
+
+    class GovernanceActionRequest(BaseModel):
+        rationale: str
+        confirm: bool = False
+
     class ClaimRequest(BaseModel):
         subject_type: str
         subject: str
@@ -747,6 +755,76 @@ def create_app():
             label=label,
             limit=limit,
         )
+
+    @app.get("/api/governance/runs")
+    def governance_runs(limit: int = 20):
+        return service.governance_runs(limit=limit)
+
+    @app.post("/api/governance/run")
+    def governance_run(request: GovernanceRunRequest = Body(...)):
+        return service.run_governance(mode=request.mode, actor="api", limit=request.limit)
+
+    @app.get("/api/governance/actions")
+    def governance_actions(status: str = "proposed", limit: int = 50):
+        return service.governance_actions(status=status, limit=limit)
+
+    @app.post("/api/governance/actions/{action_id}/apply")
+    def governance_apply(action_id: str, request: GovernanceActionRequest = Body(...)):
+        try:
+            return service.governance_apply(action_id, rationale=request.rationale, confirm=request.confirm, actor="api")
+        except LookupError as exc:
+            raise FluxApiError(
+                code="governance.action_not_found",
+                message=str(exc),
+                status_code=404,
+                component="review",
+                retryable=False,
+                user_action="Refresh governance actions before retrying.",
+                target={"type": "memory_governance_action", "id": action_id},
+            ) from exc
+        except ValueError as exc:
+            raise FluxApiError(
+                code="governance.apply_blocked",
+                message=str(exc),
+                status_code=400,
+                component="review",
+                retryable=False,
+                user_action="Confirm the action, include rationale, and ensure the governance shadow gate is ready.",
+                target={"type": "memory_governance_action", "id": action_id},
+            ) from exc
+
+    @app.post("/api/governance/actions/{action_id}/recover")
+    def governance_recover(action_id: str, request: GovernanceActionRequest = Body(...)):
+        try:
+            return service.governance_recover(action_id, rationale=request.rationale, confirm=request.confirm, actor="api")
+        except LookupError as exc:
+            raise FluxApiError(
+                code="governance.action_not_found",
+                message=str(exc),
+                status_code=404,
+                component="review",
+                retryable=False,
+                user_action="Refresh governance actions before retrying.",
+                target={"type": "memory_governance_action", "id": action_id},
+            ) from exc
+        except ValueError as exc:
+            raise FluxApiError(
+                code="governance.recovery_blocked",
+                message=str(exc),
+                status_code=400,
+                component="review",
+                retryable=False,
+                user_action="Recover only applied governance actions with confirmation and rationale.",
+                target={"type": "memory_governance_action", "id": action_id},
+            ) from exc
+
+    @app.get("/api/governance/digest")
+    def governance_digest():
+        return service.governance_digest()
+
+    @app.get("/api/governance/policy")
+    def governance_policy():
+        return service.governance_policy()
 
     @app.post("/api/claims")
     def claim_upsert(request: ClaimRequest = Body(...)):

@@ -717,6 +717,61 @@ def test_retrieval_benchmark_routes_are_exposed(monkeypatch):
     ]
 
 
+def test_governance_routes_are_exposed(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def governance_runs(self, **kwargs):
+            calls.append(("runs", kwargs))
+            return {"runs": [{"id": "run-1", "settings_mutated": False}]}
+
+        def run_governance(self, **kwargs):
+            calls.append(("run", kwargs))
+            return {"run": {"id": "run-2"}, "actions": [], "settings_mutated": False, "memory_mutated": False}
+
+        def governance_actions(self, **kwargs):
+            calls.append(("actions", kwargs))
+            return {"actions": [{"id": "action-1", "action": "stale_tag", "status": "proposed"}], "telemetry": {"by_action": {"stale_tag": 1}}}
+
+        def governance_apply(self, action_id, **kwargs):
+            calls.append(("apply", {"action_id": action_id, **kwargs}))
+            return {"action": {"id": action_id, "status": "applied"}, "memory_mutated": True, "settings_mutated": False}
+
+        def governance_recover(self, action_id, **kwargs):
+            calls.append(("recover", {"action_id": action_id, **kwargs}))
+            return {"action": {"id": action_id, "status": "recovered"}, "memory_mutated": True, "settings_mutated": False}
+
+        def governance_digest(self):
+            calls.append(("digest", {}))
+            return {"digest": {"summary": {"new_proposals": 1}}, "settings_mutated": False}
+
+        def governance_policy(self):
+            calls.append(("policy", {}))
+            return {"policy": {"min_shadow_precision": 0.8}, "settings_mutated": False}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    assert client.get("/api/governance/runs", params={"limit": 3}).json()["runs"][0]["id"] == "run-1"
+    assert client.post("/api/governance/run", json={"mode": "shadow", "limit": 4}).json()["run"]["id"] == "run-2"
+    assert client.get("/api/governance/actions", params={"status": "proposed", "limit": 5}).json()["telemetry"]["by_action"]["stale_tag"] == 1
+    assert client.post("/api/governance/actions/action-1/apply", json={"rationale": "reviewed", "confirm": True}).json()["action"]["status"] == "applied"
+    assert client.post("/api/governance/actions/action-1/recover", json={"rationale": "rollback", "confirm": True}).json()["action"]["status"] == "recovered"
+    assert client.get("/api/governance/digest").json()["digest"]["summary"]["new_proposals"] == 1
+    assert client.get("/api/governance/policy").json()["policy"]["min_shadow_precision"] == 0.8
+    assert calls == [
+        ("runs", {"limit": 3}),
+        ("run", {"mode": "shadow", "actor": "api", "limit": 4}),
+        ("actions", {"status": "proposed", "limit": 5}),
+        ("apply", {"action_id": "action-1", "rationale": "reviewed", "confirm": True, "actor": "api"}),
+        ("recover", {"action_id": "action-1", "rationale": "rollback", "confirm": True, "actor": "api"}),
+        ("digest", {}),
+        ("policy", {}),
+    ]
+
+
 def test_crawl_root_create_endpoint_rejects_missing_directory(monkeypatch, tmp_path):
     from flux_llm_kb.rest_api import create_app
 
