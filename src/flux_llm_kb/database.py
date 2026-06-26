@@ -7488,7 +7488,7 @@ def _fetch_semantic_duplicate_candidates(
                      NULLIF(e.metadata->>'workspace_key', ''),
                      CASE
                        WHEN NULLIF(e.metadata->>'root_name', '') IS NOT NULL
-                       THEN 'root:' || e.metadata->>'root_name'
+                       THEN 'root:' || (e.metadata->>'root_name')
                        ELSE ''
                      END
                    ) AS workspace_key,
@@ -7520,7 +7520,7 @@ def _fetch_semantic_duplicate_candidates(
                      NULLIF(c.metadata->>'workspace_key', ''),
                      CASE
                        WHEN NULLIF(c.metadata->>'root_name', '') IS NOT NULL
-                       THEN 'root:' || c.metadata->>'root_name'
+                       THEN 'root:' || (c.metadata->>'root_name')
                        ELSE ''
                      END
                    ) AS workspace_key,
@@ -7629,7 +7629,7 @@ def _semantic_duplicate_candidate_cte(
                      NULLIF(e.metadata->>'workspace_key', ''),
                      CASE
                        WHEN NULLIF(e.metadata->>'root_name', '') IS NOT NULL
-                       THEN 'root:' || e.metadata->>'root_name'
+                       THEN 'root:' || (e.metadata->>'root_name')
                        ELSE ''
                      END
                    ) AS workspace_key,
@@ -7654,7 +7654,7 @@ def _semantic_duplicate_candidate_cte(
                  NULLIF(c.metadata->>'workspace_key', ''),
                  CASE
                    WHEN NULLIF(c.metadata->>'root_name', '') IS NOT NULL
-                   THEN 'root:' || c.metadata->>'root_name'
+                   THEN 'root:' || (c.metadata->>'root_name')
                    ELSE ''
                  END
                ) AS workspace_key,

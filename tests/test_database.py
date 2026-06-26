@@ -1202,6 +1202,27 @@ def test_semantic_duplicate_cluster_builder_selects_canonical_without_deleting_m
     assert all(member["member_role"] in {"canonical", "duplicate"} for member in cluster["members"])
 
 
+def test_semantic_duplicate_workspace_key_sql_parenthesizes_json_extraction():
+    class FakeCursor:
+        def __init__(self):
+            self.sql = ""
+
+        def execute(self, sql, _params=()):
+            self.sql = sql
+
+        def fetchall(self):
+            return []
+
+    for memory_class, alias in (("episode", "e"), ("claim", "c")):
+        cursor = FakeCursor()
+        database._fetch_semantic_duplicate_candidates(cursor, memory_class=memory_class, root_name=None, limit=10)
+        cte, _params = database._semantic_duplicate_candidate_cte(memory_class=memory_class, root_name=None, limit=10)
+
+        expected = f"THEN 'root:' || ({alias}.metadata->>'root_name')"
+        assert expected in cursor.sql
+        assert expected in cte
+
+
 def test_list_semantic_duplicate_clusters_returns_sanitized_members(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
