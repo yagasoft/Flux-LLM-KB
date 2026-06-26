@@ -225,6 +225,40 @@ def test_classify_publication_extensions_as_deferred_documents(tmp_path):
         assert classification.extraction_tier == "deferred", extension
 
 
+def test_classify_practical_corpus_coverage_extensions(tmp_path):
+    expected = {
+        ".srt": "subtitle",
+        ".vtt": "subtitle",
+        ".eml": "mail",
+        ".mbox": "mail",
+        ".ics": "calendar",
+        ".vcf": "contact",
+        ".psv": "structured_data",
+        ".ssv": "structured_data",
+        ".ndjson": "structured_data",
+        ".jsonld": "structured_data",
+        ".sarif": "report",
+        ".spdx": "report",
+        ".har": "report",
+        ".sqlite": "database",
+        ".duckdb": "database",
+        ".geojson": "geospatial",
+        ".ifc": "cad",
+        ".h5": "scientific",
+        ".pem": "sensitive_metadata",
+        ".key": "sensitive_metadata",
+    }
+
+    for extension, file_kind in expected.items():
+        path = tmp_path / f"sample{extension}"
+        path.write_text("placeholder", encoding="utf-8")
+
+        classification = classify_file(path, CorpusPolicy(root_path=tmp_path))
+
+        assert classification.file_kind == file_kind, extension
+        assert classification.extraction_tier == "deferred", extension
+
+
 def test_scan_path_queues_comic_archives_as_deferred_archives(tmp_path):
     root = tmp_path / "publications"
     root.mkdir()

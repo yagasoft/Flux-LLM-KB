@@ -824,6 +824,11 @@ def test_crawl_backfill_endpoint_runs_worker_once(monkeypatch):
     assert archive_response.status_code == 200
     assert archive_response.json()["backfill"] == {"kind": "containers", "limit": 4, "workers": 1}
 
+    data_response = client.post("/api/crawl/backfill", json={"kind": "data", "limit": 5, "workers": 1})
+
+    assert data_response.status_code == 200
+    assert data_response.json()["backfill"] == {"kind": "data", "limit": 5, "workers": 1}
+
 
 def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
     from flux_llm_kb.rest_api import create_app

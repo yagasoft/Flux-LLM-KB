@@ -119,13 +119,14 @@ parser or local tool exists.
   files fall back to redacted text chunks with sanitized `parser_status`
   metadata; they do not block crawl/watch loops.
 - Oversized structured files use sample-first indexing where local parsing is
-  reliable. CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbooks store a
-  bounded schema/profile/sample chunk with columns, row-count estimate, sample
-  row count, parse status, truncation state, and sheet metadata where relevant;
-  they do not full-index tail rows by default. Legacy Excel and OpenDocument
-  spreadsheets converted locally through LibreOffice use the same sample-first
-  workbook profiling when the converted workbook exceeds the inline extraction
-  limit, preserving source/converted extension metadata.
+  reliable. CSV, TSV, PSV, SSV, JSON, JSONL, NDJSON, JSON-LD, and
+  OpenPyXL-supported workbooks store a bounded schema/profile/sample chunk with
+  columns, row-count estimate, sample row count, parse status, truncation state,
+  and sheet metadata where relevant; they do not full-index tail rows by
+  default. Legacy Excel and OpenDocument spreadsheets converted locally through
+  LibreOffice use the same sample-first workbook profiling when the converted
+  workbook exceeds the inline extraction limit, preserving source/converted
+  extension metadata.
 - Office and OpenDocument business files should use local adapters only.
   Cross-platform extraction prefers bundled Python parsers or LibreOffice
   conversion; Windows installs may use Word, Excel, or PowerPoint COM for legacy
@@ -149,6 +150,21 @@ parser or local tool exists.
   ASR output is redacted before chunking and before ASR cache writes. Cloud
   transcription stays off by default, and raw transcript text is not written to
   public docs or dashboard metadata.
+- Practical exchange/export formats use small local parsers before heavier
+  tooling. Subtitle files (`srt`, `vtt`, `ass`, `ssa`, `ttml`, `dfxp`, `sbv`)
+  are cleaned into transcript chunks without cue IDs or timestamps. `eml` and
+  `mbox` mail exports summarize subjects, plain bodies, message counts, and
+  attachment counts without indexing attachment bytes or raw addressing headers.
+  `ics` and `vcf` files extract conservative event/contact summaries while
+  omitting contact email addresses from chunks.
+- Security, test, coverage, and browser capture reports use bounded summaries
+  for common local formats. SARIF stores finding counts and rule/message
+  summaries, SPDX and CycloneDX store package/component summaries,
+  JUnit-style XML/TRX/TAP store test/failure/skipped totals, LCOV and
+  Cobertura-style coverage XML store line coverage totals, and HAR stores
+  method/URL/status summaries. SQLite databases are read with a read-only stdlib
+  connection and index schema/table metadata only; row values are not indexed by
+  default.
 - `drawio`, `drawio.svg`, and `drawio.png` parse embedded XML when present and
   index page names, shapes, labels, connectors, and links.
 - `vsdx` and related modern Visio files are ZIP/XML containers and are parsed
@@ -164,11 +180,18 @@ parser or local tool exists.
 - Container members are stored as related child assets linked to the parent
   archive. Inline-safe text/code members are chunked. Nested containers are
   recursively expanded up to `crawler.container_max_depth`, and embedded
-  documents, diagrams, images, audio, and video are routed through local
-  extractors from temporary private files. Embedded media sidecar transcript
-  files such as `clip.mp4.srt` or `clip.mp4.txt` are used before probing or ASR
-  tools while remaining visible as their own child assets. Child metadata
-  records sanitized depth, parent-member, parser status, skipped, and
+  documents, diagrams, images, audio, video, subtitles, mail exports,
+  calendar/contact files, structured data, reports, SQLite databases, and
+  metadata-first domain formats are routed through local extractors from
+  temporary private files. Embedded media sidecar transcript files such as
+  `clip.mp4.srt` or `clip.mp4.txt` are used before probing or ASR tools while
+  remaining visible as their own child assets. Child metadata records sanitized
+  depth, parent-member, parser status, skipped, parser count summaries, and
   blocked-dependency details.
 - Secret-bearing formats should never have raw content indexed by default.
   They may produce redacted metadata and audit entries only.
+- Extractor availability surfaces optional local capability keys for practical
+  coverage planning, including `readpst`, `msgconvert`, `duckdb`, `pyarrow`,
+  `ogrinfo`, `gdalinfo`, `ifcopenshell`, `assimp`, `blender`, `exiftool`, and
+  `pandoc`. These are diagnostics and fallback candidates; they are not required
+  dependencies.

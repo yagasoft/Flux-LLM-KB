@@ -154,7 +154,8 @@ Configured roots are crawled recursively according to root policy, `.gitignore`,
 `.fluxignore`, `.fluxkbignore`, and `.exclude.codex` markers. Metadata is recorded
 for every supported file type. Sync can target a full root, a subtree, or a
 single file. Small text-like files are extracted and chunked locally; heavy
-documents, images, audio, and video are queued for local deferred processing.
+documents, images, audio, video, archive members, and practical export/report
+formats are queued for local deferred processing.
 Images are dimensioned locally, decorative-image spacers are skipped before
 heavy enrichment, and optional local loopback vision descriptions run only when
 `acceleration.vision.enabled` and a local model are configured. Media uses
@@ -167,10 +168,11 @@ Draw.io and modern
 VSDX/VSDM/VSSX/VSSM/VSTX/VSTM diagrams are parsed structurally. Bounded
 archive/container extraction records related child assets, recursively expands
 safe nested containers up to the configured depth, and routes embedded
-documents, diagrams, images, audio, and video through the same local extractor
-chain from temporary private files. Embedded media sidecar transcripts inside
-archives are used before media probing or ASR. Unknown binaries remain
-metadata-only.
+documents, diagrams, images, audio, video, subtitles, mail exports,
+calendar/contact files, structured data, reports, SQLite databases, and
+metadata-first domain formats through the same local extractor chain from
+temporary private files. Embedded media sidecar transcripts inside archives are
+used before media probing or ASR. Unknown binaries remain metadata-only.
 
 File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
@@ -198,8 +200,9 @@ failures and unsupported code-like files still index as redacted fallback
 chunks with sanitized parser status metadata.
 
 Large structured files use sample-first indexing before any full-file backfill.
-For CSV, TSV, JSON, JSONL, and OpenPyXL-supported workbook files, oversized
-inputs produce a bounded schema/profile/sample chunk plus metadata such as
+For CSV, TSV, PSV, SSV, JSON, JSONL, NDJSON, JSON-LD, and
+OpenPyXL-supported workbook files, oversized inputs produce a bounded
+schema/profile/sample chunk plus metadata such as
 columns, row-count estimate, sample row count, parse status, source format,
 sheet count where applicable, and truncation state. Legacy Excel and
 OpenDocument spreadsheet adapters that convert through LibreOffice preserve the
@@ -207,6 +210,16 @@ source and converted extensions, then use the same sample-first workbook
 profiling when the converted workbook is oversized. The sample-first path
 avoids returning full tail rows or raw private dumps while still making large
 data assets discoverable and diagnosable.
+
+Practical local parsers cover common transcript, exchange, and report families
+without adding heavyweight required dependencies. Subtitle files are cleaned
+into transcript chunks without cue/timestamp noise. EML/MBOX mail exports,
+ICS/VCF calendar/contact files, SARIF, SPDX, CycloneDX, JUnit-style XML, TRX,
+TAP, LCOV, coverage XML, HAR, and SQLite schema metadata use bounded summaries
+and sanitized parser-count metadata. SQLite extraction is schema-only by default
+and does not index table rows.
+Proprietary CAD/BI/geospatial/scientific/database formats remain
+metadata-first until a safe local parser or local tool stage is implemented.
 
 When the API/dashboard is Docker-hosted, arbitrary Windows/macOS/Linux host
 paths are accessed through a separate local host agent (`flux-kb host-agent run`).
@@ -253,8 +266,9 @@ explicit terminal states such as `completed`, `metadata_only`, or
 Corpus jobs are classified into fixed worker families (`text`, `office`,
 `image`, `diagram`, `archive`, `media`, `embedding`, `preview`, and `general`)
 with resource class, priority, and time budget metadata. Worker/backfill
-commands translate existing `--kind` options into these families before claiming
-jobs, so family-specific workers do not lock unrelated work. Claiming can apply
+commands translate `--kind` options into these families before claiming jobs,
+including broader operator aliases such as `data`, `mail`, `reports`, and
+`metadata`, so family-specific workers do not lock unrelated work. Claiming can apply
 the configured `acceleration.worker_cap.*` map to cap concurrent running jobs per
 family and expose worker-family backpressure, oldest pending age, retrying
 locked counts, blocked locked counts, sanitized slow-job rows, parser cache
@@ -264,8 +278,10 @@ scoping, stale-only refresh, and bounded limits. Completion, retry, and blocked
 transitions record last duration and sanitized telemetry for queue
 observability, including OCR/ASR cache counters, embedding vector/cache
 counters, recursive container member, parsed-child, skipped-child, and
-blocked-dependency counts, ASR segment totals, frame sample counts/timestamps,
-thumbnail cache counters, stale-lock evidence, and blocked dependency reasons.
+blocked-dependency counts, practical parser counts for mail, calendar/contact,
+reports, BOMs, coverage, HAR, database schema extraction, sensitive metadata,
+ASR segment totals, frame sample counts/timestamps, thumbnail cache counters,
+stale-lock evidence, and blocked dependency reasons.
 Files observed before their size/mtime fingerprint stabilizes are recorded as
 `pending_stable` instead of failing the root crawl. Jobs are not completed merely
 because they were claimed. Duplicate content is suppressed by content hash while

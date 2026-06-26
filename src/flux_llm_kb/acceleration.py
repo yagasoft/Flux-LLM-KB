@@ -128,6 +128,14 @@ def kind_to_job_families(kind: str | None) -> tuple[str, ...] | None:
         return ("media",)
     if normalized == "embeddings":
         return ("embedding",)
+    if normalized == "data":
+        return ("text", "office", "general")
+    if normalized == "mail":
+        return ("general",)
+    if normalized == "reports":
+        return ("text", "general")
+    if normalized == "metadata":
+        return ("general",)
     return None
 
 

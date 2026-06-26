@@ -139,6 +139,23 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             telemetry["frame_sample_timestamps"] = [float(value) for value in frame_sampling.get("timestamps", [])[:20]]
     if metadata.get("blocked_dependency_reason"):
         telemetry["blocked_dependency_reason"] = str(metadata.get("blocked_dependency_reason"))[:120]
+    for source_key, telemetry_key in {
+        "message_count": "mail_message_count",
+        "event_count": "calendar_event_count",
+        "contact_count": "contact_count",
+        "finding_count": "report_finding_count",
+        "test_count": "report_test_count",
+        "entry_count": "har_entry_count",
+        "table_count": "database_table_count",
+        "component_count": "report_component_count",
+        "package_count": "report_package_count",
+        "covered_line_count": "coverage_covered_line_count",
+        "line_count": "coverage_line_count",
+    }.items():
+        if source_key in metadata:
+            telemetry[telemetry_key] = int(metadata.get(source_key) or 0)
+    if metadata.get("sensitive") is True:
+        telemetry["sensitive_metadata"] = True
     if metadata.get("extractor") == "container":
         for source_key, telemetry_key in {
             "member_count": "container_member_count",

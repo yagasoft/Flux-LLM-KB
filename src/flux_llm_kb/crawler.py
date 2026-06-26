@@ -40,6 +40,43 @@ TEXT_EXTENSIONS = {
     ".yml",
 }
 CODE_EXTENSIONS = set(CODE_LANGUAGE_EXTENSIONS)
+SUBTITLE_EXTENSIONS = {".ass", ".dfxp", ".sbv", ".srt", ".ssa", ".ttml", ".vtt"}
+MAIL_EXTENSIONS = {".eml", ".mbox"}
+CALENDAR_EXTENSIONS = {".ics", ".ical", ".ifb"}
+CONTACT_EXTENSIONS = {".vcf", ".vcard"}
+STRUCTURED_DATA_EXTENSIONS = {".jsonld", ".ndjson", ".psv", ".ssv"}
+REPORT_EXTENSIONS = {
+    ".burp",
+    ".cyclonedx",
+    ".har",
+    ".lcov",
+    ".nessus",
+    ".nmap",
+    ".sarif",
+    ".spdx",
+    ".tap",
+    ".trx",
+    ".zap",
+}
+REPORT_NAMES = {"cobertura.xml", "coverage.xml", "junit.xml", "results.xml"}
+DATABASE_EXTENSIONS = {".accdb", ".db", ".dbf", ".duckdb", ".fdb", ".mdb", ".sqlite", ".sqlite3"}
+GEOSPATIAL_EXTENSIONS = {".geojson", ".gpx", ".gpkg", ".kml", ".kmz", ".mbtiles", ".shp", ".topojson"}
+CAD_EXTENSIONS = {".dae", ".dgn", ".dwg", ".dxf", ".fbx", ".gltf", ".glb", ".ifc", ".ifczip", ".obj", ".rfa", ".rvt", ".skp", ".stl", ".stp", ".step", ".usd", ".usda", ".usdc", ".usdz"}
+SCIENTIFIC_EXTENSIONS = {".fits", ".h5", ".hdf5", ".mat", ".nc", ".netcdf", ".npy", ".npz"}
+SENSITIVE_METADATA_EXTENSIONS = {".age", ".cer", ".crt", ".gpg", ".jks", ".kdbx", ".key", ".kstore", ".p12", ".pem", ".pfx", ".pgp"}
+DEFERRED_LOCAL_PARSER_KINDS = {
+    "calendar",
+    "cad",
+    "contact",
+    "database",
+    "geospatial",
+    "mail",
+    "report",
+    "scientific",
+    "sensitive_metadata",
+    "structured_data",
+    "subtitle",
+}
 DOCUMENT_EXTENSIONS = {
     ".azw",
     ".azw3",
@@ -329,7 +366,7 @@ def classify_file(path: str | Path, policy: CorpusPolicy) -> FileClassification:
     mime_type, _ = mimetypes.guess_type(file_path.name)
     file_kind = _file_kind(file_path, mime_type)
 
-    if file_kind in {"archive", "container", "diagram", "image", "audio", "video"}:
+    if file_kind in {"archive", "container", "diagram", "image", "audio", "video"} | DEFERRED_LOCAL_PARSER_KINDS:
         return FileClassification(file_kind=file_kind, extraction_tier="deferred", mime_type=mime_type)
     if size > policy.heavy_threshold_bytes:
         return FileClassification(
@@ -401,6 +438,28 @@ def _file_kind(path: str | Path, mime_type: str | None) -> str:
     file_path = Path(path)
     ext = file_path.suffix.lower()
     name = file_path.name.lower()
+    if ext in SENSITIVE_METADATA_EXTENSIONS:
+        return "sensitive_metadata"
+    if ext in SUBTITLE_EXTENSIONS:
+        return "subtitle"
+    if ext in MAIL_EXTENSIONS:
+        return "mail"
+    if ext in CALENDAR_EXTENSIONS:
+        return "calendar"
+    if ext in CONTACT_EXTENSIONS:
+        return "contact"
+    if ext in STRUCTURED_DATA_EXTENSIONS:
+        return "structured_data"
+    if ext in REPORT_EXTENSIONS or name in REPORT_NAMES:
+        return "report"
+    if ext in DATABASE_EXTENSIONS:
+        return "database"
+    if ext in GEOSPATIAL_EXTENSIONS:
+        return "geospatial"
+    if ext in CAD_EXTENSIONS:
+        return "cad"
+    if ext in SCIENTIFIC_EXTENSIONS:
+        return "scientific"
     if ext in DIAGRAM_EXTENSIONS or any(name.endswith(suffix) for suffix in DIAGRAM_COMPOUND_SUFFIXES):
         return "diagram"
     if is_code_like_path(file_path):

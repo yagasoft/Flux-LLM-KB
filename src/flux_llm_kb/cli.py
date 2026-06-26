@@ -272,9 +272,10 @@ def main(argv: list[str] | None = None) -> int:
     crawl_jobs.add_argument("--limit", type=int, default=50)
 
     crawl_backfill = crawl_subparsers.add_parser("backfill", help="Claim deferred corpus extraction jobs")
+    crawl_kind_choices = ["text", "images", "diagrams", "archives", "containers", "media", "embeddings", "data", "mail", "reports", "metadata", "all"]
     crawl_backfill.add_argument(
         "--kind",
-        choices=["text", "images", "diagrams", "archives", "containers", "media", "embeddings", "all"],
+        choices=crawl_kind_choices,
         default="all",
     )
     crawl_backfill.add_argument("--limit", type=int, default=10)
@@ -287,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     crawl_worker_run = crawl_worker_subparsers.add_parser("run", help="Run the corpus worker loop")
     crawl_worker_run.add_argument(
         "--kind",
-        choices=["text", "images", "diagrams", "archives", "containers", "media", "embeddings", "all"],
+        choices=crawl_kind_choices,
         default="all",
     )
     crawl_worker_run.add_argument("--limit", type=int, default=10)

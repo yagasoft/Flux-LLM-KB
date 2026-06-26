@@ -1,8 +1,10 @@
 import base64
+from email.message import EmailMessage
 import gzip
 import importlib.machinery
 import importlib.util
 import json
+import sqlite3
 import sys
 import tarfile
 from io import BytesIO
@@ -56,6 +58,101 @@ def test_extract_file_records_png_dimensions_without_cloud_calls(tmp_path):
     assert result.metadata["extractor"] == "image"
 
 
+def test_extract_subtitle_transcript_formats_strip_cues_and_timing(tmp_path):
+    path = tmp_path / "standup.srt"
+    path.write_text(
+        "1\n00:00:00,000 --> 00:00:02,000\nCoverage bundle begins.\n\n"
+        "2\n00:00:02,000 --> 00:00:04,000\nOperators see safer metadata.",
+        encoding="utf-8",
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "subtitle"
+    assert result.metadata["cue_count"] == 2
+    assert result.chunks[0].body == "Coverage bundle begins.\nOperators see safer metadata."
+    assert "00:00" not in result.chunks[0].body
+
+
+def test_extract_eml_indexes_headers_and_plain_body_without_attachment_content(tmp_path):
+    message = EmailMessage()
+    message["Subject"] = "Roadmap Review"
+    message["From"] = "sender@example.com"
+    message["To"] = "operator@example.com"
+    message.set_content("Coverage completion should stay metadata first.")
+    message.add_attachment(b"attachment raw bytes", maintype="application", subtype="octet-stream", filename="secret.bin")
+    path = tmp_path / "message.eml"
+    path.write_bytes(message.as_bytes())
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "mail"
+    assert result.metadata["message_count"] == 1
+    assert result.metadata["attachment_count"] == 1
+    assert result.metadata["subjects"] == ["Roadmap Review"]
+    assert "Roadmap Review" in result.chunks[0].body
+    assert "Coverage completion should stay metadata first." in result.chunks[0].body
+    assert "attachment raw bytes" not in result.chunks[0].body
+    assert "sender@example.com" not in result.chunks[0].body
+
+
+def test_extract_mbox_summarizes_multiple_messages(tmp_path):
+    path = tmp_path / "archive.mbox"
+    path.write_text(
+        "From sender@example.com Fri Jan 01 00:00:00 2026\n"
+        "Subject: First Decision\n"
+        "From: sender@example.com\n"
+        "\n"
+        "First body line.\n"
+        "From sender@example.com Fri Jan 02 00:00:00 2026\n"
+        "Subject: Second Decision\n"
+        "From: sender@example.com\n"
+        "\n"
+        "Second body line.\n",
+        encoding="utf-8",
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "mail"
+    assert result.metadata["mail_format"] == "mbox"
+    assert result.metadata["message_count"] == 2
+    assert result.metadata["subjects"] == ["First Decision", "Second Decision"]
+    assert "First body line." in result.chunks[0].body
+    assert "Second body line." in result.chunks[0].body
+
+
+def test_extract_calendar_and_contact_files_use_conservative_text_summaries(tmp_path):
+    ics = tmp_path / "meeting.ics"
+    ics.write_text(
+        "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Coverage Review\nDTSTART:20260626T090000Z\n"
+        "DESCRIPTION:Review parser coverage\nEND:VEVENT\nEND:VCALENDAR\n",
+        encoding="utf-8",
+    )
+    vcf = tmp_path / "person.vcf"
+    vcf.write_text(
+        "BEGIN:VCARD\nFN:Flux Operator\nORG:Local KB\nEMAIL:operator@example.com\nEND:VCARD\n",
+        encoding="utf-8",
+    )
+
+    calendar = extract_file(ics, CorpusPolicy(root_path=tmp_path))
+    contact = extract_file(vcf, CorpusPolicy(root_path=tmp_path))
+
+    assert calendar.status == "indexed"
+    assert calendar.metadata["extractor"] == "calendar"
+    assert calendar.metadata["event_count"] == 1
+    assert "Coverage Review" in calendar.chunks[0].body
+    assert "Review parser coverage" in calendar.chunks[0].body
+    assert contact.status == "indexed"
+    assert contact.metadata["extractor"] == "contact"
+    assert contact.metadata["contact_count"] == 1
+    assert "Flux Operator" in contact.chunks[0].body
+    assert "operator@example.com" not in contact.chunks[0].body
+
+
 def test_extractor_availability_reports_optional_tools():
     availability = extractor_availability()
 
@@ -70,6 +167,20 @@ def test_extractor_availability_reports_optional_tools():
     assert "ffmpeg" in availability
     assert "faster_whisper" in availability
     assert "ebook_convert" in availability
+    for name in (
+        "readpst",
+        "msgconvert",
+        "duckdb",
+        "pyarrow",
+        "ogrinfo",
+        "gdalinfo",
+        "ifcopenshell",
+        "assimp",
+        "blender",
+        "exiftool",
+        "pandoc",
+    ):
+        assert name in availability
     assert all("ok" in item and "message" in item for item in availability.values())
 
 
@@ -1092,6 +1203,24 @@ def test_extract_package_container_uses_zip_adapter(tmp_path):
     assert "Version: 1.0" in result.child_assets[0].chunks[0].body
 
 
+def test_extract_archive_parses_embedded_practical_corpus_member(tmp_path):
+    path = tmp_path / "exports.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr(
+            "meeting.vtt",
+            "WEBVTT\n\n00:00:00.000 --> 00:00:03.000\nRoadmap owners approved coverage completion.",
+        )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_depth=2))
+
+    child = result.child_assets[0]
+    assert child.member_path == "meeting.vtt"
+    assert child.file_kind == "subtitle"
+    assert child.extraction_status == "indexed"
+    assert child.metadata["embedded_extractor"] == "subtitle"
+    assert child.chunks[0].body == "Roadmap owners approved coverage completion."
+
+
 def test_extract_archive_rejects_unsafe_member_path(tmp_path):
     path = tmp_path / "unsafe.zip"
     with ZipFile(path, "w") as archive:
@@ -1384,6 +1513,30 @@ def test_extract_large_csv_uses_sample_first_profile(tmp_path):
     assert "Customer 24" not in result.chunks[0].body
 
 
+def test_extract_pipe_and_space_delimited_files_use_sample_first_profile(tmp_path):
+    pipe_path = tmp_path / "large.psv"
+    pipe_path.write_text(
+        "id|name|amount\n" + "\n".join(f"{index}|Customer {index}|{index * 10}" for index in range(14)),
+        encoding="utf-8",
+    )
+    space_path = tmp_path / "large.ssv"
+    space_path.write_text(
+        "id name amount\n" + "\n".join(f"{index} Customer{index} {index * 10}" for index in range(14)),
+        encoding="utf-8",
+    )
+
+    pipe_result = extract_file(pipe_path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=32))
+    space_result = extract_file(space_path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=32))
+
+    assert pipe_result.metadata["extractor"] == "sample_first_tabular"
+    assert pipe_result.metadata["sample_first"]["format"] == "psv"
+    assert pipe_result.metadata["sample_first"]["columns"] == ["id", "name", "amount"]
+    assert "Customer 13" not in pipe_result.chunks[0].body
+    assert space_result.metadata["sample_first"]["format"] == "ssv"
+    assert space_result.metadata["sample_first"]["columns"] == ["id", "name", "amount"]
+    assert "Customer13" not in space_result.chunks[0].body
+
+
 def test_extract_large_jsonl_uses_sample_first_profile(tmp_path):
     jsonl_path = tmp_path / "events.jsonl"
     jsonl_path.write_text(
@@ -1403,6 +1556,36 @@ def test_extract_large_jsonl_uses_sample_first_profile(tmp_path):
     assert '"id": 19' not in result.chunks[0].body
 
 
+def test_extract_large_ndjson_and_jsonld_use_sample_first_profiles(tmp_path):
+    ndjson_path = tmp_path / "events.ndjson"
+    ndjson_path.write_text(
+        "\n".join(f'{{"id": {index}, "kind": "event", "amount": {index * 10}}}' for index in range(18)),
+        encoding="utf-8",
+    )
+    jsonld_path = tmp_path / "graph.jsonld"
+    jsonld_path.write_text(
+        json.dumps(
+            {
+                "@context": {"name": "https://schema.org/name"},
+                "@graph": [{"id": index, "name": f"Node {index}"} for index in range(16)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ndjson_result = extract_file(ndjson_path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=64))
+    jsonld_result = extract_file(jsonld_path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=64))
+
+    assert ndjson_result.metadata["extractor"] == "sample_first_jsonl"
+    assert ndjson_result.metadata["sample_first"]["format"] == "ndjson"
+    assert ndjson_result.metadata["sample_first"]["row_count_estimate"] == 18
+    assert '"id": 17' not in ndjson_result.chunks[0].body
+    assert jsonld_result.metadata["extractor"] == "sample_first_json"
+    assert jsonld_result.metadata["sample_first"]["format"] == "jsonld"
+    assert jsonld_result.metadata["sample_first"]["source_key"] == "@graph"
+    assert "Node 15" not in jsonld_result.chunks[0].body
+
+
 def test_extract_large_json_array_uses_sample_first_profile(tmp_path):
     json_path = tmp_path / "events.json"
     json_path.write_text(
@@ -1420,6 +1603,152 @@ def test_extract_large_json_array_uses_sample_first_profile(tmp_path):
     assert result.metadata["sample_first"]["truncated"] is True
     assert result.chunks[0].metadata["sample_first"] is True
     assert '"id": 17' not in result.chunks[0].body
+
+
+def test_extract_security_and_test_reports_use_bounded_summaries(tmp_path):
+    sarif = tmp_path / "scan.sarif"
+    sarif.write_text(
+        json.dumps(
+            {
+                "runs": [
+                    {
+                        "tool": {"driver": {"name": "StaticScan"}},
+                        "results": [
+                            {"ruleId": "SEC001", "message": {"text": "Use parameterized SQL"}},
+                            {"ruleId": "SEC002", "message": {"text": "Rotate test key"}},
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        """<testsuite name="unit" tests="3" failures="1" skipped="1">
+  <testcase classname="A" name="passes" />
+  <testcase classname="A" name="fails"><failure message="expected true" /></testcase>
+</testsuite>""",
+        encoding="utf-8",
+    )
+    lcov = tmp_path / "coverage.lcov"
+    lcov.write_text("TN:\nSF:src/app.py\nDA:1,1\nDA:2,0\nend_of_record\n", encoding="utf-8")
+    har = tmp_path / "session.har"
+    har.write_text(
+        json.dumps(
+            {
+                "log": {
+                    "entries": [
+                        {"request": {"method": "GET", "url": "https://example.test/api/items"}, "response": {"status": 200}},
+                        {"request": {"method": "POST", "url": "https://example.test/api/items"}, "response": {"status": 500}},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sarif_result = extract_file(sarif, CorpusPolicy(root_path=tmp_path))
+    junit_result = extract_file(junit, CorpusPolicy(root_path=tmp_path))
+    lcov_result = extract_file(lcov, CorpusPolicy(root_path=tmp_path))
+    har_result = extract_file(har, CorpusPolicy(root_path=tmp_path))
+
+    assert sarif_result.metadata["extractor"] == "report"
+    assert sarif_result.metadata["report_format"] == "sarif"
+    assert sarif_result.metadata["finding_count"] == 2
+    assert "SEC001: Use parameterized SQL" in sarif_result.chunks[0].body
+    assert junit_result.metadata["report_format"] == "junit"
+    assert junit_result.metadata["test_count"] == 3
+    assert "Failures: 1" in junit_result.chunks[0].body
+    assert lcov_result.metadata["report_format"] == "lcov"
+    assert lcov_result.metadata["line_coverage_percent"] == 50.0
+    assert har_result.metadata["report_format"] == "har"
+    assert har_result.metadata["entry_count"] == 2
+    assert "POST https://example.test/api/items -> 500" in har_result.chunks[0].body
+
+
+def test_extract_additional_bom_test_and_coverage_reports_use_bounded_summaries(tmp_path):
+    cyclonedx = tmp_path / "bom.cyclonedx"
+    cyclonedx.write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "components": [
+                    {"name": "app", "version": "1.0.0", "purl": "pkg:npm/app@1.0.0"},
+                    {"name": "lib", "version": "2.0.0"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    spdx = tmp_path / "notice.spdx"
+    spdx.write_text("SPDXVersion: SPDX-2.3\nPackageName: sample\nPackageVersion: 1.0.0\n", encoding="utf-8")
+    trx = tmp_path / "results.trx"
+    trx.write_text(
+        """<TestRun><Results>
+  <UnitTestResult testName="passes" outcome="Passed" />
+  <UnitTestResult testName="fails" outcome="Failed" />
+</Results></TestRun>""",
+        encoding="utf-8",
+    )
+    tap = tmp_path / "smoke.tap"
+    tap.write_text("TAP version 13\n1..2\nok 1 starts\nnot ok 2 fails\n", encoding="utf-8")
+    coverage = tmp_path / "coverage.xml"
+    coverage.write_text('<coverage lines-covered="5" lines-valid="10" />', encoding="utf-8")
+
+    cyclonedx_result = extract_file(cyclonedx, CorpusPolicy(root_path=tmp_path))
+    spdx_result = extract_file(spdx, CorpusPolicy(root_path=tmp_path))
+    trx_result = extract_file(trx, CorpusPolicy(root_path=tmp_path))
+    tap_result = extract_file(tap, CorpusPolicy(root_path=tmp_path))
+    coverage_result = extract_file(coverage, CorpusPolicy(root_path=tmp_path))
+
+    assert cyclonedx_result.metadata["report_format"] == "cyclonedx"
+    assert cyclonedx_result.metadata["component_count"] == 2
+    assert "pkg:npm/app@1.0.0" in cyclonedx_result.chunks[0].body
+    assert spdx_result.metadata["report_format"] == "spdx"
+    assert spdx_result.metadata["package_count"] == 1
+    assert "sample 1.0.0" in spdx_result.chunks[0].body
+    assert trx_result.metadata["report_format"] == "trx"
+    assert trx_result.metadata["test_count"] == 2
+    assert trx_result.metadata["failure_count"] == 1
+    assert "Failed: 1" in trx_result.chunks[0].body
+    assert tap_result.metadata["report_format"] == "tap"
+    assert tap_result.metadata["test_count"] == 2
+    assert tap_result.metadata["failure_count"] == 1
+    assert "not ok 2 fails" in tap_result.chunks[0].body
+    assert coverage_result.metadata["report_format"] == "coverage_xml"
+    assert coverage_result.metadata["line_coverage_percent"] == 50.0
+
+
+def test_extract_sqlite_records_schema_metadata_without_rows(tmp_path):
+    path = tmp_path / "runtime.sqlite"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE secrets (id integer primary key, token text)")
+        conn.execute("INSERT INTO secrets (token) VALUES ('raw-secret-token')")
+        conn.commit()
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "database"
+    assert result.metadata["database_format"] == "sqlite"
+    assert result.metadata["table_count"] == 1
+    assert result.metadata["tables"][0]["name"] == "secrets"
+    assert result.metadata["tables"][0]["columns"] == ["id", "token"]
+    assert "secrets (id, token)" in result.chunks[0].body
+    assert "raw-secret-token" not in result.chunks[0].body
+
+
+def test_extract_sensitive_metadata_formats_never_index_raw_content(tmp_path):
+    path = tmp_path / "private.pem"
+    path.write_text("-----BEGIN PRIVATE KEY-----\nraw secret material\n-----END PRIVATE KEY-----", encoding="utf-8")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.chunks == ()
+    assert result.metadata["extractor"] == "sensitive_metadata"
+    assert result.metadata["sensitive"] is True
 
 
 def test_extract_large_xlsx_uses_sample_first_profile(monkeypatch, tmp_path):

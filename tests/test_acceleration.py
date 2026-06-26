@@ -281,4 +281,8 @@ def test_job_family_mapping_keeps_existing_kind_compatibility():
     assert kind_to_job_families("diagrams") == ("diagram",)
     assert kind_to_job_families("archives") == ("archive",)
     assert kind_to_job_families("text") == ("text", "office")
+    assert kind_to_job_families("data") == ("text", "office", "general")
+    assert kind_to_job_families("mail") == ("general",)
+    assert kind_to_job_families("reports") == ("text", "general")
+    assert kind_to_job_families("metadata") == ("general",)
     assert kind_to_job_families("all") is None

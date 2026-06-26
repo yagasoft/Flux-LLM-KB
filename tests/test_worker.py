@@ -197,6 +197,43 @@ def test_process_corpus_job_merges_parser_and_media_diagnostics(monkeypatch, tmp
     assert result.telemetry["blocked_dependency_reason"] == "ffprobe_missing"
 
 
+def test_worker_telemetry_includes_practical_corpus_parser_counts():
+    from flux_llm_kb import worker
+
+    telemetry = worker._telemetry_from_extraction_result(
+        SimpleNamespace(
+            metadata={
+                "extractor": "report",
+                "message_count": 3,
+                "event_count": 2,
+                "contact_count": 4,
+                "finding_count": 5,
+                "test_count": 6,
+                "entry_count": 7,
+                "table_count": 8,
+                "component_count": 9,
+                "package_count": 10,
+                "covered_line_count": 11,
+                "line_count": 12,
+                "sensitive": True,
+            }
+        )
+    )
+
+    assert telemetry["mail_message_count"] == 3
+    assert telemetry["calendar_event_count"] == 2
+    assert telemetry["contact_count"] == 4
+    assert telemetry["report_finding_count"] == 5
+    assert telemetry["report_test_count"] == 6
+    assert telemetry["har_entry_count"] == 7
+    assert telemetry["database_table_count"] == 8
+    assert telemetry["report_component_count"] == 9
+    assert telemetry["report_package_count"] == 10
+    assert telemetry["coverage_covered_line_count"] == 11
+    assert telemetry["coverage_line_count"] == 12
+    assert telemetry["sensitive_metadata"] is True
+
+
 def test_process_corpus_job_merges_visual_enrichment_telemetry(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 

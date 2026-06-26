@@ -902,10 +902,19 @@ def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, cap
     archive_payload = json.loads(capsys.readouterr().out)
     assert archive_payload["backfill"] == {"kind": "archives", "limit": 5, "workers": 1}
 
+    assert cli.main(["crawl", "backfill", "--kind", "data", "--limit", "6"]) == 0
+    data_payload = json.loads(capsys.readouterr().out)
+    assert data_payload["backfill"] == {"kind": "data", "limit": 6, "workers": 1}
+
     assert cli.main(["crawl", "worker", "run", "--once", "--kind", "containers", "--limit", "4"]) == 0
     worker_payload = json.loads(capsys.readouterr().out)
     assert worker_payload["worker"]["kind"] == "containers"
     assert worker_payload["worker"]["limit"] == 4
+
+    assert cli.main(["crawl", "worker", "run", "--once", "--kind", "reports", "--limit", "7"]) == 0
+    report_worker_payload = json.loads(capsys.readouterr().out)
+    assert report_worker_payload["worker"]["kind"] == "reports"
+    assert report_worker_payload["worker"]["limit"] == 7
 
 
 def test_cli_embeddings_status_enqueue_and_backfill_use_service(monkeypatch, capsys):

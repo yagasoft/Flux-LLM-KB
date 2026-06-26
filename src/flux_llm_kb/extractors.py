@@ -5,18 +5,22 @@ import bz2
 import binascii
 import csv
 from dataclasses import dataclass, field, replace
+from email import policy as email_policy
+from email.parser import BytesParser
 import gzip
 import hashlib
 from html import unescape
 import importlib.util
 import json
 import lzma
+import mailbox
 import mimetypes
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
 import re
 import shutil
+import sqlite3
 import struct
 import tarfile
 import tempfile
@@ -34,12 +38,23 @@ from .crawler import (
     ARCHIVE_EXTENSIONS,
     AUDIO_EXTENSIONS,
     AssetChunk,
+    CAD_EXTENSIONS,
+    CALENDAR_EXTENSIONS,
     CODE_EXTENSIONS,
     CONTAINER_EXTENSIONS,
+    CONTACT_EXTENSIONS,
     DIAGRAM_COMPOUND_SUFFIXES,
     DIAGRAM_EXTENSIONS,
     DOCUMENT_EXTENSIONS,
+    GEOSPATIAL_EXTENSIONS,
     IMAGE_EXTENSIONS,
+    MAIL_EXTENSIONS,
+    REPORT_EXTENSIONS,
+    REPORT_NAMES,
+    SCIENTIFIC_EXTENSIONS,
+    SENSITIVE_METADATA_EXTENSIONS,
+    STRUCTURED_DATA_EXTENSIONS,
+    SUBTITLE_EXTENSIONS,
     TEXT_EXTENSIONS,
     VIDEO_EXTENSIONS,
     CorpusPolicy,
@@ -77,6 +92,8 @@ ASR_AUDIO_SAMPLE_RATE = 16000
 ASR_FFMPEG_TIMEOUT_SECONDS = 300
 VISION_TIMEOUT_SECONDS = 60
 FRAME_SAMPLING_TIMEOUT_SECONDS = 120
+PRACTICAL_TEXT_LIMIT_BYTES = 2 * 1024 * 1024
+PRACTICAL_SUMMARY_LIMIT = 50
 
 
 @dataclass(frozen=True)
@@ -143,6 +160,24 @@ def extract_file(path: str | Path, policy: CorpusPolicy) -> ExtractionResult:
         return sample_first
     if classification.file_kind in {"text", "code"}:
         return _extract_text(file_path, policy, extractor=classification.file_kind)
+    if classification.file_kind == "subtitle":
+        return _extract_subtitle(file_path)
+    if classification.file_kind == "mail":
+        return _extract_mail(file_path)
+    if classification.file_kind == "calendar":
+        return _extract_calendar(file_path)
+    if classification.file_kind == "contact":
+        return _extract_contact(file_path)
+    if classification.file_kind == "structured_data":
+        return _extract_structured_data(file_path, policy)
+    if classification.file_kind == "report":
+        return _extract_report(file_path)
+    if classification.file_kind == "database":
+        return _extract_database(file_path)
+    if classification.file_kind in {"geospatial", "cad", "scientific"}:
+        return _extract_domain_metadata(file_path, classification.file_kind)
+    if classification.file_kind == "sensitive_metadata":
+        return _extract_sensitive_metadata(file_path)
     if classification.file_kind == "document":
         return _extract_document(file_path, policy)
     if classification.file_kind in {"archive", "container"}:
@@ -188,6 +223,17 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "tesseract": _tool_check("tesseract"),
         "faster_whisper": _module_check("faster_whisper"),
         "ebook_convert": _tool_check("ebook-convert"),
+        "readpst": _tool_check("readpst"),
+        "msgconvert": _tool_check("msgconvert"),
+        "duckdb": _module_check("duckdb"),
+        "pyarrow": _module_check("pyarrow"),
+        "ogrinfo": _tool_check("ogrinfo"),
+        "gdalinfo": _tool_check("gdalinfo"),
+        "ifcopenshell": _module_check("ifcopenshell"),
+        "assimp": _tool_check("assimp"),
+        "blender": _tool_check("blender"),
+        "exiftool": _tool_check("exiftool"),
+        "pandoc": _tool_check("pandoc"),
     }
 
 
@@ -244,22 +290,31 @@ def _extract_sample_first_structured(path: Path, policy: CorpusPolicy) -> Extrac
     if path.stat().st_size <= policy.max_inline_bytes:
         return None
     ext = path.suffix.lower()
-    if ext in {".csv", ".tsv"}:
-        delimiter = "\t" if ext == ".tsv" else ","
-        return _extract_sample_first_delimited(path, delimiter=delimiter)
+    if ext in {".csv", ".tsv", ".psv", ".ssv"}:
+        delimiters = {".csv": ",", ".tsv": "\t", ".psv": "|", ".ssv": " "}
+        return _extract_sample_first_delimited(path, delimiter=delimiters[ext], source_format=ext.lstrip("."))
     if ext == ".json":
         return _extract_sample_first_json(path)
-    if ext == ".jsonl":
-        return _extract_sample_first_jsonl(path)
+    if ext in {".jsonl", ".ndjson"}:
+        return _extract_sample_first_jsonl(path, source_format=ext.lstrip("."))
+    if ext == ".jsonld":
+        return _extract_sample_first_json(path, source_format="jsonld")
     if ext in OPENPYXL_EXTENSIONS:
         return _extract_sample_first_workbook(path, extractor=ext.lstrip("."))
     return None
 
 
-def _extract_sample_first_delimited(path: Path, *, delimiter: str, sample_limit: int = 10) -> ExtractionResult:
+def _extract_sample_first_delimited(
+    path: Path,
+    *,
+    delimiter: str,
+    source_format: str | None = None,
+    sample_limit: int = 10,
+) -> ExtractionResult:
     rows: list[dict[str, str]] = []
     row_count = 0
     columns: list[str] = []
+    format_name = source_format or ("tsv" if delimiter == "\t" else "csv")
     with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
         reader = csv.DictReader(handle, delimiter=delimiter)
         columns = list(reader.fieldnames or [])
@@ -268,7 +323,7 @@ def _extract_sample_first_delimited(path: Path, *, delimiter: str, sample_limit:
             if len(rows) < sample_limit:
                 rows.append({str(key): str(value) for key, value in row.items() if key is not None})
     sample = {
-        "format": "tsv" if delimiter == "\t" else "csv",
+        "format": format_name,
         "columns": columns,
         "row_count_estimate": row_count,
         "sample_row_count": len(rows),
@@ -286,7 +341,7 @@ def _extract_sample_first_delimited(path: Path, *, delimiter: str, sample_limit:
     return ExtractionResult(status="indexed", chunks=(chunk,), metadata={"extractor": "sample_first_tabular", "sample_first": sample})
 
 
-def _extract_sample_first_jsonl(path: Path, *, sample_limit: int = 10) -> ExtractionResult:
+def _extract_sample_first_jsonl(path: Path, *, source_format: str = "jsonl", sample_limit: int = 10) -> ExtractionResult:
     rows: list[dict[str, Any]] = []
     columns: set[str] = set()
     row_count = 0
@@ -308,7 +363,7 @@ def _extract_sample_first_jsonl(path: Path, *, sample_limit: int = 10) -> Extrac
                     rows.append(payload)
     ordered_columns = sorted(columns)
     sample = {
-        "format": "jsonl",
+        "format": source_format,
         "columns": ordered_columns,
         "row_count_estimate": row_count,
         "sample_row_count": len(rows),
@@ -322,18 +377,18 @@ def _extract_sample_first_jsonl(path: Path, *, sample_limit: int = 10) -> Extrac
         title=f"{path.name} sample",
         body=body,
         token_estimate=max(1, len(body) // 4),
-        metadata={"sample_first": True, "format": "jsonl", "columns": ordered_columns},
+        metadata={"sample_first": True, "format": source_format, "columns": ordered_columns},
     )
     return ExtractionResult(status="indexed", chunks=(chunk,), metadata={"extractor": "sample_first_jsonl", "sample_first": sample})
 
 
-def _extract_sample_first_json(path: Path, *, sample_limit: int = 10) -> ExtractionResult:
+def _extract_sample_first_json(path: Path, *, source_format: str = "json", sample_limit: int = 10) -> ExtractionResult:
     try:
         payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError as exc:
         return ExtractionResult(
             status="blocked_missing_dependency",
-            metadata={"extractor": "sample_first_json", "sample_first": {"format": "json", "parse_status": "parse_error"}},
+            metadata={"extractor": "sample_first_json", "sample_first": {"format": source_format, "parse_status": "parse_error"}},
             message=f"JSON parse failed: {exc.msg}",
         )
     rows: list[dict[str, Any]]
@@ -356,7 +411,7 @@ def _extract_sample_first_json(path: Path, *, sample_limit: int = 10) -> Extract
     if not columns and rows:
         columns = sorted({key for row in rows for key in row})
     sample = {
-        "format": "json",
+        "format": source_format,
         "columns": [str(column) for column in columns],
         "row_count_estimate": len(source_rows),
         "sample_row_count": len(rows),
@@ -371,7 +426,7 @@ def _extract_sample_first_json(path: Path, *, sample_limit: int = 10) -> Extract
         title=f"{path.name} sample",
         body=body,
         token_estimate=max(1, len(body) // 4),
-        metadata={"sample_first": True, "format": "json", "columns": sample["columns"]},
+        metadata={"sample_first": True, "format": source_format, "columns": sample["columns"]},
     )
     return ExtractionResult(status="indexed", chunks=(chunk,), metadata={"extractor": "sample_first_json", "sample_first": sample})
 
@@ -458,6 +513,666 @@ def _sample_first_body(*, title: str, sample: dict[str, Any], rows: list[dict[st
             json.dumps(rows, ensure_ascii=True, sort_keys=True, default=str),
         ]
     )
+
+
+def _extract_subtitle(path: Path) -> ExtractionResult:
+    text = _read_text_limited(path)
+    lines: list[str] = []
+    cue_count = 0
+    in_note_block = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip("\ufeff").strip()
+        upper = line.upper()
+        if not line:
+            in_note_block = False
+            continue
+        if upper.startswith("NOTE"):
+            in_note_block = True
+            continue
+        if in_note_block:
+            continue
+        if upper in {"WEBVTT", "STYLE", "REGION"} or line.startswith("["):
+            continue
+        if upper.startswith("FORMAT:"):
+            continue
+        if re.fullmatch(r"\d+", line):
+            continue
+        if "-->" in line:
+            cue_count += 1
+            continue
+        if upper.startswith("DIALOGUE:"):
+            cue_count += 1
+            line = _ass_dialogue_text(line)
+        cleaned = _clean_subtitle_line(line)
+        if cleaned:
+            lines.append(cleaned)
+    body = "\n".join(lines)
+    chunks = _chunks_from_text(body, path.name, modality="transcript")
+    if cue_count == 0:
+        cue_count = len(lines)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "subtitle",
+            "subtitle_format": path.suffix.lower().lstrip(".") or "unknown",
+            "cue_count": cue_count,
+        },
+    )
+
+
+def _extract_mail(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    messages = _mail_messages(path) if ext == ".mbox" else [_parse_email_message(path.read_bytes())]
+    parts: list[str] = []
+    subjects: list[str] = []
+    attachment_count = 0
+    for index, message in enumerate(messages[:PRACTICAL_SUMMARY_LIMIT], start=1):
+        subject = str(message.get("Subject") or "").strip()
+        if subject:
+            subjects.append(subject)
+        attachment_count += _mail_attachment_count(message)
+        body = _mail_plain_text(message)
+        message_parts = [f"Message {index}"]
+        if subject:
+            message_parts.append(f"Subject: {subject}")
+        if body:
+            message_parts.append(body)
+        parts.append("\n".join(message_parts))
+    text = "\n\n".join(part for part in parts if part.strip())
+    chunks = _chunks_from_text(text, path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "mail",
+            "mail_format": ext.lstrip(".") or "unknown",
+            "message_count": len(messages),
+            "attachment_count": attachment_count,
+            "subjects": subjects[:20],
+            "truncated": len(messages) > PRACTICAL_SUMMARY_LIMIT,
+        },
+    )
+
+
+def _extract_calendar(path: Path) -> ExtractionResult:
+    blocks = _ical_blocks(_read_text_limited(path), "VEVENT")
+    parts: list[str] = []
+    for index, block in enumerate(blocks[:PRACTICAL_SUMMARY_LIMIT], start=1):
+        lines = [f"Event {index}"]
+        for label, key in (("Summary", "SUMMARY"), ("Start", "DTSTART"), ("End", "DTEND"), ("Location", "LOCATION"), ("Description", "DESCRIPTION")):
+            value = _first_property_value(block, key)
+            if value:
+                lines.append(f"{label}: {value}")
+        parts.append("\n".join(lines))
+    chunks = _chunks_from_text("\n\n".join(parts), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "calendar",
+            "calendar_format": path.suffix.lower().lstrip(".") or "unknown",
+            "event_count": len(blocks),
+            "truncated": len(blocks) > PRACTICAL_SUMMARY_LIMIT,
+        },
+    )
+
+
+def _extract_contact(path: Path) -> ExtractionResult:
+    blocks = _ical_blocks(_read_text_limited(path), "VCARD")
+    parts: list[str] = []
+    for index, block in enumerate(blocks[:PRACTICAL_SUMMARY_LIMIT], start=1):
+        lines = [f"Contact {index}"]
+        for label, key in (("Name", "FN"), ("Organization", "ORG"), ("Title", "TITLE"), ("Note", "NOTE")):
+            value = _first_property_value(block, key)
+            if value:
+                lines.append(f"{label}: {value}")
+        parts.append("\n".join(lines))
+    chunks = _chunks_from_text("\n\n".join(parts), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "contact",
+            "contact_format": path.suffix.lower().lstrip(".") or "unknown",
+            "contact_count": len(blocks),
+            "truncated": len(blocks) > PRACTICAL_SUMMARY_LIMIT,
+        },
+    )
+
+
+def _extract_structured_data(path: Path, policy: CorpusPolicy) -> ExtractionResult:
+    ext = path.suffix.lower()
+    if ext in {".csv", ".tsv", ".psv", ".ssv", ".json", ".jsonl", ".ndjson", ".jsonld"}:
+        expanded_policy = replace(policy, max_inline_bytes=-1)
+        sample = _extract_sample_first_structured(path, expanded_policy)
+        if sample is not None:
+            return sample
+    if path.stat().st_size <= PRACTICAL_TEXT_LIMIT_BYTES:
+        chunks = _chunks_from_text(path.read_text(encoding="utf-8", errors="replace"), path.name)
+        return ExtractionResult(
+            status="indexed" if chunks else "metadata_only",
+            chunks=chunks,
+            metadata={"extractor": "structured_data", "source_extension": ext},
+        )
+    return ExtractionResult(
+        status="metadata_only",
+        metadata={"extractor": "structured_data", "source_extension": ext, "reason": "size_limit"},
+    )
+
+
+def _extract_report(path: Path) -> ExtractionResult:
+    name = path.name.lower()
+    ext = path.suffix.lower()
+    if ext == ".sarif":
+        return _extract_sarif_report(path)
+    if ext == ".cyclonedx":
+        return _extract_cyclonedx_report(path)
+    if ext == ".spdx":
+        return _extract_spdx_report(path)
+    if ext == ".har":
+        return _extract_har_report(path)
+    if ext == ".lcov":
+        return _extract_lcov_report(path)
+    if ext == ".tap":
+        return _extract_tap_report(path)
+    if ext == ".trx":
+        return _extract_trx_report(path)
+    if ext == ".xml" or name in REPORT_NAMES:
+        return _extract_xml_report(path)
+    return _extract_bounded_report_text(path)
+
+
+def _extract_sarif_report(path: Path) -> ExtractionResult:
+    payload = json.loads(_read_text_limited(path))
+    runs = payload.get("runs") if isinstance(payload, dict) else None
+    lines: list[str] = []
+    finding_count = 0
+    if isinstance(runs, list):
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            tool = (((run.get("tool") or {}).get("driver") or {}).get("name") if isinstance(run.get("tool"), dict) else None)
+            results = run.get("results")
+            if not isinstance(results, list):
+                continue
+            finding_count += sum(1 for result in results if isinstance(result, dict))
+            if tool:
+                lines.append(f"Tool: {tool}")
+            for result in results[:PRACTICAL_SUMMARY_LIMIT]:
+                if not isinstance(result, dict):
+                    continue
+                rule_id = str(result.get("ruleId") or "finding")
+                message = result.get("message")
+                message_text = str((message or {}).get("text") or (message or {}).get("markdown") or "") if isinstance(message, dict) else ""
+                lines.append(f"{rule_id}: {message_text}".strip())
+    chunks = _chunks_from_text("\n".join(lines), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={"extractor": "report", "report_format": "sarif", "finding_count": finding_count},
+    )
+
+
+def _extract_cyclonedx_report(path: Path) -> ExtractionResult:
+    payload = json.loads(_read_text_limited(path))
+    components = payload.get("components") if isinstance(payload, dict) else None
+    lines: list[str] = []
+    if isinstance(components, list):
+        for component in components[:PRACTICAL_SUMMARY_LIMIT]:
+            if not isinstance(component, dict):
+                continue
+            name = str(component.get("name") or "").strip()
+            version = str(component.get("version") or "").strip()
+            purl = str(component.get("purl") or "").strip()
+            label = " ".join(part for part in (name, version) if part)
+            if purl:
+                label = f"{label} {purl}".strip()
+            if label:
+                lines.append(label)
+    chunks = _chunks_from_text("\n".join(lines), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "report",
+            "report_format": "cyclonedx",
+            "component_count": len(components) if isinstance(components, list) else 0,
+        },
+    )
+
+
+def _extract_spdx_report(path: Path) -> ExtractionResult:
+    packages: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for raw_line in _read_text_limited(path).splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key == "PackageName":
+            if current:
+                packages.append(current)
+            current = {"name": value}
+        elif key == "PackageVersion" and current:
+            current["version"] = value
+    if current:
+        packages.append(current)
+    lines = [
+        " ".join(part for part in (package.get("name"), package.get("version")) if part)
+        for package in packages[:PRACTICAL_SUMMARY_LIMIT]
+    ]
+    chunks = _chunks_from_text("\n".join(lines), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={"extractor": "report", "report_format": "spdx", "package_count": len(packages)},
+    )
+
+
+def _extract_har_report(path: Path) -> ExtractionResult:
+    payload = json.loads(_read_text_limited(path))
+    entries = (((payload or {}).get("log") or {}).get("entries") if isinstance(payload, dict) else None) or []
+    lines: list[str] = []
+    if isinstance(entries, list):
+        for entry in entries[:PRACTICAL_SUMMARY_LIMIT]:
+            if not isinstance(entry, dict):
+                continue
+            request = entry.get("request") if isinstance(entry.get("request"), dict) else {}
+            response = entry.get("response") if isinstance(entry.get("response"), dict) else {}
+            method = str(request.get("method") or "GET")
+            url = str(request.get("url") or "")
+            status = response.get("status")
+            if url:
+                lines.append(f"{method} {url} -> {status}")
+    chunks = _chunks_from_text("\n".join(lines), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={"extractor": "report", "report_format": "har", "entry_count": len(entries) if isinstance(entries, list) else 0},
+    )
+
+
+def _extract_xml_report(path: Path) -> ExtractionResult:
+    root = ElementTree.fromstring(_read_text_limited(path))
+    local_name = _xml_local_name(root.tag).lower()
+    if local_name == "coverage":
+        return _extract_coverage_xml_report(path, root=root)
+    if local_name == "testrun":
+        return _extract_trx_report(path, root=root)
+    return _extract_junit_report(path, root=root)
+
+
+def _extract_junit_report(path: Path, *, root: ElementTree.Element | None = None) -> ExtractionResult:
+    root = root if root is not None else ElementTree.fromstring(_read_text_limited(path))
+    suites = [root] if _xml_local_name(root.tag) == "testsuite" else [item for item in root.iter() if _xml_local_name(item.tag) == "testsuite"]
+    test_count = sum(_int_or_none(suite.get("tests")) or 0 for suite in suites)
+    failure_count = sum(_int_or_none(suite.get("failures")) or 0 for suite in suites)
+    error_count = sum(_int_or_none(suite.get("errors")) or 0 for suite in suites)
+    skipped_count = sum(_int_or_none(suite.get("skipped")) or 0 for suite in suites)
+    if test_count == 0:
+        test_count = len([item for item in root.iter() if _xml_local_name(item.tag) == "testcase"])
+    failed_cases: list[str] = []
+    for testcase in root.iter():
+        if _xml_local_name(testcase.tag) != "testcase":
+            continue
+        has_failure = any(_xml_local_name(child.tag) in {"failure", "error"} for child in testcase)
+        if has_failure:
+            case_name = ".".join(part for part in (testcase.get("classname"), testcase.get("name")) if part)
+            failed_cases.append(case_name or "failed testcase")
+    body_lines = [
+        f"Tests: {test_count}",
+        f"Failures: {failure_count}",
+        f"Errors: {error_count}",
+        f"Skipped: {skipped_count}",
+    ]
+    if failed_cases:
+        body_lines.append("Failed cases: " + ", ".join(failed_cases[:PRACTICAL_SUMMARY_LIMIT]))
+    chunks = _chunks_from_text("\n".join(body_lines), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "report",
+            "report_format": "junit",
+            "test_count": test_count,
+            "failure_count": failure_count,
+            "error_count": error_count,
+            "skipped_count": skipped_count,
+        },
+    )
+
+
+def _extract_trx_report(path: Path, *, root: ElementTree.Element | None = None) -> ExtractionResult:
+    root = root if root is not None else ElementTree.fromstring(_read_text_limited(path))
+    results = [item for item in root.iter() if _xml_local_name(item.tag).lower() == "unittestresult"]
+    failed = [
+        str(item.get("testName") or item.get("testId") or "failed test")
+        for item in results
+        if str(item.get("outcome") or "").lower() in {"failed", "error", "timeout", "aborted"}
+    ]
+    body_lines = [f"Tests: {len(results)}", f"Failed: {len(failed)}"]
+    if failed:
+        body_lines.append("Failed cases: " + ", ".join(failed[:PRACTICAL_SUMMARY_LIMIT]))
+    chunks = _chunks_from_text("\n".join(body_lines), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "report",
+            "report_format": "trx",
+            "test_count": len(results),
+            "failure_count": len(failed),
+        },
+    )
+
+
+def _extract_tap_report(path: Path) -> ExtractionResult:
+    result_lines: list[str] = []
+    failure_count = 0
+    for raw_line in _read_text_limited(path).splitlines():
+        line = raw_line.strip()
+        if line.startswith("ok ") or line.startswith("not ok "):
+            result_lines.append(line)
+            if line.startswith("not ok "):
+                failure_count += 1
+    chunks = _chunks_from_text("\n".join(result_lines[:PRACTICAL_SUMMARY_LIMIT]), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "report",
+            "report_format": "tap",
+            "test_count": len(result_lines),
+            "failure_count": failure_count,
+        },
+    )
+
+
+def _extract_coverage_xml_report(path: Path, *, root: ElementTree.Element | None = None) -> ExtractionResult:
+    root = root if root is not None else ElementTree.fromstring(_read_text_limited(path))
+    covered = _int_or_none(root.get("lines-covered"))
+    valid = _int_or_none(root.get("lines-valid"))
+    if covered is not None and valid:
+        percent = round((covered / valid) * 100, 2)
+    else:
+        line_rate = root.get("line-rate")
+        percent = round(float(line_rate) * 100, 2) if line_rate is not None else 0.0
+    body = f"Line coverage: {percent}%"
+    if covered is not None and valid is not None:
+        body = f"Lines covered: {covered}/{valid}\n{body}"
+    chunks = _chunks_from_text(body, path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "report",
+            "report_format": "coverage_xml",
+            "covered_line_count": covered,
+            "line_count": valid,
+            "line_coverage_percent": percent,
+        },
+    )
+
+
+def _extract_lcov_report(path: Path) -> ExtractionResult:
+    covered = 0
+    total = 0
+    files: set[str] = set()
+    for raw_line in _read_text_limited(path).splitlines():
+        line = raw_line.strip()
+        if line.startswith("SF:"):
+            files.add(line[3:])
+        elif line.startswith("DA:"):
+            total += 1
+            fields = line[3:].split(",", 1)
+            if len(fields) == 2 and (_int_or_none(fields[1]) or 0) > 0:
+                covered += 1
+    percent = round((covered / total) * 100, 2) if total else 0.0
+    body = f"Files: {len(files)}\nLines covered: {covered}/{total}\nLine coverage: {percent}%"
+    chunks = _chunks_from_text(body, path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "report",
+            "report_format": "lcov",
+            "covered_line_count": covered,
+            "line_count": total,
+            "line_coverage_percent": percent,
+        },
+    )
+
+
+def _extract_bounded_report_text(path: Path) -> ExtractionResult:
+    text = _read_text_limited(path)
+    lines = [line.strip() for line in text.splitlines() if line.strip()][:PRACTICAL_SUMMARY_LIMIT]
+    chunks = _chunks_from_text("\n".join(lines), path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={"extractor": "report", "report_format": path.suffix.lower().lstrip(".") or "unknown"},
+    )
+
+
+def _extract_database(path: Path) -> ExtractionResult:
+    ext = path.suffix.lower()
+    if ext not in {".db", ".sqlite", ".sqlite3"}:
+        return ExtractionResult(
+            status="metadata_only",
+            metadata={
+                "extractor": "database",
+                "database_format": ext.lstrip(".") or "unknown",
+                "tool_candidates": _domain_tool_candidates("database", ext),
+            },
+        )
+    uri_path = quote(str(path.resolve()).replace("\\", "/"), safe="/:")
+    conn = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        tables: list[dict[str, Any]] = []
+        for name, kind in rows[:PRACTICAL_SUMMARY_LIMIT]:
+            columns = [str(row[1]) for row in conn.execute(f"PRAGMA table_info({_sqlite_string_literal(str(name))})")]
+            tables.append({"name": str(name), "type": str(kind), "columns": columns})
+    finally:
+        conn.close()
+    body = "\n".join(f"{table['name']} ({', '.join(table['columns'])})" for table in tables)
+    chunks = _chunks_from_text(body, path.name)
+    return ExtractionResult(
+        status="indexed" if chunks else "metadata_only",
+        chunks=chunks,
+        metadata={
+            "extractor": "database",
+            "database_format": "sqlite",
+            "table_count": len(rows),
+            "tables": tables,
+            "truncated": len(rows) > PRACTICAL_SUMMARY_LIMIT,
+        },
+    )
+
+
+def _extract_domain_metadata(path: Path, file_kind: str) -> ExtractionResult:
+    ext = path.suffix.lower()
+    return ExtractionResult(
+        status="metadata_only",
+        metadata={
+            "extractor": file_kind,
+            "source_extension": ext,
+            "tool_candidates": _domain_tool_candidates(file_kind, ext),
+            "metadata_first": True,
+        },
+    )
+
+
+def _extract_sensitive_metadata(path: Path) -> ExtractionResult:
+    return ExtractionResult(
+        status="metadata_only",
+        metadata={
+            "extractor": "sensitive_metadata",
+            "source_extension": path.suffix.lower(),
+            "sensitive": True,
+            "metadata_first": True,
+        },
+    )
+
+
+def _read_text_limited(path: Path, limit: int = PRACTICAL_TEXT_LIMIT_BYTES) -> str:
+    data = _read_limited_file(path, limit)
+    return data.decode("utf-8", errors="replace")
+
+
+def _clean_subtitle_line(line: str) -> str:
+    line = re.sub(r"\{\\.*?\}", "", line)
+    line = re.sub(r"<[^>]+>", "", line)
+    return unescape(line).replace("\\N", "\n").strip()
+
+
+def _ass_dialogue_text(line: str) -> str:
+    _, _, payload = line.partition(":")
+    fields = payload.split(",", 9)
+    return fields[-1] if fields else payload
+
+
+def _parse_email_message(data: bytes) -> Any:
+    return BytesParser(policy=email_policy.default).parsebytes(data)
+
+
+def _mail_messages(path: Path) -> list[Any]:
+    messages: list[Any] = []
+    try:
+        box = mailbox.mbox(str(path), create=False)
+        try:
+            messages = list(box)
+        finally:
+            box.close()
+    except Exception:
+        messages = []
+    if messages:
+        return messages
+    return [_parse_email_message(raw) for raw in _split_mbox_messages(path.read_text(encoding="utf-8", errors="replace"))]
+
+
+def _split_mbox_messages(text: str) -> list[bytes]:
+    parts: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("From ") and current:
+            parts.append(current)
+            current = []
+            continue
+        if not line.startswith("From "):
+            current.append(line)
+    if current:
+        parts.append(current)
+    return ["\n".join(part).encode("utf-8", errors="replace") for part in parts if part]
+
+
+def _mail_attachment_count(message: Any) -> int:
+    count = 0
+    for part in message.walk() if hasattr(message, "walk") else ():
+        disposition = str(part.get_content_disposition() or "").lower()
+        if disposition == "attachment" or part.get_filename():
+            count += 1
+    return count
+
+
+def _mail_plain_text(message: Any) -> str:
+    if hasattr(message, "get_body"):
+        body = message.get_body(preferencelist=("plain",))
+        if body is not None:
+            try:
+                return str(body.get_content()).strip()
+            except Exception:
+                pass
+    parts: list[str] = []
+    walk = message.walk() if hasattr(message, "walk") else [message]
+    for part in walk:
+        if part.is_multipart():
+            continue
+        disposition = str(part.get_content_disposition() or "").lower()
+        if disposition == "attachment" or part.get_filename():
+            continue
+        content_type = str(part.get_content_type() or "")
+        if content_type != "text/plain":
+            continue
+        payload = part.get_payload(decode=True)
+        if isinstance(payload, bytes):
+            parts.append(payload.decode(part.get_content_charset() or "utf-8", errors="replace"))
+        else:
+            parts.append(str(part.get_payload() or ""))
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
+def _ical_blocks(text: str, block_name: str) -> list[dict[str, list[str]]]:
+    target_begin = f"BEGIN:{block_name}"
+    target_end = f"END:{block_name}"
+    blocks: list[dict[str, list[str]]] = []
+    current: dict[str, list[str]] | None = None
+    for line in _unfold_ical_lines(text):
+        upper = line.upper()
+        if upper == target_begin:
+            current = {}
+            continue
+        if upper == target_end and current is not None:
+            blocks.append(current)
+            current = None
+            continue
+        if current is None or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        prop = key.split(";", 1)[0].upper()
+        current.setdefault(prop, []).append(_decode_ical_text(value))
+    return blocks
+
+
+def _unfold_ical_lines(text: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if raw_line.startswith((" ", "\t")) and lines:
+            lines[-1] += raw_line[1:]
+        else:
+            lines.append(raw_line)
+    return [line.strip() for line in lines if line.strip()]
+
+
+def _decode_ical_text(value: str) -> str:
+    return value.replace("\\n", "\n").replace("\\N", "\n").replace("\\,", ",").replace("\\;", ";").strip()
+
+
+def _first_property_value(block: dict[str, list[str]], key: str) -> str | None:
+    values = block.get(key)
+    if not values:
+        return None
+    return values[0].strip() or None
+
+
+def _sqlite_string_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _domain_tool_candidates(file_kind: str, ext: str) -> list[str]:
+    if file_kind == "database":
+        if ext == ".duckdb":
+            return ["duckdb"]
+        if ext in {".mdb", ".accdb"}:
+            return ["mdbtools"]
+        if ext == ".dbf":
+            return ["pyarrow", "ogrinfo"]
+    if file_kind == "geospatial":
+        return ["ogrinfo", "gdalinfo"]
+    if file_kind == "cad":
+        if ext in {".ifc", ".ifczip"}:
+            return ["ifcopenshell"]
+        if ext in {".fbx", ".dae", ".obj", ".stl", ".gltf", ".glb"}:
+            return ["assimp", "blender"]
+        return ["assimp", "blender", "exiftool"]
+    if file_kind == "scientific":
+        return ["pyarrow", "duckdb"]
+    return []
 
 
 def _extract_document(path: Path, policy: CorpusPolicy) -> ExtractionResult:
@@ -1250,8 +1965,25 @@ OPTIONAL_CONTAINER_TOOLS = {
     "crx": ("7z", "7zz", "bsdtar", "unar"),
 }
 TEXT_MEMBER_NAMES = {"changelog", "copying", "license", "metadata", "notice", "readme"}
-TEXT_MEMBER_EXTENSIONS = TEXT_EXTENSIONS | {".err", ".log", ".out", ".srt", ".trace", ".vtt"}
-EMBEDDED_PARSE_MEMBER_KINDS = {"document", "diagram", "image", "audio", "video"}
+TEXT_MEMBER_EXTENSIONS = TEXT_EXTENSIONS | {".err", ".log", ".out", ".trace"}
+EMBEDDED_PARSE_MEMBER_KINDS = {
+    "document",
+    "diagram",
+    "image",
+    "audio",
+    "video",
+    "subtitle",
+    "mail",
+    "calendar",
+    "contact",
+    "structured_data",
+    "report",
+    "database",
+    "geospatial",
+    "cad",
+    "scientific",
+    "sensitive_metadata",
+}
 
 
 def _extract_container(
@@ -1837,6 +2569,24 @@ def _extract_embedded_member(
                 return _extract_image(temp_path)
             if file_kind in {"audio", "video"}:
                 return _extract_media(temp_path, file_kind, embedded_sidecar=sidecar)
+            if file_kind == "subtitle":
+                return _extract_subtitle(temp_path)
+            if file_kind == "mail":
+                return _extract_mail(temp_path)
+            if file_kind == "calendar":
+                return _extract_calendar(temp_path)
+            if file_kind == "contact":
+                return _extract_contact(temp_path)
+            if file_kind == "structured_data":
+                return _extract_structured_data(temp_path, policy)
+            if file_kind == "report":
+                return _extract_report(temp_path)
+            if file_kind == "database":
+                return _extract_database(temp_path)
+            if file_kind in {"geospatial", "cad", "scientific"}:
+                return _extract_domain_metadata(temp_path, file_kind)
+            if file_kind == "sensitive_metadata":
+                return _extract_sensitive_metadata(temp_path)
     except Exception as exc:
         return ExtractionResult(
             status="failed",
@@ -1878,6 +2628,29 @@ def _container_child_with_result(
             summary = _embedded_visual_summary(result.metadata.get(key))
             if summary:
                 metadata[f"embedded_{key}"] = summary
+        for key in (
+            "source_extension",
+            "subtitle_format",
+            "cue_count",
+            "mail_format",
+            "message_count",
+            "attachment_count",
+            "calendar_format",
+            "event_count",
+            "contact_format",
+            "contact_count",
+            "report_format",
+            "finding_count",
+            "test_count",
+            "entry_count",
+            "database_format",
+            "table_count",
+            "sensitive",
+            "metadata_first",
+            "tool_candidates",
+        ):
+            if key in result.metadata:
+                metadata[f"embedded_{key}"] = result.metadata[key]
     if child.file_kind in {"archive", "container"}:
         metadata["nested_member_count"] = int(result.metadata.get("member_count") or 0)
         metadata["nested_parsed_child_count"] = int(result.metadata.get("parsed_child_count") or 0)
@@ -1920,6 +2693,28 @@ def _member_file_kind(member_path: str) -> str:
     path = PurePosixPath(member_path)
     name = path.name.lower()
     ext = path.suffix.lower()
+    if ext in SENSITIVE_METADATA_EXTENSIONS:
+        return "sensitive_metadata"
+    if ext in SUBTITLE_EXTENSIONS:
+        return "subtitle"
+    if ext in MAIL_EXTENSIONS:
+        return "mail"
+    if ext in CALENDAR_EXTENSIONS:
+        return "calendar"
+    if ext in CONTACT_EXTENSIONS:
+        return "contact"
+    if ext in STRUCTURED_DATA_EXTENSIONS:
+        return "structured_data"
+    if ext in REPORT_EXTENSIONS or name in REPORT_NAMES:
+        return "report"
+    if ext in {".db", ".sqlite", ".sqlite3", ".duckdb", ".mdb", ".accdb", ".dbf", ".fdb"}:
+        return "database"
+    if ext in GEOSPATIAL_EXTENSIONS:
+        return "geospatial"
+    if ext in CAD_EXTENSIONS:
+        return "cad"
+    if ext in SCIENTIFIC_EXTENSIONS:
+        return "scientific"
     if name in TEXT_MEMBER_NAMES:
         return "text"
     if ext in DIAGRAM_EXTENSIONS or any(name.endswith(suffix) for suffix in DIAGRAM_COMPOUND_SUFFIXES):
