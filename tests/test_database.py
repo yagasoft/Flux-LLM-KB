@@ -2041,6 +2041,8 @@ def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypa
     assert result["chunks_indexed"] == 1
     assert result["files_changed"] == 0
     assert "EXCLUDED.extraction_status = 'indexed'" in sql
+    assert "- 'metadata_only_blocked'" in sql
+    assert "- 'readiness_status'" in sql
     assert "DELETE FROM asset_chunks WHERE asset_id = %s" in sql
     assert "INSERT INTO asset_chunks" in sql
 

@@ -2374,7 +2374,18 @@ def persist_crawl_plan(
                             ELSE source_assets.indexed_at
                         END,
                         deleted_at = NULL,
-                        metadata = source_assets.metadata || EXCLUDED.metadata,
+                        metadata = CASE
+                            WHEN source_assets.extraction_status IN ('metadata_only', 'blocked_missing_dependency')
+                                 AND EXCLUDED.extraction_status IN ('indexed', 'queued')
+                                THEN (
+                                    source_assets.metadata
+                                    - 'metadata_only_blocked'
+                                    - 'readiness_status'
+                                    - 'readiness_reason'
+                                    - 'original_status'
+                                ) || EXCLUDED.metadata
+                            ELSE source_assets.metadata || EXCLUDED.metadata
+                        END,
                         updated_at = now()
                     RETURNING id::text
                     """,
