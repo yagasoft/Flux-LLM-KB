@@ -8849,6 +8849,40 @@ def _mail_last_error(errors: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def recover_interrupted_imap_sync_runs(
+    *,
+    worker_id: str,
+    worker_started_at: datetime,
+    url: str | None = None,
+) -> dict[str, Any]:
+    error = "interrupted_imap_sync: previous worker instance stopped before completing IMAP sync"
+    event = [{"stage": "imap_scheduler", "error": error}]
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_sync_runs
+                SET status = 'backoff',
+                    finished_at = COALESCE(finished_at, now()),
+                    last_error = COALESCE(last_error, %s),
+                    errors = CASE
+                        WHEN errors IS NULL OR jsonb_typeof(errors) <> 'array' THEN %s::jsonb
+                        ELSE errors || %s::jsonb
+                    END,
+                    next_attempt_at = now(),
+                    updated_at = now()
+                WHERE status IN ('claimed', 'running')
+                  AND worker_id = %s
+                  AND COALESCE(updated_at, started_at, claimed_at) < %s
+                RETURNING id::text
+                """,
+                (error, _json_list(event), _json_list(event), worker_id, worker_started_at),
+            )
+            run_ids = [row[0] for row in cur.fetchall()]
+    return {"recovered": len(run_ids), "run_ids": run_ids, "worker_id": worker_id}
+
+
 def _expire_stale_imap_sync_runs(cur: Any, *, stale_after_seconds: int | None = None) -> int:
     seconds = _imap_sync_stale_after_seconds(stale_after_seconds)
     error = f"stale_imap_sync: IMAP sync exceeded {seconds} seconds without completion"

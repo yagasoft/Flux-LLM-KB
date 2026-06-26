@@ -191,6 +191,20 @@ def test_database_imap_scheduler_expires_stale_active_runs_before_claim_or_manua
     assert "stale_imap_sync" in expire_function
 
 
+def test_database_imap_scheduler_recovers_interrupted_worker_runs_on_start():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    assert "def recover_interrupted_imap_sync_runs" in source
+    recover_function = source.split("def recover_interrupted_imap_sync_runs", 1)[1].split("def ", 1)[0]
+
+    assert "status IN ('claimed', 'running')" in recover_function
+    assert "worker_id = %s" in recover_function
+    assert "COALESCE(updated_at, started_at, claimed_at) < %s" in recover_function
+    assert "status = 'backoff'" in recover_function
+    assert "next_attempt_at = now()" in recover_function
+    assert "interrupted_imap_sync" in recover_function
+
+
 def test_database_imap_scheduler_state_machine_uses_atomic_claims_and_run_history():
     source = Path(database.__file__).read_text(encoding="utf-8")
     migrations = "\n".join(path.read_text(encoding="utf-8") for path in sorted((Path(database.__file__).parent / "sql").glob("*.sql")))

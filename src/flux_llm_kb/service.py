@@ -3279,6 +3279,15 @@ class KnowledgeService:
         last_result: dict[str, Any] | None = None
         last_governance_at = 0.0
         last_automation_at = 0.0
+        mail_orphan_recovery: dict[str, Any] | None = None
+        if host_agent_roots is not True:
+            try:
+                mail_orphan_recovery = database.recover_interrupted_imap_sync_runs(
+                    worker_id=component_name,
+                    worker_started_at=datetime.now(timezone.utc),
+                )
+            except Exception as exc:
+                mail_orphan_recovery = {"status": "failed", "error": str(exc), "worker_id": component_name}
         while True:
             runs += 1
             database.record_runtime_component_heartbeat(
@@ -3300,6 +3309,9 @@ class KnowledgeService:
                 root_name=root_name,
                 host_agent_roots=host_agent_roots,
             )
+            if mail_orphan_recovery is not None:
+                last_result["mail_orphan_recovery"] = mail_orphan_recovery
+                mail_orphan_recovery = None
             if host_agent_roots is not True:
                 try:
                     from . import mail_ingestion

@@ -1355,6 +1355,37 @@ def test_docker_corpus_worker_processes_due_imap_mail_profiles(monkeypatch):
     assert heartbeats[-1]["metadata"]["last_result"]["mail_sync"]["profiles"][0]["profile"] == "gmail"
 
 
+def test_corpus_worker_recovers_interrupted_imap_runs_on_start(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    events = []
+
+    monkeypatch.setattr(database, "record_runtime_component_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(
+        database,
+        "recover_interrupted_imap_sync_runs",
+        lambda **kwargs: events.append(("recover", kwargs)) or {"recovered": 1},
+    )
+    monkeypatch.setattr(
+        KnowledgeService,
+        "run_corpus_backfill",
+        lambda self, **kwargs: events.append(("backfill", kwargs)) or {"claimed": 0, "completed": 0, "jobs": []},
+    )
+    monkeypatch.setattr(
+        mail_ingestion,
+        "sync_due_mail_profiles",
+        lambda **kwargs: events.append(("mail_sync", kwargs)) or {"count": 0, "profiles": []},
+    )
+
+    result = KnowledgeService().run_corpus_worker(once=True, limit=3, component_name="corpus-worker:test", host_agent_roots=False)
+
+    assert events[0][0] == "recover"
+    assert events[0][1]["worker_id"] == "corpus-worker:test"
+    assert "worker_started_at" in events[0][1]
+    assert [event[0] for event in events] == ["recover", "backfill", "mail_sync"]
+    assert result["last_result"]["mail_orphan_recovery"] == {"recovered": 1}
+
+
 def test_host_agent_corpus_worker_does_not_process_imap_mail_profiles(monkeypatch):
     from flux_llm_kb import mail_ingestion
 
