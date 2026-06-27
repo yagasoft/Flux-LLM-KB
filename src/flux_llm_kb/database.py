@@ -6943,7 +6943,7 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
             cur.execute(
                 """
                 WITH request AS (
-                    SELECT r.id
+                    SELECT r.id, p.name
                     FROM outlook_sync_requests r
                     JOIN mail_profiles p ON p.id = r.profile_id
                     WHERE r.status = 'pending'
@@ -6959,9 +6959,8 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
                     claimed_at = now(),
                     updated_at = now()
                 FROM request
-                JOIN mail_profiles p ON p.id = r.profile_id
                 WHERE r.id = request.id
-                RETURNING r.id::text, p.name, r.status
+                RETURNING r.id::text, request.name, r.status
                 """,
                 (host_id,),
             )
@@ -6995,6 +6994,77 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
             )
             row = cur.fetchone()
             return {"id": row[0], "profile_name": due[1], "status": row[1]}
+
+
+def cancel_outlook_sync_request(
+    *,
+    request_id: str,
+    actor: str = "system",
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id::text, p.name, r.status
+                FROM outlook_sync_requests r
+                JOIN mail_profiles p ON p.id = r.profile_id
+                WHERE r.id = %s
+                FOR UPDATE
+                """,
+                (request_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {
+                    "id": request_id,
+                    "status": "not_found",
+                    "cancelled": False,
+                    "error": "Outlook sync request not found.",
+                }
+
+            request_id_text, profile_name, status = row
+            if status in {"claimed", "running"}:
+                return {
+                    "id": request_id_text,
+                    "profile_name": profile_name,
+                    "status": status,
+                    "cancelled": False,
+                    "error": "Outlook sync request is already claimed and cannot be cancelled mid-execution.",
+                }
+            if status != "pending":
+                return {
+                    "id": request_id_text,
+                    "profile_name": profile_name,
+                    "status": status,
+                    "cancelled": False,
+                    "error": f"Outlook sync request is already {status}.",
+                }
+
+            cur.execute(
+                """
+                UPDATE outlook_sync_requests r
+                SET status = 'cancelled',
+                    cancelled_by = %s,
+                    cancelled_at = now(),
+                    completed_at = now(),
+                    result = %s::jsonb,
+                    updated_at = now()
+                FROM mail_profiles p
+                WHERE r.id = %s
+                  AND p.id = r.profile_id
+                RETURNING r.id::text, p.name, r.status
+                """,
+                (actor, _json({"cancelled_by": actor}), request_id),
+            )
+            cancelled = cur.fetchone()
+            return {
+                "id": cancelled[0],
+                "profile_name": cancelled[1],
+                "status": cancelled[2],
+                "cancelled": True,
+            }
 
 
 def complete_outlook_sync_request(

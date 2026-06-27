@@ -2456,6 +2456,103 @@ def test_imap_mail_claim_query_does_not_reference_update_alias_inside_from_join(
     assert "JOIN mail_profiles p ON p.id = r.profile_id" not in update_from
 
 
+def test_outlook_claim_query_does_not_reference_update_alias_inside_from_join():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def cancel_outlook_sync_request", 1)[0]
+
+    assert "SELECT r.id, p.name" in claim_function
+    update_from = claim_function.split("FROM request", 1)[1]
+    assert "JOIN mail_profiles p ON p.id = r.profile_id" not in update_from
+
+
+def test_cancel_outlook_sync_request_blocks_claimed_mid_execution(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql, _params = executed[-1]
+            if "FOR UPDATE" in sql:
+                return ("req-1", "outlook-catchup", "claimed")
+            raise AssertionError("claimed request must not be updated")
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.cancel_outlook_sync_request(request_id="req-1", actor="tester")
+
+    assert result["cancelled"] is False
+    assert result["status"] == "claimed"
+    assert "mid-execution" in result["error"]
+    assert len(executed) == 1
+
+
+def test_cancel_outlook_sync_request_marks_pending_cancelled(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql, _params = executed[-1]
+            if "FOR UPDATE" in sql:
+                return ("req-1", "outlook-catchup", "pending")
+            if "UPDATE outlook_sync_requests" in sql:
+                return ("req-1", "outlook-catchup", "cancelled")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.cancel_outlook_sync_request(request_id="req-1", actor="tester")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"id": "req-1", "profile_name": "outlook-catchup", "status": "cancelled", "cancelled": True}
+    assert "status = 'cancelled'" in sql
+    assert "cancelled_by" in sql
+
+
 def test_mail_post_process_event_helpers_persist_events_and_update_messages(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)

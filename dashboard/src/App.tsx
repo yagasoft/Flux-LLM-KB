@@ -524,16 +524,30 @@ type MailStatus = {
   };
 };
 
+type OutlookSyncRequest = {
+  id?: string;
+  profile_name?: string;
+  status?: string;
+  requested_by?: string;
+  claimed_by?: string | null;
+  error?: string | null;
+  result?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
+};
+
 type OutlookStatus = {
   host?: {
     host_id?: string;
     status?: string;
+    reported_status?: string;
     command?: string;
     heartbeat_at?: string | null;
     last_error?: string | null;
+    heartbeat_age_seconds?: number | null;
   };
   profiles?: MailProfile[];
-  pending_requests?: Array<{ id?: string; profile_name?: string; status?: string; requested_at?: string }>;
+  pending_requests?: OutlookSyncRequest[];
 };
 
 type SettingRow = {
@@ -1180,6 +1194,16 @@ export default function App() {
       await load();
     } catch (error) {
       setToast(`Sync failed for ${profile.name}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function cancelOutlookRequest(requestId: string) {
+    try {
+      await sendJson(`/api/outlook-host/requests/${encodeURIComponent(requestId)}/cancel`, "POST", {});
+      setToast("Outlook sync request cancelled.");
+      await load();
+    } catch (error) {
+      setToast(`Outlook sync request cancellation failed: ${errorMessage(error)}`);
     }
   }
 
@@ -1864,7 +1888,13 @@ export default function App() {
           />
         )}
 
-        {activeTab === "jobs" && <JobsTab state={state} onRefresh={() => void load()} />}
+        {activeTab === "jobs" && (
+          <JobsTab
+            state={state}
+            onRefresh={() => void load()}
+            onCancelOutlookRequest={(requestId) => void cancelOutlookRequest(requestId)}
+          />
+        )}
       </main>
 
       {profileDialog && (
@@ -1987,7 +2017,8 @@ function MailTab({
   onOAuthPathSave: (profile: MailProfile, clientPath: string) => void;
   onErrorDetail: (error: string) => void;
 }) {
-  const hasOutlookProfiles = profiles.some((profile) => profile.source_type === "outlook_com") || (state.outlook.pending_requests?.length ?? 0) > 0;
+  const activeOutlookCount = activeOutlookRequests(state.outlook.pending_requests).length;
+  const hasOutlookProfiles = profiles.some((profile) => profile.source_type === "outlook_com") || activeOutlookCount > 0;
   return (
     <>
       <section className="main-grid">
@@ -2031,7 +2062,7 @@ function MailTab({
         <MailPostProcessPanel mail={state.mail} selectedProfile={selectedProfile} onDryRun={onPostProcessDryRun} />
         <MailStatusPanel mail={state.mail} hostStatus={hostStatus} showOutlook={hasOutlookProfiles} />
         <MailErrorsPanel mail={state.mail} errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
-        {hasOutlookProfiles && <OutlookHostPanel host={host} hostStatus={hostStatus} pending={state.outlook.pending_requests?.length ?? 0} />}
+        {hasOutlookProfiles && <OutlookHostPanel host={host} hostStatus={hostStatus} pending={activeOutlookCount} />}
       </section>
     </>
   );
@@ -4874,8 +4905,18 @@ function prettyStreamName(value: string): string {
   return titleCase(value.replace(/^corpus_/, "corpus ").replace(/_/g, " "));
 }
 
-function JobsTab({ state, onRefresh }: { state: LoadState; onRefresh: () => void }) {
-  const jobs = state.jobs.jobs ?? [];
+function JobsTab({
+  state,
+  onRefresh,
+  onCancelOutlookRequest
+}: {
+  state: LoadState;
+  onRefresh: () => void;
+  onCancelOutlookRequest: (requestId: string) => void;
+}) {
+  const outlookJobs = activeOutlookRequests(state.outlook.pending_requests).map(outlookRequestJob);
+  const jobs = [...outlookJobs, ...(state.jobs.jobs ?? [])];
+  const hasOutlookRequests = outlookJobs.length > 0;
   const familyRows = (state.health.acceleration?.worker_families ?? []).slice(0, 8).map((family) => [
     family.family ?? "general",
     `${family.pending ?? 0} pending / ${family.running ?? 0} running`,
@@ -4884,7 +4925,12 @@ function JobsTab({ state, onRefresh }: { state: LoadState; onRefresh: () => void
   return (
     <section className="tab-grid">
       <Panel title="Job Queue" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
-        <JobQueueTable jobs={jobs} />
+        <JobQueueTable
+          jobs={jobs}
+          label={hasOutlookRequests ? "Operational jobs" : "Extraction jobs"}
+          empty={hasOutlookRequests ? "No operational jobs queued." : "No queued extraction jobs."}
+          onCancelOutlookRequest={onCancelOutlookRequest}
+        />
       </Panel>
       <Panel title="Worker Family Status">
         {familyRows.length > 0 ? <MiniTable rows={familyRows} /> : <p className="muted">No worker-family status yet.</p>}
@@ -4894,12 +4940,22 @@ function JobsTab({ state, onRefresh }: { state: LoadState; onRefresh: () => void
   );
 }
 
-function JobQueueTable({ jobs }: { jobs: Array<Record<string, unknown>> }) {
+function JobQueueTable({
+  jobs,
+  label,
+  empty,
+  onCancelOutlookRequest
+}: {
+  jobs: Array<Record<string, unknown>>;
+  label: string;
+  empty: string;
+  onCancelOutlookRequest?: (requestId: string) => void;
+}) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
-  if (jobs.length === 0) return <p className="muted">No queued extraction jobs.</p>;
+  if (jobs.length === 0) return <p className="muted">{empty}</p>;
   return (
     <div className="job-table-wrap">
-      <table className="profile-table job-table" aria-label="Extraction jobs">
+      <table className="profile-table job-table" aria-label={label}>
         <thead>
           <tr>
             <th>Status</th>
@@ -4919,6 +4975,7 @@ function JobQueueTable({ jobs }: { jobs: Array<Record<string, unknown>> }) {
             const target = jobTarget(job, payload);
             const status = stringFromUnknown(job.status) ?? "unknown";
             const expanded = expandedJobId === id;
+            const outlookRequest = stringFromUnknown(job.job_type) === "outlook_sync_request";
             return (
               <Fragment key={id}>
                 <tr>
@@ -4929,7 +4986,17 @@ function JobQueueTable({ jobs }: { jobs: Array<Record<string, unknown>> }) {
                   <td>{numberFromUnknown(job.attempts) ?? 0}</td>
                   <td>{formatDate(stringFromUnknown(job.updated_at))}</td>
                   <td className="job-error" title={stringFromUnknown(job.last_error) ?? ""}>{stringFromUnknown(job.last_error) ?? "-"}</td>
-                  <td>
+                  <td className="job-actions-cell">
+                    {outlookRequest ? (
+                      <button
+                        className="row-button warning"
+                        type="button"
+                        aria-label={`Cancel Outlook request ${id}`}
+                        onClick={() => onCancelOutlookRequest?.(id)}
+                      >
+                        <Trash2 size={15} /> Cancel
+                      </button>
+                    ) : null}
                     <button
                       className="row-button"
                       type="button"
@@ -4970,6 +5037,9 @@ function JobDetailRow({
     ["Job type", jobTypeLabel(stringFromUnknown(job.job_type))],
     ["Root", target.root],
     ["Path", target.path],
+    ["Profile", stringFromUnknown(payload.profile_name)],
+    ["Requested by", stringFromUnknown(payload.requested_by)],
+    ["Claimed by", stringFromUnknown(payload.claimed_by)],
     ["Asset id", stringFromUnknown(payload.asset_id)],
     ["Source id", stringFromUnknown(payload.source_id)],
     ["Attempts", String(numberFromUnknown(job.attempts) ?? 0)],
@@ -5029,6 +5099,7 @@ function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown
   const path = stringFromUnknown(payload.path)
     ?? stringFromUnknown(payload.canonical_path)
     ?? stringFromUnknown(payload.file_path)
+    ?? stringFromUnknown(payload.profile_name)
     ?? stringFromUnknown(job.path)
     ?? "No path";
   const root = stringFromUnknown(payload.root_name) ?? stringFromUnknown(job.root_name) ?? "-";
@@ -5037,6 +5108,31 @@ function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown
 
 function jobTypeLabel(value?: string) {
   return humanizeIdentifier(value?.replace(/^corpus_/, "") ?? "job");
+}
+
+function activeOutlookRequests(requests?: OutlookSyncRequest[]) {
+  return (requests ?? []).filter((request) => ["pending", "claimed", "running"].includes(request.status ?? "pending"));
+}
+
+function outlookRequestJob(request: OutlookSyncRequest): Record<string, unknown> {
+  const status = request.status ?? "pending";
+  return {
+    id: request.id,
+    job_type: "outlook_sync_request",
+    status,
+    path: request.profile_name ?? "Outlook request",
+    root_name: "Outlook COM",
+    attempts: 0,
+    last_error: request.error ?? null,
+    created_at: request.created_at,
+    updated_at: request.updated_at ?? request.created_at,
+    payload: {
+      profile_name: request.profile_name,
+      requested_by: request.requested_by,
+      claimed_by: request.claimed_by,
+      result: request.result
+    }
+  };
 }
 
 function humanizeIdentifier(value: string) {
@@ -5999,6 +6095,8 @@ function automationNextWindow(recurring: AutomationRecurring, policy: Record<str
 
 function hostStatusLabel(status: string) {
   if (status === "host_offline") return "Host offline";
+  if (status === "host_stale") return "Host stale";
+  if (status === "host_error") return "Host error";
   if (status === "blocked_not_windows") return "Not Windows";
   if (status === "blocked_missing_dependency") return "Missing dependency";
   if (status === "blocked_outlook_unavailable") return "Outlook unavailable";

@@ -646,6 +646,12 @@ kbd {
   background: var(--surface);
 }
 
+.row-button.warning {
+  color: var(--orange);
+  border-color: #f2c99d;
+  background: #fff8ef;
+}
+
 .source-badge {
   display: inline-flex;
   align-items: center;
@@ -1436,6 +1442,11 @@ kbd {
 .job-table .row-button {
   margin-right: 0;
   white-space: nowrap;
+}
+
+.job-actions-cell {
+  display: flex;
+  gap: 6px;
 }
 
 .chevron-open {

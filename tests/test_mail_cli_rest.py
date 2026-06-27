@@ -108,8 +108,32 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     assert "/api/mail/oauth/status" in routes
     assert "/api/outlook-host/status" in routes
     assert "/api/outlook-host/request-sync" in routes
+    assert "/api/outlook-host/requests/{request_id}/cancel" in routes
     assert "/api/outlook-host/profiles/{name}/enable" in routes
     assert "/api/outlook-host/profiles/{name}/disable" in routes
+
+
+def test_rest_outlook_cancel_returns_conflict_for_mid_execution(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import outlook_host
+
+    monkeypatch.setattr(
+        outlook_host,
+        "cancel_request",
+        lambda request_id, actor="dashboard": {
+            "id": request_id,
+            "profile_name": "outlook-catchup",
+            "status": "claimed",
+            "cancelled": False,
+            "error": "Outlook sync request is already claimed and cannot be cancelled mid-execution.",
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.post("/api/outlook-host/requests/req-1/cancel", json={})
+
+    assert response.status_code == 409
+    assert "mid-execution" in response.text
 
 
 def test_rest_mail_post_process_dry_run_calls_mail_ingestion(monkeypatch):

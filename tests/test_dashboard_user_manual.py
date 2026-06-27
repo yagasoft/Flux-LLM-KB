@@ -49,9 +49,9 @@ def test_dashboard_user_manual_source_docx_scripts_and_directive_exist():
     assert "values can appear" in manual_text
     assert len(manual_text) > 45_000
 
-    assert "dashboard UI, automation behavior, operator APIs, setup docs, or screenshots" in agents
-    assert "regenerate DOCX/screenshots" in agents
-    assert "visually verify" in agents
+    assert "Do not update `docs/user-guide/dashboard-user-manual.md`" in agents
+    assert "unless the user explicitly asks for manual updates in the current turn" in agents
+    assert "may ship without manual regeneration when no explicit manual request is present" in agents
 
 
 def test_dashboard_user_manual_references_real_gui_screenshot_set():

@@ -353,9 +353,11 @@ let governancePolicyPayload: unknown;
 let governanceRunPayload: unknown;
 let governanceApplyPayload: unknown;
 let governanceRecoverPayload: unknown;
+let outlookCancelRequests: string[];
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
+    outlook.pending_requests = [];
     healthPayload = health;
     crawlPayload = JSON.parse(JSON.stringify(crawl));
     jobsPayload = {
@@ -708,6 +710,7 @@ describe("Flux dashboard", () => {
         }
       ]
     };
+    outlookCancelRequests = [];
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -1189,6 +1192,18 @@ describe("Flux dashboard", () => {
       if (url.startsWith("/api/graph/traverse")) return json(graphPayload);
       if (url === "/api/outlook-host/request-sync") {
         return json({ id: "req-1", status: "pending", profile_name: JSON.parse(String(init?.body)).profile_name });
+      }
+      if (url.startsWith("/api/outlook-host/requests/") && url.endsWith("/cancel")) {
+        outlookCancelRequests.push(url);
+        const requestId = decodeURIComponent(url.split("/").at(-2) ?? "");
+        if (requestId === "req-claimed") {
+          return errorJson(
+            { error: { message: "Outlook sync request is already claimed and cannot be cancelled mid-execution." } },
+            409,
+            "Conflict"
+          );
+        }
+        return json({ id: requestId, status: "cancelled", cancelled: true });
       }
       if (url === "/api/crawl/roots") return json({ root: JSON.parse(String(init?.body)), sync: { files_seen: 0 } });
       if (url.startsWith("/api/crawl/roots/") && init?.method === "PATCH") {
@@ -1689,6 +1704,48 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("asset-1")).toBeInTheDocument();
     expect(screen.getByText("source-1")).toBeInTheDocument();
     expect(screen.getByText("Raw payload")).toBeInTheDocument();
+  });
+
+  test("job queue shows Outlook COM requests and cancel feedback", async () => {
+    const user = userEvent.setup();
+    outlook.pending_requests = [
+      {
+        id: "req-pending",
+        profile_name: "outlook-catchup",
+        status: "pending",
+        requested_by: "dashboard",
+        created_at: "2026-06-27T16:29:01+00:00",
+        updated_at: "2026-06-27T16:29:01+00:00"
+      },
+      {
+        id: "req-claimed",
+        profile_name: "outlook-catchup",
+        status: "claimed",
+        requested_by: "dashboard",
+        claimed_by: "host-1",
+        created_at: "2026-06-27T16:27:46+00:00",
+        updated_at: "2026-06-27T16:28:00+00:00"
+      }
+    ];
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    const table = await screen.findByRole("table", { name: "Operational jobs" });
+    expect(within(table).getAllByText("Outlook Sync Request")).toHaveLength(2);
+    expect(within(table).getAllByText("outlook-catchup")).toHaveLength(2);
+    expect(within(table).getByText("Pending")).toBeInTheDocument();
+    expect(within(table).getByText("Claimed")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel Outlook request req-pending" }));
+    await waitFor(() => {
+      expect(outlookCancelRequests).toContain("/api/outlook-host/requests/req-pending/cancel");
+    });
+    expect(await screen.findByText("Outlook sync request cancelled.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel Outlook request req-claimed" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("cannot be cancelled mid-execution");
   });
 
   test("job queue keeps the readable empty state when no jobs are queued", async () => {

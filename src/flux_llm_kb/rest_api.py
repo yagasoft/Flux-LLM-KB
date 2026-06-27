@@ -1562,6 +1562,16 @@ def create_app():
 
         return request_sync(request.profile_name, actor="dashboard")
 
+    @app.post("/api/outlook-host/requests/{request_id}/cancel")
+    def outlook_host_cancel_request(request_id: str):
+        from .outlook_host import cancel_request
+
+        payload = cancel_request(request_id, actor="dashboard")
+        if not payload.get("cancelled"):
+            status_code = 404 if payload.get("status") == "not_found" else 409
+            raise HTTPException(status_code=status_code, detail=payload.get("error") or "Outlook sync request cannot be cancelled.")
+        return payload
+
     @app.post("/api/outlook-host/profiles/{name}/enable")
     def outlook_host_profile_enable(name: str):
         from .outlook_host import set_profile_enabled
