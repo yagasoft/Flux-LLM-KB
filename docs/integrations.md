@@ -526,6 +526,8 @@ Mail post-processing is policy-driven per profile:
 - `trash`: confirmation-gated; Gmail applies Trash semantics and generic IMAP
   copies to `trash_folder` when configured, then deletes and expunges the
   source message.
+- Outlook COM profiles should use `none`; non-`none` Outlook COM policies are
+  blocked because Outlook mailbox mutation is not implemented.
 
 Use `flux-kb mail post-process dry-run` or
 `POST /api/mail/profiles/{profile}/post-process/dry-run` before enabling a new
@@ -551,6 +553,8 @@ flux-kb outlook-host run
 Docker-hosted worker. It reports that the Windows Outlook host is required. Run
 `flux-kb outlook-host run` in the logged-in Windows session for scheduled pulls,
 or queue a one-off request with `flux-kb outlook-host sync --profile <name>`.
+Outlook COM profile setup does not require an IMAP server or account value; the
+Windows Outlook profile owns that connection.
 
 Mailbox credentials, OAuth tokens, raw messages, attachments, and private mail
 content sidecars stay local and must remain outside Git.

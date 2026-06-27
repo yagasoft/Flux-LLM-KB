@@ -217,7 +217,7 @@ def add_markdown_table(document: Document, rows: list[list[str]]) -> None:
             paragraph.paragraph_format.space_after = Pt(0)
             paragraph.paragraph_format.line_spacing = 1.15
             text = row[col_index] if col_index < len(row) else ""
-            add_rich_text(paragraph, _clean_inline(text))
+            add_rich_text(paragraph, text)
             for run in paragraph.runs:
                 run.font.size = Pt(9.25)
                 if row_index == 0:

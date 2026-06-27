@@ -6,12 +6,13 @@ from flux_llm_kb.mail_post_process import apply_mail_post_process_policy
 def _profile(
     *,
     policy: str,
+    source_type: str = "imap",
     server: str = "imap.gmail.com",
     metadata: dict | None = None,
 ) -> dict:
     return {
         "name": "gmail-capture",
-        "source_type": "imap",
+        "source_type": source_type,
         "account": "me@gmail.com",
         "server": server,
         "post_process_policy": policy,
@@ -220,4 +221,28 @@ def test_missing_processed_folder_blocks_move_policy():
 
     assert result["status"] == "blocked_config"
     assert "processed" in result["error"].lower()
+    assert client.calls == []
+
+
+def test_outlook_com_non_none_policy_blocks_without_imap_commands():
+    client = FakeImapClient()
+
+    result = apply_mail_post_process_policy(
+        client=client,
+        profile=_profile(
+            policy="move_to_processed",
+            source_type="outlook_com",
+            server="imap.gmail.com",
+            metadata={"processed_folder": "FluxProcessed"},
+        ),
+        folder="Mailbox - Me\\Inbox\\Flux Capture",
+        uid=50,
+        dry_run=True,
+    )
+
+    assert result["provider"] == "outlook_com"
+    assert result["status"] == "blocked_config"
+    assert result["action"] == "outlook_unsupported_post_process"
+    assert "Outlook COM" in result["error"]
+    assert result["commands"] == []
     assert client.calls == []

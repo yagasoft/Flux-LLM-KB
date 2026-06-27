@@ -412,7 +412,10 @@ Profile post-processing supports `none`, `move_to_processed`, `remove_label`,
 and `trash`. Gmail profiles use Gmail IMAP label commands for label operations
 and Trash handling. Generic IMAP profiles use folder copy plus delete/expunge
 only for policies that require it, and can copy to `trash_folder` before deleting
-when trash is configured. `trash` requires explicit destructive confirmation in
+when trash is configured. Outlook COM profiles export through the local Outlook
+host and should keep post-processing set to `none`; non-`none` Outlook COM
+policies are reported as blocked configuration instead of issuing IMAP commands.
+`trash` requires explicit destructive confirmation in
 CLI/API/dashboard profile metadata. Use `flux-kb mail
 post-process dry-run --profile <name>` before enabling a new policy, then review
 recent command outcomes with `flux-kb mail post-process events --profile
@@ -427,8 +430,10 @@ path so any legacy plaintext mail chunks are converted to sidecar-backed chunks
 and embedding backfill can rebuild vectors from disk sidecars.
 
 Outlook COM profiles are for catch-up from selected classic Outlook folder
-paths. They use local Outlook automation and write into the same spool shape as
-IMAP, but the automation runs in a separate Windows host process:
+paths. They do not need an IMAP server or account value in Flux; classic Outlook
+owns the mailbox connection. They use local Outlook automation and write into
+the same spool shape as IMAP, but the automation runs in a separate Windows host
+process:
 
 ```powershell
 flux-kb outlook-host run

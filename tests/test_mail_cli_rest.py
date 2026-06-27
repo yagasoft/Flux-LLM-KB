@@ -63,6 +63,33 @@ def test_cli_mail_profile_add_imap_registers_profile(monkeypatch, tmp_path, caps
     assert payload["source_type"] == "imap"
 
 
+def test_cli_mail_profile_add_outlook_defaults_to_no_post_process(monkeypatch, tmp_path, capsys):
+    from flux_llm_kb import mail_ingestion
+
+    captured = {}
+    monkeypatch.setattr(mail_ingestion, "add_mail_profile", lambda **kwargs: captured.update(kwargs) or {"name": kwargs["name"]})
+
+    assert cli.main(
+        [
+            "mail",
+            "profile",
+            "add-outlook",
+            "--name",
+            "outlook-catchup",
+            "--folder",
+            "Mailbox - Me\\Inbox\\Flux Capture",
+            "--spool",
+            str(tmp_path),
+        ]
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out)["name"] == "outlook-catchup"
+    assert captured["source_type"] == "outlook_com"
+    assert captured["account"] is None
+    assert captured["server"] is None
+    assert captured["post_process_policy"] == "none"
+
+
 def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     app = create_app()

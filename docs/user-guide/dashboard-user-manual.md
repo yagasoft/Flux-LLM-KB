@@ -60,7 +60,7 @@ The global layout is present on every tab.
 | PG green | PostgreSQL and pgvector readiness are available. | Retrieval and persistence should be usable. |
 | Watcher active | One or more watched roots have filesystem watch or polling activity. | Use Corpus for root-specific state. |
 | Jobs blocked | At least one background job is blocked. | Open Diagnostics or Jobs. |
-| Mail backoff or blocked_auth_required | Mail sync needs retry time or authorization review. | Open Mail. |
+| Mail backoff or `blocked_auth_required` | Mail sync needs retry time or authorization review. | Open Mail. |
 
 ### What the actions do
 
@@ -395,7 +395,7 @@ Use include/exclude globs to avoid indexing private exports, generated folders, 
 _Figure: Mail shows profile list, profile details, scheduler state, OAuth state, runtime state, post-process policy, and mail errors._
 
 ![Mail profile form](screens/mail-profile-form.png)
-_Figure: The Add Mail Profile form captures source type, account, folders, private spool path, sync cadence, and post-process policy._
+_Figure: The Add Mail Profile form is source-aware: IMAP profiles show account/server fields, while Outlook COM profiles use the local Outlook host and hide IMAP-only fields._
 
 ### What you see
 
@@ -417,17 +417,17 @@ The main panels are:
 | Enabled | Scheduled sync is enabled for the profile. | Normal for active capture. |
 | Manual | Scheduled sync is off; use manual sync when needed. | Normal for occasional sources. |
 | IMAP | Profile connects through IMAP or Gmail IMAP. | Check server, account, folders, OAuth if blocked. |
-| Outlook COM | Profile uses the local Outlook host. | Host startup remains manual. |
+| Outlook COM | Profile uses the local Windows Outlook host and the desktop Outlook profile, not an IMAP server. | Host startup remains manual. |
 | due | Scheduler says a profile is due for sync. | It should queue automatically if enabled. |
 | queued | A sync run is waiting. | Check Jobs or scheduler if it does not move. |
 | running | A sync run is active. | Wait or inspect if stuck. |
 | completed | A sync finished. | Review counts and captures. |
 | backoff | A run failed and is waiting before retry. | Read error before forcing sync. |
-| blocked_auth_required | OAuth or credentials are missing/expired. | Start OAuth manually. |
-| remove_label | Gmail post-process can remove a label after capture. | Dry-run before enabling. |
-| move_to_processed | Move captured mail to a processed folder. | Confirm folder policy. |
-| none | Leave mail in place. | Safest default. |
-| trash/delete | Destructive post-process action. | Requires explicit confirmation and remains manual-risk. |
+| `blocked_auth_required` | OAuth or credentials are missing/expired. | Start OAuth manually. |
+| `remove_label` | Gmail post-process can remove a label after capture. | Dry-run before enabling. |
+| `move_to_processed` | Move captured mail to a processed folder. | Confirm folder policy. |
+| `none` | Leave mail in place. | Safest default and the only supported Outlook COM post-process policy. |
+| `trash/delete` | Destructive post-process action. | Requires explicit confirmation and remains manual-risk. |
 
 ### What the actions do
 
@@ -450,6 +450,8 @@ Mail capture can create valuable memory, but it touches sensitive data and exter
 - OAuth and destructive policies require a person.
 
 Use dry-run before changing post-process policy. Do not use destructive post-process actions unless you have tested the profile and understand the mailbox effect.
+
+Outlook COM profiles are different from IMAP profiles. They do not need an account or server value in Flux; classic Outlook already owns the mailbox connection. Keep post-process set to **Leave in place** for Outlook COM. The interval field appears only when scheduled sync is enabled; one-time/manual sync does not use it.
 
 ## Retrieval Tab
 
@@ -789,13 +791,14 @@ Why: root scope controls what Flux can see. A narrow root with clear globs is sa
 1. Open Mail.
 2. Click Add Profile or Edit on an existing profile.
 3. Choose IMAP, Gmail IMAP, or Outlook COM.
-4. Enter account, folders, and private spool path.
-5. Keep scheduled sync disabled until the profile is tested.
-6. Use post_process_policy none until you have run dry-runs.
-7. Save the profile.
-8. For Gmail, save OAuth client JSON path and start OAuth manually.
-9. Run Sync Now or a profile sync.
-10. Review capture jobs in Review before ingestion.
+4. For IMAP, enter account, server, folders or labels, and private spool path.
+5. For Outlook COM, enter the Outlook folder path and private spool path; no IMAP server is needed.
+6. Keep scheduled sync disabled until the profile is tested. Interval seconds matters only when scheduled sync is enabled.
+7. Use `post_process_policy` `none` until you have run dry-runs. For Outlook COM, keep post-process as `none`.
+8. Save the profile.
+9. For Gmail, save OAuth client JSON path and start OAuth manually.
+10. Run Sync Now or a profile sync.
+11. Review capture jobs in Review before ingestion.
 
 Why: mail can contain sensitive content and mailbox state. Sync, review, OAuth, and post-process policy need separate decisions.
 
@@ -858,7 +861,7 @@ This glossary explains common values that can appear across multiple tabs.
 | completed | Jobs, automation, benchmarks | Finished successfully. |
 | failed | Jobs, diagnostics, benchmarks | Finished with an error. |
 | backoff | Mail scheduler | Waiting before retry after failure. |
-| blocked_auth_required | Mail OAuth/scheduler | Credentials or OAuth authorization are missing. |
+| `blocked_auth_required` | Mail OAuth/scheduler | Credentials or OAuth authorization are missing. |
 | stale | Overview, Review, Corpus, Performance | Evidence exists but may be old. |
 | current | Review, retrieval filters | Evidence is current. |
 | superseded | Review | Newer evidence replaced this item. |

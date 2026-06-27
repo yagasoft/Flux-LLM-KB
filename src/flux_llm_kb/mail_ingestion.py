@@ -190,6 +190,10 @@ def add_mail_profile(
     max_messages_per_run: int = 200,
 ) -> dict[str, Any]:
     spool = Path(spool_path).expanduser().resolve()
+    normalized_source_type = source_type.strip().lower()
+    if normalized_source_type == "outlook_com":
+        account = None
+        server = None
     metadata = {
         "processed_folder": (processed_folder or "").strip(),
         "trash_folder": (trash_folder or "").strip(),
@@ -197,7 +201,7 @@ def add_mail_profile(
     }
     profile = database.insert_mail_profile(
         name=name,
-        source_type=source_type,
+        source_type=normalized_source_type,
         account=account,
         server=server,
         folder_paths=folder_paths,
@@ -218,7 +222,7 @@ def add_mail_profile(
         watch_enabled=False,
         enabled=True,
         trust_rank=trust_rank,
-        metadata={"mail_profile": name, "source_type": source_type, "strict_indexing": True},
+        metadata={"mail_profile": name, "source_type": normalized_source_type, "strict_indexing": True},
     )
     return profile
 

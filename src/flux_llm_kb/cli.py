@@ -487,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
     mail_add_outlook.add_argument("--name", required=True)
     mail_add_outlook.add_argument("--folder", action="append", required=True)
     mail_add_outlook.add_argument("--spool", required=True)
-    mail_add_outlook.add_argument("--post-process", default="move_to_processed")
+    mail_add_outlook.add_argument("--post-process", default="none")
     mail_add_outlook.add_argument("--processed-folder")
     mail_add_outlook.add_argument("--trash-folder")
     mail_add_outlook.add_argument("--confirm-destructive-post-process", action="store_true")

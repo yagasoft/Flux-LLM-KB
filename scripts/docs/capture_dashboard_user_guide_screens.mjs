@@ -155,6 +155,7 @@ async function openRootForm(page) {
 async function openMailProfileForm(page) {
   await page.getByRole("button", { name: /Add Profile/i }).click();
   await page.getByRole("dialog", { name: /Add Mail Profile/i }).waitFor();
+  await page.getByLabel("Source").selectOption("outlook_com");
 }
 
 async function openSearchResultDetail(page) {

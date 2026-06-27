@@ -2002,6 +2002,60 @@ describe("Flux dashboard", () => {
     expect(await screen.findByText("Mail profile saved.")).toBeInTheDocument();
   });
 
+  test("Outlook COM profile form hides IMAP fields and saves manual host profile defaults", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "Add Profile" }));
+    await user.selectOptions(screen.getByLabelText("Source"), "outlook_com");
+
+    expect(screen.queryByLabelText("Account")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Server")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Interval seconds")).not.toBeInTheDocument();
+    expect(screen.getByText(/uses the local Windows Outlook host/i)).toBeInTheDocument();
+    expect(screen.getByLabelText("Post process")).toHaveValue("none");
+
+    await user.click(screen.getByLabelText("Scheduled sync enabled"));
+    expect(screen.getByLabelText("Interval seconds")).toHaveValue(900);
+    await user.click(screen.getByLabelText("Scheduled sync enabled"));
+    expect(screen.queryByLabelText("Interval seconds")).not.toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText("Profile name"));
+    await user.type(screen.getByLabelText("Profile name"), "outlook-catchup");
+    await user.clear(screen.getByLabelText("Folders or labels"));
+    await user.type(screen.getByLabelText("Folders or labels"), "Mailbox - Me\\Inbox\\Flux Capture");
+    await user.clear(screen.getByLabelText("Private spool path"));
+    await user.type(screen.getByLabelText("Private spool path"), "private/mail-spool/outlook-catchup");
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/mail/profiles",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            name: "outlook-catchup",
+            source_type: "outlook_com",
+            account: null,
+            server: null,
+            folder_paths: ["Mailbox - Me\\Inbox\\Flux Capture"],
+            spool_path: "private/mail-spool/outlook-catchup",
+            post_process_policy: "none",
+            processed_folder: "",
+            trash_folder: "",
+            destructive_post_process_confirmed: false,
+            sync_enabled: false,
+            sync_interval_seconds: 900,
+            sync_window_days: 30,
+            max_messages_per_run: 200
+          })
+        })
+      );
+    });
+  });
+
   test("mail profile form persists post-process policy metadata", async () => {
     const user = userEvent.setup();
     render(<App />);

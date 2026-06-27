@@ -119,6 +119,28 @@ def test_mail_profile_registers_ready_spool_root(monkeypatch, tmp_path):
     assert calls[0]["metadata"]["strict_indexing"] is True
 
 
+def test_outlook_mail_profile_normalizes_imap_account_and_server(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(database, "insert_mail_profile", lambda **kwargs: calls.append(kwargs) or {"id": "profile-1", **kwargs})
+    monkeypatch.setattr(database, "add_monitored_root", lambda **kwargs: {"name": kwargs["name"]})
+
+    from flux_llm_kb.mail_ingestion import add_mail_profile
+
+    profile = add_mail_profile(
+        name="outlook-catchup",
+        source_type="outlook_com",
+        spool_path=tmp_path,
+        folder_paths=["Mailbox - Me\\Inbox\\Flux Capture"],
+        account="stale@example.com",
+        server="imap.gmail.com",
+        post_process_policy="none",
+    )
+
+    assert profile["source_type"] == "outlook_com"
+    assert calls[0]["account"] is None
+    assert calls[0]["server"] is None
+
+
 def test_sync_imap_folder_resets_cursor_when_uidvalidity_changes(monkeypatch, tmp_path):
     class FakeClient:
         def __init__(self):

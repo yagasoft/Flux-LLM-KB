@@ -1184,17 +1184,18 @@ export default function App() {
   }
 
   async function saveProfile(form: ProfileForm) {
+    const outlook = form.source_type === "outlook_com";
     const payload = {
       name: form.name.trim(),
       source_type: form.source_type,
-      account: form.account.trim() || null,
-      server: form.server.trim() || null,
+      account: outlook ? null : form.account.trim() || null,
+      server: outlook ? null : form.server.trim() || null,
       folder_paths: splitLines(form.folder_paths),
       spool_path: form.spool_path.trim(),
-      post_process_policy: form.post_process_policy,
-      processed_folder: form.processed_folder.trim(),
-      trash_folder: form.trash_folder.trim(),
-      destructive_post_process_confirmed: form.destructive_post_process_confirmed,
+      post_process_policy: outlook ? "none" : form.post_process_policy,
+      processed_folder: outlook ? "" : form.processed_folder.trim(),
+      trash_folder: outlook ? "" : form.trash_folder.trim(),
+      destructive_post_process_confirmed: outlook ? false : form.destructive_post_process_confirmed,
       sync_enabled: form.sync_enabled,
       sync_interval_seconds: Number(form.sync_interval_seconds),
       sync_window_days: Number(form.sync_window_days),
@@ -5325,24 +5326,63 @@ function RunHistory({ runs }: { runs: MailSyncRun[] }) {
 function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; onClose: () => void; onSave: (form: ProfileForm) => void }) {
   const metadata = profile?.metadata ?? {};
   const [form, setForm] = useState<ProfileForm>(() => ({
-    name: profile?.name ?? "gmail-capture",
-    source_type: (profile?.source_type === "outlook_com" ? "outlook_com" : "imap"),
-    account: profile?.account ?? "me@gmail.com",
-    server: profile?.server ?? "imap.gmail.com",
-    folder_paths: (profile?.folder_paths ?? ["FluxCapture"]).join("\n"),
-    spool_path: profile?.spool_path ?? "private/mail-spool/gmail-capture",
-    post_process_policy: profile?.post_process_policy ?? "move_to_processed",
-    processed_folder: metadataString(metadata, "processed_folder", "FluxProcessed"),
-    trash_folder: metadataString(metadata, "trash_folder", ""),
-    destructive_post_process_confirmed: Boolean(metadata.destructive_post_process_confirmed),
-    sync_enabled: Boolean(profile?.sync_enabled),
-    sync_interval_seconds: profile?.sync_interval_seconds ?? 900,
-    sync_window_days: profile?.sync_window_days ?? 30,
-    max_messages_per_run: profile?.max_messages_per_run ?? 200
+    ...(() => {
+      const sourceType = profile?.source_type === "outlook_com" ? "outlook_com" : "imap";
+      const outlook = sourceType === "outlook_com";
+      return {
+        name: profile?.name ?? "gmail-capture",
+        source_type: sourceType,
+        account: outlook ? "" : profile?.account ?? "me@gmail.com",
+        server: outlook ? "" : profile?.server ?? "imap.gmail.com",
+        folder_paths: (profile?.folder_paths ?? ["FluxCapture"]).join("\n"),
+        spool_path: profile?.spool_path ?? "private/mail-spool/gmail-capture",
+        post_process_policy: outlook ? "none" : profile?.post_process_policy ?? "move_to_processed",
+        processed_folder: metadataString(metadata, "processed_folder", outlook ? "" : "FluxProcessed"),
+        trash_folder: metadataString(metadata, "trash_folder", ""),
+        destructive_post_process_confirmed: outlook ? false : Boolean(metadata.destructive_post_process_confirmed),
+        sync_enabled: Boolean(profile?.sync_enabled),
+        sync_interval_seconds: profile?.sync_interval_seconds ?? 900,
+        sync_window_days: profile?.sync_window_days ?? 30,
+        max_messages_per_run: profile?.max_messages_per_run ?? 200
+      };
+    })()
   }));
+  const outlook = form.source_type === "outlook_com";
 
   function update<K extends keyof ProfileForm>(key: K, value: ProfileForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateSource(sourceType: ProfileForm["source_type"]) {
+    setForm((current) => {
+      if (sourceType === "outlook_com") {
+        return {
+          ...current,
+          source_type: "outlook_com",
+          name: current.name === "gmail-capture" ? "outlook-catchup" : current.name,
+          account: "",
+          server: "",
+          folder_paths: current.folder_paths === "FluxCapture" ? "Mailbox - Me\\Inbox\\Flux Capture" : current.folder_paths,
+          spool_path: current.spool_path === "private/mail-spool/gmail-capture" ? "private/mail-spool/outlook-catchup" : current.spool_path,
+          post_process_policy: "none",
+          processed_folder: "",
+          trash_folder: "",
+          destructive_post_process_confirmed: false,
+          sync_enabled: false
+        };
+      }
+      return {
+        ...current,
+        source_type: "imap",
+        name: current.name === "outlook-catchup" ? "gmail-capture" : current.name,
+        account: current.account || "me@gmail.com",
+        server: current.server || "imap.gmail.com",
+        folder_paths: current.folder_paths === "Mailbox - Me\\Inbox\\Flux Capture" ? "FluxCapture" : current.folder_paths,
+        spool_path: current.spool_path === "private/mail-spool/outlook-catchup" ? "private/mail-spool/gmail-capture" : current.spool_path,
+        post_process_policy: current.post_process_policy === "none" ? "move_to_processed" : current.post_process_policy,
+        processed_folder: current.processed_folder || "FluxProcessed"
+      };
+    });
   }
 
   function submit(event: FormEvent) {
@@ -5359,27 +5399,28 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
         </header>
         <div className="form-grid">
           <label>Profile name<input value={form.name} onChange={(event) => update("name", event.target.value)} required /></label>
-          <label>Source<select value={form.source_type} onChange={(event) => update("source_type", event.target.value as ProfileForm["source_type"])}>
+          <label>Source<select value={form.source_type} onChange={(event) => updateSource(event.target.value as ProfileForm["source_type"])}>
             <option value="imap">IMAP</option>
             <option value="outlook_com">Outlook COM</option>
           </select></label>
-          <label>Account<input value={form.account} onChange={(event) => update("account", event.target.value)} /></label>
-          <label>Server<input value={form.server} onChange={(event) => update("server", event.target.value)} /></label>
+          {outlook && <p className="muted span-2">Outlook COM uses the local Windows Outlook host. It reads the selected Outlook folder through the desktop profile, not an IMAP server.</p>}
+          {!outlook && <label>Account<input value={form.account} onChange={(event) => update("account", event.target.value)} /></label>}
+          {!outlook && <label>Server<input value={form.server} onChange={(event) => update("server", event.target.value)} /></label>}
           <label className="span-2">Folders or labels<textarea value={form.folder_paths} onChange={(event) => update("folder_paths", event.target.value)} required /></label>
           <label className="span-2">Private spool path<input value={form.spool_path} onChange={(event) => update("spool_path", event.target.value)} required /></label>
           <label>Post process<select value={form.post_process_policy} onChange={(event) => update("post_process_policy", event.target.value)}>
-            <option value="move_to_processed">Move to processed</option>
-            <option value="remove_label">Remove label</option>
+            <option value="move_to_processed" disabled={outlook}>Move to processed</option>
+            <option value="remove_label" disabled={outlook}>Remove label</option>
             <option value="none">Leave in place</option>
-            <option value="trash">Trash/delete</option>
+            <option value="trash" disabled={outlook}>Trash/delete</option>
           </select></label>
-          <label>Processed folder or label<input value={form.processed_folder} onChange={(event) => update("processed_folder", event.target.value)} /></label>
-          <label>Trash folder<input value={form.trash_folder} onChange={(event) => update("trash_folder", event.target.value)} /></label>
-          <label>Interval seconds<input type="number" min="60" value={form.sync_interval_seconds} onChange={(event) => update("sync_interval_seconds", Number(event.target.value))} /></label>
+          {!outlook && <label>Processed folder or label<input value={form.processed_folder} onChange={(event) => update("processed_folder", event.target.value)} /></label>}
+          {!outlook && <label>Trash folder<input value={form.trash_folder} onChange={(event) => update("trash_folder", event.target.value)} /></label>}
+          {form.sync_enabled && <label>Interval seconds<input type="number" min="60" value={form.sync_interval_seconds} onChange={(event) => update("sync_interval_seconds", Number(event.target.value))} /></label>}
           <label>Window days<input type="number" min="1" value={form.sync_window_days} onChange={(event) => update("sync_window_days", Number(event.target.value))} /></label>
           <label>Max messages/run<input type="number" min="1" value={form.max_messages_per_run} onChange={(event) => update("max_messages_per_run", Number(event.target.value))} /></label>
           <label className="checkbox-label"><input type="checkbox" checked={form.sync_enabled} onChange={(event) => update("sync_enabled", event.target.checked)} /> Scheduled sync enabled</label>
-          <label className="checkbox-label"><input type="checkbox" checked={form.destructive_post_process_confirmed} onChange={(event) => update("destructive_post_process_confirmed", event.target.checked)} /> Confirm destructive post-process action</label>
+          {!outlook && <label className="checkbox-label"><input type="checkbox" checked={form.destructive_post_process_confirmed} onChange={(event) => update("destructive_post_process_confirmed", event.target.checked)} /> Confirm destructive post-process action</label>}
         </div>
         <footer>
           <button className="ghost-action compact" type="button" onClick={onClose}>Cancel</button>

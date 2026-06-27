@@ -40,6 +40,18 @@ def apply_mail_post_process_policy(
             status="skipped",
             dry_run=dry_run,
         )
+    if provider == "outlook_com":
+        return _result(
+            profile=profile,
+            uid=uid,
+            provider=provider,
+            policy=policy,
+            action="outlook_unsupported_post_process",
+            status="blocked_config",
+            dry_run=dry_run,
+            commands=[],
+            error="Outlook COM post-process actions are not supported; leave the profile policy as none.",
+        )
     if policy in DESTRUCTIVE_POLICIES and not _destructive_confirmed(metadata):
         return _result(
             profile=profile,
@@ -210,6 +222,8 @@ def _uid_command(command: str, uid: int, *args: str) -> dict[str, Any]:
 
 
 def _provider(profile: dict[str, Any]) -> str:
+    if str(profile.get("source_type") or "").strip().lower() == "outlook_com":
+        return "outlook_com"
     metadata = dict(profile.get("metadata") or {})
     provider = str(metadata.get("provider") or "").strip().lower()
     if provider in {"gmail", "imap"}:
