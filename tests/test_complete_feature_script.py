@@ -79,18 +79,32 @@ def test_complete_feature_script_bounds_step_processes_without_powershell_stream
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
     assert "[int]$StepTimeoutSeconds" in script
+    assert "[int]$DeployStepTimeoutSeconds = 1800" in script
     assert "[System.Diagnostics.ProcessStartInfo]" in script
     assert "UseShellExecute = $false" in script
     assert "CreateNoWindow = $true" in script
     assert "RedirectStandardOutput = $true" in script
     assert "RedirectStandardError = $true" in script
     assert "ReadToEndAsync()" in script
-    assert "WaitForExit($StepTimeoutSeconds * 1000)" in script
+    assert "$effectiveTimeoutSeconds = if ($TimeoutSeconds -gt 0)" in script
+    assert "WaitForExit($effectiveTimeoutSeconds * 1000)" in script
     assert "ExitCode" in script
     assert "Stop-FeatureProcessTree" in script
     assert "ProcessStreamReader_CliXmlError" in script
     assert "Start-Process" not in script
     assert "*> $logPath" not in script
+
+
+def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    deploy_step = (
+        'Invoke-FeatureStep -Name "deploy-production" '
+        "-Cwd $MainRoot -Command '.\\scripts\\deploy\\update-flux.ps1' "
+        "-TimeoutSeconds $DeployStepTimeoutSeconds"
+    )
+
+    assert deploy_step in script
 
 
 def test_complete_feature_script_releases_worktree_cwd_and_checks_cleanup_failures():

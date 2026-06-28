@@ -5,7 +5,8 @@ param(
     [switch]$DryRun,
     [switch]$SkipDeploy,
     [switch]$KeepWorktree,
-    [int]$StepTimeoutSeconds = 600
+    [int]$StepTimeoutSeconds = 600,
+    [int]$DeployStepTimeoutSeconds = 1800
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,7 +87,8 @@ function Invoke-FeatureStep {
     param(
         [string]$Name,
         [string]$Command,
-        [string]$Cwd
+        [string]$Cwd,
+        [int]$TimeoutSeconds = 0
     )
     $logPath = New-StepLogPath -Name $Name
     $record = [ordered]@{
@@ -106,6 +108,7 @@ function Invoke-FeatureStep {
     $stderrText = ""
     $stdoutTask = $null
     $stderrTask = $null
+    $effectiveTimeoutSeconds = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { $StepTimeoutSeconds }
     try {
         $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Command))
         # Process-level redirection avoids nested PowerShell stream parsing failures
@@ -124,15 +127,15 @@ function Invoke-FeatureStep {
         [void]$process.Start()
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($StepTimeoutSeconds * 1000)) {
+        if (-not $process.WaitForExit($effectiveTimeoutSeconds * 1000)) {
             $record.exit_code = 124
             Stop-FeatureProcessTree -ProcessId $process.Id
             $process.WaitForExit(5000) | Out-Null
             $stdoutText = Get-FeatureTaskResult -Task $stdoutTask
             $stderrText = Get-FeatureTaskResult -Task $stderrTask
             Write-FeatureStepOutput -LogPath $logPath -Stdout $stdoutText -Stderr $stderrText
-            "Step '$Name' timed out after $StepTimeoutSeconds seconds; process tree was stopped." | Out-File -FilePath $logPath -Append -Encoding UTF8
-            throw "Step '$Name' timed out after $StepTimeoutSeconds seconds. See $logPath"
+            "Step '$Name' timed out after $effectiveTimeoutSeconds seconds; process tree was stopped." | Out-File -FilePath $logPath -Append -Encoding UTF8
+            throw "Step '$Name' timed out after $effectiveTimeoutSeconds seconds. See $logPath"
         }
         $process.WaitForExit()
         $stdoutText = Get-FeatureTaskResult -Task $stdoutTask
@@ -298,7 +301,7 @@ try {
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command 'git fetch origin main; if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { exit 1 }'
     if (-not $SkipDeploy) {
-        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1'
+        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1' -TimeoutSeconds $DeployStepTimeoutSeconds
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 15 | Out-Null'
     }
