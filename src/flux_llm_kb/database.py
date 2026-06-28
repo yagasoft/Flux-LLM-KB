@@ -7298,7 +7298,25 @@ def enqueue_corpus_sync_job(
             )
             existing = cur.fetchone()
             if existing:
-                return {"job_id": existing[0], "status": existing[1], "root_name": root, "deduped": True}
+                cur.execute(
+                    """
+                    UPDATE capture_jobs
+                    SET priority = GREATEST(priority, %s),
+                        time_budget_seconds = GREATEST(time_budget_seconds, %s),
+                        telemetry = telemetry || %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s
+                    RETURNING id::text, status
+                    """,
+                    (
+                        schedule["priority"],
+                        schedule["time_budget_seconds"],
+                        _json({"stage": "queued", "root_name": root}),
+                        existing[0],
+                    ),
+                )
+                row = cur.fetchone() or existing
+                return {"job_id": row[0], "status": row[1], "root_name": root, "deduped": True}
             cur.execute(
                 """
                 INSERT INTO capture_jobs (
@@ -9671,14 +9689,21 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+JOB_TYPE_SCHEDULE_OVERRIDES: dict[str, dict[str, int]] = {
+    "corpus_sync_root": {"priority": 95, "time_budget_seconds": 1800},
+}
+
+
 def _job_schedule_metadata(job_type: str) -> dict[str, Any]:
     family = job_family_for_type(job_type)
-    return {
+    schedule = {
         "job_family": family,
         "resource_class": resource_class_for_family(family),
         "priority": default_priority_for_family(family),
         "time_budget_seconds": time_budget_for_family(family),
     }
+    schedule.update(JOB_TYPE_SCHEDULE_OVERRIDES.get(str(job_type or "").lower(), {}))
+    return schedule
 
 
 def _normalize_embedding_owner_class(owner_class: str | None) -> str:

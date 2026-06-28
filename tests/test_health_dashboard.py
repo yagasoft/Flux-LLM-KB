@@ -172,6 +172,7 @@ def test_dashboard_health_includes_actionable_error_details(monkeypatch):
     )
     monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "embeddings": 0})
     monkeypatch.setattr(database, "list_runtime_components", lambda: [], raising=False)
+    monkeypatch.setattr(database, "list_capture_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(
         health,
         "remote_status",

@@ -2003,6 +2003,117 @@ def test_cancel_corpus_job_blocks_running_jobs_with_explicit_error(monkeypatch):
     assert len(executed) == 1
 
 
+def test_corpus_sync_root_uses_operator_priority_and_long_budget():
+    schedule = database._job_schedule_metadata("corpus_sync_root")
+
+    assert schedule["job_family"] == "general"
+    assert schedule["resource_class"] == "cpu"
+    assert schedule["priority"] > database.default_priority_for_family("text")
+    assert schedule["time_budget_seconds"] >= 900
+
+
+def test_enqueue_corpus_sync_job_uses_operator_schedule(monkeypatch):
+    executed = []
+    schedule = database._job_schedule_metadata("corpus_sync_root")
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-new", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_corpus_sync_job(root_name="mail-outlook-mohesr", reason="manual_sync")
+
+    insert_params = next(params for statement, params in executed if "INSERT INTO capture_jobs" in statement)
+    assert result == {
+        "job_id": "job-new",
+        "status": "pending",
+        "root_name": "mail-outlook-mohesr",
+        "deduped": False,
+    }
+    assert insert_params[4] == schedule["priority"]
+    assert insert_params[5] == schedule["time_budget_seconds"]
+
+
+def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
+    executed = []
+    rows = [("job-existing", "pending"), ("job-existing", "pending")]
+    schedule = database._job_schedule_metadata("corpus_sync_root")
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_corpus_sync_job(root_name="mail-outlook-mohesr", reason="manual_sync")
+
+    sql = "\n".join(statement for statement, _params in executed)
+    update_params = next(params for statement, params in executed if "UPDATE capture_jobs" in statement)
+    assert result == {
+        "job_id": "job-existing",
+        "status": "pending",
+        "root_name": "mail-outlook-mohesr",
+        "deduped": True,
+    }
+    assert "priority = GREATEST(priority, %s)" in sql
+    assert "time_budget_seconds = GREATEST(time_budget_seconds, %s)" in sql
+    assert update_params[0] == schedule["priority"]
+    assert update_params[1] == schedule["time_budget_seconds"]
+    assert update_params[3] == "job-existing"
+
+
 def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
     executed = []
 
