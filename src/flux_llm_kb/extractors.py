@@ -293,7 +293,11 @@ def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str) -> Extrac
         return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
     text = path.read_text(encoding="utf-8", errors="replace").strip()
     chunks = _chunks_from_text(text, path.name)
-    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": extractor})
+    metadata: dict[str, Any] = {"extractor": extractor}
+    if not chunks and path.stat().st_size == 0:
+        metadata["empty"] = True
+        return ExtractionResult(status="indexed", chunks=chunks, metadata=metadata)
+    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
 
 
 def _extract_sample_first_structured(path: Path, policy: CorpusPolicy) -> ExtractionResult | None:
@@ -573,7 +577,42 @@ def _extract_subtitle(path: Path) -> ExtractionResult:
 
 def _extract_mail(path: Path) -> ExtractionResult:
     ext = path.suffix.lower()
+    if ext == ".msg":
+        return _extract_msg(path)
     messages = _mail_messages(path) if ext == ".mbox" else [_parse_email_message(path.read_bytes())]
+    return _mail_result(messages, path.name, mail_format=ext.lstrip(".") or "unknown")
+
+
+def _extract_msg(path: Path) -> ExtractionResult:
+    msgconvert = shutil.which("msgconvert")
+    if not msgconvert:
+        return ExtractionResult(
+            status="blocked_missing_dependency",
+            metadata={"extractor": "mail", "mail_format": "msg", "dependency": "msgconvert"},
+            message="msgconvert command not found",
+        )
+    with tempfile.TemporaryDirectory(prefix="flux-kb-msg-") as temp_dir:
+        output_path = Path(temp_dir) / f"{path.stem}.eml"
+        result = run_no_window([msgconvert, "--outfile", str(output_path), str(path)], timeout=OCR_TIMEOUT_SECONDS)
+        if result.returncode != 0 or not output_path.exists():
+            message = (result.stderr or result.stdout or "msgconvert failed").strip()
+            return ExtractionResult(
+                status="blocked_missing_dependency",
+                metadata={"extractor": "mail", "mail_format": "msg", "dependency": "msgconvert"},
+                message=message,
+            )
+        converted = _parse_email_message(output_path.read_bytes())
+    mail_result = _mail_result([converted], path.name, mail_format="msg")
+    return ExtractionResult(
+        status=mail_result.status,
+        chunks=mail_result.chunks,
+        child_assets=mail_result.child_assets,
+        metadata={**mail_result.metadata, "converted_format": "eml"},
+        message=mail_result.message,
+    )
+
+
+def _mail_result(messages: list[Any], source_name: str, *, mail_format: str) -> ExtractionResult:
     parts: list[str] = []
     subjects: list[str] = []
     attachment_count = 0
@@ -590,13 +629,13 @@ def _extract_mail(path: Path) -> ExtractionResult:
             message_parts.append(body)
         parts.append("\n".join(message_parts))
     text = "\n\n".join(part for part in parts if part.strip())
-    chunks = _chunks_from_text(text, path.name)
+    chunks = _chunks_from_text(text, source_name)
     return ExtractionResult(
         status="indexed" if chunks else "metadata_only",
         chunks=chunks,
         metadata={
             "extractor": "mail",
-            "mail_format": ext.lstrip(".") or "unknown",
+            "mail_format": mail_format,
             "message_count": len(messages),
             "attachment_count": attachment_count,
             "subjects": subjects[:20],

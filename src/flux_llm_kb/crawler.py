@@ -41,7 +41,7 @@ TEXT_EXTENSIONS = {
 }
 CODE_EXTENSIONS = set(CODE_LANGUAGE_EXTENSIONS)
 SUBTITLE_EXTENSIONS = {".ass", ".dfxp", ".sbv", ".srt", ".ssa", ".ttml", ".vtt"}
-MAIL_EXTENSIONS = {".eml", ".mbox"}
+MAIL_EXTENSIONS = {".eml", ".mbox", ".msg"}
 CALENDAR_EXTENSIONS = {".ics", ".ical", ".ifb"}
 CONTACT_EXTENSIONS = {".vcf", ".vcard"}
 STRUCTURED_DATA_EXTENSIONS = {".jsonld", ".ndjson", ".psv", ".ssv"}

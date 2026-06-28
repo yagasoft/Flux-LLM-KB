@@ -296,6 +296,7 @@ def test_classify_practical_corpus_coverage_extensions(tmp_path):
         ".srt": "subtitle",
         ".vtt": "subtitle",
         ".eml": "mail",
+        ".msg": "mail",
         ".mbox": "mail",
         ".ics": "calendar",
         ".vcf": "contact",

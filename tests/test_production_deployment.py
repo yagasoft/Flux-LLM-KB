@@ -116,6 +116,7 @@ def test_dockerfile_installs_practical_extractor_pack():
         "ffmpeg",
         "calibre",
         "pst-utils",
+        "libemail-address-perl",
         "libemail-outlook-message-perl",
         "libimage-exiftool-perl",
         "pandoc",

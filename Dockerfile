@@ -17,6 +17,7 @@ RUN apt-get update \
         cpio \
         ffmpeg \
         libarchive-tools \
+        libemail-address-perl \
         libemail-outlook-message-perl \
         libimage-exiftool-perl \
         libreoffice \

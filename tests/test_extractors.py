@@ -46,6 +46,18 @@ def test_extract_file_reads_text_chunks(tmp_path):
     assert result.metadata["extractor"] == "text"
 
 
+def test_extract_file_treats_empty_text_as_completed_no_content(tmp_path):
+    path = tmp_path / "body.txt"
+    path.write_text("", encoding="utf-8")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks == ()
+    assert result.metadata["extractor"] == "text"
+    assert result.metadata["empty"] is True
+
+
 def test_extract_file_records_png_dimensions_without_cloud_calls(tmp_path):
     path = tmp_path / "pixel.png"
     path.write_bytes(PNG_BYTES)
@@ -123,6 +135,51 @@ def test_extract_mbox_summarizes_multiple_messages(tmp_path):
     assert result.metadata["subjects"] == ["First Decision", "Second Decision"]
     assert "First body line." in result.chunks[0].body
     assert "Second body line." in result.chunks[0].body
+
+
+def test_extract_msg_uses_msgconvert_to_index_converted_eml(monkeypatch, tmp_path):
+    path = tmp_path / "attached.msg"
+    path.write_bytes(b"fake msg")
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/msgconvert.exe"
+        assert command[1] == "--outfile"
+        out_path = Path(command[2])
+        assert out_path.name == "attached.eml"
+        assert command[3] == str(path)
+        out_path.write_text(
+            "Subject: Shared Folder\nFrom: sender@example.com\n\nPlease review the shared folder.",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/msgconvert.exe" if command == "msgconvert" else None,
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["extractor"] == "mail"
+    assert result.metadata["mail_format"] == "msg"
+    assert result.metadata["converted_format"] == "eml"
+    assert result.metadata["subjects"] == ["Shared Folder"]
+    assert "Please review the shared folder." in result.chunks[0].body
+
+
+def test_extract_msg_blocks_when_msgconvert_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "attached.msg"
+    path.write_bytes(b"fake msg")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.metadata["extractor"] == "mail"
+    assert result.metadata["mail_format"] == "msg"
+    assert result.metadata["dependency"] == "msgconvert"
 
 
 def test_extract_calendar_and_contact_files_use_conservative_text_summaries(tmp_path):
