@@ -236,6 +236,7 @@ def scan_path(
     policy: CorpusPolicy | None = None,
     *,
     target_path: str | Path | None = None,
+    progress_callback: Callable[[dict[str, int | str]], None] | None = None,
 ) -> CrawlPlan:
     root = Path(root_path).expanduser().resolve()
     active_policy = policy or CorpusPolicy(root_path=root)
@@ -251,13 +252,17 @@ def scan_path(
         _iter_files(root, recursive=active_policy.recursive, target=target),
         key=lambda item: item.relative_to(root).as_posix().lower(),
     )
+    _emit_progress(progress_callback, stage="enumerated", files_total=len(paths))
 
+    files_skipped = 0
     for path in paths:
         try:
             relative_path = path.relative_to(root).as_posix()
             if not _is_included(relative_path, active_policy, marker_patterns):
+                files_skipped += 1
                 continue
             if active_policy.mail_spool and _is_mail_spool_internal_artifact(relative_path):
+                files_skipped += 1
                 continue
             if _should_wait_for_stability(path, root, active_policy):
                 entries.append(("asset", _status_asset(path, root, "pending_stable", "mtime_not_stable", active_policy)))
@@ -269,7 +274,17 @@ def scan_path(
                 continue
             errors.append({"path": str(path), "error": str(exc)})
 
+    _emit_progress(
+        progress_callback,
+        stage="filtered",
+        files_total=len(paths),
+        files_seen=0,
+        files_candidate=len(entries),
+        files_skipped=files_skipped,
+        errors=len(errors),
+    )
     stable_paths = [entry[1] for entry in entries if entry[0] == "path"]
+    _emit_progress(progress_callback, stage="hashing", files_total=len(stable_paths), files_seen=0)
     precomputed_hashes = _precompute_content_hashes(stable_paths, root, active_policy)
 
     for entry_type, entry in entries:
@@ -304,6 +319,14 @@ def scan_path(
                 continue
             errors.append({"path": str(path), "error": str(exc)})
 
+    _emit_progress(
+        progress_callback,
+        stage="discovered",
+        files_total=len(entries),
+        files_seen=len(assets),
+        jobs_queued=len(deferred_jobs),
+        errors=len(errors),
+    )
     return CrawlPlan(
         root_path=root,
         scope_relative_path=scope_relative_path,
@@ -312,6 +335,15 @@ def scan_path(
         deferred_jobs=deferred_jobs,
         errors=errors,
     )
+
+
+def _emit_progress(callback: Callable[[dict[str, int | str]], None] | None, **payload: int | str) -> None:
+    if callback is None:
+        return
+    try:
+        callback(dict(payload))
+    except Exception:
+        return
 
 
 def discover_asset(

@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from .acceleration import (
@@ -1899,9 +1899,11 @@ class KnowledgeService:
         path: str | Path | None = None,
         dry_run: bool = False,
         reason: str = "manual_sync",
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         root = _select_root(root_name=root_name, path=path)
         glob_policy = _configured_glob_policy(root)
+        manifest = _manifest_store(root["name"])
         policy = CorpusPolicy(
             root_path=Path(root["root_path"]),
             recursive=root["recursive"],
@@ -1912,12 +1914,12 @@ class KnowledgeService:
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
             **_configured_container_limits(),
             hash_parallelism=_configured_hash_parallelism(),
-            manifest_lookup=_manifest_lookup(root["name"]),
+            manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
             stability_quiet_seconds=_configured_stability_quiet_seconds() if reason == "watch_event" else 0.0,
             large_file_stability_quiet_seconds=_configured_large_file_stability_quiet_seconds() if reason == "watch_event" else 0.0,
             mail_spool=bool((root.get("metadata") or {}).get("mail_profile")) if isinstance(root.get("metadata"), dict) else False,
         )
-        plan = scan_path(root["root_path"], policy, target_path=path)
+        plan = scan_path(root["root_path"], policy, target_path=path, progress_callback=progress_callback)
         return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run, reason=reason)
 
     def watch_probe(self, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
@@ -3223,21 +3225,46 @@ class KnowledgeService:
         )
 
         stop_heartbeat = threading.Event()
+        progress_lock = threading.Lock()
+        latest_progress: dict[str, Any] = {"stage": "running", "root_name": root_name, "reason": reason}
+        last_progress_at = 0.0
+
+        def report_progress(progress: dict[str, Any]) -> None:
+            nonlocal last_progress_at
+            telemetry = {"root_name": root_name, "reason": reason}
+            telemetry.update(progress)
+            telemetry["stage"] = str(telemetry.get("stage") or "running")
+            with progress_lock:
+                latest_progress.clear()
+                latest_progress.update(telemetry)
+            now = time.monotonic()
+            if now - last_progress_at < 5.0 and telemetry["stage"] not in {"enumerated", "discovered"}:
+                return
+            last_progress_at = now
+            database.update_corpus_job_progress(job_id=job_id, telemetry=telemetry)
 
         def heartbeat() -> None:
             while not stop_heartbeat.wait(15.0):
                 try:
-                    database.update_corpus_job_progress(
-                        job_id=job_id,
-                        telemetry={"stage": "running", "root_name": root_name, "reason": reason},
-                    )
+                    with progress_lock:
+                        telemetry = dict(latest_progress)
+                    telemetry.setdefault("stage", "running")
+                    telemetry["root_name"] = root_name
+                    telemetry["reason"] = reason
+                    database.update_corpus_job_progress(job_id=job_id, telemetry=telemetry)
                 except Exception:
                     pass
 
         thread = threading.Thread(target=heartbeat, name=f"corpus-sync-heartbeat:{root_name}", daemon=True)
         thread.start()
         try:
-            result = self.sync_corpus(root_name=root_name, path=path, dry_run=False, reason=reason)
+            result = self.sync_corpus(
+                root_name=root_name,
+                path=path,
+                dry_run=False,
+                reason=reason,
+                progress_callback=report_progress,
+            )
         except ValueError as exc:
             message = str(exc)
             status = "cancelled_orphaned_root" if "monitored root not found" in message else "failed"
@@ -4693,6 +4720,13 @@ def _manifest_lookup(root_name: str):
             return None
 
     return lookup
+
+
+def _manifest_store(root_name: str) -> dict[str, dict[str, Any]]:
+    try:
+        return database.load_scan_manifest(root_name=root_name)
+    except Exception:
+        return {}
 
 
 def _watch_event_path_hash(event: WatchEvent) -> str:

@@ -5297,17 +5297,45 @@ def lookup_scan_manifest(*, root_name: str, path: str, url: str | None = None) -
             row = cur.fetchone()
             if row is None:
                 return None
-            return {
-                "path": row[0],
-                "size_bytes": row[1],
-                "mtime_ns": row[2],
-                "quick_hash": row[3],
-                "content_hash": row[4],
-                "metadata": _sanitize_operational_metadata(row[5] or {}),
-                "source_asset_status": row[6],
-                "source_asset_deleted": bool(row[7]),
-                "chunk_count": int(row[8] or 0),
-            }
+            return _scan_manifest_row(row)
+
+
+def load_scan_manifest(*, root_name: str, url: str | None = None) -> dict[str, dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            root_id = _root_id_for_name(cur, root_name)
+            cur.execute(
+                """
+                SELECT m.path, m.size_bytes, m.mtime_ns, m.quick_hash, m.content_hash,
+                       m.metadata, a.extraction_status, (a.deleted_at IS NOT NULL) AS source_asset_deleted,
+                       count(c.id)::integer AS chunk_count
+                FROM crawl_path_manifests m
+                LEFT JOIN source_assets a
+                  ON a.root_id = m.root_id
+                 AND a.path = m.path
+                LEFT JOIN asset_chunks c ON c.asset_id = a.id
+                WHERE m.root_id = %s
+                GROUP BY m.path, m.size_bytes, m.mtime_ns, m.quick_hash, m.content_hash,
+                         m.metadata, a.extraction_status, a.deleted_at
+                """,
+                (root_id,),
+            )
+            return {str(row[0]): _scan_manifest_row(row) for row in cur.fetchall()}
+
+
+def _scan_manifest_row(row: Any) -> dict[str, Any]:
+    return {
+        "path": row[0],
+        "size_bytes": row[1],
+        "mtime_ns": row[2],
+        "quick_hash": row[3],
+        "content_hash": row[4],
+        "metadata": _sanitize_operational_metadata(row[5] or {}),
+        "source_asset_status": row[6],
+        "source_asset_deleted": bool(row[7]),
+        "chunk_count": int(row[8] or 0),
+    }
 
 
 def apply_extraction_result(

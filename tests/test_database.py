@@ -1133,6 +1133,57 @@ def test_scan_manifest_upsert_and_lookup_are_metadata_only(monkeypatch):
     assert row["chunk_count"] == 2
 
 
+def test_load_scan_manifest_returns_path_manifest_map(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            if "SELECT id::text FROM monitored_roots" in executed[-1][0]:
+                return ("root-1",)
+            return None
+
+        def fetchall(self):
+            return [
+                ("docs/readme.md", 12, 42, "quick", "content", {"fixture": "text-heavy"}, "indexed", False, 2),
+                ("docs/missing.md", 10, 40, "quick2", None, {}, "queued", True, 0),
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    manifest = database.load_scan_manifest(root_name="docs")
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "SELECT m.path, m.size_bytes, m.mtime_ns, m.quick_hash, m.content_hash" in sql
+    assert "WHERE m.root_id = %s" in sql
+    assert "AND m.path = %s" not in sql
+    assert manifest["docs/readme.md"]["content_hash"] == "content"
+    assert manifest["docs/readme.md"]["chunk_count"] == 2
+    assert manifest["docs/missing.md"]["source_asset_deleted"] is True
+
+
 def test_persist_crawl_plan_replaces_chunks_for_manifest_missing_chunk_repair():
     source = Path(database.__file__).read_text(encoding="utf-8")
     function = source.split("def persist_crawl_plan", 1)[1].split("def crawl_status", 1)[0]

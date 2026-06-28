@@ -34,8 +34,17 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
 
     sync_calls = []
 
-    def fake_sync(self, *, root_name=None, path=None, dry_run=False, reason="manual_sync"):
-        sync_calls.append({"root_name": root_name, "path": path, "dry_run": dry_run, "reason": reason})
+    def fake_sync(self, *, root_name=None, path=None, dry_run=False, reason="manual_sync", progress_callback=None):
+        sync_calls.append(
+            {
+                "root_name": root_name,
+                "path": path,
+                "dry_run": dry_run,
+                "reason": reason,
+                "progress_callback": callable(progress_callback),
+            }
+        )
+        progress_callback({"stage": "enumerated", "files_total": 35655, "files_seen": 0, "jobs_queued": 0})
         return {
             "root_name": root_name,
             "dry_run": dry_run,
@@ -55,10 +64,17 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     assert calls["blocked"] == []
     assert calls["retried"] == []
     assert sync_calls == [
-        {"root_name": "mail-outlook-mohesr", "path": None, "dry_run": False, "reason": "outlook_spool_sync"}
+        {
+            "root_name": "mail-outlook-mohesr",
+            "path": None,
+            "dry_run": False,
+            "reason": "outlook_spool_sync",
+            "progress_callback": True,
+        }
     ]
     assert calls["progress"][0]["job_id"] == "job-sync"
     assert calls["progress"][0]["telemetry"]["stage"] == "starting"
+    assert any(call["telemetry"]["stage"] == "enumerated" for call in calls["progress"])
     assert calls["completed"][0]["job_id"] == "job-sync"
     assert calls["completed"][0]["telemetry"]["files_seen"] == 35655
     assert calls["completed"][0]["telemetry"]["jobs_queued"] == 120
@@ -604,16 +620,36 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
         ],
     )
 
-    def fake_scan(_root_path, policy, target_path=None):
+    def fake_scan(_root_path, policy, target_path=None, progress_callback=None):
         captured["policy"] = policy
         captured["target_path"] = target_path
+        captured["manifest"] = policy.manifest_lookup("docs/readme.md")
+        if progress_callback:
+            progress_callback({"stage": "enumerated", "files_total": 1})
         return SimpleNamespace(assets=[], deferred_jobs=[], errors=[], root_path=root)
 
     monkeypatch.setattr(service_module, "scan_path", fake_scan)
-    monkeypatch.setattr(database, "lookup_scan_manifest", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        database,
+        "load_scan_manifest",
+        lambda **_kwargs: {
+            "docs/readme.md": {
+                "content_hash": "cached",
+                "source_asset_status": "indexed",
+                "chunk_count": 1,
+            }
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
+        "lookup_scan_manifest",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("per-file manifest lookup should not be used")),
+    )
     monkeypatch.setattr(database, "persist_crawl_plan", lambda **kwargs: {"root_name": kwargs["root_name"]})
 
-    result = KnowledgeService().sync_corpus(root_name="docs")
+    progress = []
+    result = KnowledgeService().sync_corpus(root_name="docs", progress_callback=progress.append)
 
     assert result == {"root_name": "docs"}
     assert captured["policy"].container_max_depth == 3
@@ -621,6 +657,8 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
     assert captured["policy"].container_max_total_bytes == 8192
     assert captured["policy"].container_max_member_bytes == 1024
     assert callable(captured["policy"].manifest_lookup)
+    assert captured["manifest"]["content_hash"] == "cached"
+    assert progress == [{"stage": "enumerated", "files_total": 1}]
 
 
 def test_backfill_passes_configured_worker_family_caps(monkeypatch):

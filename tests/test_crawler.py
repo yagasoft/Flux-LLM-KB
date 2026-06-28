@@ -126,6 +126,26 @@ def test_scan_path_skips_mail_spool_internal_raw_artifacts(tmp_path):
     assert plan.deferred_jobs == []
 
 
+def test_scan_path_reports_progress_events(tmp_path):
+    root = tmp_path / "ready"
+    export = root / "export-1"
+    attachments = export / "attachments"
+    attachments.mkdir(parents=True)
+    (export / "body.txt").write_text("Please review the customer RFP.", encoding="utf-8")
+    (export / "manifest.json").write_text('{"subject":"Customer RFP"}', encoding="utf-8")
+    (export / "message.eml").write_text("Subject: Customer RFP\n\nPlease review", encoding="utf-8")
+    (attachments / "brief.pdf").write_bytes(b"%PDF-1.4\n")
+    events = []
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, mail_spool=True), progress_callback=events.append)
+
+    assert [event["stage"] for event in events] == ["enumerated", "filtered", "hashing", "discovered"]
+    assert events[0]["files_total"] == 4
+    assert events[1]["files_skipped"] == 1
+    assert events[-1]["files_seen"] == len(plan.assets)
+    assert events[-1]["jobs_queued"] == len(plan.deferred_jobs)
+
+
 def test_scan_path_indexes_two_level_eml_outside_managed_mail_spool(tmp_path):
     root = tmp_path / "docs"
     export = root / "export-1"
