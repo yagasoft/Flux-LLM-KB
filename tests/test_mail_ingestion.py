@@ -379,6 +379,71 @@ def test_export_outlook_item_does_not_touch_blocking_live_fields(tmp_path):
     assert parsed.text_body == ""
 
 
+def test_sync_mail_spool_for_profile_uses_api_fallback_when_host_spool_blocked(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    profile = {"name": "outlook-catchup", "source_type": "outlook_com"}
+    direct = {
+        "count": 1,
+        "profiles": [
+            {
+                "profile": "outlook-catchup",
+                "root_name": "mail-outlook-catchup",
+                "status": "blocked_spool_unavailable",
+                "error": "mail spool root is not accessible from this runtime",
+            }
+        ],
+    }
+    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: direct)
+    monkeypatch.setattr(
+        mail_ingestion,
+        "_sync_mail_spool_via_api",
+        lambda root_name: {"files_seen": 16, "jobs_queued": 16, "chunks_indexed": 0},
+    )
+
+    result = mail_ingestion._sync_mail_spool_for_profile(profile)
+
+    assert result["sync_mode"] == "api_fallback"
+    assert result["profiles"][0]["status"] == "api_synced"
+    assert result["profiles"][0]["root_name"] == "mail-outlook-catchup"
+    assert result["profiles"][0]["files_seen"] == 16
+    assert result["profiles"][0]["direct_status"] == "blocked_spool_unavailable"
+
+
+def test_sync_mail_spool_via_api_posts_root_sync(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({"files_seen": 16, "jobs_queued": 16}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append((request, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(mail_ingestion.urllib.request, "urlopen", fake_urlopen)
+
+    result = mail_ingestion._sync_mail_spool_via_api("mail-outlook-catchup", api_url="http://127.0.0.1:8765/")
+
+    request, timeout = calls[0]
+    assert result == {"files_seen": 16, "jobs_queued": 16}
+    assert request.full_url == "http://127.0.0.1:8765/api/crawl/sync"
+    assert request.get_method() == "POST"
+    assert timeout == 60
+    assert json.loads(request.data.decode("utf-8")) == {
+        "root_name": "mail-outlook-catchup",
+        "dry_run": False,
+    }
+
+
 def test_sync_imap_profile_refreshes_oauth_token_before_login(monkeypatch, tmp_path):
     from flux_llm_kb import mail_ingestion, mail_oauth
 

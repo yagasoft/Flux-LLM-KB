@@ -13,6 +13,8 @@ import re
 import shutil
 import time
 from typing import Any, Iterable
+import urllib.error
+import urllib.request
 
 from . import database
 from .mail_post_process import apply_mail_post_process_policy
@@ -340,7 +342,7 @@ def sync_mail_profile(
                 }
         else:
             result = {"profile": profile["name"], "status": "unsupported_source_type"}
-        spool_result = sync_mail_spool(profile_name=profile["name"])
+        spool_result = _sync_mail_spool_for_profile(profile)
         result["spool_sync"] = spool_result
         results.append(result)
     return {"profiles": results, "count": len(results)}
@@ -400,8 +402,66 @@ def sync_outlook_profile(profile_name: str) -> dict[str, Any]:
     if profile["source_type"] != "outlook_com":
         raise ValueError(f"mail profile is not Outlook COM: {profile_name}")
     result = _sync_outlook_profile(profile)
-    result["spool_sync"] = sync_mail_spool(profile_name=profile_name)
+    result["spool_sync"] = _sync_mail_spool_for_profile(profile)
     return result
+
+
+def _sync_mail_spool_for_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    direct = sync_mail_spool(profile_name=profile["name"])
+    if profile.get("source_type") != "outlook_com" or not _spool_sync_blocked_unavailable(direct):
+        return direct
+    root_name = f"mail-{profile['name']}"
+    try:
+        api_result = _sync_mail_spool_via_api(root_name)
+    except Exception as exc:
+        blocked = (direct.get("profiles") or [{}])[0]
+        return {
+            "profiles": [
+                {
+                    **blocked,
+                    "status": "blocked_spool_api_unavailable",
+                    "direct_status": blocked.get("status"),
+                    "api_error": str(exc),
+                }
+            ],
+            "count": 1,
+            "sync_mode": "api_fallback_failed",
+        }
+    return {
+        "profiles": [
+            {
+                "profile": profile["name"],
+                "root_name": root_name,
+                "status": "api_synced",
+                "direct_status": (direct.get("profiles") or [{}])[0].get("status"),
+                **api_result,
+            }
+        ],
+        "count": 1,
+        "sync_mode": "api_fallback",
+    }
+
+
+def _spool_sync_blocked_unavailable(result: dict[str, Any]) -> bool:
+    profiles = result.get("profiles") or []
+    return bool(profiles) and all(row.get("status") == "blocked_spool_unavailable" for row in profiles)
+
+
+def _sync_mail_spool_via_api(root_name: str, *, api_url: str | None = None) -> dict[str, Any]:
+    base_url = (api_url or os.environ.get("FLUX_KB_API_URL") or "http://127.0.0.1:8765").rstrip("/")
+    payload = json.dumps({"root_name": root_name, "dry_run": False}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{base_url}/api/crawl/sync",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"API spool sync failed with HTTP {exc.code}: {detail}") from exc
 
 
 def sync_mail_spool(profile_name: str | None = None) -> dict[str, Any]:
