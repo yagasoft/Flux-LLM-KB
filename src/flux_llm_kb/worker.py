@@ -95,6 +95,10 @@ def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) ->
     if not strict_indexing or getattr(result, "status", None) != "metadata_only":
         return result
     metadata = dict(getattr(result, "metadata", {}) or {})
+    decorative = metadata.get("decorative")
+    if isinstance(decorative, dict) and decorative.get("status") == "skipped":
+        metadata.update({"strict_indexing": True, "decorative_indexed": True})
+        return ExtractionResult(status="indexed", chunks=(), child_assets=(), metadata=metadata, message=getattr(result, "message", None))
     message = strict_metadata_only_message(getattr(result, "message", None))
     metadata.update(
         {

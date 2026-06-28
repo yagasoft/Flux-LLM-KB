@@ -94,6 +94,8 @@ VISION_TIMEOUT_SECONDS = 60
 FRAME_SAMPLING_TIMEOUT_SECONDS = 120
 PRACTICAL_TEXT_LIMIT_BYTES = 2 * 1024 * 1024
 PRACTICAL_SUMMARY_LIMIT = 50
+DECORATIVE_ICON_MAX_DIMENSION = 32
+DECORATIVE_ICON_MAX_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -238,10 +240,18 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
 
 
 def image_metadata(path: str | Path) -> dict[str, Any]:
+    file_path = Path(path)
     metadata: dict[str, Any] = {"extractor": "image"}
-    dimensions = _image_dimensions(Path(path))
+    try:
+        metadata["size_bytes"] = file_path.stat().st_size
+    except OSError:
+        pass
+    dimensions = _image_dimensions(file_path)
     if dimensions:
         metadata.update({"width": dimensions[0], "height": dimensions[1]})
+    has_transparency = _image_has_transparency(file_path)
+    if has_transparency is not None:
+        metadata["has_transparency"] = has_transparency
     return metadata
 
 
@@ -3173,7 +3183,7 @@ def _extract_image(path: Path) -> ExtractionResult:
     decorative = _decorative_image_metadata(metadata)
     if decorative is not None:
         metadata["decorative"] = decorative
-        return ExtractionResult(status="metadata_only", metadata=metadata)
+        return ExtractionResult(status="indexed", metadata=metadata)
     ocr = _ocr_image(path)
     metadata["ocr"] = ocr.metadata
     vision = _vision_image(path, source_label=path.name)
@@ -3750,6 +3760,17 @@ def _decorative_image_metadata(metadata: dict[str, Any]) -> dict[str, Any] | Non
     height = _int_or_none(metadata.get("height"))
     if width is not None and height is not None and (width <= 1 or height <= 1):
         return {"status": "skipped", "reason": "tiny_spacer"}
+    size_bytes = _int_or_none(metadata.get("size_bytes"))
+    if (
+        width is not None
+        and height is not None
+        and size_bytes is not None
+        and metadata.get("has_transparency") is True
+        and width <= DECORATIVE_ICON_MAX_DIMENSION
+        and height <= DECORATIVE_ICON_MAX_DIMENSION
+        and size_bytes <= DECORATIVE_ICON_MAX_BYTES
+    ):
+        return {"status": "skipped", "reason": "small_icon"}
     return None
 
 
@@ -3981,6 +4002,20 @@ def _image_dimensions(path: Path) -> tuple[int, int] | None:
             return image.size
     except Exception:
         return _png_dimensions(path)
+
+
+def _image_has_transparency(path: Path) -> bool | None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            if image.mode in {"RGBA", "LA"}:
+                extrema = image.getextrema()
+                if extrema and isinstance(extrema[-1], tuple):
+                    return int(extrema[-1][0]) < 255
+            return bool(image.info.get("transparency"))
+    except Exception:
+        return None
 
 
 def _png_dimensions(path: Path) -> tuple[int, int] | None:

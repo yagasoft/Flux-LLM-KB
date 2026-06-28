@@ -652,9 +652,39 @@ def test_extract_image_skips_decorative_one_pixel_assets_before_ocr_or_vision(mo
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
-    assert result.status == "metadata_only"
+    assert result.status == "indexed"
     assert result.chunks == ()
     assert result.metadata["decorative"] == {"status": "skipped", "reason": "tiny_spacer"}
+    assert "ocr" not in result.metadata
+    assert "vision" not in result.metadata
+
+
+def test_extract_image_skips_small_inline_icons_before_ocr_or_vision(monkeypatch, tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "inline-icon.png"
+    Image.new("RGBA", (20, 20), (0, 0, 0, 0)).save(path)
+    assert path.stat().st_size <= 4096
+    _configure_vision(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda _command: (_ for _ in ()).throw(AssertionError("decorative image should not probe OCR tools")),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("decorative image should not run tools")),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("decorative image should not call vision")),
+        raising=False,
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks == ()
+    assert result.metadata["decorative"] == {"status": "skipped", "reason": "small_icon"}
     assert "ocr" not in result.metadata
     assert "vision" not in result.metadata
 

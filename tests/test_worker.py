@@ -472,6 +472,53 @@ def test_process_corpus_job_blocks_metadata_only_for_strict_roots(monkeypatch, t
     assert applied_result.metadata["original_status"] == "metadata_only"
 
 
+def test_process_corpus_job_allows_decorative_metadata_only_for_strict_roots(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "icon.png").write_bytes(b"fake image")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="metadata_only",
+            message=None,
+            chunks=(),
+            child_assets=(),
+            metadata={"extractor": "image", "decorative": {"status": "skipped", "reason": "small_icon"}},
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "icon.png"}})
+
+    assert result.status == "indexed"
+    assert result.telemetry["decorative_image_skips"] == 1
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "indexed"
+    assert applied_result.chunks == ()
+    assert applied_result.metadata["strict_indexing"] is True
+    assert applied_result.metadata["decorative_indexed"] is True
+    assert "metadata_only_blocked" not in applied_result.metadata
+
+
 def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
     from flux_llm_kb import service as service_module
 
