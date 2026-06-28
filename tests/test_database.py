@@ -2465,6 +2465,17 @@ def test_outlook_claim_query_does_not_reference_update_alias_inside_from_join():
     assert "JOIN mail_profiles p ON p.id = r.profile_id" not in update_from
 
 
+def test_outlook_claim_query_recovers_stale_claims_from_dead_hosts():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def cancel_outlook_sync_request", 1)[0]
+
+    assert "stale_claimed" in claim_function
+    assert "r.status = 'claimed'" in claim_function
+    assert "r.claimed_at < now() - interval '15 minutes'" in claim_function
+    assert "h.heartbeat_at >= now() - interval '120 seconds'" in claim_function
+    assert "claimed_by = NULL" in claim_function
+
+
 def test_cancel_outlook_sync_request_blocks_claimed_mid_execution(monkeypatch):
     executed = []
 

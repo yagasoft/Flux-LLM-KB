@@ -7,6 +7,7 @@ from email.message import EmailMessage, Message
 from email.parser import BytesParser
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -106,7 +107,7 @@ def export_email_to_spool(
     source_message_id: str,
     extra_metadata: dict[str, Any] | None = None,
 ) -> MailExportResult:
-    spool = Path(spool_path).expanduser().resolve()
+    spool = _resolve_host_spool_path(spool_path)
     parsed = parse_email_bytes(raw_message)
     export_id = _export_id(profile_name, source_folder, source_message_id, raw_message)
     inflight = spool / "_inflight" / export_id
@@ -152,7 +153,7 @@ def export_email_to_spool(
 
 
 def scan_ready_spool(spool_path: str | Path) -> list[dict[str, Any]]:
-    ready = Path(spool_path).expanduser().resolve() / "ready"
+    ready = _resolve_host_spool_path(spool_path) / "ready"
     if not ready.exists():
         return []
     manifests: list[dict[str, Any]] = []
@@ -162,6 +163,20 @@ def scan_ready_spool(spool_path: str | Path) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             continue
     return manifests
+
+
+def _resolve_host_spool_path(spool_path: str | Path) -> Path:
+    raw_path = str(spool_path)
+    normalized = raw_path.replace("\\", "/")
+    container_private = "/app/private"
+    private_dir = os.environ.get("FLUX_KB_PRIVATE_DIR")
+    if private_dir and (normalized == container_private or normalized.startswith(f"{container_private}/")):
+        suffix = normalized.removeprefix(container_private).lstrip("/")
+        root = Path(private_dir).expanduser()
+        if suffix:
+            root = root.joinpath(*suffix.split("/"))
+        return root.resolve()
+    return Path(spool_path).expanduser().resolve()
 
 
 def normalize_outlook_folder_path(path: str) -> OutlookFolderPath:
@@ -551,23 +566,25 @@ def export_outlook_item_to_spool(
     folder_path: str,
 ) -> MailExportResult:
     raw_message = _outlook_item_to_email(item)
+    entry_id = getattr(item, "EntryID", None)
+    store_id = getattr(item, "StoreID", None)
     result = export_email_to_spool(
         raw_message=raw_message,
         spool_path=spool_path,
         profile_name=profile_name,
         source_type="outlook_com",
         source_folder=folder_path,
-        source_message_id=f"entry:{getattr(item, 'EntryID', '')}",
+        source_message_id=f"entry:{entry_id or ''}",
         extra_metadata={
-            "outlook_entry_id": getattr(item, "EntryID", None),
-            "outlook_store_id": getattr(item, "StoreID", None),
+            "outlook_entry_id": entry_id,
+            "outlook_store_id": store_id,
+            "outlook_export_mode": "metadata_only",
         },
     )
-    _save_outlook_msg_backup(item, result.ready_path / "message.msg")
-    _save_outlook_attachments(item, result.ready_path / "attachments")
     manifest = dict(result.manifest)
-    manifest["outlook_entry_id"] = getattr(item, "EntryID", None)
-    manifest["outlook_store_id"] = getattr(item, "StoreID", None)
+    manifest["outlook_entry_id"] = entry_id
+    manifest["outlook_store_id"] = store_id
+    manifest["outlook_export_mode"] = "metadata_only"
     (result.ready_path / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return MailExportResult(export_id=result.export_id, ready_path=result.ready_path, manifest=manifest)
 
@@ -973,21 +990,13 @@ def _resolve_outlook_folder(namespace: Any, folder_path: OutlookFolderPath) -> A
 def _outlook_item_to_email(item: Any) -> bytes:
     message = EmailMessage()
     message["Subject"] = str(getattr(item, "Subject", ""))
-    message["From"] = str(getattr(item, "SenderEmailAddress", ""))
-    message["To"] = str(getattr(item, "To", ""))
     internet_message_id = getattr(item, "InternetMessageID", None)
     if internet_message_id:
         message["Message-ID"] = str(internet_message_id)
     received = getattr(item, "ReceivedTime", None)
     if received:
         message["Date"] = str(received)
-    body = str(getattr(item, "Body", "") or "")
-    html_body = str(getattr(item, "HTMLBody", "") or "")
-    if html_body:
-        message.set_content(body or _strip_html(html_body))
-        message.add_alternative(html_body, subtype="html")
-    else:
-        message.set_content(body)
+    message.set_content("")
     return message.as_bytes()
 
 

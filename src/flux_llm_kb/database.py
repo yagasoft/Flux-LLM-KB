@@ -6942,6 +6942,35 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
         with conn.cursor() as cur:
             cur.execute(
                 """
+                WITH stale_claimed AS (
+                    SELECT r.id
+                    FROM outlook_sync_requests r
+                    JOIN mail_profiles p ON p.id = r.profile_id
+                    WHERE r.status = 'claimed'
+                      AND r.claimed_at < now() - interval '15 minutes'
+                      AND p.enabled
+                      AND p.source_type = 'outlook_com'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM outlook_host_state h
+                          WHERE h.host_id = r.claimed_by
+                            AND h.status = 'running'
+                            AND h.heartbeat_at >= now() - interval '120 seconds'
+                      )
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE outlook_sync_requests r
+                SET status = 'pending',
+                    claimed_by = NULL,
+                    claimed_at = NULL,
+                    updated_at = now(),
+                    result = COALESCE(r.result, '{}'::jsonb) || jsonb_build_object('requeued_from_stale_claim', true)
+                FROM stale_claimed
+                WHERE r.id = stale_claimed.id
+                """
+            )
+            cur.execute(
+                """
                 WITH request AS (
                     SELECT r.id, p.name
                     FROM outlook_sync_requests r
