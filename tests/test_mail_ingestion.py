@@ -309,62 +309,34 @@ def test_sync_imap_folder_records_post_process_failure_without_advancing_cursor(
     assert events[0]["status"] == "failed"
 
 
-def test_export_outlook_item_to_spool_writes_safe_metadata_manifest(tmp_path):
+def test_export_outlook_item_to_spool_writes_rich_outlook_artifacts(tmp_path):
+    class FakeAttachment:
+        FileName = "notes.txt"
+
+        def SaveAsFile(self, path):
+            Path(path).write_text("attachment", encoding="utf-8")
+
+    class FakeAttachments:
+        Count = 1
+
+        def Item(self, index):
+            assert index == 1
+            return FakeAttachment()
+
     class FakeItem:
         Subject = "Outlook catch-up"
+        SenderEmailAddress = "sender@example.com"
+        To = "me@example.com"
         EntryID = "entry-1"
         StoreID = "store-1"
         InternetMessageID = "<outlook-1@example.com>"
         ReceivedTime = "2026-06-20 10:00:00"
-
-    result = export_outlook_item_to_spool(
-        item=FakeItem(),
-        spool_path=tmp_path,
-        profile_name="outlook-catchup",
-        folder_path="Mailbox/Inbox/Flux",
-    )
-
-    assert not (result.ready_path / "message.msg").exists()
-    assert not any((result.ready_path / "attachments").iterdir())
-    assert result.manifest["source_type"] == "outlook_com"
-    assert result.manifest["outlook_entry_id"] == "entry-1"
-    assert result.manifest["outlook_export_mode"] == "metadata_only"
-
-
-def test_export_outlook_item_does_not_touch_blocking_live_fields(tmp_path):
-    class FakeItem:
-        Subject = "Outlook catch-up"
-        EntryID = "entry-2"
-        StoreID = "store-2"
-        InternetMessageID = "<outlook-2@example.com>"
-        ReceivedTime = "2026-06-20 10:00:00"
-
-        @property
-        def SenderName(self):
-            raise AssertionError("SenderName blocked")
-
-        @property
-        def SenderEmailAddress(self):
-            raise AssertionError("SenderEmailAddress blocked")
-
-        @property
-        def To(self):
-            raise AssertionError("To blocked")
-
-        @property
-        def Body(self):
-            raise AssertionError("Body blocked")
-
-        @property
-        def HTMLBody(self):
-            raise AssertionError("HTMLBody blocked")
-
-        @property
-        def Attachments(self):
-            raise AssertionError("Attachments blocked")
+        Body = "Outlook body text"
+        HTMLBody = "<p>Outlook body text</p>"
+        Attachments = FakeAttachments()
 
         def SaveAs(self, path, *_args):
-            raise AssertionError("SaveAs blocked")
+            Path(path).write_bytes(b"msg")
 
     result = export_outlook_item_to_spool(
         item=FakeItem(),
@@ -374,9 +346,15 @@ def test_export_outlook_item_does_not_touch_blocking_live_fields(tmp_path):
     )
 
     parsed = parse_email_bytes((result.ready_path / "message.eml").read_bytes())
-    assert parsed.subject == "Outlook catch-up"
-    assert parsed.sender == ""
-    assert parsed.text_body == ""
+    assert parsed.sender == "sender@example.com"
+    assert parsed.recipients == ("me@example.com",)
+    assert parsed.text_body == "Outlook body text"
+    assert (result.ready_path / "message.msg").read_bytes() == b"msg"
+    assert (result.ready_path / "attachments" / "notes.txt").read_text(encoding="utf-8") == "attachment"
+    assert result.manifest["source_type"] == "outlook_com"
+    assert result.manifest["outlook_entry_id"] == "entry-1"
+    assert result.manifest["outlook_export_mode"] == "rich"
+    assert result.manifest["outlook_attachment_count"] == 1
 
 
 def test_sync_mail_spool_for_profile_uses_api_fallback_when_host_spool_blocked(monkeypatch):

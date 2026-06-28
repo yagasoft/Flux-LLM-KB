@@ -628,6 +628,7 @@ def export_outlook_item_to_spool(
     raw_message = _outlook_item_to_email(item)
     entry_id = getattr(item, "EntryID", None)
     store_id = getattr(item, "StoreID", None)
+    export_mode = "rich"
     result = export_email_to_spool(
         raw_message=raw_message,
         spool_path=spool_path,
@@ -638,13 +639,16 @@ def export_outlook_item_to_spool(
         extra_metadata={
             "outlook_entry_id": entry_id,
             "outlook_store_id": store_id,
-            "outlook_export_mode": "metadata_only",
+            "outlook_export_mode": export_mode,
         },
     )
+    _save_outlook_msg_backup(item, result.ready_path / "message.msg")
+    outlook_attachment_count = _save_outlook_attachments(item, result.ready_path / "attachments")
     manifest = dict(result.manifest)
     manifest["outlook_entry_id"] = entry_id
     manifest["outlook_store_id"] = store_id
-    manifest["outlook_export_mode"] = "metadata_only"
+    manifest["outlook_export_mode"] = export_mode
+    manifest["outlook_attachment_count"] = outlook_attachment_count
     (result.ready_path / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return MailExportResult(export_id=result.export_id, ready_path=result.ready_path, manifest=manifest)
 
@@ -1050,13 +1054,21 @@ def _resolve_outlook_folder(namespace: Any, folder_path: OutlookFolderPath) -> A
 def _outlook_item_to_email(item: Any) -> bytes:
     message = EmailMessage()
     message["Subject"] = str(getattr(item, "Subject", ""))
+    message["From"] = str(getattr(item, "SenderEmailAddress", ""))
+    message["To"] = str(getattr(item, "To", ""))
     internet_message_id = getattr(item, "InternetMessageID", None)
     if internet_message_id:
         message["Message-ID"] = str(internet_message_id)
     received = getattr(item, "ReceivedTime", None)
     if received:
         message["Date"] = str(received)
-    message.set_content("")
+    body = str(getattr(item, "Body", "") or "")
+    html_body = str(getattr(item, "HTMLBody", "") or "")
+    if html_body:
+        message.set_content(body or _strip_html(html_body))
+        message.add_alternative(html_body, subtype="html")
+    else:
+        message.set_content(body)
     return message.as_bytes()
 
 
@@ -1069,16 +1081,19 @@ def _save_outlook_msg_backup(item: Any, path: Path) -> None:
         item.SaveAs(str(path))
 
 
-def _save_outlook_attachments(item: Any, attachments_dir: Path) -> None:
+def _save_outlook_attachments(item: Any, attachments_dir: Path) -> int:
     attachments = getattr(item, "Attachments", None)
     count = int(getattr(attachments, "Count", 0) or 0)
     if not attachments or count < 1:
-        return
+        return 0
     attachments_dir.mkdir(exist_ok=True)
+    saved = 0
     for index in range(1, count + 1):
         attachment = attachments.Item(index)
         filename = _safe_filename(str(getattr(attachment, "FileName", f"attachment-{index}.bin")))
         attachment.SaveAsFile(str(attachments_dir / filename))
+        saved += 1
+    return saved
 
 
 def _strip_html(value: str) -> str:
