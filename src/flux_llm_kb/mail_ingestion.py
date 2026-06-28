@@ -410,6 +410,42 @@ def sync_outlook_profile(profile_name: str) -> dict[str, Any]:
 
 
 def _sync_mail_spool_for_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    if profile.get("source_type") == "outlook_com":
+        root_name = f"mail-{profile['name']}"
+        try:
+            job = database.enqueue_corpus_sync_job(
+                root_name=root_name,
+                reason="outlook_spool_sync",
+                payload={"profile_name": profile["name"], "source_type": "outlook_com"},
+            )
+        except Exception as exc:
+            return {
+                "profiles": [
+                    {
+                        "profile": profile["name"],
+                        "root_name": root_name,
+                        "status": "blocked_spool_job_unavailable",
+                        "error": str(exc),
+                    }
+                ],
+                "count": 1,
+                "sync_mode": "background_job_failed",
+            }
+        return {
+            "profiles": [
+                {
+                    "profile": profile["name"],
+                    "root_name": root_name,
+                    "status": "queued_background_sync",
+                    "job_id": job["job_id"],
+                    "job_status": job["status"],
+                    "deduped": job.get("deduped", False),
+                }
+            ],
+            "count": 1,
+            "sync_mode": "background_job",
+        }
+
     direct = sync_mail_spool(profile_name=profile["name"])
     if profile.get("source_type") != "outlook_com" or not _spool_sync_blocked_unavailable(direct):
         return direct

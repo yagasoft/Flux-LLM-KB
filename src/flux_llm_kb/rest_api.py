@@ -620,6 +620,16 @@ def create_app():
     def dashboard_jobs(limit: int = 50):
         return collect_jobs_payload(limit=limit)
 
+    @app.post("/api/dashboard/jobs/{job_id}/cancel")
+    def dashboard_job_cancel(job_id: str):
+        from . import database
+
+        payload = database.cancel_corpus_job(job_id=job_id, actor="dashboard")
+        if not payload.get("cancelled"):
+            status_code = 404 if payload.get("status") == "not_found" else 409
+            raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job cannot be cancelled.")
+        return payload
+
     @app.get("/api/dashboard/retrieval-stats")
     def dashboard_retrieval_stats():
         return collect_retrieval_payload()
@@ -1346,6 +1356,16 @@ def create_app():
     @app.get("/api/crawl/jobs")
     def crawl_jobs(limit: int = 50):
         return collect_jobs_payload(limit=limit)
+
+    @app.post("/api/crawl/jobs/{job_id}/cancel")
+    def crawl_job_cancel(job_id: str):
+        from . import database
+
+        payload = database.cancel_corpus_job(job_id=job_id, actor="dashboard")
+        if not payload.get("cancelled"):
+            status_code = 404 if payload.get("status") == "not_found" else 409
+            raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job cannot be cancelled.")
+        return payload
 
     @app.post("/api/crawl/backfill")
     def crawl_backfill(request: CrawlBackfillRequest = Body(...)):

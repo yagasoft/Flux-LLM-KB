@@ -354,6 +354,7 @@ let governanceRunPayload: unknown;
 let governanceApplyPayload: unknown;
 let governanceRecoverPayload: unknown;
 let outlookCancelRequests: string[];
+let corpusCancelRequests: string[];
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -711,6 +712,7 @@ describe("Flux dashboard", () => {
       ]
     };
     outlookCancelRequests = [];
+    corpusCancelRequests = [];
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -1204,6 +1206,18 @@ describe("Flux dashboard", () => {
           );
         }
         return json({ id: requestId, status: "cancelled", cancelled: true });
+      }
+      if (url.startsWith("/api/dashboard/jobs/") && url.endsWith("/cancel")) {
+        corpusCancelRequests.push(url);
+        const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");
+        if (jobId === "job-sync-running") {
+          return errorJson(
+            { error: { message: "Corpus job is running and cannot be cancelled mid-execution." } },
+            409,
+            "Conflict"
+          );
+        }
+        return json({ job_id: jobId, status: "cancelled_operator", cancelled: true });
       }
       if (url === "/api/crawl/roots") return json({ root: JSON.parse(String(init?.body)), sync: { files_seen: 0 } });
       if (url.startsWith("/api/crawl/roots/") && init?.method === "PATCH") {
@@ -1745,6 +1759,56 @@ describe("Flux dashboard", () => {
     expect(await screen.findByText("Outlook sync request cancelled.")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Cancel Outlook request req-claimed" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("cannot be cancelled mid-execution");
+  });
+
+  test("job queue shows corpus sync progress and cancel feedback", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-sync-pending",
+          job_type: "corpus_sync_root",
+          status: "pending",
+          payload: { root_name: "mail-outlook-mohesr", profile_name: "outlook-mohesr", reason: "outlook_spool_sync" },
+          attempts: 0,
+          telemetry: { stage: "queued" },
+          updated_at: "2026-06-27T16:29:01+00:00"
+        },
+        {
+          id: "job-sync-running",
+          job_type: "corpus_sync_root",
+          status: "running",
+          payload: { root_name: "mail-outlook-mohesr", profile_name: "outlook-mohesr", reason: "outlook_spool_sync" },
+          attempts: 1,
+          telemetry: { stage: "running", files_seen: 35655, files_changed: 35371, jobs_queued: 120 },
+          updated_at: "2026-06-27T16:30:01+00:00"
+        }
+      ]
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    const table = await screen.findByRole("table", { name: "Extraction jobs" });
+    expect(within(table).getAllByText("Sync Root")).toHaveLength(2);
+    expect(within(table).getAllByText("outlook-mohesr")).toHaveLength(2);
+    expect(within(table).getAllByText("mail-outlook-mohesr")).toHaveLength(2);
+
+    await user.click(screen.getByRole("button", { name: "Show details for job job-sync-running" }));
+    expect(screen.getByText("Stage")).toBeInTheDocument();
+    expect(screen.getAllByText("Running").length).toBeGreaterThan(0);
+    expect(screen.getByText("Files seen")).toBeInTheDocument();
+    expect(screen.getByText("35655")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel corpus job job-sync-pending" }));
+    await waitFor(() => {
+      expect(corpusCancelRequests).toContain("/api/dashboard/jobs/job-sync-pending/cancel");
+    });
+    expect(await screen.findByText("Corpus job cancelled.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel corpus job job-sync-running" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("cannot be cancelled mid-execution");
   });
 

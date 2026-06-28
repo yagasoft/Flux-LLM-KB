@@ -1919,6 +1919,90 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert executed[0][1] == ("operator retry", "job-1")
 
 
+def test_cancel_corpus_job_marks_pending_jobs_cancelled(monkeypatch):
+    executed = []
+    rows = [("job-1", "pending")]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.cancel_corpus_job(job_id="job-1", actor="dashboard")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"job_id": "job-1", "status": "cancelled_operator", "cancelled": True}
+    assert "status = 'cancelled_operator'" in sql
+    assert "status IN ('pending', 'retrying_locked')" in sql
+    assert executed[1][1] == ("cancelled by dashboard", "job-1")
+
+
+def test_cancel_corpus_job_blocks_running_jobs_with_explicit_error(monkeypatch):
+    executed = []
+    rows = [("job-running", "running")]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.cancel_corpus_job(job_id="job-running", actor="dashboard")
+
+    assert result["job_id"] == "job-running"
+    assert result["status"] == "running"
+    assert result["cancelled"] is False
+    assert "cannot be cancelled mid-execution" in result["error"]
+    assert len(executed) == 1
+
+
 def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
     executed = []
 

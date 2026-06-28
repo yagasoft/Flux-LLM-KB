@@ -1208,6 +1208,16 @@ export default function App() {
     }
   }
 
+  async function cancelCorpusJob(jobId: string) {
+    try {
+      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/cancel`, "POST", {});
+      setToast("Corpus job cancelled.");
+      await load();
+    } catch (error) {
+      setToast(`Corpus job cancellation failed: ${errorMessage(error)}`);
+    }
+  }
+
   async function saveProfile(form: ProfileForm) {
     const outlook = form.source_type === "outlook_com";
     const payload = {
@@ -1895,6 +1905,7 @@ export default function App() {
             state={state}
             onRefresh={() => void load()}
             onCancelOutlookRequest={(requestId) => void cancelOutlookRequest(requestId)}
+            onCancelCorpusJob={(jobId) => void cancelCorpusJob(jobId)}
           />
         )}
       </main>
@@ -4910,11 +4921,13 @@ function prettyStreamName(value: string): string {
 function JobsTab({
   state,
   onRefresh,
-  onCancelOutlookRequest
+  onCancelOutlookRequest,
+  onCancelCorpusJob
 }: {
   state: LoadState;
   onRefresh: () => void;
   onCancelOutlookRequest: (requestId: string) => void;
+  onCancelCorpusJob: (jobId: string) => void;
 }) {
   const outlookJobs = activeOutlookRequests(state.outlook.pending_requests).map(outlookRequestJob);
   const jobs = [...outlookJobs, ...(state.jobs.jobs ?? [])];
@@ -4932,6 +4945,7 @@ function JobsTab({
           label={hasOutlookRequests ? "Operational jobs" : "Extraction jobs"}
           empty={hasOutlookRequests ? "No operational jobs queued." : "No queued extraction jobs."}
           onCancelOutlookRequest={onCancelOutlookRequest}
+          onCancelCorpusJob={onCancelCorpusJob}
         />
       </Panel>
       <Panel title="Worker Family Status">
@@ -4946,12 +4960,14 @@ function JobQueueTable({
   jobs,
   label,
   empty,
-  onCancelOutlookRequest
+  onCancelOutlookRequest,
+  onCancelCorpusJob
 }: {
   jobs: Array<Record<string, unknown>>;
   label: string;
   empty: string;
   onCancelOutlookRequest?: (requestId: string) => void;
+  onCancelCorpusJob?: (jobId: string) => void;
 }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   if (jobs.length === 0) return <p className="muted">{empty}</p>;
@@ -4978,6 +4994,7 @@ function JobQueueTable({
             const status = stringFromUnknown(job.status) ?? "unknown";
             const expanded = expandedJobId === id;
             const outlookRequest = stringFromUnknown(job.job_type) === "outlook_sync_request";
+            const cancellableCorpusJob = isCancelableCorpusJob(job, status);
             return (
               <Fragment key={id}>
                 <tr>
@@ -4995,6 +5012,16 @@ function JobQueueTable({
                         type="button"
                         aria-label={`Cancel Outlook request ${id}`}
                         onClick={() => onCancelOutlookRequest?.(id)}
+                      >
+                        <Trash2 size={15} /> Cancel
+                      </button>
+                    ) : null}
+                    {cancellableCorpusJob ? (
+                      <button
+                        className="row-button warning"
+                        type="button"
+                        aria-label={`Cancel corpus job ${id}`}
+                        onClick={() => onCancelCorpusJob?.(id)}
                       >
                         <Trash2 size={15} /> Cancel
                       </button>
@@ -5033,6 +5060,7 @@ function JobDetailRow({
   id: string;
   status: string;
 }) {
+  const telemetry = jobTelemetry(job);
   const details = [
     ["Job id", id],
     ["Status", humanizeIdentifier(status)],
@@ -5044,6 +5072,10 @@ function JobDetailRow({
     ["Claimed by", stringFromUnknown(payload.claimed_by)],
     ["Asset id", stringFromUnknown(payload.asset_id)],
     ["Source id", stringFromUnknown(payload.source_id)],
+    ["Stage", humanizeIdentifier(stringFromUnknown(telemetry.stage) ?? "")],
+    ["Files seen", stringFromUnknown(telemetry.files_seen) ?? numberFromUnknown(telemetry.files_seen)?.toString()],
+    ["Files changed", stringFromUnknown(telemetry.files_changed) ?? numberFromUnknown(telemetry.files_changed)?.toString()],
+    ["Jobs queued", stringFromUnknown(telemetry.jobs_queued) ?? numberFromUnknown(telemetry.jobs_queued)?.toString()],
     ["Attempts", String(numberFromUnknown(job.attempts) ?? 0)],
     ["Created", formatDate(stringFromUnknown(job.created_at))],
     ["Updated", formatDate(stringFromUnknown(job.updated_at))]
@@ -5097,12 +5129,18 @@ function jobPayload(job: Record<string, unknown>) {
   return job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload as Record<string, unknown> : {};
 }
 
+function jobTelemetry(job: Record<string, unknown>) {
+  return job.telemetry && typeof job.telemetry === "object" && !Array.isArray(job.telemetry) ? job.telemetry as Record<string, unknown> : {};
+}
+
 function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown>) {
+  const syncRootJob = stringFromUnknown(job.job_type) === "corpus_sync_root";
   const path = stringFromUnknown(payload.path)
     ?? stringFromUnknown(payload.canonical_path)
     ?? stringFromUnknown(payload.file_path)
     ?? stringFromUnknown(payload.profile_name)
     ?? stringFromUnknown(job.path)
+    ?? (syncRootJob ? "Root sync" : undefined)
     ?? "No path";
   const root = stringFromUnknown(payload.root_name) ?? stringFromUnknown(job.root_name) ?? "-";
   return { path, root };
@@ -5110,6 +5148,11 @@ function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown
 
 function jobTypeLabel(value?: string) {
   return humanizeIdentifier(value?.replace(/^corpus_/, "") ?? "job");
+}
+
+function isCancelableCorpusJob(job: Record<string, unknown>, status: string) {
+  const type = stringFromUnknown(job.job_type) ?? "";
+  return type.startsWith("corpus_") && ["pending", "retrying_locked", "running"].includes(status);
 }
 
 function activeOutlookRequests(requests?: OutlookSyncRequest[]) {

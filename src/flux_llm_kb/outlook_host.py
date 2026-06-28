@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -72,7 +73,7 @@ def run_forever(*, host_id: str = DEFAULT_HOST_ID, interval_seconds: int = 15, m
     }
 
 
-def run_once(*, host_id: str = DEFAULT_HOST_ID) -> dict[str, Any]:
+def run_once(*, host_id: str = DEFAULT_HOST_ID, heartbeat_interval_seconds: float = 30.0) -> dict[str, Any]:
     if platform.system() != "Windows":
         return _blocked(host_id, "blocked_not_windows", "Outlook COM host requires Windows")
     try:
@@ -86,7 +87,12 @@ def run_once(*, host_id: str = DEFAULT_HOST_ID) -> dict[str, Any]:
         return {"status": "idle", "host_id": host_id}
 
     try:
-        result = sync_outlook_profile(request["profile_name"])
+        result = _run_with_active_heartbeat(
+            host_id=host_id,
+            metadata={"active_request_id": request["id"], "profile_name": request["profile_name"]},
+            interval_seconds=heartbeat_interval_seconds,
+            action=lambda: sync_outlook_profile(request["profile_name"]),
+        )
         status_value = result.get("status", "completed")
         database.complete_outlook_sync_request(
             request_id=request["id"],
@@ -117,6 +123,33 @@ def run_once(*, host_id: str = DEFAULT_HOST_ID) -> dict[str, Any]:
             "status": "blocked_outlook_unavailable",
             "error": str(exc),
         }
+
+
+def _run_with_active_heartbeat(
+    *,
+    host_id: str,
+    metadata: dict[str, Any],
+    interval_seconds: float,
+    action,
+):
+    stop_heartbeat = threading.Event()
+    interval = max(0.1, float(interval_seconds or 30.0))
+
+    def heartbeat() -> None:
+        while not stop_heartbeat.is_set():
+            try:
+                database.record_outlook_host_heartbeat(host_id=host_id, status="running", metadata=metadata)
+            except Exception:
+                traceback.print_exc()
+            stop_heartbeat.wait(interval)
+
+    thread = threading.Thread(target=heartbeat, name=f"outlook-host-heartbeat:{host_id}", daemon=True)
+    thread.start()
+    try:
+        return action()
+    finally:
+        stop_heartbeat.set()
+        thread.join(timeout=1.0)
 
 
 def _blocked(host_id: str, status_value: str, message: str) -> dict[str, Any]:

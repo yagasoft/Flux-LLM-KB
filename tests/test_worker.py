@@ -7,6 +7,63 @@ from flux_llm_kb import database, service as service_module
 from flux_llm_kb.service import KnowledgeService
 
 
+def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "progress": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
+            {
+                "id": "job-sync",
+                "job_type": "corpus_sync_root",
+                "job_family": "general",
+                "resource_class": "cpu",
+                "payload": {"root_name": "mail-outlook-mohesr", "reason": "outlook_spool_sync"},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "update_corpus_job_progress", lambda **kwargs: calls["progress"].append(kwargs), raising=False)
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    sync_calls = []
+
+    def fake_sync(self, *, root_name=None, path=None, dry_run=False, reason="manual_sync"):
+        sync_calls.append({"root_name": root_name, "path": path, "dry_run": dry_run, "reason": reason})
+        return {
+            "root_name": root_name,
+            "dry_run": dry_run,
+            "reason": reason,
+            "files_seen": 35655,
+            "files_changed": 35371,
+            "files_deleted": 0,
+            "jobs_queued": 120,
+            "chunks_indexed": 6500,
+        }
+
+    monkeypatch.setattr(KnowledgeService, "sync_corpus", fake_sync)
+
+    result = KnowledgeService().run_corpus_backfill(kind="general", limit=1, workers=1)
+
+    assert result["completed"] == 1
+    assert calls["blocked"] == []
+    assert calls["retried"] == []
+    assert sync_calls == [
+        {"root_name": "mail-outlook-mohesr", "path": None, "dry_run": False, "reason": "outlook_spool_sync"}
+    ]
+    assert calls["progress"][0]["job_id"] == "job-sync"
+    assert calls["progress"][0]["telemetry"]["stage"] == "starting"
+    assert calls["completed"][0]["job_id"] == "job-sync"
+    assert calls["completed"][0]["telemetry"]["files_seen"] == 35655
+    assert calls["completed"][0]["telemetry"]["jobs_queued"] == 120
+
+
 def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(

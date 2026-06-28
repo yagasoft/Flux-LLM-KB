@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import sys
+import threading
+import types
 
 from flux_llm_kb import database
 
@@ -103,6 +106,54 @@ def test_outlook_host_claims_due_request_and_runs_com_sync(monkeypatch):
     assert ("heartbeat", {"host_id": "host-1", "status": "running", "metadata": {}}) in events
     assert events[-1][0] == "complete"
     assert events[-1][1]["status"] == "completed"
+
+
+def test_outlook_host_heartbeats_while_sync_request_is_running(monkeypatch):
+    from flux_llm_kb import outlook_host
+
+    events = []
+    saw_two_active_heartbeats = threading.Event()
+    monkeypatch.setattr(outlook_host.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "win32com", types.SimpleNamespace(client=types.SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "win32com.client", types.SimpleNamespace())
+
+    def fake_heartbeat(**kwargs):
+        events.append(("heartbeat", kwargs))
+        metadata = kwargs.get("metadata") or {}
+        active = [
+            event
+            for event_type, event in events
+            if event_type == "heartbeat" and (event.get("metadata") or {}).get("active_request_id") == "req-1"
+        ]
+        if len(active) >= 2:
+            saw_two_active_heartbeats.set()
+        return kwargs
+
+    monkeypatch.setattr(database, "record_outlook_host_heartbeat", fake_heartbeat)
+    monkeypatch.setattr(
+        database,
+        "claim_outlook_sync_request",
+        lambda host_id="default": {"id": "req-1", "profile_name": "outlook-catchup", "status": "claimed"},
+    )
+
+    def slow_sync(profile_name):
+        assert saw_two_active_heartbeats.wait(1.0)
+        return {"profile": profile_name, "status": "completed", "exported": 3}
+
+    monkeypatch.setattr(outlook_host, "sync_outlook_profile", slow_sync)
+    monkeypatch.setattr(database, "complete_outlook_sync_request", lambda **kwargs: events.append(("complete", kwargs)) or kwargs)
+
+    payload = outlook_host.run_once(host_id="host-1", heartbeat_interval_seconds=0.01)
+
+    assert payload["status"] == "completed"
+    active_heartbeats = [
+        event
+        for event_type, event in events
+        if event_type == "heartbeat" and (event.get("metadata") or {}).get("active_request_id") == "req-1"
+    ]
+    assert len(active_heartbeats) >= 2
+    assert all(event["status"] == "running" for event in active_heartbeats)
+    assert events[-1][0] == "complete"
 
 
 def test_outlook_host_reports_not_windows_without_crashing(monkeypatch):

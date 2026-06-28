@@ -896,6 +896,31 @@ def test_crawl_backfill_endpoint_runs_worker_once(monkeypatch):
     assert data_response.json()["backfill"] == {"kind": "data", "limit": 5, "workers": 1}
 
 
+def test_dashboard_job_cancel_endpoint_reports_running_job_conflict(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "cancel_corpus_job",
+        lambda **kwargs: calls.append(kwargs)
+        or {
+            "job_id": kwargs["job_id"],
+            "status": "running",
+            "cancelled": False,
+            "error": "Corpus job is running and cannot be cancelled mid-execution.",
+        },
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-running/cancel")
+
+    assert response.status_code == 409
+    assert "cannot be cancelled mid-execution" in response.json()["detail"]
+    assert calls == [{"job_id": "job-running", "actor": "dashboard"}]
+
+
 def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

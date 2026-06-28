@@ -3321,6 +3321,68 @@ def requeue_corpus_job(
             return {"job_id": row[0], "status": row[1], "attempts": int(row[2] or 0)}
 
 
+def cancel_corpus_job(
+    *,
+    job_id: str,
+    actor: str = "operator",
+    url: str | None = None,
+) -> dict[str, Any]:
+    clean_actor = str(actor or "operator").strip() or "operator"
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, status
+                FROM capture_jobs
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {"job_id": job_id, "status": "not_found", "cancelled": False, "error": f"corpus job not found: {job_id}"}
+            status = str(row[1] or "unknown")
+            if status == "running":
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "cancelled": False,
+                    "error": "Corpus job is running and cannot be cancelled mid-execution.",
+                }
+            if status not in {"pending", "retrying_locked"}:
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "cancelled": False,
+                    "error": f"Corpus job status {status} cannot be cancelled.",
+                }
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = 'cancelled_operator',
+                    last_error = %s,
+                    completed_at = now(),
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND status IN ('pending', 'retrying_locked')
+                """,
+                (f"cancelled by {clean_actor}", row[0]),
+            )
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, target_table, target_id, details)
+                VALUES ('capture_job.cancelled', 'capture_jobs', %s, %s::jsonb)
+                """,
+                (row[0], _json({"actor": clean_actor, "previous_status": status})),
+            )
+            return {"job_id": row[0], "status": "cancelled_operator", "cancelled": True}
+
+
 def block_corpus_job(
     *,
     job_id: str,
@@ -7204,6 +7266,90 @@ def get_outlook_host_state(*, host_id: str = "default", url: str | None = None) 
                 "metadata": row[5],
                 "updated_at": row[6].isoformat(),
             }
+
+
+def enqueue_corpus_sync_job(
+    *,
+    root_name: str,
+    reason: str = "manual_sync",
+    payload: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    root = str(root_name or "").strip()
+    if not root:
+        raise ValueError("root_name is required")
+    job_payload = {"root_name": root, "reason": str(reason or "manual_sync")}
+    job_payload.update(payload or {})
+    schedule = _job_schedule_metadata("corpus_sync_root")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, status
+                FROM capture_jobs
+                WHERE job_type = 'corpus_sync_root'
+                  AND payload->>'root_name' = %s
+                  AND status IN ('pending', 'running', 'retrying_locked')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (root,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                return {"job_id": existing[0], "status": existing[1], "root_name": root, "deduped": True}
+            cur.execute(
+                """
+                INSERT INTO capture_jobs (
+                    job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
+                )
+                VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
+                RETURNING id::text, status
+                """,
+                (
+                    "corpus_sync_root",
+                    _json(job_payload),
+                    schedule["job_family"],
+                    schedule["resource_class"],
+                    schedule["priority"],
+                    schedule["time_budget_seconds"],
+                    _json({"stage": "queued", "root_name": root}),
+                ),
+            )
+            row = cur.fetchone()
+            job_id = row[0]
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, target_table, target_id, details)
+                VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
+                """,
+                (job_id, _json({"job_type": "corpus_sync_root", "root_name": root, "reason": job_payload["reason"]})),
+            )
+            return {"job_id": job_id, "status": row[1], "root_name": root, "deduped": False}
+
+
+def update_corpus_job_progress(
+    *,
+    job_id: str,
+    telemetry: dict[str, Any],
+    last_error: str | None = None,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET telemetry = telemetry || %s::jsonb,
+                    last_error = COALESCE(%s, last_error),
+                    updated_at = now()
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                """,
+                (_json(telemetry or {}), last_error, job_id),
+            )
 
 
 def enqueue_capture_job(

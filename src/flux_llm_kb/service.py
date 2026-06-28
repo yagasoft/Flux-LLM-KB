@@ -11,6 +11,7 @@ from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 import tempfile
+import threading
 import time
 from typing import Any
 from uuid import UUID, uuid4
@@ -3109,7 +3110,9 @@ class KnowledgeService:
         cancelled_orphaned = 0
         for job in claimed:
             started = time.perf_counter()
-            if job.get("job_type") == "corpus_embed":
+            if job.get("job_type") == "corpus_sync_root":
+                process_result = self._process_corpus_sync_job(job)
+            elif job.get("job_type") == "corpus_embed":
                 process_result = worker.process_embedding_job(job)
             else:
                 process_result = worker.process_corpus_job(job)
@@ -3203,6 +3206,68 @@ class KnowledgeService:
             "cleared_completed_errors": cleared_errors["cleared"],
             "jobs": claimed,
         }
+
+    def _process_corpus_sync_job(self, job: dict[str, Any]):
+        from .worker import JobProcessResult
+
+        payload = job.get("payload") or {}
+        root_name = str(payload.get("root_name") or "").strip()
+        if not root_name:
+            return JobProcessResult(status="failed", message="corpus_sync_root payload requires root_name")
+        reason = str(payload.get("reason") or "background_sync")
+        path = payload.get("path") or None
+        job_id = str(job.get("id") or "")
+        database.update_corpus_job_progress(
+            job_id=job_id,
+            telemetry={"stage": "starting", "root_name": root_name, "reason": reason},
+        )
+
+        stop_heartbeat = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop_heartbeat.wait(15.0):
+                try:
+                    database.update_corpus_job_progress(
+                        job_id=job_id,
+                        telemetry={"stage": "running", "root_name": root_name, "reason": reason},
+                    )
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=heartbeat, name=f"corpus-sync-heartbeat:{root_name}", daemon=True)
+        thread.start()
+        try:
+            result = self.sync_corpus(root_name=root_name, path=path, dry_run=False, reason=reason)
+        except ValueError as exc:
+            message = str(exc)
+            status = "cancelled_orphaned_root" if "monitored root not found" in message else "failed"
+            return JobProcessResult(
+                status=status,
+                message=message,
+                telemetry={"stage": "failed", "root_name": root_name, "reason": reason, "error_type": exc.__class__.__name__},
+            )
+        except Exception as exc:
+            return JobProcessResult(
+                status="failed",
+                message=str(exc),
+                telemetry={"stage": "failed", "root_name": root_name, "reason": reason, "error_type": exc.__class__.__name__},
+            )
+        finally:
+            stop_heartbeat.set()
+            thread.join(timeout=1.0)
+
+        telemetry = {
+            "stage": "completed",
+            "root_name": root_name,
+            "reason": reason,
+            "files_seen": int(result.get("files_seen") or 0),
+            "files_changed": int(result.get("files_changed") or 0),
+            "files_deleted": int(result.get("files_deleted") or 0),
+            "jobs_queued": int(result.get("jobs_queued") or 0),
+            "chunks_indexed": int(result.get("chunks_indexed") or 0),
+            "manifest_skipped_unchanged": int(result.get("manifest_skipped_unchanged") or 0),
+        }
+        return JobProcessResult(status="indexed", telemetry=telemetry)
 
     def remediate_diagnostic(
         self,

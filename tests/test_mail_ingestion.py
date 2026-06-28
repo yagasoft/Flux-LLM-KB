@@ -503,35 +503,42 @@ def test_export_outlook_item_to_spool_writes_rich_outlook_artifacts(tmp_path):
     assert result.manifest["outlook_attachment_count"] == 1
 
 
-def test_sync_mail_spool_for_profile_uses_api_fallback_when_host_spool_blocked(monkeypatch):
+def test_sync_mail_spool_for_profile_queues_outlook_spool_sync_job(monkeypatch):
     from flux_llm_kb import mail_ingestion
 
     profile = {"name": "outlook-catchup", "source_type": "outlook_com"}
-    direct = {
-        "count": 1,
-        "profiles": [
-            {
-                "profile": "outlook-catchup",
-                "root_name": "mail-outlook-catchup",
-                "status": "blocked_spool_unavailable",
-                "error": "mail spool root is not accessible from this runtime",
-            }
-        ],
-    }
-    monkeypatch.setattr(mail_ingestion, "sync_mail_spool", lambda profile_name=None: direct)
+    queued = []
+    monkeypatch.setattr(
+        mail_ingestion,
+        "sync_mail_spool",
+        lambda profile_name=None: (_ for _ in ()).throw(AssertionError("Outlook spool sync must be queued, not run inline")),
+    )
     monkeypatch.setattr(
         mail_ingestion,
         "_sync_mail_spool_via_api",
-        lambda root_name: {"files_seen": 16, "jobs_queued": 16, "chunks_indexed": 0},
+        lambda root_name: (_ for _ in ()).throw(AssertionError("Outlook spool sync must not wait on HTTP")),
+    )
+    monkeypatch.setattr(
+        mail_ingestion.database,
+        "enqueue_corpus_sync_job",
+        lambda **kwargs: queued.append(kwargs) or {"job_id": "job-1", "status": "pending", "deduped": False},
     )
 
     result = mail_ingestion._sync_mail_spool_for_profile(profile)
 
-    assert result["sync_mode"] == "api_fallback"
-    assert result["profiles"][0]["status"] == "api_synced"
+    assert result["sync_mode"] == "background_job"
+    assert result["profiles"][0]["status"] == "queued_background_sync"
+    assert result["profiles"][0]["profile"] == "outlook-catchup"
     assert result["profiles"][0]["root_name"] == "mail-outlook-catchup"
-    assert result["profiles"][0]["files_seen"] == 16
-    assert result["profiles"][0]["direct_status"] == "blocked_spool_unavailable"
+    assert result["profiles"][0]["job_id"] == "job-1"
+    assert result["profiles"][0]["job_status"] == "pending"
+    assert queued == [
+        {
+            "root_name": "mail-outlook-catchup",
+            "reason": "outlook_spool_sync",
+            "payload": {"profile_name": "outlook-catchup", "source_type": "outlook_com"},
+        }
+    ]
 
 
 def test_sync_mail_spool_via_api_posts_root_sync(monkeypatch):
