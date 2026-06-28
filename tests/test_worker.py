@@ -1329,6 +1329,30 @@ def test_process_corpus_job_reports_locked_file(monkeypatch, tmp_path):
     assert "being used" in result.message
 
 
+def test_process_corpus_job_returns_failed_for_unexpected_extractor_error(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "broken.pdf").write_bytes(b"broken")
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+    })
+    monkeypatch.setattr(worker, "extract_file", lambda *_args: (_ for _ in ()).throw(RuntimeError("extractor crashed")))
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "broken.pdf"}})
+
+    assert result.status == "failed"
+    assert "extractor crashed" in result.message
+    assert result.telemetry == {"error_type": "RuntimeError"}
+
+
 def test_docker_corpus_worker_processes_due_imap_mail_profiles(monkeypatch):
     from flux_llm_kb import mail_ingestion
 

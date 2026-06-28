@@ -50,6 +50,12 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         if _is_locked_error(exc):
             return JobProcessResult(status="retrying_locked", message=str(exc))
         raise
+    except Exception as exc:
+        return JobProcessResult(
+            status="failed",
+            message=str(exc),
+            telemetry={"error_type": exc.__class__.__name__},
+        )
     result = _enforce_strict_indexing_result(result, strict_indexing=strict_indexing)
     if result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
         database.apply_extraction_result(root_name=root_name, relative_path=relative_path, result=result)

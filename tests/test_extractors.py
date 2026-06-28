@@ -897,6 +897,31 @@ def test_extract_pdf_with_embedded_text_skips_ocr(monkeypatch, tmp_path):
     assert result.metadata["ocr"]["pages_attempted"] == 0
 
 
+def test_extract_pdf_blocks_when_pypdf_needs_crypto_dependency(monkeypatch, tmp_path):
+    path = tmp_path / "encrypted.pdf"
+    path.write_bytes(b"%PDF encrypted")
+
+    class DependencyError(Exception):
+        pass
+
+    class FakePdfReader:
+        def __init__(self, _path):
+            raise DependencyError("cryptography>=3.1 is required for AES algorithm")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pypdf",
+        SimpleNamespace(PdfReader=FakePdfReader, errors=SimpleNamespace(DependencyError=DependencyError)),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert "cryptography" in result.message
+    assert result.metadata["extractor"] == "pdf"
+    assert result.metadata["dependency"] == "cryptography"
+
+
 def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_path):
     path = tmp_path / "scan.pdf"
     path.write_bytes(b"%PDF scanned")

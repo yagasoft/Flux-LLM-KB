@@ -1211,7 +1211,16 @@ def _extract_pdf(path: Path) -> ExtractionResult:
         from pypdf import PdfReader
     except ImportError:
         return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pdf"}, message="pypdf not installed")
-    reader = PdfReader(str(path))
+    try:
+        reader = PdfReader(str(path))
+    except Exception as exc:
+        if exc.__class__.__name__ == "DependencyError":
+            message = str(exc) or "pypdf missing required dependency"
+            metadata = {"extractor": "pdf"}
+            if "cryptography" in message.lower():
+                metadata["dependency"] = "cryptography"
+            return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=message)
+        raise
     page_count = len(reader.pages)
     text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
     chunks = _chunks_from_text(text, path.name)
