@@ -1,6 +1,8 @@
 import json
 from email.message import EmailMessage
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 from flux_llm_kb import database
 from flux_llm_kb.mail_ingestion import (
@@ -174,6 +176,150 @@ def test_outlook_mail_profile_normalizes_imap_account_and_server(monkeypatch, tm
     assert profile["source_type"] == "outlook_com"
     assert calls[0]["account"] is None
     assert calls[0]["server"] is None
+
+
+def test_outlook_mail_profile_defaults_to_include_subfolders(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(database, "insert_mail_profile", lambda **kwargs: calls.append(kwargs) or {"id": "profile-1", **kwargs})
+    monkeypatch.setattr(database, "add_monitored_root", lambda **kwargs: {"name": kwargs["name"]})
+
+    from flux_llm_kb.mail_ingestion import add_mail_profile
+
+    add_mail_profile(
+        name="outlook-catchup",
+        source_type="outlook_com",
+        spool_path=tmp_path,
+        folder_paths=["Mailbox - Me\\Inbox\\MOHESR"],
+        post_process_policy="none",
+    )
+
+    assert calls[0]["metadata"]["include_subfolders"] is True
+
+
+def test_outlook_mail_profile_can_disable_include_subfolders(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(database, "insert_mail_profile", lambda **kwargs: calls.append(kwargs) or {"id": "profile-1", **kwargs})
+    monkeypatch.setattr(database, "add_monitored_root", lambda **kwargs: {"name": kwargs["name"]})
+
+    from flux_llm_kb.mail_ingestion import add_mail_profile
+
+    add_mail_profile(
+        name="outlook-catchup",
+        source_type="outlook_com",
+        spool_path=tmp_path,
+        folder_paths=["Mailbox - Me\\Inbox\\MOHESR"],
+        post_process_policy="none",
+        include_subfolders=False,
+    )
+
+    assert calls[0]["metadata"]["include_subfolders"] is False
+
+
+def test_sync_outlook_profile_includes_child_folders_by_default(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+
+        def __init__(self, entry_id: str):
+            self.EntryID = entry_id
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or []
+            self.Folders = folders or []
+
+    moh = FakeFolder(
+        "MOHESR",
+        items=[FakeItem("parent-1")],
+        folders=[
+            FakeFolder("PM", items=[FakeItem("pm-1")]),
+            FakeFolder("Business", items=[FakeItem("business-1")]),
+        ],
+    )
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    exports = []
+
+    def fake_export(*, item, folder_path, **_kwargs):
+        exports.append((item.EntryID, folder_path))
+        return SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None})
+
+    monkeypatch.setattr(mail_ingestion, "export_outlook_item_to_spool", fake_export)
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: kwargs)
+
+    result = mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {},
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert result["exported"] == 3
+    assert exports == [
+        ("parent-1", "Mailbox - Me\\Inbox\\MOHESR"),
+        ("pm-1", "Mailbox - Me\\Inbox\\MOHESR\\PM"),
+        ("business-1", "Mailbox - Me\\Inbox\\MOHESR\\Business"),
+    ]
+
+
+def test_sync_outlook_profile_continues_after_item_export_error(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+
+        def __init__(self, entry_id: str):
+            self.EntryID = entry_id
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or []
+            self.Folders = folders or []
+
+    moh = FakeFolder("MOHESR", items=[FakeItem("bad-1"), FakeItem("good-1")])
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    def fake_export(*, item, **_kwargs):
+        if item.EntryID == "bad-1":
+            raise RuntimeError("cannot save item")
+        return SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None})
+
+    runs = []
+    monkeypatch.setattr(mail_ingestion, "export_outlook_item_to_spool", fake_export)
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or kwargs)
+
+    result = mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {},
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert result["status"] == "partial"
+    assert result["exported"] == 1
+    assert "cannot save item" in result["errors"][0]["error"]
+    assert runs[0]["messages_exported"] == 1
 
 
 def test_sync_imap_folder_resets_cursor_when_uidvalidity_changes(monkeypatch, tmp_path):

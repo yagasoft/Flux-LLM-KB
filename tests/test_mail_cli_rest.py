@@ -88,6 +88,32 @@ def test_cli_mail_profile_add_outlook_defaults_to_no_post_process(monkeypatch, t
     assert captured["account"] is None
     assert captured["server"] is None
     assert captured["post_process_policy"] == "none"
+    assert captured["include_subfolders"] is True
+
+
+def test_cli_mail_profile_add_outlook_can_disable_subfolders(monkeypatch, tmp_path, capsys):
+    from flux_llm_kb import mail_ingestion
+
+    captured = {}
+    monkeypatch.setattr(mail_ingestion, "add_mail_profile", lambda **kwargs: captured.update(kwargs) or {"name": kwargs["name"]})
+
+    assert cli.main(
+        [
+            "mail",
+            "profile",
+            "add-outlook",
+            "--name",
+            "outlook-catchup",
+            "--folder",
+            "Mailbox - Me\\Inbox\\Flux Capture",
+            "--spool",
+            str(tmp_path),
+            "--no-include-subfolders",
+        ]
+    ) == 0
+
+    assert json.loads(capsys.readouterr().out)["name"] == "outlook-catchup"
+    assert captured["include_subfolders"] is False
 
 
 def test_rest_exposes_settings_and_mail_routes(monkeypatch):
@@ -111,6 +137,31 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     assert "/api/outlook-host/requests/{request_id}/cancel" in routes
     assert "/api/outlook-host/profiles/{name}/enable" in routes
     assert "/api/outlook-host/profiles/{name}/disable" in routes
+
+
+def test_rest_mail_profile_add_passes_include_subfolders(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_ingestion
+
+    captured = {}
+    monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
+    monkeypatch.setattr(mail_ingestion, "add_mail_profile", lambda **kwargs: captured.update(kwargs) or {"name": kwargs["name"]})
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/mail/profiles",
+        json={
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "post_process_policy": "none",
+            "include_subfolders": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["include_subfolders"] is False
 
 
 def test_rest_outlook_cancel_returns_conflict_for_mid_execution(monkeypatch):

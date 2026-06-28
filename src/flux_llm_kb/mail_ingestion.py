@@ -205,6 +205,7 @@ def add_mail_profile(
     sync_interval_seconds: int = 900,
     sync_window_days: int = 30,
     max_messages_per_run: int = 200,
+    include_subfolders: bool | None = None,
 ) -> dict[str, Any]:
     spool = Path(spool_path).expanduser().resolve()
     normalized_source_type = source_type.strip().lower()
@@ -216,6 +217,8 @@ def add_mail_profile(
         "trash_folder": (trash_folder or "").strip(),
         "destructive_post_process_confirmed": destructive_post_process_confirmed,
     }
+    if normalized_source_type == "outlook_com":
+        metadata["include_subfolders"] = True if include_subfolders is None else bool(include_subfolders)
     profile = database.insert_mail_profile(
         name=name,
         source_type=normalized_source_type,
@@ -910,38 +913,73 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
     outlook = win32com.client.Dispatch("Outlook.Application")
     namespace = outlook.GetNamespace("MAPI")
     exported = 0
+    seen = 0
     errors: list[dict[str, Any]] = []
+    include_subfolders = _outlook_profile_include_subfolders(profile)
+    max_messages = _positive_int(profile.get("max_messages_per_run"), default=200)
     for folder_path in profile["folder_paths"]:
         try:
             folder = _resolve_outlook_folder(namespace, normalize_outlook_folder_path(folder_path))
-            for item in folder.Items:
-                result = export_outlook_item_to_spool(
-                    item=item,
-                    spool_path=profile["spool_path"],
-                    profile_name=profile["name"],
-                    folder_path=folder_path,
-                )
-                database.record_mail_message(
-                    profile_name=profile["name"],
-                    source_message_id=f"outlook:{getattr(item, 'EntryID', result.export_id)}",
-                    source_folder=folder_path,
-                    export_state="exported",
-                    export_id=result.export_id,
-                    content_hash=result.manifest["content_hash"],
-                    internet_message_id=result.manifest.get("message_id"),
-                    metadata={"outlook_store_id": getattr(item, "StoreID", None)},
-                )
-                exported += 1
         except Exception as exc:
             errors.append({"folder": folder_path, "error": str(exc)})
+            continue
+        for current_folder_path, current_folder in _iter_outlook_folders(
+            folder,
+            folder_path,
+            include_subfolders=include_subfolders,
+        ):
+            if exported >= max_messages:
+                break
+            try:
+                items = current_folder.Items
+            except Exception as exc:
+                errors.append({"folder": current_folder_path, "error": str(exc)})
+                continue
+            for item in items:
+                if exported >= max_messages:
+                    break
+                if not _is_outlook_mail_item(item):
+                    continue
+                seen += 1
+                entry_id = getattr(item, "EntryID", None)
+                try:
+                    result = export_outlook_item_to_spool(
+                        item=item,
+                        spool_path=profile["spool_path"],
+                        profile_name=profile["name"],
+                        folder_path=current_folder_path,
+                    )
+                    database.record_mail_message(
+                        profile_name=profile["name"],
+                        source_message_id=f"outlook:{entry_id or result.export_id}",
+                        source_folder=current_folder_path,
+                        export_state="exported",
+                        export_id=result.export_id,
+                        content_hash=result.manifest["content_hash"],
+                        internet_message_id=result.manifest.get("message_id"),
+                        metadata={"outlook_store_id": getattr(item, "StoreID", None)},
+                    )
+                    exported += 1
+                except Exception as exc:
+                    errors.append({"folder": current_folder_path, "entry_id": str(entry_id or ""), "error": str(exc)})
+        if exported >= max_messages:
+            break
     status = "completed" if not errors else "partial"
     database.record_mail_sync_run(
         profile_name=profile["name"],
         status=status,
+        messages_seen=seen,
         messages_exported=exported,
         errors=errors,
     )
-    return {"profile": profile["name"], "status": status, "exported": exported, "errors": errors}
+    return {
+        "profile": profile["name"],
+        "status": status,
+        "exported": exported,
+        "seen": seen,
+        "errors": errors,
+        "include_subfolders": include_subfolders,
+    }
 
 
 def _part_text(part: Message) -> str:
@@ -1049,6 +1087,46 @@ def _resolve_outlook_folder(namespace: Any, folder_path: OutlookFolderPath) -> A
             raise ValueError(f"Outlook folder not found: {part}")
         current = next_folder
     return current
+
+
+def _iter_outlook_folders(
+    folder: Any,
+    folder_path: str,
+    *,
+    include_subfolders: bool,
+) -> Iterable[tuple[str, Any]]:
+    yield folder_path, folder
+    if not include_subfolders:
+        return
+    for child in getattr(folder, "Folders", []) or []:
+        child_name = str(getattr(child, "Name", "") or "")
+        child_path = f"{folder_path}\\{child_name}" if child_name else folder_path
+        yield from _iter_outlook_folders(child, child_path, include_subfolders=True)
+
+
+def _outlook_profile_include_subfolders(profile: dict[str, Any]) -> bool:
+    metadata = profile.get("metadata") or {}
+    value = metadata.get("include_subfolders") if isinstance(metadata, dict) else None
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no", "off"}
+    return bool(value)
+
+
+def _is_outlook_mail_item(item: Any) -> bool:
+    item_class = getattr(item, "Class", None)
+    return item_class in {None, 43, "43"}
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 def _outlook_item_to_email(item: Any) -> bytes:

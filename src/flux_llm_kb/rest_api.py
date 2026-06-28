@@ -316,6 +316,7 @@ def create_app():
         sync_interval_seconds: int = 900
         sync_window_days: int = 30
         max_messages_per_run: int = 200
+        include_subfolders: bool | None = None
 
     class MailSyncRequest(BaseModel):
         profile_name: str | None = None
@@ -1455,6 +1456,7 @@ def create_app():
             sync_interval_seconds=request.sync_interval_seconds,
             sync_window_days=request.sync_window_days,
             max_messages_per_run=request.max_messages_per_run,
+            include_subfolders=request.include_subfolders,
         )
 
     @app.post("/api/mail/profiles/{profile_name}/post-process/dry-run")

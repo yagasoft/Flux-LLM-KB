@@ -961,6 +961,7 @@ type ProfileForm = {
   sync_interval_seconds: number;
   sync_window_days: number;
   max_messages_per_run: number;
+  include_subfolders: boolean;
 };
 
 type MonitoredRoot = {
@@ -1223,7 +1224,8 @@ export default function App() {
       sync_enabled: form.sync_enabled,
       sync_interval_seconds: Number(form.sync_interval_seconds),
       sync_window_days: Number(form.sync_window_days),
-      max_messages_per_run: Number(form.max_messages_per_run)
+      max_messages_per_run: Number(form.max_messages_per_run),
+      ...(outlook ? { include_subfolders: form.include_subfolders } : {})
     };
     await sendJson("/api/mail/profiles", "POST", payload);
     setProfileDialog(null);
@@ -5439,7 +5441,8 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
         sync_enabled: Boolean(profile?.sync_enabled),
         sync_interval_seconds: profile?.sync_interval_seconds ?? 900,
         sync_window_days: profile?.sync_window_days ?? 30,
-        max_messages_per_run: profile?.max_messages_per_run ?? 200
+        max_messages_per_run: profile?.max_messages_per_run ?? 200,
+        include_subfolders: outlook ? metadataBoolean(metadata, "include_subfolders", true) : false
       };
     })()
   }));
@@ -5464,7 +5467,8 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
           processed_folder: "",
           trash_folder: "",
           destructive_post_process_confirmed: false,
-          sync_enabled: false
+          sync_enabled: false,
+          include_subfolders: true
         };
       }
       return {
@@ -5476,7 +5480,8 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
         folder_paths: current.folder_paths === "Mailbox - Me\\Inbox\\Flux Capture" ? "FluxCapture" : current.folder_paths,
         spool_path: current.spool_path === "private/mail-spool/outlook-catchup" ? "private/mail-spool/gmail-capture" : current.spool_path,
         post_process_policy: current.post_process_policy === "none" ? "move_to_processed" : current.post_process_policy,
-        processed_folder: current.processed_folder || "FluxProcessed"
+        processed_folder: current.processed_folder || "FluxProcessed",
+        include_subfolders: false
       };
     });
   }
@@ -5512,6 +5517,7 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
           </select></label>
           {!outlook && <label>Processed folder or label<input value={form.processed_folder} onChange={(event) => update("processed_folder", event.target.value)} /></label>}
           {!outlook && <label>Trash folder<input value={form.trash_folder} onChange={(event) => update("trash_folder", event.target.value)} /></label>}
+          {outlook && <label className="checkbox-label span-2"><input type="checkbox" checked={form.include_subfolders} onChange={(event) => update("include_subfolders", event.target.checked)} /> Include subfolders</label>}
           {form.sync_enabled && <label>Interval seconds<input type="number" min="60" value={form.sync_interval_seconds} onChange={(event) => update("sync_interval_seconds", Number(event.target.value))} /></label>}
           <label>Window days<input type="number" min="1" value={form.sync_window_days} onChange={(event) => update("sync_window_days", Number(event.target.value))} /></label>
           <label>Max messages/run<input type="number" min="1" value={form.max_messages_per_run} onChange={(event) => update("max_messages_per_run", Number(event.target.value))} /></label>
@@ -5845,6 +5851,14 @@ function mailPostProcessActionLabel(action?: string) {
 function metadataString(metadata: Record<string, unknown>, key: string, fallback: string) {
   const value = metadata[key];
   return typeof value === "string" ? value : fallback;
+}
+
+function metadataBoolean(metadata: Record<string, unknown>, key: string, fallback: boolean) {
+  const value = metadata[key];
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return !["", "0", "false", "no", "off"].includes(value.trim().toLowerCase());
+  return Boolean(value);
 }
 
 function nextMailRun(runs: MailSyncRun[]) {

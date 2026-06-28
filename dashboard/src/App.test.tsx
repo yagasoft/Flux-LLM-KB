@@ -2073,6 +2073,7 @@ describe("Flux dashboard", () => {
     expect(screen.queryByLabelText("Interval seconds")).not.toBeInTheDocument();
     expect(screen.getByText(/uses the local Windows Outlook host/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Post process")).toHaveValue("none");
+    expect(screen.getByLabelText("Include subfolders")).toBeChecked();
 
     await user.click(screen.getByLabelText("Scheduled sync enabled"));
     expect(screen.getByLabelText("Interval seconds")).toHaveValue(900);
@@ -2106,7 +2107,8 @@ describe("Flux dashboard", () => {
             sync_enabled: false,
             sync_interval_seconds: 900,
             sync_window_days: 30,
-            max_messages_per_run: 200
+            max_messages_per_run: 200,
+            include_subfolders: true
           })
         })
       );

@@ -491,6 +491,12 @@ def main(argv: list[str] | None = None) -> int:
     mail_add_outlook.add_argument("--processed-folder")
     mail_add_outlook.add_argument("--trash-folder")
     mail_add_outlook.add_argument("--confirm-destructive-post-process", action="store_true")
+    mail_add_outlook.add_argument(
+        "--include-subfolders",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include child folders under each selected Outlook COM folder",
+    )
     _add_mail_schedule_args(mail_add_outlook)
     mail_profile_subparsers.add_parser("list", help="List mail profiles")
     mail_subparsers.add_parser("status", help="Show mail ingestion status")
@@ -1348,6 +1354,7 @@ def _mail(args: argparse.Namespace) -> int:
                 sync_interval_seconds=args.sync_interval_seconds,
                 sync_window_days=args.sync_window_days,
                 max_messages_per_run=args.max_messages_per_run,
+                include_subfolders=args.include_subfolders,
             )
         elif args.mail_profile_command == "list":
             payload = database.list_mail_profiles()
