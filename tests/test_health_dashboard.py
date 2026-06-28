@@ -411,6 +411,7 @@ def test_pyproject_defines_corpus_optional_extra():
 
     assert "watchdog>=4.0" in corpus
     assert "pypdf>=4.0" in corpus
+    assert "cryptography>=3.1" in corpus
     assert "python-docx>=1.1" in corpus
     assert "python-pptx>=0.6" in corpus
     assert "openpyxl>=3.1" in corpus
