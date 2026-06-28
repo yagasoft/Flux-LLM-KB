@@ -6950,12 +6950,15 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
                       AND r.claimed_at < now() - interval '15 minutes'
                       AND p.enabled
                       AND p.source_type = 'outlook_com'
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM outlook_host_state h
-                          WHERE h.host_id = r.claimed_by
-                            AND h.status = 'running'
-                            AND h.heartbeat_at >= now() - interval '120 seconds'
+                      AND (
+                          r.claimed_by = %s
+                          OR NOT EXISTS (
+                              SELECT 1
+                              FROM outlook_host_state h
+                              WHERE h.host_id = r.claimed_by
+                                AND h.status = 'running'
+                                AND h.heartbeat_at >= now() - interval '120 seconds'
+                          )
                       )
                     FOR UPDATE SKIP LOCKED
                 )
@@ -6967,7 +6970,8 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
                     result = COALESCE(r.result, '{}'::jsonb) || jsonb_build_object('requeued_from_stale_claim', true)
                 FROM stale_claimed
                 WHERE r.id = stale_claimed.id
-                """
+                """,
+                (host_id,),
             )
             cur.execute(
                 """

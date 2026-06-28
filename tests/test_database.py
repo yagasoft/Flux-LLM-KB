@@ -2472,6 +2472,7 @@ def test_outlook_claim_query_recovers_stale_claims_from_dead_hosts():
     assert "stale_claimed" in claim_function
     assert "r.status = 'claimed'" in claim_function
     assert "r.claimed_at < now() - interval '15 minutes'" in claim_function
+    assert "r.claimed_by = %s" in claim_function
     assert "h.heartbeat_at >= now() - interval '120 seconds'" in claim_function
     assert "claimed_by = NULL" in claim_function
 
