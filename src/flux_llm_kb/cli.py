@@ -508,6 +508,13 @@ def main(argv: list[str] | None = None) -> int:
     mail_subparsers.add_parser("status", help="Show mail ingestion status")
     mail_sync = mail_subparsers.add_parser("sync", help="Sync exported mail spool into the corpus")
     mail_sync.add_argument("--profile")
+    mail_spool_dedupe = mail_subparsers.add_parser("spool-dedupe", help="Report or purge safe duplicate Outlook spool exports")
+    mail_spool_dedupe_source = mail_spool_dedupe.add_mutually_exclusive_group(required=True)
+    mail_spool_dedupe_source.add_argument("--profile")
+    mail_spool_dedupe_source.add_argument("--spool")
+    mail_spool_dedupe.add_argument("--apply", action="store_true", help="Apply the dedupe action")
+    mail_spool_dedupe.add_argument("--purge", action="store_true", help="Permanently delete safe duplicate export folders")
+    mail_spool_dedupe.add_argument("--json", action="store_true", dest="json_output", help="Emit JSON output")
     mail_watch = mail_subparsers.add_parser("watch", help="Run a foreground mail watcher")
     mail_watch_subparsers = mail_watch.add_subparsers(dest="mail_watch_command", required=True)
     mail_watch_run = mail_watch_subparsers.add_parser("run", help="Run mail reconciliation loop")
@@ -1371,6 +1378,20 @@ def _mail(args: argparse.Namespace) -> int:
         payload = mail_ingestion.mail_status()
     elif args.mail_command == "sync":
         payload = mail_ingestion.sync_mail_profile(profile_name=args.profile)
+    elif args.mail_command == "spool-dedupe":
+        if args.profile:
+            profiles = database.list_mail_profiles(name=args.profile)
+            if not profiles:
+                raise SystemExit(f"mail profile not found: {args.profile}")
+            profile = profiles[0]
+            payload = mail_ingestion.dedupe_outlook_spool(
+                profile["spool_path"],
+                profile_name=profile["name"],
+                apply=args.apply,
+                purge=args.purge,
+            )
+        else:
+            payload = mail_ingestion.dedupe_outlook_spool(args.spool, apply=args.apply, purge=args.purge)
     elif args.mail_command == "post-process":
         if args.mail_post_process_command == "dry-run":
             payload = mail_ingestion.dry_run_mail_post_process(profile_name=args.profile, limit=args.limit)

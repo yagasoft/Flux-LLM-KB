@@ -557,3 +557,81 @@ def test_cli_mail_post_process_events_outputs_database_events(monkeypatch, capsy
 
     assert captured == {"profile_name": "gmail", "limit": 2}
     assert payload["events"][0]["status"] == "applied"
+
+
+def _write_cli_spool_export(spool_path, export_id: str, *, exported_at_epoch: int) -> None:
+    ready_path = spool_path / "ready" / export_id
+    attachments_path = ready_path / "attachments"
+    attachments_path.mkdir(parents=True)
+    (ready_path / "body.txt").write_text("Outlook body text", encoding="utf-8")
+    (ready_path / "body.html").write_text("<p>Outlook body text</p>", encoding="utf-8")
+    (ready_path / "message.eml").write_text(f"Subject: Outlook\n\n{export_id}", encoding="utf-8")
+    (ready_path / "message.msg").write_bytes(f"msg-{export_id}".encode("utf-8"))
+    (attachments_path / "attachment.bin").write_bytes(b"attachment")
+    manifest = {
+        "export_id": export_id,
+        "profile_name": "outlook-catchup",
+        "source_type": "outlook_com",
+        "source_folder": "Mailbox/Inbox/Flux",
+        "source_message_id": "entry:entry-1",
+        "subject": "Outlook",
+        "sender": "sender@example.com",
+        "recipients": ["me@example.com"],
+        "message_id": "<outlook-1@example.com>",
+        "received_at": "2026-06-20 10:00:00",
+        "attachment_count": 0,
+        "content_hash": f"hash-{export_id}",
+        "exported_at_epoch": exported_at_epoch,
+        "outlook_entry_id": "entry-1",
+        "outlook_attachment_count": 1,
+    }
+    (ready_path / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def test_cli_mail_spool_dedupe_reports_direct_spool(tmp_path, capsys):
+    _write_cli_spool_export(tmp_path, "older", exported_at_epoch=1)
+    _write_cli_spool_export(tmp_path, "newer", exported_at_epoch=2)
+
+    assert cli.main(["mail", "spool-dedupe", "--spool", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["settings_mutated"] is False
+    assert payload["applied"] is False
+    assert payload["duplicate_group_count"] == 1
+    assert payload["candidate_duplicate_export_ids"] == ["older"]
+    assert (tmp_path / "ready" / "older").exists()
+
+
+def test_cli_mail_spool_dedupe_applies_direct_spool_purge(tmp_path, capsys):
+    _write_cli_spool_export(tmp_path, "older", exported_at_epoch=1)
+    _write_cli_spool_export(tmp_path, "newer", exported_at_epoch=2)
+
+    assert cli.main(["mail", "spool-dedupe", "--spool", str(tmp_path), "--apply", "--purge"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["applied"] is True
+    assert payload["purged_export_ids"] == ["older"]
+    assert not (tmp_path / "ready" / "older").exists()
+    assert (tmp_path / "ready" / "newer").exists()
+
+
+def test_cli_mail_spool_dedupe_resolves_profile_spool(monkeypatch, tmp_path, capsys):
+    _write_cli_spool_export(tmp_path, "older", exported_at_epoch=1)
+    _write_cli_spool_export(tmp_path, "newer", exported_at_epoch=2)
+    monkeypatch.setattr(
+        database,
+        "list_mail_profiles",
+        lambda name=None: [
+            {
+                "name": name or "outlook-catchup",
+                "source_type": "outlook_com",
+                "spool_path": str(tmp_path),
+            }
+        ],
+    )
+
+    assert cli.main(["mail", "spool-dedupe", "--profile", "outlook-catchup", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["profile_name"] == "outlook-catchup"
+    assert payload["duplicate_group_count"] == 1

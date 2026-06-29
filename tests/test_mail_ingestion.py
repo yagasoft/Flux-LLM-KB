@@ -1334,6 +1334,165 @@ def test_export_outlook_item_to_spool_writes_rich_outlook_artifacts(tmp_path):
     assert result.manifest["outlook_attachment_count"] == 1
 
 
+def test_outlook_item_to_email_is_deterministic_for_same_html_item():
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Subject = "Outlook catch-up"
+        SenderEmailAddress = "sender@example.com"
+        To = "me@example.com"
+        EntryID = "entry-1"
+        StoreID = "store-1"
+        InternetMessageID = "<outlook-1@example.com>"
+        ReceivedTime = "2026-06-20 10:00:00"
+        Body = "Outlook body text"
+        HTMLBody = "<p>Outlook body text</p>"
+
+    first = mail_ingestion._outlook_item_to_email(FakeItem())
+    second = mail_ingestion._outlook_item_to_email(FakeItem())
+
+    assert first == second
+
+
+def test_export_outlook_item_to_spool_reuses_ready_folder_for_same_html_item(tmp_path):
+    class FakeItem:
+        Subject = "Outlook catch-up"
+        SenderEmailAddress = "sender@example.com"
+        To = "me@example.com"
+        EntryID = "entry-1"
+        StoreID = "store-1"
+        InternetMessageID = "<outlook-1@example.com>"
+        ReceivedTime = "2026-06-20 10:00:00"
+        Body = "Outlook body text"
+        HTMLBody = "<p>Outlook body text</p>"
+
+        def SaveAs(self, path, *_args):
+            Path(path).write_bytes(b"msg")
+
+    first = export_outlook_item_to_spool(
+        item=FakeItem(),
+        spool_path=tmp_path,
+        profile_name="outlook-catchup",
+        folder_path="Mailbox/Inbox/Flux",
+    )
+    second = export_outlook_item_to_spool(
+        item=FakeItem(),
+        spool_path=tmp_path,
+        profile_name="outlook-catchup",
+        folder_path="Mailbox/Inbox/Flux",
+    )
+
+    assert second.export_id == first.export_id
+    assert second.ready_path == first.ready_path
+    assert [path.name for path in (tmp_path / "ready").iterdir()] == [first.export_id]
+
+
+def _write_outlook_spool_export(
+    spool_path: Path,
+    export_id: str,
+    *,
+    source_message_id: str = "entry:entry-1",
+    body_text: str = "Outlook body text",
+    attachment_payloads: tuple[bytes, ...] = (b"attachment",),
+    exported_at_epoch: int = 1,
+) -> Path:
+    ready_path = spool_path / "ready" / export_id
+    attachments_path = ready_path / "attachments"
+    attachments_path.mkdir(parents=True)
+    (ready_path / "body.txt").write_text(body_text, encoding="utf-8")
+    (ready_path / "body.html").write_text(f"<p>{body_text}</p>", encoding="utf-8")
+    (ready_path / "message.eml").write_text(
+        f"Subject: Outlook catch-up\n\n{body_text}\n",
+        encoding="utf-8",
+    )
+    (ready_path / "message.msg").write_bytes(f"msg-{export_id}".encode("utf-8"))
+    for index, payload in enumerate(attachment_payloads, start=1):
+        (attachments_path / f"attachment-{index}.bin").write_bytes(payload)
+    manifest = {
+        "export_id": export_id,
+        "profile_name": "outlook-catchup",
+        "source_type": "outlook_com",
+        "source_folder": "Mailbox/Inbox/Flux",
+        "source_message_id": source_message_id,
+        "subject": "Outlook catch-up",
+        "sender": "sender@example.com",
+        "recipients": ["me@example.com"],
+        "message_id": "<outlook-1@example.com>",
+        "received_at": "2026-06-20 10:00:00",
+        "attachment_count": 0,
+        "content_hash": f"hash-{export_id}",
+        "exported_at_epoch": exported_at_epoch,
+        "outlook_entry_id": source_message_id.removeprefix("entry:"),
+        "outlook_attachment_count": len(attachment_payloads),
+    }
+    (ready_path / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return ready_path
+
+
+def test_dedupe_outlook_spool_reports_safe_duplicates_without_mutating(tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    _write_outlook_spool_export(tmp_path, "older", exported_at_epoch=1)
+    _write_outlook_spool_export(tmp_path, "newer", exported_at_epoch=2)
+
+    payload = mail_ingestion.dedupe_outlook_spool(tmp_path)
+
+    assert payload["settings_mutated"] is False
+    assert payload["applied"] is False
+    assert payload["duplicate_group_count"] == 1
+    assert payload["duplicate_export_count"] == 1
+    assert payload["kept_export_ids"] == ["newer"]
+    assert payload["candidate_duplicate_export_ids"] == ["older"]
+    assert payload["reclaimable_bytes"] > 0
+    assert (tmp_path / "ready" / "older").exists()
+    assert (tmp_path / "ready" / "newer").exists()
+
+
+def test_dedupe_outlook_spool_purges_only_safe_duplicates(tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    _write_outlook_spool_export(tmp_path, "older", exported_at_epoch=1)
+    _write_outlook_spool_export(tmp_path, "newer", exported_at_epoch=2)
+
+    payload = mail_ingestion.dedupe_outlook_spool(tmp_path, apply=True, purge=True)
+
+    assert payload["applied"] is True
+    assert payload["purged_export_ids"] == ["older"]
+    assert payload["kept_export_ids"] == ["newer"]
+    assert not (tmp_path / "ready" / "older").exists()
+    assert (tmp_path / "ready" / "newer").exists()
+
+
+def test_dedupe_outlook_spool_skips_same_source_with_changed_body(tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    _write_outlook_spool_export(tmp_path, "older", body_text="Original body", exported_at_epoch=1)
+    _write_outlook_spool_export(tmp_path, "newer", body_text="Changed body", exported_at_epoch=2)
+
+    payload = mail_ingestion.dedupe_outlook_spool(tmp_path, apply=True, purge=True)
+
+    assert payload["duplicate_group_count"] == 0
+    assert payload["skipped_group_count"] == 1
+    assert payload["purged_export_ids"] == []
+    assert (tmp_path / "ready" / "older").exists()
+    assert (tmp_path / "ready" / "newer").exists()
+
+
+def test_dedupe_outlook_spool_skips_same_source_with_changed_attachments(tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    _write_outlook_spool_export(tmp_path, "older", attachment_payloads=(b"one",), exported_at_epoch=1)
+    _write_outlook_spool_export(tmp_path, "newer", attachment_payloads=(b"two",), exported_at_epoch=2)
+
+    payload = mail_ingestion.dedupe_outlook_spool(tmp_path, apply=True, purge=True)
+
+    assert payload["duplicate_group_count"] == 0
+    assert payload["skipped_group_count"] == 1
+    assert payload["purged_export_ids"] == []
+    assert (tmp_path / "ready" / "older").exists()
+    assert (tmp_path / "ready" / "newer").exists()
+
+
 def test_sync_mail_spool_for_profile_queues_outlook_spool_sync_job(monkeypatch):
     from flux_llm_kb import mail_ingestion
 

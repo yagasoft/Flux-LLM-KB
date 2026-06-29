@@ -28,10 +28,20 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
 
     deploy_index = script.index("scripts\\deploy\\update-flux.ps1")
     probe_index = script.index("http://127.0.0.1:8765/api/dashboard/health")
+    reclaim_index = script.index('Invoke-FeatureStep -Name "post-deploy-outlook-spool-reclaim"')
     repair_index = script.index('Invoke-FeatureStep -Name "repair-python-editable-install"')
     cleanup_index = script.index('Invoke-FeatureStep -Name "cleanup-worktree"')
 
-    assert deploy_index < probe_index < repair_index < cleanup_index
+    assert deploy_index < probe_index < reclaim_index < repair_index < cleanup_index
+
+
+def test_complete_feature_script_has_optional_post_deploy_outlook_spool_reclaim():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "[string]$PostDeployReclaimOutlookProfile" in script
+    assert "flux_llm_kb.cli mail spool-dedupe --profile" in script
+    assert "--apply --purge --json" in script
+    assert 'Invoke-FeatureStep -Name "post-deploy-outlook-spool-reclaim"' in script
 
 
 def test_complete_feature_script_installs_dashboard_dependencies_before_tests():

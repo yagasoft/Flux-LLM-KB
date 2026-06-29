@@ -6,7 +6,8 @@ param(
     [switch]$SkipDeploy,
     [switch]$KeepWorktree,
     [int]$StepTimeoutSeconds = 600,
-    [int]$DeployStepTimeoutSeconds = 1800
+    [int]$DeployStepTimeoutSeconds = 1800,
+    [string]$PostDeployReclaimOutlookProfile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -304,6 +305,11 @@ try {
         Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild' -TimeoutSeconds $DeployStepTimeoutSeconds
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 15 | Out-Null'
+        if ($PostDeployReclaimOutlookProfile) {
+            $safeReclaimProfile = $PostDeployReclaimOutlookProfile.Replace("'", "''")
+            $reclaimCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli mail spool-dedupe --profile ''' + $safeReclaimProfile + ''' --apply --purge --json'
+            Invoke-FeatureStep -Name "post-deploy-outlook-spool-reclaim" -Cwd $MainRoot -Command $reclaimCommand
+        }
     }
     $previousRepairMainRoot = $env:FLUX_KB_REPAIR_MAIN_ROOT
     $previousRepairFeatureWorktree = $env:FLUX_KB_REPAIR_FEATURE_WORKTREE

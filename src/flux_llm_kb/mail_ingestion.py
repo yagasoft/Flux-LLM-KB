@@ -168,6 +168,118 @@ def scan_ready_spool(spool_path: str | Path) -> list[dict[str, Any]]:
     return manifests
 
 
+def dedupe_outlook_spool(
+    spool_path: str | Path,
+    *,
+    profile_name: str | None = None,
+    apply: bool = False,
+    purge: bool = False,
+) -> dict[str, Any]:
+    spool = _resolve_host_spool_path(spool_path)
+    ready = spool / "ready"
+    payload: dict[str, Any] = {
+        "settings_mutated": False,
+        "spool_path": str(spool),
+        "profile_name": profile_name,
+        "applied": bool(apply and purge),
+        "purge": bool(purge),
+        "status": "ready",
+        "duplicate_group_count": 0,
+        "duplicate_export_count": 0,
+        "skipped_group_count": 0,
+        "reclaimable_bytes": 0,
+        "reclaimed_bytes": 0,
+        "kept_export_ids": [],
+        "candidate_duplicate_export_ids": [],
+        "purged_export_ids": [],
+        "duplicate_groups": [],
+        "skipped_groups": [],
+    }
+    if apply and not purge:
+        payload["status"] = "blocked_purge_required"
+        return payload
+    if not ready.exists():
+        payload["status"] = "missing_ready_spool"
+        return payload
+
+    identity_groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for manifest_path in sorted(ready.glob("*/manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            payload["skipped_groups"].append(
+                {"export_id": manifest_path.parent.name, "reason": "invalid_manifest", "error": str(exc)}
+            )
+            continue
+        if manifest.get("source_type") != "outlook_com":
+            continue
+        manifest_profile = str(manifest.get("profile_name") or "")
+        if profile_name and manifest_profile != profile_name:
+            continue
+        source_folder = str(manifest.get("source_folder") or "")
+        source_message_id = str(manifest.get("source_message_id") or "")
+        if not manifest_profile or not source_folder or not source_message_id:
+            payload["skipped_groups"].append(
+                {
+                    "export_id": str(manifest.get("export_id") or manifest_path.parent.name),
+                    "reason": "missing_identity",
+                }
+            )
+            continue
+        entry = {
+            "export_id": str(manifest.get("export_id") or manifest_path.parent.name),
+            "path": manifest_path.parent,
+            "manifest": manifest,
+            "fingerprint": _outlook_spool_material_fingerprint(manifest_path.parent, manifest),
+            "bytes": _directory_size(manifest_path.parent),
+        }
+        identity_groups.setdefault((manifest_profile, source_folder, source_message_id), []).append(entry)
+
+    for identity, entries in sorted(identity_groups.items(), key=lambda item: item[0]):
+        if len(entries) < 2:
+            continue
+        fingerprint_groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+        for entry in entries:
+            fingerprint_groups.setdefault(entry["fingerprint"], []).append(entry)
+        if len(fingerprint_groups) > 1:
+            skipped = {
+                "profile_name": identity[0],
+                "source_folder": identity[1],
+                "source_message_id_hash": _stable_text_hash(identity[2])[:16],
+                "reason": "changed_body_or_attachments",
+                "export_ids": sorted(entry["export_id"] for entry in entries),
+            }
+            payload["skipped_groups"].append(skipped)
+            continue
+        ordered = sorted(entries, key=_outlook_spool_entry_sort_key)
+        kept = ordered[-1]
+        duplicates = ordered[:-1]
+        duplicate_ids = [entry["export_id"] for entry in duplicates]
+        reclaimable = sum(int(entry["bytes"]) for entry in duplicates)
+        group = {
+            "profile_name": identity[0],
+            "source_folder": identity[1],
+            "source_message_id_hash": _stable_text_hash(identity[2])[:16],
+            "kept_export_id": kept["export_id"],
+            "duplicate_export_ids": duplicate_ids,
+            "reclaimable_bytes": reclaimable,
+        }
+        payload["duplicate_groups"].append(group)
+        payload["kept_export_ids"].append(kept["export_id"])
+        payload["candidate_duplicate_export_ids"].extend(duplicate_ids)
+        payload["reclaimable_bytes"] += reclaimable
+        if apply and purge:
+            for entry in duplicates:
+                _remove_tree_under(entry["path"], ready)
+                payload["purged_export_ids"].append(entry["export_id"])
+                payload["reclaimed_bytes"] += int(entry["bytes"])
+
+    payload["duplicate_group_count"] = len(payload["duplicate_groups"])
+    payload["duplicate_export_count"] = len(payload["candidate_duplicate_export_ids"])
+    payload["skipped_group_count"] = len([group for group in payload["skipped_groups"] if group.get("reason") == "changed_body_or_attachments"])
+    return payload
+
+
 def _resolve_host_spool_path(spool_path: str | Path) -> Path:
     raw_path = str(spool_path)
     normalized = raw_path.replace("\\", "/")
@@ -1431,6 +1543,93 @@ def _positive_int(value: Any, *, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _outlook_spool_material_fingerprint(export_path: Path, manifest: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(manifest.get("subject") or ""),
+        str(manifest.get("sender") or ""),
+        tuple(str(item) for item in (manifest.get("recipients") or [])),
+        str(manifest.get("message_id") or ""),
+        str(manifest.get("received_at") or ""),
+        _file_fingerprint(export_path / "body.txt"),
+        _file_fingerprint(export_path / "body.html"),
+        tuple(_attachment_fingerprints(export_path / "attachments")),
+    )
+
+
+def _outlook_spool_entry_sort_key(entry: dict[str, Any]) -> tuple[int, float, str]:
+    manifest = entry.get("manifest") or {}
+    try:
+        exported_at = int(manifest.get("exported_at_epoch") or 0)
+    except (TypeError, ValueError):
+        exported_at = 0
+    path = entry.get("path")
+    mtime = path.stat().st_mtime if isinstance(path, Path) and path.exists() else 0.0
+    return exported_at, mtime, str(entry.get("export_id") or "")
+
+
+def _directory_size(path: Path) -> int:
+    total = 0
+    for file_path in path.rglob("*"):
+        if file_path.is_file():
+            try:
+                total += file_path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _file_fingerprint(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return "missing"
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return f"{size}:{digest.hexdigest()}"
+
+
+def _attachment_fingerprints(attachments_path: Path) -> list[str]:
+    if not attachments_path.exists():
+        return []
+    fingerprints: list[str] = []
+    for file_path in sorted(path for path in attachments_path.rglob("*") if path.is_file()):
+        relative = file_path.relative_to(attachments_path).as_posix()
+        fingerprints.append(f"{relative}:{_file_fingerprint(file_path)}")
+    return fingerprints
+
+
+def _remove_tree_under(path: Path, root: Path) -> None:
+    resolved_path = path.resolve()
+    resolved_root = root.resolve()
+    if resolved_path == resolved_root or resolved_root not in resolved_path.parents:
+        raise ValueError(f"refusing to remove path outside mail spool ready root: {resolved_path}")
+    shutil.rmtree(resolved_path)
+
+
+def _stable_text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _outlook_mime_boundary(item: Any, *, body: str, html_body: str) -> str:
+    digest = hashlib.sha256()
+    for value in (
+        getattr(item, "EntryID", None),
+        getattr(item, "StoreID", None),
+        getattr(item, "InternetMessageID", None),
+        getattr(item, "Subject", None),
+        getattr(item, "SenderEmailAddress", None),
+        getattr(item, "To", None),
+        getattr(item, "ReceivedTime", None),
+        body,
+        html_body,
+    ):
+        digest.update(str(value or "").encode("utf-8", errors="ignore"))
+        digest.update(b"\0")
+    return f"flux-outlook-{digest.hexdigest()[:32]}"
+
+
 def _outlook_item_to_email(item: Any) -> bytes:
     message = EmailMessage()
     message["Subject"] = str(getattr(item, "Subject", ""))
@@ -1447,6 +1646,7 @@ def _outlook_item_to_email(item: Any) -> bytes:
     if html_body:
         message.set_content(body or _strip_html(html_body))
         message.add_alternative(html_body, subtype="html")
+        message.set_boundary(_outlook_mime_boundary(item, body=body, html_body=html_body))
     else:
         message.set_content(body)
     return message.as_bytes()
