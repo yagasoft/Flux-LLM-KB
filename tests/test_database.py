@@ -2634,6 +2634,56 @@ def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
     assert "INSERT INTO asset_chunks" in sql
 
 
+def test_apply_extraction_result_strips_stale_strict_blocked_metadata(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
+                return ("asset-1", None, "root-1", "file:///docs/scan.png", 123)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    result = SimpleNamespace(
+        status="indexed",
+        metadata={"strict_indexing": True, "readiness_status": "indexed", "readiness_reason": "content_extracted"},
+        chunks=(),
+        child_assets=(),
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.apply_extraction_result(root_name="docs", relative_path="scan.png", result=result)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "metadata - 'metadata_only_blocked' - 'readiness_reason'" in sql
+    assert "COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'" in sql
+
+
 def test_apply_extraction_result_persists_nested_container_child_metadata(monkeypatch):
     executed = []
 

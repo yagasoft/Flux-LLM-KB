@@ -2157,6 +2157,7 @@ def _extract_zip_container(
         with ZipFile(path) as archive:
             infos = [info for info in archive.infolist() if not info.is_dir()]
             member_payloads: list[dict[str, Any]] = []
+            skipped_children: list[ContainerChildAsset] = []
             total_bytes = 0
             for index, info in enumerate(infos):
                 member_path = _safe_container_member_name(info.filename)
@@ -2165,10 +2166,27 @@ def _extract_zip_container(
                 if info.flag_bits & 0x1:
                     return _failed_container_result(metadata, f"encrypted container member is not supported: {member_path}")
                 size = int(info.file_size or 0)
-                cap_message = _container_cap_message(policy, member_count=index + 1, member_size=size, total_bytes=total_bytes + size)
+                cap_message = _container_cap_message(policy, member_count=index + 1, member_size=0, total_bytes=total_bytes + size)
                 if cap_message:
                     metadata["member_count"] = len(infos)
                     return _metadata_only_container_result(metadata, cap_message)
+                if size > policy.container_max_member_bytes:
+                    skipped_children.append(
+                        _skipped_container_child(
+                            _join_container_member_path(member_prefix, member_path),
+                            size_bytes=size,
+                            reason="member_size_limit",
+                            message="member exceeds size limit",
+                            container_format=format_name,
+                            container_kind=container_kind,
+                            member_index=index,
+                            compressed_size=int(info.compress_size or 0),
+                            member_depth=depth + 1,
+                            parent_member_path=member_prefix or None,
+                        )
+                    )
+                    total_bytes += size
+                    continue
                 total_bytes += size
                 data = archive.read(info)
                 member_payloads.append(
@@ -2182,7 +2200,7 @@ def _extract_zip_container(
                     }
                 )
             sidecars = _embedded_media_sidecars(member_payloads)
-            children: list[ContainerChildAsset] = []
+            children: list[ContainerChildAsset] = list(skipped_children)
             for member in member_payloads:
                 children.extend(
                     _container_child_assets_from_bytes(
@@ -2203,6 +2221,9 @@ def _extract_zip_container(
     except ValueError as exc:
         return _failed_container_result(metadata, str(exc))
 
+    if skipped_children:
+        metadata["skipped_member_size_limit_count"] = len(skipped_children)
+        metadata["warnings"] = sorted({*(metadata.get("warnings") or []), "member exceeds size limit"})
     return _final_container_result(metadata, children, direct_member_count=len(infos), total_uncompressed_bytes=total_bytes)
 
 
@@ -2220,6 +2241,7 @@ def _extract_tar_container(
         with tarfile.open(path) as archive:
             members = [member for member in archive.getmembers() if not member.isdir()]
             member_payloads: list[dict[str, Any]] = []
+            skipped_children: list[ContainerChildAsset] = []
             total_bytes = 0
             for index, member in enumerate(members):
                 member_path = _safe_container_member_name(member.name)
@@ -2228,10 +2250,27 @@ def _extract_tar_container(
                 if not member.isfile():
                     return _failed_container_result(metadata, f"unsafe non-file container member: {member_path}")
                 size = int(member.size or 0)
-                cap_message = _container_cap_message(policy, member_count=index + 1, member_size=size, total_bytes=total_bytes + size)
+                cap_message = _container_cap_message(policy, member_count=index + 1, member_size=0, total_bytes=total_bytes + size)
                 if cap_message:
                     metadata["member_count"] = len(members)
                     return _metadata_only_container_result(metadata, cap_message)
+                if size > policy.container_max_member_bytes:
+                    skipped_children.append(
+                        _skipped_container_child(
+                            _join_container_member_path(member_prefix, member_path),
+                            size_bytes=size,
+                            reason="member_size_limit",
+                            message="member exceeds size limit",
+                            container_format=format_name,
+                            container_kind=container_kind,
+                            member_index=index,
+                            compressed_size=None,
+                            member_depth=depth + 1,
+                            parent_member_path=member_prefix or None,
+                        )
+                    )
+                    total_bytes += size
+                    continue
                 extracted = archive.extractfile(member)
                 data = extracted.read() if extracted is not None else b""
                 total_bytes += len(data)
@@ -2246,7 +2285,7 @@ def _extract_tar_container(
                     }
                 )
             sidecars = _embedded_media_sidecars(member_payloads)
-            children: list[ContainerChildAsset] = []
+            children: list[ContainerChildAsset] = list(skipped_children)
             for member in member_payloads:
                 children.extend(
                     _container_child_assets_from_bytes(
@@ -2267,6 +2306,9 @@ def _extract_tar_container(
     except ValueError as exc:
         return _failed_container_result(metadata, str(exc))
 
+    if skipped_children:
+        metadata["skipped_member_size_limit_count"] = len(skipped_children)
+        metadata["warnings"] = sorted({*(metadata.get("warnings") or []), "member exceeds size limit"})
     return _final_container_result(metadata, children, direct_member_count=len(members), total_uncompressed_bytes=total_bytes)
 
 
@@ -2534,6 +2576,51 @@ def _container_child_from_bytes(
         extraction_tier=extraction_tier,
         extraction_status=extraction_status,
         chunks=chunks,
+        metadata=metadata,
+    )
+
+
+def _skipped_container_child(
+    member_path: str,
+    *,
+    size_bytes: int,
+    reason: str,
+    message: str,
+    container_format: str,
+    container_kind: str,
+    member_index: int,
+    compressed_size: int | None,
+    member_depth: int,
+    parent_member_path: str | None,
+) -> ContainerChildAsset:
+    file_kind = _member_file_kind(member_path)
+    extension = PurePosixPath(member_path).suffix.lower()
+    mime_type, _ = mimetypes.guess_type(member_path)
+    metadata: dict[str, Any] = {
+        "extractor": "container_member",
+        "container_format": container_format,
+        "container_kind": container_kind,
+        "container_member_path": member_path,
+        "container_member_index": member_index,
+        "container_depth": member_depth,
+        "skipped_reason": reason,
+        "warnings": [message],
+    }
+    if parent_member_path:
+        metadata["container_parent_path"] = parent_member_path
+    if compressed_size is not None:
+        metadata["compressed_size_bytes"] = compressed_size
+    return ContainerChildAsset(
+        member_path=member_path,
+        file_kind=file_kind,
+        mime_type=mime_type,
+        extension=extension,
+        size_bytes=size_bytes,
+        quick_hash=_container_child_quick_hash(member_path, size_bytes, reason),
+        content_hash=None,
+        extraction_tier="metadata_only",
+        extraction_status="metadata_only",
+        chunks=(),
         metadata=metadata,
     )
 

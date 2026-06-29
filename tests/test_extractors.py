@@ -1470,8 +1470,35 @@ def test_extract_archive_respects_member_size_cap(tmp_path):
     result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_member_bytes=4))
 
     assert result.status == "metadata_only"
-    assert result.child_assets == ()
-    assert "member exceeds size limit" in (result.message or "")
+    assert result.message is None
+    assert result.metadata["skipped_member_size_limit_count"] == 1
+    assert result.metadata["parsed_child_count"] == 0
+    assert result.metadata["skipped_child_count"] == 1
+    assert "member exceeds size limit" in result.metadata["warnings"]
+    assert len(result.child_assets) == 1
+    child = result.child_assets[0]
+    assert child.member_path == "large.txt"
+    assert child.extraction_status == "metadata_only"
+    assert child.content_hash is None
+    assert child.metadata["skipped_reason"] == "member_size_limit"
+
+
+def test_extract_archive_skips_oversized_member_and_indexes_safe_member(tmp_path):
+    path = tmp_path / "mixed.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr("large.txt", "too large")
+        archive.writestr("notes.txt", "ok")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_member_bytes=4))
+
+    assert result.status == "metadata_only"
+    assert result.metadata["skipped_member_size_limit_count"] == 1
+    assert result.metadata["parsed_child_count"] == 1
+    assert result.metadata["skipped_child_count"] == 1
+    assert [child.member_path for child in result.child_assets] == ["large.txt", "notes.txt"]
+    assert result.child_assets[0].metadata["skipped_reason"] == "member_size_limit"
+    assert result.child_assets[1].extraction_status == "indexed"
+    assert result.child_assets[1].chunks[0].body == "ok"
 
 
 def test_extract_unsupported_archive_blocks_when_tool_missing(monkeypatch, tmp_path):

@@ -96,7 +96,18 @@ def _is_locked_error(exc: OSError) -> bool:
 
 
 def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) -> object:
-    if not strict_indexing or getattr(result, "status", None) != "metadata_only":
+    if not strict_indexing:
+        return result
+    if getattr(result, "status", None) == "indexed":
+        metadata = _strict_indexed_metadata(dict(getattr(result, "metadata", {}) or {}))
+        return ExtractionResult(
+            status="indexed",
+            chunks=tuple(getattr(result, "chunks", ()) or ()),
+            child_assets=tuple(getattr(result, "child_assets", ()) or ()),
+            metadata=metadata,
+            message=getattr(result, "message", None),
+        )
+    if getattr(result, "status", None) != "metadata_only":
         return result
     metadata = dict(getattr(result, "metadata", {}) or {})
     decorative = metadata.get("decorative")
@@ -152,11 +163,32 @@ def _strict_metadata_only_container_has_extracted_children(metadata: dict[str, A
         return False
     if _metadata_int(metadata, "blocked_dependency_count") > 0:
         return False
-    return bool(child_assets) or _metadata_int(metadata, "parsed_child_count") > 0 or _metadata_int(metadata, "child_asset_count") > 0
+    if _metadata_int(metadata, "parsed_child_count") > 0:
+        return True
+    return any(str(getattr(child, "extraction_status", "")) == "indexed" for child in child_assets)
+
+
+def _strict_indexed_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    metadata.pop("metadata_only_blocked", None)
+    if metadata.get("readiness_status") == "blocked_missing_dependency":
+        metadata["readiness_status"] = "indexed"
+        metadata["readiness_reason"] = "content_extracted"
+    metadata["strict_indexing"] = True
+    metadata.setdefault("readiness_status", "indexed")
+    metadata.setdefault("readiness_reason", "content_extracted")
+    return metadata
 
 
 def _strict_completed_no_content_reason(metadata: dict[str, Any]) -> str | None:
     extractor = str(metadata.get("extractor") or "")
+    if extractor == "container":
+        if (
+            _metadata_int(metadata, "blocked_dependency_count") == 0
+            and _metadata_int(metadata, "parsed_child_count") == 0
+            and _metadata_int(metadata, "skipped_member_size_limit_count") > 0
+        ):
+            return "archive_members_exceeded_size_limit"
+        return None
     if extractor == "image":
         ocr = metadata.get("ocr")
         vision = metadata.get("vision")

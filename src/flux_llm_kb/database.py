@@ -5564,16 +5564,22 @@ def apply_extraction_result(
             status = result.status
             if canonical_asset_id and status == "indexed":
                 status = "duplicate_suppressed"
+            metadata_json = _json(result.metadata or {})
             cur.execute(
                 """
                 UPDATE source_assets
                 SET extraction_status = %s,
-                    metadata = metadata || %s::jsonb,
+                    metadata = CASE
+                        WHEN %s::jsonb ? 'strict_indexing'
+                             AND COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'
+                        THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
+                        ELSE metadata || %s::jsonb
+                    END,
                     indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
                     updated_at = now()
                 WHERE id = %s
                 """,
-                (status, _json(result.metadata or {}), status, asset_id),
+                (status, metadata_json, metadata_json, metadata_json, metadata_json, status, asset_id),
             )
             _replace_asset_chunks(cur, asset_id, () if canonical_asset_id else result.chunks)
             child_assets = tuple(getattr(result, "child_assets", ()) or ())

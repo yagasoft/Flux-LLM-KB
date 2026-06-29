@@ -883,6 +883,60 @@ def test_process_corpus_job_allows_image_no_content_after_vision_attempt_for_str
     assert "metadata_only_blocked" not in applied_result.metadata
 
 
+def test_process_corpus_job_marks_strict_indexed_vision_result_ready(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "scan.png").write_bytes(b"fake image")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="indexed",
+            message=None,
+            chunks=(SimpleNamespace(body="vision caption"),),
+            child_assets=(),
+            metadata={
+                "extractor": "image",
+                "ocr": {"status": "completed", "text_length": 0},
+                "vision": {"status": "completed", "descriptions": 1},
+                "vision_escalation": "completed",
+                "readiness_status": "blocked_missing_dependency",
+                "metadata_only_blocked": True,
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "scan.png"}})
+
+    assert result.status == "indexed"
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "indexed"
+    assert applied_result.metadata["strict_indexing"] is True
+    assert applied_result.metadata["readiness_status"] == "indexed"
+    assert applied_result.metadata["readiness_reason"] == "content_extracted"
+    assert applied_result.metadata["vision_escalation"] == "completed"
+    assert "metadata_only_blocked" not in applied_result.metadata
+
+
 @pytest.mark.parametrize(
     ("extractor", "extra_metadata", "expected_reason"),
     [
@@ -1043,6 +1097,60 @@ def test_process_corpus_job_allows_partial_container_parent_when_safe_children_a
     assert applied_result.metadata["container_children_indexed"] is True
     assert applied_result.metadata["partial_extraction"] is True
     assert applied_result.metadata["readiness_status"] == "completed_partial"
+    assert "metadata_only_blocked" not in applied_result.metadata
+
+
+def test_process_corpus_job_allows_archive_no_content_when_members_are_policy_skipped(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "bundle.zip").write_bytes(b"fake archive")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="metadata_only",
+            message=None,
+            chunks=(),
+            child_assets=(SimpleNamespace(extraction_status="metadata_only"),),
+            metadata={
+                "extractor": "container",
+                "child_asset_count": 1,
+                "parsed_child_count": 0,
+                "skipped_child_count": 1,
+                "blocked_dependency_count": 0,
+                "skipped_member_size_limit_count": 1,
+                "warnings": ["member exceeds size limit"],
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "bundle.zip"}})
+
+    assert result.status == "indexed"
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "indexed"
+    assert applied_result.metadata["readiness_status"] == "completed_no_content"
+    assert applied_result.metadata["no_content_reason"] == "archive_members_exceeded_size_limit"
+    assert applied_result.metadata["skipped_member_size_limit_count"] == 1
     assert "metadata_only_blocked" not in applied_result.metadata
 
 
