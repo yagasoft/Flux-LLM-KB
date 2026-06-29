@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import hashlib
 import os
 from pathlib import Path
+import time
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
@@ -155,8 +156,22 @@ def _embedding_result_for_text(*, owner_table: str, owner_id: str, text: str) ->
 def _insert_embedding_result(cur: Any, result: EmbeddingResult) -> None:
     cur.execute(
         """
-        INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding, metadata, updated_at)
-        VALUES (%s, %s, %s, %s, %s::vector, %s::jsonb, now())
+        INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding, metadata, root_id, updated_at)
+        VALUES (
+            %s,
+            %s,
+            %s,
+            %s,
+            %s::vector,
+            %s::jsonb,
+            CASE WHEN %s = 'asset_chunks' THEN (
+                SELECT a.root_id
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                WHERE c.id = %s::uuid
+            ) ELSE NULL END,
+            now()
+        )
         """,
         (
             result.owner_table,
@@ -165,6 +180,8 @@ def _insert_embedding_result(cur: Any, result: EmbeddingResult) -> None:
             result.dimensions,
             to_pgvector_literal(result.vector),
             _json(result.metadata),
+            result.owner_table,
+            result.owner_id,
         ),
     )
 
@@ -451,10 +468,13 @@ def search_corpus_chunks(
     root_name: str | None = None,
     filters: dict[str, Any] | None = None,
     url: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     limit = max(1, min(limit, 50))
     candidate_limit = max(limit * 4, 12)
+    hydration_limit = min(max(limit * 2, 20), 100)
+    max_vector_candidate_limit = min(max(candidate_limit * 2, 240), 400)
     query_vector = to_pgvector_literal(embed_text(query))
     root_name_sql = "AND r.name = %s" if root_name else ""
     root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
@@ -463,21 +483,14 @@ def search_corpus_chunks(
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             streams: dict[str, list[str]] = {}
-            details: dict[str, dict[str, Any]] = {}
+            raw_scores: dict[str, dict[str, float]] = {}
+            root_id = _corpus_root_id(cur, root_name=root_name) if root_name else None
 
+            started = time.perf_counter()
             cur.execute(
                 f"""
-                SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
-                       (
-                           SELECT count(*)
-                           FROM source_assets duplicate
-                           WHERE duplicate.canonical_asset_id = a.id
-                       ) AS duplicate_count,
-                       r.trust_rank,
-                       r.name AS root_name,
-                       ts_rank(c.search_vector, plainto_tsquery('english', %s)) AS score,
-                       a.file_kind,
-                       c.metadata -> 'code' AS code
+                SELECT c.id::text,
+                       ts_rank(c.search_vector, plainto_tsquery('english', %s)) AS score
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
                 JOIN monitored_roots r ON r.id = a.root_id
@@ -502,21 +515,23 @@ def search_corpus_chunks(
                 """,
                 (query, query, *root_name_params, *code_filter_params, candidate_limit),
             )
-            _add_ranked_corpus_rows("corpus_lexical", cur.fetchall(), streams, details)
+            rows = cur.fetchall()
+            _add_ranked_corpus_candidates("corpus_lexical", rows, streams, raw_scores)
+            _record_corpus_stream_diagnostics(
+                diagnostics,
+                "corpus_lexical",
+                started,
+                rows=len(rows),
+                plan="tsquery_candidates",
+            )
 
+            cur.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)", ("0.10",))
+            started = time.perf_counter()
             cur.execute(
                 f"""
-                SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
-                       (
-                           SELECT count(*)
-                           FROM source_assets duplicate
-                           WHERE duplicate.canonical_asset_id = a.id
-                       ) AS duplicate_count,
-                       r.trust_rank,
-                       r.name AS root_name,
+                SELECT c.id::text,
                        greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score,
-                       a.file_kind,
-                       c.metadata -> 'code' AS code
+                       c.updated_at
                 FROM asset_chunks c
                 JOIN source_assets a ON a.id = c.asset_id
                 JOIN monitored_roots r ON r.id = a.root_id
@@ -524,7 +539,7 @@ def search_corpus_chunks(
                   AND a.deleted_at IS NULL
                   AND a.canonical_asset_id IS NULL
                   AND a.extraction_status = 'indexed'
-                  AND (similarity(c.title, %s) > 0.10 OR similarity(c.body, %s) > 0.15)
+                  AND (c.title %% %s OR c.body %% %s)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM semantic_duplicate_members sm
@@ -541,85 +556,119 @@ def search_corpus_chunks(
                 """,
                 (query, query, query, query, *root_name_params, *code_filter_params, candidate_limit),
             )
-            _add_ranked_corpus_rows("corpus_fuzzy", cur.fetchall(), streams, details)
-
-            cur.execute(
-                f"""
-                SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
-                       (
-                           SELECT count(*)
-                           FROM source_assets duplicate
-                           WHERE duplicate.canonical_asset_id = a.id
-                       ) AS duplicate_count,
-                       r.trust_rank,
-                       r.name AS root_name,
-                       1 - (emb.embedding <=> %s::vector) AS score,
-                       a.file_kind,
-                       c.metadata -> 'code' AS code
-                FROM embeddings emb
-                JOIN asset_chunks c
-                  ON emb.owner_table = 'asset_chunks'
-                 AND emb.owner_id = c.id
-                JOIN source_assets a ON a.id = c.asset_id
-                JOIN monitored_roots r ON r.id = a.root_id
-                WHERE r.enabled
-                  AND a.deleted_at IS NULL
-                  AND a.canonical_asset_id IS NULL
-                  AND a.extraction_status = 'indexed'
-                  AND emb.model = %s
-                  AND 1 - (emb.embedding <=> %s::vector) > 0.25
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM semantic_duplicate_members sm
-                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
-                      WHERE sc.status = 'active'
-                        AND sm.owner_table = 'asset_chunks'
-                        AND sm.owner_id = c.id
-                        AND sm.member_role = 'duplicate'
-                  )
-                  {root_name_sql}
-                  {code_filter_sql}
-                ORDER BY emb.embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (
-                    query_vector,
-                    DEFAULT_EMBEDDING_MODEL,
-                    query_vector,
-                    *root_name_params,
-                    *code_filter_params,
-                    query_vector,
-                    candidate_limit,
-                ),
+            rows = [(row[0], row[1]) for row in cur.fetchall()]
+            _add_ranked_corpus_candidates("corpus_fuzzy", rows, streams, raw_scores)
+            _record_corpus_stream_diagnostics(
+                diagnostics,
+                "corpus_fuzzy",
+                started,
+                rows=len(rows),
+                plan="trigram_candidates",
             )
-            _add_ranked_corpus_rows("corpus_vector", cur.fetchall(), streams, details)
-            _add_ranked_corpus_rows(
+
+            if root_name and root_id is None:
+                streams["corpus_vector"] = []
+                _record_corpus_stream_diagnostics(
+                    diagnostics,
+                    "corpus_vector",
+                    time.perf_counter(),
+                    rows=0,
+                    plan="root_not_found",
+                )
+            else:
+                vector_root_sql = "AND (nearest.root_id = %s::uuid OR nearest.root_id IS NULL)" if root_id else ""
+                vector_root_params: tuple[Any, ...] = (root_id,) if root_id else ()
+                non_vector_candidate_count = len(raw_scores)
+                vector_candidate_limit = 80 if non_vector_candidate_count >= candidate_limit else max_vector_candidate_limit
+                cur.execute("SELECT set_config('hnsw.ef_search', %s, true)", (str(vector_candidate_limit),))
+                started = time.perf_counter()
+                cur.execute(
+                    f"""
+                    WITH nearest_embeddings AS MATERIALIZED (
+                        SELECT emb.owner_id,
+                               emb.root_id,
+                               1 - (emb.embedding <=> %s::vector) AS score,
+                               emb.embedding <=> %s::vector AS distance
+                        FROM embeddings emb
+                        WHERE emb.owner_table = 'asset_chunks'
+                          AND emb.model = %s
+                        ORDER BY emb.embedding <=> %s::vector
+                        LIMIT %s
+                    )
+                    SELECT c.id::text, nearest.score
+                    FROM nearest_embeddings nearest
+                    JOIN asset_chunks c ON c.id = nearest.owner_id
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE r.enabled
+                      AND a.deleted_at IS NULL
+                      AND a.canonical_asset_id IS NULL
+                      AND a.extraction_status = 'indexed'
+                      AND nearest.score > 0.25
+                      {vector_root_sql}
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM semantic_duplicate_members sm
+                          JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                          WHERE sc.status = 'active'
+                            AND sm.owner_table = 'asset_chunks'
+                            AND sm.owner_id = c.id
+                            AND sm.member_role = 'duplicate'
+                      )
+                      {root_name_sql}
+                      {code_filter_sql}
+                    ORDER BY nearest.distance
+                    LIMIT %s
+                    """,
+                    (
+                        query_vector,
+                        query_vector,
+                        DEFAULT_EMBEDDING_MODEL,
+                        query_vector,
+                        vector_candidate_limit,
+                        *vector_root_params,
+                        *root_name_params,
+                        *code_filter_params,
+                        candidate_limit,
+                    ),
+                )
+                rows = cur.fetchall()
+                _add_ranked_corpus_candidates("corpus_vector", rows, streams, raw_scores)
+                _record_corpus_stream_diagnostics(
+                    diagnostics,
+                    "corpus_vector",
+                    started,
+                    rows=len(rows),
+                    plan="root_scoped_hnsw_candidates" if root_id else "global_hnsw_candidates",
+                    candidate_limit=vector_candidate_limit,
+                )
+
+            started = time.perf_counter()
+            sidecar_rows = _search_mail_sidecar_rows(cur, query=query, root_name=root_name, filters=filters, limit=candidate_limit)
+            rows = [(row[0], row[8]) for row in sidecar_rows]
+            _add_ranked_corpus_candidates("mail_sidecar", rows, streams, raw_scores)
+            _record_corpus_stream_diagnostics(
+                diagnostics,
                 "mail_sidecar",
-                _search_mail_sidecar_rows(cur, query=query, root_name=root_name, filters=filters, limit=candidate_limit),
-                streams,
-                details,
+                started,
+                rows=len(rows),
+                plan="sidecar_candidates",
             )
 
             if query.strip() or _has_code_filters(filters):
+                cur.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)", ("0.20",))
+                started = time.perf_counter()
                 cur.execute(
                     f"""
-                    SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
-                           (
-                               SELECT count(*)
-                               FROM source_assets duplicate
-                               WHERE duplicate.canonical_asset_id = a.id
-                           ) AS duplicate_count,
-                           r.trust_rank,
-                           r.name AS root_name,
-                           CASE
+                    SELECT c.id::text,
+                           max(CASE
                                WHEN lower(cs.qualified_name) = lower(%s) THEN 3.0
                                WHEN lower(cs.name) = lower(%s) THEN 2.5
                                WHEN cs.qualified_name ILIKE %s THEN 2.0
                                WHEN cs.name ILIKE %s THEN 1.8
                                ELSE greatest(similarity(cs.qualified_name, %s), similarity(cs.name, %s))
-                           END AS score,
-                           a.file_kind,
-                           c.metadata -> 'code' AS code
+                           END) AS score,
+                           c.updated_at
                     FROM code_symbols cs
                     JOIN asset_chunks c ON c.id = cs.asset_chunk_id
                     JOIN source_assets a ON a.id = c.asset_id
@@ -631,11 +680,12 @@ def search_corpus_chunks(
                       AND (
                           cs.qualified_name ILIKE %s
                           OR cs.name ILIKE %s
-                          OR similarity(cs.qualified_name, %s) > 0.20
-                          OR similarity(cs.name, %s) > 0.20
+                          OR cs.qualified_name %% %s
+                          OR cs.name %% %s
                       )
                       {root_name_sql}
                       {code_filter_sql}
+                    GROUP BY c.id, c.updated_at
                     ORDER BY score DESC, c.updated_at DESC
                     LIMIT %s
                     """,
@@ -655,70 +705,63 @@ def search_corpus_chunks(
                         candidate_limit,
                     ),
                 )
-                _add_ranked_corpus_rows("code_symbol_exact", cur.fetchall(), streams, details)
-
-            if details:
-                cur.execute(
-                    f"""
-                    SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
-                           (
-                               SELECT count(*)
-                               FROM source_assets duplicate
-                               WHERE duplicate.canonical_asset_id = a.id
-                           ) AS duplicate_count,
-                           r.trust_rank,
-                           r.name AS root_name,
-                           1.0 / greatest(r.trust_rank, 1) AS score,
-                           a.file_kind,
-                           c.metadata -> 'code' AS code
-                    FROM asset_chunks c
-                    JOIN source_assets a ON a.id = c.asset_id
-                    JOIN monitored_roots r ON r.id = a.root_id
-                    WHERE c.id = ANY(%s::uuid[])
-                      AND a.extraction_status = 'indexed'
-                      {root_name_sql}
-                      {code_filter_sql}
-                    ORDER BY r.trust_rank ASC, c.updated_at DESC
-                    """,
-                    (list(details.keys()), *root_name_params, *code_filter_params),
+                rows = [(row[0], row[1]) for row in cur.fetchall()]
+                _add_ranked_corpus_candidates("code_symbol_exact", rows, streams, raw_scores)
+                _record_corpus_stream_diagnostics(
+                    diagnostics,
+                    "code_symbol_exact",
+                    started,
+                    rows=len(rows),
+                    plan="trigram_symbol_candidates",
                 )
-                _add_ranked_corpus_rows("corpus_trust", cur.fetchall(), streams, details)
 
-                cur.execute(
-                    f"""
-                    SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
-                           (
-                               SELECT count(*)
-                               FROM source_assets duplicate
-                               WHERE duplicate.canonical_asset_id = a.id
-                           ) AS duplicate_count,
-                           r.trust_rank,
-                           r.name AS root_name,
-                           1.0 / (
-                               1.0 + (
-                                   GREATEST(EXTRACT(EPOCH FROM (now() - c.updated_at)), 0)
-                                   / 86400.0 / 30.0
-                               )
-                           ) AS score,
-                           a.file_kind,
-                           c.metadata -> 'code' AS code
-                    FROM asset_chunks c
-                    JOIN source_assets a ON a.id = c.asset_id
-                    JOIN monitored_roots r ON r.id = a.root_id
-                    WHERE c.id = ANY(%s::uuid[])
-                      AND a.extraction_status = 'indexed'
-                      {root_name_sql}
-                      {code_filter_sql}
-                    ORDER BY score DESC, c.updated_at DESC
-                    """,
-                    (list(details.keys()), *root_name_params, *code_filter_params),
+            details: dict[str, dict[str, Any]] = {}
+            if raw_scores:
+                primary_fused = reciprocal_rank_fusion(streams)
+                hydrated_candidate_ids = [item.item_id for item in primary_fused[:hydration_limit]]
+                started = time.perf_counter()
+                details = _hydrate_corpus_candidate_details(
+                    cur,
+                    candidate_ids=hydrated_candidate_ids,
+                    root_name=root_name,
+                    filters=filters,
+                    raw_scores=raw_scores,
                 )
-                _add_ranked_corpus_rows("corpus_freshness", cur.fetchall(), streams, details)
+                _record_corpus_stream_diagnostics(
+                    diagnostics,
+                    "corpus_hydration",
+                    started,
+                    rows=len(details),
+                    plan="single_detail_query",
+                    candidate_limit=hydration_limit,
+                )
+                _add_ranked_corpus_candidates(
+                    "corpus_trust",
+                    sorted(
+                        ((item_id, detail.get("_trust_score", 0.0)) for item_id, detail in details.items()),
+                        key=lambda row: (-float(row[1] or 0.0), row[0]),
+                    ),
+                    streams,
+                    raw_scores,
+                )
+                _add_ranked_corpus_candidates(
+                    "corpus_freshness",
+                    sorted(
+                        ((item_id, detail.get("_freshness_score", 0.0)) for item_id, detail in details.items()),
+                        key=lambda row: (-float(row[1] or 0.0), row[0]),
+                    ),
+                    streams,
+                    raw_scores,
+                )
+                for item_id, detail in details.items():
+                    detail["raw_scores"] = dict(raw_scores.get(item_id, {}))
                 _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=details)
 
     fused = reciprocal_rank_fusion(streams)
     results: list[dict[str, Any]] = []
     for item in fused[:limit]:
+        if item.item_id not in details:
+            continue
         result = details[item.item_id]
         results.append(
             {
@@ -733,6 +776,7 @@ def search_corpus_chunks(
                 "root_name": result["root_name"],
                 "duplicate_count": result["duplicate_count"],
                 "trust_rank": result["trust_rank"],
+                "raw_scores": result["raw_scores"],
             }
         )
         if result.get("file_kind") is not None:
@@ -7642,6 +7686,130 @@ def _add_ranked_corpus_rows(
             detail["file_kind"] = row[9]
         if len(row) > 10 and row[10]:
             detail["code"] = row[10]
+
+
+def _add_ranked_corpus_candidates(
+    stream: str,
+    rows: list[tuple[Any, ...]],
+    streams: dict[str, list[str]],
+    raw_scores: dict[str, dict[str, float]],
+) -> None:
+    streams[stream] = []
+    seen: set[str] = set()
+    for row in rows:
+        item_id = str(row[0])
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        streams[stream].append(item_id)
+        raw_scores.setdefault(item_id, {})[stream] = float(row[1] or 0.0)
+
+
+def _record_corpus_stream_diagnostics(
+    diagnostics: dict[str, Any] | None,
+    stream: str,
+    started: float,
+    *,
+    rows: int,
+    plan: str,
+    candidate_limit: int | None = None,
+) -> None:
+    if diagnostics is None:
+        return
+    stream_payload: dict[str, Any] = {
+        "duration_ms": round((time.perf_counter() - started) * 1000, 3),
+        "rows": int(rows),
+        "plan": plan,
+    }
+    if candidate_limit is not None:
+        stream_payload["candidate_limit"] = int(candidate_limit)
+    diagnostics.setdefault("streams", {})[stream] = stream_payload
+
+
+def _corpus_root_id(cur: Any, *, root_name: str | None) -> str | None:
+    if not root_name:
+        return None
+    cur.execute(
+        """
+        SELECT id::text FROM monitored_roots
+        WHERE name = %s
+          AND enabled
+        """,
+        (root_name,),
+    )
+    row = cur.fetchone()
+    return str(row[0]) if row else None
+
+
+def _hydrate_corpus_candidate_details(
+    cur: Any,
+    *,
+    candidate_ids: list[str],
+    root_name: str | None,
+    filters: dict[str, Any] | None,
+    raw_scores: dict[str, dict[str, float]],
+) -> dict[str, dict[str, Any]]:
+    if not candidate_ids:
+        return {}
+    root_name_sql = "AND r.name = %s" if root_name else ""
+    root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    code_filter_sql, code_filter_params = _corpus_code_filter_sql(filters)
+    cur.execute(
+        f"""
+        SELECT c.id::text, c.asset_id::text, c.title, c.body, a.path,
+               (
+                   SELECT count(*)
+                   FROM source_assets duplicate
+                   WHERE duplicate.canonical_asset_id = a.id
+               ) AS duplicate_count,
+               r.trust_rank,
+               r.name AS root_name,
+               1.0 / greatest(r.trust_rank, 1) AS trust_score,
+               1.0 / (
+                   1.0 + (
+                       GREATEST(EXTRACT(EPOCH FROM (now() - c.updated_at)), 0)
+                       / 86400.0 / 30.0
+                   )
+               ) AS freshness_score,
+               a.file_kind,
+               c.metadata -> 'code' AS code,
+               c.metadata
+        FROM asset_chunks c
+        JOIN source_assets a ON a.id = c.asset_id
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE c.id = ANY(%s::uuid[])
+          AND r.enabled
+          AND a.deleted_at IS NULL
+          AND a.canonical_asset_id IS NULL
+          AND a.extraction_status = 'indexed'
+          {root_name_sql}
+          {code_filter_sql}
+        """,
+        (candidate_ids, *root_name_params, *code_filter_params),
+    )
+    details: dict[str, dict[str, Any]] = {}
+    for row in cur.fetchall():
+        item_id = str(row[0])
+        metadata = row[12] if isinstance(row[12], dict) else {}
+        body = mail_content_store.hydrate_chunk_body({"body": row[3], "metadata": metadata})
+        detail = {
+            "asset_id": row[1],
+            "title": row[2],
+            "summary": body,
+            "source_path": row[4],
+            "duplicate_count": int(row[5] or 0),
+            "trust_rank": int(row[6] or 500),
+            "root_name": row[7],
+            "raw_scores": dict(raw_scores.get(item_id, {})),
+            "_trust_score": float(row[8] or 0.0),
+            "_freshness_score": float(row[9] or 0.0),
+        }
+        if row[10] is not None:
+            detail["file_kind"] = row[10]
+        if row[11]:
+            detail["code"] = row[11]
+        details[item_id] = detail
+    return details
 
 
 def _search_mail_sidecar_rows(

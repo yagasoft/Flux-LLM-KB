@@ -92,6 +92,20 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "build:" not in _embedded_compose_template(update)
 
 
+def test_postgres_compose_uses_performance_first_local_tuning():
+    dev_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    install_compose = _embedded_compose_template(_script("install-flux.ps1"))
+
+    for compose in (dev_compose, install_compose):
+        assert "-c shared_buffers=1GB" in compose
+        assert "-c effective_cache_size=12GB" in compose
+        assert "-c work_mem=32MB" in compose
+        assert "-c maintenance_work_mem=512MB" in compose
+        assert "-c effective_io_concurrency=200" in compose
+        assert "-c random_page_cost=1.1" in compose
+        assert "-c max_parallel_workers_per_gather=4" in compose
+
+
 def test_dockerfile_installs_practical_extractor_pack():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -163,9 +177,10 @@ def test_docs_describe_production_runtime_boundary():
 
 
 def _embedded_compose_template(script: str) -> str:
-    marker = "@'"
-    start = script.find(marker)
-    if start == -1:
-        return ""
-    end = script.find("'@", start + len(marker))
-    return script[start:end]
+    for marker, terminator in (("@'", "'@"), ('@"', '"@')):
+        start = script.find(marker)
+        if start == -1:
+            continue
+        end = script.find(terminator, start + len(marker))
+        return script[start:end]
+    return ""

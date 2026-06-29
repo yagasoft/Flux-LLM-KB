@@ -16,6 +16,7 @@ from urllib import error, request
 from pydantic import BaseModel, ConfigDict
 
 from . import database
+from .glob_policy import effective_glob_policy
 from .processes import run_no_window
 from .runtime_heartbeat import WatcherHeartbeatRunner
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
@@ -641,15 +642,20 @@ def _service():
 
 def _load_host_watch_roots(root_name: str | None = None) -> list[WatchRoot]:
     roots = _load_host_roots(root_name=root_name, watch_enabled=True)
-    return [
-        WatchRoot(
-            name=root["name"],
-            root_path=Path(root["root_path"]),
-            watch_enabled=root["watch_enabled"],
-            recursive=root["recursive"],
+    watch_roots: list[WatchRoot] = []
+    for root in roots:
+        glob_policy = _configured_glob_policy(root)
+        watch_roots.append(
+            WatchRoot(
+                name=root["name"],
+                root_path=Path(root["root_path"]),
+                watch_enabled=root["watch_enabled"],
+                recursive=root["recursive"],
+                include_globs=tuple(glob_policy["include_globs"]),
+                exclude_globs=tuple(glob_policy["exclude_globs"]),
+            )
         )
-        for root in roots
-    ]
+    return watch_roots
 
 
 def _load_host_roots(root_name: str | None = None, *, watch_enabled: bool | None = None) -> list[dict[str, Any]]:
@@ -670,6 +676,19 @@ def _configured_worker_batch_size() -> int:
         return int(SettingsService().resolve("worker.batch_size").raw_value)
     except Exception:
         return 10
+
+
+def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from .settings import SettingsService
+
+        settings = SettingsService()
+        global_include = settings.resolve("crawler.global_include_globs").raw_value
+        global_exclude = settings.resolve("crawler.global_exclude_globs").raw_value
+    except Exception:
+        global_include = []
+        global_exclude = []
+    return effective_glob_policy(root, global_include=global_include, global_exclude=global_exclude)
 
 
 def _configured_reconcile_on_start() -> bool:

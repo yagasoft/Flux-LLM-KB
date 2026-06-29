@@ -121,6 +121,21 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "memory_mutated boolean NOT NULL DEFAULT false" in governance_migration.sql
     assert "idx_memory_governance_actions_status" in governance_migration.sql
     assert "idx_memory_governance_actions_target" in governance_migration.sql
+    retrieval_performance_migration = next(item for item in migrations if item.name == "0026_retrieval_performance")
+    assert "ADD COLUMN IF NOT EXISTS root_id uuid" in retrieval_performance_migration.sql
+    assert "UPDATE embeddings emb" in retrieval_performance_migration.sql
+    assert "FROM asset_chunks c" in retrieval_performance_migration.sql
+    assert "c.id = emb.owner_id" in retrieval_performance_migration.sql
+    assert "JOIN source_assets a ON a.id = c.asset_id" in retrieval_performance_migration.sql
+    assert "idx_embeddings_asset_chunks_root_model" in retrieval_performance_migration.sql
+    assert "idx_source_assets_active_root" in retrieval_performance_migration.sql
+    assert "idx_asset_chunks_sidecar_ref" in retrieval_performance_migration.sql
+    assert "idx_code_symbols_qualified_name_trgm" in retrieval_performance_migration.sql
+    assert "idx_code_symbols_name_trgm" in retrieval_performance_migration.sql
+    assert "gin_trgm_ops" in retrieval_performance_migration.sql
+    retrieval_hydration_migration = next(item for item in migrations if item.name == "0027_retrieval_hydration_performance")
+    assert "idx_source_assets_canonical_asset_id" in retrieval_hydration_migration.sql
+    assert "WHERE canonical_asset_id IS NOT NULL" in retrieval_hydration_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

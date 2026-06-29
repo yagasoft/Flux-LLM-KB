@@ -443,13 +443,42 @@ def test_brief_keeps_current_evidence_filtering_with_scoped_search(monkeypatch):
     assert "Retired" not in brief
 
 
+def test_explain_includes_additive_corpus_retrieval_timings(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [{"name": "flux", "root_path": "E:\\LLM KB", "enabled": True}],
+    )
+    monkeypatch.setattr(database, "search_episodes", lambda *_args, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, diagnostics=None, url=None):
+        if diagnostics is not None:
+            diagnostics.setdefault("streams", {})["corpus_vector"] = {
+                "duration_ms": 2.5,
+                "rows": 1,
+                "plan": "root_scoped_hnsw_candidates",
+            }
+        return [_chunk("local-chunk", "Local corpus note", ["corpus_vector"], score=0.7)]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    payload = KnowledgeService().explain("local corpus", cwd="E:\\LLM KB", scope_mode="local_only")
+
+    assert payload["results"][0]["id"] == "local-chunk"
+    assert payload["retrieval_timing"]["scopes"]["local"]["corpus"]["streams"]["corpus_vector"] == {
+        "duration_ms": 2.5,
+        "rows": 1,
+        "plan": "root_scoped_hnsw_candidates",
+    }
+
+
 def test_search_corpus_chunks_accepts_root_name_filter_in_all_streams():
     source = open(database.__file__, encoding="utf-8").read()
     function = source.split("def search_corpus_chunks", 1)[1].split("\ndef ", 1)[0]
 
     assert "root_name: str | None = None" in function
     assert "r.name = %s" in function
-    assert "r.name AS root_name" in function
+    assert "r.name AS root_name" in source
     assert "root_name_params" in function
 
 

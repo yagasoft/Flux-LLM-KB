@@ -1206,7 +1206,113 @@ def test_search_corpus_chunks_includes_freshness_stream():
     assert "corpus_vector" in function
     assert "corpus_trust" in function
     assert "corpus_freshness" in function
-    assert "EXTRACT(EPOCH FROM (now() - c.updated_at))" in function
+    assert "EXTRACT(EPOCH FROM (now() - c.updated_at))" in source
+
+
+def test_search_corpus_chunks_uses_candidate_first_root_scoped_vector_and_trigram_search():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    function = source.split("def search_corpus_chunks", 1)[1].split("\ndef ", 1)[0]
+
+    assert "WITH nearest_embeddings AS MATERIALIZED" in function
+    assert "nearest.root_id = %s::uuid" in function
+    assert "OR nearest.root_id IS NULL" in function
+    assert "ORDER BY emb.embedding <=> %s::vector" in function
+    assert "JOIN asset_chunks c ON c.id = nearest.owner_id" in function
+    assert "c.title %% %s" in function
+    assert "c.body %% %s" in function
+    assert "cs.qualified_name %% %s" in function
+    assert "cs.name %% %s" in function
+    assert "set_config('pg_trgm.similarity_threshold'" in function
+    assert "set_config('hnsw.ef_search'" in function
+
+
+def test_search_corpus_chunks_hydrates_candidates_once_and_records_diagnostics(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, tuple(params)))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text FROM monitored_roots" in sql:
+                return ("root-1",)
+            return None
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "plainto_tsquery" in sql and "SELECT c.id::text" in sql:
+                return [("chunk-1", 0.9)]
+            if "greatest(similarity(c.title" in sql:
+                return [("chunk-1", 0.7)]
+            if "nearest_embeddings" in sql:
+                return [("chunk-1", 0.8)]
+            if "FROM code_symbols" in sql:
+                return [("chunk-1", 2.0)]
+            if "WHERE c.id = ANY" in sql:
+                return [
+                    (
+                        "chunk-1",
+                        "asset-1",
+                        "SearchService.search",
+                        "Search implementation details",
+                        "src/flux_llm_kb/service.py",
+                        0,
+                        500,
+                        "llm-kb",
+                        0.5,
+                        0.75,
+                        "code",
+                        {"language": "python"},
+                        {},
+                    )
+                ]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    diagnostics: dict[str, object] = {}
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _vector: "[0,0,0]")
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(database, "_search_mail_sidecar_rows", lambda *_args, **_kwargs: [])
+
+    rows = database.search_corpus_chunks("SearchService.search", root_name="llm-kb", diagnostics=diagnostics)
+
+    hydrate_queries = [sql for sql, _params in executed if "WHERE c.id = ANY" in sql and "JOIN source_assets" in sql]
+    assert len(hydrate_queries) == 1
+    assert rows[0]["id"] == "chunk-1"
+    assert rows[0]["raw_scores"]["corpus_vector"] == 0.8
+    assert diagnostics["streams"]["corpus_vector"]["plan"] == "root_scoped_hnsw_candidates"
+    assert diagnostics["streams"]["corpus_hydration"]["rows"] == 1
+
+
+def test_embedding_insert_populates_asset_chunk_root_id():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    function = source.split("def _insert_embedding_result", 1)[1].split("\ndef ", 1)[0]
+
+    assert "root_id" in function
+    assert "CASE WHEN %s = 'asset_chunks'" in function
+    assert "JOIN source_assets a ON a.id = c.asset_id" in function
 
 
 def test_semantic_duplicate_cluster_builder_selects_canonical_without_deleting_members():

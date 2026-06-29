@@ -29,6 +29,25 @@ def test_polling_watcher_emits_events_for_enabled_roots(tmp_path):
     assert events[0].action == "changed"
 
 
+def test_polling_watcher_skips_excluded_subtrees(tmp_path):
+    root = tmp_path / "watched"
+    root.mkdir()
+    (root / ".worktrees" / "branch").mkdir(parents=True)
+    (root / "src").mkdir()
+    events = []
+    watcher = PollingCorpusWatcher(
+        [WatchRoot(name="docs", root_path=root, watch_enabled=True, exclude_globs=(".worktrees/**",))],
+        on_change=events.append,
+    )
+
+    watcher.poll_once(seed=True)
+    (root / ".worktrees" / "branch" / "ignored.py").write_text("ignore", encoding="utf-8")
+    (root / "src" / "indexed.py").write_text("index", encoding="utf-8")
+    watcher.poll_once()
+
+    assert [event.relative_path for event in events] == ["src/indexed.py"]
+
+
 def test_polling_watcher_suppresses_disabled_roots(tmp_path):
     root = tmp_path / "disabled"
     root.mkdir()
@@ -63,6 +82,27 @@ def test_reloadable_watcher_honors_live_enable_disable(tmp_path):
     watcher.poll_once()
 
     assert [event.relative_path for event in events] == ["one.md", "three.md"]
+
+
+def test_reloadable_watcher_skips_excluded_subtrees(tmp_path):
+    root = tmp_path / "live"
+    root.mkdir()
+    (root / ".worktrees" / "branch").mkdir(parents=True)
+    (root / "src").mkdir()
+    events = []
+    watcher = ReloadableCorpusWatcher(
+        lambda: [WatchRoot(name="docs", root_path=root, watch_enabled=True, exclude_globs=(".worktrees/**",))],
+        on_change=events.append,
+        debounce_seconds=0,
+    )
+
+    watcher.poll_once(seed=True)
+    (root / ".worktrees" / "branch" / "ignored.py").write_text("ignore", encoding="utf-8")
+    (root / "src" / "indexed.py").write_text("index", encoding="utf-8")
+    watcher.poll_once()
+
+    assert [event.relative_path for event in events] == ["src/indexed.py"]
+    assert [event.relative_path for event in watcher.drain_events()] == ["src/indexed.py"]
 
 
 def test_reloadable_watcher_debounces_and_bounds_events(tmp_path):

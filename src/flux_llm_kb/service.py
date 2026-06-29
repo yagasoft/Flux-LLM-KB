@@ -120,14 +120,22 @@ class KnowledgeService:
         root_name: str | None,
         scope_mode: str,
         filters: dict[str, Any] | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         scope = _resolve_retrieval_scope(cwd=cwd, root_name=root_name, scope_mode=scope_mode)
         if scope.mode == "global" or not scope.is_scoped:
-            return self._search_once(query, limit=limit, scope=RetrievalScope(mode="global"), label="global", filters=filters)
+            return self._search_once(
+                query,
+                limit=limit,
+                scope=RetrievalScope(mode="global"),
+                label="global",
+                filters=filters,
+                diagnostics=diagnostics,
+            )
         if scope.mode == "workspace_boosted":
-            return self._search_workspace_boosted(query, limit=limit, scope=scope, filters=filters)
+            return self._search_workspace_boosted(query, limit=limit, scope=scope, filters=filters, diagnostics=diagnostics)
 
-        scoped_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters)
+        scoped_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters, diagnostics=diagnostics)
         if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
             return scoped_results
 
@@ -137,11 +145,20 @@ class KnowledgeService:
             scope=RetrievalScope(mode="global"),
             label="global_fallback",
             filters=filters,
+            diagnostics=diagnostics,
         )
 
-    def _search_workspace_boosted(self, query: str, *, limit: int, scope: RetrievalScope, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def _search_workspace_boosted(
+        self,
+        query: str,
+        *,
+        limit: int,
+        scope: RetrievalScope,
+        filters: dict[str, Any] | None = None,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit or 5), 50))
-        local_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters)
+        local_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters, diagnostics=diagnostics)
         local_keys = {_result_identity(item) for item in local_results}
 
         cross_candidate_limit = min(max(limit * 2, 8), 50)
@@ -152,6 +169,7 @@ class KnowledgeService:
             label_scope=scope,
             label="cross_workspace",
             filters=filters,
+            diagnostics=diagnostics,
         )
         cross_results = [
             item
@@ -178,6 +196,7 @@ class KnowledgeService:
         label: str,
         label_scope: RetrievalScope | None = None,
         filters: dict[str, Any] | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         corpus_limit = max(limit * 4, 20)
         is_local = label == "local"
@@ -199,7 +218,12 @@ class KnowledgeService:
         corpus_kwargs: dict[str, Any] = {"limit": corpus_limit, "root_name": scope.root_name}
         if filters is not None:
             corpus_kwargs["filters"] = filters
+        corpus_diagnostics: dict[str, Any] | None = {} if diagnostics is not None else None
+        if corpus_diagnostics is not None:
+            corpus_kwargs["diagnostics"] = corpus_diagnostics
         corpus_items = database.search_corpus_chunks(query, **corpus_kwargs) if include_corpus and (not is_local or scope.root_name) else []
+        if diagnostics is not None and corpus_diagnostics is not None:
+            diagnostics.setdefault("scopes", {}).setdefault(label, {})["corpus"] = corpus_diagnostics
         episodes = [
             {
                 "kind": "episode",
@@ -271,19 +295,24 @@ class KnowledgeService:
             token_budget = _configured_token_budget()
         result_limit = max(1, min(int(limit or 5), 50))
         if filters is None:
-            search_results = self.search(
+            diagnostics: dict[str, Any] = {}
+            raw_results = self._search_raw(
                 query,
                 limit=max(result_limit, 10),
                 cwd=cwd,
                 root_name=root_name,
                 scope_mode=scope_mode,
+                diagnostics=diagnostics,
             )
+            search_results = _enrich_search_results(query, raw_results)
             return {
                 "query": query,
                 "results": search_results[:result_limit],
                 "brief": _brief_selection_trace(search_results, token_budget=token_budget),
+                "retrieval_timing": diagnostics,
             }
         normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
+        diagnostics = {}
         raw_results = self._search_raw(
             query,
             limit=max(result_limit, 10),
@@ -291,6 +320,7 @@ class KnowledgeService:
             root_name=root_name,
             scope_mode=scope_mode,
             filters=normalized_filters,
+            diagnostics=diagnostics,
         )
         filtered_results, excluded = _apply_retrieval_filters(raw_results, normalized_filters)
         search_results = _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
@@ -298,6 +328,7 @@ class KnowledgeService:
             "query": query,
             "results": search_results[:result_limit],
             "brief": _brief_selection_trace(search_results, token_budget=token_budget),
+            "retrieval_timing": diagnostics,
         }
         if normalized_filters is not None:
             payload["filters"] = normalized_filters
@@ -5528,12 +5559,17 @@ def _load_watch_roots(root_name: str | None = None) -> list[WatchRoot]:
         for root in database.list_monitored_roots(watch_enabled=True)
         if root["enabled"] and (root_name is None or root["name"] == root_name)
     ]
-    return [
-        WatchRoot(
-            name=root["name"],
-            root_path=Path(root["root_path"]),
-            watch_enabled=root["watch_enabled"],
-            recursive=root["recursive"],
+    watch_roots: list[WatchRoot] = []
+    for root in roots:
+        glob_policy = _configured_glob_policy(root)
+        watch_roots.append(
+            WatchRoot(
+                name=root["name"],
+                root_path=Path(root["root_path"]),
+                watch_enabled=root["watch_enabled"],
+                recursive=root["recursive"],
+                include_globs=tuple(glob_policy["include_globs"]),
+                exclude_globs=tuple(glob_policy["exclude_globs"]),
+            )
         )
-        for root in roots
-    ]
+    return watch_roots

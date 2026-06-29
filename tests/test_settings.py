@@ -74,6 +74,15 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "operator.automation.auto_run_governance_shadow" in keys
 
 
+def test_crawler_global_excludes_skip_dedicated_worktrees(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    exclude_globs = service.resolve("crawler.global_exclude_globs").raw_value
+
+    assert ".worktrees/**" in exclude_globs
+
+
 def test_governance_settings_defaults_and_env_overrides(monkeypatch):
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     service = SettingsService()

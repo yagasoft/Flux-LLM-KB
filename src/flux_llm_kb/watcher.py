@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections import deque
+import fnmatch
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -15,6 +16,8 @@ class WatchRoot:
     root_path: Path
     watch_enabled: bool = False
     recursive: bool = True
+    include_globs: tuple[str, ...] = ()
+    exclude_globs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,8 @@ class PollingCorpusWatcher:
                 self.on_change(event)
                 emitted.append(event)
             for relative_path in previous.keys() - current.keys():
+                if not _is_watch_included(root, relative_path):
+                    continue
                 event = _event(root, relative_path, "deleted")
                 self.on_change(event)
                 emitted.append(event)
@@ -140,6 +145,8 @@ class ReloadableCorpusWatcher:
         events.extend(self._stable_candidate_events(root, current))
         for relative_path in previous.keys() - current.keys():
             self._pending_stable.pop((root.name, relative_path), None)
+            if not _is_watch_included(root, relative_path):
+                continue
             event = _event(root, relative_path, "deleted")
             if self._enqueue(event):
                 events.append(event)
@@ -259,6 +266,8 @@ class WatchdogCorpusWatcher(ReloadableCorpusWatcher):
                 try:
                     relative_path = event_path.resolve().relative_to(root.root_path.resolve()).as_posix()
                 except ValueError:
+                    return
+                if not _is_watch_included(root, relative_path):
                     return
                 action = "deleted" if event.event_type == "deleted" else "changed"
                 if action == "deleted":
@@ -422,8 +431,36 @@ def _snapshot(root: WatchRoot) -> dict[str, tuple[int, int]]:
     for path in iterator:
         if not path.is_file():
             continue
-        snapshot[path.relative_to(root_path).as_posix()] = _fingerprint(path)
+        relative_path = path.relative_to(root_path).as_posix()
+        if not _is_watch_included(root, relative_path):
+            continue
+        snapshot[relative_path] = _fingerprint(path)
     return snapshot
+
+
+def _is_watch_included(root: WatchRoot, relative_path: str) -> bool:
+    included = not root.include_globs
+    for pattern in root.include_globs:
+        if _matches_watch_glob(relative_path, pattern):
+            included = True
+    for pattern in root.exclude_globs:
+        negated = pattern.startswith("!")
+        candidate = pattern[1:] if negated else pattern
+        if _matches_watch_glob(relative_path, candidate):
+            included = bool(negated)
+    return included
+
+
+def _matches_watch_glob(relative_path: str, pattern: str) -> bool:
+    normalized = pattern.replace("\\", "/").strip()
+    if not normalized:
+        return False
+    if normalized.endswith("/"):
+        return relative_path.startswith(normalized)
+    if normalized.endswith("/**"):
+        return relative_path == normalized[:-3] or relative_path.startswith(normalized[:-2])
+    name = Path(relative_path).name
+    return fnmatch.fnmatch(relative_path, normalized) or fnmatch.fnmatch(name, normalized)
 
 
 def _fingerprint(path: Path) -> tuple[int, int]:

@@ -930,7 +930,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="crawler.global_exclude_globs",
         category="crawler",
-        default=["private/**", "node_modules/**", ".git/**"],
+        default=["private/**", "node_modules/**", ".git/**", ".worktrees/**"],
         value_type="list[str]",
         description="Global exclude glob defaults inherited by monitored roots unless overridden.",
         env_var="FLUX_KB_CRAWLER_GLOBAL_EXCLUDE_GLOBS",

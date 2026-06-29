@@ -417,7 +417,7 @@ def test_service_brief_prefers_current_lifecycle_evidence(monkeypatch):
 
 
 def test_service_explain_returns_results_and_brief_selection_trace(monkeypatch):
-    def fake_search(_self, _query, limit=10, **_kwargs):
+    def fake_search_raw(_self, _query, *, limit=10, **_kwargs):
         return [
             {
                 "kind": "episode",
@@ -445,7 +445,7 @@ def test_service_explain_returns_results_and_brief_selection_trace(monkeypatch):
             },
         ][:limit]
 
-    monkeypatch.setattr(KnowledgeService, "search", fake_search)
+    monkeypatch.setattr(KnowledgeService, "_search_raw", fake_search_raw)
 
     payload = KnowledgeService().explain("retrieval decision", limit=2, token_budget=30)
 
