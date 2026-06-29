@@ -2,10 +2,6 @@
 
 FROM python:3.12-slim
 
-ARG PIP_INDEX_URL=""
-ARG PIP_DEFAULT_TIMEOUT=30
-ARG PIP_RETRIES=2
-
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
@@ -37,6 +33,10 @@ RUN apt-get update \
         wv \
         zstd \
     && rm -rf /var/lib/apt/lists/*
+
+ARG PIP_INDEX_URL=""
+ARG PIP_DEFAULT_TIMEOUT=30
+ARG PIP_RETRIES=2
 
 COPY pyproject.toml ./
 

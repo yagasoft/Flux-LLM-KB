@@ -27,6 +27,16 @@ def test_dockerfile_uses_pip_buildkit_cache() -> None:
     assert "--no-cache-dir" not in dockerfile
 
 
+def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    apt_install = dockerfile.index("apt-get install")
+    pip_index_arg = dockerfile.index('ARG PIP_INDEX_URL=""')
+    pyproject_copy = dockerfile.index("COPY pyproject.toml ./")
+
+    assert apt_install < pip_index_arg < pyproject_copy
+
+
 def test_docker_compose_defines_corpus_worker_service() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
