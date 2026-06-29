@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextlib
+import os
 import platform
+import re
+import tempfile
 import threading
 import time
 import traceback
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from . import database
 from .mail_ingestion import sync_outlook_profile
@@ -13,6 +17,12 @@ from .mail_ingestion import sync_outlook_profile
 
 DEFAULT_HOST_ID = "default"
 HOST_HEARTBEAT_STALE_AFTER_SECONDS = 120
+_LOCKED_HOST_PATHS: set[str] = set()
+_LOCKED_HOST_PATHS_GUARD = threading.Lock()
+
+
+class OutlookHostAlreadyRunning(RuntimeError):
+    pass
 
 
 def status(*, host_id: str = DEFAULT_HOST_ID) -> dict[str, Any]:
@@ -49,6 +59,19 @@ def set_profile_enabled(profile_name: str, *, enabled: bool) -> dict[str, Any]:
 
 
 def run_forever(*, host_id: str = DEFAULT_HOST_ID, interval_seconds: int = 15, max_iterations: int | None = None) -> dict[str, Any]:
+    try:
+        with _outlook_host_lock(host_id):
+            return _run_forever_locked(host_id=host_id, interval_seconds=interval_seconds, max_iterations=max_iterations)
+    except OutlookHostAlreadyRunning as exc:
+        return {"status": "already_running", "host_id": host_id, "error": str(exc)}
+
+
+def _run_forever_locked(
+    *,
+    host_id: str = DEFAULT_HOST_ID,
+    interval_seconds: int = 15,
+    max_iterations: int | None = None,
+) -> dict[str, Any]:
     iterations = 0
     error_count = 0
     last_result: dict[str, Any] | None = None
@@ -81,7 +104,7 @@ def run_once(*, host_id: str = DEFAULT_HOST_ID, heartbeat_interval_seconds: floa
     except ImportError:
         return _blocked(host_id, "blocked_missing_dependency", "pywin32 is required for Outlook COM")
 
-    database.record_outlook_host_heartbeat(host_id=host_id, status="running", metadata={})
+    database.record_outlook_host_heartbeat(host_id=host_id, status="running", process_id=os.getpid(), metadata={})
     request = database.claim_outlook_sync_request(host_id=host_id)
     if request is None:
         return {"status": "idle", "host_id": host_id}
@@ -113,6 +136,7 @@ def run_once(*, host_id: str = DEFAULT_HOST_ID, heartbeat_interval_seconds: floa
         database.record_outlook_host_heartbeat(
             host_id=host_id,
             status="blocked_outlook_unavailable",
+            process_id=os.getpid(),
             last_error=str(exc),
             metadata={},
         )
@@ -138,7 +162,7 @@ def _run_with_active_heartbeat(
     def heartbeat() -> None:
         while not stop_heartbeat.is_set():
             try:
-                database.record_outlook_host_heartbeat(host_id=host_id, status="running", metadata=metadata)
+                database.record_outlook_host_heartbeat(host_id=host_id, status="running", process_id=os.getpid(), metadata=metadata)
             except Exception:
                 traceback.print_exc()
             stop_heartbeat.wait(interval)
@@ -156,6 +180,7 @@ def _blocked(host_id: str, status_value: str, message: str) -> dict[str, Any]:
     database.record_outlook_host_heartbeat(
         host_id=host_id,
         status=status_value,
+        process_id=os.getpid(),
         last_error=message,
         metadata={},
     )
@@ -167,11 +192,78 @@ def _record_loop_error(host_id: str, exc: Exception) -> None:
         database.record_outlook_host_heartbeat(
             host_id=host_id,
             status="host_error",
+            process_id=os.getpid(),
             last_error=str(exc),
             metadata={"error_type": exc.__class__.__name__},
         )
     except Exception:
         traceback.print_exc()
+
+
+@contextlib.contextmanager
+def _outlook_host_lock(host_id: str = DEFAULT_HOST_ID) -> Iterator[str]:
+    lock_path = _outlook_host_lock_path(host_id)
+    with _LOCKED_HOST_PATHS_GUARD:
+        if lock_path in _LOCKED_HOST_PATHS:
+            raise OutlookHostAlreadyRunning(f"Outlook host {host_id!r} is already running")
+        _LOCKED_HOST_PATHS.add(lock_path)
+    handle = None
+    try:
+        handle = open(lock_path, "a+b")
+        _lock_file(handle, host_id)
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()).encode("ascii"))
+        handle.flush()
+        yield lock_path
+    finally:
+        if handle is not None:
+            try:
+                _unlock_file(handle)
+            finally:
+                handle.close()
+        with _LOCKED_HOST_PATHS_GUARD:
+            _LOCKED_HOST_PATHS.discard(lock_path)
+
+
+def _outlook_host_lock_path(host_id: str) -> str:
+    lock_dir = os.environ.get("FLUX_KB_LOG_DIR") or os.path.join(tempfile.gettempdir(), "flux-llm-kb")
+    os.makedirs(lock_dir, exist_ok=True)
+    safe_host_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", host_id or DEFAULT_HOST_ID)
+    return os.path.abspath(os.path.join(lock_dir, f"outlook-host-{safe_host_id}.lock"))
+
+
+def _lock_file(handle: Any, host_id: str) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            raise OutlookHostAlreadyRunning(f"Outlook host {host_id!r} is already running") from exc
+        return
+    import fcntl
+
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        raise OutlookHostAlreadyRunning(f"Outlook host {host_id!r} is already running") from exc
+
+
+def _unlock_file(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        return
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _normalize_host_status(host: dict[str, Any]) -> dict[str, Any]:

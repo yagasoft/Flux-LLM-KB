@@ -7273,7 +7273,6 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
                     FROM outlook_sync_requests r
                     JOIN mail_profiles p ON p.id = r.profile_id
                     WHERE r.status = 'claimed'
-                      AND r.claimed_at < now() - interval '15 minutes'
                       AND p.enabled
                       AND p.source_type = 'outlook_com'
                       AND (

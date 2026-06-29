@@ -85,6 +85,9 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "Remove-FluxLegacyConsoleLaunchers" in update
     assert "run-host-agent.ps1" in update
     assert "run-outlook-host.ps1" in update
+    assert "Stop-FluxOutlookHostLaunchers" in update
+    assert "Get-CimInstance Win32_Process" in update
+    assert "run-outlook-host.pyw" in update
     assert '-Execute "pwsh.exe"' not in update
     assert "[int]$HostAgentPort = 8799" in update
     assert "[int]$PostgresPort = 5432" in update

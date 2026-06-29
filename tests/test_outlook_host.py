@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import os
 import sys
 import threading
 import types
@@ -103,9 +104,42 @@ def test_outlook_host_claims_due_request_and_runs_com_sync(monkeypatch):
 
     assert payload["status"] == "completed"
     assert payload["profile"] == "outlook-catchup"
-    assert ("heartbeat", {"host_id": "host-1", "status": "running", "metadata": {}}) in events
+    assert events[0][0] == "heartbeat"
+    assert events[0][1]["host_id"] == "host-1"
+    assert events[0][1]["status"] == "running"
+    assert events[0][1]["process_id"] == os.getpid()
+    assert events[0][1]["metadata"] == {}
     assert events[-1][0] == "complete"
     assert events[-1][1]["status"] == "completed"
+
+
+def test_outlook_host_heartbeat_records_process_id_before_claim(monkeypatch):
+    from flux_llm_kb import outlook_host
+
+    events = []
+    monkeypatch.setattr(outlook_host.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "win32com", types.SimpleNamespace(client=types.SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "win32com.client", types.SimpleNamespace())
+    monkeypatch.setattr(database, "record_outlook_host_heartbeat", lambda **kwargs: events.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "claim_outlook_sync_request", lambda host_id="default": None)
+
+    payload = outlook_host.run_once(host_id="host-1")
+
+    assert payload["status"] == "idle"
+    assert events[0]["process_id"] == os.getpid()
+
+
+def test_outlook_host_duplicate_process_exits_before_claiming_requests(monkeypatch, tmp_path):
+    from flux_llm_kb import outlook_host
+
+    monkeypatch.setenv("FLUX_KB_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(database, "claim_outlook_sync_request", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not claim")))
+
+    with outlook_host._outlook_host_lock("host-1"):
+        payload = outlook_host.run_forever(host_id="host-1", interval_seconds=0, max_iterations=1)
+
+    assert payload["status"] == "already_running"
+    assert payload["host_id"] == "host-1"
 
 
 def test_outlook_host_heartbeats_while_sync_request_is_running(monkeypatch):

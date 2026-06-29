@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email import policy
@@ -988,12 +989,20 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
                 entry_id = getattr(item, "EntryID", None)
                 item_cursor = _outlook_item_cursor_datetime(item, incremental_basis["attribute"])
                 source_message_id = f"outlook:{entry_id}" if entry_id else None
-                if folder_cursor is not None and source_message_id and database.mail_message_exists(
+                if source_message_id and database.mail_message_exists(
                     profile_name=profile["name"],
                     source_folder=current_folder_path,
                     source_message_id=source_message_id,
                 ):
                     cursor_candidate = _max_outlook_cursor(cursor_candidate, item_cursor)
+                    _checkpoint_outlook_cursor(
+                        profile=profile,
+                        metadata=metadata,
+                        cursors=cursors,
+                        folder_path=current_folder_path,
+                        cursor_value=cursor_candidate,
+                        incremental_basis=incremental_basis,
+                    )
                     continue
                 try:
                     result = export_outlook_item_to_spool(
@@ -1014,15 +1023,25 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
                     )
                     exported += 1
                     cursor_candidate = _max_outlook_cursor(cursor_candidate, item_cursor)
+                    _checkpoint_outlook_cursor(
+                        profile=profile,
+                        metadata=metadata,
+                        cursors=cursors,
+                        folder_path=current_folder_path,
+                        cursor_value=cursor_candidate,
+                        incremental_basis=incremental_basis,
+                    )
                 except Exception as exc:
                     errors.append({"folder": current_folder_path, "entry_id": str(entry_id or ""), "error": str(exc)})
-            if cursor_candidate is not None:
-                cursors[current_folder_path] = _outlook_cursor_payload(cursor_candidate, incremental_basis)
+                    break
         if exported >= max_messages:
             break
-    metadata["outlook_incremental_basis"] = incremental_basis["basis"]
-    metadata["outlook_cursors"] = cursors
-    database.update_mail_profile_metadata(name=profile["name"], metadata=metadata)
+    _persist_outlook_metadata_if_changed(
+        profile=profile,
+        metadata=metadata,
+        cursors=cursors,
+        incremental_basis=incremental_basis,
+    )
     status = "completed" if not errors else "partial"
     database.record_mail_sync_run(
         profile_name=profile["name"],
@@ -1041,6 +1060,40 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "include_subfolders": include_subfolders,
         "incremental_basis": incremental_basis["basis"],
     }
+
+
+def _checkpoint_outlook_cursor(
+    *,
+    profile: dict[str, Any],
+    metadata: dict[str, Any],
+    cursors: dict[str, Any],
+    folder_path: str,
+    cursor_value: datetime | None,
+    incremental_basis: dict[str, str],
+) -> None:
+    if cursor_value is None:
+        return
+    payload = _outlook_cursor_payload(cursor_value, incremental_basis)
+    if cursors.get(folder_path) == payload:
+        return
+    cursors[folder_path] = payload
+    metadata["outlook_incremental_basis"] = incremental_basis["basis"]
+    metadata["outlook_cursors"] = cursors
+    database.update_mail_profile_metadata(name=profile["name"], metadata=copy.deepcopy(metadata))
+
+
+def _persist_outlook_metadata_if_changed(
+    *,
+    profile: dict[str, Any],
+    metadata: dict[str, Any],
+    cursors: dict[str, Any],
+    incremental_basis: dict[str, str],
+) -> None:
+    if metadata.get("outlook_incremental_basis") == incremental_basis["basis"] and metadata.get("outlook_cursors") == cursors:
+        return
+    metadata["outlook_incremental_basis"] = incremental_basis["basis"]
+    metadata["outlook_cursors"] = cursors
+    database.update_mail_profile_metadata(name=profile["name"], metadata=copy.deepcopy(metadata))
 
 
 def _part_text(part: Message) -> str:
@@ -1215,7 +1268,7 @@ def _prepare_outlook_items_for_incremental_sync(
     field = f"[{basis['property']}]"
     sort = getattr(items, "Sort", None)
     if callable(sort):
-        sort(field, True)
+        sort(field, False)
     if cursor is None:
         return items
     restrict = getattr(items, "Restrict", None)

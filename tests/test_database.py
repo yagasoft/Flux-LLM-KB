@@ -3153,9 +3153,20 @@ def test_outlook_claim_query_recovers_stale_claims_from_dead_hosts():
 
     assert "stale_claimed" in claim_function
     assert "r.status = 'claimed'" in claim_function
-    assert "r.claimed_at < now() - interval '15 minutes'" in claim_function
+    assert "r.claimed_at < now() - interval '15 minutes'" not in claim_function
     assert "r.claimed_by = %s" in claim_function
     assert "h.heartbeat_at >= now() - interval '120 seconds'" in claim_function
+    assert "claimed_by = NULL" in claim_function
+
+
+def test_outlook_claim_query_recovers_stale_claims_from_stale_heartbeat_without_claim_age_gate():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+    claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def cancel_outlook_sync_request", 1)[0]
+    stale_claimed = claim_function.split("WITH stale_claimed AS", 1)[1].split("UPDATE outlook_sync_requests r", 1)[0]
+
+    assert "r.status = 'claimed'" in stale_claimed
+    assert "r.claimed_at < now() - interval '15 minutes'" not in stale_claimed
+    assert "h.heartbeat_at >= now() - interval '120 seconds'" in stale_claimed
     assert "claimed_by = NULL" in claim_function
 
 

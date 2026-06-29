@@ -101,6 +101,20 @@ function Remove-FluxLegacyConsoleLaunchers {
     }
 }
 
+function Stop-FluxOutlookHostLaunchers {
+    param([string]$InstallRoot)
+    $launcherPath = Join-Path (Join-Path $InstallRoot "app") "run-outlook-host.pyw"
+    $launcherPattern = [regex]::Escape($launcherPath)
+    $processes = Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -and
+        $_.CommandLine -match $launcherPattern -and
+        ($_.Name -eq "python.exe" -or $_.Name -eq "pythonw.exe")
+    }
+    foreach ($process in $processes) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Resolve-FluxPythonwExe {
     param([string]$AppRoot)
     $pythonw = Join-Path $AppRoot ".venv\Scripts\pythonw.exe"
@@ -382,6 +396,7 @@ if (-not (Test-Path $venvPython)) {
 Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
+Stop-FluxOutlookHostLaunchers -InstallRoot $InstallRoot
 
 Push-Location $appRoot
 try {
