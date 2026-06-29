@@ -31,9 +31,11 @@ def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> N
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
     apt_install = dockerfile.index("apt-get install")
+    apt_mirror_arg = dockerfile.index('ARG APT_DEBIAN_MIRROR_URL=""')
     pip_index_arg = dockerfile.index('ARG PIP_INDEX_URL=""')
     pyproject_copy = dockerfile.index("COPY pyproject.toml ./")
 
+    assert apt_mirror_arg < apt_install
     assert apt_install < pip_index_arg < pyproject_copy
 
 

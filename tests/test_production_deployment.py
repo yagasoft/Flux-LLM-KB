@@ -230,6 +230,23 @@ def test_production_deploy_supports_custom_pip_index_for_gpu_wheels():
         assert '"--index-url", $PipIndexUrl' in script
 
 
+def test_production_deploy_supports_custom_apt_mirrors_for_slow_system_packages():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    assert 'ARG APT_DEBIAN_MIRROR_URL=""' in dockerfile
+    assert 'ARG APT_SECURITY_MIRROR_URL=""' in dockerfile
+    assert "APT_DEBIAN_MIRROR_URL" in dockerfile
+    assert "APT_SECURITY_MIRROR_URL" in dockerfile
+    assert "/etc/apt/sources.list.d/debian.sources" in dockerfile
+    for script in (install, update):
+        assert "[string]$AptDebianMirrorUrl = $env:FLUX_KB_APT_DEBIAN_MIRROR_URL" in script
+        assert "[string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL" in script
+        assert '"--build-arg", "APT_DEBIAN_MIRROR_URL=$AptDebianMirrorUrl"' in script
+        assert '"--build-arg", "APT_SECURITY_MIRROR_URL=$AptSecurityMirrorUrl"' in script
+
+
 def test_docs_describe_production_runtime_boundary():
     setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
     architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")

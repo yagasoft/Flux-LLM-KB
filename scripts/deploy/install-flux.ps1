@@ -13,7 +13,9 @@ param(
     [int]$PipInstallTimeoutSeconds = 900,
     [int]$PipTimeoutSeconds = 30,
     [int]$PipRetries = 2,
-    [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL
+    [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL,
+    [string]$AptDebianMirrorUrl = $env:FLUX_KB_APT_DEBIAN_MIRROR_URL,
+    [string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL
 )
 
 $ErrorActionPreference = "Stop"
@@ -484,6 +486,12 @@ $dockerBuildArgs = @(
     "--build-arg", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
     "--build-arg", "PIP_RETRIES=$PipRetries"
 )
+if ($AptDebianMirrorUrl) {
+    $dockerBuildArgs += @("--build-arg", "APT_DEBIAN_MIRROR_URL=$AptDebianMirrorUrl")
+}
+if ($AptSecurityMirrorUrl) {
+    $dockerBuildArgs += @("--build-arg", "APT_SECURITY_MIRROR_URL=$AptSecurityMirrorUrl")
+}
 if ($PipIndexUrl) {
     $dockerBuildArgs += @("--build-arg", "PIP_INDEX_URL=$PipIndexUrl")
 }
