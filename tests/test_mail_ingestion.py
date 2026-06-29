@@ -308,6 +308,124 @@ def test_sync_outlook_profile_includes_child_folders_by_default(monkeypatch, tmp
         ("pm-1", "Mailbox - Me\\Inbox\\MOHESR\\PM"),
         ("business-1", "Mailbox - Me\\Inbox\\MOHESR\\Business"),
     ]
+    assert result["spool_paths"] == ["export-parent-1", "export-pm-1", "export-business-1"]
+
+
+def test_sync_outlook_profile_queues_only_changed_spool_paths(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    queued = []
+    monkeypatch.setattr(
+        mail_ingestion.database,
+        "list_mail_profiles",
+        lambda name=None: [
+            {
+                "name": name or "outlook-catchup",
+                "source_type": "outlook_com",
+                "enabled": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mail_ingestion,
+        "_sync_outlook_profile",
+        lambda _profile: {
+            "profile": "outlook-catchup",
+            "status": "completed",
+            "exported": 2,
+            "seen": 2,
+            "errors": [],
+            "spool_paths": ["export-1", "export-2"],
+        },
+    )
+    monkeypatch.setattr(
+        mail_ingestion.database,
+        "get_monitored_root",
+        lambda _root_name: {"root_path": "/app/private/mail-spool/outlook-catchup/ready"},
+    )
+    monkeypatch.setattr(
+        mail_ingestion.database,
+        "enqueue_corpus_sync_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("Outlook deltas must use path-batch enqueueing")),
+    )
+    monkeypatch.setattr(
+        mail_ingestion.database,
+        "enqueue_corpus_sync_path_batch_jobs",
+        lambda **kwargs: queued.append(kwargs)
+        or {
+            "jobs": [{"job_id": f"job-{len(queued)}", "status": "pending", "deduped": False}],
+            "count": 1,
+            "path_count": len(kwargs["paths"]),
+        },
+        raising=False,
+    )
+
+    result = mail_ingestion.sync_outlook_profile("outlook-catchup")
+
+    assert result["spool_sync"]["sync_mode"] == "background_path_jobs"
+    assert result["spool_sync"]["profiles"][0]["path_count"] == 2
+    assert queued == [
+        {
+            "root_name": "mail-outlook-catchup",
+            "reason": "outlook_spool_sync",
+            "paths": [
+                "/app/private/mail-spool/outlook-catchup/ready/export-1",
+                "/app/private/mail-spool/outlook-catchup/ready/export-2",
+            ],
+            "payload": {
+                "profile_name": "outlook-catchup",
+                "source_type": "outlook_com",
+            },
+        }
+    ]
+
+
+def test_sync_outlook_profile_skips_spool_job_when_no_messages_changed(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    monkeypatch.setattr(
+        mail_ingestion.database,
+        "list_mail_profiles",
+        lambda name=None: [
+            {
+                "name": name or "outlook-catchup",
+                "source_type": "outlook_com",
+                "enabled": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mail_ingestion,
+        "_sync_outlook_profile",
+        lambda _profile: {
+            "profile": "outlook-catchup",
+            "status": "completed",
+            "exported": 0,
+            "seen": 10,
+            "errors": [],
+            "spool_paths": [],
+        },
+    )
+    monkeypatch.setattr(
+        mail_ingestion.database,
+        "enqueue_corpus_sync_job",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("unchanged Outlook runs must not queue a full-root sync")),
+    )
+
+    result = mail_ingestion.sync_outlook_profile("outlook-catchup")
+
+    assert result["spool_sync"] == {
+        "profiles": [
+            {
+                "profile": "outlook-catchup",
+                "root_name": "mail-outlook-catchup",
+                "status": "skipped_no_spool_changes",
+                "path_count": 0,
+            }
+        ],
+        "count": 1,
+        "sync_mode": "skipped_no_spool_changes",
+    }
 
 
 def test_sync_outlook_profile_stops_after_item_export_error(monkeypatch, tmp_path):

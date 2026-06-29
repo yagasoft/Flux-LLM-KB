@@ -169,11 +169,20 @@ def test_scan_path_reports_progress_events(tmp_path):
 
     plan = scan_path(root, CorpusPolicy(root_path=root, mail_spool=True), progress_callback=events.append)
 
-    assert [event["stage"] for event in events] == ["enumerated", "filtered", "hashing", "discovered"]
-    assert events[0]["files_total"] == 4
-    assert events[1]["files_skipped"] == 1
+    assert [event["stage"] for event in events] == ["enumerating", "enumerated", "filtered", "hashing", "discovered"]
+    assert events[0]["stage_index"] == 1
+    assert events[0]["stage_total"] == 6
+    assert events[0]["files_done"] == 0
+    assert events[1]["files_total"] == 4
+    assert events[1]["progress_label"] == "Enumerated 4 files"
+    assert events[2]["files_skipped"] == 1
+    assert events[3]["stage_index"] == 4
+    assert events[3]["files_done"] == 0
     assert events[-1]["files_seen"] == len(plan.assets)
+    assert events[-1]["files_done"] == len(plan.assets)
     assert events[-1]["jobs_queued"] == len(plan.deferred_jobs)
+    assert events[-1]["stage_index"] == 5
+    assert events[-1]["progress_percent"] < 100
 
 
 def test_scan_path_indexes_two_level_eml_outside_managed_mail_spool(tmp_path):

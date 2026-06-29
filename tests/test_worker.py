@@ -10,7 +10,7 @@ from flux_llm_kb.service import KnowledgeService
 
 
 def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
-    calls = {"completed": [], "blocked": [], "retried": [], "progress": [], "repaired": [], "cleared_errors": []}
+    calls = {"completed": [], "blocked": [], "retried": [], "progress": [], "recovered": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
@@ -25,6 +25,7 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
             }
         ],
     )
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **kwargs: calls["recovered"].append(kwargs) or {"recovered": 0})
     monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
     monkeypatch.setattr(database, "update_corpus_job_progress", lambda **kwargs: calls["progress"].append(kwargs), raising=False)
     monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
@@ -63,6 +64,7 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     result = KnowledgeService().run_corpus_backfill(kind="general", limit=1, workers=1)
 
     assert result["completed"] == 1
+    assert calls["recovered"] == [{"root_name": None}]
     assert calls["blocked"] == []
     assert calls["retried"] == []
     assert sync_calls == [
@@ -80,6 +82,87 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     assert calls["completed"][0]["job_id"] == "job-sync"
     assert calls["completed"][0]["telemetry"]["files_seen"] == 35655
     assert calls["completed"][0]["telemetry"]["jobs_queued"] == 120
+
+
+def test_backfill_recovers_stale_jobs_globally(monkeypatch):
+    calls = {"recovered": [], "cancelled": [], "repaired": [], "cleared_errors": []}
+
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **kwargs: calls["recovered"].append(kwargs) or {"recovered": 2})
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **kwargs: calls["cancelled"].append(kwargs) or {"cancelled": 0})
+    monkeypatch.setattr(database, "claim_corpus_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    result = KnowledgeService().run_corpus_backfill(kind="general", limit=1, workers=1)
+
+    assert calls["recovered"] == [{"root_name": None}]
+    assert result["recovered_stale_running"] == 2
+    assert calls["cancelled"] == [{"root_name": None}]
+
+
+def test_process_corpus_sync_job_uses_worker_heartbeat_without_progress_renewal(monkeypatch):
+    calls = {"progress": [], "heartbeats": []}
+
+    monkeypatch.setattr(database, "update_corpus_job_progress", lambda **kwargs: calls["progress"].append(kwargs), raising=False)
+    monkeypatch.setattr(database, "heartbeat_corpus_job", lambda **kwargs: calls["heartbeats"].append(kwargs), raising=False)
+
+    class OneShotEvent:
+        def __init__(self):
+            self.calls = 0
+            self.is_set = False
+
+        def wait(self, _timeout):
+            if self.calls == 0:
+                self.calls += 1
+                return False
+            return True
+
+        def set(self):
+            self.is_set = True
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(service_module.threading, "Event", OneShotEvent)
+    monkeypatch.setattr(service_module.threading, "Thread", ImmediateThread)
+
+    def fake_sync(self, *, root_name=None, path=None, dry_run=False, reason="manual_sync", progress_callback=None):
+        if progress_callback:
+            progress_callback({"stage": "enumerated", "files_total": 1, "files_done": 1})
+        return {
+            "root_name": root_name,
+            "files_seen": 1,
+            "files_changed": 1,
+            "files_deleted": 0,
+            "jobs_queued": 0,
+            "chunks_indexed": 0,
+            "manifest_skipped_unchanged": 0,
+        }
+
+    monkeypatch.setattr(KnowledgeService, "sync_corpus", fake_sync)
+
+    result = KnowledgeService()._process_corpus_sync_job(
+        {
+            "id": "job-sync",
+            "job_type": "corpus_sync_root",
+            "payload": {"root_name": "docs", "reason": "manual_sync"},
+        }
+    )
+
+    assert result.status == "indexed"
+    assert calls["progress"][0]["telemetry"]["stage"] == "starting"
+    assert any(call["telemetry"]["stage"] == "enumerated" for call in calls["progress"])
+    assert calls["heartbeats"]
+    assert calls["heartbeats"][0]["job_id"] == "job-sync"
+    assert calls["heartbeats"][0]["telemetry"]["stage"] == "running"
 
 
 def test_backfill_processes_batched_corpus_sync_root_paths(monkeypatch):
@@ -1208,7 +1291,13 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
         "lookup_scan_manifest",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("per-file manifest lookup should not be used")),
     )
-    monkeypatch.setattr(database, "persist_crawl_plan", lambda **kwargs: {"root_name": kwargs["root_name"]})
+    def fake_persist(**kwargs):
+        captured["persist_progress_callback"] = kwargs.get("progress_callback")
+        if kwargs.get("progress_callback"):
+            kwargs["progress_callback"]({"stage": "persisted", "files_total": 1})
+        return {"root_name": kwargs["root_name"]}
+
+    monkeypatch.setattr(database, "persist_crawl_plan", fake_persist)
 
     progress = []
     result = KnowledgeService().sync_corpus(root_name="docs", progress_callback=progress.append)
@@ -1220,7 +1309,8 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
     assert captured["policy"].container_max_member_bytes == 1024
     assert callable(captured["policy"].manifest_lookup)
     assert captured["manifest"]["content_hash"] == "cached"
-    assert progress == [{"stage": "enumerated", "files_total": 1}]
+    assert callable(captured["persist_progress_callback"])
+    assert progress == [{"stage": "enumerated", "files_total": 1}, {"stage": "persisted", "files_total": 1}]
 
 
 def test_backfill_passes_configured_worker_family_caps(monkeypatch):

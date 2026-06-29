@@ -1783,7 +1783,20 @@ describe("Flux dashboard", () => {
           status: "running",
           payload: { root_name: "mail-outlook-mohesr", profile_name: "outlook-mohesr", reason: "outlook_spool_sync" },
           attempts: 1,
-          telemetry: { stage: "running", files_seen: 35655, files_changed: 35371, jobs_queued: 120 },
+          telemetry: {
+            stage: "hashing",
+            stage_index: 4,
+            stage_total: 6,
+            paths_done: 42,
+            paths_total: 3292,
+            files_done: 3,
+            files_total: 8,
+            files_seen: 35655,
+            files_changed: 35371,
+            jobs_queued: 120,
+            current_path: "/app/private/mail-spool/outlook-mohesr/ready/export-42",
+            progress_percent: 13
+          },
           updated_at: "2026-06-27T16:30:01+00:00"
         }
       ]
@@ -1794,13 +1807,19 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
     const table = await screen.findByRole("table", { name: "Extraction jobs" });
+    expect(within(table).getByText("Progress")).toBeInTheDocument();
     expect(within(table).getAllByText("Sync Root")).toHaveLength(2);
     expect(within(table).getAllByText("outlook-mohesr")).toHaveLength(2);
     expect(within(table).getAllByText("mail-outlook-mohesr")).toHaveLength(2);
+    expect(within(table).getByText("Paths 42/3292, stage 4/6 hashing, files 3/8")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Show details for job job-sync-running" }));
     expect(screen.getByText("Stage")).toBeInTheDocument();
-    expect(screen.getAllByText("Running").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Hashing").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Progress").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("Paths 42/3292, stage 4/6 hashing, files 3/8").length).toBeGreaterThan(0);
+    expect(screen.getByText("Current path")).toBeInTheDocument();
+    expect(screen.getByText("/app/private/mail-spool/outlook-mohesr/ready/export-42")).toBeInTheDocument();
     expect(screen.getByText("Files seen")).toBeInTheDocument();
     expect(screen.getByText("35655")).toBeInTheDocument();
 

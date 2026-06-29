@@ -203,6 +203,48 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
     assert any("FOR UPDATE SKIP LOCKED" in sql for sql in executed_sql)
 
 
+def test_claim_corpus_jobs_skips_sync_root_when_same_root_is_running(monkeypatch):
+    executed_sql = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed_sql.append(sql)
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.claim_corpus_jobs(limit=2, worker_id="worker-a")
+
+    sql = "\n".join(executed_sql)
+    assert "other.job_type = 'corpus_sync_root'" in sql
+    assert "other.status = 'running'" in sql
+    assert "other.payload->>'root_name' = capture_jobs.payload->>'root_name'" in sql
+    assert "first_sync.job_type = 'corpus_sync_root'" in sql
+    assert "first_sync.payload->>'root_name' = capture_jobs.payload->>'root_name'" in sql
+
+
 def test_code_index_status_filters_selected_root_without_join_leakage(monkeypatch):
     executed: list[tuple[str, tuple]] = []
     result_sets = [
@@ -2474,6 +2516,66 @@ def test_enqueue_corpus_sync_job_creates_pending_followup_for_running_path_job(m
     assert json.loads(insert_params[1]) == {"root_name": "docs", "reason": "watch_event", "path": "b.md"}
 
 
+def test_enqueue_corpus_sync_path_batch_jobs_splits_large_outlook_delta(monkeypatch):
+    executed = []
+    inserted = 0
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            nonlocal inserted
+            if "INSERT INTO capture_jobs" in executed[-1][0]:
+                inserted += 1
+                return (f"job-{inserted}", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    paths = [f"/app/private/mail-spool/outlook/ready/export-{index}" for index in range(5001)]
+    result = database.enqueue_corpus_sync_path_batch_jobs(
+        root_name="mail-outlook",
+        reason="outlook_spool_sync",
+        paths=paths,
+        payload={"profile_name": "outlook", "source_type": "outlook_com"},
+    )
+
+    assert database.MAX_CORPUS_SYNC_BATCH_PATHS == 5000
+    assert result["count"] == 2
+    assert [job["job_id"] for job in result["jobs"]] == ["job-1", "job-2"]
+    insert_params = [params for statement, params in executed if "INSERT INTO capture_jobs" in statement]
+    payloads = [json.loads(params[1]) for params in insert_params]
+    assert len(payloads[0]["paths"]) == 5000
+    assert len(payloads[1]["paths"]) == 1
+    assert payloads[0]["paths_total"] == 5001
+    assert payloads[0]["path_batch_index"] == 1
+    assert payloads[0]["path_batch_total"] == 2
+    assert payloads[1]["path_batch_index"] == 2
+    assert payloads[1]["path_batch_total"] == 2
+    assert payloads[1]["profile_name"] == "outlook"
+
+
 def test_update_corpus_job_progress_records_progress_heartbeat(monkeypatch):
     executed = []
 
@@ -2507,6 +2609,42 @@ def test_update_corpus_job_progress_records_progress_heartbeat(monkeypatch):
 
     sql = "\n".join(statement for statement, _params in executed)
     assert "progress_heartbeat_at = now()" in sql
+
+
+def test_heartbeat_corpus_job_does_not_refresh_progress_heartbeat(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.heartbeat_corpus_job(job_id="job-sync", telemetry={"stage": "running"})
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "updated_at = now()" in sql
+    assert "progress_heartbeat_at" not in sql
 
 
 def test_recover_stale_running_corpus_jobs_uses_progress_heartbeat_and_worker_liveness(monkeypatch):
@@ -2552,6 +2690,26 @@ def test_recover_stale_running_corpus_jobs_uses_progress_heartbeat_and_worker_li
     assert "runtime_components" in sql
     assert "status = 'running'" in sql
     assert "status = 'pending'" in sql
+
+
+def test_persist_crawl_plan_reports_progress_in_dry_run(tmp_path):
+    events = []
+    plan = CrawlPlan(root_path=tmp_path, assets=[], deferred_jobs=[], errors=[])
+
+    result = database.persist_crawl_plan(root_name="docs", plan=plan, dry_run=True, progress_callback=events.append)
+
+    assert result["dry_run"] is True
+    assert events == [
+        {
+            "stage": "persisted",
+            "stage_index": 6,
+            "stage_total": 6,
+            "files_done": 0,
+            "files_total": 0,
+            "progress_percent": 100,
+            "progress_label": "Persisted 0/0 files",
+        }
+    ]
 
 
 def test_apply_extraction_result_persists_container_child_assets(monkeypatch):

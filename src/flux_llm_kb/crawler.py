@@ -249,10 +249,13 @@ def scan_path(
     scope_relative_path = _scope_relative_path(root, target) if target else None
     scope_is_file = bool(target and target.is_file())
     entries: list[tuple[str, Path | DiscoveredAsset]] = []
-    paths = sorted(
-        _iter_files(root, recursive=active_policy.recursive, target=target, policy=active_policy, marker_patterns=marker_patterns),
-        key=lambda item: item.relative_to(root).as_posix().lower(),
-    )
+    paths: list[Path] = []
+    _emit_progress(progress_callback, stage="enumerating", files_done=0)
+    for path in _iter_files(root, recursive=active_policy.recursive, target=target, policy=active_policy, marker_patterns=marker_patterns):
+        paths.append(path)
+        if len(paths) % 500 == 0:
+            _emit_progress(progress_callback, stage="enumerating", files_done=len(paths))
+    paths = sorted(paths, key=lambda item: item.relative_to(root).as_posix().lower())
     _emit_progress(progress_callback, stage="enumerated", files_total=len(paths))
 
     files_skipped = 0
@@ -341,13 +344,76 @@ def scan_path(
     )
 
 
+_SCAN_STAGE_INDEX = {
+    "enumerating": 1,
+    "enumerated": 2,
+    "filtered": 3,
+    "hashing": 4,
+    "discovering": 5,
+    "discovered": 5,
+}
+_SCAN_STAGE_TOTAL = 6
+
+
 def _emit_progress(callback: Callable[[dict[str, Any]], None] | None, **payload: Any) -> None:
     if callback is None:
         return
+    progress = dict(payload)
+    stage = str(progress.get("stage") or "running")
+    progress["stage"] = stage
+    stage_index = int(progress.get("stage_index") or _SCAN_STAGE_INDEX.get(stage, 0) or 0)
+    if stage_index:
+        progress.setdefault("stage_index", stage_index)
+        progress.setdefault("stage_total", _SCAN_STAGE_TOTAL)
+    if "files_done" not in progress:
+        if "files_seen" in progress:
+            progress["files_done"] = progress["files_seen"]
+        elif stage in {"enumerated", "filtered"} and "files_total" in progress:
+            progress["files_done"] = progress["files_total"]
+        else:
+            progress["files_done"] = 0
+    if "progress_percent" not in progress and stage_index:
+        total = _coerce_progress_int(progress.get("files_total"))
+        done = _coerce_progress_int(progress.get("files_done"))
+        stage_fraction = 0.0
+        if total and done is not None:
+            stage_fraction = max(0.0, min(float(done) / float(total), 1.0))
+        elif stage in {"enumerated", "filtered", "discovered"}:
+            stage_fraction = 1.0
+        progress["progress_percent"] = min(99, int(((stage_index - 1 + stage_fraction) / _SCAN_STAGE_TOTAL) * 100))
+    if "progress_label" not in progress:
+        progress["progress_label"] = _scan_progress_label(progress)
     try:
-        callback(dict(payload))
+        callback(progress)
     except Exception:
         return
+
+
+def _coerce_progress_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scan_progress_label(progress: dict[str, Any]) -> str:
+    stage = str(progress.get("stage") or "running")
+    files_done = _coerce_progress_int(progress.get("files_done"))
+    files_total = _coerce_progress_int(progress.get("files_total"))
+    if stage == "enumerating":
+        return f"Enumerating {files_done or 0} files"
+    if stage == "enumerated":
+        return f"Enumerated {files_total or files_done or 0} files"
+    if stage == "filtered":
+        skipped = _coerce_progress_int(progress.get("files_skipped")) or 0
+        return f"Filtered {files_done or 0} files, skipped {skipped}"
+    if stage == "hashing":
+        return f"Hashing {files_done or 0}/{files_total or 0} files"
+    if stage in {"discovering", "discovered"}:
+        return f"Discovered {files_done or 0}/{files_total or 0} files"
+    return stage.replace("_", " ").title()
 
 
 def discover_asset(

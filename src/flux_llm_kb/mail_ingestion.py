@@ -316,6 +316,7 @@ def sync_mail_profile(
     for profile in profiles:
         if not profile["enabled"]:
             continue
+        changed_spool_paths: list[str] | None = None
         if profile["source_type"] == "imap":
             run = database.create_imap_sync_run(profile_name=profile["name"], trigger="manual", requested_by=requested_by)
             if run.get("status") in {"running", "claimed"} or (run.get("status") == "backoff" and not _mail_sync_run_due_for_retry(run)):
@@ -339,16 +340,19 @@ def sync_mail_profile(
         elif profile["source_type"] == "outlook_com":
             if allow_outlook_com:
                 result = _sync_outlook_profile(profile)
+                changed_spool_paths = _changed_spool_paths_from_result(result)
             else:
                 result = {
                     "profile": profile["name"],
                     "status": "outlook_host_required",
                     "command": "flux-kb outlook-host run",
                     "exported": 0,
+                    "spool_paths": [],
                 }
+                changed_spool_paths = []
         else:
             result = {"profile": profile["name"], "status": "unsupported_source_type"}
-        spool_result = _sync_mail_spool_for_profile(profile)
+        spool_result = _sync_mail_spool_for_profile(profile, changed_paths=changed_spool_paths)
         result["spool_sync"] = spool_result
         results.append(result)
     return {"profiles": results, "count": len(results)}
@@ -408,13 +412,76 @@ def sync_outlook_profile(profile_name: str) -> dict[str, Any]:
     if profile["source_type"] != "outlook_com":
         raise ValueError(f"mail profile is not Outlook COM: {profile_name}")
     result = _sync_outlook_profile(profile)
-    result["spool_sync"] = _sync_mail_spool_for_profile(profile)
+    result["spool_sync"] = _sync_mail_spool_for_profile(profile, changed_paths=_changed_spool_paths_from_result(result))
     return result
 
 
-def _sync_mail_spool_for_profile(profile: dict[str, Any]) -> dict[str, Any]:
+def _changed_spool_paths_from_result(result: dict[str, Any]) -> list[str]:
+    raw_paths = result.get("spool_paths")
+    if not isinstance(raw_paths, list):
+        return []
+    return [str(path).strip() for path in raw_paths if str(path).strip()]
+
+
+def _sync_mail_spool_for_profile(profile: dict[str, Any], *, changed_paths: Iterable[str] | None = None) -> dict[str, Any]:
     if profile.get("source_type") == "outlook_com":
         root_name = f"mail-{profile['name']}"
+        if changed_paths is not None:
+            changed = [str(path).strip() for path in changed_paths if str(path).strip()]
+            if not changed:
+                return {
+                    "profiles": [
+                        {
+                            "profile": profile["name"],
+                            "root_name": root_name,
+                            "status": "skipped_no_spool_changes",
+                            "path_count": 0,
+                        }
+                    ],
+                    "count": 1,
+                    "sync_mode": "skipped_no_spool_changes",
+                }
+            try:
+                root = database.get_monitored_root(root_name)
+                if not root or not root.get("root_path"):
+                    raise RuntimeError(f"mail monitored root is not configured: {root_name}")
+                root_path = str(root["root_path"])
+                sync_paths = [_mail_spool_ready_path(root_path, path) for path in changed]
+                batch_result = database.enqueue_corpus_sync_path_batch_jobs(
+                    root_name=root_name,
+                    reason="outlook_spool_sync",
+                    paths=sync_paths,
+                    payload={"profile_name": profile["name"], "source_type": "outlook_com"},
+                )
+            except Exception as exc:
+                return {
+                    "profiles": [
+                        {
+                            "profile": profile["name"],
+                            "root_name": root_name,
+                            "status": "blocked_spool_job_unavailable",
+                            "error": str(exc),
+                            "path_count": len(changed),
+                        }
+                    ],
+                    "count": 1,
+                    "sync_mode": "background_path_jobs_failed",
+                }
+            jobs = batch_result.get("jobs") or []
+            return {
+                "profiles": [
+                    {
+                        "profile": profile["name"],
+                        "root_name": root_name,
+                        "status": "queued_background_path_sync",
+                        "path_count": int(batch_result.get("path_count") or len(sync_paths)),
+                        "job_count": int(batch_result.get("count") or len(jobs)),
+                        "jobs": jobs,
+                    }
+                ],
+                "count": 1,
+                "sync_mode": "background_path_jobs",
+            }
         try:
             job = database.enqueue_corpus_sync_job(
                 root_name=root_name,
@@ -482,6 +549,21 @@ def _sync_mail_spool_for_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "count": 1,
         "sync_mode": "api_fallback",
     }
+
+
+def _mail_spool_ready_path(root_path: str, changed_path: str) -> str:
+    clean = str(changed_path or "").strip()
+    if not clean:
+        return str(root_path)
+    normalized = clean.replace("\\", "/")
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        return clean
+    normalized = normalized.removeprefix("ready/").lstrip("/")
+    root = str(root_path).rstrip("/\\")
+    separator = "/" if root.startswith("/") or "/" in root else "\\"
+    if separator == "\\":
+        normalized = normalized.replace("/", "\\")
+    return f"{root}{separator}{normalized}"
 
 
 def _spool_sync_blocked_unavailable(result: dict[str, Any]) -> bool:
@@ -953,6 +1035,7 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
     namespace = outlook.GetNamespace("MAPI")
     exported = 0
     seen = 0
+    spool_paths: list[str] = []
     errors: list[dict[str, Any]] = []
     include_subfolders = _outlook_profile_include_subfolders(profile)
     incremental_basis = _outlook_incremental_basis_config(profile)
@@ -1021,6 +1104,7 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
                         internet_message_id=result.manifest.get("message_id"),
                         metadata={"outlook_store_id": getattr(item, "StoreID", None)},
                     )
+                    spool_paths.append(result.export_id)
                     exported += 1
                     cursor_candidate = _max_outlook_cursor(cursor_candidate, item_cursor)
                     _checkpoint_outlook_cursor(
@@ -1057,6 +1141,7 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "exported": exported,
         "seen": seen,
         "errors": errors,
+        "spool_paths": spool_paths,
         "include_subfolders": include_subfolders,
         "incremental_basis": incremental_basis["basis"],
     }

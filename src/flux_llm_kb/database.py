@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Any
+from typing import Any, Callable, Iterable
 from urllib.parse import quote
 from uuid import UUID
 
@@ -2341,9 +2341,11 @@ def persist_crawl_plan(
     plan: CrawlPlan,
     dry_run: bool = False,
     reason: str = "manual_sync",
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
     url: str | None = None,
 ) -> dict[str, Any]:
     if dry_run:
+        _emit_persist_progress(progress_callback, stage="persisted", files_done=len(plan.assets), files_total=len(plan.assets))
         return {
             "root_name": root_name,
             "root_path": str(plan.root_path),
@@ -2377,7 +2379,9 @@ def persist_crawl_plan(
             jobs_queued = 0
             changed = 0
             manifest_skipped_unchanged = 0
-            for asset in plan.assets:
+            files_total = len(plan.assets)
+            _emit_persist_progress(progress_callback, stage="persisting", files_done=0, files_total=files_total)
+            for index, asset in enumerate(plan.assets, start=1):
                 seen_paths.add(asset.relative_path)
                 if asset.metadata.get("manifest_skipped_unchanged"):
                     manifest_skipped_unchanged += 1
@@ -2596,6 +2600,14 @@ def persist_crawl_plan(
                         jobs_queued += 1
                     elif asset.extraction_tier == "deferred" and canonical_id:
                         _cancel_duplicate_corpus_job_for_asset(cur, root_name=root_name, relative_path=asset.relative_path)
+                if index == files_total or index % 100 == 0:
+                    _emit_persist_progress(
+                        progress_callback,
+                        stage="persisting",
+                        files_done=index,
+                        files_total=files_total,
+                        current_path=asset.relative_path,
+                    )
 
             _mark_deleted_assets(cur, root_id, seen_paths, plan)
             deleted = cur.rowcount
@@ -2614,6 +2626,7 @@ def persist_crawl_plan(
                 """,
                 (len(plan.assets), changed, deleted, chunks_indexed, jobs_queued, _json_list(plan.errors), run_id),
             )
+            _emit_persist_progress(progress_callback, stage="persisted", files_done=files_total, files_total=files_total)
             return {
                 "root_name": root_name,
                 "root_path": str(plan.root_path),
@@ -2626,6 +2639,42 @@ def persist_crawl_plan(
                 "chunks_indexed": chunks_indexed,
                 "manifest_skipped_unchanged": manifest_skipped_unchanged,
             }
+
+
+def _emit_persist_progress(
+    callback: Callable[[dict[str, Any]], None] | None,
+    *,
+    stage: str,
+    files_done: int,
+    files_total: int,
+    current_path: str | None = None,
+) -> None:
+    if callback is None:
+        return
+    total = max(0, int(files_total or 0))
+    done = max(0, min(int(files_done or 0), total)) if total else 0
+    if stage == "persisted":
+        percent = 100
+        label = f"Persisted {done}/{total} files"
+    else:
+        stage_fraction = done / total if total else 0.0
+        percent = min(99, int(((5 + stage_fraction) / 6) * 100))
+        label = f"Persisting {done}/{total} files"
+    payload: dict[str, Any] = {
+        "stage": stage,
+        "stage_index": 6,
+        "stage_total": 6,
+        "files_done": done,
+        "files_total": total,
+        "progress_percent": percent,
+        "progress_label": label,
+    }
+    if current_path:
+        payload["current_path"] = current_path
+    try:
+        callback(payload)
+    except Exception:
+        return
 
 
 def crawl_status(*, url: str | None = None) -> dict[str, Any]:
@@ -3145,6 +3194,31 @@ def claim_corpus_jobs(
                             AND r.metadata->>'host_access' = 'host_agent'
                       )
         """
+    same_root_sync_filter = """
+                      AND (
+                          capture_jobs.job_type <> 'corpus_sync_root'
+                          OR capture_jobs.id = (
+                              SELECT first_sync.id
+                              FROM capture_jobs first_sync
+                              WHERE first_sync.job_type = 'corpus_sync_root'
+                                AND first_sync.status IN ('pending', 'retrying_locked')
+                                AND first_sync.next_attempt_at <= now()
+                                AND first_sync.payload->>'root_name' = capture_jobs.payload->>'root_name'
+                              ORDER BY first_sync.priority DESC, first_sync.created_at
+                              LIMIT 1
+                          )
+                      )
+                      AND NOT (
+                          capture_jobs.job_type = 'corpus_sync_root'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM capture_jobs other
+                              WHERE other.job_type = 'corpus_sync_root'
+                                AND other.status = 'running'
+                                AND other.payload->>'root_name' = capture_jobs.payload->>'root_name'
+                          )
+                      )
+        """
     params_list: list[Any] = []
     if family_caps:
         params_list.append(_json({key: max(0, int(value)) for key, value in sorted(family_caps.items())}))
@@ -3180,6 +3254,7 @@ def claim_corpus_jobs(
                       {root_filter}
                       {host_root_filter}
                       {caps_filter}
+                      {same_root_sync_filter}
                     ORDER BY priority DESC, created_at
                     LIMIT %s
                     FOR UPDATE SKIP LOCKED
@@ -7531,7 +7606,7 @@ def get_outlook_host_state(*, host_id: str = "default", url: str | None = None) 
             }
 
 
-MAX_CORPUS_SYNC_BATCH_PATHS = 128
+MAX_CORPUS_SYNC_BATCH_PATHS = 5000
 
 
 def _corpus_sync_payload_paths(payload: dict[str, Any]) -> list[str]:
@@ -7669,6 +7744,99 @@ def enqueue_corpus_sync_job(
             return result
 
 
+def enqueue_corpus_sync_path_batch_jobs(
+    *,
+    root_name: str,
+    paths: Iterable[str],
+    reason: str = "manual_sync",
+    payload: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    root = str(root_name or "").strip()
+    if not root:
+        raise ValueError("root_name is required")
+    clean_paths = _dedupe_preserving_order([str(path).strip() for path in paths if str(path).strip()])
+    if not clean_paths:
+        return {"root_name": root, "jobs": [], "count": 0, "path_count": 0}
+    schedule = _job_schedule_metadata("corpus_sync_root")
+    batch_size = MAX_CORPUS_SYNC_BATCH_PATHS
+    batches = [clean_paths[index : index + batch_size] for index in range(0, len(clean_paths), batch_size)]
+    psycopg = _load_psycopg()
+    jobs: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            for batch_index, batch_paths in enumerate(batches, start=1):
+                job_payload = {
+                    "root_name": root,
+                    "reason": str(reason or "manual_sync"),
+                    **(payload or {}),
+                    "paths": batch_paths,
+                    "paths_total": len(clean_paths),
+                    "path_batch_index": batch_index,
+                    "path_batch_total": len(batches),
+                }
+                cur.execute(
+                    """
+                    INSERT INTO capture_jobs (
+                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
+                    )
+                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
+                    RETURNING id::text, status
+                    """,
+                    (
+                        "corpus_sync_root",
+                        _json(job_payload),
+                        schedule["job_family"],
+                        schedule["resource_class"],
+                        schedule["priority"],
+                        schedule["time_budget_seconds"],
+                        _json(
+                            {
+                                "stage": "queued",
+                                "root_name": root,
+                                "paths_total": len(clean_paths),
+                                "paths_queued": len(batch_paths),
+                                "path_batch_index": batch_index,
+                                "path_batch_total": len(batches),
+                            }
+                        ),
+                    ),
+                )
+                row = cur.fetchone()
+                job_id = row[0]
+                cur.execute(
+                    """
+                    INSERT INTO audit_events (event_type, target_table, target_id, details)
+                    VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
+                    """,
+                    (
+                        job_id,
+                        _json(
+                            {
+                                "job_type": "corpus_sync_root",
+                                "root_name": root,
+                                "reason": job_payload["reason"],
+                                "paths_queued": len(batch_paths),
+                                "path_batch_index": batch_index,
+                                "path_batch_total": len(batches),
+                            }
+                        ),
+                    ),
+                )
+                jobs.append(
+                    {
+                        "job_id": job_id,
+                        "status": row[1],
+                        "root_name": root,
+                        "deduped": False,
+                        "path_count": len(batch_paths),
+                        "path_batch_index": batch_index,
+                        "path_batch_total": len(batches),
+                    }
+                )
+    return {"root_name": root, "jobs": jobs, "count": len(jobs), "path_count": len(clean_paths)}
+
+
 def update_corpus_job_progress(
     *,
     job_id: str,
@@ -7685,6 +7853,29 @@ def update_corpus_job_progress(
                 SET telemetry = telemetry || %s::jsonb,
                     last_error = COALESCE(%s, last_error),
                     progress_heartbeat_at = now(),
+                    updated_at = now()
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                """,
+                (_json(telemetry or {}), last_error, job_id),
+            )
+
+
+def heartbeat_corpus_job(
+    *,
+    job_id: str,
+    telemetry: dict[str, Any],
+    last_error: str | None = None,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET telemetry = telemetry || %s::jsonb,
+                    last_error = COALESCE(%s, last_error),
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'

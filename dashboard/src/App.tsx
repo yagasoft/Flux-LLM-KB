@@ -4995,6 +4995,7 @@ function JobQueueTable({
             <th>Root</th>
             <th>Attempts</th>
             <th>Updated</th>
+            <th>Progress</th>
             <th>Last error</th>
             <th>Details</th>
           </tr>
@@ -5008,6 +5009,7 @@ function JobQueueTable({
             const expanded = expandedJobId === id;
             const outlookRequest = stringFromUnknown(job.job_type) === "outlook_sync_request";
             const cancellableCorpusJob = isCancelableCorpusJob(job, status);
+            const progress = jobProgressSummary(job);
             return (
               <Fragment key={id}>
                 <tr>
@@ -5017,6 +5019,7 @@ function JobQueueTable({
                   <td>{target.root}</td>
                   <td>{numberFromUnknown(job.attempts) ?? 0}</td>
                   <td>{formatDate(stringFromUnknown(job.updated_at))}</td>
+                  <td className="job-progress" title={progress}>{progress}</td>
                   <td className="job-error" title={stringFromUnknown(job.last_error) ?? ""}>{stringFromUnknown(job.last_error) ?? "-"}</td>
                   <td className="job-actions-cell">
                     {outlookRequest ? (
@@ -5074,6 +5077,7 @@ function JobDetailRow({
   status: string;
 }) {
   const telemetry = jobTelemetry(job);
+  const progress = jobProgressSummary(job);
   const details = [
     ["Job id", id],
     ["Status", humanizeIdentifier(status)],
@@ -5085,7 +5089,12 @@ function JobDetailRow({
     ["Claimed by", stringFromUnknown(payload.claimed_by)],
     ["Asset id", stringFromUnknown(payload.asset_id)],
     ["Source id", stringFromUnknown(payload.source_id)],
+    ["Progress", progress],
     ["Stage", humanizeIdentifier(stringFromUnknown(telemetry.stage) ?? "")],
+    ["Stage progress", stageProgressSummary(telemetry)],
+    ["Paths", countProgressSummary(telemetry.paths_done, telemetry.paths_total)],
+    ["Files", countProgressSummary(telemetry.files_done ?? telemetry.files_seen, telemetry.files_total)],
+    ["Current path", stringFromUnknown(telemetry.current_path ?? telemetry.path)],
     ["Files seen", stringFromUnknown(telemetry.files_seen) ?? numberFromUnknown(telemetry.files_seen)?.toString()],
     ["Files changed", stringFromUnknown(telemetry.files_changed) ?? numberFromUnknown(telemetry.files_changed)?.toString()],
     ["Jobs queued", stringFromUnknown(telemetry.jobs_queued) ?? numberFromUnknown(telemetry.jobs_queued)?.toString()],
@@ -5095,7 +5104,7 @@ function JobDetailRow({
   ].filter(([, value]) => value && value !== "-");
   return (
     <tr className="job-detail-row">
-      <td colSpan={8}>
+      <td colSpan={9}>
         <div className="job-detail-panel">
           <dl className="job-detail-grid">
             {details.map(([label, value]) => (
@@ -5144,6 +5153,39 @@ function jobPayload(job: Record<string, unknown>) {
 
 function jobTelemetry(job: Record<string, unknown>) {
   return job.telemetry && typeof job.telemetry === "object" && !Array.isArray(job.telemetry) ? job.telemetry as Record<string, unknown> : {};
+}
+
+function jobProgressSummary(job: Record<string, unknown>) {
+  const telemetry = jobTelemetry(job);
+  const explicit = stringFromUnknown(telemetry.progress_label);
+  if (explicit) return explicit;
+  const parts = [
+    countProgressSummary(telemetry.paths_done, telemetry.paths_total, "Paths"),
+    stageProgressSummary(telemetry),
+    countProgressSummary(telemetry.files_done ?? telemetry.files_seen, telemetry.files_total, "files")
+  ].filter(Boolean);
+  if (parts.length > 0) return parts.join(", ");
+  const percent = numberFromUnknown(telemetry.progress_percent);
+  if (percent !== undefined) return `${percent}%`;
+  const stage = stringFromUnknown(telemetry.stage);
+  return stage ? humanizeIdentifier(stage) : "-";
+}
+
+function stageProgressSummary(telemetry: Record<string, unknown>) {
+  const stage = stringFromUnknown(telemetry.stage);
+  const stageIndex = numberFromUnknown(telemetry.stage_index);
+  const stageTotal = numberFromUnknown(telemetry.stage_total);
+  if (stageIndex !== undefined && stageTotal !== undefined && stage) return `stage ${stageIndex}/${stageTotal} ${stage}`;
+  if (stage) return humanizeIdentifier(stage);
+  return undefined;
+}
+
+function countProgressSummary(doneValue: unknown, totalValue: unknown, label?: string) {
+  const done = numberFromUnknown(doneValue);
+  const total = numberFromUnknown(totalValue);
+  if (done === undefined || total === undefined) return undefined;
+  const prefix = label ? `${label} ` : "";
+  return `${prefix}${done}/${total}`;
 }
 
 function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown>) {

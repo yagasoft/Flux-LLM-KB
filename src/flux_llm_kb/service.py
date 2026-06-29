@@ -1970,7 +1970,13 @@ class KnowledgeService:
             mail_spool=bool((root.get("metadata") or {}).get("mail_profile")) if isinstance(root.get("metadata"), dict) else False,
         )
         plan = scan_path(root["root_path"], policy, target_path=path, progress_callback=progress_callback)
-        return database.persist_crawl_plan(root_name=root["name"], plan=plan, dry_run=dry_run, reason=reason)
+        return database.persist_crawl_plan(
+            root_name=root["name"],
+            plan=plan,
+            dry_run=dry_run,
+            reason=reason,
+            progress_callback=progress_callback,
+        )
 
     def watch_probe(self, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
         return probe_watcher_backend(
@@ -3171,11 +3177,10 @@ class KnowledgeService:
         family: str | None = None,
     ) -> dict[str, Any]:
         stale_recovery = {"root_name": root_name, "recovered": 0}
-        if root_name:
-            try:
-                stale_recovery = database.recover_stale_running_corpus_jobs(root_name=root_name)
-            except Exception as exc:
-                stale_recovery = {"root_name": root_name, "recovered": 0, "error": str(exc)}
+        try:
+            stale_recovery = database.recover_stale_running_corpus_jobs(root_name=root_name)
+        except Exception as exc:
+            stale_recovery = {"root_name": root_name, "recovered": 0, "error": str(exc)}
         cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
         effective_kind = family or kind
         job_families = kind_to_job_families(effective_kind)
@@ -3351,21 +3356,79 @@ class KnowledgeService:
             paths.append(str(path))
         paths = list(dict.fromkeys(paths))
         job_id = str(job.get("id") or "")
+
+        def progress_int(value: Any, default: int = 0) -> int:
+            try:
+                if value is None:
+                    return default
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        def progress_label(telemetry: dict[str, Any]) -> str:
+            parts: list[str] = []
+            paths_total = progress_int(telemetry.get("paths_total"))
+            if paths_total:
+                parts.append(f"Paths {progress_int(telemetry.get('paths_done'))}/{paths_total}")
+            stage = str(telemetry.get("stage") or "running")
+            stage_index = progress_int(telemetry.get("stage_index"))
+            stage_total = progress_int(telemetry.get("stage_total"))
+            if stage_index and stage_total:
+                parts.append(f"stage {stage_index}/{stage_total} {stage}")
+            else:
+                parts.append(stage)
+            files_total = progress_int(telemetry.get("files_total"))
+            if files_total:
+                parts.append(f"files {progress_int(telemetry.get('files_done'), progress_int(telemetry.get('files_seen')))}/{files_total}")
+            return ", ".join(parts)
+
+        def normalize_progress(progress: dict[str, Any]) -> dict[str, Any]:
+            telemetry = {"root_name": root_name, "reason": reason}
+            telemetry.update(progress)
+            telemetry["stage"] = str(telemetry.get("stage") or "running")
+            if "path" in telemetry and "current_path" not in telemetry:
+                telemetry["current_path"] = telemetry["path"]
+            if len(paths) and "paths_total" not in telemetry:
+                telemetry["paths_total"] = len(paths)
+            if "path_index" in telemetry and "paths_done" not in telemetry:
+                telemetry["paths_done"] = progress_int(telemetry.get("path_index"))
+            if "files_done" not in telemetry and "files_seen" in telemetry:
+                telemetry["files_done"] = progress_int(telemetry.get("files_seen"))
+            paths_total = progress_int(telemetry.get("paths_total"))
+            if paths_total and "path_index" in telemetry:
+                completed_before = max(0, min(progress_int(telemetry.get("path_index")) - 1, paths_total))
+                path_fraction = max(0.0, min(float(progress_int(telemetry.get("progress_percent"))) / 100.0, 1.0))
+                if telemetry["stage"] == "path_completed":
+                    path_fraction = 1.0
+                telemetry["progress_percent"] = min(100, int(((completed_before + path_fraction) / paths_total) * 100))
+            elif "progress_percent" not in telemetry:
+                telemetry["progress_percent"] = 0 if telemetry["stage"] == "starting" else None
+            if not telemetry.get("progress_label"):
+                telemetry["progress_label"] = progress_label(telemetry)
+            return {key: value for key, value in telemetry.items() if value is not None}
+
         database.update_corpus_job_progress(
             job_id=job_id,
-            telemetry={"stage": "starting", "root_name": root_name, "reason": reason, "paths_total": len(paths)},
+            telemetry=normalize_progress(
+                {
+                    "stage": "starting",
+                    "stage_index": 0,
+                    "stage_total": 6,
+                    "paths_done": 0,
+                    "paths_total": len(paths),
+                    "progress_percent": 0,
+                }
+            ),
         )
 
         stop_heartbeat = threading.Event()
         progress_lock = threading.Lock()
-        latest_progress: dict[str, Any] = {"stage": "running", "root_name": root_name, "reason": reason}
+        latest_progress: dict[str, Any] = normalize_progress({"stage": "running", "paths_total": len(paths)})
         last_progress_at = 0.0
 
         def report_progress(progress: dict[str, Any]) -> None:
             nonlocal last_progress_at
-            telemetry = {"root_name": root_name, "reason": reason}
-            telemetry.update(progress)
-            telemetry["stage"] = str(telemetry.get("stage") or "running")
+            telemetry = normalize_progress(progress)
             with progress_lock:
                 latest_progress.clear()
                 latest_progress.update(telemetry)
@@ -3383,7 +3446,7 @@ class KnowledgeService:
                     telemetry.setdefault("stage", "running")
                     telemetry["root_name"] = root_name
                     telemetry["reason"] = reason
-                    database.update_corpus_job_progress(job_id=job_id, telemetry=telemetry)
+                    database.heartbeat_corpus_job(job_id=job_id, telemetry=telemetry)
                 except Exception:
                     pass
 
@@ -3405,16 +3468,19 @@ class KnowledgeService:
                     report_progress(
                         {
                             "stage": "path_sync",
-                            "path": sync_path,
+                            "current_path": sync_path,
                             "path_index": index,
+                            "paths_done": index - 1,
                             "paths_total": len(paths),
                         }
                     )
 
                     def path_progress(progress: dict[str, Any], *, current_path: str = sync_path, current_index: int = index) -> None:
                         progress_payload = dict(progress)
+                        progress_payload["current_path"] = current_path
                         progress_payload["path"] = current_path
                         progress_payload["path_index"] = current_index
+                        progress_payload["paths_done"] = current_index - 1
                         progress_payload["paths_total"] = len(paths)
                         report_progress(progress_payload)
 
@@ -3434,6 +3500,17 @@ class KnowledgeService:
                         "manifest_skipped_unchanged",
                     ):
                         result[key] += int(path_result.get(key) or 0)
+                    report_progress(
+                        {
+                            "stage": "path_completed",
+                            "current_path": sync_path,
+                            "path_index": index,
+                            "paths_done": index,
+                            "paths_total": len(paths),
+                            "files_done": int(path_result.get("files_seen") or 0),
+                            "files_total": int(path_result.get("files_seen") or 0),
+                        }
+                    )
             else:
                 result = self.sync_corpus(
                     root_name=root_name,
