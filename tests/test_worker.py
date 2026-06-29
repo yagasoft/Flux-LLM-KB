@@ -82,6 +82,62 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     assert calls["completed"][0]["telemetry"]["jobs_queued"] == 120
 
 
+def test_backfill_processes_batched_corpus_sync_root_paths(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "progress": [], "recovered": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
+            {
+                "id": "job-sync",
+                "job_type": "corpus_sync_root",
+                "job_family": "general",
+                "resource_class": "cpu",
+                "payload": {"root_name": "docs", "reason": "watch_event", "paths": ["a.md", "b.md"]},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **kwargs: calls["recovered"].append(kwargs) or {"recovered": 0})
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "update_corpus_job_progress", lambda **kwargs: calls["progress"].append(kwargs), raising=False)
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+    sync_calls = []
+
+    def fake_sync(self, *, root_name=None, path=None, dry_run=False, reason="manual_sync", progress_callback=None):
+        sync_calls.append({"root_name": root_name, "path": path, "reason": reason})
+        progress_callback({"stage": "discovered", "files_total": 1, "files_seen": 1, "jobs_queued": 0})
+        return {
+            "root_name": root_name,
+            "files_seen": 1,
+            "files_changed": 1 if path == "a.md" else 0,
+            "files_deleted": 0,
+            "jobs_queued": 0,
+            "chunks_indexed": 2 if path == "a.md" else 0,
+            "manifest_skipped_unchanged": 0 if path == "a.md" else 1,
+        }
+
+    monkeypatch.setattr(KnowledgeService, "sync_corpus", fake_sync)
+
+    result = KnowledgeService().run_corpus_backfill(kind="general", limit=1, workers=1)
+
+    assert result["completed"] == 1
+    assert sync_calls == [
+        {"root_name": "docs", "path": "a.md", "reason": "watch_event"},
+        {"root_name": "docs", "path": "b.md", "reason": "watch_event"},
+    ]
+    assert calls["completed"][0]["telemetry"]["paths_total"] == 2
+    assert calls["completed"][0]["telemetry"]["files_seen"] == 2
+    assert calls["completed"][0]["telemetry"]["files_changed"] == 1
+    assert calls["completed"][0]["telemetry"]["chunks_indexed"] == 2
+    assert calls["completed"][0]["telemetry"]["manifest_skipped_unchanged"] == 1
+
+
 def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(

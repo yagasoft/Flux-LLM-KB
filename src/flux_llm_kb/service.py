@@ -3170,6 +3170,12 @@ class KnowledgeService:
         host_agent_roots: bool | None = None,
         family: str | None = None,
     ) -> dict[str, Any]:
+        stale_recovery = {"root_name": root_name, "recovered": 0}
+        if root_name:
+            try:
+                stale_recovery = database.recover_stale_running_corpus_jobs(root_name=root_name)
+            except Exception as exc:
+                stale_recovery = {"root_name": root_name, "recovered": 0, "error": str(exc)}
         cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
         effective_kind = family or kind
         job_families = kind_to_job_families(effective_kind)
@@ -3257,6 +3263,7 @@ class KnowledgeService:
                 "blocked": blocked,
                 "retried": retried,
                 "cancelled_orphaned": cancelled_orphaned,
+                "recovered_stale_running": stale_recovery.get("recovered", 0),
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
                 "cleared_completed_errors": cleared_errors["cleared"],
@@ -3273,6 +3280,7 @@ class KnowledgeService:
             "blocked": blocked,
             "retried": retried,
             "cancelled_orphaned": cancelled_orphaned,
+            "recovered_stale_running": stale_recovery.get("recovered", 0),
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],
             "cleared_completed_errors": cleared_errors["cleared"],
@@ -3321,10 +3329,17 @@ class KnowledgeService:
             return JobProcessResult(status="failed", message="corpus_sync_root payload requires root_name")
         reason = str(payload.get("reason") or "background_sync")
         path = payload.get("path") or None
+        raw_paths = payload.get("paths")
+        paths = []
+        if isinstance(raw_paths, list):
+            paths.extend(str(item).strip() for item in raw_paths if str(item).strip())
+        if path:
+            paths.append(str(path))
+        paths = list(dict.fromkeys(paths))
         job_id = str(job.get("id") or "")
         database.update_corpus_job_progress(
             job_id=job_id,
-            telemetry={"stage": "starting", "root_name": root_name, "reason": reason},
+            telemetry={"stage": "starting", "root_name": root_name, "reason": reason, "paths_total": len(paths)},
         )
 
         stop_heartbeat = threading.Event()
@@ -3361,13 +3376,58 @@ class KnowledgeService:
         thread = threading.Thread(target=heartbeat, name=f"corpus-sync-heartbeat:{root_name}", daemon=True)
         thread.start()
         try:
-            result = self.sync_corpus(
-                root_name=root_name,
-                path=path,
-                dry_run=False,
-                reason=reason,
-                progress_callback=report_progress,
-            )
+            if paths:
+                result = {
+                    "root_name": root_name,
+                    "files_seen": 0,
+                    "files_changed": 0,
+                    "files_deleted": 0,
+                    "jobs_queued": 0,
+                    "chunks_indexed": 0,
+                    "manifest_skipped_unchanged": 0,
+                    "paths_total": len(paths),
+                }
+                for index, sync_path in enumerate(paths, start=1):
+                    report_progress(
+                        {
+                            "stage": "path_sync",
+                            "path": sync_path,
+                            "path_index": index,
+                            "paths_total": len(paths),
+                        }
+                    )
+
+                    def path_progress(progress: dict[str, Any], *, current_path: str = sync_path, current_index: int = index) -> None:
+                        progress_payload = dict(progress)
+                        progress_payload["path"] = current_path
+                        progress_payload["path_index"] = current_index
+                        progress_payload["paths_total"] = len(paths)
+                        report_progress(progress_payload)
+
+                    path_result = self.sync_corpus(
+                        root_name=root_name,
+                        path=sync_path,
+                        dry_run=False,
+                        reason=reason,
+                        progress_callback=path_progress,
+                    )
+                    for key in (
+                        "files_seen",
+                        "files_changed",
+                        "files_deleted",
+                        "jobs_queued",
+                        "chunks_indexed",
+                        "manifest_skipped_unchanged",
+                    ):
+                        result[key] += int(path_result.get(key) or 0)
+            else:
+                result = self.sync_corpus(
+                    root_name=root_name,
+                    path=path,
+                    dry_run=False,
+                    reason=reason,
+                    progress_callback=report_progress,
+                )
         except ValueError as exc:
             message = str(exc)
             status = "cancelled_orphaned_root" if "monitored root not found" in message else "failed"
@@ -3397,6 +3457,8 @@ class KnowledgeService:
             "chunks_indexed": int(result.get("chunks_indexed") or 0),
             "manifest_skipped_unchanged": int(result.get("manifest_skipped_unchanged") or 0),
         }
+        if paths:
+            telemetry["paths_total"] = len(paths)
         return JobProcessResult(status="indexed", telemetry=telemetry)
 
     def remediate_diagnostic(
@@ -3430,8 +3492,13 @@ class KnowledgeService:
             if not root_name:
                 raise ValueError("clear_completed_errors requires root_name")
             result = database.clear_completed_corpus_job_errors(root_name=root_name)
+        elif normalized_action == "recover_stale_running_jobs":
+            result = database.recover_stale_running_corpus_jobs(root_name=root_name)
         else:
-            raise ValueError("diagnostic remediation action must be retry_corpus_job, run_backfill, repair_asset_statuses, or clear_completed_errors")
+            raise ValueError(
+                "diagnostic remediation action must be retry_corpus_job, run_backfill, repair_asset_statuses, "
+                "clear_completed_errors, or recover_stale_running_jobs"
+            )
         audit_target_id = target_id if _is_uuid_like(target_id) else None
         audit_event = database.record_audit_event(
             event_type="diagnostics.remediation",

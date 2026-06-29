@@ -136,6 +136,9 @@ def test_load_migrations_returns_ordered_sql_files():
     retrieval_hydration_migration = next(item for item in migrations if item.name == "0027_retrieval_hydration_performance")
     assert "idx_source_assets_canonical_asset_id" in retrieval_hydration_migration.sql
     assert "WHERE canonical_asset_id IS NOT NULL" in retrieval_hydration_migration.sql
+    sync_performance_migration = next(item for item in migrations if item.name == "0028_corpus_sync_performance")
+    assert "ADD COLUMN IF NOT EXISTS progress_heartbeat_at" in sync_performance_migration.sql
+    assert "idx_capture_jobs_stale_running_sync" in sync_performance_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

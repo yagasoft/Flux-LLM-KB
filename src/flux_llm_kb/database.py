@@ -2769,7 +2769,8 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
                 """
                 SELECT id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
                        status, payload, attempts, last_error, created_at, updated_at,
-                       started_at, completed_at, last_duration_ms, telemetry
+                       started_at, completed_at, last_duration_ms, telemetry,
+                       locked_at, locked_by, progress_heartbeat_at
                 FROM capture_jobs
                 WHERE job_type LIKE 'corpus_%%'
                 ORDER BY updated_at DESC
@@ -2795,6 +2796,9 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
                     "completed_at": row[13].isoformat() if row[13] else None,
                     "last_duration_ms": row[14],
                     "telemetry": row[15] or {},
+                    "locked_at": row[16].isoformat() if row[16] else None,
+                    "locked_by": row[17],
+                    "progress_heartbeat_at": row[18].isoformat() if row[18] else None,
                 }
                 for row in cur.fetchall()
             ]
@@ -3163,6 +3167,7 @@ def claim_corpus_jobs(
                     completed_at = NULL,
                     locked_at = now(),
                     locked_by = %s,
+                    progress_heartbeat_at = now(),
                     updated_at = now()
                 WHERE id IN (
                     SELECT id
@@ -3346,6 +3351,55 @@ def clear_completed_corpus_job_errors(
                 params,
             )
             return {"root_name": root_name, "cleared": int(cur.fetchone()[0] or 0)}
+
+
+def recover_stale_running_corpus_jobs(
+    *,
+    root_name: str | None = None,
+    stale_after_seconds: int = 300,
+    active_worker_grace_seconds: int | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    root_filter = "AND job.payload->>'root_name' = %s" if root_name else ""
+    active_grace = max(1, int(active_worker_grace_seconds or stale_after_seconds or 300))
+    stale_after = max(1, int(stale_after_seconds or 300))
+    params: list[Any] = [stale_after, active_grace]
+    if root_name:
+        params.append(root_name)
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH recovered AS (
+                    UPDATE capture_jobs job
+                    SET status = 'pending',
+                        next_attempt_at = now(),
+                        last_error = COALESCE(last_error, 'stale_running_recovered'),
+                        completed_at = NULL,
+                        locked_at = NULL,
+                        locked_by = NULL,
+                        telemetry = telemetry || jsonb_build_object('stale_running_recovered', true),
+                        updated_at = now()
+                    WHERE job.job_type = 'corpus_sync_root'
+                      AND job.status = 'running'
+                      AND COALESCE(job.progress_heartbeat_at, job.locked_at, job.started_at, job.updated_at)
+                          < now() - make_interval(secs => %s)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM runtime_components component
+                          WHERE component.name = job.locked_by
+                            AND component.status = 'running'
+                            AND component.heartbeat_at >= now() - make_interval(secs => %s)
+                      )
+                      {root_filter}
+                    RETURNING 1
+                )
+                SELECT count(*) FROM recovered
+                """,
+                tuple(params),
+            )
+            return {"root_name": root_name, "recovered": int(cur.fetchone()[0] or 0)}
 
 
 def retry_corpus_job(
@@ -7416,6 +7470,41 @@ def get_outlook_host_state(*, host_id: str = "default", url: str | None = None) 
             }
 
 
+MAX_CORPUS_SYNC_BATCH_PATHS = 128
+
+
+def _corpus_sync_payload_paths(payload: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    raw_paths = payload.get("paths")
+    if isinstance(raw_paths, list):
+        paths.extend(str(item).strip() for item in raw_paths if str(item).strip())
+    raw_path = str(payload.get("path") or "").strip()
+    if raw_path:
+        paths.append(raw_path)
+    return _dedupe_preserving_order(paths)
+
+
+def _merge_corpus_sync_payload(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = {key: value for key, value in {**existing, **incoming}.items() if key not in {"path", "paths"}}
+    merged["root_name"] = str(incoming.get("root_name") or existing.get("root_name") or "").strip()
+    merged["reason"] = str(incoming.get("reason") or existing.get("reason") or "manual_sync")
+    existing_paths = _corpus_sync_payload_paths(existing)
+    incoming_paths = _corpus_sync_payload_paths(incoming)
+    if not incoming_paths:
+        return merged
+    if not existing_paths and ("path" not in existing and "paths" not in existing):
+        return merged
+    paths = _dedupe_preserving_order([*existing_paths, *incoming_paths])
+    if len(paths) > MAX_CORPUS_SYNC_BATCH_PATHS:
+        merged["paths_truncated_to_root_sync"] = True
+        return merged
+    if len(paths) == 1:
+        merged["path"] = paths[0]
+    else:
+        merged["paths"] = paths
+    return merged
+
+
 def enqueue_corpus_sync_job(
     *,
     root_name: str,
@@ -7442,30 +7531,33 @@ def enqueue_corpus_sync_job(
                 FROM capture_jobs
                 WHERE job_type = 'corpus_sync_root'
                   AND payload->>'root_name' = %s
-                  AND status IN ('pending', 'running', 'retrying_locked')
+                  AND status = 'running'
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
                 (root,),
             )
-            existing = cur.fetchone()
-            if existing:
-                existing_payload = existing[2] if len(existing) > 2 and isinstance(existing[2], dict) else {}
-                existing_path = str(existing_payload.get("path") or "").strip()
-                incoming_path = str(job_payload.get("path") or "").strip()
-                widen_to_root_sync = bool(
-                    (not existing_path and incoming_path)
-                    or (existing_path and (not incoming_path or existing_path != incoming_path))
-                )
-                update_payload = dict(job_payload)
-                payload_sql = "payload || %s::jsonb"
-                if widen_to_root_sync:
-                    update_payload.pop("path", None)
-                    payload_sql = "(payload - 'path') || %s::jsonb"
+            running = cur.fetchone()
+            cur.execute(
+                """
+                SELECT id::text, status, payload
+                FROM capture_jobs
+                WHERE job_type = 'corpus_sync_root'
+                  AND payload->>'root_name' = %s
+                  AND status IN ('pending', 'retrying_locked')
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (root,),
+            )
+            pending = cur.fetchone()
+            if pending:
+                existing_payload = pending[2] if len(pending) > 2 and isinstance(pending[2], dict) else {}
+                update_payload = _merge_corpus_sync_payload(existing_payload, job_payload)
                 cur.execute(
-                    f"""
+                    """
                     UPDATE capture_jobs
-                    SET payload = {payload_sql},
+                    SET payload = %s::jsonb,
                         priority = GREATEST(priority, %s),
                         time_budget_seconds = GREATEST(time_budget_seconds, %s),
                         telemetry = telemetry || %s::jsonb,
@@ -7477,11 +7569,11 @@ def enqueue_corpus_sync_job(
                         _json(update_payload),
                         schedule["priority"],
                         schedule["time_budget_seconds"],
-                        _json({"stage": "queued", "root_name": root}),
-                        existing[0],
+                        _json({"stage": "queued", "root_name": root, "paths_queued": len(_corpus_sync_payload_paths(update_payload))}),
+                        pending[0],
                     ),
                 )
-                row = cur.fetchone() or existing
+                row = cur.fetchone() or pending
                 return {"job_id": row[0], "status": row[1], "root_name": root, "deduped": True}
             cur.execute(
                 """
@@ -7510,7 +7602,10 @@ def enqueue_corpus_sync_job(
                 """,
                 (job_id, _json({"job_type": "corpus_sync_root", "root_name": root, "reason": job_payload["reason"]})),
             )
-            return {"job_id": job_id, "status": row[1], "root_name": root, "deduped": False}
+            result = {"job_id": job_id, "status": row[1], "root_name": root, "deduped": False}
+            if running:
+                result["followup"] = True
+            return result
 
 
 def update_corpus_job_progress(
@@ -7528,6 +7623,7 @@ def update_corpus_job_progress(
                 UPDATE capture_jobs
                 SET telemetry = telemetry || %s::jsonb,
                     last_error = COALESCE(%s, last_error),
+                    progress_heartbeat_at = now(),
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'

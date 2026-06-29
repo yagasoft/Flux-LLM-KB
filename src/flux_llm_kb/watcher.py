@@ -218,7 +218,8 @@ class WatchdogCorpusWatcher(ReloadableCorpusWatcher):
         if not seed:
             active_roots = {root.name: root for root in self.load_roots() if root.watch_enabled}
             for root in active_roots.values():
-                emitted.extend(self._stable_candidate_events(root, _snapshot(root)))
+                if self._has_pending_stable_candidates(root.name):
+                    emitted.extend(self._stable_candidate_events(root, _snapshot(root)))
         return emitted
 
     def run_forever(self) -> None:
@@ -282,6 +283,9 @@ class WatchdogCorpusWatcher(ReloadableCorpusWatcher):
                     watcher._enqueue(_event(root, relative_path, action))
 
         return Handler()
+
+    def _has_pending_stable_candidates(self, root_name: str) -> bool:
+        return any(key[0] == root_name for key in self._pending_stable)
 
 
 def create_corpus_watcher(
@@ -426,16 +430,83 @@ def _drain_probe(watcher: ReloadableCorpusWatcher, events: list[WatchEvent], tim
 
 def _snapshot(root: WatchRoot) -> dict[str, tuple[int, int]]:
     root_path = root.root_path.expanduser().resolve()
-    iterator = root_path.rglob("*") if root.recursive else root_path.iterdir()
     snapshot: dict[str, tuple[int, int]] = {}
-    for path in iterator:
-        if not path.is_file():
-            continue
-        relative_path = path.relative_to(root_path).as_posix()
-        if not _is_watch_included(root, relative_path):
-            continue
-        snapshot[relative_path] = _fingerprint(path)
+
+    def visit(path: Path) -> None:
+        try:
+            children = sorted(path.iterdir(), key=lambda item: item.name.lower())
+        except OSError:
+            return
+        for child in children:
+            if child.is_dir():
+                if root.recursive and not _should_prune_watch_directory(root, root_path, child):
+                    visit(child)
+                continue
+            if not child.is_file():
+                continue
+            relative_path = child.relative_to(root_path).as_posix()
+            if not _is_watch_included(root, relative_path):
+                continue
+            snapshot[relative_path] = _fingerprint(child)
+
+    if root.recursive:
+        visit(root_path)
+    else:
+        try:
+            children = sorted(root_path.iterdir(), key=lambda item: item.name.lower())
+        except OSError:
+            children = []
+        for path in children:
+            if not path.is_file():
+                continue
+            relative_path = path.relative_to(root_path).as_posix()
+            if not _is_watch_included(root, relative_path):
+                continue
+            snapshot[relative_path] = _fingerprint(path)
     return snapshot
+
+
+def _should_prune_watch_directory(root: WatchRoot, root_path: Path, directory: Path) -> bool:
+    try:
+        relative_path = directory.relative_to(root_path).as_posix()
+    except ValueError:
+        return False
+    if not relative_path or relative_path == ".":
+        return False
+    for pattern in root.exclude_globs:
+        if pattern.startswith("!"):
+            continue
+        if _matches_watch_directory(relative_path, pattern) and not _has_negated_watch_descendant(relative_path, root.exclude_globs):
+            return True
+    return False
+
+
+def _matches_watch_directory(relative_path: str, pattern: str) -> bool:
+    normalized = pattern.replace("\\", "/").strip()
+    if not normalized:
+        return False
+    if normalized.endswith("/"):
+        base = normalized.rstrip("/")
+        return relative_path == base or relative_path.startswith(f"{base}/")
+    if normalized.endswith("/**"):
+        base = normalized[:-3].rstrip("/")
+        return relative_path == base or relative_path.startswith(f"{base}/")
+    return _matches_watch_glob(relative_path, normalized) or _matches_watch_glob(f"{relative_path}/", normalized)
+
+
+def _has_negated_watch_descendant(relative_path: str, patterns: tuple[str, ...]) -> bool:
+    prefix = f"{relative_path}/"
+    for pattern in patterns:
+        if not pattern.startswith("!"):
+            continue
+        candidate = pattern[1:].replace("\\", "/").strip()
+        if not candidate:
+            continue
+        if "/" not in candidate:
+            return True
+        if candidate == relative_path or candidate.startswith(prefix):
+            return True
+    return False
 
 
 def _is_watch_included(root: WatchRoot, relative_path: str) -> bool:

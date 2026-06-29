@@ -27,6 +27,36 @@ def test_policy_honors_marker_ignores(tmp_path):
     assert plan.assets[0].chunks[0].body == "durable project decision"
 
 
+def test_scan_path_prunes_excluded_directories_before_recursive_descent(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (root / ".git" / "objects").mkdir(parents=True)
+    (root / ".git" / "objects" / "noise").write_text("ignored", encoding="utf-8")
+
+    def fail_rglob(self, *_args, **_kwargs):
+        raise AssertionError(f"recursive scan should prune directories without Path.rglob: {self}")
+
+    monkeypatch.setattr(Path, "rglob", fail_rglob)
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, exclude_globs=(".git/**",)))
+
+    assert [asset.relative_path for asset in plan.assets] == ["src/app.py"]
+
+
+def test_scan_path_preserves_negated_excludes_when_pruning(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "private").mkdir()
+    (root / "private" / "keep.md").write_text("public exception", encoding="utf-8")
+    (root / "private" / "secret.md").write_text("ignore me", encoding="utf-8")
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, exclude_globs=("private/**", "!private/keep.md")))
+
+    assert [asset.relative_path for asset in plan.assets] == ["private/keep.md"]
+
+
 def test_scan_path_indexes_python_code_with_semantic_chunks_and_metadata(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()

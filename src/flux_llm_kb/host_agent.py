@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -279,7 +280,12 @@ class HostAgentWatcherLoop:
 
     def _handle_event(self, event: WatchEvent) -> None:
         try:
-            database.record_watch_event(root_name=event.root_name)
+            database.record_watch_event(
+                root_name=event.root_name,
+                action=event.action,
+                path_hash=_watch_event_path_hash(event),
+                metadata={"action": event.action},
+            )
             database.enqueue_corpus_sync_job(root_name=event.root_name, path=str(event.path), reason="watch_event")
         except Exception as exc:  # pragma: no cover - environment-specific watcher loop
             _safe_record_watch_error(root_name=event.root_name, error=str(exc))
@@ -389,6 +395,10 @@ def _safe_record_watch_error(*, root_name: str, error: str, metadata: dict[str, 
         database.record_watch_error(root_name=root_name, error=error, metadata=metadata)
     except Exception:
         pass
+
+
+def _watch_event_path_hash(event: WatchEvent) -> str:
+    return hashlib.sha256(event.relative_path.encode("utf-8", errors="ignore")).hexdigest()
 
 
 def _safe_record_runtime_component_heartbeat(

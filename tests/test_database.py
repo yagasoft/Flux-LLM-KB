@@ -2271,7 +2271,6 @@ def test_enqueue_corpus_sync_job_uses_operator_schedule(monkeypatch):
 
 def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
     executed = []
-    rows = [("job-existing", "pending", {"root_name": "mail-outlook-mohesr"}), ("job-existing", "pending")]
     schedule = database._job_schedule_metadata("corpus_sync_root")
 
     class FakeCursor:
@@ -2285,7 +2284,14 @@ def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
             executed.append((sql, params))
 
         def fetchone(self):
-            return rows.pop(0)
+            sql = executed[-1][0]
+            if "status = 'running'" in sql:
+                return None
+            if "status IN ('pending', 'retrying_locked')" in sql:
+                return ("job-existing", "pending", {"root_name": "mail-outlook-mohesr"})
+            if "UPDATE capture_jobs" in sql:
+                return ("job-existing", "pending")
+            return None
 
     class FakeConnection:
         def __enter__(self):
@@ -2321,12 +2327,8 @@ def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
     assert update_params[4] == "job-existing"
 
 
-def test_enqueue_corpus_sync_job_widens_active_path_job_for_different_watch_path(monkeypatch):
+def test_enqueue_corpus_sync_job_batches_pending_path_job_for_different_watch_path(monkeypatch):
     executed = []
-    rows = [
-        ("job-existing", "pending", {"root_name": "docs", "reason": "watch_event", "path": "a.md"}),
-        ("job-existing", "pending"),
-    ]
 
     class FakeCursor:
         def __enter__(self):
@@ -2339,7 +2341,14 @@ def test_enqueue_corpus_sync_job_widens_active_path_job_for_different_watch_path
             executed.append((sql, params))
 
         def fetchone(self):
-            return rows.pop(0)
+            sql = executed[-1][0]
+            if "status = 'running'" in sql:
+                return None
+            if "status IN ('pending', 'retrying_locked')" in sql:
+                return ("job-existing", "pending", {"root_name": "docs", "reason": "watch_event", "path": "a.md"})
+            if "UPDATE capture_jobs" in sql:
+                return ("job-existing", "pending")
+            return None
 
     class FakeConnection:
         def __enter__(self):
@@ -2362,8 +2371,133 @@ def test_enqueue_corpus_sync_job_widens_active_path_job_for_different_watch_path
     sql = "\n".join(statement for statement, _params in executed)
     update_params = next(params for statement, params in executed if "UPDATE capture_jobs" in statement)
     assert result["deduped"] is True
-    assert "(payload - 'path') || %s::jsonb" in sql
-    assert json.loads(update_params[0]) == {"root_name": "docs", "reason": "watch_event"}
+    assert "(payload - 'path') || %s::jsonb" not in sql
+    assert json.loads(update_params[0]) == {"root_name": "docs", "reason": "watch_event", "paths": ["a.md", "b.md"]}
+
+
+def test_enqueue_corpus_sync_job_creates_pending_followup_for_running_path_job(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "status = 'running'" in sql:
+                return ("job-running", "running", {"root_name": "docs", "reason": "watch_event", "path": "a.md"})
+            if "status IN ('pending', 'retrying_locked')" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-followup", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_corpus_sync_job(root_name="docs", path="b.md", reason="watch_event")
+
+    sql = "\n".join(statement for statement, _params in executed)
+    insert_params = next(params for statement, params in executed if "INSERT INTO capture_jobs" in statement)
+    assert result == {"job_id": "job-followup", "status": "pending", "root_name": "docs", "deduped": False, "followup": True}
+    assert "UPDATE capture_jobs" not in sql
+    assert json.loads(insert_params[1]) == {"root_name": "docs", "reason": "watch_event", "path": "b.md"}
+
+
+def test_update_corpus_job_progress_records_progress_heartbeat(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.update_corpus_job_progress(job_id="job-sync", telemetry={"stage": "hashing"})
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "progress_heartbeat_at = now()" in sql
+
+
+def test_recover_stale_running_corpus_jobs_uses_progress_heartbeat_and_worker_liveness(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (2,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.recover_stale_running_corpus_jobs(root_name="docs", stale_after_seconds=120)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result == {"root_name": "docs", "recovered": 2}
+    assert "progress_heartbeat_at" in sql
+    assert "runtime_components" in sql
+    assert "status = 'running'" in sql
+    assert "status = 'pending'" in sql
 
 
 def test_apply_extraction_result_persists_container_child_assets(monkeypatch):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import fnmatch
@@ -236,7 +237,7 @@ def scan_path(
     policy: CorpusPolicy | None = None,
     *,
     target_path: str | Path | None = None,
-    progress_callback: Callable[[dict[str, int | str]], None] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> CrawlPlan:
     root = Path(root_path).expanduser().resolve()
     active_policy = policy or CorpusPolicy(root_path=root)
@@ -249,17 +250,19 @@ def scan_path(
     scope_is_file = bool(target and target.is_file())
     entries: list[tuple[str, Path | DiscoveredAsset]] = []
     paths = sorted(
-        _iter_files(root, recursive=active_policy.recursive, target=target),
+        _iter_files(root, recursive=active_policy.recursive, target=target, policy=active_policy, marker_patterns=marker_patterns),
         key=lambda item: item.relative_to(root).as_posix().lower(),
     )
     _emit_progress(progress_callback, stage="enumerated", files_total=len(paths))
 
     files_skipped = 0
+    skipped_top_dirs: Counter[str] = Counter()
     for path in paths:
         try:
             relative_path = path.relative_to(root).as_posix()
             if not _is_included(relative_path, active_policy, marker_patterns):
                 files_skipped += 1
+                skipped_top_dirs[relative_path.split("/", 1)[0]] += 1
                 continue
             if active_policy.mail_spool and _is_mail_spool_internal_artifact(relative_path):
                 files_skipped += 1
@@ -281,6 +284,7 @@ def scan_path(
         files_seen=0,
         files_candidate=len(entries),
         files_skipped=files_skipped,
+        top_skipped_dirs=[{"path": path, "count": count} for path, count in skipped_top_dirs.most_common(10)],
         errors=len(errors),
     )
     stable_paths = [entry[1] for entry in entries if entry[0] == "path"]
@@ -337,7 +341,7 @@ def scan_path(
     )
 
 
-def _emit_progress(callback: Callable[[dict[str, int | str]], None] | None, **payload: int | str) -> None:
+def _emit_progress(callback: Callable[[dict[str, Any]], None] | None, **payload: Any) -> None:
     if callback is None:
         return
     try:
@@ -489,7 +493,30 @@ def _is_mail_spool_internal_artifact(relative_path: str) -> bool:
     return len(parts) == 2 and parts[1].lower() in MAIL_SPOOL_INTERNAL_FILES
 
 
-def _iter_files(root: Path, *, recursive: bool, target: Path | None = None) -> Iterable[Path]:
+def _iter_files(
+    root: Path,
+    *,
+    recursive: bool,
+    target: Path | None = None,
+    policy: CorpusPolicy | None = None,
+    marker_patterns: list[str] | None = None,
+) -> Iterable[Path]:
+    active_policy = policy or CorpusPolicy(root_path=root)
+    active_marker_patterns = marker_patterns or []
+
+    def walk(directory: Path) -> Iterable[Path]:
+        try:
+            children = sorted(directory.iterdir(), key=lambda item: item.name.lower())
+        except OSError:
+            return
+        for child in children:
+            if child.is_dir():
+                if recursive and not _should_prune_directory(child, root, active_policy, active_marker_patterns):
+                    yield from walk(child)
+                continue
+            if child.is_file() and child.name not in MARKER_FILES and not _is_transient_artifact(child):
+                yield child
+
     if target is not None:
         if not _is_relative_to(target, root):
             raise ValueError(f"target path is outside monitored root: {target}")
@@ -497,10 +524,63 @@ def _iter_files(root: Path, *, recursive: bool, target: Path | None = None) -> I
             return iter([target])
         if not target.exists():
             return iter(())
-        iterator = target.rglob("*") if recursive else target.iterdir()
-        return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES and not _is_transient_artifact(path))
-    iterator = root.rglob("*") if recursive else root.iterdir()
-    return (path for path in iterator if path.is_file() and path.name not in MARKER_FILES and not _is_transient_artifact(path))
+        if not target.is_dir() or _should_prune_directory(target, root, active_policy, active_marker_patterns):
+            return iter(())
+        return walk(target) if recursive else (
+            path for path in target.iterdir() if path.is_file() and path.name not in MARKER_FILES and not _is_transient_artifact(path)
+        )
+    return walk(root) if recursive else (
+        path for path in root.iterdir() if path.is_file() and path.name not in MARKER_FILES and not _is_transient_artifact(path)
+    )
+
+
+def _should_prune_directory(
+    directory: Path,
+    root: Path,
+    policy: CorpusPolicy,
+    marker_patterns: list[str],
+) -> bool:
+    try:
+        relative_path = directory.relative_to(root).as_posix()
+    except ValueError:
+        return False
+    if not relative_path or relative_path == ".":
+        return False
+    patterns = [*policy.exclude_globs, *marker_patterns]
+    for pattern in patterns:
+        if pattern.startswith("!"):
+            continue
+        if _matches_directory(relative_path, pattern) and not _has_negated_descendant(relative_path, patterns):
+            return True
+    return False
+
+
+def _matches_directory(relative_path: str, pattern: str) -> bool:
+    normalized = pattern.replace("\\", "/").strip()
+    if not normalized:
+        return False
+    if normalized.endswith("/"):
+        base = normalized.rstrip("/")
+        return relative_path == base or relative_path.startswith(f"{base}/")
+    if normalized.endswith("/**"):
+        base = normalized[:-3].rstrip("/")
+        return relative_path == base or relative_path.startswith(f"{base}/")
+    return _matches(relative_path, normalized) or _matches(f"{relative_path}/", normalized)
+
+
+def _has_negated_descendant(relative_path: str, patterns: list[str]) -> bool:
+    prefix = f"{relative_path}/"
+    for pattern in patterns:
+        if not pattern.startswith("!"):
+            continue
+        candidate = pattern[1:].replace("\\", "/").strip()
+        if not candidate:
+            continue
+        if "/" not in candidate:
+            return True
+        if candidate == relative_path or candidate.startswith(prefix):
+            return True
+    return False
 
 
 def _file_kind(path: str | Path, mime_type: str | None) -> str:

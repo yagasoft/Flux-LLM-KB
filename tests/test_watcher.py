@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from flux_llm_kb import watcher as watcher_module
 from flux_llm_kb.watcher import (
     WatchRoot,
     PollingCorpusWatcher,
@@ -46,6 +49,29 @@ def test_polling_watcher_skips_excluded_subtrees(tmp_path):
     watcher.poll_once()
 
     assert [event.relative_path for event in events] == ["src/indexed.py"]
+
+
+def test_polling_watcher_prunes_excluded_directories_before_snapshot_descent(monkeypatch, tmp_path):
+    root = tmp_path / "watched"
+    root.mkdir()
+    (root / "src").mkdir()
+    (root / "src" / "decision.md").write_text("watch this", encoding="utf-8")
+    (root / ".git" / "objects").mkdir(parents=True)
+    (root / ".git" / "objects" / "noise").write_text("ignored", encoding="utf-8")
+    events = []
+    watcher = PollingCorpusWatcher(
+        [WatchRoot(name="docs", root_path=root, watch_enabled=True, exclude_globs=(".git/**",))],
+        on_change=events.append,
+    )
+
+    def fail_rglob(self, *_args, **_kwargs):
+        raise AssertionError(f"watch snapshot should prune directories without Path.rglob: {self}")
+
+    monkeypatch.setattr(Path, "rglob", fail_rglob)
+
+    watcher.poll_once(seed=True)
+
+    assert events == []
 
 
 def test_polling_watcher_suppresses_disabled_roots(tmp_path):
@@ -219,6 +245,26 @@ def test_resolve_watcher_backend_rejects_explicit_watchdog_when_missing():
         assert "watchdog is not installed" in str(exc)
     else:  # pragma: no cover - proves the test failed
         raise AssertionError("explicit watchdog backend should fail when watchdog is unavailable")
+
+
+def test_watchdog_poll_skips_snapshot_when_no_stability_candidates(monkeypatch, tmp_path):
+    root = tmp_path / "watched"
+    root.mkdir()
+    monkeypatch.setattr(watcher_module.importlib.util, "find_spec", lambda _name: object())
+    watcher = WatchdogCorpusWatcher(
+        lambda: [WatchRoot(name="docs", root_path=root, watch_enabled=True)],
+        on_change=None,
+        stability_quiet_seconds=2.0,
+    )
+    monkeypatch.setattr(watcher, "_ensure_observer", lambda: None)
+    monkeypatch.setattr(watcher, "_sync_watches", lambda: None)
+
+    def fail_snapshot(_root):
+        raise AssertionError("watchdog polling should not snapshot roots without pending stable files")
+
+    monkeypatch.setattr(watcher_module, "_snapshot", fail_snapshot)
+
+    assert watcher.poll_once(seed=False) == []
 
 
 def test_create_corpus_watcher_honors_explicit_polling_backend(tmp_path):

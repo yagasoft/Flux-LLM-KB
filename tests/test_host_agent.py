@@ -388,7 +388,7 @@ def test_host_agent_watcher_loop_records_heartbeat_and_queues_changed_file(monke
         ],
     )
     monkeypatch.setattr(host_agent.database, "record_watcher_heartbeat", lambda *, root_name, metadata=None: heartbeats.append(root_name))
-    monkeypatch.setattr(host_agent.database, "record_watch_event", lambda *, root_name: watch_events.append(root_name))
+    monkeypatch.setattr(host_agent.database, "record_watch_event", lambda **kwargs: watch_events.append(kwargs))
     monkeypatch.setattr(
         host_agent.database,
         "enqueue_corpus_sync_job",
@@ -430,7 +430,10 @@ def test_host_agent_watcher_loop_records_heartbeat_and_queues_changed_file(monke
 
     assert result == {"status": "running", "roots": 1, "events": 1}
     assert heartbeats == ["watch-test"]
-    assert watch_events == ["watch-test"]
+    assert watch_events[0]["root_name"] == "watch-test"
+    assert watch_events[0]["action"] == "changed"
+    assert watch_events[0]["metadata"] == {"action": "changed"}
+    assert len(watch_events[0]["path_hash"]) == 64
     assert queued == [{"root_name": "watch-test", "path": str(tmp_path / "changed.md"), "reason": "watch_event"}]
     assert synced == []
 
