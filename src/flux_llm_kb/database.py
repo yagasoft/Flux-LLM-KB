@@ -3437,10 +3437,10 @@ def recover_stale_running_corpus_jobs(
                         locked_by = NULL,
                         telemetry = telemetry || jsonb_build_object('stale_running_recovered', true),
                         updated_at = now()
-                    WHERE job.job_type = 'corpus_sync_root'
+                    WHERE job.job_type LIKE 'corpus_%%'
                       AND job.status = 'running'
                       AND COALESCE(job.progress_heartbeat_at, job.locked_at, job.started_at, job.updated_at)
-                          < now() - make_interval(secs => %s)
+                          < now() - make_interval(secs => GREATEST(%s, COALESCE(job.time_budget_seconds, 0)))
                       AND NOT EXISTS (
                           SELECT 1
                           FROM runtime_components component

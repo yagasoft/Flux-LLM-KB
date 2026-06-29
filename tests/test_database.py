@@ -2545,7 +2545,10 @@ def test_recover_stale_running_corpus_jobs_uses_progress_heartbeat_and_worker_li
 
     sql = "\n".join(statement for statement, _params in executed)
     assert result == {"root_name": "docs", "recovered": 2}
+    assert "job.job_type LIKE 'corpus_%%'" in sql
+    assert "job.job_type = 'corpus_sync_root'" not in sql
     assert "progress_heartbeat_at" in sql
+    assert "GREATEST(%s, COALESCE(job.time_budget_seconds, 0))" in sql
     assert "runtime_components" in sql
     assert "status = 'running'" in sql
     assert "status = 'pending'" in sql
