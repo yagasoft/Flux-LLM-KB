@@ -180,6 +180,7 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
 
     assert "[int]$DockerComposeTimeoutSeconds" in update
     assert "Invoke-FluxDockerComposeUp" in update
+    assert "Invoke-FluxNativeCommand" in update
     assert "[System.Diagnostics.ProcessStartInfo]" in update
     assert "UseShellExecute = $false" in update
     assert "CreateNoWindow = $true" in update
@@ -196,6 +197,37 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     assert "flux-llm-kb-api" in update
     assert "flux-llm-kb-worker" in update
     assert 'Start-Process -FilePath "docker"' not in update
+
+
+def test_production_deploy_bounds_docker_build_and_pip_installs():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        assert "[int]$DockerBuildTimeoutSeconds" in script
+        assert "[int]$PipInstallTimeoutSeconds" in script
+        assert "[int]$PipTimeoutSeconds" in script
+        assert "[int]$PipRetries" in script
+        assert "Invoke-FluxNativeCommand" in script
+        assert "StepName \"docker build\"" in script
+        assert "TimeoutSeconds $DockerBuildTimeoutSeconds" in script
+        assert "StepName \"pip install production extras\"" in script
+        assert "TimeoutSeconds $PipInstallTimeoutSeconds" in script
+        assert '"--timeout", ([string]$PipTimeoutSeconds)' in script
+        assert '"--retries", ([string]$PipRetries)' in script
+
+
+def test_production_deploy_supports_custom_pip_index_for_gpu_wheels():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    assert "ARG PIP_INDEX_URL=\"\"" in dockerfile
+    assert "--index-url \"$PIP_INDEX_URL\"" in dockerfile
+    for script in (install, update):
+        assert "[string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL" in script
+        assert '"--build-arg", "PIP_INDEX_URL=$PipIndexUrl"' in script
+        assert '"--index-url", $PipIndexUrl' in script
 
 
 def test_docs_describe_production_runtime_boundary():

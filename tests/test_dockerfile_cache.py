@@ -6,7 +6,7 @@ from pathlib import Path
 def test_dockerfile_installs_dependencies_before_application_code() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
-    dependency_install = dockerfile.index("pip install -r /tmp/requirements-docker.txt")
+    dependency_install = dockerfile.index("-r /tmp/requirements-docker.txt")
     source_copy = dockerfile.index("COPY src ./src")
     plugin_copy = dockerfile.index("COPY plugins ./plugins")
 

@@ -2,6 +2,10 @@
 
 FROM python:3.12-slim
 
+ARG PIP_INDEX_URL=""
+ARG PIP_DEFAULT_TIMEOUT=30
+ARG PIP_RETRIES=2
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
@@ -52,8 +56,12 @@ Path("/tmp/requirements-docker.txt").write_text(
 PY
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --upgrade pip \
-    && python -m pip install -r /tmp/requirements-docker.txt
+    python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --upgrade pip \
+    && if [ -n "$PIP_INDEX_URL" ]; then \
+        python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --index-url "$PIP_INDEX_URL" -r /tmp/requirements-docker.txt; \
+    else \
+        python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" -r /tmp/requirements-docker.txt; \
+    fi
 
 COPY src ./src
 COPY plugins ./plugins

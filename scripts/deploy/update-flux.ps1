@@ -10,7 +10,12 @@ param(
     [switch]$SkipDashboardBuild,
     [switch]$RecreateVenv,
     [switch]$RestartHostTasks,
-    [int]$DockerComposeTimeoutSeconds = 120
+    [int]$DockerComposeTimeoutSeconds = 120,
+    [int]$DockerBuildTimeoutSeconds = 1200,
+    [int]$PipInstallTimeoutSeconds = 900,
+    [int]$PipTimeoutSeconds = 30,
+    [int]$PipRetries = 2,
+    [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL
 )
 
 $ErrorActionPreference = "Stop"
@@ -468,6 +473,47 @@ function Stop-FluxProcessTree {
     Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
 }
 
+function Invoke-FluxNativeCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory,
+        [int]$TimeoutSeconds,
+        [string]$StepName
+    )
+    $label = if ($StepName) { $StepName } else { $FilePath }
+    $argumentText = ($Arguments | ForEach-Object { ConvertTo-FluxCommandArgument $_ }) -join " "
+    Write-Host "Running ${label}: $FilePath $argumentText"
+
+    $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = $FilePath
+    $processInfo.Arguments = $argumentText
+    $processInfo.WorkingDirectory = $WorkingDirectory
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    [void]$process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+
+    if ($TimeoutSeconds -gt 0 -and -not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        Write-Warning "$label did not exit within $TimeoutSeconds seconds; stopping process tree."
+        Stop-FluxProcessTree -ProcessId $process.Id
+        $process.WaitForExit(5000) | Out-Null
+        Write-FluxProcessOutput -Stdout (Get-FluxTaskResult -Task $stdoutTask) -Stderr (Get-FluxTaskResult -Task $stderrTask)
+        throw "$label timed out after $TimeoutSeconds seconds."
+    }
+
+    $process.WaitForExit()
+    Write-FluxProcessOutput -Stdout (Get-FluxTaskResult -Task $stdoutTask) -Stderr (Get-FluxTaskResult -Task $stderrTask)
+    if ($process.ExitCode -ne 0) {
+        throw "$label failed with exit code $($process.ExitCode)."
+    }
+}
+
 function Get-FluxContainerStatus {
     param([string]$ContainerName)
     $status = docker inspect --format "{{.State.Status}}" $ContainerName 2>$null
@@ -582,9 +628,19 @@ if (-not $SkipDashboardBuild) {
 
 $resolvedPython = Resolve-FluxPythonExe -InstallRoot $InstallRoot -RequestedPython $PythonExe
 
-docker build -t "flux-llm-kb-api:$imageTag" -t "flux-llm-kb-api:local" $SourceRoot
-docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:$imageTag"
-docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:local"
+$dockerBuildArgs = @(
+    "build",
+    "--progress=plain",
+    "--build-arg", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
+    "--build-arg", "PIP_RETRIES=$PipRetries"
+)
+if ($PipIndexUrl) {
+    $dockerBuildArgs += @("--build-arg", "PIP_INDEX_URL=$PipIndexUrl")
+}
+$dockerBuildArgs += @("-t", "flux-llm-kb-api:$imageTag", "-t", "flux-llm-kb-api:local", $SourceRoot)
+Invoke-FluxNativeCommand -FilePath "docker" -Arguments $dockerBuildArgs -WorkingDirectory $SourceRoot -TimeoutSeconds $DockerBuildTimeoutSeconds -StepName "docker build"
+Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:$imageTag") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker version"
+Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:local") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker local"
 
 $gpuEnabled = Assert-FluxGpuAvailable -ImageTag $imageTag -GpuMode $GpuMode
 
@@ -606,8 +662,13 @@ if ($RecreateVenv -and (Test-Path $venvRoot)) {
 if (-not (Test-Path $venvPython)) {
     & $resolvedPython -m venv $venvRoot
 }
-& $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install "$SourceRoot[api,corpus,mail,mcp,processors,gpu]"
+$pipCommonArgs = @("--timeout", ([string]$PipTimeoutSeconds), "--retries", ([string]$PipRetries))
+$pipIndexArgs = @()
+if ($PipIndexUrl) {
+    $pipIndexArgs += @("--index-url", $PipIndexUrl)
+}
+Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("--upgrade", "pip")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip upgrade"
+Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("$SourceRoot[api,corpus,mail,mcp,processors,gpu]")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip install production extras"
 Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
