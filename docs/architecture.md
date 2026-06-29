@@ -179,7 +179,7 @@ auto-apply is limited to low-risk `mark_review`, `stale_tag`, and
 rules. Governance actions never mutate runtime settings, and every response
 reports `settings_mutated: false`.
 
-Optional local-model rationale settings are loopback-only and advisory. When a
+Optional local-model rationale settings are local-only and advisory. When a
 local model is unavailable or disabled, deterministic rule-based rationale and
 canonical-summary drafts are used instead. Digests are local read models for the
 dashboard/API/CLI/MCP only; this layer does not send outbound email, webhooks,
@@ -221,7 +221,7 @@ single file. Small text-like files are extracted and chunked locally; heavy
 documents, images, audio, video, archive members, and practical export/report
 formats are queued for local deferred processing.
 Images are dimensioned locally, decorative-image spacers are skipped before
-heavy enrichment, and optional local loopback vision descriptions run only when
+heavy enrichment, and optional local vision descriptions run only when
 `acceleration.vision.enabled` and a local model are configured. Media uses
 sidecar transcripts, `ffprobe` metadata, scene-transition video frame sampling
 with thumbnail cache reuse, and optional local faster-whisper ASR when
@@ -316,11 +316,12 @@ cheap structural signals first: file hash caches, dimensions, SVG/draw.io
 and modern Visio structure, sidecar transcripts including embedded media
 sidecar files from archives, and decorative-image skips.
 Optional richer stages can then run as bounded jobs: Tesseract or PaddleOCR OCR,
-configured loopback local inference for image descriptions, scene-transition
+configured local inference for image descriptions, scene-transition
 frame sampling with thumbnail cache reuse, and faster-whisper audio/video
 transcription. Vision requires `acceleration.vision.enabled`, a configured
 local vision model identifier in `acceleration.vision.model`, and
-`acceleration.local_inference.*` pointing at a healthy loopback local provider.
+`acceleration.local_inference.*` pointing at a healthy local loopback or Docker
+host-gateway provider.
 The first implemented vision runtime uses an Ollama-compatible API, so local
 Gemma-class vision models can be selected by model tag when that runtime has
 them installed. ASR requires `ffmpeg`, the `faster-whisper` Python

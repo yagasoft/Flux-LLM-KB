@@ -226,6 +226,16 @@ def test_vision_model_setting_description_is_provider_neutral():
     assert "ollama" not in description
 
 
+def test_local_inference_base_url_accepts_docker_host_gateway():
+    definitions = {definition.key: definition for definition in SETTING_REGISTRY}
+    base_url = definitions["acceleration.local_inference.base_url"]
+
+    assert base_url.validate("http://host.docker.internal:11434/") == "http://host.docker.internal:11434"
+
+    with pytest.raises(ValueError, match="local"):
+        base_url.validate("https://api.openai.com/v1")
+
+
 def test_container_cap_settings_defaults_and_env_overrides(monkeypatch):
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     service = SettingsService()

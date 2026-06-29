@@ -338,7 +338,55 @@ def test_backfill_cancels_orphaned_root_jobs_without_retrying(monkeypatch):
     assert calls["cancelled"][0]["telemetry"]["result_status"] == "cancelled_orphaned_root"
 
 
-def test_corpus_job_blocks_missing_source_file_instead_of_retrying(monkeypatch, tmp_path):
+def test_backfill_cancels_missing_source_jobs_without_retrying(monkeypatch):
+    calls = {"cancelled": [], "completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
+            {
+                "id": "job-missing",
+                "job_type": "corpus_extract_document",
+                "job_family": "office",
+                "payload": {"path": "missing/attachment.docx", "root_name": "mail-outlook-mohesr"},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "cancel_missing_source_corpus_job", lambda **kwargs: calls["cancelled"].append(kwargs))
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda job: worker.JobProcessResult(
+            status="cancelled_missing_source",
+            message="source file not found: missing/attachment.docx",
+            telemetry={"missing_source": True, "missing_source_deleted": True},
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="office", limit=1, workers=1)
+
+    assert result["cancelled_missing_source"] == 1
+    assert calls["completed"] == []
+    assert calls["blocked"] == []
+    assert calls["retried"] == []
+    assert calls["cancelled"][0]["job_id"] == "job-missing"
+    assert calls["cancelled"][0]["root_name"] == "mail-outlook-mohesr"
+    assert calls["cancelled"][0]["relative_path"] == "missing/attachment.docx"
+    assert calls["cancelled"][0]["telemetry"]["result_status"] == "cancelled_missing_source"
+
+
+def test_corpus_job_cancels_missing_source_file_instead_of_blocking(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 
     monkeypatch.setattr(
@@ -364,9 +412,9 @@ def test_corpus_job_blocks_missing_source_file_instead_of_retrying(monkeypatch, 
         }
     )
 
-    assert result.status == "blocked_missing_dependency"
+    assert result.status == "cancelled_missing_source"
     assert result.message == "source file not found: missing/attachment.docx"
-    assert result.telemetry == {"missing_source": True}
+    assert result.telemetry == {"missing_source": True, "missing_source_deleted": True}
 
 
 def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
@@ -777,6 +825,119 @@ def test_process_corpus_job_allows_decorative_metadata_only_for_strict_roots(mon
     assert applied_result.chunks == ()
     assert applied_result.metadata["strict_indexing"] is True
     assert applied_result.metadata["decorative_indexed"] is True
+    assert applied_result.metadata["readiness_status"] == "completed_no_content"
+    assert applied_result.metadata["no_content_reason"] == "decorative_image"
+    assert "metadata_only_blocked" not in applied_result.metadata
+
+
+def test_process_corpus_job_allows_image_no_content_after_vision_attempt_for_strict_roots(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "scan.png").write_bytes(b"fake image")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="metadata_only",
+            message=None,
+            chunks=(),
+            child_assets=(),
+            metadata={
+                "extractor": "image",
+                "ocr": {"status": "completed", "text_length": 0},
+                "vision": {"status": "completed", "descriptions": 0},
+                "vision_escalation": "no_content",
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "scan.png"}})
+
+    assert result.status == "indexed"
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "indexed"
+    assert applied_result.chunks == ()
+    assert applied_result.metadata["strict_indexing"] is True
+    assert applied_result.metadata["readiness_status"] == "completed_no_content"
+    assert applied_result.metadata["no_content_reason"] == "image_ocr_and_vision_empty"
+    assert applied_result.metadata["vision_escalation"] == "no_content"
+    assert "metadata_only_blocked" not in applied_result.metadata
+
+
+@pytest.mark.parametrize(
+    ("extractor", "extra_metadata", "expected_reason"),
+    [
+        ("docx", {}, "docx_empty"),
+        ("pptx", {"slide_count": 3}, "pptx_empty"),
+        ("pdf", {"ocr": {"status": "completed", "pages_attempted": 2}}, "pdf_text_and_ocr_empty"),
+    ],
+)
+def test_process_corpus_job_allows_office_no_content_after_successful_extraction_for_strict_roots(
+    monkeypatch,
+    tmp_path,
+    extractor,
+    extra_metadata,
+    expected_reason,
+):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "empty.docx").write_bytes(b"fake office")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="metadata_only",
+            message=None,
+            chunks=(),
+            child_assets=(),
+            metadata={"extractor": extractor, **extra_metadata},
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "empty.docx"}})
+
+    assert result.status == "indexed"
+    applied_result = applied[0]["result"]
+    assert applied_result.metadata["readiness_status"] == "completed_no_content"
+    assert applied_result.metadata["no_content_reason"] == expected_reason
     assert "metadata_only_blocked" not in applied_result.metadata
 
 
@@ -829,6 +990,59 @@ def test_process_corpus_job_allows_container_parent_when_children_are_extracted_
     assert applied_result.status == "indexed"
     assert applied_result.child_assets == (SimpleNamespace(path="child.txt"),)
     assert applied_result.metadata["container_children_indexed"] is True
+    assert "metadata_only_blocked" not in applied_result.metadata
+
+
+def test_process_corpus_job_allows_partial_container_parent_when_safe_children_are_extracted(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "bundle.zip").write_bytes(b"fake archive")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="metadata_only",
+            message="member exceeds size limit",
+            chunks=(),
+            child_assets=(SimpleNamespace(path="child.txt"),),
+            metadata={
+                "extractor": "container",
+                "child_asset_count": 2,
+                "parsed_child_count": 1,
+                "skipped_child_count": 1,
+                "blocked_dependency_count": 0,
+                "warnings": ["member exceeds size limit"],
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "bundle.zip"}})
+
+    assert result.status == "indexed"
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "indexed"
+    assert applied_result.metadata["container_children_indexed"] is True
+    assert applied_result.metadata["partial_extraction"] is True
+    assert applied_result.metadata["readiness_status"] == "completed_partial"
     assert "metadata_only_blocked" not in applied_result.metadata
 
 

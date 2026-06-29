@@ -31,9 +31,9 @@ def process_corpus_job(job: dict) -> JobProcessResult:
     path = Path(root["root_path"]) / relative_path
     if not path.exists():
         return JobProcessResult(
-            status="blocked_missing_dependency",
+            status="cancelled_missing_source",
             message=f"source file not found: {relative_path}",
-            telemetry={"missing_source": True},
+            telemetry={"missing_source": True, "missing_source_deleted": True},
         )
 
     root_metadata = root.get("metadata") if isinstance(root.get("metadata"), dict) else {}
@@ -101,11 +101,21 @@ def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) ->
     metadata = dict(getattr(result, "metadata", {}) or {})
     decorative = metadata.get("decorative")
     if isinstance(decorative, dict) and decorative.get("status") == "skipped":
-        metadata.update({"strict_indexing": True, "decorative_indexed": True})
+        metadata.update(
+            {
+                "strict_indexing": True,
+                "decorative_indexed": True,
+                "readiness_status": "completed_no_content",
+                "no_content_reason": "decorative_image",
+                "original_status": "metadata_only",
+            }
+        )
         return ExtractionResult(status="indexed", chunks=(), child_assets=(), metadata=metadata, message=getattr(result, "message", None))
     child_assets = tuple(getattr(result, "child_assets", ()) or ())
     if _strict_metadata_only_container_has_extracted_children(metadata, child_assets):
         metadata.update({"strict_indexing": True, "container_children_indexed": True})
+        if _metadata_int(metadata, "skipped_child_count") > 0 or metadata.get("warnings"):
+            metadata.update({"partial_extraction": True, "readiness_status": "completed_partial"})
         return ExtractionResult(
             status="indexed",
             chunks=tuple(getattr(result, "chunks", ()) or ()),
@@ -113,6 +123,17 @@ def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) ->
             metadata=metadata,
             message=getattr(result, "message", None),
         )
+    no_content_reason = _strict_completed_no_content_reason(metadata)
+    if no_content_reason is not None:
+        metadata.update(
+            {
+                "strict_indexing": True,
+                "readiness_status": "completed_no_content",
+                "no_content_reason": no_content_reason,
+                "original_status": "metadata_only",
+            }
+        )
+        return ExtractionResult(status="indexed", chunks=(), child_assets=(), metadata=metadata, message=getattr(result, "message", None))
     message = strict_metadata_only_message(getattr(result, "message", None))
     metadata.update(
         {
@@ -129,11 +150,44 @@ def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) ->
 def _strict_metadata_only_container_has_extracted_children(metadata: dict[str, Any], child_assets: tuple[Any, ...]) -> bool:
     if metadata.get("extractor") != "container":
         return False
-    if metadata.get("warnings"):
-        return False
     if _metadata_int(metadata, "blocked_dependency_count") > 0:
         return False
     return bool(child_assets) or _metadata_int(metadata, "parsed_child_count") > 0 or _metadata_int(metadata, "child_asset_count") > 0
+
+
+def _strict_completed_no_content_reason(metadata: dict[str, Any]) -> str | None:
+    extractor = str(metadata.get("extractor") or "")
+    if extractor == "image":
+        ocr = metadata.get("ocr")
+        vision = metadata.get("vision")
+        vision_escalation = str(metadata.get("vision_escalation") or "")
+        ocr_completed = isinstance(ocr, dict) and str(ocr.get("status") or "") in {"completed", "cache_hit"}
+        vision_finished = vision_escalation in {"no_content", "unavailable", "ineligible"}
+        if ocr_completed and vision_finished and not _metadata_has_vision_description(vision):
+            return "image_ocr_and_vision_empty"
+        return None
+    if extractor == "pdf":
+        ocr = metadata.get("ocr")
+        if isinstance(ocr, dict) and str(ocr.get("status") or "") in {"completed", "cache_hit"}:
+            return "pdf_text_and_ocr_empty"
+        return None
+    if extractor in {
+        "docx",
+        "pptx",
+        "xlsx",
+        "xlsm",
+        "xltx",
+        "xltm",
+        "libreoffice",
+        "excel_com",
+        "powerpoint_com",
+    } and not metadata.get("warnings"):
+        return f"{extractor}_empty"
+    return None
+
+
+def _metadata_has_vision_description(vision: object) -> bool:
+    return isinstance(vision, dict) and _metadata_int(vision, "descriptions") > 0
 
 
 def _metadata_int(metadata: dict[str, Any], key: str) -> int:

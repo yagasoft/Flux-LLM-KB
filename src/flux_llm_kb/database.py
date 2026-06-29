@@ -3326,6 +3326,62 @@ def cancel_orphaned_corpus_job(
             )
 
 
+def cancel_missing_source_corpus_job(
+    *,
+    job_id: str,
+    root_name: str,
+    relative_path: str,
+    error: str,
+    duration_ms: int | None = None,
+    telemetry: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = 'cancelled_missing_source',
+                    last_error = %s,
+                    completed_at = now(),
+                    last_duration_ms = %s,
+                    telemetry = telemetry || %s::jsonb,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                """,
+                (error, duration_ms, _json(telemetry or {}), job_id),
+            )
+            cur.execute(
+                """
+                UPDATE source_assets a
+                SET extraction_status = 'deleted',
+                    deleted_at = COALESCE(a.deleted_at, now()),
+                    metadata = a.metadata || %s::jsonb,
+                    updated_at = now()
+                FROM monitored_roots r
+                WHERE r.id = a.root_id
+                  AND r.name = %s
+                  AND a.path = %s
+                  AND a.deleted_at IS NULL
+                """,
+                (
+                    _json(
+                        {
+                            "missing_source_deleted": True,
+                            "readiness_status": "deleted",
+                            "readiness_reason": error,
+                        }
+                    ),
+                    root_name,
+                    relative_path,
+                ),
+            )
+
+
 def clear_completed_corpus_job_errors(
     *, root_name: str | None = None, url: str | None = None
 ) -> dict[str, Any]:

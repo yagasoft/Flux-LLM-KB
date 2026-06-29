@@ -3243,6 +3243,7 @@ def _extract_image(path: Path) -> ExtractionResult:
     vision = _vision_image(path, source_label=path.name)
     if vision.status != "disabled":
         metadata["vision"] = vision.metadata
+        metadata["vision_escalation"] = _vision_escalation_status(vision)
     chunks = tuple(
         list(_chunks_from_text(ocr.text, path.name, modality="ocr"))
         + list(_chunks_from_text(vision.text, path.name, modality="vision"))
@@ -3256,10 +3257,27 @@ def _extract_image(path: Path) -> ExtractionResult:
             return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=vision.message)
         return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
     if vision.status in {"blocked_config", "blocked_missing_dependency"}:
+        if ocr.status == "completed":
+            metadata["vision_escalation"] = "unavailable"
+            return ExtractionResult(status="metadata_only", metadata=metadata, message=vision.message)
         return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=vision.message)
     if vision.status == "failed":
+        if ocr.status == "completed":
+            metadata["vision_escalation"] = "unavailable"
+            return ExtractionResult(status="metadata_only", metadata=metadata, message=vision.message)
         return ExtractionResult(status="failed", metadata=metadata, message=vision.message)
     return ExtractionResult(status="metadata_only", metadata=metadata)
+
+
+def _vision_escalation_status(vision: VisionResult) -> str:
+    status = str(vision.metadata.get("status") or vision.status)
+    if vision.status == "completed":
+        return "completed" if vision.text.strip() else "no_content"
+    if status.startswith("skipped_"):
+        return "ineligible"
+    if vision.status in {"blocked_config", "blocked_missing_dependency", "failed"}:
+        return "unavailable"
+    return status
 
 
 def _extract_media(path: Path, file_kind: str, *, embedded_sidecar: tuple[str, str] | None = None) -> ExtractionResult:

@@ -2079,6 +2079,57 @@ def test_cancel_orphaned_corpus_job_records_terminal_state(monkeypatch):
     )
 
 
+def test_cancel_missing_source_corpus_job_records_terminal_state_and_marks_asset_deleted(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.cancel_missing_source_corpus_job(
+        job_id="job-1",
+        root_name="mail-outlook-mohesr",
+        relative_path="missing/attachment.docx",
+        error="source file not found: missing/attachment.docx",
+        duration_ms=12,
+        telemetry={"result_status": "cancelled_missing_source"},
+    )
+
+    sql = "\n".join(item[0] for item in executed)
+    assert "status = 'cancelled_missing_source'" in sql
+    assert "UPDATE source_assets" in sql
+    assert "extraction_status = 'deleted'" in sql
+    assert executed[0][1] == (
+        "source file not found: missing/attachment.docx",
+        12,
+        '{"result_status": "cancelled_missing_source"}',
+        "job-1",
+    )
+    assert json.loads(executed[1][1][0])["missing_source_deleted"] is True
+
+
 def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch):
     executed = []
 

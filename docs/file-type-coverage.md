@@ -152,7 +152,8 @@ installed.
   text is not written to public docs or dashboard metadata.
 - Audio/video ASR uses local tools only. Sidecar transcripts remain preferred;
   otherwise bounded media jobs can sample scene-transition video frames into the
-  thumbnail cache, run optional configured loopback local inference captions
+  thumbnail cache, run optional configured local loopback or Docker
+  host-gateway inference captions
   into the vision cache, extract temporary mono 16 kHz audio with `ffmpeg`, and
   transcribe with faster-whisper using `acceleration.asr.model_path`.
   ASR output is redacted before chunking and before ASR cache writes. Cloud

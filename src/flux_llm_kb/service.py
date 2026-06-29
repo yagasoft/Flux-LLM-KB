@@ -3194,6 +3194,7 @@ class KnowledgeService:
         blocked = 0
         retried = 0
         cancelled_orphaned = 0
+        cancelled_missing_source = 0
         for job, duration_ms, process_result in self._process_claimed_corpus_jobs(claimed, workers=workers):
             telemetry = {
                 "job_family": job.get("job_family"),
@@ -3212,6 +3213,17 @@ class KnowledgeService:
                     telemetry=telemetry,
                 )
                 cancelled_orphaned += 1
+            elif process_result.status == "cancelled_missing_source":
+                payload = job.get("payload") or {}
+                database.cancel_missing_source_corpus_job(
+                    job_id=job["id"],
+                    root_name=str(payload.get("root_name") or ""),
+                    relative_path=str(payload.get("path") or ""),
+                    error=process_result.message or "source file not found",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                cancelled_missing_source += 1
             elif process_result.status == "blocked_missing_dependency":
                 database.block_corpus_job(
                     job_id=job["id"],
@@ -3263,6 +3275,7 @@ class KnowledgeService:
                 "blocked": blocked,
                 "retried": retried,
                 "cancelled_orphaned": cancelled_orphaned,
+                "cancelled_missing_source": cancelled_missing_source,
                 "recovered_stale_running": stale_recovery.get("recovered", 0),
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
@@ -3280,6 +3293,7 @@ class KnowledgeService:
             "blocked": blocked,
             "retried": retried,
             "cancelled_orphaned": cancelled_orphaned,
+            "cancelled_missing_source": cancelled_missing_source,
             "recovered_stale_running": stale_recovery.get("recovered", 0),
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],

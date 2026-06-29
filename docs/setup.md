@@ -362,7 +362,7 @@ Governance librarian settings are catalog-backed and default conservative:
 `governance.librarian.protected_memory_rules` for rule-based protected-memory
 thresholds. Optional local rationale settings
 `governance.local_model_rationale.enabled` and
-`governance.local_model_rationale.model` are loopback-only and fall back to
+`governance.local_model_rationale.model` are local-only and fall back to
 deterministic rule-based rationales when unavailable. The corpus worker runs the
 librarian only when enabled, stays shadow-only unless auto mode and auto-apply
 are explicitly configured, and auto-applies only low-risk claim `mark_review`,

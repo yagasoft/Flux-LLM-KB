@@ -119,14 +119,14 @@ def _loopback_http_url(value: Any) -> str:
     hostname = parsed.hostname
     if not hostname:
         raise ValueError("value must include a host")
-    if hostname.lower() == "localhost":
+    if hostname.lower() in {"localhost", "host.docker.internal"}:
         return parsed_value.rstrip("/")
     try:
         if ipaddress.ip_address(hostname).is_loopback:
             return parsed_value.rstrip("/")
     except ValueError:
         pass
-    raise ValueError("value must use a loopback host")
+    raise ValueError("value must use a local loopback host or Docker host gateway")
 
 
 SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
@@ -485,7 +485,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         category="acceleration",
         default=False,
         value_type="bool",
-        description="Enable localhost-only probing for optional local model servers.",
+        description="Enable local loopback or Docker host-gateway probing for optional local model servers.",
         env_var="FLUX_KB_LOCAL_INFERENCE_ENABLED",
         apply_mode=APPLY_RELOAD,
         affected_components=("worker", "dashboard"),
@@ -506,7 +506,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         category="acceleration",
         default="http://127.0.0.1:11434",
         value_type="str",
-        description="Loopback-only local model server base URL.",
+        description="Local model server base URL using loopback or Docker host gateway.",
         env_var="FLUX_KB_LOCAL_INFERENCE_BASE_URL",
         apply_mode=APPLY_RELOAD,
         affected_components=("worker", "dashboard"),
@@ -624,7 +624,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         category="governance",
         default=False,
         value_type="bool",
-        description="Enable optional localhost-only model rationale drafts for governance proposals.",
+        description="Enable optional local-only model rationale drafts for governance proposals.",
         env_var="FLUX_KB_GOVERNANCE_LOCAL_MODEL_RATIONALE_ENABLED",
         apply_mode=APPLY_RELOAD,
         affected_components=("worker", "api", "cli", "mcp", "dashboard"),

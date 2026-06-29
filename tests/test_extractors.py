@@ -644,6 +644,7 @@ def _configure_vision(
     model: str = "llava:latest",
     provider: str = "ollama",
     max_pixels: int = 4_096_000,
+    base_url: str = "http://127.0.0.1:11434",
 ) -> None:
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
     monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "true" if enabled else "false")
@@ -651,7 +652,7 @@ def _configure_vision(
     monkeypatch.setenv("FLUX_KB_VISION_MAX_IMAGE_PIXELS", str(max_pixels))
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_ENABLED", "true")
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_PROVIDER", provider)
-    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_BASE_URL", base_url)
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_PROBE_TIMEOUT_SECONDS", "1")
 
 
@@ -789,6 +790,46 @@ def test_extract_image_uses_local_vision_when_ocr_is_missing_and_reuses_cache(mo
     assert second.metadata["vision"]["cache_hits"] == 1
     assert second.metadata["vision"]["cache_misses"] == 0
     assert calls == {"vision": 1}
+
+
+def test_extract_image_uses_local_vision_after_empty_ocr_via_docker_host_gateway(monkeypatch, tmp_path):
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(
+        monkeypatch,
+        tmp_path,
+        model="qwen2.5vl:7b",
+        base_url="http://host.docker.internal:11434",
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/tesseract.exe"
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"response":"Diagram shows an approvals workflow and inbox attachments."}'
+
+    def fake_urlopen(request, **_kwargs):
+        assert request.full_url == "http://host.docker.internal:11434/api/generate"
+        return FakeResponse()
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].modality == "vision"
+    assert result.chunks[0].body == "Diagram shows an approvals workflow and inbox attachments."
+    assert result.metadata["ocr"]["status"] == "completed"
+    assert result.metadata["vision"]["status"] == "completed"
+    assert result.metadata["vision"]["model"] == "qwen2.5vl:7b"
+    assert result.metadata["vision_escalation"] == "completed"
 
 
 def test_extract_image_blocks_unsupported_vision_provider_without_remote_call(monkeypatch, tmp_path):
