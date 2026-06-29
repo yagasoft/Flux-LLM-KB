@@ -3539,17 +3539,23 @@ class KnowledgeService:
 
         telemetry = {
             "stage": "completed",
+            "stage_index": 6,
+            "stage_total": 6,
             "root_name": root_name,
             "reason": reason,
             "files_seen": int(result.get("files_seen") or 0),
+            "files_done": int(result.get("files_seen") or 0),
             "files_changed": int(result.get("files_changed") or 0),
             "files_deleted": int(result.get("files_deleted") or 0),
             "jobs_queued": int(result.get("jobs_queued") or 0),
             "chunks_indexed": int(result.get("chunks_indexed") or 0),
             "manifest_skipped_unchanged": int(result.get("manifest_skipped_unchanged") or 0),
+            "progress_percent": 100,
         }
         if paths:
             telemetry["paths_total"] = len(paths)
+            telemetry["paths_done"] = len(paths)
+        telemetry["progress_label"] = progress_label(telemetry)
         return JobProcessResult(status="indexed", telemetry=telemetry)
 
     def remediate_diagnostic(

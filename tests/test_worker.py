@@ -215,6 +215,9 @@ def test_backfill_processes_batched_corpus_sync_root_paths(monkeypatch):
         {"root_name": "docs", "path": "b.md", "reason": "watch_event"},
     ]
     assert calls["completed"][0]["telemetry"]["paths_total"] == 2
+    assert calls["completed"][0]["telemetry"]["paths_done"] == 2
+    assert calls["completed"][0]["telemetry"]["progress_percent"] == 100
+    assert calls["completed"][0]["telemetry"]["progress_label"] == "Paths 2/2, stage 6/6 completed"
     assert calls["completed"][0]["telemetry"]["files_seen"] == 2
     assert calls["completed"][0]["telemetry"]["files_changed"] == 1
     assert calls["completed"][0]["telemetry"]["chunks_indexed"] == 2
