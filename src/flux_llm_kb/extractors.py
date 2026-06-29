@@ -88,6 +88,7 @@ THUMBNAIL_CACHE_SCHEMA = "flux-thumbnail-cache-v1"
 VISION_PROMPT_SCHEMA = "flux-vision-caption-v1"
 OCR_MAX_PDF_PAGES = 25
 OCR_PDF_DPI = 200
+OCR_MAX_IMAGE_EDGE = 6000
 OCR_TIMEOUT_SECONDS = 30
 ASR_AUDIO_SAMPLE_RATE = 16000
 ASR_FFMPEG_TIMEOUT_SECONDS = 300
@@ -3449,6 +3450,8 @@ def _asr_media(path: Path, probed: dict[str, Any]) -> AsrResult:
         status="pending",
         duration_seconds=duration,
         max_duration_seconds=settings["max_duration_seconds"],
+        device=settings["device"],
+        compute_type=settings["compute_type"],
     )
     if not settings["enabled"]:
         return AsrResult(status="completed", metadata={**metadata, "status": "disabled"})
@@ -3489,11 +3492,24 @@ def _asr_media(path: Path, probed: dict[str, Any]) -> AsrResult:
             text=text,
             metadata={**metadata, "status": "cache_hit", "cache_hits": 1, "cache_misses": 0, "segments": segments},
         )
-    return _asr_with_faster_whisper(path, ffmpeg=ffmpeg, model_path=model_path, metadata=metadata)
+    return _asr_with_faster_whisper(
+        path,
+        ffmpeg=ffmpeg,
+        model_path=model_path,
+        metadata=metadata,
+        device=settings["device"],
+        compute_type=settings["compute_type"],
+    )
 
 
 def _asr_settings() -> dict[str, Any]:
-    defaults = {"enabled": True, "model_path": "", "max_duration_seconds": 3600}
+    defaults = {
+        "enabled": True,
+        "model_path": "",
+        "max_duration_seconds": 3600,
+        "device": "auto",
+        "compute_type": "default",
+    }
     try:
         from .settings import SettingsService
 
@@ -3502,12 +3518,22 @@ def _asr_settings() -> dict[str, Any]:
             "enabled": bool(service.resolve("acceleration.asr.enabled").raw_value),
             "model_path": str(service.resolve("acceleration.asr.model_path").raw_value or ""),
             "max_duration_seconds": int(service.resolve("acceleration.asr.max_duration_seconds").raw_value or 3600),
+            "device": str(service.resolve("acceleration.asr.device").raw_value or "auto"),
+            "compute_type": str(service.resolve("acceleration.asr.compute_type").raw_value or "default"),
         }
     except Exception:
         return defaults
 
 
-def _asr_with_faster_whisper(path: Path, *, ffmpeg: str, model_path: Path, metadata: dict[str, Any]) -> AsrResult:
+def _asr_with_faster_whisper(
+    path: Path,
+    *,
+    ffmpeg: str,
+    model_path: Path,
+    metadata: dict[str, Any],
+    device: str,
+    compute_type: str,
+) -> AsrResult:
     with tempfile.TemporaryDirectory(prefix="flux-kb-asr-") as temp_dir:
         audio_path = Path(temp_dir) / "audio.wav"
         command = [
@@ -3542,7 +3568,12 @@ def _asr_with_faster_whisper(path: Path, *, ffmpeg: str, model_path: Path, metad
             )
         try:
             faster_whisper = importlib.import_module("faster_whisper")
-            model = faster_whisper.WhisperModel(str(model_path), local_files_only=True)
+            model_kwargs: dict[str, Any] = {"local_files_only": True}
+            if device != "auto":
+                model_kwargs["device"] = device
+            if compute_type != "default":
+                model_kwargs["compute_type"] = compute_type
+            model = faster_whisper.WhisperModel(str(model_path), **model_kwargs)
             segments_iter, info = model.transcribe(str(audio_path))
             parts: list[str] = []
             segment_count = 0
@@ -3574,11 +3605,15 @@ def _asr_metadata(
     status: str,
     duration_seconds: float | None,
     max_duration_seconds: int,
+    device: str,
+    compute_type: str,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "engine": "faster_whisper",
         "status": status,
         "max_duration_seconds": max_duration_seconds,
+        "device": device,
+        "compute_type": compute_type,
         "cache_hits": 0,
         "cache_misses": 0,
         "segments": 0,
@@ -4256,6 +4291,8 @@ def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
                         renderer,
                         "-r",
                         str(OCR_PDF_DPI),
+                        "-scale-to",
+                        str(OCR_MAX_IMAGE_EDGE),
                         "-png",
                         "-f",
                         str(page_number),
@@ -4309,8 +4346,9 @@ def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
     return OcrResult(status="completed", text="\n".join(parts), metadata={**base_metadata, "status": "completed"})
 
 
-def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
-    cached = _read_ocr_cache(path)
+def _ocr_image_with_tesseract(path: Path, tesseract: str, *, cache_path: Path | None = None) -> OcrResult:
+    source_path = cache_path or path
+    cached = _read_ocr_cache(source_path)
     if cached is not None:
         return OcrResult(
             status="completed",
@@ -4320,11 +4358,19 @@ def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
                 "status": "cache_hit",
                 "cache_hits": 1,
                 "cache_misses": 0,
+                "preprocess": {"status": "cache_hit", "max_edge": OCR_MAX_IMAGE_EDGE},
             },
         )
+    preprocess = _ocr_preprocess_metadata(path)
+    tesseract_input = path
+    temp_dir_obj: tempfile.TemporaryDirectory[str] | None = None
+    if preprocess.get("status") == "needs_scaling":
+        temp_dir_obj = tempfile.TemporaryDirectory(prefix="flux-kb-ocr-image-")
+        temp_root = Path(temp_dir_obj.name)
+        tesseract_input, preprocess = _scaled_ocr_input(path, temp_root=temp_root, base_metadata=preprocess)
     try:
         result = run_no_window(
-            [tesseract, str(path), "stdout"],
+            [tesseract, str(tesseract_input), "stdout"],
             text=True,
             capture_output=True,
             timeout=OCR_TIMEOUT_SECONDS,
@@ -4338,6 +4384,7 @@ def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
                 "status": "blocked_timeout",
                 "cache_hits": 0,
                 "cache_misses": 1,
+                "preprocess": preprocess,
             },
             message=str(exc),
         )
@@ -4349,9 +4396,13 @@ def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
                 "status": "failed",
                 "cache_hits": 0,
                 "cache_misses": 1,
+                "preprocess": preprocess,
             },
             message=str(exc),
         )
+    finally:
+        if temp_dir_obj is not None:
+            temp_dir_obj.cleanup()
     if result.returncode != 0:
         return OcrResult(
             status="completed",
@@ -4360,12 +4411,13 @@ def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
                 "status": "failed",
                 "cache_hits": 0,
                 "cache_misses": 1,
+                "preprocess": preprocess,
             },
             message=result.stderr.strip() or "tesseract failed",
         )
     redacted, _ = redact_text(result.stdout.strip())
     text = redacted.strip()
-    _write_ocr_cache(path, text)
+    _write_ocr_cache(source_path, text)
     return OcrResult(
         status="completed",
         text=text,
@@ -4374,8 +4426,53 @@ def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
             "status": "completed",
             "cache_hits": 0,
             "cache_misses": 1,
+            "preprocess": preprocess,
         },
     )
+
+
+def _ocr_preprocess_metadata(path: Path) -> dict[str, Any]:
+    width = None
+    height = None
+    dimensions = _image_dimensions(path)
+    if dimensions is not None:
+        width, height = dimensions
+    metadata: dict[str, Any] = {
+        "status": "original",
+        "max_edge": OCR_MAX_IMAGE_EDGE,
+    }
+    if width is not None and height is not None:
+        metadata.update(
+            {
+                "input_width": width,
+                "input_height": height,
+                "output_width": width,
+                "output_height": height,
+            }
+        )
+        if max(width, height) > OCR_MAX_IMAGE_EDGE:
+            metadata["status"] = "needs_scaling"
+    return metadata
+
+
+def _scaled_ocr_input(path: Path, *, temp_root: Path, base_metadata: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    try:
+        from PIL import Image
+
+        output_path = temp_root / "ocr-input.png"
+        with Image.open(path) as image:
+            image.thumbnail((OCR_MAX_IMAGE_EDGE, OCR_MAX_IMAGE_EDGE), Image.Resampling.LANCZOS)
+            prepared = image.convert("RGB")
+            prepared.save(output_path)
+            output_width, output_height = prepared.size
+        return output_path, {
+            **base_metadata,
+            "status": "scaled",
+            "output_width": output_width,
+            "output_height": output_height,
+        }
+    except Exception as exc:
+        return path, {**base_metadata, "status": "scale_failed", "message": str(exc)[:200]}
 
 
 def _read_ocr_cache(path: Path) -> str | None:

@@ -291,9 +291,9 @@ try {
     Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
     Invoke-FeatureStep -Name "compileall" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m compileall -q src tests'
     Invoke-FeatureStep -Name "flux-lint" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli lint'
-    Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci'
-    Invoke-FeatureStep -Name "dashboard-test" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard test'
-    Invoke-FeatureStep -Name "dashboard-build" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard run build'
+    Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci --include=dev'
+    Invoke-FeatureStep -Name "dashboard-test" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/vitest.mjs run } finally { Pop-Location }'
+    Invoke-FeatureStep -Name "dashboard-build" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'
     Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A; if ((git status --porcelain) -ne `$null) { git commit -m '$CommitMessage' }"
     Invoke-FeatureStep -Name "sync-main" -Cwd $MainRoot -Command 'git pull --ff-only origin main'
     Invoke-FeatureStep -Name "squash-merge" -Cwd $MainRoot -Command "git merge --squash $Branch"
@@ -301,7 +301,7 @@ try {
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command 'git fetch origin main; if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { exit 1 }'
     if (-not $SkipDeploy) {
-        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1' -TimeoutSeconds $DeployStepTimeoutSeconds
+        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1 -GpuMode on' -TimeoutSeconds $DeployStepTimeoutSeconds
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 15 | Out-Null'
     }

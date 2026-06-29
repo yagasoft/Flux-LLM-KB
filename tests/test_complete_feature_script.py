@@ -39,15 +39,15 @@ def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
 
     install_step = (
         'Invoke-FeatureStep -Name "dashboard-install" '
-        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci'"
+        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci --include=dev'"
     )
     test_step = (
         'Invoke-FeatureStep -Name "dashboard-test" '
-        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard test'"
+        "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/vitest.mjs run } finally { Pop-Location }'"
     )
     build_step = (
         'Invoke-FeatureStep -Name "dashboard-build" '
-        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard run build'"
+        "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'"
     )
 
     assert install_step in script
@@ -100,7 +100,7 @@ def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
 
     deploy_step = (
         'Invoke-FeatureStep -Name "deploy-production" '
-        "-Cwd $MainRoot -Command '.\\scripts\\deploy\\update-flux.ps1' "
+        "-Cwd $MainRoot -Command '.\\scripts\\deploy\\update-flux.ps1 -GpuMode on' "
         "-TimeoutSeconds $DeployStepTimeoutSeconds"
     )
 

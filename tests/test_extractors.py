@@ -617,6 +617,46 @@ def test_extract_media_runs_local_asr_and_reuses_redacted_cache(monkeypatch, tmp
     assert calls == {"ffprobe": 2, "ffmpeg": 1, "model": 1}
 
 
+def test_extract_media_passes_configured_gpu_settings_to_faster_whisper(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    model_path = _configure_asr(monkeypatch, tmp_path, device="cuda", compute_type="float16")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    fake_spec = importlib.machinery.ModuleSpec("faster_whisper", loader=None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.importlib.util.find_spec",
+        lambda name: fake_spec if name == "faster_whisper" else importlib.util.find_spec(name),
+    )
+    model_kwargs = {}
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    class FakeWhisperModel:
+        def __init__(self, model_size_or_path, **kwargs):
+            assert model_size_or_path == str(model_path)
+            model_kwargs.update(kwargs)
+
+        def transcribe(self, audio_path, **_kwargs):
+            assert Path(audio_path).exists()
+            return ([SimpleNamespace(text="GPU ASR text")], SimpleNamespace(language="en"))
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=FakeWhisperModel, __spec__=fake_spec))
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["asr"]["device"] == "cuda"
+    assert result.metadata["asr"]["compute_type"] == "float16"
+    assert model_kwargs == {"local_files_only": True, "device": "cuda", "compute_type": "float16"}
+
+
 def _configure_asr(
     monkeypatch,
     tmp_path: Path,
@@ -624,6 +664,8 @@ def _configure_asr(
     enabled: bool = True,
     model_path: str | None = None,
     max_duration: int = 3600,
+    device: str = "auto",
+    compute_type: str = "default",
 ) -> Path:
     model_dir = tmp_path / "models" / "faster-whisper-tiny"
     if model_path is None:
@@ -632,6 +674,8 @@ def _configure_asr(
     monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("FLUX_KB_ASR_MODEL_PATH", model_path)
     monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", str(max_duration))
+    monkeypatch.setenv("FLUX_KB_ASR_DEVICE", device)
+    monkeypatch.setenv("FLUX_KB_ASR_COMPUTE_TYPE", compute_type)
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
     return model_dir
 
@@ -939,6 +983,51 @@ def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_pat
     assert second.metadata["ocr"]["cache_misses"] == 0
 
 
+def test_extract_large_image_downscales_tesseract_input_and_reuses_original_cache(monkeypatch, tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "tall-scan.png"
+    Image.new("RGB", (16, 7000), "white").save(path)
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        tesseract_input = Path(command[1])
+        assert tesseract_input != path
+        with Image.open(tesseract_input) as image:
+            assert max(image.size) <= 6000
+        return SimpleNamespace(returncode=0, stdout="Large scan text", stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    first = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert first.status == "indexed"
+    assert first.chunks[0].body == "Large scan text"
+    assert first.metadata["ocr"]["preprocess"]["status"] == "scaled"
+    assert first.metadata["ocr"]["preprocess"]["input_width"] == 16
+    assert first.metadata["ocr"]["preprocess"]["input_height"] == 7000
+    assert first.metadata["ocr"]["preprocess"]["max_edge"] == 6000
+    assert len(calls) == 1
+
+    def fail_run(_command, **_kwargs):
+        raise AssertionError("second extraction should use original-source OCR cache")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fail_run)
+
+    second = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert second.status == "indexed"
+    assert second.chunks[0].body == first.chunks[0].body
+    assert second.metadata["ocr"]["cache_hits"] == 1
+    assert second.metadata["ocr"]["cache_misses"] == 0
+
+
 def test_extract_video_samples_transition_frames_and_reuses_thumbnail_cache(monkeypatch, tmp_path):
     path = tmp_path / "clip.mp4"
     path.write_bytes(b"fake media")
@@ -1118,6 +1207,7 @@ def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_pat
         calls.append(command)
         if command[0] == "C:/tools/pdftoppm.exe":
             page = command[command.index("-f") + 1]
+            assert command[command.index("-scale-to") + 1] == "6000"
             output_prefix = Path(command[-1])
             output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
             return SimpleNamespace(returncode=0, stdout="", stderr="")

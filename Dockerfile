@@ -43,7 +43,7 @@ from pathlib import Path
 config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 requirements = list(config["project"]["dependencies"])
 optional = config["project"].get("optional-dependencies", {})
-for extra in ("api", "corpus", "processors"):
+for extra in ("api", "corpus", "processors", "gpu"):
     requirements.extend(optional.get(extra, []))
 Path("/tmp/requirements-docker.txt").write_text(
     "\n".join(requirements) + "\n",

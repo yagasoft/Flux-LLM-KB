@@ -177,15 +177,21 @@ def test_asr_settings_defaults_and_env_overrides(monkeypatch, tmp_path):
     assert service.resolve("acceleration.asr.enabled").raw_value is True
     assert service.resolve("acceleration.asr.model_path").raw_value == ""
     assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 3600
+    assert service.resolve("acceleration.asr.device").raw_value == "auto"
+    assert service.resolve("acceleration.asr.compute_type").raw_value == "default"
 
     model_dir = tmp_path / "models" / "faster-whisper"
     monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "false")
     monkeypatch.setenv("FLUX_KB_ASR_MODEL_PATH", str(model_dir))
     monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", "42")
+    monkeypatch.setenv("FLUX_KB_ASR_DEVICE", "cuda")
+    monkeypatch.setenv("FLUX_KB_ASR_COMPUTE_TYPE", "float16")
 
     assert service.resolve("acceleration.asr.enabled").raw_value is False
     assert service.resolve("acceleration.asr.model_path").raw_value == str(model_dir)
     assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 42
+    assert service.resolve("acceleration.asr.device").raw_value == "cuda"
+    assert service.resolve("acceleration.asr.compute_type").raw_value == "float16"
 
 
 def test_vision_and_video_settings_defaults_and_env_overrides(monkeypatch, tmp_path):

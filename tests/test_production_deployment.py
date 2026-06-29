@@ -41,7 +41,9 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "-m flux_llm_kb.cli migrate" in install
     assert "Invoke-FluxCodexPluginInstall" in install
     assert "-m flux_llm_kb.cli codex install-plugin" in install
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in install
+    assert "GpuMode" in install
+    assert "Assert-FluxGpuAvailable" in install
     assert 'Join-Path $appRoot "plugins"' in install
     assert "E:\\LLM KB" not in install
     assert "private\\runtime" not in install
@@ -79,7 +81,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "-m flux_llm_kb.cli migrate" in update
     assert "Invoke-FluxCodexPluginInstall" in update
     assert "-m flux_llm_kb.cli codex install-plugin" in update
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in update
     assert "Register-FluxTask" in update
     assert "New-FluxHostTaskTriggers" in update
     assert "New-ScheduledTaskTrigger -Once" in update
@@ -102,7 +104,25 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "[int]$HostAgentPort = 8799" in update
     assert "[int]$PostgresPort = 5432" in update
     assert "Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort" in update
+    assert "GpuMode" in update
+    assert "Write-FluxCompose" in update
+    assert "Assert-FluxGpuAvailable" in update
     assert "build:" not in _embedded_compose_template(update)
+
+
+def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
+    install_compose = _embedded_compose_template(_script("install-flux.ps1"))
+
+    assert install_compose.count("gpus: all") == 2
+    assert install_compose.count("NVIDIA_VISIBLE_DEVICES: all") == 2
+    assert install_compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 2
+    assert "FLUX_KB_ASR_DEVICE: cuda" in install_compose
+    assert "FLUX_KB_ASR_COMPUTE_TYPE: float16" in install_compose
+    assert "FLUX_KB_LOCAL_INFERENCE_ENABLED: \"true\"" in install_compose
+    assert "FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434" in install_compose
+    assert "FLUX_KB_VISION_ENABLED: \"true\"" in install_compose
+    assert "FLUX_KB_VISION_MODEL: qwen2.5vl:7b" in install_compose
+    assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in install_compose
 
 
 def test_postgres_compose_uses_performance_first_local_tuning():
@@ -125,7 +145,7 @@ def test_dockerfile_installs_practical_extractor_pack():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
 
-    assert 'for extra in ("api", "corpus", "processors")' in dockerfile
+    assert 'for extra in ("api", "corpus", "processors", "gpu")' in dockerfile
     for package in (
         "libreoffice",
         "antiword",
@@ -149,10 +169,10 @@ def test_dockerfile_installs_practical_extractor_pack():
         "pandoc",
     ):
         assert package in dockerfile
-    for dependency in ("duckdb", "pyarrow", "faster-whisper"):
+    for dependency in ("duckdb", "pyarrow", "faster-whisper", "onnxruntime-gpu"):
         assert dependency in pyproject
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in install
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in update
 
 
 def test_production_update_bounds_compose_up_and_recovers_created_services():

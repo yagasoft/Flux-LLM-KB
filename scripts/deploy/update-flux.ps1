@@ -1,9 +1,12 @@
 param(
     [string]$InstallRoot = "D:\FluxLLMKB",
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
+    [int]$ApiPort = 8765,
     [int]$HostAgentPort = 8799,
     [int]$PostgresPort = 5432,
     [string]$PythonExe = "",
+    [ValidateSet("auto", "on", "off")]
+    [string]$GpuMode = "auto",
     [switch]$SkipDashboardBuild,
     [switch]$RecreateVenv,
     [switch]$RestartHostTasks,
@@ -25,6 +28,217 @@ function Resolve-FluxPythonExe {
     $installedPython = Join-Path $InstallRoot "python\python.exe"
     if (Test-Path $installedPython) { return $installedPython }
     return "python"
+}
+
+function Set-FluxEnvValue {
+    param([string]$TargetPath, [string]$Key, [string]$Value)
+    $line = "$Key=$Value"
+    if (-not (Test-Path $TargetPath)) {
+        Set-Content -Path $TargetPath -Value "$line`n" -Encoding UTF8
+        return
+    }
+    $existing = Get-Content -Raw -Path $TargetPath
+    if ($existing -match "(?m)^$([regex]::Escape($Key))=") {
+        $updated = [regex]::Replace($existing, "(?m)^$([regex]::Escape($Key))=.*$", $line)
+        Set-Content -Path $TargetPath -Value $updated -Encoding UTF8
+    } else {
+        Add-Content -Path $TargetPath -Value $line -Encoding UTF8
+    }
+}
+
+function Remove-FluxGpuComposeAccess {
+    param([string]$ComposeText)
+    $filtered = foreach ($line in ($ComposeText -split "`r?`n")) {
+        if ($line -match "^\s+gpus: all\s*$") { continue }
+        if ($line -match "^\s+NVIDIA_VISIBLE_DEVICES: all\s*$") { continue }
+        if ($line -match "^\s+NVIDIA_DRIVER_CAPABILITIES: compute,utility\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_ASR_DEVICE: cuda\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_ASR_COMPUTE_TYPE: float16\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_ENABLED: `"true`"\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host\.docker\.internal:11434\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_VISION_ENABLED: `"true`"\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen2\.5vl:7b\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_VISION_MAX_IMAGE_PIXELS: `"80000000`"\s*$") { continue }
+        $line
+    }
+    return ($filtered -join "`n")
+}
+
+function Assert-FluxGpuAvailable {
+    param(
+        [string]$ImageTag,
+        [ValidateSet("auto", "on", "off")]
+        [string]$GpuMode
+    )
+    if ($GpuMode -eq "off") {
+        Write-Host "Flux GPU mode is off; Docker GPU access will not be requested."
+        return $false
+    }
+    $image = "flux-llm-kb-api:$ImageTag"
+    docker run --rm --gpus all --entrypoint nvidia-smi $image | Out-Host
+    if ($LASTEXITCODE -eq 0) {
+        return $true
+    }
+    $message = "Flux GPU mode '$GpuMode' could not run nvidia-smi through Docker GPU passthrough for image $image."
+    if ($GpuMode -eq "on") {
+        throw $message
+    }
+    Write-Warning $message
+    return $false
+}
+
+function Write-FluxCompose {
+    param(
+        [string]$TargetPath,
+        [string]$ImageTag,
+        [int]$ApiPort,
+        [int]$PostgresPort,
+        [bool]$GpuEnabled
+    )
+    $compose = @"
+services:
+  api:
+    image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-api
+    restart: unless-stopped
+    gpus: all
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_API_HOST: 0.0.0.0
+      FLUX_KB_API_PORT: "8765"
+      FLUX_KB_APP_ROOT: /app
+      FLUX_KB_ASR_DEVICE: cuda
+      FLUX_KB_ASR_COMPUTE_TYPE: float16
+      FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434
+      FLUX_KB_VISION_ENABLED: "true"
+      FLUX_KB_VISION_MODEL: qwen2.5vl:7b
+      FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
+    ports:
+      - "127.0.0.1:${ApiPort}:8765"
+    volumes:
+      - ../private:/app/private
+      - ../logs:/app/logs
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m uvicorn flux_llm_kb.rest_api:create_app --factory --host 0.0.0.0 --port 8765"
+
+  worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-worker
+    restart: unless-stopped
+    gpus: all
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_APP_ROOT: /app
+      FLUX_KB_ASR_DEVICE: cuda
+      FLUX_KB_ASR_COMPUTE_TYPE: float16
+      FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434
+      FLUX_KB_VISION_ENABLED: "true"
+      FLUX_KB_VISION_MODEL: qwen2.5vl:7b
+      FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
+    volumes:
+      - ../private:/app/private
+      - ../logs:/app/logs
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5 --limit 10"
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: flux-llm-kb-postgres
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_buffers=1GB
+      -c effective_cache_size=12GB
+      -c work_mem=32MB
+      -c maintenance_work_mem=512MB
+      -c effective_io_concurrency=200
+      -c random_page_cost=1.1
+      -c max_parallel_workers_per_gather=4
+    environment:
+      POSTGRES_USER: flux
+      POSTGRES_PASSWORD: flux
+      POSTGRES_DB: flux_llm_kb
+    ports:
+      - "127.0.0.1:${PostgresPort}:5432"
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flux -d flux_llm_kb"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+"@
+    if (-not $GpuEnabled) {
+        $compose = Remove-FluxGpuComposeAccess -ComposeText $compose
+    }
+    Set-Content -Path $TargetPath -Value $compose -Encoding UTF8
+}
+
+function Write-FluxEnv {
+    param(
+        [string]$TargetPath,
+        [string]$InstallRoot,
+        [string]$ImageTag,
+        [int]$PostgresPort,
+        [bool]$GpuEnabled
+    )
+    $databaseUrl = "postgresql://flux:flux@postgres:5432/flux_llm_kb"
+    $envText = @"
+FLUX_KB_DATABASE_URL=$databaseUrl
+FLUX_KB_INSTALL_ROOT=$InstallRoot
+FLUX_KB_APP_ROOT=$InstallRoot\app
+FLUX_KB_PRIVATE_DIR=$InstallRoot\private
+FLUX_KB_DATA_DIR=$InstallRoot\data
+FLUX_KB_LOG_DIR=$InstallRoot\logs
+FLUX_KB_IMAGE_TAG=$ImageTag
+FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb
+"@
+    if ($GpuEnabled) {
+        $envText += @"
+FLUX_KB_ASR_DEVICE=cuda
+FLUX_KB_ASR_COMPUTE_TYPE=float16
+FLUX_KB_LOCAL_INFERENCE_ENABLED=true
+FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://host.docker.internal:11434
+FLUX_KB_VISION_ENABLED=true
+FLUX_KB_VISION_MODEL=qwen2.5vl:7b
+FLUX_KB_VISION_MAX_IMAGE_PIXELS=80000000
+"@
+    } else {
+        $envText += @"
+FLUX_KB_ASR_DEVICE=auto
+FLUX_KB_ASR_COMPUTE_TYPE=default
+FLUX_KB_LOCAL_INFERENCE_ENABLED=false
+FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://127.0.0.1:11434
+FLUX_KB_VISION_ENABLED=false
+FLUX_KB_VISION_MODEL=
+FLUX_KB_VISION_MAX_IMAGE_PIXELS=4096000
+"@
+    }
+    if (-not (Test-Path $TargetPath)) {
+        Set-Content -Path $TargetPath -Value $envText -Encoding UTF8
+        return
+    }
+    foreach ($line in $envText -split "`r?`n") {
+        if (-not $line.Trim()) { continue }
+        $parts = $line -split "=", 2
+        Set-FluxEnvValue -TargetPath $TargetPath -Key $parts[0] -Value $parts[1]
+    }
 }
 
 function Write-FluxHostScripts {
@@ -372,6 +586,8 @@ docker build -t "flux-llm-kb-api:$imageTag" -t "flux-llm-kb-api:local" $SourceRo
 docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:$imageTag"
 docker tag "flux-llm-kb-api:$imageTag" "flux-llm-kb-worker:local"
 
+$gpuEnabled = Assert-FluxGpuAvailable -ImageTag $imageTag -GpuMode $GpuMode
+
 $pluginSource = Join-Path $SourceRoot "plugins"
 $pluginTarget = Join-Path $appRoot "plugins"
 if (Test-Path $pluginSource) {
@@ -379,17 +595,10 @@ if (Test-Path $pluginSource) {
     Copy-Item -Path $pluginSource -Destination $pluginTarget -Recurse -Force
 }
 
+Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
 Set-Content -Path $appEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag`n" -Encoding UTF8
 Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
-if (Test-Path $privateEnvPath) {
-    $envText = Get-Content -Raw -Path $privateEnvPath
-    if ($envText -match "(?m)^FLUX_KB_IMAGE_TAG=") {
-        $envText = [regex]::Replace($envText, "(?m)^FLUX_KB_IMAGE_TAG=.*$", "FLUX_KB_IMAGE_TAG=$imageTag")
-        Set-Content -Path $privateEnvPath -Value $envText -Encoding UTF8
-    } else {
-        Add-Content -Path $privateEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag" -Encoding UTF8
-    }
-}
+Write-FluxEnv -TargetPath $privateEnvPath -InstallRoot $InstallRoot -ImageTag $imageTag -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
 
 if ($RecreateVenv -and (Test-Path $venvRoot)) {
     Remove-Item -LiteralPath $venvRoot -Recurse -Force
@@ -398,7 +607,7 @@ if (-not (Test-Path $venvPython)) {
     & $resolvedPython -m venv $venvRoot
 }
 & $venvPython -m pip install --upgrade pip
-& $venvPython -m pip install "$SourceRoot[api,corpus,mail,mcp,processors]"
+& $venvPython -m pip install "$SourceRoot[api,corpus,mail,mcp,processors,gpu]"
 Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
