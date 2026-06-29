@@ -142,6 +142,39 @@ def test_outlook_host_duplicate_process_exits_before_claiming_requests(monkeypat
     assert payload["host_id"] == "host-1"
 
 
+def test_outlook_host_run_forever_heartbeats_while_claim_is_blocked(monkeypatch, tmp_path):
+    from flux_llm_kb import outlook_host
+
+    events = []
+    claim_entered = threading.Event()
+    saw_background_heartbeat = threading.Event()
+    monkeypatch.setenv("FLUX_KB_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(outlook_host.platform, "system", lambda: "Windows")
+    monkeypatch.setitem(sys.modules, "win32com", types.SimpleNamespace(client=types.SimpleNamespace()))
+    monkeypatch.setitem(sys.modules, "win32com.client", types.SimpleNamespace())
+
+    def fake_heartbeat(**kwargs):
+        events.append(kwargs)
+        if claim_entered.is_set():
+            saw_background_heartbeat.set()
+        return kwargs
+
+    def blocked_claim(*, host_id="default"):
+        claim_entered.set()
+        assert saw_background_heartbeat.wait(1.0)
+        return None
+
+    monkeypatch.setattr(database, "record_outlook_host_heartbeat", fake_heartbeat)
+    monkeypatch.setattr(database, "claim_outlook_sync_request", blocked_claim)
+    monkeypatch.setattr(outlook_host.time, "sleep", lambda _seconds: None)
+
+    payload = outlook_host.run_forever(host_id="host-1", interval_seconds=0, max_iterations=1, heartbeat_interval_seconds=0.01)
+
+    assert payload["status"] == "stopped"
+    assert len(events) >= 2
+    assert all(event["process_id"] == os.getpid() for event in events)
+
+
 def test_outlook_host_heartbeats_while_sync_request_is_running(monkeypatch):
     from flux_llm_kb import outlook_host
 
@@ -210,12 +243,13 @@ def test_outlook_host_loop_continues_after_internal_error(monkeypatch):
     calls = []
     sleeps = []
 
-    def flaky_once(*, host_id="default"):
+    def flaky_once(*, host_id="default", heartbeat_interval_seconds=30.0):
         calls.append(host_id)
         if len(calls) == 1:
             raise RuntimeError("database claim failed")
         return {"status": "idle", "host_id": host_id}
 
+    monkeypatch.setattr(database, "record_outlook_host_heartbeat", lambda **kwargs: kwargs)
     monkeypatch.setattr(outlook_host, "run_once", flaky_once)
     monkeypatch.setattr(outlook_host.time, "sleep", lambda seconds: sleeps.append(seconds))
 

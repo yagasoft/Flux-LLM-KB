@@ -236,13 +236,19 @@ function Resolve-FluxPythonwExe {
     throw "Missing windowless Python launcher: $pythonw"
 }
 
+function New-FluxHostTaskTriggers {
+    $logonTrigger = New-ScheduledTaskTrigger -AtLogOn
+    $watchdogTrigger = New-ScheduledTaskTrigger -Once -At ([DateTime]::Now.AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+    return @($logonTrigger, $watchdogTrigger)
+}
+
 function Register-FluxTask {
     param([string]$TaskName, [string]$LauncherPath, [string]$AppRoot)
     $pythonw = Resolve-FluxPythonwExe -AppRoot $AppRoot
     $action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$LauncherPath`""
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Description "Flux-LLM-KB local host process" -Force | Out-Null
+    $triggers = New-FluxHostTaskTriggers
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -MultipleInstances IgnoreNew -Hidden
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $triggers -Settings $settings -Description "Flux-LLM-KB local host process" -Force | Out-Null
 }
 
 function Invoke-FluxMigration {

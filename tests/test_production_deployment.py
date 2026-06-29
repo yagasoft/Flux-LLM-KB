@@ -23,6 +23,11 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "FluxKB Outlook Host" in install
     assert "Register-ScheduledTask" in install
     assert "-Hidden" in install
+    assert "New-FluxHostTaskTriggers" in install
+    assert "New-ScheduledTaskTrigger -Once" in install
+    assert "-RepetitionInterval (New-TimeSpan -Minutes 1)" in install
+    assert "-MultipleInstances IgnoreNew" in install
+    assert "-StartWhenAvailable" in install
     assert "pythonw.exe" in install
     assert "run-host-agent.pyw" in install
     assert "run-outlook-host.pyw" in install
@@ -76,6 +81,11 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "-m flux_llm_kb.cli codex install-plugin" in update
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
     assert "Register-FluxTask" in update
+    assert "New-FluxHostTaskTriggers" in update
+    assert "New-ScheduledTaskTrigger -Once" in update
+    assert "-RepetitionInterval (New-TimeSpan -Minutes 1)" in update
+    assert "-MultipleInstances IgnoreNew" in update
+    assert "-StartWhenAvailable" in update
     assert "Wait-FluxTaskStopped" in update
     assert "Wait-FluxTcpClosed" in update
     assert "Port = $HostAgentPort" in update
