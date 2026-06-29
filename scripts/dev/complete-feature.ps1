@@ -299,9 +299,9 @@ try {
     Invoke-FeatureStep -Name "squash-merge" -Cwd $MainRoot -Command "git merge --squash $Branch"
     Invoke-FeatureStep -Name "main-commit" -Cwd $MainRoot -Command "if ((git status --porcelain) -ne `$null) { git commit -m '$CommitMessage' } else { 'No staged changes to commit.' }"
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
-    Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command 'git fetch origin main; if ((git rev-parse HEAD) -ne (git rev-parse origin/main)) { exit 1 }'
+    Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
     if (-not $SkipDeploy) {
-        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1 -GpuMode on' -TimeoutSeconds $DeployStepTimeoutSeconds
+        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild' -TimeoutSeconds $DeployStepTimeoutSeconds
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 15 | Out-Null'
     }

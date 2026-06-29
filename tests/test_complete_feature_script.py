@@ -100,11 +100,20 @@ def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
 
     deploy_step = (
         'Invoke-FeatureStep -Name "deploy-production" '
-        "-Cwd $MainRoot -Command '.\\scripts\\deploy\\update-flux.ps1 -GpuMode on' "
+        "-Cwd $MainRoot -Command '.\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild' "
         "-TimeoutSeconds $DeployStepTimeoutSeconds"
     )
 
     assert deploy_step in script
+
+
+def test_complete_feature_script_verifies_origin_main_with_scalar_hashes():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "$headSha = (git rev-parse HEAD).Trim()" in script
+    assert "$originSha = (git rev-parse origin/main).Trim()" in script
+    assert "$headSha -ne $originSha" in script
+    assert "HEAD $headSha differs from origin/main $originSha" in script
 
 
 def test_complete_feature_script_releases_worktree_cwd_and_checks_cleanup_failures():
