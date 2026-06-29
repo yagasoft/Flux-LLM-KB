@@ -1480,10 +1480,24 @@ def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
         from docx import Document
     except ImportError:
         return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="python-docx not installed")
-    document = Document(str(path))
+    try:
+        document = Document(str(path))
+    except Exception as exc:
+        if _is_invalid_package_error(exc):
+            return ExtractionResult(
+                status="blocked_missing_dependency",
+                metadata={"extractor": extractor, "reason": "invalid_package"},
+                message=str(exc),
+            )
+        raise
     text = "\n".join(paragraph.text for paragraph in document.paragraphs).strip()
     chunks = _chunks_from_text(text, path.name)
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": extractor})
+
+
+def _is_invalid_package_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return exc.__class__.__name__ in {"PackageNotFoundError", "BadZipFile"} or "package not found" in message
 
 
 def _extract_pptx(path: Path, *, extractor: str = "pptx") -> ExtractionResult:

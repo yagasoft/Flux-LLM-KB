@@ -1030,6 +1030,26 @@ def test_extract_pdf_blocks_when_pypdf_needs_crypto_dependency(monkeypatch, tmp_
     assert result.metadata["dependency"] == "cryptography"
 
 
+def test_extract_docx_blocks_invalid_package_without_retryable_failure(monkeypatch, tmp_path):
+    path = tmp_path / "broken.docx"
+    path.write_bytes(b"not a docx package")
+
+    class PackageNotFoundError(Exception):
+        pass
+
+    def fake_document(_path):
+        raise PackageNotFoundError(f"Package not found at '{path}'")
+
+    monkeypatch.setitem(sys.modules, "docx", SimpleNamespace(Document=fake_document))
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert "Package not found" in result.message
+    assert result.metadata["extractor"] == "docx"
+    assert result.metadata["reason"] == "invalid_package"
+
+
 def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_path):
     path = tmp_path / "scan.pdf"
     path.write_bytes(b"%PDF scanned")
