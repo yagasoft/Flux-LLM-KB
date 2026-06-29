@@ -2931,6 +2931,49 @@ def test_record_mail_post_process_event_rejects_unknown_profile(monkeypatch):
     assert "INSERT INTO mail_post_process_events" not in sql
 
 
+def test_mail_message_exists_checks_profile_folder_and_source_message(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (True,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    assert database.mail_message_exists(
+        profile_name="outlook-catchup",
+        source_folder="Mailbox - Me\\Inbox\\MOHESR",
+        source_message_id="outlook:entry-1",
+    ) is True
+    sql, params = executed[0]
+    assert "mail_messages" in sql
+    assert "mail_profiles" in sql
+    assert params == ("outlook-catchup", "Mailbox - Me\\Inbox\\MOHESR", "outlook:entry-1")
+
+
 def test_list_mail_post_process_events_filters_by_profile(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)

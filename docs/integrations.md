@@ -543,7 +543,8 @@ Classic Outlook COM catch-up is scoped to selected folder paths:
 flux-kb mail profile add-outlook `
   --name outlook-catchup `
   --folder "Mailbox - Me\Inbox\Flux Capture" `
-  --spool private\mail-spool\outlook-catchup
+  --spool private\mail-spool\outlook-catchup `
+  --incremental-basis received-time
 
 flux-kb outlook-host sync --profile outlook-catchup
 flux-kb outlook-host run
@@ -555,6 +556,14 @@ Docker-hosted worker. It reports that the Windows Outlook host is required. Run
 or queue a one-off request with `flux-kb outlook-host sync --profile <name>`.
 Outlook COM profile setup does not require an IMAP server or account value; the
 Windows Outlook profile owns that connection.
+
+Outlook COM sync keeps profile-scoped cursors in mail profile metadata and
+filters each folder before enumerating messages. The default incremental basis
+is `received-time`, which exports messages whose Outlook `ReceivedTime` is newer
+than the prior cursor, with a small overlap for timestamp safety. Use
+`--incremental-basis last-modification-time` or REST field
+`outlook_incremental_basis: "last_modification_time"` for watched folders where
+operators move older mail in after it was originally received.
 
 Mailbox credentials, OAuth tokens, raw messages, attachments, and private mail
 content sidecars stay local and must remain outside Git.

@@ -654,6 +654,15 @@ separate Windows host process (`flux-kb outlook-host run`) under the logged-in
 user session. Docker-hosted Flux services never attempt COM directly; they
 record sync requests and read host heartbeat/status through PostgreSQL and REST.
 
+Outlook COM exports are incremental per resolved folder path. Each profile stores
+`metadata.outlook_cursors` and `metadata.outlook_incremental_basis`; the default
+basis is `received_time`, while `last_modification_time` is available for
+drop-folder workflows where older messages are moved into a watched folder. The
+host sorts the Outlook `Items` collection on the selected COM timestamp, applies
+a `Restrict` filter from the previous cursor minus a small overlap, skips known
+overlap duplicates by `profile + folder + outlook EntryID`, and advances each
+folder cursor only for successfully exported or already-known messages.
+
 After the split, Outlook COM crawls when a sync request is queued or when a
 scheduled Outlook profile becomes due while the Windows host is running. If
 `sync_enabled=false`, it crawls only on manual requests such as dashboard

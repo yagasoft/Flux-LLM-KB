@@ -317,6 +317,7 @@ def create_app():
         sync_window_days: int = 30
         max_messages_per_run: int = 200
         include_subfolders: bool | None = None
+        outlook_incremental_basis: str | None = None
 
     class MailSyncRequest(BaseModel):
         profile_name: str | None = None
@@ -1477,6 +1478,7 @@ def create_app():
             sync_window_days=request.sync_window_days,
             max_messages_per_run=request.max_messages_per_run,
             include_subfolders=request.include_subfolders,
+            outlook_incremental_basis=request.outlook_incremental_basis,
         )
 
     @app.post("/api/mail/profiles/{profile_name}/post-process/dry-run")

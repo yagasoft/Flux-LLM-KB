@@ -2161,6 +2161,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText(/uses the local Windows Outlook host/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Post process")).toHaveValue("none");
     expect(screen.getByLabelText("Include subfolders")).toBeChecked();
+    expect(screen.getByLabelText("Outlook incremental mode")).toHaveValue("received_time");
 
     await user.click(screen.getByLabelText("Scheduled sync enabled"));
     expect(screen.getByLabelText("Interval seconds")).toHaveValue(900);
@@ -2173,6 +2174,7 @@ describe("Flux dashboard", () => {
     await user.type(screen.getByLabelText("Folders or labels"), "Mailbox - Me\\Inbox\\Flux Capture");
     await user.clear(screen.getByLabelText("Private spool path"));
     await user.type(screen.getByLabelText("Private spool path"), "private/mail-spool/outlook-catchup");
+    await user.selectOptions(screen.getByLabelText("Outlook incremental mode"), "last_modification_time");
     await user.click(screen.getByRole("button", { name: "Save profile" }));
 
     await waitFor(() => {
@@ -2195,7 +2197,8 @@ describe("Flux dashboard", () => {
             sync_interval_seconds: 900,
             sync_window_days: 30,
             max_messages_per_run: 200,
-            include_subfolders: true
+            include_subfolders: true,
+            outlook_incremental_basis: "last_modification_time"
           })
         })
       );

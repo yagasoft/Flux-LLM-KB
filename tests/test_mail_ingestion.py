@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 import sys
@@ -215,6 +216,41 @@ def test_outlook_mail_profile_can_disable_include_subfolders(monkeypatch, tmp_pa
     assert calls[0]["metadata"]["include_subfolders"] is False
 
 
+def test_outlook_mail_profile_defaults_to_received_time_incremental_basis(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    calls = []
+    monkeypatch.setattr(database, "insert_mail_profile", lambda **kwargs: calls.append(kwargs) or {"name": kwargs["name"]})
+    monkeypatch.setattr(database, "add_monitored_root", lambda **_kwargs: {"name": "mail-outlook-catchup"})
+
+    mail_ingestion.add_mail_profile(
+        name="outlook-catchup",
+        source_type="outlook_com",
+        folder_paths=["Mailbox - Me\\Inbox\\Flux Capture"],
+        spool_path=tmp_path,
+    )
+
+    assert calls[0]["metadata"]["outlook_incremental_basis"] == "received_time"
+
+
+def test_outlook_mail_profile_accepts_last_modification_incremental_basis(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    calls = []
+    monkeypatch.setattr(database, "insert_mail_profile", lambda **kwargs: calls.append(kwargs) or {"name": kwargs["name"]})
+    monkeypatch.setattr(database, "add_monitored_root", lambda **_kwargs: {"name": "mail-outlook-catchup"})
+
+    mail_ingestion.add_mail_profile(
+        name="outlook-catchup",
+        source_type="outlook_com",
+        folder_paths=["Mailbox - Me\\Inbox\\Flux Capture"],
+        spool_path=tmp_path,
+        outlook_incremental_basis="last_modification_time",
+    )
+
+    assert calls[0]["metadata"]["outlook_incremental_basis"] == "last_modification_time"
+
+
 def test_sync_outlook_profile_includes_child_folders_by_default(monkeypatch, tmp_path):
     from flux_llm_kb import mail_ingestion
 
@@ -253,6 +289,7 @@ def test_sync_outlook_profile_includes_child_folders_by_default(monkeypatch, tmp
     monkeypatch.setattr(mail_ingestion, "export_outlook_item_to_spool", fake_export)
     monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
     monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
 
     result = mail_ingestion._sync_outlook_profile(
         {
@@ -304,6 +341,7 @@ def test_sync_outlook_profile_continues_after_item_export_error(monkeypatch, tmp
     monkeypatch.setattr(mail_ingestion, "export_outlook_item_to_spool", fake_export)
     monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
     monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
 
     result = mail_ingestion._sync_outlook_profile(
         {
@@ -320,6 +358,456 @@ def test_sync_outlook_profile_continues_after_item_export_error(monkeypatch, tmp
     assert result["exported"] == 1
     assert "cannot save item" in result["errors"][0]["error"]
     assert runs[0]["messages_exported"] == 1
+
+
+def test_sync_outlook_profile_first_run_writes_received_time_cursor(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+
+        def __init__(self, entry_id: str, received_time: datetime):
+            self.EntryID = entry_id
+            self.ReceivedTime = received_time
+            self.LastModificationTime = received_time
+
+    class FakeItems(list):
+        def __init__(self, items):
+            super().__init__(items)
+            self.sorts = []
+            self.restricts = []
+
+        def Sort(self, field, descending):
+            self.sorts.append((field, descending))
+
+        def Restrict(self, restriction):
+            self.restricts.append(restriction)
+            return self
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or FakeItems([])
+            self.Folders = folders or []
+
+    items = FakeItems(
+        [
+            FakeItem("newest", datetime(2026, 6, 20, 11, 0, tzinfo=timezone.utc)),
+            FakeItem("older", datetime(2026, 6, 20, 10, 0, tzinfo=timezone.utc)),
+        ]
+    )
+    moh = FakeFolder("MOHESR", items=items)
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    exports = []
+    metadata_updates = []
+    runs = []
+
+    def fake_export(*, item, **_kwargs):
+        exports.append(item.EntryID)
+        return SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None})
+
+    monkeypatch.setattr(mail_ingestion, "export_outlook_item_to_spool", fake_export)
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: metadata_updates.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "mail_message_exists", lambda **_kwargs: False, raising=False)
+
+    result = mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {},
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert result["exported"] == 2
+    assert exports == ["newest", "older"]
+    assert items.sorts == [("[ReceivedTime]", True)]
+    assert items.restricts == []
+    assert metadata_updates[0]["metadata"]["outlook_cursors"]["Mailbox - Me\\Inbox\\MOHESR"] == {
+        "basis": "received_time",
+        "property": "ReceivedTime",
+        "value": "2026-06-20T11:00:00+00:00",
+    }
+    assert runs[0]["last_cursor"]["Mailbox - Me\\Inbox\\MOHESR"]["value"] == "2026-06-20T11:00:00+00:00"
+
+
+def test_sync_outlook_profile_restricts_received_time_from_existing_cursor(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+
+        def __init__(self, entry_id: str, received_time: datetime):
+            self.EntryID = entry_id
+            self.ReceivedTime = received_time
+            self.LastModificationTime = received_time
+
+    class FakeItems(list):
+        def __init__(self, items):
+            super().__init__(items)
+            self.sorts = []
+            self.restricts = []
+
+        def Sort(self, field, descending):
+            self.sorts.append((field, descending))
+
+        def Restrict(self, restriction):
+            self.restricts.append(restriction)
+            return FakeItems([item for item in self if item.EntryID == "new"])
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or FakeItems([])
+            self.Folders = folders or []
+
+    items = FakeItems(
+        [
+            FakeItem("new", datetime(2026, 6, 20, 11, 30, tzinfo=timezone.utc)),
+            FakeItem("old", datetime(2026, 6, 20, 9, 0, tzinfo=timezone.utc)),
+        ]
+    )
+    moh = FakeFolder("MOHESR", items=items)
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    exports = []
+    monkeypatch.setattr(
+        mail_ingestion,
+        "export_outlook_item_to_spool",
+        lambda *, item, **_kwargs: exports.append(item.EntryID)
+        or SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None}),
+    )
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "mail_message_exists", lambda **_kwargs: False, raising=False)
+
+    result = mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {
+                "outlook_cursors": {
+                    "Mailbox - Me\\Inbox\\MOHESR": {
+                        "basis": "received_time",
+                        "property": "ReceivedTime",
+                        "value": "2026-06-20T10:00:00+00:00",
+                    }
+                }
+            },
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert result["exported"] == 1
+    assert exports == ["new"]
+    assert items.sorts == [("[ReceivedTime]", True)]
+    assert items.restricts == ["[ReceivedTime] >= '06/20/2026 09:45 AM'"]
+
+
+def test_sync_outlook_profile_can_use_last_modification_time_for_moved_mail(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+        ReceivedTime = datetime(2026, 1, 15, 9, 0, tzinfo=timezone.utc)
+
+        def __init__(self, entry_id: str, modified_time: datetime):
+            self.EntryID = entry_id
+            self.LastModificationTime = modified_time
+
+    class FakeItems(list):
+        def __init__(self, items):
+            super().__init__(items)
+            self.sorts = []
+            self.restricts = []
+
+        def Sort(self, field, descending):
+            self.sorts.append((field, descending))
+
+        def Restrict(self, restriction):
+            self.restricts.append(restriction)
+            return FakeItems([item for item in self if item.EntryID == "moved-old"])
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or FakeItems([])
+            self.Folders = folders or []
+
+    items = FakeItems([FakeItem("moved-old", datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc))])
+    moh = FakeFolder("MOHESR", items=items)
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    exports = []
+    runs = []
+    monkeypatch.setattr(
+        mail_ingestion,
+        "export_outlook_item_to_spool",
+        lambda *, item, **_kwargs: exports.append(item.EntryID)
+        or SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None}),
+    )
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "mail_message_exists", lambda **_kwargs: False, raising=False)
+
+    mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {
+                "outlook_incremental_basis": "last_modification_time",
+                "outlook_cursors": {
+                    "Mailbox - Me\\Inbox\\MOHESR": {
+                        "basis": "last_modification_time",
+                        "property": "LastModificationTime",
+                        "value": "2026-06-20T10:00:00+00:00",
+                    }
+                },
+            },
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert exports == ["moved-old"]
+    assert items.sorts == [("[LastModificationTime]", True)]
+    assert items.restricts == ["[LastModificationTime] >= '06/20/2026 09:45 AM'"]
+    assert runs[0]["last_cursor"]["Mailbox - Me\\Inbox\\MOHESR"]["property"] == "LastModificationTime"
+
+
+def test_sync_outlook_profile_skips_overlap_duplicates_before_export(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+
+        def __init__(self, entry_id: str, received_time: datetime):
+            self.EntryID = entry_id
+            self.ReceivedTime = received_time
+            self.LastModificationTime = received_time
+
+    class FakeItems(list):
+        def Sort(self, *_args):
+            return None
+
+        def Restrict(self, *_args):
+            return self
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or FakeItems()
+            self.Folders = folders or []
+
+    items = FakeItems(
+        [
+            FakeItem("duplicate", datetime(2026, 6, 20, 10, 5, tzinfo=timezone.utc)),
+            FakeItem("fresh", datetime(2026, 6, 20, 10, 30, tzinfo=timezone.utc)),
+        ]
+    )
+    moh = FakeFolder("MOHESR", items=items)
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    exports = []
+    monkeypatch.setattr(
+        mail_ingestion,
+        "export_outlook_item_to_spool",
+        lambda *, item, **_kwargs: exports.append(item.EntryID)
+        or SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None}),
+    )
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        database,
+        "mail_message_exists",
+        lambda **kwargs: kwargs["source_message_id"] == "outlook:duplicate",
+        raising=False,
+    )
+
+    result = mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {
+                "outlook_cursors": {
+                    "Mailbox - Me\\Inbox\\MOHESR": {
+                        "basis": "received_time",
+                        "property": "ReceivedTime",
+                        "value": "2026-06-20T10:10:00+00:00",
+                    }
+                }
+            },
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert result["exported"] == 1
+    assert exports == ["fresh"]
+
+
+def test_sync_outlook_profile_does_not_advance_cursor_past_failed_item(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+
+        def __init__(self, entry_id: str, received_time: datetime):
+            self.EntryID = entry_id
+            self.ReceivedTime = received_time
+            self.LastModificationTime = received_time
+
+    class FakeItems(list):
+        def Sort(self, *_args):
+            return None
+
+        def Restrict(self, *_args):
+            return self
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or FakeItems()
+            self.Folders = folders or []
+
+    items = FakeItems(
+        [
+            FakeItem("bad", datetime(2026, 6, 20, 11, 0, tzinfo=timezone.utc)),
+            FakeItem("good", datetime(2026, 6, 20, 10, 30, tzinfo=timezone.utc)),
+        ]
+    )
+    moh = FakeFolder("MOHESR", items=items)
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    runs = []
+
+    def fake_export(*, item, **_kwargs):
+        if item.EntryID == "bad":
+            raise RuntimeError("cannot save item")
+        return SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None})
+
+    monkeypatch.setattr(mail_ingestion, "export_outlook_item_to_spool", fake_export)
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "mail_message_exists", lambda **_kwargs: False, raising=False)
+
+    result = mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {
+                "outlook_cursors": {
+                    "Mailbox - Me\\Inbox\\MOHESR": {
+                        "basis": "received_time",
+                        "property": "ReceivedTime",
+                        "value": "2026-06-20T10:00:00+00:00",
+                    }
+                }
+            },
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert result["status"] == "partial"
+    assert runs[0]["last_cursor"]["Mailbox - Me\\Inbox\\MOHESR"]["value"] == "2026-06-20T10:30:00+00:00"
+
+
+def test_sync_outlook_profile_tracks_recursive_folder_cursors_independently(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    class FakeItem:
+        Class = 43
+        StoreID = "store-1"
+
+        def __init__(self, entry_id: str, received_time: datetime):
+            self.EntryID = entry_id
+            self.ReceivedTime = received_time
+            self.LastModificationTime = received_time
+
+    class FakeItems(list):
+        def Sort(self, *_args):
+            return None
+
+        def Restrict(self, *_args):
+            return self
+
+    class FakeFolder:
+        def __init__(self, name: str, *, items=None, folders=None):
+            self.Name = name
+            self.Items = items or FakeItems()
+            self.Folders = folders or []
+
+    moh = FakeFolder(
+        "MOHESR",
+        items=FakeItems([FakeItem("parent", datetime(2026, 6, 20, 11, 0, tzinfo=timezone.utc))]),
+        folders=[
+            FakeFolder("PM", items=FakeItems([FakeItem("pm", datetime(2026, 6, 20, 12, 0, tzinfo=timezone.utc))])),
+        ],
+    )
+    namespace = SimpleNamespace(Folders=[FakeFolder("Mailbox - Me", folders=[FakeFolder("Inbox", folders=[moh])])])
+    fake_client = SimpleNamespace(Dispatch=lambda _name: SimpleNamespace(GetNamespace=lambda _namespace: namespace))
+    monkeypatch.setitem(sys.modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+
+    runs = []
+    monkeypatch.setattr(
+        mail_ingestion,
+        "export_outlook_item_to_spool",
+        lambda *, item, **_kwargs: SimpleNamespace(export_id=f"export-{item.EntryID}", manifest={"content_hash": f"hash-{item.EntryID}", "message_id": None}),
+    )
+    monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "mail_message_exists", lambda **_kwargs: False, raising=False)
+
+    mail_ingestion._sync_outlook_profile(
+        {
+            "name": "outlook-catchup",
+            "source_type": "outlook_com",
+            "folder_paths": ["Mailbox - Me\\Inbox\\MOHESR"],
+            "spool_path": str(tmp_path),
+            "metadata": {},
+            "max_messages_per_run": 200,
+        }
+    )
+
+    assert runs[0]["last_cursor"]["Mailbox - Me\\Inbox\\MOHESR"]["value"] == "2026-06-20T11:00:00+00:00"
+    assert runs[0]["last_cursor"]["Mailbox - Me\\Inbox\\MOHESR\\PM"]["value"] == "2026-06-20T12:00:00+00:00"
 
 
 def test_sync_imap_folder_resets_cursor_when_uidvalidity_changes(monkeypatch, tmp_path):

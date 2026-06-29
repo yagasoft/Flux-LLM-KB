@@ -962,6 +962,7 @@ type ProfileForm = {
   sync_window_days: number;
   max_messages_per_run: number;
   include_subfolders: boolean;
+  outlook_incremental_basis: "received_time" | "last_modification_time";
 };
 
 type MonitoredRoot = {
@@ -1235,7 +1236,12 @@ export default function App() {
       sync_interval_seconds: Number(form.sync_interval_seconds),
       sync_window_days: Number(form.sync_window_days),
       max_messages_per_run: Number(form.max_messages_per_run),
-      ...(outlook ? { include_subfolders: form.include_subfolders } : {})
+      ...(outlook
+        ? {
+            include_subfolders: form.include_subfolders,
+            outlook_incremental_basis: form.outlook_incremental_basis
+          }
+        : {})
     };
     await sendJson("/api/mail/profiles", "POST", payload);
     setProfileDialog(null);
@@ -5492,7 +5498,8 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
         sync_interval_seconds: profile?.sync_interval_seconds ?? 900,
         sync_window_days: profile?.sync_window_days ?? 30,
         max_messages_per_run: profile?.max_messages_per_run ?? 200,
-        include_subfolders: outlook ? metadataBoolean(metadata, "include_subfolders", true) : false
+        include_subfolders: outlook ? metadataBoolean(metadata, "include_subfolders", true) : false,
+        outlook_incremental_basis: outlookIncrementalBasis(metadata)
       };
     })()
   }));
@@ -5518,7 +5525,8 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
           trash_folder: "",
           destructive_post_process_confirmed: false,
           sync_enabled: false,
-          include_subfolders: true
+          include_subfolders: true,
+          outlook_incremental_basis: "received_time"
         };
       }
       return {
@@ -5531,7 +5539,8 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
         spool_path: current.spool_path === "private/mail-spool/outlook-catchup" ? "private/mail-spool/gmail-capture" : current.spool_path,
         post_process_policy: current.post_process_policy === "none" ? "move_to_processed" : current.post_process_policy,
         processed_folder: current.processed_folder || "FluxProcessed",
-        include_subfolders: false
+        include_subfolders: false,
+        outlook_incremental_basis: "received_time"
       };
     });
   }
@@ -5568,6 +5577,10 @@ function ProfileDialog({ profile, onClose, onSave }: { profile?: MailProfile; on
           {!outlook && <label>Processed folder or label<input value={form.processed_folder} onChange={(event) => update("processed_folder", event.target.value)} /></label>}
           {!outlook && <label>Trash folder<input value={form.trash_folder} onChange={(event) => update("trash_folder", event.target.value)} /></label>}
           {outlook && <label className="checkbox-label span-2"><input type="checkbox" checked={form.include_subfolders} onChange={(event) => update("include_subfolders", event.target.checked)} /> Include subfolders</label>}
+          {outlook && <label>Outlook incremental mode<select value={form.outlook_incremental_basis} onChange={(event) => update("outlook_incremental_basis", event.target.value as ProfileForm["outlook_incremental_basis"])}>
+            <option value="received_time">New received mail</option>
+            <option value="last_modification_time">Moved or changed mail</option>
+          </select></label>}
           {form.sync_enabled && <label>Interval seconds<input type="number" min="60" value={form.sync_interval_seconds} onChange={(event) => update("sync_interval_seconds", Number(event.target.value))} /></label>}
           <label>Window days<input type="number" min="1" value={form.sync_window_days} onChange={(event) => update("sync_window_days", Number(event.target.value))} /></label>
           <label>Max messages/run<input type="number" min="1" value={form.max_messages_per_run} onChange={(event) => update("max_messages_per_run", Number(event.target.value))} /></label>
@@ -5909,6 +5922,11 @@ function metadataBoolean(metadata: Record<string, unknown>, key: string, fallbac
   if (typeof value === "boolean") return value;
   if (typeof value === "string") return !["", "0", "false", "no", "off"].includes(value.trim().toLowerCase());
   return Boolean(value);
+}
+
+function outlookIncrementalBasis(metadata: Record<string, unknown>): ProfileForm["outlook_incremental_basis"] {
+  const value = metadataString(metadata, "outlook_incremental_basis", "received_time").replace(/-/g, "_").toLowerCase();
+  return value === "last_modification_time" ? "last_modification_time" : "received_time";
 }
 
 function nextMailRun(runs: MailSyncRun[]) {

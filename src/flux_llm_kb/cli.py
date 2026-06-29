@@ -497,6 +497,12 @@ def main(argv: list[str] | None = None) -> int:
         default=True,
         help="Include child folders under each selected Outlook COM folder",
     )
+    mail_add_outlook.add_argument(
+        "--incremental-basis",
+        choices=["received-time", "last-modification-time"],
+        default="received-time",
+        help="Outlook COM timestamp used for incremental sync filtering",
+    )
     _add_mail_schedule_args(mail_add_outlook)
     mail_profile_subparsers.add_parser("list", help="List mail profiles")
     mail_subparsers.add_parser("status", help="Show mail ingestion status")
@@ -1355,6 +1361,7 @@ def _mail(args: argparse.Namespace) -> int:
                 sync_window_days=args.sync_window_days,
                 max_messages_per_run=args.max_messages_per_run,
                 include_subfolders=args.include_subfolders,
+                outlook_incremental_basis=args.incremental_basis.replace("-", "_"),
             )
         elif args.mail_profile_command == "list":
             payload = database.list_mail_profiles()

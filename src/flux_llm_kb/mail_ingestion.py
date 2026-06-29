@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email import policy
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
@@ -206,6 +206,7 @@ def add_mail_profile(
     sync_window_days: int = 30,
     max_messages_per_run: int = 200,
     include_subfolders: bool | None = None,
+    outlook_incremental_basis: str | None = None,
 ) -> dict[str, Any]:
     spool = Path(spool_path).expanduser().resolve()
     normalized_source_type = source_type.strip().lower()
@@ -219,6 +220,7 @@ def add_mail_profile(
     }
     if normalized_source_type == "outlook_com":
         metadata["include_subfolders"] = True if include_subfolders is None else bool(include_subfolders)
+        metadata["outlook_incremental_basis"] = _normalize_outlook_incremental_basis(outlook_incremental_basis)
     profile = database.insert_mail_profile(
         name=name,
         source_type=normalized_source_type,
@@ -952,6 +954,9 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
     seen = 0
     errors: list[dict[str, Any]] = []
     include_subfolders = _outlook_profile_include_subfolders(profile)
+    incremental_basis = _outlook_incremental_basis_config(profile)
+    metadata = dict(profile.get("metadata") or {})
+    cursors = dict(metadata.get("outlook_cursors") or {})
     max_messages = _positive_int(profile.get("max_messages_per_run"), default=200)
     for folder_path in profile["folder_paths"]:
         try:
@@ -971,6 +976,9 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
             except Exception as exc:
                 errors.append({"folder": current_folder_path, "error": str(exc)})
                 continue
+            folder_cursor = _outlook_cursor_datetime(cursors.get(current_folder_path), incremental_basis["basis"])
+            items = _prepare_outlook_items_for_incremental_sync(items, folder_cursor, incremental_basis)
+            cursor_candidate = folder_cursor
             for item in items:
                 if exported >= max_messages:
                     break
@@ -978,6 +986,15 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
                     continue
                 seen += 1
                 entry_id = getattr(item, "EntryID", None)
+                item_cursor = _outlook_item_cursor_datetime(item, incremental_basis["attribute"])
+                source_message_id = f"outlook:{entry_id}" if entry_id else None
+                if folder_cursor is not None and source_message_id and database.mail_message_exists(
+                    profile_name=profile["name"],
+                    source_folder=current_folder_path,
+                    source_message_id=source_message_id,
+                ):
+                    cursor_candidate = _max_outlook_cursor(cursor_candidate, item_cursor)
+                    continue
                 try:
                     result = export_outlook_item_to_spool(
                         item=item,
@@ -996,16 +1013,23 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
                         metadata={"outlook_store_id": getattr(item, "StoreID", None)},
                     )
                     exported += 1
+                    cursor_candidate = _max_outlook_cursor(cursor_candidate, item_cursor)
                 except Exception as exc:
                     errors.append({"folder": current_folder_path, "entry_id": str(entry_id or ""), "error": str(exc)})
+            if cursor_candidate is not None:
+                cursors[current_folder_path] = _outlook_cursor_payload(cursor_candidate, incremental_basis)
         if exported >= max_messages:
             break
+    metadata["outlook_incremental_basis"] = incremental_basis["basis"]
+    metadata["outlook_cursors"] = cursors
+    database.update_mail_profile_metadata(name=profile["name"], metadata=metadata)
     status = "completed" if not errors else "partial"
     database.record_mail_sync_run(
         profile_name=profile["name"],
         status=status,
         messages_seen=seen,
         messages_exported=exported,
+        last_cursor=cursors,
         errors=errors,
     )
     return {
@@ -1015,6 +1039,7 @@ def _sync_outlook_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "seen": seen,
         "errors": errors,
         "include_subfolders": include_subfolders,
+        "incremental_basis": incremental_basis["basis"],
     }
 
 
@@ -1150,6 +1175,109 @@ def _outlook_profile_include_subfolders(profile: dict[str, Any]) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"", "0", "false", "no", "off"}
     return bool(value)
+
+
+_OUTLOOK_INCREMENTAL_BASIS: dict[str, dict[str, str]] = {
+    "received_time": {"basis": "received_time", "attribute": "ReceivedTime", "property": "ReceivedTime"},
+    "last_modification_time": {
+        "basis": "last_modification_time",
+        "attribute": "LastModificationTime",
+        "property": "LastModificationTime",
+    },
+}
+
+
+def _normalize_outlook_incremental_basis(value: Any) -> str:
+    if value is None:
+        return "received_time"
+    normalized = str(value).strip().lower().replace("-", "_")
+    if normalized in {"", "received", "receivedtime"}:
+        return "received_time"
+    if normalized in {"modified", "lastmodified", "last_modified", "lastmodifiedtime"}:
+        return "last_modification_time"
+    if normalized in _OUTLOOK_INCREMENTAL_BASIS:
+        return normalized
+    raise ValueError("outlook_incremental_basis must be received_time or last_modification_time")
+
+
+def _outlook_incremental_basis_config(profile: dict[str, Any]) -> dict[str, str]:
+    metadata = profile.get("metadata") or {}
+    value = metadata.get("outlook_incremental_basis") if isinstance(metadata, dict) else None
+    basis = _normalize_outlook_incremental_basis(value)
+    return _OUTLOOK_INCREMENTAL_BASIS[basis]
+
+
+def _prepare_outlook_items_for_incremental_sync(
+    items: Any,
+    cursor: datetime | None,
+    basis: dict[str, str],
+) -> Any:
+    field = f"[{basis['property']}]"
+    sort = getattr(items, "Sort", None)
+    if callable(sort):
+        sort(field, True)
+    if cursor is None:
+        return items
+    restrict = getattr(items, "Restrict", None)
+    if not callable(restrict):
+        return items
+    threshold = cursor - timedelta(minutes=15)
+    return restrict(f"{field} >= '{_format_outlook_restrict_datetime(threshold)}'")
+
+
+def _format_outlook_restrict_datetime(value: datetime) -> str:
+    return value.strftime("%m/%d/%Y %I:%M %p")
+
+
+def _outlook_cursor_datetime(payload: Any, basis: str) -> datetime | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("basis") not in {None, basis}:
+        return None
+    return _coerce_outlook_datetime(payload.get("value"))
+
+
+def _outlook_item_cursor_datetime(item: Any, attribute: str) -> datetime | None:
+    return _coerce_outlook_datetime(getattr(item, attribute, None))
+
+
+def _coerce_outlook_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _max_outlook_cursor(current: datetime | None, candidate: datetime | None) -> datetime | None:
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    current_key = current.astimezone(UTC) if current.tzinfo else current
+    candidate_key = candidate.astimezone(UTC) if candidate.tzinfo else candidate
+    return candidate if candidate_key > current_key else current
+
+
+def _outlook_cursor_payload(value: datetime, basis: dict[str, str]) -> dict[str, str]:
+    return {
+        "basis": basis["basis"],
+        "property": basis["property"],
+        "value": value.isoformat(),
+    }
 
 
 def _is_outlook_mail_item(item: Any) -> bool:

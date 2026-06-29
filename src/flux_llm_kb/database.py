@@ -6758,6 +6758,33 @@ def record_mail_message(
             return {"id": row[0], "export_state": row[1]}
 
 
+def mail_message_exists(
+    *,
+    profile_name: str,
+    source_folder: str,
+    source_message_id: str,
+    url: str | None = None,
+) -> bool:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM mail_messages m
+                    JOIN mail_profiles p ON p.id = m.profile_id
+                    WHERE p.name = %s
+                      AND m.source_folder = %s
+                      AND m.source_message_id = %s
+                )
+                """,
+                (profile_name, source_folder, source_message_id),
+            )
+            row = cur.fetchone()
+            return bool(row and row[0])
+
+
 def record_mail_post_process_event(
     *,
     profile_name: str,
