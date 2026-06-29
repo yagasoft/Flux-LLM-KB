@@ -1306,6 +1306,55 @@ def test_search_corpus_chunks_hydrates_candidates_once_and_records_diagnostics(m
     assert diagnostics["streams"]["corpus_hydration"]["rows"] == 1
 
 
+def test_search_corpus_chunks_promotes_exact_code_definition():
+    streams = {
+        "corpus_lexical": ["caller", "definition", "test"],
+        "corpus_fuzzy": ["caller", "definition", "test"],
+        "code_symbol_exact": ["definition", "caller", "test"],
+        "corpus_trust": ["caller", "test", "definition"],
+        "corpus_freshness": ["caller", "test", "definition"],
+    }
+    details = {
+        "caller": {
+            "title": "src/flux_llm_kb/acceleration.py::collect_acceleration_status",
+            "raw_scores": {"code_symbol_exact": 0.32},
+            "code": {
+                "primary_symbol": "collect_acceleration_status",
+                "relationship": "definition",
+            },
+        },
+        "definition": {
+            "title": "src/flux_llm_kb/acceleration.py::_watcher_backend_status",
+            "raw_scores": {"code_symbol_exact": 3.0},
+            "code": {
+                "primary_symbol": "_watcher_backend_status",
+                "relationship": "definition",
+            },
+        },
+        "test": {
+            "title": "tests/test_acceleration.py::test_watcher_backend_status",
+            "raw_scores": {"code_symbol_exact": 0.24},
+            "code": {
+                "primary_symbol": "test_watcher_backend_status",
+                "relationship": "test",
+            },
+        },
+    }
+
+    ranked = database._rank_corpus_candidates(
+        "src/flux_llm_kb/acceleration.py _watcher_backend_status",
+        streams=streams,
+        details=details,
+        filters=None,
+    )
+
+    assert ranked[0].item_id == "definition"
+    assert "code_rank_adjustment" in ranked[0].streams
+    assert details["definition"]["raw_scores"]["code_rank_adjustment"] == 0.1
+    assert details["caller"]["raw_scores"]["code_rank_adjustment"] == 0.025
+    assert "code_rank_adjustment" not in details["test"]["raw_scores"]
+
+
 def test_embedding_insert_populates_asset_chunk_root_id():
     source = Path(database.__file__).read_text(encoding="utf-8")
     function = source.split("def _insert_embedding_result", 1)[1].split("\ndef ", 1)[0]

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import hashlib
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any
 from urllib.parse import quote
@@ -31,7 +32,7 @@ from .embeddings import (
 )
 from . import mail_content_store
 from .migrations import load_migrations
-from .scoring import LifecycleScoreInput, lifecycle_score, reciprocal_rank_fusion
+from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciprocal_rank_fusion
 
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
@@ -47,6 +48,50 @@ _SEMANTIC_DUPLICATE_OWNER_TABLES = {
 }
 _SEMANTIC_DUPLICATE_DEFAULT_THRESHOLD = 0.86
 _SEMANTIC_DUPLICATE_ALGORITHM = f"{DEFAULT_EMBEDDING_MODEL}:cosine"
+_CODE_EXACT_SYMBOL_BOOST = 0.10
+_CODE_IMPLEMENTATION_INTENT_BOOST = 0.025
+_CODE_IMPLEMENTATION_RELATIONSHIPS = {"definition", "route", "config", "migration"}
+_CODE_NON_IMPLEMENTATION_INTENT_TERMS = {
+    "call",
+    "called",
+    "caller",
+    "callers",
+    "calls",
+    "example",
+    "examples",
+    "fixture",
+    "fixtures",
+    "import",
+    "imports",
+    "mock",
+    "mocks",
+    "reference",
+    "references",
+    "referenced",
+    "spec",
+    "specs",
+    "test",
+    "tests",
+    "usage",
+    "uses",
+}
+_CODE_IMPLEMENTATION_INTENT_TERMS = {
+    "class",
+    "code",
+    "config",
+    "definition",
+    "def",
+    "function",
+    "handler",
+    "implementation",
+    "implemented",
+    "method",
+    "migration",
+    "route",
+    "source",
+    "where",
+}
+_CODE_SYMBOL_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$.]*")
 REQUEUE_DOCUMENT_EXTENSIONS = {
     ".doc",
     ".docm",
@@ -718,7 +763,11 @@ def search_corpus_chunks(
             details: dict[str, dict[str, Any]] = {}
             if raw_scores:
                 primary_fused = reciprocal_rank_fusion(streams)
-                hydrated_candidate_ids = [item.item_id for item in primary_fused[:hydration_limit]]
+                hydrated_candidate_ids = _corpus_hydration_candidate_ids(
+                    primary_fused,
+                    streams=streams,
+                    hydration_limit=hydration_limit,
+                )
                 started = time.perf_counter()
                 details = _hydrate_corpus_candidate_details(
                     cur,
@@ -757,7 +806,7 @@ def search_corpus_chunks(
                     detail["raw_scores"] = dict(raw_scores.get(item_id, {}))
                 _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=details)
 
-    fused = reciprocal_rank_fusion(streams)
+    fused = _rank_corpus_candidates(query, streams=streams, details=details, filters=filters)
     results: list[dict[str, Any]] = []
     for item in fused[:limit]:
         if item.item_id not in details:
@@ -7686,6 +7735,155 @@ def _add_ranked_corpus_rows(
             detail["file_kind"] = row[9]
         if len(row) > 10 and row[10]:
             detail["code"] = row[10]
+
+
+def _corpus_hydration_candidate_ids(
+    primary_fused: list[RankedItem],
+    *,
+    streams: dict[str, list[str]],
+    hydration_limit: int,
+) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for item in primary_fused[:hydration_limit]:
+        if item.item_id in seen:
+            continue
+        selected.append(item.item_id)
+        seen.add(item.item_id)
+
+    code_symbol_ids = streams.get("code_symbol_exact") or []
+    for item_id in code_symbol_ids[: min(10, hydration_limit)]:
+        if item_id in seen:
+            continue
+        if len(selected) >= hydration_limit and selected:
+            removed = selected.pop()
+            seen.discard(removed)
+        selected.append(item_id)
+        seen.add(item_id)
+    return selected
+
+
+def _rank_corpus_candidates(
+    query: str,
+    *,
+    streams: dict[str, list[str]],
+    details: dict[str, dict[str, Any]],
+    filters: dict[str, Any] | None,
+) -> list[RankedItem]:
+    fused = reciprocal_rank_fusion(streams)
+    if not details:
+        return fused
+
+    query_symbols = _code_query_symbols(query)
+    implementation_intent_allowed = (
+        _has_code_implementation_intent(query)
+        and not _query_requests_non_implementation_code(query)
+        and not _filters_request_non_implementation_relationship(filters)
+    )
+    adjusted: list[RankedItem] = []
+    for item in fused:
+        detail = details.get(item.item_id)
+        if not detail:
+            adjusted.append(item)
+            continue
+        boost = _corpus_code_rank_adjustment(
+            detail,
+            query_symbols=query_symbols,
+            implementation_intent_allowed=implementation_intent_allowed,
+        )
+        if boost <= 0:
+            adjusted.append(item)
+            continue
+        raw_scores = detail.setdefault("raw_scores", {})
+        raw_scores["code_rank_adjustment"] = round(boost, 6)
+        adjusted.append(
+            RankedItem(
+                item_id=item.item_id,
+                score=item.score + boost,
+                streams=tuple(sorted(set(item.streams) | {"code_rank_adjustment"})),
+            )
+        )
+    return sorted(adjusted, key=lambda item: (-item.score, item.item_id))
+
+
+def _corpus_code_rank_adjustment(
+    detail: dict[str, Any],
+    *,
+    query_symbols: set[str],
+    implementation_intent_allowed: bool,
+) -> float:
+    code = detail.get("code") if isinstance(detail.get("code"), dict) else {}
+    relationship = str(code.get("relationship") or "").strip().lower().replace("-", "_")
+    if relationship not in _CODE_IMPLEMENTATION_RELATIONSHIPS:
+        return 0.0
+    candidate_symbols = _candidate_code_symbol_aliases(detail)
+    if query_symbols and candidate_symbols.intersection(query_symbols):
+        return _CODE_EXACT_SYMBOL_BOOST
+    if implementation_intent_allowed:
+        return _CODE_IMPLEMENTATION_INTENT_BOOST
+    return 0.0
+
+
+def _candidate_code_symbol_aliases(detail: dict[str, Any]) -> set[str]:
+    aliases: set[str] = set()
+    code = detail.get("code") if isinstance(detail.get("code"), dict) else {}
+    primary_symbol = code.get("primary_symbol")
+    if primary_symbol:
+        aliases.update(_code_symbol_aliases(str(primary_symbol)))
+    title = str(detail.get("title") or "")
+    if "::" in title:
+        aliases.update(_code_symbol_aliases(title.rsplit("::", 1)[-1]))
+    return aliases
+
+
+def _code_query_symbols(query: str) -> set[str]:
+    symbols: set[str] = set()
+    for token in _CODE_SYMBOL_TOKEN_RE.findall(query or ""):
+        symbols.update(_code_symbol_aliases(token))
+    return symbols
+
+
+def _code_symbol_aliases(value: str) -> set[str]:
+    normalized = _normalize_code_symbol(value)
+    if not normalized:
+        return set()
+    aliases = {normalized}
+    for separator in ("::", ".", "/", "\\"):
+        if separator in value:
+            tail = value.rsplit(separator, 1)[-1]
+            tail_normalized = _normalize_code_symbol(tail)
+            if tail_normalized:
+                aliases.add(tail_normalized)
+    if "." in normalized:
+        aliases.add(normalized.rsplit(".", 1)[-1])
+    return aliases
+
+
+def _normalize_code_symbol(value: str) -> str:
+    return value.strip().strip("`'\"()[]{}:,;").replace("::", ".").lower()
+
+
+def _has_code_implementation_intent(query: str) -> bool:
+    normalized = f" {str(query or '').lower()} "
+    if any(f" {term} " in normalized for term in _CODE_IMPLEMENTATION_INTENT_TERMS):
+        return True
+    if any(token in normalized for token in ("/", "\\", "::", ".py", ".ts", ".js", ".cs", ".sql")):
+        return True
+    return any("_" in symbol or "." in symbol for symbol in _code_query_symbols(query))
+
+
+def _query_requests_non_implementation_code(query: str) -> bool:
+    tokens = {token.lower() for token in re.findall(r"[A-Za-z_]+", query or "")}
+    return bool(tokens.intersection(_CODE_NON_IMPLEMENTATION_INTENT_TERMS))
+
+
+def _filters_request_non_implementation_relationship(filters: dict[str, Any] | None) -> bool:
+    if not isinstance(filters, dict):
+        return False
+    relationships = {str(value).lower().replace("-", "_") for value in filters.get("relationships") or []}
+    if not relationships:
+        return False
+    return not relationships.issubset(_CODE_IMPLEMENTATION_RELATIONSHIPS)
 
 
 def _add_ranked_corpus_candidates(

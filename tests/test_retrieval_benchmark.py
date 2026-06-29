@@ -128,6 +128,44 @@ def test_retrieval_benchmark_metrics_cover_search_brief_scope_and_suppression():
     assert "beta query" not in json.dumps(report)
 
 
+def test_retrieval_benchmark_suppression_check_targets_expected_hits():
+    report = evaluate_retrieval_cases(
+        [
+            {
+                "id": "case-target",
+                "category": "scoped_corpus",
+                "query": "target query",
+                "expected_ids": ["chunk-target"],
+                "expected_scope": "local",
+                "expect_suppression": False,
+            }
+        ],
+        {
+            "case-target": {
+                "results": [
+                    {
+                        "id": "chunk-target",
+                        "score": 0.9,
+                        "retrieval_scope": "local",
+                        "duplicate_count": 0,
+                    },
+                    {
+                        "id": "chunk-runner-up",
+                        "score": 0.4,
+                        "retrieval_scope": "local",
+                        "duplicate_count": 1,
+                    },
+                ],
+                "brief": {"packed": [{"id": "chunk-target"}]},
+            }
+        },
+    )
+
+    case = report["case_results"][0]
+    assert case["status"] == "passed"
+    assert case["observed_suppression"] is False
+
+
 def test_service_retrieval_benchmark_records_sanitized_metadata(monkeypatch):
     recorded = []
 
@@ -285,6 +323,65 @@ def test_retrieval_benchmark_expected_id_uses_source_path_without_search_fallbac
     )
 
     assert expected_id == "chunk-target"
+
+
+def test_retrieval_benchmark_expected_id_can_target_code_symbol(monkeypatch):
+    monkeypatch.setattr(database, "list_source_assets", lambda **_kwargs: [])
+
+    class MetadataService(KnowledgeService):
+        def search(self, query, limit=10, **_kwargs):
+            return [
+                {
+                    "id": "chunk-caller",
+                    "source_path": "src/acceleration.py",
+                    "title": "src/acceleration.py::collect_acceleration_status",
+                    "code": {"primary_symbol": "collect_acceleration_status"},
+                },
+                {
+                    "id": "chunk-helper",
+                    "source_path": "src/acceleration.py",
+                    "title": "src/acceleration.py::_watcher_backend_status",
+                    "code": {"primary_symbol": "_watcher_backend_status"},
+                },
+            ]
+
+    class TitleService(KnowledgeService):
+        def search(self, query, limit=10, **_kwargs):
+            return [
+                {
+                    "id": "chunk-caller",
+                    "source_path": "src/acceleration.py",
+                    "title": "src/acceleration.py::collect_acceleration_status",
+                },
+                {
+                    "id": "chunk-helper",
+                    "source_path": "src/acceleration.py",
+                    "title": "src/acceleration.py::_watcher_backend_status",
+                },
+            ]
+
+    assert (
+        _retrieval_benchmark_expected_id(
+            MetadataService(),
+            query="_watcher_backend_status",
+            root_name="docs",
+            source_path="src/acceleration.py",
+            filters=None,
+            expected_symbol="_watcher_backend_status",
+        )
+        == "chunk-helper"
+    )
+    assert (
+        _retrieval_benchmark_expected_id(
+            TitleService(),
+            query="_watcher_backend_status",
+            root_name="docs",
+            source_path="src/acceleration.py",
+            filters=None,
+            expected_symbol="_watcher_backend_status",
+        )
+        == "chunk-helper"
+    )
 
 
 def test_governance_shadow_proposals_are_metadata_only_and_non_mutating():
@@ -470,6 +567,15 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
             calls.append(("sync", _kwargs))
 
         def search(self, query, limit=10, **_kwargs):
+            if "_benchmark_private_helper" in query:
+                return [
+                    {
+                        "id": "chunk-helper",
+                        "source_path": "service_impl.py",
+                        "title": "service_impl.py::_benchmark_private_helper",
+                        "code": {"primary_symbol": "_benchmark_private_helper"},
+                    }
+                ]
             if "caller" in query or "test" in query:
                 return [{"id": "chunk-test", "source_path": "tests/test_service_impl.py"}]
             if "route" in query:
@@ -496,8 +602,12 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
         "code_config",
         "code_migration",
         "code_cross_root",
+        "code_exact_definition",
     }:
         assert category in by_category
+    assert by_category["code_exact_definition"]["expected_ids"] == ["chunk-helper"]
+    assert by_category["code_exact_definition"]["expected_symbol"] == "_benchmark_private_helper"
+    assert by_category["code_symbol"]["filters"]["path_globs"] == ["service_impl.py"]
     assert by_category["code_route"]["filters"]["relationships"] == ["route"]
     assert by_category["code_test"]["filters"]["relationships"] == ["test"]
     assert by_category["code_generated_suppression"]["filters"]["include_generated"] is True

@@ -1032,8 +1032,10 @@ class KnowledgeService:
                 ),
                 "service_impl.py": (
                     f"# code-{marker} retrieval benchmark fixture\n\n"
+                    "def _benchmark_private_helper(request):\n"
+                    "    return {'status': 'ok', 'source': request}\n\n"
                     "def benchmark_handler(request):\n"
-                    "    return {'status': 'ok', 'source': request}\n"
+                    "    return _benchmark_private_helper(request)\n"
                 ),
                 "tests/test_service_impl.py": (
                     f"# caller-{marker} test benchmark fixture\n\n"
@@ -1176,6 +1178,20 @@ class KnowledgeService:
                     query=f"code-{marker} benchmark_handler",
                     root_name=root_name,
                     source_path="service_impl.py",
+                    filters={
+                        "logical_kinds": ["file"],
+                        "current_only": True,
+                        "path_globs": ["service_impl.py"],
+                    },
+                ),
+                _retrieval_benchmark_case(
+                    self,
+                    case_id="code-exact-definition",
+                    category="code_exact_definition",
+                    query=f"code-{marker} _benchmark_private_helper",
+                    root_name=root_name,
+                    source_path="service_impl.py",
+                    expected_symbol="_benchmark_private_helper",
                     filters={"logical_kinds": ["file"], "current_only": True},
                 ),
                 _retrieval_benchmark_case(
@@ -4041,6 +4057,7 @@ def _retrieval_benchmark_case(
     filters: dict[str, Any] | None = None,
     semantic_similarity: float | None = None,
     expected_semantic_duplicate: bool | None = None,
+    expected_symbol: str | None = None,
 ) -> dict[str, Any]:
     expected_id = _retrieval_benchmark_expected_id(
         service,
@@ -4048,8 +4065,9 @@ def _retrieval_benchmark_case(
         root_name=root_name,
         source_path=source_path,
         filters=filters,
+        expected_symbol=expected_symbol,
     )
-    return {
+    case = {
         "id": case_id,
         "category": category,
         "query": query,
@@ -4063,6 +4081,9 @@ def _retrieval_benchmark_case(
         "semantic_similarity": semantic_similarity,
         "expected_semantic_duplicate": expected_semantic_duplicate,
     }
+    if expected_symbol:
+        case["expected_symbol"] = expected_symbol
+    return case
 
 
 def _retrieval_benchmark_expected_id(
@@ -4072,9 +4093,20 @@ def _retrieval_benchmark_expected_id(
     root_name: str,
     source_path: str,
     filters: dict[str, Any] | None,
+    expected_symbol: str | None = None,
 ) -> str | None:
     results = service.search(query, limit=10, root_name=root_name, scope_mode="local_only", filters=filters)
     normalized_source = source_path.replace("\\", "/")
+    if expected_symbol:
+        for item in results:
+            item_path = str(item.get("source_path") or "").replace("\\", "/")
+            if item_path == normalized_source and _retrieval_benchmark_item_matches_symbol(item, expected_symbol):
+                return str(item.get("id") or "") or None
+        return _retrieval_benchmark_source_chunk_id(
+            root_name=root_name,
+            source_path=source_path,
+            expected_symbol=expected_symbol,
+        )
     for item in results:
         item_path = str(item.get("source_path") or "").replace("\\", "/")
         if item_path == normalized_source:
@@ -4085,7 +4117,12 @@ def _retrieval_benchmark_expected_id(
     return None
 
 
-def _retrieval_benchmark_source_chunk_id(*, root_name: str, source_path: str) -> str | None:
+def _retrieval_benchmark_source_chunk_id(
+    *,
+    root_name: str,
+    source_path: str,
+    expected_symbol: str | None = None,
+) -> str | None:
     normalized_source = source_path.replace("\\", "/").strip("/")
     assets = database.list_source_assets(root_name=root_name, path=normalized_source, limit=20)
     for asset in assets:
@@ -4103,10 +4140,40 @@ def _retrieval_benchmark_source_chunk_id(*, root_name: str, source_path: str) ->
             [item for item in chunks if isinstance(item, dict)],
             key=lambda item: int(item.get("chunk_index") or 0),
         ):
+            if expected_symbol and not _retrieval_benchmark_item_matches_symbol(chunk, expected_symbol):
+                continue
             chunk_id = str(chunk.get("id") or "")
             if chunk_id:
                 return chunk_id
     return None
+
+
+def _retrieval_benchmark_item_matches_symbol(item: dict[str, Any], expected_symbol: str) -> bool:
+    expected_aliases = _retrieval_benchmark_symbol_aliases(expected_symbol)
+    if not expected_aliases:
+        return False
+    code = item.get("code") if isinstance(item.get("code"), dict) else {}
+    primary_symbol = code.get("primary_symbol")
+    if primary_symbol and _retrieval_benchmark_symbol_aliases(str(primary_symbol)).intersection(expected_aliases):
+        return True
+    title = str(item.get("title") or "")
+    if "::" in title and _retrieval_benchmark_symbol_aliases(title.rsplit("::", 1)[-1]).intersection(expected_aliases):
+        return True
+    return False
+
+
+def _retrieval_benchmark_symbol_aliases(value: str) -> set[str]:
+    normalized = _normalize_retrieval_benchmark_symbol(value)
+    if not normalized:
+        return set()
+    aliases = {normalized}
+    if "." in normalized:
+        aliases.add(normalized.rsplit(".", 1)[-1])
+    return aliases
+
+
+def _normalize_retrieval_benchmark_symbol(value: str) -> str:
+    return str(value or "").strip().strip("`'\"()[]{}:,;").replace("::", ".").lower()
 
 
 def _normalize_filter_values(value: Any) -> list[str]:

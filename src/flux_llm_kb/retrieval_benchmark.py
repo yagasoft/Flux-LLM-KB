@@ -219,7 +219,7 @@ def _evaluate_case(case: dict[str, Any], observation: dict[str, Any], *, limit_p
     expected_scope = str(case.get("expected_scope") or "").strip() or None
     scope_pass = True if not expected_scope else observed_scope == expected_scope
     expected_suppression = bool(case.get("expect_suppression"))
-    observed_suppression = _observed_suppression(results)
+    observed_suppression = _observed_suppression(results, expected_ids=expected_ids)
     suppression_pass = observed_suppression if expected_suppression else not observed_suppression
     reasons: list[str] = []
     if top1 < 1.0:
@@ -282,8 +282,10 @@ def _observed_scope(results: list[dict[str, Any]]) -> str | None:
     return str(first.get("retrieval_scope") or scope.get("label") or "").strip() or None
 
 
-def _observed_suppression(results: list[dict[str, Any]]) -> bool:
-    for item in results:
+def _observed_suppression(results: list[dict[str, Any]], *, expected_ids: list[str] | None = None) -> bool:
+    expected_set = set(expected_ids or [])
+    scoped_results = [item for item in results if str(item.get("id") or "") in expected_set] if expected_set else results
+    for item in scoped_results:
         if int(item.get("duplicate_count") or 0) > 0:
             return True
         explanation = item.get("retrieval_explanation") if isinstance(item.get("retrieval_explanation"), dict) else {}
