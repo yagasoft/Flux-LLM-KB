@@ -2167,8 +2167,15 @@ function MailPostProcessPanel({ mail, selectedProfile, onDryRun }: { mail: MailS
   );
 }
 
+function isMailOperationalError(error: string): boolean {
+  if (/mail-spool|corpus_|pdftoppm|tesseract|ffprobe|ffmpeg|strict indexing|metadata-only/i.test(error)) {
+    return false;
+  }
+  return /imap|oauth|gmail|outlook sync|outlook host|mail ingestion|mail profile|mail scheduler|blocked_auth/i.test(error);
+}
+
 function MailErrorsPanel({ mail, errors, onErrorDetail }: { mail: MailStatus; errors: string[]; onErrorDetail: (error: string) => void }) {
-  const mailErrors = errors.filter((error) => /mail|imap|oauth|gmail|outlook/i.test(error));
+  const mailErrors = errors.filter(isMailOperationalError);
   return (
     <Panel title="Mail Errors">
       <div className="error-list">

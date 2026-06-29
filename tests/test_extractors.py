@@ -5,6 +5,7 @@ import importlib.machinery
 import importlib.util
 import json
 import sqlite3
+import subprocess
 import sys
 import tarfile
 from io import BytesIO
@@ -839,6 +840,26 @@ def test_extract_image_keeps_ocr_indexing_when_vision_provider_is_blocked(monkey
     assert result.metadata["vision"]["provider"] == "openai_compatible"
 
 
+def test_extract_image_blocks_tesseract_timeout_without_retryable_failure(monkeypatch, tmp_path):
+    path = tmp_path / "scan.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda command, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(command, 30)),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert "timed out" in result.message
+    assert result.metadata["ocr"]["status"] == "blocked_timeout"
+    assert result.metadata["ocr"]["engine"] == "tesseract"
+
+
 def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_path):
     path = tmp_path / "scan.png"
     path.write_bytes(PNG_BYTES)
@@ -1083,6 +1104,40 @@ def test_extract_image_only_pdf_blocks_when_renderer_is_missing(monkeypatch, tmp
     assert result.status == "blocked_missing_dependency"
     assert result.message == "pdftoppm command not found"
     assert result.metadata["ocr"]["status"] == "blocked_missing_dependency"
+    assert result.metadata["ocr"]["pages_attempted"] == 0
+
+
+def test_extract_image_only_pdf_blocks_pdftoppm_timeout_without_retryable_failure(monkeypatch, tmp_path):
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(b"%PDF scanned")
+
+    class EmptyPage:
+        def extract_text(self):
+            return ""
+
+    class FakePdfReader:
+        def __init__(self, _path):
+            self.pages = [EmptyPage()]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: {
+            "pdftoppm": "C:/tools/pdftoppm.exe",
+            "tesseract": "C:/tools/tesseract.exe",
+        }.get(command),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda command, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(command, 30)),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert "timed out" in result.message
+    assert result.metadata["ocr"]["status"] == "blocked_timeout"
+    assert result.metadata["ocr"]["renderer"] == "pdftoppm"
     assert result.metadata["ocr"]["pages_attempted"] == 0
 
 

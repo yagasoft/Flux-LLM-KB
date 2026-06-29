@@ -22,6 +22,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import subprocess
 import tarfile
 import tempfile
 from typing import Any, Callable, Iterable
@@ -4149,6 +4150,12 @@ def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
                     timeout=OCR_TIMEOUT_SECONDS,
                     check=False,
                 )
+            except subprocess.TimeoutExpired as exc:
+                return OcrResult(
+                    status="blocked_missing_dependency",
+                    metadata={**base_metadata, "pages_attempted": page_number - 1, "status": "blocked_timeout"},
+                    message=str(exc),
+                )
             except Exception as exc:  # pragma: no cover - environment-specific
                 return OcrResult(
                     status="failed",
@@ -4170,6 +4177,12 @@ def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
                 return OcrResult(
                     status="failed",
                     metadata={**base_metadata, "status": "failed"},
+                    message=page_ocr.message,
+                )
+            if page_ocr.status == "blocked_missing_dependency":
+                return OcrResult(
+                    status="blocked_missing_dependency",
+                    metadata={**base_metadata, "status": page_ocr.metadata.get("status") or "blocked_missing_dependency"},
                     message=page_ocr.message,
                 )
             if page_ocr.text:
@@ -4197,6 +4210,17 @@ def _ocr_image_with_tesseract(path: Path, tesseract: str) -> OcrResult:
             capture_output=True,
             timeout=OCR_TIMEOUT_SECONDS,
             check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return OcrResult(
+            status="blocked_missing_dependency",
+            metadata={
+                "engine": "tesseract",
+                "status": "blocked_timeout",
+                "cache_hits": 0,
+                "cache_misses": 1,
+            },
+            message=str(exc),
         )
     except Exception as exc:
         return OcrResult(

@@ -181,6 +181,37 @@ def test_backfill_cancels_orphaned_root_jobs_without_retrying(monkeypatch):
     assert calls["cancelled"][0]["telemetry"]["result_status"] == "cancelled_orphaned_root"
 
 
+def test_corpus_job_blocks_missing_source_file_instead_of_retrying(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda root_name: {
+            "name": root_name,
+            "root_path": str(tmp_path),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 262144,
+            "heavy_threshold_bytes": 10485760,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-missing",
+            "job_type": "corpus_extract_document",
+            "payload": {"root_name": "mail-outlook-mohesr", "path": "missing/attachment.docx"},
+        }
+    )
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "source file not found: missing/attachment.docx"
+    assert result.telemetry == {"missing_source": True}
+
+
 def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(
@@ -589,6 +620,58 @@ def test_process_corpus_job_allows_decorative_metadata_only_for_strict_roots(mon
     assert applied_result.chunks == ()
     assert applied_result.metadata["strict_indexing"] is True
     assert applied_result.metadata["decorative_indexed"] is True
+    assert "metadata_only_blocked" not in applied_result.metadata
+
+
+def test_process_corpus_job_allows_container_parent_when_children_are_extracted_for_strict_roots(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "bundle.zip").write_bytes(b"fake archive")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {"strict_indexing": True},
+        },
+    )
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="metadata_only",
+            message=None,
+            chunks=(),
+            child_assets=(SimpleNamespace(path="child.txt"),),
+            metadata={
+                "extractor": "container",
+                "child_asset_count": 1,
+                "parsed_child_count": 1,
+                "skipped_child_count": 0,
+                "blocked_dependency_count": 0,
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "bundle.zip"}})
+
+    assert result.status == "indexed"
+    assert result.telemetry["container_parsed_child_count"] == 1
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "indexed"
+    assert applied_result.child_assets == (SimpleNamespace(path="child.txt"),)
+    assert applied_result.metadata["container_children_indexed"] is True
     assert "metadata_only_blocked" not in applied_result.metadata
 
 

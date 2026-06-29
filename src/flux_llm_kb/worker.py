@@ -30,7 +30,11 @@ def process_corpus_job(job: dict) -> JobProcessResult:
 
     path = Path(root["root_path"]) / relative_path
     if not path.exists():
-        return JobProcessResult(status="failed", message=f"file not found: {relative_path}")
+        return JobProcessResult(
+            status="blocked_missing_dependency",
+            message=f"source file not found: {relative_path}",
+            telemetry={"missing_source": True},
+        )
 
     root_metadata = root.get("metadata") if isinstance(root.get("metadata"), dict) else {}
     strict_indexing = strict_indexing_enabled(root_metadata)
@@ -99,6 +103,16 @@ def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) ->
     if isinstance(decorative, dict) and decorative.get("status") == "skipped":
         metadata.update({"strict_indexing": True, "decorative_indexed": True})
         return ExtractionResult(status="indexed", chunks=(), child_assets=(), metadata=metadata, message=getattr(result, "message", None))
+    child_assets = tuple(getattr(result, "child_assets", ()) or ())
+    if _strict_metadata_only_container_has_extracted_children(metadata, child_assets):
+        metadata.update({"strict_indexing": True, "container_children_indexed": True})
+        return ExtractionResult(
+            status="indexed",
+            chunks=tuple(getattr(result, "chunks", ()) or ()),
+            child_assets=child_assets,
+            metadata=metadata,
+            message=getattr(result, "message", None),
+        )
     message = strict_metadata_only_message(getattr(result, "message", None))
     metadata.update(
         {
@@ -110,6 +124,23 @@ def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) ->
         }
     )
     return ExtractionResult(status="blocked_missing_dependency", chunks=(), child_assets=(), metadata=metadata, message=message)
+
+
+def _strict_metadata_only_container_has_extracted_children(metadata: dict[str, Any], child_assets: tuple[Any, ...]) -> bool:
+    if metadata.get("extractor") != "container":
+        return False
+    if metadata.get("warnings"):
+        return False
+    if _metadata_int(metadata, "blocked_dependency_count") > 0:
+        return False
+    return bool(child_assets) or _metadata_int(metadata, "parsed_child_count") > 0 or _metadata_int(metadata, "child_asset_count") > 0
+
+
+def _metadata_int(metadata: dict[str, Any], key: str) -> int:
+    try:
+        return int(metadata.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:

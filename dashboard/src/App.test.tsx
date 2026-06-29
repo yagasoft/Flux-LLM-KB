@@ -322,6 +322,7 @@ let resultDetailPayload: unknown;
 let fileActionPayload: unknown;
 let healthPayload: unknown;
 let crawlPayload: unknown;
+let mailPayload: unknown;
 let jobsPayload: unknown;
 let crawlSyncErrorPayload: unknown;
 let reviewPayload: unknown;
@@ -361,6 +362,7 @@ describe("Flux dashboard", () => {
     outlook.pending_requests = [];
     healthPayload = health;
     crawlPayload = JSON.parse(JSON.stringify(crawl));
+    mailPayload = JSON.parse(JSON.stringify(mail));
     jobsPayload = {
       jobs: [
         {
@@ -734,7 +736,7 @@ describe("Flux dashboard", () => {
       if (url === "/api/dashboard/crawl") return json(crawlPayload);
       if (url === "/api/dashboard/jobs") return json(jobsPayload);
       if (url === "/api/dashboard/retrieval-stats") return json({ retrieval: health.retrieval, duplicate_assets: 0 });
-      if (url === "/api/mail/status") return json(mail);
+      if (url === "/api/mail/status") return json(mailPayload);
       if (url === "/api/outlook-host/status") return json(outlook);
       if (url === "/api/host/status") return json({ status: "running", browse_supported: true, platform: "Windows" });
       if (url === "/api/host/browse-folder") return json({ status: "selected", path: "E:\\Temp\\watch-test" });
@@ -1917,6 +1919,27 @@ describe("Flux dashboard", () => {
     expect(within(details as HTMLElement).getByText("Blocked Auth Required")).toBeInTheDocument();
     expect(within(details as HTMLElement).getByText("IMAP search timed out")).toBeInTheDocument();
     expect(within(details as HTMLElement).getByText("1 missed")).toBeInTheDocument();
+  });
+
+  test("mail errors panel ignores corpus extraction errors from mail spool paths", async () => {
+    const corpusError =
+      "Command '['/usr/bin/pdftoppm'] timed out for /app/private/mail-spool/outlook-mohesr/ready/message/attachments/scan.pdf";
+    healthPayload = {
+      ...health,
+      recent_errors: [corpusError],
+      status: { ...health.status, recent_errors: [corpusError] }
+    };
+    mailPayload = { ...(mail as Record<string, unknown>), errored_messages: 0 };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+
+    const panel = screen.getByRole("heading", { name: "Mail Errors" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("No mail errors.")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).queryByText(corpusError)).not.toBeInTheDocument();
   });
 
   test("mail tab shows post-process outcomes and runs dry-run for selected profile", async () => {
