@@ -435,6 +435,145 @@ def test_host_agent_watcher_loop_records_heartbeat_and_queues_changed_file(monke
     assert synced == []
 
 
+def test_host_agent_watcher_loop_survives_db_failure_while_reporting_error(monkeypatch):
+    attempts: list[bool] = []
+
+    class FakeHeartbeat:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def update(self, **_kwargs):
+            pass
+
+        def beat_once(self):
+            pass
+
+    class FakeWatcher:
+        def poll_once(self, *, seed=False):
+            pass
+
+        def drain_events(self):
+            return []
+
+    monkeypatch.setattr(host_agent, "WatcherHeartbeatRunner", FakeHeartbeat)
+    monkeypatch.setattr(host_agent, "_configured_reconcile_on_start", lambda: False)
+    monkeypatch.setattr(host_agent, "_configured_reconcile_interval_seconds", lambda: 0)
+
+    loop = host_agent.HostAgentWatcherLoop(
+        interval_seconds=0.01,
+        watcher_factory=lambda *_args, **_kwargs: FakeWatcher(),
+    )
+
+    def fake_run_once(*, seed=False):
+        attempts.append(seed)
+        if seed:
+            return {"status": "seeded"}
+        if attempts.count(False) == 1:
+            raise RuntimeError("database is shutting down")
+        loop._stop.set()
+        return {"status": "running"}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        host_agent,
+        "_load_host_watch_roots",
+        lambda _root_name=None: (_ for _ in ()).throw(RuntimeError("database still down")),
+    )
+
+    loop.start()
+    assert loop._thread is not None
+    loop._thread.join(timeout=1)
+
+    assert attempts.count(False) >= 2
+    assert not loop._thread.is_alive()
+
+
+def test_host_agent_watcher_loop_survives_startup_seed_db_failure(monkeypatch):
+    attempts: list[bool] = []
+
+    class FakeHeartbeat:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def update(self, **_kwargs):
+            pass
+
+        def beat_once(self):
+            pass
+
+    class FakeWatcher:
+        def poll_once(self, *, seed=False):
+            pass
+
+        def drain_events(self):
+            return []
+
+    monkeypatch.setattr(host_agent, "WatcherHeartbeatRunner", FakeHeartbeat)
+    monkeypatch.setattr(host_agent, "_configured_reconcile_on_start", lambda: False)
+    monkeypatch.setattr(host_agent, "_configured_reconcile_interval_seconds", lambda: 0)
+    monkeypatch.setattr(host_agent, "_record_watcher_loop_error", lambda *_args, **_kwargs: None)
+
+    loop = host_agent.HostAgentWatcherLoop(
+        interval_seconds=0.01,
+        watcher_factory=lambda *_args, **_kwargs: FakeWatcher(),
+    )
+
+    def fake_run_once(*, seed=False):
+        attempts.append(seed)
+        if seed:
+            raise RuntimeError("database is shutting down")
+        loop._stop.set()
+        return {"status": "running"}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+
+    loop.start()
+    assert loop._thread is not None
+    loop._thread.join(timeout=1)
+
+    assert attempts == [True, False]
+    assert not loop._thread.is_alive()
+
+
+def test_host_agent_worker_loop_survives_db_failure_while_reporting_error(monkeypatch):
+    attempts = 0
+    loop = host_agent.HostAgentWorkerLoop(interval_seconds=0.01)
+
+    def fake_run_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("database is shutting down")
+        loop._stop.set()
+        return {"status": "running"}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        host_agent.database,
+        "record_runtime_component_heartbeat",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("database still down")),
+    )
+
+    loop.start()
+    assert loop._thread is not None
+    loop._thread.join(timeout=1)
+
+    assert attempts >= 2
+    assert not loop._thread.is_alive()
+
+
 def test_host_path_validator_accepts_windows_absolute_path(monkeypatch):
     monkeypatch.setattr(Path, "exists", lambda _self: False)
 

@@ -255,11 +255,14 @@ class HostAgentWatcherLoop:
     def _run(self) -> None:
         self._heartbeat.start()
         try:
-            if _configured_reconcile_on_start():
-                self._heartbeat.update(stage="startup_reconcile", busy=True)
-                self.reconcile_once(reason="startup_reconcile")
-                self._last_reconcile_at = time.monotonic()
-            self.run_once(seed=True)
+            try:
+                if _configured_reconcile_on_start():
+                    self._heartbeat.update(stage="startup_reconcile", busy=True)
+                    self.reconcile_once(reason="startup_reconcile")
+                    self._last_reconcile_at = time.monotonic()
+                self.run_once(seed=True)
+            except Exception as exc:  # pragma: no cover - defensive long-running loop
+                _record_watcher_loop_error(self.root_name, str(exc))
             while not self._stop.wait(self.interval_seconds):
                 try:
                     self.run_once(seed=False)
@@ -270,8 +273,7 @@ class HostAgentWatcherLoop:
                         self._last_reconcile_at = time.monotonic()
                         self._heartbeat.update(stage="idle", busy=False)
                 except Exception as exc:  # pragma: no cover - defensive long-running loop
-                    for root in _load_host_watch_roots(self.root_name):
-                        database.record_watch_error(root_name=root.name, error=str(exc))
+                    _record_watcher_loop_error(self.root_name, str(exc))
         finally:
             self._heartbeat.stop()
 
@@ -280,7 +282,7 @@ class HostAgentWatcherLoop:
             database.record_watch_event(root_name=event.root_name)
             database.enqueue_corpus_sync_job(root_name=event.root_name, path=str(event.path), reason="watch_event")
         except Exception as exc:  # pragma: no cover - environment-specific watcher loop
-            database.record_watch_error(root_name=event.root_name, error=str(exc))
+            _safe_record_watch_error(root_name=event.root_name, error=str(exc))
 
     def _record_heartbeat(self, root_name: str, metadata: dict[str, Any]) -> None:
         database.record_watcher_heartbeat(root_name=root_name, metadata={"host_agent": True, **metadata})
@@ -329,10 +331,10 @@ class HostAgentWorkerLoop:
         roots = _load_host_roots(self.root_name)
         batch_size = self.limit if self.limit is not None else _configured_worker_batch_size()
         metadata = {"root_count": len(roots), "roots": [root["name"] for root in roots]}
-        database.record_runtime_component_heartbeat(
+        _safe_record_runtime_component_heartbeat(
             name="corpus-worker:host-agent",
             status="running" if roots else "idle",
-            metadata=metadata,
+            metadata={**metadata, "last_error": None},
         )
         if not roots:
             return {"status": "no_enabled_host_roots", "roots": 0, "completed": 0, "blocked": 0, "retried": 0}
@@ -352,10 +354,10 @@ class HostAgentWorkerLoop:
             for key in totals:
                 totals[key] += int(result.get(key) or 0)
         payload = {"status": "running", "roots": len(roots), **totals, "results": results}
-        database.record_runtime_component_heartbeat(
+        _safe_record_runtime_component_heartbeat(
             name="corpus-worker:host-agent",
             status="running",
-            metadata={"last_result": payload},
+            metadata={"last_error": None, "last_result": payload},
         )
         return payload
 
@@ -364,13 +366,41 @@ class HostAgentWorkerLoop:
             try:
                 self.run_once()
             except Exception as exc:  # pragma: no cover - defensive long-running loop
-                database.record_runtime_component_heartbeat(
+                _safe_record_runtime_component_heartbeat(
                     name="corpus-worker:host-agent",
                     status="error",
                     metadata={"last_error": str(exc)},
                 )
             if self._stop.wait(self.interval_seconds):
                 return
+
+
+def _record_watcher_loop_error(root_name: str | None, error: str) -> None:
+    try:
+        roots = _load_host_watch_roots(root_name)
+    except Exception:
+        return
+    for root in roots:
+        _safe_record_watch_error(root_name=root.name, error=error)
+
+
+def _safe_record_watch_error(*, root_name: str, error: str, metadata: dict[str, Any] | None = None) -> None:
+    try:
+        database.record_watch_error(root_name=root_name, error=error, metadata=metadata)
+    except Exception:
+        pass
+
+
+def _safe_record_runtime_component_heartbeat(
+    *,
+    name: str,
+    status: str = "running",
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        database.record_runtime_component_heartbeat(name=name, status=status, metadata=metadata)
+    except Exception:
+        pass
 
 
 def create_app(*, start_watcher: bool = False):

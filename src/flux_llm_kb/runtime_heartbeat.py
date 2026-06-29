@@ -29,7 +29,10 @@ class WatcherHeartbeatRunner:
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="flux-watcher-heartbeat", daemon=True)
         self._thread.start()
-        self.beat_once()
+        try:
+            self.beat_once()
+        except Exception:
+            pass
 
     def stop(self, *, timeout: float = 2.0) -> None:
         self._stop.set()
