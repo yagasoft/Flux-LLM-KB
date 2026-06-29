@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import base64
@@ -43,6 +44,7 @@ from .redaction import RedactionFinding, redact_text
 from .retrieval_benchmark import build_retrieval_recommendations, evaluate_retrieval_cases, metric_deltas
 from .retrieval_explain import enrich_search_result
 from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
+from .runtime_heartbeat import WatcherHeartbeatRunner
 from .scoring import ContextCandidate, pack_context, pack_context_with_trace
 from .settings import SettingsService
 from .versioning import collapse_version_families
@@ -52,6 +54,7 @@ from .watcher import WatchEvent, WatchRoot, create_corpus_watcher, probe_watcher
 LOCAL_SCOPE_SCORE_BOOST = 1.15
 STRONG_VECTOR_MIN_SCORE = 0.35
 ALLOWED_RETRIEVAL_LOGICAL_KINDS = {"episode", "file", "mail"}
+WATCHER_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -3058,7 +3061,7 @@ class KnowledgeService:
 
         watcher = create_corpus_watcher(
             lambda: _load_watch_roots(root_name),
-            on_change=self._handle_watch_event,
+            on_change=None,
             interval_seconds=interval_seconds,
             debounce_seconds=_configured_watcher_debounce_seconds(),
             stability_quiet_seconds=_configured_stability_quiet_seconds(),
@@ -3066,19 +3069,49 @@ class KnowledgeService:
             backend_policy=_configured_watcher_backend(),
         )
         last_reconcile_at = 0.0
-        if _configured_reconcile_on_start():
-            self.reconcile_watch_roots(root_name=root_name, reason="startup_reconcile")
-            last_reconcile_at = time.monotonic()
-        watcher.poll_once(seed=True)
-        while True:
-            for root in _load_watch_roots(root_name):
-                database.record_watcher_heartbeat(root_name=root.name, metadata={"watcher_backend": watcher.backend_status})
-            watcher.poll_once()
-            reconcile_interval = _configured_reconcile_interval_seconds()
-            if reconcile_interval > 0 and time.monotonic() - last_reconcile_at >= reconcile_interval:
-                self.reconcile_watch_roots(root_name=root_name, reason="periodic_reconcile")
+        heartbeat = WatcherHeartbeatRunner(
+            load_roots=lambda: _load_watch_roots(root_name),
+            record=lambda name, metadata: database.record_watcher_heartbeat(
+                root_name=name,
+                metadata={
+                    "watcher_backend": getattr(watcher, "backend_status", None),
+                    **metadata,
+                },
+            ),
+            interval_seconds=WATCHER_HEARTBEAT_INTERVAL_SECONDS,
+        )
+        heartbeat.start()
+        try:
+            if _configured_reconcile_on_start():
+                heartbeat.update(stage="startup_reconcile", busy=True)
+                self.reconcile_watch_roots(root_name=root_name, reason="startup_reconcile")
                 last_reconcile_at = time.monotonic()
-            time.sleep(interval_seconds)
+            heartbeat.update(stage="seed", busy=True)
+            watcher.poll_once(seed=True)
+            while True:
+                started = time.perf_counter()
+                heartbeat.update(stage="poll", busy=True)
+                polled_events = watcher.poll_once()
+                events = _drained_watch_events(watcher, polled_events)
+                for event in events:
+                    self._handle_watch_event(event)
+                loop_duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+                heartbeat.update(
+                    stage="idle",
+                    busy=False,
+                    last_loop_duration_ms=loop_duration_ms,
+                    last_event_count=len(events),
+                    queue_depth=_watcher_queue_depth(watcher),
+                )
+                reconcile_interval = _configured_reconcile_interval_seconds()
+                if reconcile_interval > 0 and time.monotonic() - last_reconcile_at >= reconcile_interval:
+                    heartbeat.update(stage="periodic_reconcile", busy=True)
+                    self.reconcile_watch_roots(root_name=root_name, reason="periodic_reconcile")
+                    last_reconcile_at = time.monotonic()
+                    heartbeat.update(stage="idle", busy=False)
+                time.sleep(interval_seconds)
+        finally:
+            heartbeat.stop()
 
     def run_corpus_backfill(
         self,
@@ -3090,8 +3123,6 @@ class KnowledgeService:
         host_agent_roots: bool | None = None,
         family: str | None = None,
     ) -> dict[str, Any]:
-        from . import worker
-
         cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
         effective_kind = family or kind
         job_families = kind_to_job_families(effective_kind)
@@ -3110,15 +3141,7 @@ class KnowledgeService:
         blocked = 0
         retried = 0
         cancelled_orphaned = 0
-        for job in claimed:
-            started = time.perf_counter()
-            if job.get("job_type") == "corpus_sync_root":
-                process_result = self._process_corpus_sync_job(job)
-            elif job.get("job_type") == "corpus_embed":
-                process_result = worker.process_embedding_job(job)
-            else:
-                process_result = worker.process_corpus_job(job)
-            duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        for job, duration_ms, process_result in self._process_claimed_corpus_jobs(claimed, workers=workers):
             telemetry = {
                 "job_family": job.get("job_family"),
                 "resource_class": job.get("resource_class"),
@@ -3208,6 +3231,39 @@ class KnowledgeService:
             "cleared_completed_errors": cleared_errors["cleared"],
             "jobs": claimed,
         }
+
+    def _process_claimed_corpus_jobs(self, claimed: list[dict[str, Any]], *, workers: int) -> list[tuple[dict[str, Any], int, Any]]:
+        bounded_workers = max(1, min(int(workers or 1), len(claimed) or 1))
+        if bounded_workers <= 1 or len(claimed) <= 1:
+            return [self._process_claimed_corpus_job(job) for job in claimed]
+
+        indexed_jobs = list(enumerate(claimed))
+        results: list[tuple[int, tuple[dict[str, Any], int, Any]]] = []
+        with ThreadPoolExecutor(max_workers=bounded_workers, thread_name_prefix="flux-corpus-worker") as executor:
+            futures = {executor.submit(self._process_claimed_corpus_job, job): index for index, job in indexed_jobs}
+            for future in as_completed(futures):
+                results.append((futures[future], future.result()))
+        return [result for _, result in sorted(results, key=lambda item: item[0])]
+
+    def _process_claimed_corpus_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], int, Any]:
+        from . import worker
+
+        started = time.perf_counter()
+        try:
+            if job.get("job_type") == "corpus_sync_root":
+                process_result = self._process_corpus_sync_job(job)
+            elif job.get("job_type") == "corpus_embed":
+                process_result = worker.process_embedding_job(job)
+            else:
+                process_result = worker.process_corpus_job(job)
+        except Exception as exc:
+            process_result = worker.JobProcessResult(
+                status="failed",
+                message=str(exc),
+                telemetry={"error_type": exc.__class__.__name__},
+            )
+        duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+        return job, duration_ms, process_result
 
     def _process_corpus_sync_job(self, job: dict[str, Any]):
         from .worker import JobProcessResult
@@ -3469,7 +3525,7 @@ class KnowledgeService:
                 path_hash=_watch_event_path_hash(event),
                 metadata={"action": event.action},
             )
-            self.sync_corpus(root_name=event.root_name, path=event.path, reason="watch_event")
+            database.enqueue_corpus_sync_job(root_name=event.root_name, path=str(event.path), reason="watch_event")
         except Exception as exc:  # pragma: no cover - environment-specific watcher loop
             database.record_watch_error(root_name=event.root_name, error=str(exc))
 
@@ -4732,6 +4788,20 @@ def _manifest_store(root_name: str) -> dict[str, dict[str, Any]]:
 def _watch_event_path_hash(event: WatchEvent) -> str:
     digest = hashlib.sha256(f"{event.root_name}:{event.relative_path}".encode("utf-8", errors="ignore")).hexdigest()
     return f"sha256:{digest}"
+
+
+def _drained_watch_events(watcher: Any, polled_events: list[WatchEvent]) -> list[WatchEvent]:
+    if hasattr(watcher, "drain_events"):
+        return list(watcher.drain_events())
+    return list(polled_events or [])
+
+
+def _watcher_queue_depth(watcher: Any) -> int:
+    queue = getattr(watcher, "_queue", None)
+    try:
+        return len(queue) if queue is not None else 0
+    except TypeError:
+        return 0
 
 
 def _benchmark_family_breakdown(plan: Any) -> dict[str, dict[str, int]]:

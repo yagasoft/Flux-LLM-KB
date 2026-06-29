@@ -746,7 +746,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.text",
         category="acceleration",
-        default=2,
+        default=8,
         value_type="int",
         description="Maximum text-family extraction workers.",
         env_var="FLUX_KB_WORKER_CAP_TEXT",
@@ -757,7 +757,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.office",
         category="acceleration",
-        default=1,
+        default=3,
         value_type="int",
         description="Maximum Office/PDF-family extraction workers.",
         env_var="FLUX_KB_WORKER_CAP_OFFICE",
@@ -768,7 +768,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.image",
         category="acceleration",
-        default=1,
+        default=2,
         value_type="int",
         description="Maximum image-family extraction workers.",
         env_var="FLUX_KB_WORKER_CAP_IMAGE",
@@ -779,7 +779,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.diagram",
         category="acceleration",
-        default=1,
+        default=2,
         value_type="int",
         description="Maximum diagram-family extraction workers.",
         env_var="FLUX_KB_WORKER_CAP_DIAGRAM",
@@ -790,7 +790,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.archive",
         category="acceleration",
-        default=1,
+        default=3,
         value_type="int",
         description="Maximum archive/container-family extraction workers.",
         env_var="FLUX_KB_WORKER_CAP_ARCHIVE",
@@ -801,7 +801,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.media",
         category="acceleration",
-        default=1,
+        default=2,
         value_type="int",
         description="Maximum media-family extraction workers.",
         env_var="FLUX_KB_WORKER_CAP_MEDIA",
@@ -812,7 +812,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.embedding",
         category="acceleration",
-        default=1,
+        default=2,
         value_type="int",
         description="Maximum embedding-family workers.",
         env_var="FLUX_KB_WORKER_CAP_EMBEDDING",
@@ -823,7 +823,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.preview",
         category="acceleration",
-        default=1,
+        default=2,
         value_type="int",
         description="Maximum preview-generation workers.",
         env_var="FLUX_KB_WORKER_CAP_PREVIEW",
@@ -834,7 +834,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="acceleration.worker_cap.general",
         category="acceleration",
-        default=1,
+        default=4,
         value_type="int",
         description="Maximum general fallback workers.",
         env_var="FLUX_KB_WORKER_CAP_GENERAL",
@@ -909,7 +909,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="crawler.hash_parallelism",
         category="crawler",
-        default=1,
+        default=8,
         value_type="int",
         description="Maximum bounded hashing concurrency for crawl/reconcile scans.",
         env_var="FLUX_KB_CRAWLER_HASH_PARALLELISM",
@@ -1033,7 +1033,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="worker.batch_size",
         category="worker",
-        default=10,
+        default=24,
         value_type="int",
         description="Default corpus/mail job batch size.",
         env_var="FLUX_KB_WORKER_BATCH_SIZE",

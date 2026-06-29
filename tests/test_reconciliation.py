@@ -1,6 +1,8 @@
-from flux_llm_kb import database, host_agent
+import threading
+
+from flux_llm_kb import database, host_agent, service as service_module
 from flux_llm_kb.service import KnowledgeService
-from flux_llm_kb.watcher import WatchRoot
+from flux_llm_kb.watcher import WatchEvent, WatchRoot
 
 
 def test_service_reconciles_enabled_watch_roots_with_reason(monkeypatch):
@@ -84,6 +86,84 @@ def test_run_watch_reconciles_before_seeding_watcher(monkeypatch):
         pass
 
     assert calls[:2] == ["reconcile", "seed"]
+
+
+def test_run_watch_heartbeats_while_startup_reconcile_is_running(monkeypatch):
+    heartbeat_count = 0
+    saw_two_heartbeats = threading.Event()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "flux_llm_kb.service._load_watch_roots",
+        lambda root_name=None: [WatchRoot(name="enabled", root_path=".", watch_enabled=True)],
+    )
+    monkeypatch.setattr(service_module, "WATCHER_HEARTBEAT_INTERVAL_SECONDS", 0.01, raising=False)
+
+    def record_heartbeat(**kwargs):
+        nonlocal heartbeat_count
+        heartbeat_count += 1
+        assert kwargs["root_name"] == "enabled"
+        metadata = kwargs.get("metadata") or {}
+        assert metadata.get("stage") in {"startup_reconcile", "seed", "poll", "idle"}
+        if heartbeat_count >= 2:
+            saw_two_heartbeats.set()
+
+    def slow_reconcile(self, **_kwargs):
+        calls.append("reconcile")
+        assert saw_two_heartbeats.wait(1.0)
+        return {"status": "completed", "roots": 1, "results": []}
+
+    class StopAfterSeedWatcher:
+        def poll_once(self, *, seed=False):
+            calls.append("seed" if seed else "poll")
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(database, "record_watcher_heartbeat", record_heartbeat)
+    monkeypatch.setattr(KnowledgeService, "reconcile_watch_roots", slow_reconcile)
+    monkeypatch.setattr(
+        "flux_llm_kb.service.create_corpus_watcher",
+        lambda *args, **kwargs: StopAfterSeedWatcher(),
+    )
+
+    try:
+        KnowledgeService().run_watch(interval_seconds=0.01)
+    except KeyboardInterrupt:
+        pass
+
+    assert calls[:2] == ["reconcile", "seed"]
+
+
+def test_service_watch_event_enqueues_sync_job_without_inline_index(monkeypatch, tmp_path):
+    watch_events: list[dict] = []
+    queued: list[dict] = []
+    errors: list[dict] = []
+    event = WatchEvent(
+        root_name="docs",
+        root_path=tmp_path,
+        path=tmp_path / "changed.md",
+        relative_path="changed.md",
+        action="changed",
+    )
+
+    monkeypatch.setattr(database, "record_watch_event", lambda **kwargs: watch_events.append(kwargs))
+    monkeypatch.setattr(database, "record_watch_error", lambda **kwargs: errors.append(kwargs))
+    monkeypatch.setattr(
+        database,
+        "enqueue_corpus_sync_job",
+        lambda **kwargs: queued.append(kwargs) or {"id": "job-1", "created": True},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        KnowledgeService,
+        "sync_corpus",
+        lambda self, **_kwargs: (_ for _ in ()).throw(AssertionError("watch events must not index inline")),
+    )
+
+    KnowledgeService()._handle_watch_event(event)
+
+    assert watch_events[0]["root_name"] == "docs"
+    assert queued == [{"root_name": "docs", "path": str(tmp_path / "changed.md"), "reason": "watch_event"}]
+    assert errors == []
 
 
 def test_host_agent_startup_reconciles_host_roots_before_watch_seed(monkeypatch):

@@ -2116,7 +2116,7 @@ def test_enqueue_corpus_sync_job_uses_operator_schedule(monkeypatch):
 
 def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
     executed = []
-    rows = [("job-existing", "pending"), ("job-existing", "pending")]
+    rows = [("job-existing", "pending", {"root_name": "mail-outlook-mohesr"}), ("job-existing", "pending")]
     schedule = database._job_schedule_metadata("corpus_sync_root")
 
     class FakeCursor:
@@ -2160,9 +2160,55 @@ def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
     }
     assert "priority = GREATEST(priority, %s)" in sql
     assert "time_budget_seconds = GREATEST(time_budget_seconds, %s)" in sql
-    assert update_params[0] == schedule["priority"]
-    assert update_params[1] == schedule["time_budget_seconds"]
-    assert update_params[3] == "job-existing"
+    assert json.loads(update_params[0]) == {"root_name": "mail-outlook-mohesr", "reason": "manual_sync"}
+    assert update_params[1] == schedule["priority"]
+    assert update_params[2] == schedule["time_budget_seconds"]
+    assert update_params[4] == "job-existing"
+
+
+def test_enqueue_corpus_sync_job_widens_active_path_job_for_different_watch_path(monkeypatch):
+    executed = []
+    rows = [
+        ("job-existing", "pending", {"root_name": "docs", "reason": "watch_event", "path": "a.md"}),
+        ("job-existing", "pending"),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_corpus_sync_job(root_name="docs", path="b.md", reason="watch_event")
+
+    sql = "\n".join(statement for statement, _params in executed)
+    update_params = next(params for statement, params in executed if "UPDATE capture_jobs" in statement)
+    assert result["deduped"] is True
+    assert "(payload - 'path') || %s::jsonb" in sql
+    assert json.loads(update_params[0]) == {"root_name": "docs", "reason": "watch_event"}
 
 
 def test_apply_extraction_result_persists_container_child_assets(monkeypatch):

@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from . import database
 from .processes import run_no_window
+from .runtime_heartbeat import WatcherHeartbeatRunner
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher
 
 
@@ -25,6 +26,7 @@ HOST_AGENT_REQUEST_TIMEOUT_SECONDS = 3
 HOST_AGENT_BROWSE_TIMEOUT_SECONDS = 300
 HOST_AGENT_BACKFILL_TIMEOUT_SECONDS = 600
 HOST_AGENT_BENCHMARK_TIMEOUT_SECONDS = 600
+WATCHER_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
 class ValidateRequest(BaseModel):
@@ -211,6 +213,11 @@ class HostAgentWatcherLoop:
             stability_quiet_seconds=_configured_stability_quiet_seconds(),
             max_queue_size=_configured_watcher_max_queue_size(),
         )
+        self._heartbeat = WatcherHeartbeatRunner(
+            load_roots=lambda: _load_host_watch_roots(self.root_name),
+            record=self._record_heartbeat,
+            interval_seconds=WATCHER_HEARTBEAT_INTERVAL_SECONDS,
+        )
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -228,37 +235,54 @@ class HostAgentWatcherLoop:
         roots = _load_host_watch_roots(self.root_name)
         if not roots:
             return {"status": "no_enabled_host_roots", "roots": 0, "events": 0}
-        for root in roots:
-            database.record_watcher_heartbeat(root_name=root.name)
+        started = time.perf_counter()
+        self._heartbeat.update(stage="seed" if seed else "poll", busy=True)
+        self._heartbeat.beat_once()
         self._watcher.poll_once(seed=seed)
         events = self._watcher.drain_events() if hasattr(self._watcher, "drain_events") else []
         for event in events:
             self._handle_event(event)
+        self._heartbeat.update(
+            stage="idle",
+            busy=False,
+            last_loop_duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+            last_event_count=len(events),
+            queue_depth=_watcher_queue_depth(self._watcher),
+        )
         return {"status": "running", "roots": len(roots), "events": len(events)}
 
     def _run(self) -> None:
-        if _configured_reconcile_on_start():
-            self.reconcile_once(reason="startup_reconcile")
-            self._last_reconcile_at = time.monotonic()
-        self.run_once(seed=True)
-        while not self._stop.wait(self.interval_seconds):
-            try:
-                self.run_once(seed=False)
-                reconcile_interval = _configured_reconcile_interval_seconds()
-                if reconcile_interval > 0 and time.monotonic() - self._last_reconcile_at >= reconcile_interval:
-                    self.reconcile_once(reason="periodic_reconcile")
-                    self._last_reconcile_at = time.monotonic()
-            except Exception as exc:  # pragma: no cover - defensive long-running loop
-                for root in _load_host_watch_roots(self.root_name):
-                    database.record_watch_error(root_name=root.name, error=str(exc))
+        self._heartbeat.start()
+        try:
+            if _configured_reconcile_on_start():
+                self._heartbeat.update(stage="startup_reconcile", busy=True)
+                self.reconcile_once(reason="startup_reconcile")
+                self._last_reconcile_at = time.monotonic()
+            self.run_once(seed=True)
+            while not self._stop.wait(self.interval_seconds):
+                try:
+                    self.run_once(seed=False)
+                    reconcile_interval = _configured_reconcile_interval_seconds()
+                    if reconcile_interval > 0 and time.monotonic() - self._last_reconcile_at >= reconcile_interval:
+                        self._heartbeat.update(stage="periodic_reconcile", busy=True)
+                        self.reconcile_once(reason="periodic_reconcile")
+                        self._last_reconcile_at = time.monotonic()
+                        self._heartbeat.update(stage="idle", busy=False)
+                except Exception as exc:  # pragma: no cover - defensive long-running loop
+                    for root in _load_host_watch_roots(self.root_name):
+                        database.record_watch_error(root_name=root.name, error=str(exc))
+        finally:
+            self._heartbeat.stop()
 
     def _handle_event(self, event: WatchEvent) -> None:
         try:
             database.record_watch_event(root_name=event.root_name)
-            service = self.service_factory() if self.service_factory else _service()
-            service.sync_corpus(root_name=event.root_name, path=str(event.path), reason="watch_event")
+            database.enqueue_corpus_sync_job(root_name=event.root_name, path=str(event.path), reason="watch_event")
         except Exception as exc:  # pragma: no cover - environment-specific watcher loop
             database.record_watch_error(root_name=event.root_name, error=str(exc))
+
+    def _record_heartbeat(self, root_name: str, metadata: dict[str, Any]) -> None:
+        database.record_watcher_heartbeat(root_name=root_name, metadata={"host_agent": True, **metadata})
 
     def reconcile_once(self, *, reason: str) -> dict[str, Any]:
         service = self.service_factory() if self.service_factory else _service()
@@ -735,6 +759,14 @@ def _is_host_agent_root(root: dict[str, Any]) -> bool:
     if metadata.get("host_access") == "host_agent":
         return True
     return _path_style(str(root.get("root_path") or "")) in {"windows_drive", "windows_unc"}
+
+
+def _watcher_queue_depth(watcher: Any) -> int:
+    queue = getattr(watcher, "_queue", None)
+    try:
+        return len(queue) if queue is not None else 0
+    except TypeError:
+        return 0
 
 
 def _resolve_known_asset_path(asset: dict[str, Any]) -> Path | None:

@@ -359,9 +359,10 @@ def test_remote_file_action_reports_host_agent_offline(monkeypatch):
     assert result["state"] == "host_agent_offline"
 
 
-def test_host_agent_watcher_loop_records_heartbeat_and_syncs_changed_file(monkeypatch, tmp_path):
+def test_host_agent_watcher_loop_records_heartbeat_and_queues_changed_file(monkeypatch, tmp_path):
     heartbeats: list[str] = []
     watch_events: list[str] = []
+    queued: list[dict] = []
     synced: list[dict] = []
 
     monkeypatch.setattr(
@@ -386,8 +387,14 @@ def test_host_agent_watcher_loop_records_heartbeat_and_syncs_changed_file(monkey
             },
         ],
     )
-    monkeypatch.setattr(host_agent.database, "record_watcher_heartbeat", lambda *, root_name: heartbeats.append(root_name))
+    monkeypatch.setattr(host_agent.database, "record_watcher_heartbeat", lambda *, root_name, metadata=None: heartbeats.append(root_name))
     monkeypatch.setattr(host_agent.database, "record_watch_event", lambda *, root_name: watch_events.append(root_name))
+    monkeypatch.setattr(
+        host_agent.database,
+        "enqueue_corpus_sync_job",
+        lambda **kwargs: queued.append(kwargs) or {"id": "job-1", "created": True},
+        raising=False,
+    )
     monkeypatch.setattr(host_agent.database, "record_watch_error", lambda **_kwargs: None)
 
     class FakeService:
@@ -424,7 +431,8 @@ def test_host_agent_watcher_loop_records_heartbeat_and_syncs_changed_file(monkey
     assert result == {"status": "running", "roots": 1, "events": 1}
     assert heartbeats == ["watch-test"]
     assert watch_events == ["watch-test"]
-    assert synced == [{"root_name": "watch-test", "path": str(tmp_path / "changed.md"), "reason": "watch_event"}]
+    assert queued == [{"root_name": "watch-test", "path": str(tmp_path / "changed.md"), "reason": "watch_event"}]
+    assert synced == []
 
 
 def test_host_path_validator_accepts_windows_absolute_path(monkeypatch):

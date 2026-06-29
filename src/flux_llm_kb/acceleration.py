@@ -63,15 +63,15 @@ FAMILY_DEFAULT_TIME_BUDGET_SECONDS: dict[str, int] = {
 }
 
 FAMILY_DEFAULT_CAPS: dict[str, int] = {
-    "text": 2,
-    "office": 1,
-    "image": 1,
-    "diagram": 1,
-    "archive": 1,
-    "media": 1,
-    "embedding": 1,
-    "preview": 1,
-    "general": 1,
+    "text": 8,
+    "office": 3,
+    "image": 2,
+    "diagram": 2,
+    "archive": 3,
+    "media": 2,
+    "embedding": 2,
+    "preview": 2,
+    "general": 4,
 }
 
 BENCHMARK_FIXTURES: tuple[dict[str, str], ...] = (

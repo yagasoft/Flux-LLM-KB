@@ -5,12 +5,34 @@ from types import SimpleNamespace
 import pytest
 
 from flux_llm_kb.acceleration import (
+    FAMILY_DEFAULT_CAPS,
     collect_acceleration_status,
     job_family_for_type,
     kind_to_job_families,
     resolve_cache_layout,
     validate_local_model_base_url,
 )
+from flux_llm_kb.settings_registry import get_definition
+
+
+def test_aggressive_local_worker_defaults_match_settings_registry():
+    expected = {
+        "text": 8,
+        "office": 3,
+        "image": 2,
+        "diagram": 2,
+        "archive": 3,
+        "media": 2,
+        "embedding": 2,
+        "preview": 2,
+        "general": 4,
+    }
+
+    assert FAMILY_DEFAULT_CAPS == expected
+    for family, cap in expected.items():
+        assert get_definition(f"acceleration.worker_cap.{family}").default == cap
+    assert get_definition("crawler.hash_parallelism").default == 8
+    assert get_definition("worker.batch_size").default >= 24
 
 
 def test_cache_layout_defaults_under_install_root(tmp_path, monkeypatch):

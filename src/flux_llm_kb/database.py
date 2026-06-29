@@ -7328,6 +7328,7 @@ def enqueue_corpus_sync_job(
     root_name: str,
     reason: str = "manual_sync",
     payload: dict[str, Any] | None = None,
+    path: str | None = None,
     url: str | None = None,
 ) -> dict[str, Any]:
     root = str(root_name or "").strip()
@@ -7335,13 +7336,16 @@ def enqueue_corpus_sync_job(
         raise ValueError("root_name is required")
     job_payload = {"root_name": root, "reason": str(reason or "manual_sync")}
     job_payload.update(payload or {})
+    clean_path = str(path).strip() if path is not None else ""
+    if clean_path:
+        job_payload["path"] = clean_path
     schedule = _job_schedule_metadata("corpus_sync_root")
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id::text, status
+                SELECT id::text, status, payload
                 FROM capture_jobs
                 WHERE job_type = 'corpus_sync_root'
                   AND payload->>'root_name' = %s
@@ -7353,10 +7357,23 @@ def enqueue_corpus_sync_job(
             )
             existing = cur.fetchone()
             if existing:
+                existing_payload = existing[2] if len(existing) > 2 and isinstance(existing[2], dict) else {}
+                existing_path = str(existing_payload.get("path") or "").strip()
+                incoming_path = str(job_payload.get("path") or "").strip()
+                widen_to_root_sync = bool(
+                    (not existing_path and incoming_path)
+                    or (existing_path and (not incoming_path or existing_path != incoming_path))
+                )
+                update_payload = dict(job_payload)
+                payload_sql = "payload || %s::jsonb"
+                if widen_to_root_sync:
+                    update_payload.pop("path", None)
+                    payload_sql = "(payload - 'path') || %s::jsonb"
                 cur.execute(
-                    """
+                    f"""
                     UPDATE capture_jobs
-                    SET priority = GREATEST(priority, %s),
+                    SET payload = {payload_sql},
+                        priority = GREATEST(priority, %s),
                         time_budget_seconds = GREATEST(time_budget_seconds, %s),
                         telemetry = telemetry || %s::jsonb,
                         updated_at = now()
@@ -7364,6 +7381,7 @@ def enqueue_corpus_sync_job(
                     RETURNING id::text, status
                     """,
                     (
+                        _json(update_payload),
                         schedule["priority"],
                         schedule["time_budget_seconds"],
                         _json({"stage": "queued", "root_name": root}),

@@ -1,9 +1,11 @@
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from flux_llm_kb import database, service as service_module
+from flux_llm_kb import database, service as service_module, worker
 from flux_llm_kb.service import KnowledgeService
 
 
@@ -133,6 +135,105 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     assert calls["blocked"][0]["telemetry"]["ocr_cache_misses"] == 0
     assert calls["repaired"] == [{"root_name": None}]
     assert calls["cleared_errors"] == [{"root_name": None}]
+
+
+def test_backfill_processes_claimed_jobs_in_parallel_when_workers_gt_one(monkeypatch):
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+    saw_parallel = threading.Event()
+    completed: list[dict] = []
+
+    jobs = [
+        {
+            "id": f"job-{index}",
+            "job_type": "corpus_extract_text",
+            "job_family": "text",
+            "resource_class": "cpu",
+            "payload": {"root_name": "docs", "path": f"file-{index}.md"},
+            "attempts": 1,
+        }
+        for index in range(4)
+    ]
+
+    monkeypatch.setattr(database, "claim_corpus_jobs", lambda **_kwargs: list(jobs))
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: completed.append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **_kwargs: None)
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **_kwargs: None)
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **_kwargs: {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **_kwargs: {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    def slow_process(job):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            if active >= 2:
+                saw_parallel.set()
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return worker.JobProcessResult(status="indexed", telemetry={"path": job["payload"]["path"]})
+
+    monkeypatch.setattr(worker, "process_corpus_job", slow_process)
+
+    result = KnowledgeService().run_corpus_backfill(kind="text", limit=4, workers=4)
+
+    assert result["claimed"] == 4
+    assert result["completed"] == 4
+    assert len(completed) == 4
+    assert saw_parallel.is_set()
+    assert max_active >= 2
+
+
+def test_backfill_handles_parallel_job_exceptions_independently(monkeypatch):
+    completed: list[dict] = []
+    retried: list[dict] = []
+    jobs = [
+        {
+            "id": "job-fail",
+            "job_type": "corpus_extract_text",
+            "job_family": "text",
+            "resource_class": "cpu",
+            "payload": {"root_name": "docs", "path": "fail.md"},
+            "attempts": 1,
+        },
+        {
+            "id": "job-ok",
+            "job_type": "corpus_extract_text",
+            "job_family": "text",
+            "resource_class": "cpu",
+            "payload": {"root_name": "docs", "path": "ok.md"},
+            "attempts": 1,
+        },
+    ]
+
+    monkeypatch.setattr(database, "claim_corpus_jobs", lambda **_kwargs: list(jobs))
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: completed.append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **_kwargs: None)
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: retried.append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **_kwargs: {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **_kwargs: {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    def process(job):
+        if job["id"] == "job-fail":
+            raise RuntimeError("boom")
+        return worker.JobProcessResult(status="indexed", telemetry={"path": job["payload"]["path"]})
+
+    monkeypatch.setattr(worker, "process_corpus_job", process)
+
+    result = KnowledgeService().run_corpus_backfill(kind="text", limit=2, workers=2)
+
+    assert result["claimed"] == 2
+    assert result["completed"] == 1
+    assert result["retried"] == 1
+    assert completed[0]["job_id"] == "job-ok"
+    assert retried[0]["job_id"] == "job-fail"
+    assert retried[0]["error"] == "boom"
 
 
 def test_backfill_cancels_orphaned_root_jobs_without_retrying(monkeypatch):
