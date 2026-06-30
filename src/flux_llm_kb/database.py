@@ -33,6 +33,7 @@ from .embeddings import (
 from . import mail_content_store
 from .migrations import load_migrations
 from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciprocal_rank_fusion
+from .text_safety import sanitize_postgres_text_value, strip_postgres_nul
 
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
@@ -8035,7 +8036,7 @@ def update_corpus_job_progress(
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
                 """,
-                (_json(telemetry or {}), last_error, job_id),
+                (_json(telemetry or {}), _postgres_text_or_none(last_error), job_id),
             )
 
 
@@ -8058,7 +8059,7 @@ def heartbeat_corpus_job(
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
                 """,
-                (_json(telemetry or {}), last_error, job_id),
+                (_json(telemetry or {}), _postgres_text_or_none(last_error), job_id),
             )
 
 
@@ -10614,15 +10615,18 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
     cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s", (asset_id,))
     inserted = 0
     for chunk in chunks:
-        chunk_body = str(chunk.body)
-        chunk_metadata = dict(getattr(chunk, "metadata", {}) or {})
+        chunk_title = strip_postgres_nul(str(chunk.title))
+        chunk_body = strip_postgres_nul(str(chunk.body))
+        chunk_modality = strip_postgres_nul(str(chunk.modality))
+        chunk_locator = _postgres_text_or_none(chunk.locator)
+        chunk_metadata = sanitize_postgres_text_value(dict(getattr(chunk, "metadata", {}) or {}))
         db_body = chunk_body
         if mail_context is not None:
             content_ref = mail_content_store.write_mail_content(
                 root_name=mail_context["root_name"],
                 asset_path=mail_context["asset_path"],
                 chunk_index=int(chunk.chunk_index),
-                title=str(chunk.title),
+                title=chunk_title,
                 text=chunk_body,
                 kind=mail_context["kind"],
             )
@@ -10639,10 +10643,10 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
             (
                 asset_id,
                 chunk.chunk_index,
-                chunk.title,
+                chunk_title,
                 db_body,
-                chunk.modality,
-                chunk.locator,
+                chunk_modality,
+                chunk_locator,
                 chunk.token_estimate,
                 _json(_sanitize_operational_metadata(chunk_metadata)),
             ),
@@ -10654,7 +10658,7 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
             _embedding_result_for_text(
                 owner_table="asset_chunks",
                 owner_id=chunk_id,
-                text=f"{chunk.title}\n{chunk_body}",
+                text=f"{chunk_title}\n{chunk_body}",
             ),
         )
         inserted += 1
@@ -11740,19 +11744,25 @@ def _load_psycopg():
     return psycopg
 
 
+def _postgres_text_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return strip_postgres_nul(str(value))
+
+
 def _json(value: dict[str, Any]) -> str:
     import json
 
-    return json.dumps(value, sort_keys=True)
+    return json.dumps(sanitize_postgres_text_value(value), sort_keys=True)
 
 
 def _json_any(value: Any) -> str:
     import json
 
-    return json.dumps(value, sort_keys=True)
+    return json.dumps(sanitize_postgres_text_value(value), sort_keys=True)
 
 
 def _json_list(value: list[dict[str, Any]]) -> str:
     import json
 
-    return json.dumps(value, sort_keys=True)
+    return json.dumps(sanitize_postgres_text_value(value), sort_keys=True)

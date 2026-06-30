@@ -47,6 +47,18 @@ def test_extract_file_reads_text_chunks(tmp_path):
     assert result.metadata["extractor"] == "text"
 
 
+def test_extract_file_decodes_utf16_bom_without_nul_chunks(tmp_path):
+    path = tmp_path / "decision.txt"
+    path.write_bytes("# Decision\nPreserve Arabic نص and tabs\twithout NUL bytes.".encode("utf-16"))
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert "\x00" not in result.chunks[0].body
+    assert "Preserve Arabic نص" in result.chunks[0].body
+    assert "\t" in result.chunks[0].body
+
+
 def test_extract_file_treats_empty_text_as_completed_no_content(tmp_path):
     path = tmp_path / "body.txt"
     path.write_text("", encoding="utf-8")

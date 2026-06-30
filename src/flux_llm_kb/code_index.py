@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from .redaction import redact_text
+from .text_safety import read_text_with_bom
 
 
 @dataclass(frozen=True)
@@ -243,7 +244,7 @@ def parse_code_file(path: str | Path, *, root: str | Path | None = None) -> Code
     root_path = Path(root).resolve() if root is not None else file_path.parent.resolve()
     relative_path = _relative_path(file_path, root_path)
     language = language_for_path(file_path)
-    raw_text = file_path.read_text(encoding="utf-8", errors="replace")
+    raw_text = read_text_with_bom(file_path)
 
     if language == "python":
         return _parse_python(raw_text, relative_path=relative_path, language=language)

@@ -63,6 +63,7 @@ from .crawler import (
 )
 from .processes import run_no_window
 from .redaction import redact_text
+from .text_safety import decode_text_bytes, read_text_with_bom
 
 
 DIAGRAM_MAX_ZIP_MEMBERS = 200
@@ -293,7 +294,7 @@ def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str) -> Extrac
             },
         }
         return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
-    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    text = read_text_with_bom(path).strip()
     chunks = _chunks_from_text(text, path.name)
     metadata: dict[str, Any] = {"extractor": extractor}
     if not chunks and path.stat().st_size == 0:
@@ -400,7 +401,7 @@ def _extract_sample_first_jsonl(path: Path, *, source_format: str = "jsonl", sam
 
 def _extract_sample_first_json(path: Path, *, source_format: str = "json", sample_limit: int = 10) -> ExtractionResult:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        payload = json.loads(read_text_with_bom(path))
     except json.JSONDecodeError as exc:
         return ExtractionResult(
             status="blocked_missing_dependency",
@@ -700,7 +701,7 @@ def _extract_structured_data(path: Path, policy: CorpusPolicy) -> ExtractionResu
         if sample is not None:
             return sample
     if path.stat().st_size <= PRACTICAL_TEXT_LIMIT_BYTES:
-        chunks = _chunks_from_text(path.read_text(encoding="utf-8", errors="replace"), path.name)
+        chunks = _chunks_from_text(read_text_with_bom(path), path.name)
         return ExtractionResult(
             status="indexed" if chunks else "metadata_only",
             chunks=chunks,
@@ -1073,7 +1074,7 @@ def _extract_sensitive_metadata(path: Path) -> ExtractionResult:
 
 def _read_text_limited(path: Path, limit: int = PRACTICAL_TEXT_LIMIT_BYTES) -> str:
     data = _read_limited_file(path, limit)
-    return data.decode("utf-8", errors="replace")
+    return decode_text_bytes(data)
 
 
 def _clean_subtitle_line(line: str) -> str:
@@ -1104,7 +1105,7 @@ def _mail_messages(path: Path) -> list[Any]:
         messages = []
     if messages:
         return messages
-    return [_parse_email_message(raw) for raw in _split_mbox_messages(path.read_text(encoding="utf-8", errors="replace"))]
+    return [_parse_email_message(raw) for raw in _split_mbox_messages(read_text_with_bom(path))]
 
 
 def _split_mbox_messages(text: str) -> list[bytes]:
@@ -1390,7 +1391,7 @@ def _extract_calibre_publication(path: Path) -> ExtractionResult:
         if result.returncode != 0:
             message = result.stderr.strip() if isinstance(result.stderr, str) else str(result.stderr or "ebook-convert failed")
             return ExtractionResult(status="failed", metadata={**metadata, "attempted": ["ebook-convert"]}, message=message)
-        text = output_path.read_text(encoding="utf-8", errors="replace").strip() if output_path.exists() else ""
+        text = read_text_with_bom(output_path).strip() if output_path.exists() else ""
     chunks = _chunks_from_text(text, path.name)
     return ExtractionResult(
         status="indexed" if chunks else "metadata_only",
@@ -1774,7 +1775,7 @@ def _extract_with_libreoffice(path: Path) -> str | None:
             output_path = Path(temp_dir) / f"{path.stem}.txt"
             candidates = [output_path] if output_path.exists() else sorted(Path(temp_dir).glob("*.txt"))
             for candidate in candidates:
-                text = candidate.read_text(encoding="utf-8", errors="replace").strip()
+                text = read_text_with_bom(candidate).strip()
                 if text:
                     return text
     except Exception:
@@ -1825,7 +1826,7 @@ def _extract_with_wvtext(path: Path) -> str | None:
             )
             if result.returncode != 0 or not output_path.exists():
                 return None
-            return output_path.read_text(encoding="utf-8", errors="replace").strip() or None
+            return read_text_with_bom(output_path).strip() or None
     except Exception:
         return None
 
@@ -4528,7 +4529,7 @@ def _read_sidecar_transcript(path: Path) -> str | None:
     for suffix in (".txt", ".md", ".vtt", ".srt"):
         sidecar = path.with_suffix(path.suffix + suffix)
         if sidecar.exists():
-            return sidecar.read_text(encoding="utf-8", errors="replace").strip()
+            return read_text_with_bom(sidecar).strip()
     return None
 
 

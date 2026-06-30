@@ -21,6 +21,23 @@ def test_normalize_root_path_preserves_absolute_posix_container_path():
     )
 
 
+def test_json_helpers_strip_postgres_nul_from_nested_strings():
+    payload = database._json(
+        {
+            "clean": "Arabic نص\tkept",
+            "bad\x00key": "bad\x00value",
+            "nested": [{"item": "a\x00b"}],
+        }
+    )
+
+    assert "\x00" not in payload
+    assert json.loads(payload) == {
+        "clean": "Arabic نص\tkept",
+        "badkey": "badvalue",
+        "nested": [{"item": "ab"}],
+    }
+
+
 def test_update_monitored_root_blocks_existing_metadata_only_assets_when_strict(monkeypatch):
     executed = []
 
@@ -2665,10 +2682,19 @@ def test_update_corpus_job_progress_records_progress_heartbeat(monkeypatch):
 
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
 
-    database.update_corpus_job_progress(job_id="job-sync", telemetry={"stage": "hashing"})
+    database.update_corpus_job_progress(
+        job_id="job-sync",
+        telemetry={"stage": "hash\x00ing", "current_path": "a\x00/b.txt"},
+        last_error="bad\x00error",
+    )
 
     sql = "\n".join(statement for statement, _params in executed)
+    params = executed[0][1]
+    telemetry = json.loads(params[0])
     assert "progress_heartbeat_at = now()" in sql
+    assert telemetry["stage"] == "hashing"
+    assert telemetry["current_path"] == "a/b.txt"
+    assert params[1] == "baderror"
 
 
 def test_heartbeat_corpus_job_does_not_refresh_progress_heartbeat(monkeypatch):
@@ -2700,11 +2726,20 @@ def test_heartbeat_corpus_job_does_not_refresh_progress_heartbeat(monkeypatch):
 
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
 
-    database.heartbeat_corpus_job(job_id="job-sync", telemetry={"stage": "running"})
+    database.heartbeat_corpus_job(
+        job_id="job-sync",
+        telemetry={"stage": "run\x00ning", "current_path": "a\x00/b.txt"},
+        last_error="heartbeat\x00error",
+    )
 
     sql = "\n".join(statement for statement, _params in executed)
+    params = executed[0][1]
+    telemetry = json.loads(params[0])
     assert "updated_at = now()" in sql
     assert "progress_heartbeat_at" not in sql
+    assert telemetry["stage"] == "running"
+    assert telemetry["current_path"] == "a/b.txt"
+    assert params[1] == "heartbeaterror"
 
 
 def test_recover_stale_running_corpus_jobs_uses_progress_heartbeat_and_worker_liveness(monkeypatch):
@@ -3296,6 +3331,56 @@ def test_managed_mail_chunks_store_private_text_off_db(monkeypatch):
     assert metadata["sidecar_ref"]["storage"] == "disk_sidecar"
     assert metadata["sidecar_ref"]["sha256"] == "abc123"
     assert metadata["sidecar_ref"]["redacted_from_db"] is True
+
+
+def test_replace_asset_chunks_strips_postgres_nul_from_text_fields(monkeypatch):
+    executed = []
+    embedded_texts = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT a.path" in sql and "JOIN monitored_roots" in sql:
+                return None
+            if "INSERT INTO asset_chunks" in sql:
+                return ("chunk-1",)
+            return None
+
+    def fake_embedding_result(**kwargs):
+        embedded_texts.append(kwargs["text"])
+        return SimpleNamespace()
+
+    monkeypatch.setattr(database, "_embedding_result_for_text", fake_embedding_result)
+    monkeypatch.setattr(database, "_insert_embedding_result", lambda *_args, **_kwargs: None)
+
+    inserted = database._replace_asset_chunks(
+        FakeCursor(),
+        "asset-1",
+        (
+            AssetChunk(
+                chunk_index=0,
+                title="nul\x00title",
+                body="body\x00text\nArabic نص",
+                modality="te\x00xt",
+                locator="char:0\x00-9",
+                token_estimate=3,
+                metadata={"bad\x00key": "bad\x00value"},
+            ),
+        ),
+    )
+
+    insert_params = next(params for sql, params in executed if "INSERT INTO asset_chunks" in sql)
+    metadata = json.loads(insert_params[7])
+    assert inserted == 1
+    assert insert_params[2] == "nultitle"
+    assert insert_params[3] == "bodytext\nArabic نص"
+    assert insert_params[4] == "text"
+    assert insert_params[5] == "char:0-9"
+    assert metadata == {"badkey": "badvalue"}
+    assert embedded_texts == ["nultitle\nbodytext\nArabic نص"]
 
 
 def test_corpus_embedding_and_semantic_candidates_require_indexed_assets():

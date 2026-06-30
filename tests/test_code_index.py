@@ -3,6 +3,27 @@ import json
 from flux_llm_kb.code_index import parse_code_file
 
 
+def test_parse_code_file_decodes_utf16_bom_without_nul_chunks(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    path = root / "_references.js"
+    path.write_bytes(
+        "\n".join(
+            [
+                '/// <autosync enabled="true" />',
+                '/// <reference path="modernizr-2.6.2.js" />',
+                '/// <reference path="jquery-1.10.2.js" />',
+            ]
+        ).encode("utf-16")
+    )
+
+    result = parse_code_file(path, root=root)
+
+    bodies = "\n".join(chunk.body for chunk in result.chunks)
+    assert "\x00" not in bodies
+    assert "jquery-1.10.2.js" in bodies
+
+
 def test_parse_python_code_emits_semantic_chunks_symbols_and_references(tmp_path):
     root = tmp_path / "repo"
     src = root / "src"
