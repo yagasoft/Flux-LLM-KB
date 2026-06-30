@@ -34,36 +34,41 @@ The production layout is:
 
 - `D:\FluxLLMKB\app`: deployed compose files, app venv, host launchers, version metadata
 - `D:\FluxLLMKB\private`: local env, OAuth tokens, mail spool, and private config
-- `D:\FluxLLMKB\data`: PostgreSQL bind-mounted data on the D drive
-- `D:\FluxLLMKB\logs`: API, worker, host-agent, and Outlook-host logs
-- `D:\FluxLLMKB\models\ollama`: Docker Ollama model cache for local vision
-- `D:\FluxLLMKB\runtime`: process heartbeat/status files
-- `D:\FluxLLMKB\backups`: future local backup/export target
+- Docker named volumes: PostgreSQL data, container cache/data/runtime/logs, and
+  the Docker Ollama model cache
+- `D:\FluxLLMKB\data`: legacy PostgreSQL bind-mount rollback data after migration
+- `D:\FluxLLMKB\logs`: host-agent and Outlook-host logs
+- `D:\FluxLLMKB\models\ollama`: legacy Ollama model-cache rollback data after migration
+- `D:\FluxLLMKB\runtime`: host process heartbeat/status files
+- `D:\FluxLLMKB\backups`: local PostgreSQL dump/export target
 
 The repository remains source code only. Production Docker Compose uses prebuilt
-local image tags, not `build.context: .`, and it bind-mounts only the deployed
-private/data/log paths. API access remains local at
+local image tags, not `build.context: .`. Container-owned persistent state lives
+in Docker named volumes; Windows bind mounts are reserved for host-managed
+private config, mail spool, and Windows-only watched roots. API access remains local at
 `http://127.0.0.1:8765/dashboard`.
+
+The local Docker profile assumes a high-memory single-user workstation. Generated
+Compose files give PostgreSQL larger shared buffers, work memory, maintenance
+memory, WAL/checkpoint headroom, and a larger `/dev/shm` mount while keeping API,
+worker, Outlook host, and Ollama memory headroom. `status-flux.ps1` prints the
+Docker-visible memory limit and Postgres `/dev/shm` size so tuning decisions use
+the Linux VM/container limit, not only Windows host free RAM.
 
 When production GPU mode is available, the generated Compose deployment also
 starts a dedicated `ollama/ollama` service named `flux-ollama`. Flux API and
 worker containers call it through `http://ollama:11434`; Ollama is not baked into
 the Flux image and is not run inside the API or worker containers. Models persist
-under `D:\FluxLLMKB\models\ollama`, so recreate/update cycles do not re-download
-large model blobs. After a GPU deployment, install the configured vision model
-explicitly:
+in the `flux_llm_kb_ollama_models` Docker named volume, so image rebuilds and
+container recreation do not re-download large model blobs. After a GPU
+deployment, install the configured vision model explicitly:
 
 ```powershell
 docker exec flux-ollama ollama pull qwen3-vl:8b
 ```
 
 Production GPU mode defaults to `qwen3-vl:8b` and a 2-minute Ollama keepalive so
-VRAM is released shortly after Flux vision work goes idle. If a workload needs
-the larger model for an accuracy check, pull it explicitly:
-
-```powershell
-docker exec flux-ollama ollama pull qwen3-vl:32b
-```
+VRAM is released shortly after Flux vision work goes idle.
 
 Update an existing deployment from the current checkout with:
 

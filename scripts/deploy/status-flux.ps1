@@ -25,6 +25,30 @@ if (Test-Path $composePath) {
     Write-Host "Compose file not found."
 }
 
+Write-Host "Flux Docker storage"
+$dockerMemory = docker info --format "{{.MemTotal}}" 2>$null
+if ($LASTEXITCODE -eq 0 -and $dockerMemory) {
+    $dockerMemoryGiB = [math]::Round(([double]$dockerMemory / 1GB), 2)
+    Write-Host "Docker-visible memory: ${dockerMemoryGiB} GiB ($dockerMemory bytes)"
+} else {
+    Write-Host "Docker-visible memory: unavailable"
+}
+foreach ($container in @("flux-llm-kb-postgres", "flux-llm-kb-api", "flux-llm-kb-worker", "flux-ollama")) {
+    $mounts = docker inspect --format "{{json .Mounts}}" $container 2>$null
+    if ($LASTEXITCODE -eq 0 -and $mounts) {
+        Write-Host "${container} Mounts: $mounts"
+    } else {
+        Write-Host "${container} Mounts: unavailable"
+    }
+}
+$postgresMemory = docker exec flux-llm-kb-postgres sh -lc "awk '/MemTotal|MemAvailable/ {print}' /proc/meminfo; df -h /dev/shm" 2>$null
+if ($LASTEXITCODE -eq 0 -and $postgresMemory) {
+    Write-Host "flux-llm-kb-postgres memory and /dev/shm:"
+    $postgresMemory | ForEach-Object { Write-Host $_ }
+} else {
+    Write-Host "flux-llm-kb-postgres memory and /dev/shm: unavailable"
+}
+
 foreach ($task in @("FluxKB Host Agent", "FluxKB Outlook Host")) {
     $existing = Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
     if ($existing) {

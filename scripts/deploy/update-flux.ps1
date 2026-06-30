@@ -91,8 +91,7 @@ function Remove-FluxGpuComposeAccess {
         if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_ENABLED: `"true`"\s*$") { continue }
-        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen3-vl:8b\s*$") { continue }
-        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen3-vl:32b\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_VISION_MODEL:\s+.+\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_MAX_IMAGE_PIXELS: `"80000000`"\s*$") { continue }
         $line
     }
@@ -149,10 +148,12 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       FLUX_KB_API_HOST: 0.0.0.0
       FLUX_KB_API_PORT: "8765"
-      FLUX_KB_INSTALL_ROOT: /app
+      FLUX_KB_INSTALL_ROOT: /app/runtime
       FLUX_KB_APP_ROOT: /app
       FLUX_KB_PRIVATE_DIR: /app/private
+      FLUX_KB_DATA_DIR: /app/data
       FLUX_KB_LOG_DIR: /app/logs
+      FLUX_KB_CACHE_ROOT: /app/cache
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
@@ -165,7 +166,10 @@ services:
       - "127.0.0.1:${ApiPort}:8765"
     volumes:
       - ../private:/app/private
-      - ../logs:/app/logs
+      - flux_llm_kb_data:/app/data
+      - flux_llm_kb_cache:/app/cache
+      - flux_llm_kb_runtime:/app/runtime
+      - flux_llm_kb_logs:/app/logs
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m uvicorn flux_llm_kb.rest_api:create_app --factory --host 0.0.0.0 --port 8765"
@@ -185,10 +189,12 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
-      FLUX_KB_INSTALL_ROOT: /app
+      FLUX_KB_INSTALL_ROOT: /app/runtime
       FLUX_KB_APP_ROOT: /app
       FLUX_KB_PRIVATE_DIR: /app/private
+      FLUX_KB_DATA_DIR: /app/data
       FLUX_KB_LOG_DIR: /app/logs
+      FLUX_KB_CACHE_ROOT: /app/cache
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
@@ -199,7 +205,10 @@ services:
       FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
     volumes:
       - ../private:/app/private
-      - ../logs:/app/logs
+      - flux_llm_kb_data:/app/data
+      - flux_llm_kb_cache:/app/cache
+      - flux_llm_kb_runtime:/app/runtime
+      - flux_llm_kb_logs:/app/logs
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5 --limit 10"
@@ -215,7 +224,7 @@ services:
       OLLAMA_LOAD_TIMEOUT: 30m
       OLLAMA_KEEP_ALIVE: 2m
     volumes:
-      - ../models/ollama:/root/.ollama
+      - flux_llm_kb_ollama_models:/root/.ollama
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
@@ -227,15 +236,27 @@ services:
     image: pgvector/pgvector:pg16
     container_name: flux-llm-kb-postgres
     restart: unless-stopped
+    shm_size: "4gb"
     command: >
       postgres
-      -c shared_buffers=1GB
-      -c effective_cache_size=12GB
-      -c work_mem=32MB
-      -c maintenance_work_mem=512MB
+      -c shared_buffers=8GB
+      -c effective_cache_size=36GB
+      -c work_mem=64MB
+      -c maintenance_work_mem=2GB
+      -c autovacuum_work_mem=512MB
+      -c temp_buffers=64MB
       -c effective_io_concurrency=200
       -c random_page_cost=1.1
-      -c max_parallel_workers_per_gather=4
+      -c max_worker_processes=16
+      -c max_parallel_workers=12
+      -c max_parallel_workers_per_gather=6
+      -c max_parallel_maintenance_workers=4
+      -c track_io_timing=on
+      -c wal_compression=on
+      -c max_wal_size=8GB
+      -c min_wal_size=1GB
+      -c checkpoint_timeout=15min
+      -c checkpoint_completion_target=0.9
     environment:
       POSTGRES_USER: flux
       POSTGRES_PASSWORD: flux
@@ -243,12 +264,26 @@ services:
     ports:
       - "127.0.0.1:${PostgresPort}:5432"
     volumes:
-      - ../data/postgres:/var/lib/postgresql/data
+      - flux_llm_kb_postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U flux -d flux_llm_kb"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+volumes:
+  flux_llm_kb_postgres_data:
+    name: flux_llm_kb_postgres_data
+  flux_llm_kb_data:
+    name: flux_llm_kb_data
+  flux_llm_kb_cache:
+    name: flux_llm_kb_cache
+  flux_llm_kb_runtime:
+    name: flux_llm_kb_runtime
+  flux_llm_kb_logs:
+    name: flux_llm_kb_logs
+  flux_llm_kb_ollama_models:
+    name: flux_llm_kb_ollama_models
 "@
     if (-not $GpuEnabled) {
         $compose = Remove-FluxGpuComposeAccess -ComposeText $compose
@@ -610,6 +645,21 @@ function Resolve-FluxDockerBuildBase {
     return [pscustomobject]@{ Image = $pythonBase; SkipSystemPackages = $false }
 }
 
+function Invoke-FluxDashboardBuild {
+    param([string]$DashboardRoot)
+    $viteCmd = Join-Path $DashboardRoot "node_modules\.bin\vite.cmd"
+    if (-not (Test-Path -LiteralPath $viteCmd)) {
+        npm --prefix $DashboardRoot ci
+        if ($LASTEXITCODE -ne 0) {
+            throw "npm ci failed for dashboard dependencies with exit code $LASTEXITCODE"
+        }
+    }
+    npm --prefix $DashboardRoot run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm run build failed for dashboard with exit code $LASTEXITCODE"
+    }
+}
+
 function Get-FluxContainerStatus {
     param([string]$ContainerName)
     $status = docker inspect --format "{{.State.Status}}" $ContainerName 2>$null
@@ -725,7 +775,7 @@ try {
 }
 
 if (-not $SkipDashboardBuild) {
-    npm --prefix (Join-Path $SourceRoot "dashboard") run build
+    Invoke-FluxDashboardBuild -DashboardRoot (Join-Path $SourceRoot "dashboard")
 }
 
 $resolvedPython = Resolve-FluxPythonExe -InstallRoot $InstallRoot -RequestedPython $PythonExe
@@ -763,6 +813,7 @@ if (Test-Path $pluginSource) {
     Copy-Item -Path $pluginSource -Destination $pluginTarget -Recurse -Force
 }
 
+& (Join-Path $PSScriptRoot "migrate-postgres-to-docker-volume.ps1") -InstallRoot $InstallRoot -PostgresPort $PostgresPort
 Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
 Set-Content -Path $appEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag`n" -Encoding UTF8
 Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
@@ -819,5 +870,4 @@ foreach ($taskSpec in @(
 Write-Host "Flux production runtime updated at $InstallRoot to image tag $imageTag"
 if ($gpuEnabled) {
     Write-Host "Install the Docker Ollama vision model with: docker exec flux-ollama ollama pull qwen3-vl:8b"
-    Write-Host "Optional higher-accuracy model pull command: docker exec flux-ollama ollama pull qwen3-vl:32b"
 }

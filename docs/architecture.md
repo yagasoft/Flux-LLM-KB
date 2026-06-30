@@ -420,10 +420,18 @@ by file size and timeout, and must fall back cleanly when unavailable.
 
 Production deployments are intentionally not repo-coupled. The default Windows
 PC install root is `D:\FluxLLMKB`, with deployed app files under `app`, private
-runtime/config/spool data under `private`, PostgreSQL bind-mounted data under
-`data`, and logs under `logs`. Docker runs PostgreSQL/API/dashboard/worker from
-prebuilt local images and bind-mounts only deployed runtime paths. Host-agent and
-Outlook-host run as Windows Scheduled Tasks in the logged-in user session.
+runtime/config/spool data under `private`, host logs under `logs`, and backups
+under `backups`. Container-owned persistent state lives in Docker named volumes:
+PostgreSQL data, cache/data/runtime/logs, and the Docker Ollama model cache.
+Docker runs PostgreSQL/API/dashboard/worker from prebuilt local images and bind
+mounts only Windows-host-owned paths such as private config, mail spool, and
+host-accessed watched roots. Host-agent and Outlook-host run as Windows
+Scheduled Tasks in the logged-in user session. Production Compose uses a
+high-memory local PostgreSQL profile only when Docker Desktop exposes enough
+Linux VM memory: larger shared buffers, bounded `work_mem`, larger maintenance
+memory, WAL/checkpoint headroom, and an enlarged `/dev/shm`. Runtime status
+prints Docker-visible memory and Postgres shared-memory sizing so future changes
+are based on container-visible limits.
 
 The V2.8 acceleration status model is read-only. It detects CPU count, Windows
 memory when available, cache-root disk space, NVIDIA/CUDA through `nvidia-smi`,

@@ -53,6 +53,11 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "docker compose down" not in install
     assert "--volumes" not in install
     assert "docker volume rm" not in install
+    assert "Flux Docker storage" in status
+    assert "Mounts" in status
+    assert "Docker-visible memory" in status
+    assert "/dev/shm" in status
+    assert "flux-llm-kb-postgres" in status
     for protected_path in (
         "$InstallRoot",
         "$privateRoot",
@@ -123,7 +128,8 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "container_name: flux-ollama" in compose
         assert compose.count("OLLAMA_LOAD_TIMEOUT: 30m") == 1
         assert compose.count("OLLAMA_KEEP_ALIVE: 2m") == 1
-        assert "- ../models/ollama:/root/.ollama" in compose
+        assert "flux_llm_kb_ollama_models:/root/.ollama" in compose
+        assert "../models/ollama:/root/.ollama" not in compose
         assert 'test: ["CMD", "ollama", "list"]' in compose
         assert "ollama:" in compose
         assert "condition: service_healthy" in compose
@@ -145,20 +151,86 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
 
     for script in (install, update):
         assert "docker exec flux-ollama ollama pull qwen3-vl:8b" in script
-        assert "docker exec flux-ollama ollama pull qwen3-vl:32b" in script
-        assert script.find("docker exec flux-ollama ollama pull qwen3-vl:8b") < script.find(
-            "docker exec flux-ollama ollama pull qwen3-vl:32b"
-        )
+        assert "qwen3-vl:32b" not in script
 
 
 def test_production_compose_overrides_host_paths_inside_api_and_worker():
     for script_name in ("install-flux.ps1", "update-flux.ps1"):
         compose = _embedded_compose_template(_script(script_name))
 
-        assert compose.count("FLUX_KB_INSTALL_ROOT: /app") == 2
+        assert compose.count("FLUX_KB_INSTALL_ROOT: /app/runtime") == 2
+        assert compose.count("FLUX_KB_DATA_DIR: /app/data") == 2
+        assert compose.count("FLUX_KB_CACHE_ROOT: /app/cache") == 2
         assert compose.count("FLUX_KB_PRIVATE_DIR: /app/private") == 2
         assert compose.count("FLUX_KB_LOG_DIR: /app/logs") == 2
         assert "FLUX_KB_PRIVATE_DIR: D:\\FluxLLMKB\\private" not in compose
+
+
+def test_production_compose_uses_docker_volumes_for_container_owned_state():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        compose = _embedded_compose_template(_script(script_name))
+
+        assert "flux_llm_kb_postgres_data:/var/lib/postgresql/data" in compose
+        assert "../data/postgres:/var/lib/postgresql/data" not in compose
+        for volume_name, mount_path in (
+            ("flux_llm_kb_data", "/app/data"),
+            ("flux_llm_kb_cache", "/app/cache"),
+            ("flux_llm_kb_runtime", "/app/runtime"),
+            ("flux_llm_kb_logs", "/app/logs"),
+        ):
+            assert compose.count(f"{volume_name}:{mount_path}") == 2
+            assert f"  {volume_name}:" in compose
+            assert f"    name: {volume_name}" in compose
+        assert "  flux_llm_kb_postgres_data:" in compose
+        assert "    name: flux_llm_kb_postgres_data" in compose
+        assert "  flux_llm_kb_ollama_models:" in compose
+        assert "    name: flux_llm_kb_ollama_models" in compose
+        assert compose.count("../private:/app/private") == 2
+        assert "../logs:/app/logs" not in compose
+
+
+def test_production_deploy_migrates_legacy_postgres_bind_data_before_volume_compose():
+    migration_script = _script("migrate-postgres-to-docker-volume.ps1")
+
+    assert "flux_llm_kb_postgres_data" in migration_script
+    assert "data\\postgres" in migration_script
+    assert "PG_VERSION" in migration_script
+    assert "pg_dump" in migration_script
+    assert "pg_restore" in migration_script
+    assert "docker volume create" in migration_script
+    assert "Copy-FluxDirectoryToDockerVolume" in migration_script
+    assert "private\\cache" in migration_script
+    assert "models\\ollama" in migration_script
+    assert "flux_llm_kb_cache" in migration_script
+    assert "flux_llm_kb_runtime" in migration_script
+    assert "flux_llm_kb_logs" in migration_script
+    assert "flux_llm_kb_ollama_models" in migration_script
+    assert "docker compose down" not in migration_script
+    assert "--volumes" not in migration_script
+    assert "docker volume rm" not in migration_script
+
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+        assert "migrate-postgres-to-docker-volume.ps1" in script
+        assert script.find("migrate-postgres-to-docker-volume.ps1") < script.find("Write-FluxCompose -TargetPath")
+
+
+def test_container_state_migration_skips_transient_log_locks():
+    migration_script = _script("migrate-postgres-to-docker-volume.ps1")
+
+    assert 'Copy-FluxDirectoryToDockerVolume -SourcePath (Join-Path $InstallRoot "logs") -VolumeName "flux_llm_kb_logs" -CopyCommand' in migration_script
+    assert "--exclude='*.lock'" in migration_script
+    assert "tar -C /to -xf -" in migration_script
+
+
+def test_production_deploy_scripts_install_dashboard_dependencies_and_fail_on_build_errors():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+
+        assert "function Invoke-FluxDashboardBuild" in script
+        assert "npm --prefix $DashboardRoot ci" in script
+        assert 'throw "npm ci failed for dashboard dependencies with exit code $LASTEXITCODE"' in script
+        assert 'throw "npm run build failed for dashboard with exit code $LASTEXITCODE"' in script
 
 
 def test_production_env_gpu_settings_start_on_new_lines():
@@ -177,13 +249,27 @@ def test_postgres_compose_uses_performance_first_local_tuning():
     install_compose = _embedded_compose_template(_script("install-flux.ps1"))
 
     for compose in (dev_compose, install_compose):
-        assert "-c shared_buffers=1GB" in compose
-        assert "-c effective_cache_size=12GB" in compose
-        assert "-c work_mem=32MB" in compose
-        assert "-c maintenance_work_mem=512MB" in compose
+        assert "-c shared_buffers=8GB" in compose
+        assert "-c effective_cache_size=36GB" in compose
+        assert "-c work_mem=64MB" in compose
+        assert "-c maintenance_work_mem=2GB" in compose
+        assert "-c autovacuum_work_mem=512MB" in compose
+        assert "-c temp_buffers=64MB" in compose
+        assert "-c max_worker_processes=16" in compose
+        assert "-c max_parallel_workers=12" in compose
         assert "-c effective_io_concurrency=200" in compose
         assert "-c random_page_cost=1.1" in compose
-        assert "-c max_parallel_workers_per_gather=4" in compose
+        assert "-c max_parallel_workers_per_gather=6" in compose
+        assert "-c max_parallel_maintenance_workers=4" in compose
+        assert "-c track_io_timing=on" in compose
+        assert "-c wal_compression=on" in compose
+        assert "-c max_wal_size=8GB" in compose
+        assert "-c min_wal_size=1GB" in compose
+        assert "-c checkpoint_timeout=15min" in compose
+        assert "-c checkpoint_completion_target=0.9" in compose
+
+    for compose in (dev_compose, install_compose):
+        assert 'shm_size: "4gb"' in compose
 
 
 def test_dockerfile_installs_practical_extractor_pack():
@@ -321,6 +407,10 @@ def test_docs_describe_production_runtime_boundary():
 
     assert "D:\\FluxLLMKB" in setup
     assert "production" in setup.lower()
+    assert "docker named volumes" in setup.lower()
+    assert "postgresql bind-mounted data on the d drive" not in setup.lower()
+    assert "container-owned persistent state" in architecture.lower()
+    assert "postgresql bind-mounted data under" not in architecture.lower()
     assert "startup reconciliation" in architecture.lower()
     assert "periodic reconciliation" in architecture.lower()
     assert "repository remains source code only" in setup.lower()
