@@ -32,7 +32,7 @@
     "termsOfServiceURL": "https://github.com/yagasoft/Flux-LLM-KB/blob/main/LICENSE",
     "defaultPrompt": [
       "Use Flux LLM-KB to retrieve relevant project memory before starting non-trivial work",
-      "Use normal kb.brief/search for broad context; broad search/brief excludes code by default, so when broad lookup should return code pass filters={\"file_kinds\":[\"code\"]} with the query or use kb.code_search / kb.code_symbol_lookup",
+      "Use normal kb.brief/search for broad context; broad search/brief excludes code by default, so when broad lookup should return code pass filters={\"file_kinds\":[\"code\"]} as the only file kind or use kb.code_search / kb.code_symbol_lookup; use separate broad non-code and code-specific calls for mixed context",
       "Use Flux LLM-KB for concise redacted durable saves of reusable mid-turn outcomes when decisions, fixes, procedures, commands, or verified project facts should be retrievable before the turn ends",
       "Make final responses indexable for Flux LLM-KB by summarizing decisions, files changed or referenced, commands/tests run, and unresolved gaps without including secrets"
     ],

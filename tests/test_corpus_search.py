@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from flux_llm_kb import database
 from flux_llm_kb import service
 from flux_llm_kb.service import KnowledgeService
@@ -33,6 +35,65 @@ def test_normalize_retrieval_filters_canonicalizes_contract():
         "path_globs": ["src/*.py"],
         "include_generated": True,
     }
+
+
+def test_normalize_retrieval_filters_rejects_mixed_code_file_kinds():
+    with pytest.raises(ValueError, match="file_kinds.*code.*alone"):
+        service.normalize_retrieval_filters({"file_kinds": ["code", "text"]})
+
+
+def test_broad_surfaces_reject_mixed_code_file_kinds(monkeypatch):
+    def fail_search(*_args, **_kwargs):
+        raise AssertionError("mixed filters should fail before querying corpus")
+
+    monkeypatch.setattr(database, "search_episodes", fail_search)
+    monkeypatch.setattr(database, "search_corpus_chunks", fail_search)
+
+    service_api = KnowledgeService()
+    filters = {"file_kinds": ["code", "text"]}
+
+    with pytest.raises(ValueError, match="file_kinds.*code.*alone"):
+        service_api.search("prior parser context", filters=filters)
+    with pytest.raises(ValueError, match="file_kinds.*code.*alone"):
+        service_api.explain("prior parser context", filters=filters)
+    with pytest.raises(ValueError, match="file_kinds.*code.*alone"):
+        service_api.brief("prior parser context", filters=filters)
+
+
+def test_service_search_accepts_non_code_file_kind_filters(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, limit=20, root_name=None, filters=None, **_kwargs):
+        captured["filters"] = filters
+        return [
+            {
+                "id": "chunk-guide",
+                "asset_id": "asset-guide",
+                "title": "guide.md",
+                "summary": "Operators should read the guide.",
+                "score": 0.8,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.9},
+                "source_path": "docs/guide.md",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "text",
+            }
+        ]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    results = KnowledgeService().search(
+        "operator guide",
+        root_name="repo",
+        filters={"file_kinds": ["text", "document", "image"]},
+    )
+
+    assert [result["id"] for result in results] == ["chunk-guide"]
+    assert captured["filters"]["file_kinds"] == ["document", "image", "text"]
+    assert captured["filters"]["_exclude_file_kinds"] == ["code"]
 
 
 def test_service_search_includes_corpus_chunks(monkeypatch):

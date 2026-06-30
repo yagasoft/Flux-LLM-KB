@@ -314,9 +314,13 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "normal kb.brief/search for broad context" in skill
     assert "kb.code_search" in skill
     assert 'filters={"file_kinds":["code"]}' in skill
+    assert "as the only file kind" in skill
+    assert "mixed code plus non-code file kinds are rejected" in skill
     assert "Broad `kb.search`, `kb.brief`, and `kb.explain` exclude code results by default" in skill
     assert "kb.code_search" in prompts
     assert 'filters={"file_kinds":["code"]}' in prompts
+    assert "as the only file kind" in prompts
+    assert "separate broad non-code and code-specific calls" in prompts
     assert "broad search/brief excludes code" in prompts
     assert "code-heavy results" not in prompts
     assert "mcp__flux_llm_kb.kb_remember" in skill

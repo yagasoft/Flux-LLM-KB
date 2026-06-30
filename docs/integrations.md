@@ -195,8 +195,10 @@ settings: `logical_kinds` (`episode`, `file`, `mail`), `current_only`,
 `lifecycle_states`, `include_suppressed`, and code filters. Broad search,
 explain, and brief exclude `file_kind=code` results by default; callers that
 want code from these broad surfaces must pass `file_kind=code` /
-`filters={"file_kinds":["code"]}` with the query, or use dedicated code
-search/symbol lookup surfaces. REST POST bodies use a `filters` object; REST GET
+`filters={"file_kinds":["code"]}` as the only requested file kind, or use
+dedicated code search/symbol lookup surfaces. Mixed code plus non-code file-kind
+filters are rejected; make separate broad non-code and code-specific calls when
+both contexts are needed. REST POST bodies use a `filters` object; REST GET
 accepts `kind`, `current_only`, `lifecycle_state`, `include_suppressed`, and
 `file_kind=code` query parameters; MCP tools accept an optional `filters` object;
 CLI search/explain use `--kind`, `--current-only`, `--lifecycle-state`,

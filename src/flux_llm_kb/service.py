@@ -3799,10 +3799,19 @@ def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[s
         "relationships": _normalize_filter_values(filters.get("relationships") or filters.get("relationship")),
         "path_globs": _normalize_filter_values(filters.get("path_globs") or filters.get("path_glob")),
     }
+    _validate_code_file_kind_filter(code_filters["file_kinds"])
     normalized.update({key: value for key, value in code_filters.items() if value})
     if "include_generated" in filters:
         normalized["include_generated"] = bool(filters.get("include_generated"))
     return normalized
+
+
+def _validate_code_file_kind_filter(file_kinds: list[str]) -> None:
+    if CODE_FILE_KIND in file_kinds and len(file_kinds) > 1:
+        raise ValueError(
+            'file_kinds must request code alone; use filters={"file_kinds":["code"]} '
+            "or run separate broad non-code and dedicated code lookups."
+        )
 
 
 def _effective_retrieval_filters(filters: dict[str, Any] | None) -> dict[str, Any]:

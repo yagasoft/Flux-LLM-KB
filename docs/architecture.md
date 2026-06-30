@@ -502,7 +502,9 @@ surfaces reuse the stored symbol/reference tables and sanitize path output.
 Code and generic corpus search filters accept `relationship`, `path_glob`, and
 `include_generated`; broad search, explain, and brief exclude code by default,
 so callers must include `file_kind=code` / `filters={"file_kinds":["code"]}`
-with the query before those broad surfaces return code results. Generated files
+as the only requested file kind before those broad surfaces return code results.
+Mixed code plus non-code file-kind filters are rejected; use separate broad
+non-code and code-specific calls when both contexts are needed. Generated files
 are excluded when `include_generated=false` is part of the active filter set.
 Sanitized code results can include `is_generated`, `relationship`, `target_symbol`,
 `source_symbol`, `route`, `test_target`, `parser_status`, `language`,
