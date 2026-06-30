@@ -3400,9 +3400,9 @@ def _extract_image(path: Path) -> ExtractionResult:
     if vision.status != "disabled":
         metadata["vision"] = vision.metadata
         metadata["vision_escalation"] = _vision_escalation_status(vision)
-    chunks = tuple(
-        list(_chunks_from_text(ocr.text, path.name, modality="ocr"))
-        + list(_chunks_from_text(vision.text, path.name, modality="vision"))
+    chunks = _reindexed_chunks(
+        _chunks_from_text(ocr.text, path.name, modality="ocr"),
+        _chunks_from_text(vision.text, path.name, modality="vision"),
     )
     if chunks:
         return ExtractionResult(status="indexed", chunks=chunks, metadata=metadata)
@@ -3493,7 +3493,7 @@ def _extract_media(path: Path, file_kind: str, *, embedded_sidecar: tuple[str, s
             metadata["vision"] = vision_summary
     asr = _asr_media(path, probed)
     metadata["asr"] = asr.metadata
-    chunks = tuple(list(_chunks_from_text(asr.text, path.name, modality="transcript")) + list(frame_chunks))
+    chunks = _reindexed_chunks(_chunks_from_text(asr.text, path.name, modality="transcript"), frame_chunks)
     if chunks:
         return ExtractionResult(status="indexed", chunks=chunks, metadata=metadata, message=asr.message or frame_sampling.message if frame_sampling else asr.message)
     if asr.status == "blocked_missing_dependency":
@@ -3790,7 +3790,7 @@ def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingRes
     }
     if vision_summary["status"] != "disabled":
         final_metadata["vision"] = vision_summary
-    return FrameSamplingResult(status="completed", chunks=tuple(chunks), metadata=final_metadata)
+    return FrameSamplingResult(status="completed", chunks=_reindexed_chunks(chunks), metadata=final_metadata)
 
 
 def _frame_sampling_settings() -> dict[str, Any]:
@@ -4014,6 +4014,14 @@ def _chunks_from_text(text: str, title: str, *, modality: str = "text") -> tuple
                     token_estimate=max(1, len(body.split())),
                 )
             )
+    return tuple(chunks)
+
+
+def _reindexed_chunks(*groups: Iterable[AssetChunk]) -> tuple[AssetChunk, ...]:
+    chunks: list[AssetChunk] = []
+    for group in groups:
+        for chunk in group:
+            chunks.append(replace(chunk, chunk_index=len(chunks)))
     return tuple(chunks)
 
 

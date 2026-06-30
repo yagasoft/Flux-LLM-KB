@@ -664,6 +664,55 @@ def test_claim_corpus_jobs_limits_each_family_to_remaining_capacity(monkeypatch)
     assert "GREATEST(0, family_cap - running_count)" in sql
 
 
+def test_claim_corpus_jobs_orders_family_cap_filter_params(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.claim_corpus_jobs(
+        limit=5,
+        worker_id="worker-a",
+        root_name="docs",
+        job_families=["image"],
+        family_caps={"image": 2},
+    )
+
+    sql, params = executed[0]
+    assert "WITH family_caps AS" in sql
+    assert json.loads(params[0]) == {"image": 2}
+    assert params[1] == ["image"]
+    assert params[2] == "docs"
+    assert params[3] == "worker-a"
+    assert params[4] == 5
+
+
 def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)

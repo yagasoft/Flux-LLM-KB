@@ -875,6 +875,34 @@ def test_extract_image_sends_configured_local_inference_keep_alive(monkeypatch, 
     assert result.metadata["vision"]["status"] == "completed"
 
 
+def test_extract_image_reindexes_combined_ocr_and_vision_chunks(monkeypatch, tmp_path):
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/tesseract.exe"
+        return SimpleNamespace(returncode=0, stdout="OCR text", stderr="")
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"response":"Vision text"}'
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", lambda *_args, **_kwargs: FakeResponse(), raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert [chunk.chunk_index for chunk in result.chunks] == [0, 1]
+    assert [chunk.modality for chunk in result.chunks] == ["ocr", "vision"]
+    assert [chunk.body for chunk in result.chunks] == ["OCR text", "Vision text"]
+
+
 def test_extract_image_uses_local_vision_after_empty_ocr_via_docker_host_gateway(monkeypatch, tmp_path):
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)
@@ -1117,6 +1145,60 @@ def test_extract_video_samples_transition_frames_and_reuses_thumbnail_cache(monk
     assert second.metadata["frame_sampling"]["thumbnail_cache_hits"] == 2
     assert second.metadata["frame_sampling"]["thumbnail_cache_misses"] == 0
     assert calls == ["ffprobe", "scene"]
+
+
+def test_extract_video_reindexes_transcript_and_frame_vision_chunks(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_frame_sampling(monkeypatch, tmp_path, count=2, threshold=0.35)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._asr_media",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status="completed",
+            text="Transcript text",
+            metadata={"status": "completed"},
+            message=None,
+        ),
+    )
+
+    def fake_run(command, **_kwargs):
+        joined = " ".join(str(part) for part in command)
+        if command[0].endswith("ffprobe.exe"):
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=60), stderr="")
+        if "select='gt(scene,0.35)'" in joined:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="",
+                stderr=(
+                    "frame:1 pts_time:10.0\n"
+                    "lavfi.scene_score=0.95\n"
+                    "frame:2 pts_time:20.0\n"
+                    "lavfi.scene_score=0.90\n"
+                ),
+            )
+        if "-frames:v" in command:
+            Path(command[-1]).write_bytes(PNG_BYTES)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    def fake_vision(_path, *, source_label):
+        return SimpleNamespace(
+            status="completed",
+            text=f"Vision text for {source_label}",
+            metadata={"status": "completed", "cache_hits": 0, "cache_misses": 1, "descriptions": 1},
+            message=None,
+        )
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._vision_image", fake_vision)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert [chunk.chunk_index for chunk in result.chunks] == [0, 1, 2]
+    assert [chunk.modality for chunk in result.chunks] == ["transcript", "vision", "vision"]
+    assert result.chunks[0].body == "Transcript text"
 
 
 def test_extract_video_uses_midpoint_frame_when_no_transition_is_detected(monkeypatch, tmp_path):

@@ -3447,11 +3447,17 @@ def claim_corpus_jobs(
     params_list: list[Any] = []
     if family_caps:
         params_list.append(_json({key: max(0, int(value)) for key, value in sorted(family_caps.items())}))
-    params_list.append(worker_id)
-    if job_families:
-        params_list.append(list(job_families))
-    if root_name:
-        params_list.append(root_name)
+        if job_families:
+            params_list.append(list(job_families))
+        if root_name:
+            params_list.append(root_name)
+        params_list.append(worker_id)
+    else:
+        params_list.append(worker_id)
+        if job_families:
+            params_list.append(list(job_families))
+        if root_name:
+            params_list.append(root_name)
     params_list.append(max(1, min(limit, 100)))
     params = tuple(params_list)
     with psycopg.connect(url or database_url()) as conn:
