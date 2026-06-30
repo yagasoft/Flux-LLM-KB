@@ -213,7 +213,7 @@ services:
       - flux_llm_kb_logs:/app/logs
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
-             python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5 --limit 10"
+             python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5"
 
   ollama:
     image: ollama/ollama:latest

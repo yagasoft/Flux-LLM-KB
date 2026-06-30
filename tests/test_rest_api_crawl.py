@@ -896,6 +896,22 @@ def test_crawl_backfill_endpoint_runs_worker_once(monkeypatch):
     assert data_response.json()["backfill"] == {"kind": "data", "limit": 5, "workers": 1}
 
 
+def test_crawl_backfill_endpoint_omits_default_parallelism_knobs(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    class FakeService:
+        def run_corpus_backfill(self, **kwargs):
+            return {"backfill": kwargs}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post("/api/crawl/backfill", json={"kind": "text"})
+
+    assert response.status_code == 200
+    assert response.json()["backfill"] == {"kind": "text", "limit": None, "workers": None}
+
+
 def test_dashboard_job_cancel_endpoint_reports_running_job_conflict(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

@@ -73,6 +73,18 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "operator.automation.auto_remediate_diagnostics" in keys
     assert "operator.automation.auto_refresh_embeddings" in keys
     assert "operator.automation.auto_run_governance_shadow" in keys
+    assert "worker.default_workers" in keys
+
+
+def test_worker_default_workers_uses_environment_override(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_WORKER_DEFAULT_WORKERS", "12")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+
+    resolved = SettingsService().resolve("worker.default_workers")
+
+    assert resolved.value == 12
+    assert resolved.raw_value == 12
+    assert resolved.source == "env"
 
 
 def test_crawler_global_excludes_skip_dedicated_worktrees(monkeypatch):

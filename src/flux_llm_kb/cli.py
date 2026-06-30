@@ -330,8 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=crawl_kind_choices,
         default="all",
     )
-    crawl_backfill.add_argument("--limit", type=int, default=10)
-    crawl_backfill.add_argument("--workers", type=int, default=1)
+    crawl_backfill.add_argument("--limit", type=int)
+    crawl_backfill.add_argument("--workers", type=int)
     crawl_backfill.add_argument("--root", dest="root_name")
     crawl_backfill.add_argument("--family", choices=JOB_FAMILIES)
 
@@ -343,8 +343,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=crawl_kind_choices,
         default="all",
     )
-    crawl_worker_run.add_argument("--limit", type=int, default=10)
-    crawl_worker_run.add_argument("--workers", type=int, default=1)
+    crawl_worker_run.add_argument("--limit", type=int)
+    crawl_worker_run.add_argument("--workers", type=int)
     crawl_worker_run.add_argument("--interval", type=float, default=5.0)
     crawl_worker_run.add_argument("--once", action="store_true")
     crawl_worker_run.add_argument("--host-agent-roots", action="store_true", help="Process only host-agent owned roots")

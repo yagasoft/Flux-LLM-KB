@@ -1413,6 +1413,50 @@ def test_backfill_passes_configured_worker_family_caps(monkeypatch):
     assert claim_calls[0]["family_caps"]["media"] == 3
 
 
+def test_backfill_uses_configured_batch_and_worker_defaults(monkeypatch):
+    claim_calls = []
+    process_calls = []
+    monkeypatch.setenv("FLUX_KB_WORKER_BATCH_SIZE", "24")
+    monkeypatch.setenv("FLUX_KB_WORKER_DEFAULT_WORKERS", "8")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+
+    def fake_claim_corpus_jobs(*, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None):
+        claim_calls.append({"limit": limit, "worker_id": worker_id})
+        return []
+
+    monkeypatch.setattr(database, "claim_corpus_jobs", fake_claim_corpus_jobs)
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **_kwargs: {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **_kwargs: {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+    monkeypatch.setattr(KnowledgeService, "_process_claimed_corpus_jobs", lambda self, claimed, *, workers: process_calls.append(workers) or [])
+
+    result = KnowledgeService().run_corpus_backfill(kind="all", limit=None, workers=None)
+
+    assert result["claimed"] == 0
+    assert claim_calls[0]["limit"] == 24
+    assert process_calls == [8]
+
+
+def test_backfill_preserves_explicit_serial_worker_values(monkeypatch):
+    claim_calls = []
+    process_calls = []
+    monkeypatch.setenv("FLUX_KB_WORKER_BATCH_SIZE", "24")
+    monkeypatch.setenv("FLUX_KB_WORKER_DEFAULT_WORKERS", "8")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "claim_corpus_jobs", lambda **kwargs: claim_calls.append(kwargs) or [])
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **_kwargs: {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **_kwargs: {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+    monkeypatch.setattr(KnowledgeService, "_process_claimed_corpus_jobs", lambda self, claimed, *, workers: process_calls.append(workers) or [])
+
+    KnowledgeService().run_corpus_backfill(kind="all", limit=3, workers=1)
+
+    assert claim_calls[0]["limit"] == 3
+    assert process_calls == [1]
+
+
 def test_backfill_accepts_exact_worker_family(monkeypatch):
     claim_calls = []
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)

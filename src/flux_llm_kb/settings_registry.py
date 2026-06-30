@@ -1073,6 +1073,16 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         validator=_min_int(1),
     ),
     SettingDefinition(
+        key="worker.default_workers",
+        category="worker",
+        default=8,
+        value_type="int",
+        description="Default corpus job processing threads when a worker command omits --workers.",
+        env_var="FLUX_KB_WORKER_DEFAULT_WORKERS",
+        affected_components=("worker", "host-agent", "dashboard"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
         key="worker.retry_cooldown_seconds",
         category="worker",
         default=300,

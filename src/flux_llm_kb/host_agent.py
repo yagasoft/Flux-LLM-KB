@@ -44,8 +44,8 @@ class SyncRequest(BaseModel):
 
 class BackfillRequest(BaseModel):
     kind: str = "all"
-    limit: int = 10
-    workers: int = 1
+    limit: int | None = None
+    workers: int | None = None
     root_name: str | None = None
     family: str | None = None
 
@@ -320,7 +320,7 @@ class HostAgentWorkerLoop:
         root_name: str | None = None,
         interval_seconds: float = 5.0,
         limit: int | None = None,
-        workers: int = 1,
+        workers: int | None = None,
         service_factory=None,
     ) -> None:
         self.root_name = root_name
@@ -594,8 +594,8 @@ def remote_sync(
 def remote_backfill(
     *,
     kind: str = "all",
-    limit: int = 10,
-    workers: int = 1,
+    limit: int | None = None,
+    workers: int | None = None,
     root_name: str | None = None,
     family: str | None = None,
     agent_url: str | None = None,

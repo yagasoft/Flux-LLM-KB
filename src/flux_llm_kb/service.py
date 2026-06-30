@@ -3173,21 +3173,23 @@ class KnowledgeService:
         self,
         *,
         kind: str = "all",
-        limit: int = 10,
-        workers: int = 1,
+        limit: int | None = None,
+        workers: int | None = None,
         root_name: str | None = None,
         host_agent_roots: bool | None = None,
         family: str | None = None,
         worker_id: str | None = None,
     ) -> dict[str, Any]:
-        effective_worker_id = worker_id or _new_worker_instance_id(f"flux-kb-backfill-{workers}")
+        effective_limit = _resolved_worker_batch_size(limit)
+        effective_workers = _resolved_worker_count(workers)
+        effective_worker_id = worker_id or _new_worker_instance_id(f"flux-kb-backfill-{effective_workers}")
         _record_worker_instance_heartbeat(
             worker_id=effective_worker_id,
-            parent_component=None if worker_id else f"flux-kb-backfill-{workers}",
+            parent_component=None if worker_id else f"flux-kb-backfill-{effective_workers}",
             metadata={
                 "kind": family or kind,
-                "limit": limit,
-                "workers": workers,
+                "limit": effective_limit,
+                "workers": effective_workers,
                 "root_name": root_name,
                 "host_agent_roots": host_agent_roots,
             },
@@ -3201,7 +3203,7 @@ class KnowledgeService:
         effective_kind = family or kind
         job_families = kind_to_job_families(effective_kind)
         claim_kwargs: dict[str, Any] = {
-            "limit": limit,
+            "limit": effective_limit,
             "worker_id": effective_worker_id,
             "root_name": root_name,
         }
@@ -3217,7 +3219,7 @@ class KnowledgeService:
         failed = 0
         cancelled_orphaned = 0
         cancelled_missing_source = 0
-        for job, duration_ms, process_result in self._process_claimed_corpus_jobs(claimed, workers=workers):
+        for job, duration_ms, process_result in self._process_claimed_corpus_jobs(claimed, workers=effective_workers):
             telemetry = {
                 "job_family": job.get("job_family"),
                 "resource_class": job.get("resource_class"),
@@ -3323,7 +3325,7 @@ class KnowledgeService:
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
                 "cleared_completed_errors": cleared_errors["cleared"],
-                "workers": workers,
+                "workers": effective_workers,
             },
         )
         return {
@@ -3666,8 +3668,8 @@ class KnowledgeService:
         self,
         *,
         kind: str = "all",
-        limit: int = 10,
-        workers: int = 1,
+        limit: int | None = None,
+        workers: int | None = None,
         interval_seconds: float = 5.0,
         once: bool = False,
         root_name: str | None = None,
@@ -3690,13 +3692,15 @@ class KnowledgeService:
                 mail_orphan_recovery = {"status": "failed", "error": str(exc), "worker_id": component_name}
         while True:
             runs += 1
+            effective_limit = _resolved_worker_batch_size(limit)
+            effective_workers = _resolved_worker_count(workers)
             _record_worker_instance_heartbeat(
                 worker_id=worker_id,
                 parent_component=component_name,
                 metadata={
                     "kind": kind,
-                    "limit": limit,
-                    "workers": workers,
+                    "limit": effective_limit,
+                    "workers": effective_workers,
                     "root_name": root_name,
                     "host_agent_roots": host_agent_roots,
                     "runs": runs,
@@ -3708,8 +3712,8 @@ class KnowledgeService:
                 status="running",
                 metadata={
                     "kind": kind,
-                    "limit": limit,
-                    "workers": workers,
+                    "limit": effective_limit,
+                    "workers": effective_workers,
                     "root_name": root_name,
                     "host_agent_roots": host_agent_roots,
                     "runs": runs,
@@ -3717,8 +3721,8 @@ class KnowledgeService:
             )
             last_result = self.run_corpus_backfill(
                 kind=kind,
-                limit=limit,
-                workers=workers,
+                limit=effective_limit,
+                workers=effective_workers,
                 root_name=root_name,
                 host_agent_roots=host_agent_roots,
                 worker_id=worker_id,
@@ -3730,7 +3734,7 @@ class KnowledgeService:
                 try:
                     from . import mail_ingestion
 
-                    last_result["mail_sync"] = mail_ingestion.sync_due_mail_profiles(limit=limit, worker_id=component_name)
+                    last_result["mail_sync"] = mail_ingestion.sync_due_mail_profiles(limit=effective_limit, worker_id=component_name)
                 except Exception as exc:
                     last_result["mail_sync"] = {"status": "failed", "error": str(exc)}
             automation_policy = operator_automation.normalized_policy(_operator_automation_policy_from_settings())
@@ -3774,8 +3778,8 @@ class KnowledgeService:
                     "once": True,
                     "worker_id": worker_id,
                     "kind": kind,
-                    "limit": limit,
-                    "workers": workers,
+                    "limit": effective_limit,
+                    "workers": effective_workers,
                     "interval_seconds": interval_seconds,
                     "root_name": root_name,
                     "host_agent_roots": host_agent_roots,
@@ -5079,6 +5083,30 @@ def _configured_worker_caps() -> dict[str, int]:
         except Exception:
             caps[family] = int(default)
     return caps
+
+
+def _configured_worker_batch_size() -> int:
+    try:
+        return int(SettingsService().resolve("worker.batch_size").raw_value)
+    except Exception:
+        return 24
+
+
+def _configured_default_workers() -> int:
+    try:
+        return int(SettingsService().resolve("worker.default_workers").raw_value)
+    except Exception:
+        return 8
+
+
+def _resolved_worker_batch_size(limit: int | None) -> int:
+    value = _configured_worker_batch_size() if limit is None else limit
+    return max(1, int(value))
+
+
+def _resolved_worker_count(workers: int | None) -> int:
+    value = _configured_default_workers() if workers is None else workers
+    return max(1, int(value))
 
 
 def _new_worker_instance_id(component_name: str) -> str:

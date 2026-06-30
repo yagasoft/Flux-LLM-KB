@@ -194,7 +194,7 @@ def create_server():
         return service.worker_status(family=family)
 
     @mcp.tool(name="kb.crawl_backfill")
-    def crawl_backfill(kind: str = "all", limit: int = 10, workers: int = 1, root_name: str | None = None, family: str | None = None):
+    def crawl_backfill(kind: str = "all", limit: int | None = None, workers: int | None = None, root_name: str | None = None, family: str | None = None):
         """Run a bounded corpus backfill by kind or exact worker family, optionally scoped to a root."""
         return service.run_corpus_backfill(
             kind=family or kind,

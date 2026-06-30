@@ -310,6 +310,17 @@ def test_postgres_compose_uses_performance_first_local_tuning():
         assert 'shm_size: "4gb"' in compose
 
 
+def test_worker_compose_commands_use_settings_driven_parallelism_defaults():
+    dev_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    install_compose = _embedded_compose_template(_script("install-flux.ps1"))
+    update_compose = _embedded_compose_template(_script("update-flux.ps1"))
+
+    for compose in (dev_compose, install_compose, update_compose):
+        assert "python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5" in compose
+        assert "--limit 10" not in compose
+        assert "--workers 1" not in compose
+
+
 def test_dockerfile_installs_practical_extractor_pack():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

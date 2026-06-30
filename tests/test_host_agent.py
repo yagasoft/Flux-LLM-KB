@@ -68,6 +68,31 @@ def test_host_agent_backfill_endpoint_routes_to_service(monkeypatch):
 @pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
 )
+def test_host_agent_backfill_endpoint_omits_default_parallelism_knobs(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    class FakeService:
+        def run_corpus_backfill(self, **kwargs):
+            return {"backfill": kwargs}
+
+    monkeypatch.setattr("flux_llm_kb.service.KnowledgeService", lambda: FakeService())
+
+    client = TestClient(host_agent.create_app())
+
+    response = client.post("/crawl/backfill", json={"kind": "all", "root_name": "watch-test"})
+
+    assert response.status_code == 200
+    assert response.json()["backfill"] == {
+        "kind": "all",
+        "limit": None,
+        "workers": None,
+        "root_name": "watch-test",
+    }
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
 def test_host_agent_benchmark_endpoint_routes_to_service(monkeypatch):
     from fastapi.testclient import TestClient
 

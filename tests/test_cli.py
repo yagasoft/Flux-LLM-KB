@@ -468,7 +468,7 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
     assert feedback_summary_payload["rows"][0]["miss_category"] == "missing_symbol"
     assert diagnostics_payload["settings_mutated"] is False
     assert remediation_payload["action"] == "retry_corpus_job"
-    assert backfill_payload["backfill"] == {"kind": "office", "limit": 4, "workers": 1, "root_name": "app"}
+    assert backfill_payload["backfill"] == {"kind": "office", "limit": 4, "workers": None, "root_name": "app"}
     assert calls == [
         ("code_status", {"root_name": "app"}),
         (
@@ -523,7 +523,7 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
                 "actor": "cli",
             },
         ),
-        ("crawl_backfill", {"kind": "office", "limit": 4, "workers": 1, "root_name": "app"}),
+        ("crawl_backfill", {"kind": "office", "limit": 4, "workers": None, "root_name": "app"}),
     ]
 
 
@@ -982,6 +982,22 @@ def test_cli_crawl_worker_run_once_invokes_backfill_loop(monkeypatch, capsys):
     assert payload["worker"]["limit"] == 2
 
 
+def test_cli_crawl_worker_run_omits_default_parallelism_knobs(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    class FakeService:
+        def run_corpus_worker(self, **kwargs):
+            return {"worker": kwargs}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["crawl", "worker", "run", "--once"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["worker"]["limit"] is None
+    assert payload["worker"]["workers"] is None
+
+
 def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, capsys):
     from flux_llm_kb import service
 
@@ -1000,16 +1016,16 @@ def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, cap
 
     assert cli.main(["crawl", "backfill", "--kind", "diagrams", "--limit", "3"]) == 0
     backfill_payload = json.loads(capsys.readouterr().out)
-    assert backfill_payload["backfill"] == {"kind": "diagrams", "limit": 3, "workers": 1}
+    assert backfill_payload["backfill"] == {"kind": "diagrams", "limit": 3, "workers": None}
     assert calls["backfill"]["kind"] == "diagrams"
 
     assert cli.main(["crawl", "backfill", "--kind", "archives", "--limit", "5"]) == 0
     archive_payload = json.loads(capsys.readouterr().out)
-    assert archive_payload["backfill"] == {"kind": "archives", "limit": 5, "workers": 1}
+    assert archive_payload["backfill"] == {"kind": "archives", "limit": 5, "workers": None}
 
     assert cli.main(["crawl", "backfill", "--kind", "data", "--limit", "6"]) == 0
     data_payload = json.loads(capsys.readouterr().out)
-    assert data_payload["backfill"] == {"kind": "data", "limit": 6, "workers": 1}
+    assert data_payload["backfill"] == {"kind": "data", "limit": 6, "workers": None}
 
     assert cli.main(["crawl", "worker", "run", "--once", "--kind", "containers", "--limit", "4"]) == 0
     worker_payload = json.loads(capsys.readouterr().out)

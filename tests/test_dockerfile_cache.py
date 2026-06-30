@@ -62,6 +62,7 @@ def test_docker_compose_defines_corpus_worker_service() -> None:
 
     assert "  worker:" in compose
     assert "python -m flux_llm_kb.cli crawl worker run" in compose
+    assert "--limit 10" not in compose
     assert "FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb" in compose
 
 

@@ -240,8 +240,8 @@ def create_app():
 
     class CrawlBackfillRequest(BaseModel):
         kind: str = "all"
-        limit: int = 10
-        workers: int = 1
+        limit: int | None = None
+        workers: int | None = None
         root_name: str | None = None
         family: str | None = None
 
@@ -1632,8 +1632,8 @@ def host_agent_sync(*, root_name: str | None = None, path: str | None = None, dr
 def host_agent_backfill(
     *,
     kind: str = "all",
-    limit: int = 10,
-    workers: int = 1,
+    limit: int | None = None,
+    workers: int | None = None,
     root_name: str | None = None,
     family: str | None = None,
 ) -> dict:

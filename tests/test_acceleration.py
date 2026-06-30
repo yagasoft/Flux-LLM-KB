@@ -33,6 +33,7 @@ def test_aggressive_local_worker_defaults_match_settings_registry():
         assert get_definition(f"acceleration.worker_cap.{family}").default == cap
     assert get_definition("crawler.hash_parallelism").default == 8
     assert get_definition("worker.batch_size").default >= 24
+    assert get_definition("worker.default_workers").default == 8
 
 
 def test_cache_layout_defaults_under_install_root(tmp_path, monkeypatch):
