@@ -2380,8 +2380,245 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert "last_error = NULL" in sql
     assert "locked_at = NULL" in sql
     assert "jsonb_build_object('remediation_reason', %s::text)" in sql
-    assert "status IN ('failed', 'blocked_missing_dependency', 'blocked_locked', 'retrying_locked')" in sql
+    assert "status = 'failed'" in sql
+    assert "status LIKE 'blocked_%%'" in sql
+    assert "status = 'retrying_locked'" in sql
+    assert "status LIKE 'cancelled_%%'" in sql
     assert executed[0][1] == ("operator retry", "job-1")
+
+
+def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 25, 12, 30, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "job-1",
+                    "corpus_extract_pdf",
+                    "office",
+                    "cpu",
+                    70,
+                    300,
+                    "failed",
+                    {"root_name": "docs", "path": "docs/open.pdf"},
+                    3,
+                    "extract failed",
+                    timestamp,
+                    timestamp,
+                    None,
+                    None,
+                    None,
+                    {"stage": "extract"},
+                    None,
+                    None,
+                    None,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    jobs = database.list_capture_jobs(
+        limit=25,
+        offset=50,
+        status="failed",
+        root_name="docs",
+        job_type="corpus_extract_pdf",
+        updated_from="2026-06-25T00:00:00+00:00",
+        updated_to="2026-06-26T00:00:00+00:00",
+    )
+
+    sql, params = executed[0]
+    assert jobs[0]["id"] == "job-1"
+    assert "status = %s" in sql
+    assert "payload->>'root_name' = %s" in sql
+    assert "job_type = %s" in sql
+    assert "updated_at >= %s" in sql
+    assert "updated_at <= %s" in sql
+    assert "ORDER BY updated_at DESC, id DESC" in sql
+    assert "LIMIT %s" in sql
+    assert "OFFSET %s" in sql
+    assert params == (
+        "failed",
+        "docs",
+        "corpus_extract_pdf",
+        "2026-06-25T00:00:00+00:00",
+        "2026-06-26T00:00:00+00:00",
+        25,
+        50,
+    )
+
+
+def test_count_capture_jobs_reuses_job_history_filters(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (7,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    count = database.count_capture_jobs(
+        status="blocked_missing_dependency",
+        root_name="docs",
+        job_type="corpus_sync_root",
+        updated_from="2026-06-20T00:00:00+00:00",
+        updated_to="2026-06-27T00:00:00+00:00",
+    )
+
+    sql, params = executed[0]
+    assert count == 7
+    assert "SELECT count(*)" in sql
+    assert "status = %s" in sql
+    assert "payload->>'root_name' = %s" in sql
+    assert "job_type = %s" in sql
+    assert "updated_at >= %s" in sql
+    assert "updated_at <= %s" in sql
+    assert params == (
+        "blocked_missing_dependency",
+        "docs",
+        "corpus_sync_root",
+        "2026-06-20T00:00:00+00:00",
+        "2026-06-27T00:00:00+00:00",
+    )
+
+
+def test_capture_job_filter_options_lists_distinct_status_roots_and_types(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "SELECT DISTINCT status" in sql:
+                return [("failed",), ("retrying_locked",)]
+            if "payload->>'root_name'" in sql:
+                return [("docs",), ("mail",)]
+            if "SELECT DISTINCT job_type" in sql:
+                return [("corpus_extract_pdf",), ("corpus_sync_root",)]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    options = database.capture_job_filter_options()
+
+    assert options == {
+        "statuses": ["failed", "retrying_locked"],
+        "roots": ["docs", "mail"],
+        "job_types": ["corpus_extract_pdf", "corpus_sync_root"],
+    }
+    assert len(executed) == 3
+
+
+def test_requeue_corpus_job_allows_cancelled_states_for_operator_retry(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("job-1", "pending", 0)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.requeue_corpus_job(job_id="job-1", reason="operator retry")
+
+    sql = executed[0][0]
+    assert result == {"job_id": "job-1", "status": "pending", "attempts": 0}
+    assert "status = 'failed'" in sql
+    assert "status LIKE 'blocked_%%'" in sql
+    assert "status = 'retrying_locked'" in sql
+    assert "status LIKE 'cancelled_%%'" in sql
 
 
 def test_cancel_corpus_job_marks_pending_jobs_cancelled(monkeypatch):

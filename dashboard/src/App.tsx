@@ -5,6 +5,8 @@ import {
   BriefcaseBusiness,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Clock3,
   Database,
@@ -572,9 +574,19 @@ type CrawlPayload = {
   recent_errors?: string[];
 };
 
+type JobFilterOptions = {
+  statuses?: string[];
+  roots?: string[];
+  job_types?: string[];
+};
+
 type JobsPayload = {
   jobs?: Array<Record<string, unknown>>;
   count?: number;
+  limit?: number;
+  offset?: number;
+  has_next?: boolean;
+  filter_options?: JobFilterOptions;
 };
 
 type RetrievalPayload = {
@@ -1036,10 +1048,26 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
 
 const DASHBOARD_STATE_KEY = "flux-dashboard-state";
 const DEFAULT_POLL_SECONDS = 10;
+const JOB_PAGE_LIMIT = 50;
+type JobHistoryFilters = {
+  status: string;
+  root_name: string;
+  job_type: string;
+  updated_from: string;
+  updated_to: string;
+};
+const emptyJobHistoryFilters: JobHistoryFilters = {
+  status: "",
+  root_name: "",
+  job_type: "",
+  updated_from: "",
+  updated_to: ""
+};
 type SavedDashboardState = {
   activeTab?: TabId;
   selectedName?: string;
   selectedRootName?: string;
+  jobFilters?: JobHistoryFilters;
 };
 
 export default function App() {
@@ -1048,6 +1076,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>(initialDashboardState.activeTab ?? "overview");
   const [selectedName, setSelectedName] = useState<string>(initialDashboardState.selectedName ?? "");
   const [selectedRootName, setSelectedRootName] = useState<string>(initialDashboardState.selectedRootName ?? "");
+  const [jobFilters, setJobFilters] = useState<JobHistoryFilters>(initialDashboardState.jobFilters ?? emptyJobHistoryFilters);
+  const [jobOffset, setJobOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [toast, setToast] = useState<string>("");
@@ -1088,14 +1118,16 @@ export default function App() {
   const [reviewLoading, setReviewLoading] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
 
-  async function load(options: { showLoading?: boolean } = {}) {
+  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number } = {}) {
     if (options.showLoading ?? false) {
       setLoading(true);
     }
+    const effectiveJobFilters = options.jobFilters ?? jobFilters;
+    const effectiveJobOffset = options.jobOffset ?? jobOffset;
     const [health, crawl, jobs, retrieval, mail, outlook, settings] = await Promise.all([
       getJson<HealthPayload>("/api/dashboard/health", {}),
       getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }),
-      getJson<JobsPayload>("/api/dashboard/jobs", { jobs: [] }),
+      getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }),
       getJson<RetrievalPayload>("/api/dashboard/retrieval-stats", {}),
       getJson<MailStatus>("/api/mail/status", { profiles: [] }),
       getJson<OutlookStatus>("/api/outlook-host/status", { profiles: [], pending_requests: [] }),
@@ -1163,15 +1195,15 @@ export default function App() {
   const pollSeconds = dashboardPollSeconds(state.settings);
 
   useEffect(() => {
-    writeDashboardState({ activeTab, selectedName, selectedRootName });
-  }, [activeTab, selectedName, selectedRootName]);
+    writeDashboardState({ activeTab, selectedName, selectedRootName, jobFilters });
+  }, [activeTab, selectedName, selectedRootName, jobFilters]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       void load({ showLoading: false });
     }, pollSeconds * 1000);
     return () => window.clearInterval(timer);
-  }, [pollSeconds]);
+  }, [pollSeconds, jobFilters, jobOffset]);
 
   async function requestProfileSync(profile = selectedProfile) {
     if (!profile) {
@@ -1221,6 +1253,34 @@ export default function App() {
     } catch (error) {
       setToast(`Corpus job cancellation failed: ${errorMessage(error)}`);
     }
+  }
+
+  async function retryCorpusJob(jobId: string) {
+    try {
+      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/retry`, "POST", {});
+      setToast("Corpus job queued for retry.");
+      await load();
+    } catch (error) {
+      setToast(`Corpus job retry failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async function applyJobFilters(filters: JobHistoryFilters) {
+    setJobFilters(filters);
+    setJobOffset(0);
+    await load({ jobFilters: filters, jobOffset: 0 });
+  }
+
+  async function clearJobFilters() {
+    setJobFilters(emptyJobHistoryFilters);
+    setJobOffset(0);
+    await load({ jobFilters: emptyJobHistoryFilters, jobOffset: 0 });
+  }
+
+  async function pageJobHistory(offset: number) {
+    const nextOffset = Math.max(0, offset);
+    setJobOffset(nextOffset);
+    await load({ jobOffset: nextOffset });
   }
 
   async function saveProfile(form: ProfileForm) {
@@ -1931,9 +1991,14 @@ export default function App() {
         {activeTab === "jobs" && (
           <JobsTab
             state={state}
+            jobFilters={jobFilters}
             onRefresh={() => void load()}
+            onApplyJobFilters={(filters) => void applyJobFilters(filters)}
+            onClearJobFilters={() => void clearJobFilters()}
+            onPageJobHistory={(offset) => void pageJobHistory(offset)}
             onCancelOutlookRequest={(requestId) => void cancelOutlookRequest(requestId)}
             onCancelCorpusJob={(jobId) => void cancelCorpusJob(jobId)}
+            onRetryCorpusJob={(jobId) => void retryCorpusJob(jobId)}
           />
         )}
       </main>
@@ -5002,18 +5067,33 @@ function prettyStreamName(value: string): string {
 
 function JobsTab({
   state,
+  jobFilters,
   onRefresh,
+  onApplyJobFilters,
+  onClearJobFilters,
+  onPageJobHistory,
   onCancelOutlookRequest,
-  onCancelCorpusJob
+  onCancelCorpusJob,
+  onRetryCorpusJob
 }: {
   state: LoadState;
+  jobFilters: JobHistoryFilters;
   onRefresh: () => void;
+  onApplyJobFilters: (filters: JobHistoryFilters) => void;
+  onClearJobFilters: () => void;
+  onPageJobHistory: (offset: number) => void;
   onCancelOutlookRequest: (requestId: string) => void;
   onCancelCorpusJob: (jobId: string) => void;
+  onRetryCorpusJob: (jobId: string) => void;
 }) {
   const outlookJobs = activeOutlookRequests(state.outlook.pending_requests).map(outlookRequestJob);
-  const jobs = [...outlookJobs, ...(state.jobs.jobs ?? [])];
+  const corpusJobs = state.jobs.jobs ?? [];
+  const jobs = [...outlookJobs, ...corpusJobs];
   const hasOutlookRequests = outlookJobs.length > 0;
+  const jobLimit = numberFromUnknown(state.jobs.limit) ?? JOB_PAGE_LIMIT;
+  const jobOffsetValue = numberFromUnknown(state.jobs.offset) ?? 0;
+  const jobCount = numberFromUnknown(state.jobs.count) ?? corpusJobs.length;
+  const hasNext = Boolean(state.jobs.has_next ?? (jobOffsetValue + corpusJobs.length < jobCount));
   const familyRows = (state.health.acceleration?.worker_families ?? []).slice(0, 8).map((family) => [
     family.family ?? "general",
     `${family.pending ?? 0} pending / ${family.running ?? 0} running`,
@@ -5022,12 +5102,25 @@ function JobsTab({
   return (
     <section className="tab-grid">
       <Panel title="Job Queue" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
+        <JobHistoryControls
+          filters={jobFilters}
+          options={state.jobs.filter_options ?? {}}
+          count={jobCount}
+          limit={jobLimit}
+          offset={jobOffsetValue}
+          visibleCount={corpusJobs.length}
+          hasNext={hasNext}
+          onApply={onApplyJobFilters}
+          onClear={onClearJobFilters}
+          onPage={onPageJobHistory}
+        />
         <JobQueueTable
           jobs={jobs}
           label={hasOutlookRequests ? "Operational jobs" : "Extraction jobs"}
           empty={hasOutlookRequests ? "No operational jobs queued." : "No queued extraction jobs."}
           onCancelOutlookRequest={onCancelOutlookRequest}
           onCancelCorpusJob={onCancelCorpusJob}
+          onRetryCorpusJob={onRetryCorpusJob}
         />
       </Panel>
       <Panel title="Worker Family Status">
@@ -5038,18 +5131,99 @@ function JobsTab({
   );
 }
 
+function JobHistoryControls({
+  filters,
+  options,
+  count,
+  limit,
+  offset,
+  visibleCount,
+  hasNext,
+  onApply,
+  onClear,
+  onPage
+}: {
+  filters: JobHistoryFilters;
+  options: JobFilterOptions;
+  count: number;
+  limit: number;
+  offset: number;
+  visibleCount: number;
+  hasNext: boolean;
+  onApply: (filters: JobHistoryFilters) => void;
+  onClear: () => void;
+  onPage: (offset: number) => void;
+}) {
+  const [draft, setDraft] = useState<JobHistoryFilters>(filters);
+  useEffect(() => {
+    setDraft(filters);
+  }, [filters.status, filters.root_name, filters.job_type, filters.updated_from, filters.updated_to]);
+  const updateDraft = (key: keyof JobHistoryFilters, value: string) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
+  const pageStart = count > 0 ? offset + 1 : 0;
+  const pageEnd = count > 0 ? Math.min(offset + visibleCount, count) : 0;
+  const safeLimit = Math.max(1, limit || JOB_PAGE_LIMIT);
+  const jobWord = count === 1 ? "job" : "jobs";
+  return (
+    <div className="job-history-controls">
+      <div className="job-filter-grid">
+        <label>Status
+          <select aria-label="Job status filter" value={draft.status} onChange={(event) => updateDraft("status", event.target.value)}>
+            <option value="">All statuses</option>
+            {(options.statuses ?? []).map((status) => <option key={status} value={status}>{humanizeIdentifier(status)}</option>)}
+          </select>
+        </label>
+        <label>Root
+          <select aria-label="Job root filter" value={draft.root_name} onChange={(event) => updateDraft("root_name", event.target.value)}>
+            <option value="">All roots</option>
+            {(options.roots ?? []).map((root) => <option key={root} value={root}>{root}</option>)}
+          </select>
+        </label>
+        <label>Type
+          <select aria-label="Job type filter" value={draft.job_type} onChange={(event) => updateDraft("job_type", event.target.value)}>
+            <option value="">All types</option>
+            {(options.job_types ?? []).map((type) => <option key={type} value={type}>{jobTypeLabel(type)}</option>)}
+          </select>
+        </label>
+        <label>Updated from
+          <input aria-label="Updated from filter" type="datetime-local" value={draft.updated_from} onChange={(event) => updateDraft("updated_from", event.target.value)} />
+        </label>
+        <label>Updated to
+          <input aria-label="Updated to filter" type="datetime-local" value={draft.updated_to} onChange={(event) => updateDraft("updated_to", event.target.value)} />
+        </label>
+        <div className="job-filter-actions">
+          <button className="ghost-action compact" type="button" onClick={() => onApply(draft)}><ListFilter size={15} /> Apply job filters</button>
+          <button className="ghost-action compact" type="button" onClick={() => { setDraft(emptyJobHistoryFilters); onClear(); }}><X size={15} /> Clear job filters</button>
+        </div>
+      </div>
+      <div className="job-pager" aria-label="Job history paging">
+        <span>{pageStart}-{pageEnd} of {count} corpus {jobWord}</span>
+        <button className="ghost-action compact" type="button" aria-label="Previous jobs page" disabled={offset <= 0} onClick={() => onPage(Math.max(0, offset - safeLimit))}>
+          <ChevronLeft size={15} /> Previous
+        </button>
+        <button className="ghost-action compact" type="button" aria-label="Next jobs page" disabled={!hasNext} onClick={() => onPage(offset + safeLimit)}>
+          Next <ChevronRight size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function JobQueueTable({
   jobs,
   label,
   empty,
   onCancelOutlookRequest,
-  onCancelCorpusJob
+  onCancelCorpusJob,
+  onRetryCorpusJob
 }: {
   jobs: Array<Record<string, unknown>>;
   label: string;
   empty: string;
   onCancelOutlookRequest?: (requestId: string) => void;
   onCancelCorpusJob?: (jobId: string) => void;
+  onRetryCorpusJob?: (jobId: string) => void;
 }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   if (jobs.length === 0) return <p className="muted">{empty}</p>;
@@ -5078,6 +5252,7 @@ function JobQueueTable({
             const expanded = expandedJobId === id;
             const outlookRequest = stringFromUnknown(job.job_type) === "outlook_sync_request";
             const cancellableCorpusJob = isCancelableCorpusJob(job, status);
+            const retryableCorpusJob = isRetryableCorpusJob(job, status);
             const progress = jobProgressSummary(job);
             return (
               <Fragment key={id}>
@@ -5091,6 +5266,16 @@ function JobQueueTable({
                   <td className="job-progress" title={progress}>{progress}</td>
                   <td className="job-error" title={stringFromUnknown(job.last_error) ?? ""}>{stringFromUnknown(job.last_error) ?? "-"}</td>
                   <td className="job-actions-cell">
+                    {retryableCorpusJob ? (
+                      <button
+                        className="row-button"
+                        type="button"
+                        aria-label={`Force retry corpus job ${id}`}
+                        onClick={() => onRetryCorpusJob?.(id)}
+                      >
+                        <RotateCcw size={15} /> Retry
+                      </button>
+                    ) : null}
                     {outlookRequest ? (
                       <button
                         className="row-button warning"
@@ -5277,6 +5462,16 @@ function jobTypeLabel(value?: string) {
 function isCancelableCorpusJob(job: Record<string, unknown>, status: string) {
   const type = stringFromUnknown(job.job_type) ?? "";
   return type.startsWith("corpus_") && ["pending", "retrying_locked", "running"].includes(status);
+}
+
+function isRetryableCorpusJob(job: Record<string, unknown>, status: string) {
+  const type = stringFromUnknown(job.job_type) ?? "";
+  return type.startsWith("corpus_") && (
+    status === "failed"
+    || status === "retrying_locked"
+    || status.startsWith("blocked_")
+    || status.startsWith("cancelled_")
+  );
 }
 
 function activeOutlookRequests(requests?: OutlookSyncRequest[]) {
@@ -5892,16 +6087,26 @@ function readDashboardState(): SavedDashboardState {
   const tab = normalizeTabId(params.get("tab"));
   const root = params.get("root");
   const profile = params.get("profile");
-  if (tab) {
-    return { activeTab: tab, selectedRootName: root ?? "", selectedName: profile ?? "" };
-  }
+  let saved: SavedDashboardState = {};
   try {
-    const saved = JSON.parse(localStorage.getItem(DASHBOARD_STATE_KEY) ?? "{}") as SavedDashboardState;
-    saved.activeTab = normalizeTabId(saved.activeTab) ?? "overview";
-    return saved;
+    saved = normalizeDashboardState(JSON.parse(localStorage.getItem(DASHBOARD_STATE_KEY) ?? "{}"));
   } catch {
-    return {};
+    saved = {};
   }
+  if (tab) {
+    return { ...saved, activeTab: tab, selectedRootName: root ?? "", selectedName: profile ?? "" };
+  }
+  return saved;
+}
+
+function normalizeDashboardState(value: unknown): SavedDashboardState {
+  if (!isRecord(value)) return {};
+  return {
+    activeTab: normalizeTabId(value.activeTab) ?? "overview",
+    selectedName: stringFromUnknown(value.selectedName) ?? "",
+    selectedRootName: stringFromUnknown(value.selectedRootName) ?? "",
+    jobFilters: normalizeJobHistoryFilters(value.jobFilters)
+  };
 }
 
 function writeDashboardState(value: SavedDashboardState) {
@@ -5915,6 +6120,43 @@ function writeDashboardState(value: SavedDashboardState) {
   if (`${window.location.pathname}${window.location.search}` !== nextUrl) {
     window.history.replaceState(null, "", nextUrl);
   }
+}
+
+function jobHistoryUrl(filters: JobHistoryFilters, offset: number) {
+  const safeOffset = Math.max(0, offset);
+  if (!hasJobHistoryFilters(filters) && safeOffset === 0) return "/api/dashboard/jobs";
+  const params = new URLSearchParams();
+  params.set("limit", String(JOB_PAGE_LIMIT));
+  params.set("offset", String(safeOffset));
+  if (filters.status) params.set("status", filters.status);
+  if (filters.root_name) params.set("root_name", filters.root_name);
+  if (filters.job_type) params.set("job_type", filters.job_type);
+  const updatedFrom = datetimeLocalToIso(filters.updated_from);
+  const updatedTo = datetimeLocalToIso(filters.updated_to);
+  if (updatedFrom) params.set("updated_from", updatedFrom);
+  if (updatedTo) params.set("updated_to", updatedTo);
+  return `/api/dashboard/jobs?${params.toString()}`;
+}
+
+function hasJobHistoryFilters(filters: JobHistoryFilters) {
+  return Boolean(filters.status || filters.root_name || filters.job_type || filters.updated_from || filters.updated_to);
+}
+
+function normalizeJobHistoryFilters(value: unknown): JobHistoryFilters {
+  if (!isRecord(value)) return emptyJobHistoryFilters;
+  return {
+    status: stringFromUnknown(value.status) ?? "",
+    root_name: stringFromUnknown(value.root_name) ?? "",
+    job_type: stringFromUnknown(value.job_type) ?? "",
+    updated_from: stringFromUnknown(value.updated_from) ?? "",
+    updated_to: stringFromUnknown(value.updated_to) ?? ""
+  };
+}
+
+function datetimeLocalToIso(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
 function normalizeTabId(value: unknown): TabId | undefined {

@@ -363,6 +363,8 @@ let governanceApplyPayload: unknown;
 let governanceRecoverPayload: unknown;
 let outlookCancelRequests: string[];
 let corpusCancelRequests: string[];
+let corpusRetryRequests: string[];
+let jobsRequestUrls: string[];
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -387,7 +389,16 @@ describe("Flux dashboard", () => {
           created_at: "2026-06-23T06:00:00+00:00",
           updated_at: "2026-06-23T06:04:00+00:00"
         }
-      ]
+      ],
+      count: 1,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["retrying_locked", "failed", "blocked_missing_dependency", "cancelled_operator"],
+        roots: ["docs"],
+        job_types: ["corpus_extract_pdf"]
+      }
     };
     crawlSyncErrorPayload = undefined;
     mailSyncPayload = { profiles: [{ profile: "gmail-capture", status: "completed", exported: 0 }], count: 1 };
@@ -722,6 +733,8 @@ describe("Flux dashboard", () => {
     };
     outlookCancelRequests = [];
     corpusCancelRequests = [];
+    corpusRetryRequests = [];
+    jobsRequestUrls = [];
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -741,7 +754,10 @@ describe("Flux dashboard", () => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(healthPayload);
       if (url === "/api/dashboard/crawl") return json(crawlPayload);
-      if (url === "/api/dashboard/jobs") return json(jobsPayload);
+      if (url.startsWith("/api/dashboard/jobs") && !url.endsWith("/cancel") && !url.endsWith("/retry")) {
+        jobsRequestUrls.push(url);
+        return json(jobsPayload);
+      }
       if (url === "/api/dashboard/retrieval-stats") return json({ retrieval: health.retrieval, duplicate_assets: 0 });
       if (url === "/api/mail/status") return json(mailPayload);
       if (url === "/api/outlook-host/status") return json(outlook);
@@ -1227,6 +1243,18 @@ describe("Flux dashboard", () => {
           );
         }
         return json({ job_id: jobId, status: "cancelled_operator", cancelled: true });
+      }
+      if (url.startsWith("/api/dashboard/jobs/") && url.endsWith("/retry")) {
+        corpusRetryRequests.push(url);
+        const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");
+        if (jobId === "job-completed") {
+          return errorJson(
+            { error: { message: "retryable corpus job not found: job-completed" } },
+            409,
+            "Conflict"
+          );
+        }
+        return json({ settings_mutated: false, action: "retry_corpus_job", result: { job_id: jobId, status: "pending" } });
       }
       if (url === "/api/crawl/roots") return json({ root: JSON.parse(String(init?.body)), sync: { files_seen: 0 } });
       if (url.startsWith("/api/crawl/roots/") && init?.method === "PATCH") {
@@ -1750,6 +1778,194 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("asset-1")).toBeInTheDocument();
     expect(screen.getByText("source-1")).toBeInTheDocument();
     expect(screen.getByText("Raw payload")).toBeInTheDocument();
+  });
+
+  test("job queue filters and pages corpus history through the jobs API", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-failed",
+          job_type: "corpus_extract_pdf",
+          status: "failed",
+          payload: { root_name: "docs", path: "docs/failed.pdf" },
+          attempts: 3,
+          last_error: "extract failed",
+          updated_at: "2026-06-26T09:30:00+00:00"
+        }
+      ],
+      count: 75,
+      limit: 50,
+      offset: 0,
+      has_next: true,
+      filter_options: {
+        statuses: ["failed", "retrying_locked"],
+        roots: ["docs", "mail"],
+        job_types: ["corpus_extract_pdf", "corpus_sync_root"]
+      }
+    };
+    const updatedFromIso = new Date("2026-06-25T00:00").toISOString();
+    const updatedToIso = new Date("2026-06-26T23:59").toISOString();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await screen.findByRole("table", { name: "Extraction jobs" });
+
+    await user.selectOptions(screen.getByLabelText("Job status filter"), "failed");
+    await user.selectOptions(screen.getByLabelText("Job root filter"), "docs");
+    await user.selectOptions(screen.getByLabelText("Job type filter"), "corpus_extract_pdf");
+    await user.type(screen.getByLabelText("Updated from filter"), "2026-06-25T00:00");
+    await user.type(screen.getByLabelText("Updated to filter"), "2026-06-26T23:59");
+    await user.click(screen.getByRole("button", { name: "Apply job filters" }));
+
+    await waitFor(() => {
+      const queryUrl = jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
+      expect(queryUrl).toBeTruthy();
+      const params = new URLSearchParams(queryUrl?.split("?")[1]);
+      expect(params.get("status")).toBe("failed");
+      expect(params.get("root_name")).toBe("docs");
+      expect(params.get("job_type")).toBe("corpus_extract_pdf");
+      expect(params.get("updated_from")).toBe(updatedFromIso);
+      expect(params.get("updated_to")).toBe(updatedToIso);
+      expect(params.get("limit")).toBe("50");
+      expect(params.get("offset")).toBe("0");
+    });
+    await waitFor(() => {
+      const savedState = JSON.parse(localStorage.getItem("flux-dashboard-state") ?? "{}") as { jobFilters?: Record<string, string> };
+      expect(savedState.jobFilters).toMatchObject({
+        status: "failed",
+        root_name: "docs",
+        job_type: "corpus_extract_pdf",
+        updated_from: "2026-06-25T00:00",
+        updated_to: "2026-06-26T23:59"
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: "Next jobs page" }));
+
+    await waitFor(() => {
+      const latestUrl = jobsRequestUrls.at(-1) ?? "";
+      const params = new URLSearchParams(latestUrl.split("?")[1]);
+      expect(params.get("offset")).toBe("50");
+      expect(params.get("limit")).toBe("50");
+      expect(params.get("status")).toBe("failed");
+    });
+  });
+
+  test("job queue restores persisted history filters on load", async () => {
+    localStorage.setItem("flux-dashboard-state", JSON.stringify({
+      activeTab: "jobs",
+      jobFilters: {
+        status: "failed",
+        root_name: "docs",
+        job_type: "corpus_extract_pdf",
+        updated_from: "2026-06-25T00:00",
+        updated_to: "2026-06-26T23:59"
+      }
+    }));
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-failed",
+          job_type: "corpus_extract_pdf",
+          status: "failed",
+          payload: { root_name: "docs", path: "docs/failed.pdf" },
+          attempts: 3,
+          last_error: "extract failed",
+          updated_at: "2026-06-26T09:30:00+00:00"
+        }
+      ],
+      count: 1,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["failed", "retrying_locked"],
+        roots: ["docs", "mail"],
+        job_types: ["corpus_extract_pdf", "corpus_sync_root"]
+      }
+    };
+    const updatedFromIso = new Date("2026-06-25T00:00").toISOString();
+    const updatedToIso = new Date("2026-06-26T23:59").toISOString();
+
+    render(<App />);
+
+    await screen.findByRole("table", { name: "Extraction jobs" });
+    expect(screen.getByLabelText("Job status filter")).toHaveValue("failed");
+    expect(screen.getByLabelText("Job root filter")).toHaveValue("docs");
+    expect(screen.getByLabelText("Job type filter")).toHaveValue("corpus_extract_pdf");
+    expect(screen.getByLabelText("Updated from filter")).toHaveValue("2026-06-25T00:00");
+    expect(screen.getByLabelText("Updated to filter")).toHaveValue("2026-06-26T23:59");
+    await waitFor(() => {
+      const queryUrl = jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
+      expect(queryUrl).toBeTruthy();
+      const params = new URLSearchParams(queryUrl?.split("?")[1]);
+      expect(params.get("status")).toBe("failed");
+      expect(params.get("root_name")).toBe("docs");
+      expect(params.get("job_type")).toBe("corpus_extract_pdf");
+      expect(params.get("updated_from")).toBe(updatedFromIso);
+      expect(params.get("updated_to")).toBe(updatedToIso);
+      expect(params.get("limit")).toBe("50");
+      expect(params.get("offset")).toBe("0");
+    });
+  });
+
+  test("job queue exposes force retry only for eligible corpus jobs", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-failed",
+          job_type: "corpus_extract_pdf",
+          status: "failed",
+          payload: { root_name: "docs", path: "docs/failed.pdf" },
+          attempts: 3,
+          last_error: "extract failed",
+          updated_at: "2026-06-26T09:30:00+00:00"
+        },
+        {
+          id: "job-cancelled",
+          job_type: "corpus_sync_root",
+          status: "cancelled_operator",
+          payload: { root_name: "mail", profile_name: "outlook-catchup" },
+          attempts: 1,
+          updated_at: "2026-06-26T09:20:00+00:00"
+        },
+        {
+          id: "job-completed",
+          job_type: "corpus_extract_pdf",
+          status: "completed",
+          payload: { root_name: "docs", path: "docs/done.pdf" },
+          attempts: 1,
+          updated_at: "2026-06-26T09:10:00+00:00"
+        }
+      ],
+      count: 3,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["failed", "cancelled_operator", "completed"],
+        roots: ["docs", "mail"],
+        job_types: ["corpus_extract_pdf", "corpus_sync_root"]
+      }
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    expect(await screen.findByRole("button", { name: "Force retry corpus job job-failed" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Force retry corpus job job-cancelled" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Force retry corpus job job-completed" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Force retry corpus job job-cancelled" }));
+
+    await waitFor(() => {
+      expect(corpusRetryRequests).toContain("/api/dashboard/jobs/job-cancelled/retry");
+    });
+    expect(await screen.findByText("Corpus job queued for retry.")).toBeInTheDocument();
   });
 
   test("job queue shows Outlook COM requests and cancel feedback", async () => {

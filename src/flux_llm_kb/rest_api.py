@@ -618,8 +618,24 @@ def create_app():
         return collect_crawl_payload()
 
     @app.get("/api/dashboard/jobs")
-    def dashboard_jobs(limit: int = 50):
-        return collect_jobs_payload(limit=limit)
+    def dashboard_jobs(
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        root_name: str | None = None,
+        job_type: str | None = None,
+        updated_from: str | None = None,
+        updated_to: str | None = None,
+    ):
+        return collect_jobs_payload(
+            limit=limit,
+            offset=offset,
+            status=status,
+            root_name=root_name,
+            job_type=job_type,
+            updated_from=updated_from,
+            updated_to=updated_to,
+        )
 
     @app.post("/api/dashboard/jobs/{job_id}/cancel")
     def dashboard_job_cancel(job_id: str):
@@ -630,6 +646,21 @@ def create_app():
             status_code = 404 if payload.get("status") == "not_found" else 409
             raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job cannot be cancelled.")
         return payload
+
+    @app.post("/api/dashboard/jobs/{job_id}/retry")
+    def dashboard_job_retry(job_id: str):
+        try:
+            return service.remediate_diagnostic(
+                action="retry_corpus_job",
+                target_type="job",
+                target_id=job_id,
+                reason="operator forced retry from dashboard",
+                actor="dashboard",
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/dashboard/retrieval-stats")
     def dashboard_retrieval_stats():
@@ -1355,8 +1386,24 @@ def create_app():
             ) from exc
 
     @app.get("/api/crawl/jobs")
-    def crawl_jobs(limit: int = 50):
-        return collect_jobs_payload(limit=limit)
+    def crawl_jobs(
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        root_name: str | None = None,
+        job_type: str | None = None,
+        updated_from: str | None = None,
+        updated_to: str | None = None,
+    ):
+        return collect_jobs_payload(
+            limit=limit,
+            offset=offset,
+            status=status,
+            root_name=root_name,
+            job_type=job_type,
+            updated_from=updated_from,
+            updated_to=updated_to,
+        )
 
     @app.post("/api/crawl/jobs/{job_id}/cancel")
     def crawl_job_cancel(job_id: str):

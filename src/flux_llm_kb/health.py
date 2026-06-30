@@ -175,8 +175,51 @@ def collect_crawl_payload() -> dict[str, Any]:
     }
 
 
-def collect_jobs_payload(limit: int = 50) -> dict[str, Any]:
-    return {"jobs": _safe(lambda: database.list_capture_jobs(limit=limit), [])}
+def _bounded_jobs_limit(value: int | str | None) -> int:
+    try:
+        numeric = int(value if value is not None else 50)
+    except (TypeError, ValueError):
+        numeric = 50
+    return max(1, min(numeric, 200))
+
+
+def _bounded_jobs_offset(value: int | str | None) -> int:
+    try:
+        numeric = int(value if value is not None else 0)
+    except (TypeError, ValueError):
+        numeric = 0
+    return max(0, numeric)
+
+
+def collect_jobs_payload(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    root_name: str | None = None,
+    job_type: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+) -> dict[str, Any]:
+    safe_limit = _bounded_jobs_limit(limit)
+    safe_offset = _bounded_jobs_offset(offset)
+    filters = {
+        "status": status,
+        "root_name": root_name,
+        "job_type": job_type,
+        "updated_from": updated_from,
+        "updated_to": updated_to,
+    }
+    jobs = _safe(lambda: database.list_capture_jobs(limit=safe_limit, offset=safe_offset, **filters), [])
+    count = _safe(lambda: database.count_capture_jobs(**filters), len(jobs))
+    filter_options = _safe(database.capture_job_filter_options, {"statuses": [], "roots": [], "job_types": []})
+    return {
+        "jobs": jobs,
+        "count": count,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "has_next": safe_offset + len(jobs) < int(count or 0),
+        "filter_options": filter_options,
+    }
 
 
 def collect_retrieval_payload() -> dict[str, Any]:

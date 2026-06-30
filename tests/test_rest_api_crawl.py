@@ -937,6 +937,98 @@ def test_dashboard_job_cancel_endpoint_reports_running_job_conflict(monkeypatch)
     assert calls == [{"job_id": "job-running", "actor": "dashboard"}]
 
 
+def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    def fake_collect_jobs_payload(**kwargs):
+        calls.append(kwargs)
+        return {
+            "jobs": [],
+            "count": 0,
+            "limit": kwargs["limit"],
+            "offset": kwargs["offset"],
+            "has_next": False,
+            "filter_options": {"statuses": [], "roots": [], "job_types": []},
+        }
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.collect_jobs_payload", fake_collect_jobs_payload)
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.get(
+        "/api/dashboard/jobs",
+        params={
+            "status": "failed",
+            "root_name": "docs",
+            "job_type": "corpus_extract_pdf",
+            "updated_from": "2026-06-25T00:00:00+00:00",
+            "updated_to": "2026-06-26T00:00:00+00:00",
+            "limit": 25,
+            "offset": 50,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["limit"] == 25
+    assert calls == [
+        {
+            "limit": 25,
+            "offset": 50,
+            "status": "failed",
+            "root_name": "docs",
+            "job_type": "corpus_extract_pdf",
+            "updated_from": "2026-06-25T00:00:00+00:00",
+            "updated_to": "2026-06-26T00:00:00+00:00",
+        }
+    ]
+
+
+def test_dashboard_job_retry_endpoint_uses_diagnostic_remediation(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def remediate_diagnostic(self, **kwargs):
+            calls.append(kwargs)
+            return {"settings_mutated": False, "action": "retry_corpus_job", "result": {"job_id": kwargs["target_id"], "status": "pending"}}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-1/retry")
+
+    assert response.status_code == 200
+    assert response.json()["result"] == {"job_id": "job-1", "status": "pending"}
+    assert calls == [
+        {
+            "action": "retry_corpus_job",
+            "target_type": "job",
+            "target_id": "job-1",
+            "reason": "operator forced retry from dashboard",
+            "actor": "dashboard",
+        }
+    ]
+
+
+def test_dashboard_job_retry_endpoint_reports_ineligible_job_conflict(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    class FakeService:
+        def remediate_diagnostic(self, **_kwargs):
+            raise LookupError("retryable corpus job not found: job-completed")
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-completed/retry")
+
+    assert response.status_code == 409
+    assert "retryable corpus job not found" in response.json()["detail"]
+
+
 def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

@@ -2989,22 +2989,90 @@ def crawl_root_summaries(
             return summaries
 
 
-def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+def _capture_job_limit(value: int | str | None, *, default: int = 50) -> int:
+    try:
+        numeric = int(value if value is not None else default)
+    except (TypeError, ValueError):
+        numeric = default
+    return max(1, min(numeric, 200))
+
+
+def _capture_job_offset(value: int | str | None) -> int:
+    try:
+        numeric = int(value if value is not None else 0)
+    except (TypeError, ValueError):
+        numeric = 0
+    return max(0, numeric)
+
+
+def _capture_job_filter_sql(
+    *,
+    status: str | None = None,
+    root_name: str | None = None,
+    job_type: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+) -> tuple[str, list[Any]]:
+    clauses = ["job_type LIKE 'corpus_%%'"]
+    params: list[Any] = []
+    clean_status = str(status or "").strip()
+    clean_root = str(root_name or "").strip()
+    clean_job_type = str(job_type or "").strip()
+    clean_updated_from = str(updated_from or "").strip()
+    clean_updated_to = str(updated_to or "").strip()
+    if clean_status:
+        clauses.append("status = %s")
+        params.append(clean_status)
+    if clean_root:
+        clauses.append("payload->>'root_name' = %s")
+        params.append(clean_root)
+    if clean_job_type:
+        clauses.append("job_type = %s")
+        params.append(clean_job_type)
+    if clean_updated_from:
+        clauses.append("updated_at >= %s")
+        params.append(clean_updated_from)
+    if clean_updated_to:
+        clauses.append("updated_at <= %s")
+        params.append(clean_updated_to)
+    return " AND ".join(clauses), params
+
+
+def list_capture_jobs(
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    status: str | None = None,
+    root_name: str | None = None,
+    job_type: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    where_sql, params = _capture_job_filter_sql(
+        status=status,
+        root_name=root_name,
+        job_type=job_type,
+        updated_from=updated_from,
+        updated_to=updated_to,
+    )
+    params.extend([_capture_job_limit(limit), _capture_job_offset(offset)])
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
                        status, payload, attempts, last_error, created_at, updated_at,
                        started_at, completed_at, last_duration_ms, telemetry,
                        locked_at, locked_by, progress_heartbeat_at
                 FROM capture_jobs
-                WHERE job_type LIKE 'corpus_%%'
-                ORDER BY updated_at DESC
+                WHERE {where_sql}
+                ORDER BY updated_at DESC, id DESC
                 LIMIT %s
+                OFFSET %s
                 """,
-                (max(1, min(limit, 200)),),
+                tuple(params),
             )
             return [
                 {
@@ -3030,6 +3098,73 @@ def list_capture_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[s
                 }
                 for row in cur.fetchall()
             ]
+
+
+def count_capture_jobs(
+    *,
+    status: str | None = None,
+    root_name: str | None = None,
+    job_type: str | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+    url: str | None = None,
+) -> int:
+    where_sql, params = _capture_job_filter_sql(
+        status=status,
+        root_name=root_name,
+        job_type=job_type,
+        updated_from=updated_from,
+        updated_to=updated_to,
+    )
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT count(*)
+                FROM capture_jobs
+                WHERE {where_sql}
+                """,
+                tuple(params),
+            )
+            row = cur.fetchone()
+            return int(row[0] or 0) if row else 0
+
+
+def capture_job_filter_options(*, url: str | None = None) -> dict[str, list[str]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT status
+                FROM capture_jobs
+                WHERE job_type LIKE 'corpus_%%'
+                  AND status IS NOT NULL
+                ORDER BY status
+                """
+            )
+            statuses = [str(row[0]) for row in cur.fetchall() if row[0]]
+            cur.execute(
+                """
+                SELECT DISTINCT payload->>'root_name'
+                FROM capture_jobs
+                WHERE job_type LIKE 'corpus_%%'
+                  AND COALESCE(payload->>'root_name', '') <> ''
+                ORDER BY payload->>'root_name'
+                """
+            )
+            roots = [str(row[0]) for row in cur.fetchall() if row[0]]
+            cur.execute(
+                """
+                SELECT DISTINCT job_type
+                FROM capture_jobs
+                WHERE job_type LIKE 'corpus_%%'
+                ORDER BY job_type
+                """
+            )
+            job_types = [str(row[0]) for row in cur.fetchall() if row[0]]
+            return {"statuses": statuses, "roots": roots, "job_types": job_types}
 
 
 _CAPTURE_REVIEW_STATUSES = {
@@ -3807,7 +3942,12 @@ def requeue_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
-                  AND status IN ('failed', 'blocked_missing_dependency', 'blocked_locked', 'retrying_locked')
+                  AND (
+                      status = 'failed'
+                      OR status LIKE 'blocked_%%'
+                      OR status = 'retrying_locked'
+                      OR status LIKE 'cancelled_%%'
+                  )
                 RETURNING id::text, status, attempts
                 """,
                 (reason, job_id),
