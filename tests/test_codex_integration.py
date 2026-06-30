@@ -411,6 +411,36 @@ def test_codex_status_checks_cache_against_configured_marketplace_source(tmp_pat
     assert result["repo_plugin_path"] == str(dev_root / "plugins" / "flux-llm-kb")
 
 
+def test_codex_install_plugin_without_repo_root_preserves_configured_marketplace_source(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    dev_root = tmp_path / "dev"
+    app_root = tmp_path / "FluxLLMKB" / "app"
+    _write_test_marketplace(app_root)
+    _write_test_plugin(app_root, skill_text="deployed guidance")
+    _write_test_plugin(dev_root, skill_text="dev checkout guidance")
+    (codex_home / "config.toml").write_text(
+        f'[marketplaces.flux-llm-kb-local]\nsource_type = "local"\nsource = {json.dumps(str(app_root))}\n'
+        '[plugins."flux-llm-kb@flux-llm-kb-local"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+    fake_module = dev_root / "src" / "flux_llm_kb" / "codex_integration.py"
+    fake_module.parent.mkdir(parents=True)
+    fake_module.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("FLUX_KB_APP_ROOT", raising=False)
+    monkeypatch.setattr(codex_integration, "__file__", str(fake_module))
+
+    result = install_plugin()
+
+    config = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert f"source = {json.dumps(str(app_root))}" in config
+    assert f"source = {json.dumps(str(dev_root))}" not in config
+    assert result["plugin_source_path"] == str(app_root / "plugins" / "flux-llm-kb")
+    assert result["repo_plugin_path"] == str(app_root / "plugins" / "flux-llm-kb")
+
+
 def test_codex_install_plugin_invalidates_stale_discovery_cache_only(tmp_path, monkeypatch):
     codex_home = tmp_path / ".codex"
     repo_root = tmp_path / "repo"

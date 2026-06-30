@@ -125,11 +125,32 @@ def _default_root() -> Path:
     app_root = os.environ.get("FLUX_KB_APP_ROOT")
     if app_root:
         candidates.append(Path(app_root))
+    configured_source = _configured_marketplace_source_root()
+    if configured_source:
+        candidates.append(configured_source)
     candidates.extend(Path(__file__).resolve().parents)
     for root in candidates:
         if (root / "plugins" / PLUGIN_NAME).exists():
             return root
     return candidates[0]
+
+
+def _configured_marketplace_source_root() -> Path | None:
+    config_path = Path.home() / ".codex" / "config.toml"
+    if not config_path.exists():
+        return None
+    try:
+        config = config_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    source = _read_local_marketplace_source(config)
+    if not source:
+        return None
+    if not (source / "plugins" / PLUGIN_NAME).exists():
+        return None
+    if not _marketplace_contains_plugin(_marketplace_file(source)):
+        return None
+    return source
 
 
 def _install_plugin_path(source: Path, target: Path) -> None:

@@ -630,6 +630,12 @@ environment when available, then the active Python. `flux-kb codex status` and
 dashboard health report whether this MCP block is configured, enabled, and able
 to import the optional MCP dependency.
 
+When `FLUX_KB_APP_ROOT` is not set, `flux-kb codex install-plugin` preserves an
+existing valid Flux local marketplace source before falling back to the imported
+package location. This keeps Codex pointed at a deployed app such as
+`D:\FluxLLMKB\app` even after developer editable installs are repaired back to
+the repository checkout.
+
 `flux-kb codex status` also checks the Codex plugin discovery cache under
 `~/.codex/plugins/cache`. A cache entry is considered discoverable only when the
 cached Flux manifest, skills, hooks, and scripts match the installed plugin
