@@ -1083,6 +1083,16 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         validator=_min_int(1),
     ),
     SettingDefinition(
+        key="worker.failure_max_attempts",
+        category="worker",
+        default=3,
+        value_type="int",
+        description="Number of non-lock worker failures before marking a corpus job failed.",
+        env_var="FLUX_KB_WORKER_FAILURE_MAX_ATTEMPTS",
+        affected_components=("worker", "host-agent"),
+        validator=_min_int(1),
+    ),
+    SettingDefinition(
         key="worker.lock_retry_cooldown_seconds",
         category="worker",
         default=300,

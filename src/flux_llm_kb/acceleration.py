@@ -483,11 +483,13 @@ def _family_row(settings: dict[str, Any], family: str, row: dict[str, Any]) -> d
     blocked = int(row.get("blocked") or 0)
     failed = int(row.get("failed") or 0)
     cap_available = max(0, configured_cap - running)
+    over_cap_running = max(0, running - configured_cap)
     return {
         "family": family,
         "resource_class": row.get("resource_class") or resource_class_for_family(family),
         "configured_cap": configured_cap,
         "cap_available": cap_available,
+        "over_cap_running": over_cap_running,
         "backpressure": _backpressure_reason(pending=pending, running=running, blocked=blocked, failed=failed, cap_available=cap_available),
         "pending": pending,
         "running": running,

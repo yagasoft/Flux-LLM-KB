@@ -21,6 +21,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "watcher.large_file_stability_quiet_seconds" in keys
     assert "watcher.reconcile_on_start" in keys
     assert "watcher.reconcile_interval_seconds" in keys
+    assert "worker.failure_max_attempts" in keys
     assert "worker.lock_retry_cooldown_seconds" in keys
     assert "worker.lock_max_attempts" in keys
     assert "host_agent.vss_enabled" in keys
@@ -163,6 +164,7 @@ def test_lock_tolerant_indexing_settings_defaults(monkeypatch):
 
     assert service.resolve("watcher.stability_quiet_seconds").raw_value == 2.0
     assert service.resolve("watcher.large_file_stability_quiet_seconds").raw_value == 10.0
+    assert service.resolve("worker.failure_max_attempts").raw_value == 3
     assert service.resolve("worker.lock_retry_cooldown_seconds").raw_value == 300
     assert service.resolve("worker.lock_max_attempts").raw_value == 3
     assert service.resolve("host_agent.vss_enabled").raw_value is False

@@ -353,10 +353,10 @@ class HostAgentWorkerLoop:
             metadata={**metadata, "last_error": None},
         )
         if not roots:
-            return {"status": "no_enabled_host_roots", "roots": 0, "completed": 0, "blocked": 0, "retried": 0}
+            return {"status": "no_enabled_host_roots", "roots": 0, "completed": 0, "blocked": 0, "retried": 0, "failed": 0}
 
         service = self.service_factory() if self.service_factory else _service()
-        totals = {"completed": 0, "blocked": 0, "retried": 0, "claimed": 0}
+        totals = {"completed": 0, "blocked": 0, "retried": 0, "failed": 0, "claimed": 0}
         results: list[dict[str, Any]] = []
         for root in roots:
             result = service.run_corpus_backfill(

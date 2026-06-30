@@ -101,6 +101,77 @@ def test_backfill_recovers_stale_jobs_globally(monkeypatch):
     assert calls["cancelled"] == [{"root_name": None}]
 
 
+def test_backfill_marks_failed_job_terminal_after_configured_attempts(monkeypatch):
+    calls = {"blocked": [], "retried": [], "recovered": [], "repaired": [], "cleared_errors": []}
+
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **kwargs: calls["recovered"].append(kwargs) or {"recovered": 0})
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-image",
+                "job_type": "corpus_extract_image",
+                "job_family": "image",
+                "resource_class": "gpu",
+                "payload": {"root_name": "docs", "path": "bad.png"},
+                "attempts": 3,
+            }
+        ],
+    )
+    monkeypatch.setattr(worker, "process_corpus_job", lambda _job: worker.JobProcessResult(status="failed", message="extract failed"))
+    monkeypatch.setattr(service_module, "_configured_failure_max_attempts", lambda: 3, raising=False)
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    result = KnowledgeService().run_corpus_backfill(kind="image", limit=1, workers=1)
+
+    assert result["failed"] == 1
+    assert calls["retried"] == []
+    assert calls["blocked"][0]["job_id"] == "job-image"
+    assert calls["blocked"][0]["status"] == "failed"
+    assert calls["blocked"][0]["error"] == "extract failed"
+
+
+def test_backfill_retries_failed_job_below_configured_attempt_limit(monkeypatch):
+    calls = {"blocked": [], "retried": [], "recovered": [], "repaired": [], "cleared_errors": []}
+
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **kwargs: calls["recovered"].append(kwargs) or {"recovered": 0})
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-image",
+                "job_type": "corpus_extract_image",
+                "job_family": "image",
+                "resource_class": "gpu",
+                "payload": {"root_name": "docs", "path": "bad.png"},
+                "attempts": 2,
+            }
+        ],
+    )
+    monkeypatch.setattr(worker, "process_corpus_job", lambda _job: worker.JobProcessResult(status="failed", message="extract failed"))
+    monkeypatch.setattr(service_module, "_configured_failure_max_attempts", lambda: 3, raising=False)
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    result = KnowledgeService().run_corpus_backfill(kind="image", limit=1, workers=1)
+
+    assert result["failed"] == 0
+    assert calls["blocked"] == []
+    assert calls["retried"][0]["job_id"] == "job-image"
+    assert calls["retried"][0]["error"] == "extract failed"
+
+
 def test_process_corpus_sync_job_uses_worker_heartbeat_without_progress_renewal(monkeypatch):
     calls = {"progress": [], "heartbeats": []}
 
@@ -2205,6 +2276,37 @@ def test_corpus_worker_recovers_interrupted_imap_runs_on_start(monkeypatch):
     assert "worker_started_at" in events[0][1]
     assert [event[0] for event in events] == ["recover", "backfill", "mail_sync"]
     assert result["last_result"]["mail_orphan_recovery"] == {"recovered": 1}
+
+
+def test_corpus_worker_uses_unique_instance_lease_for_backfill_and_heartbeat(monkeypatch):
+    heartbeats = []
+    backfill_calls = []
+
+    monkeypatch.setattr(database, "record_runtime_component_heartbeat", lambda **kwargs: heartbeats.append(kwargs))
+    monkeypatch.setattr(database, "recover_interrupted_imap_sync_runs", lambda **_kwargs: {"recovered": 0})
+    monkeypatch.setattr(
+        KnowledgeService,
+        "run_corpus_backfill",
+        lambda self, **kwargs: backfill_calls.append(kwargs) or {"claimed": 0, "completed": 0, "jobs": []},
+    )
+    monkeypatch.setattr(service_module, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="abc123")), raising=False)
+
+    result = KnowledgeService().run_corpus_worker(
+        once=True,
+        limit=3,
+        component_name="corpus-worker:test",
+        host_agent_roots=True,
+    )
+
+    worker_id = "corpus-worker:test:abc123"
+    assert backfill_calls[0]["worker_id"] == worker_id
+    assert result["worker_id"] == worker_id
+    assert any(
+        heartbeat["name"] == worker_id
+        and heartbeat["metadata"]["worker_instance"] is True
+        and heartbeat["metadata"]["parent_component"] == "corpus-worker:test"
+        for heartbeat in heartbeats
+    )
 
 
 def test_host_agent_corpus_worker_does_not_process_imap_mail_profiles(monkeypatch):

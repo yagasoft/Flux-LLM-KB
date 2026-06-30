@@ -344,14 +344,24 @@ Corpus jobs are classified into fixed worker families (`text`, `office`,
 with resource class, priority, and time budget metadata. Worker/backfill
 commands translate `--kind` options into these families before claiming jobs,
 including broader operator aliases such as `data`, `mail`, `reports`, and
-`metadata`, so family-specific workers do not lock unrelated work. Claiming can apply
-the configured `acceleration.worker_cap.*` map to cap concurrent running jobs per
-family and expose worker-family backpressure, oldest pending age, retrying
-locked counts, blocked locked counts, sanitized slow-job rows, parser cache
-hits/misses, and manifest skip counters. `corpus_embed` jobs route to vector
-refresh instead of file extraction and support owner class, optional root
-scoping, stale-only refresh, and bounded limits. Completion, retry, and blocked
-transitions record last duration and sanitized telemetry for queue
+`metadata`, so family-specific workers do not lock unrelated work. Claiming can
+apply the configured `acceleration.worker_cap.*` map by ranking candidates per
+worker family and claiming no more than `configured_cap - current_running` for
+each family, even when the requested batch limit is larger. Status surfaces
+expose cap usage, `over_cap_running`, worker-family backpressure, oldest pending
+age, retrying locked counts, blocked locked counts, sanitized slow-job rows,
+parser cache hits/misses, and manifest skip counters. Worker and backfill
+processes store a unique worker-instance id in `capture_jobs.locked_by` and
+write a matching runtime heartbeat with `worker_instance=true`; stale `running`
+recovery requeues abandoned jobs only when that exact worker-instance heartbeat
+is not fresh, so a restarted deployment using the same aggregate component name
+does not hide interrupted work. Non-lock worker failures retry through
+`worker.failure_max_attempts` and then become terminal `failed` jobs with
+duration and telemetry instead of cycling forever as pending work.
+`corpus_embed` jobs route to vector refresh instead of file extraction and
+support owner class, optional root scoping, stale-only refresh, and bounded
+limits. Completion, retry, failed, and blocked transitions record last duration
+and sanitized telemetry for queue
 observability, including OCR/ASR cache counters, embedding vector/cache
 counters, recursive container member, parsed-child, skipped-child, and
 blocked-dependency counts, practical parser counts for mail, calendar/contact,

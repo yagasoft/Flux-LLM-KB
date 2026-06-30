@@ -3335,25 +3335,6 @@ def claim_corpus_jobs(
     psycopg = _load_psycopg()
     root_filter = "AND payload->>'root_name' = %s" if root_name else ""
     family_filter = "AND job_family = ANY(%s)" if job_families else ""
-    caps_filter = ""
-    caps_cte = ""
-    if family_caps:
-        caps_cte = """
-                WITH family_caps AS (SELECT %s::jsonb AS caps),
-                     running_family_counts AS (
-                         SELECT job_family AS family, count(*)::integer AS running_count
-                         FROM capture_jobs
-                         WHERE job_type LIKE 'corpus_%%'
-                           AND status = 'running'
-                         GROUP BY job_family
-                     )
-        """
-        caps_filter = """
-                      AND COALESCE(
-                          (SELECT running_count FROM running_family_counts WHERE family = capture_jobs.job_family),
-                          0
-                      ) < COALESCE(NULLIF(family_caps.caps ->> capture_jobs.job_family, '')::integer, 2147483647)
-        """
     host_root_filter = ""
     if host_agent_roots is True:
         host_root_filter = """
@@ -3398,6 +3379,71 @@ def claim_corpus_jobs(
                           )
                       )
         """
+    caps_cte = ""
+    claim_selection = f"""
+                    SELECT id
+                    FROM capture_jobs
+                    WHERE job_type LIKE 'corpus_%%'
+                      AND status IN ('pending', 'retrying_locked')
+                      AND next_attempt_at <= now()
+                      {family_filter}
+                      {root_filter}
+                      {host_root_filter}
+                      {same_root_sync_filter}
+                    ORDER BY priority DESC, created_at
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+    """
+    if family_caps:
+        caps_cte = f"""
+                WITH family_caps AS (SELECT %s::jsonb AS caps),
+                     running_family_counts AS (
+                         SELECT job_family AS family, count(*)::integer AS running_count
+                         FROM capture_jobs
+                         WHERE job_type LIKE 'corpus_%%'
+                           AND status = 'running'
+                         GROUP BY job_family
+                     ),
+                     claimable_jobs AS (
+                         SELECT capture_jobs.id,
+                                capture_jobs.job_family,
+                                capture_jobs.priority,
+                                capture_jobs.created_at,
+                                COALESCE(
+                                    (SELECT running_count FROM running_family_counts WHERE family = capture_jobs.job_family),
+                                    0
+                                ) AS running_count,
+                                COALESCE(NULLIF(family_caps.caps ->> capture_jobs.job_family, '')::integer, 2147483647) AS family_cap
+                         FROM capture_jobs
+                         CROSS JOIN family_caps
+                         WHERE capture_jobs.job_type LIKE 'corpus_%%'
+                           AND capture_jobs.status IN ('pending', 'retrying_locked')
+                           AND capture_jobs.next_attempt_at <= now()
+                           {family_filter}
+                           {root_filter}
+                           {host_root_filter}
+                           {same_root_sync_filter}
+                         ORDER BY capture_jobs.priority DESC, capture_jobs.created_at
+                     ),
+                     ranked_claimable_jobs AS (
+                         SELECT id,
+                                priority,
+                                created_at,
+                                row_number() OVER (PARTITION BY job_family ORDER BY priority DESC, created_at) AS family_rank,
+                                GREATEST(0, family_cap - running_count) AS family_capacity_available
+                         FROM claimable_jobs
+                     )
+        """
+        claim_selection = """
+                    SELECT capture_jobs.id
+                    FROM capture_jobs
+                    JOIN ranked_claimable_jobs ranked
+                      ON ranked.id = capture_jobs.id
+                    WHERE ranked.family_rank <= ranked.family_capacity_available
+                    ORDER BY ranked.priority DESC, ranked.created_at
+                    LIMIT %s
+                    FOR UPDATE OF capture_jobs SKIP LOCKED
+        """
     params_list: list[Any] = []
     if family_caps:
         params_list.append(_json({key: max(0, int(value)) for key, value in sorted(family_caps.items())}))
@@ -3423,20 +3469,7 @@ def claim_corpus_jobs(
                     progress_heartbeat_at = now(),
                     updated_at = now()
                 WHERE id IN (
-                    SELECT id
-                    FROM capture_jobs
-                    {"CROSS JOIN family_caps" if family_caps else ""}
-                    WHERE job_type LIKE 'corpus_%%'
-                      AND status IN ('pending', 'retrying_locked')
-                      AND next_attempt_at <= now()
-                      {family_filter}
-                      {root_filter}
-                      {host_root_filter}
-                      {caps_filter}
-                      {same_root_sync_filter}
-                    ORDER BY priority DESC, created_at
-                    LIMIT %s
-                    FOR UPDATE SKIP LOCKED
+                    {claim_selection}
                 )
                 RETURNING id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
                           status, payload, attempts, last_error, telemetry
@@ -3699,6 +3732,7 @@ def recover_stale_running_corpus_jobs(
                           SELECT 1
                           FROM runtime_components component
                           WHERE component.name = job.locked_by
+                            AND component.metadata->>'worker_instance' = 'true'
                             AND component.status = 'running'
                             AND component.heartbeat_at >= now() - make_interval(secs => %s)
                       )

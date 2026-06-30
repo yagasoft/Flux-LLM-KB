@@ -624,6 +624,46 @@ def test_claim_corpus_jobs_applies_family_caps(monkeypatch):
     assert params[0] == json.dumps({"archive": 2, "media": 1}, sort_keys=True)
 
 
+def test_claim_corpus_jobs_limits_each_family_to_remaining_capacity(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.claim_corpus_jobs(limit=20, worker_id="worker-a", family_caps={"image": 2, "office": 3})
+
+    sql, _params = executed[0]
+    assert "row_number() OVER (PARTITION BY job_family" in sql
+    assert "ranked.family_rank <= ranked.family_capacity_available" in sql
+    assert "GREATEST(0, family_cap - running_count)" in sql
+
+
 def test_benchmark_runs_insert_list_and_compute_previous_delta(monkeypatch):
     executed = []
     timestamp = datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)
@@ -2783,6 +2823,7 @@ def test_recover_stale_running_corpus_jobs_uses_progress_heartbeat_and_worker_li
     assert "progress_heartbeat_at" in sql
     assert "GREATEST(%s, COALESCE(job.time_budget_seconds, 0))" in sql
     assert "runtime_components" in sql
+    assert "component.metadata->>'worker_instance' = 'true'" in sql
     assert "status = 'running'" in sql
     assert "status = 'pending'" in sql
 

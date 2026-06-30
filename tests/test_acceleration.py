@@ -284,6 +284,7 @@ def test_collect_status_adds_watcher_policy_backpressure_and_benchmark_history()
     media = next(row for row in payload["worker_families"] if row["family"] == "media")
     assert media["configured_cap"] == 1
     assert media["cap_available"] == 0
+    assert media["over_cap_running"] == 0
     assert media["backpressure"] == "cap_reached"
     assert media["oldest_pending_age_seconds"] == 120
     assert media["retrying_locked"] == 2
@@ -294,6 +295,28 @@ def test_collect_status_adds_watcher_policy_backpressure_and_benchmark_history()
     assert payload["benchmarks"]["history"][0]["previous_elapsed_delta_ms"] == -250
     assert payload["benchmarks"]["history"][0]["previous_throughput_delta"] == 2.0
     assert payload["benchmarks"]["history"][0]["manifest_skipped_unchanged"] == 8
+
+
+def test_collect_status_reports_over_cap_running_workers():
+    payload = collect_acceleration_status(
+        settings={
+            "acceleration.cache_root": "",
+            "acceleration.local_inference.enabled": False,
+            "acceleration.local_inference.provider": "ollama",
+            "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+            "acceleration.local_inference.probe_timeout_seconds": 1,
+            "acceleration.worker_cap.image": 2,
+        },
+        command_runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="missing"),
+        module_importer=lambda _name: (_ for _ in ()).throw(ModuleNotFoundError("missing")),
+        worker_family_stats=lambda: [{"family": "image", "pending": 9, "running": 5}],
+        benchmark_stats=lambda: [],
+    )
+
+    image = next(row for row in payload["worker_families"] if row["family"] == "image")
+    assert image["configured_cap"] == 2
+    assert image["cap_available"] == 0
+    assert image["over_cap_running"] == 3
 
 
 def test_collect_status_reports_empty_deterministic_benchmark_fixtures():

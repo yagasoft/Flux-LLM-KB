@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 from typing import Any, Callable
+import uuid
 from uuid import UUID, uuid4
 
 from .acceleration import (
@@ -3177,7 +3178,20 @@ class KnowledgeService:
         root_name: str | None = None,
         host_agent_roots: bool | None = None,
         family: str | None = None,
+        worker_id: str | None = None,
     ) -> dict[str, Any]:
+        effective_worker_id = worker_id or _new_worker_instance_id(f"flux-kb-backfill-{workers}")
+        _record_worker_instance_heartbeat(
+            worker_id=effective_worker_id,
+            parent_component=None if worker_id else f"flux-kb-backfill-{workers}",
+            metadata={
+                "kind": family or kind,
+                "limit": limit,
+                "workers": workers,
+                "root_name": root_name,
+                "host_agent_roots": host_agent_roots,
+            },
+        )
         stale_recovery = {"root_name": root_name, "recovered": 0}
         try:
             stale_recovery = database.recover_stale_running_corpus_jobs(root_name=root_name)
@@ -3188,7 +3202,7 @@ class KnowledgeService:
         job_families = kind_to_job_families(effective_kind)
         claim_kwargs: dict[str, Any] = {
             "limit": limit,
-            "worker_id": f"flux-kb-backfill-{workers}",
+            "worker_id": effective_worker_id,
             "root_name": root_name,
         }
         if job_families is not None:
@@ -3200,6 +3214,7 @@ class KnowledgeService:
         completed = 0
         blocked = 0
         retried = 0
+        failed = 0
         cancelled_orphaned = 0
         cancelled_missing_source = 0
         for job, duration_ms, process_result in self._process_claimed_corpus_jobs(claimed, workers=workers):
@@ -3259,11 +3274,30 @@ class KnowledgeService:
                         telemetry=telemetry,
                     )
                     retried += 1
+            elif process_result.status == "failed":
+                if int(job.get("attempts") or 0) >= _configured_failure_max_attempts():
+                    database.block_corpus_job(
+                        job_id=job["id"],
+                        error=process_result.message or process_result.status,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        telemetry=telemetry,
+                    )
+                    failed += 1
+                else:
+                    database.retry_corpus_job(
+                        job_id=job["id"],
+                        error=process_result.message or process_result.status,
+                        cooldown_seconds=_configured_retry_cooldown_seconds(),
+                        duration_ms=duration_ms,
+                        telemetry=telemetry,
+                    )
+                    retried += 1
             else:
                 database.retry_corpus_job(
                     job_id=job["id"],
                     error=process_result.message or process_result.status,
-                    cooldown_seconds=300,
+                    cooldown_seconds=_configured_retry_cooldown_seconds(),
                     duration_ms=duration_ms,
                     telemetry=telemetry,
                 )
@@ -3277,10 +3311,12 @@ class KnowledgeService:
                 "job_families": list(job_families) if job_families else None,
                 "root_name": root_name,
                 "host_agent_roots": host_agent_roots,
+                "worker_id": effective_worker_id,
                 "claimed": len(claimed),
                 "completed": completed,
                 "blocked": blocked,
                 "retried": retried,
+                "failed": failed,
                 "cancelled_orphaned": cancelled_orphaned,
                 "cancelled_missing_source": cancelled_missing_source,
                 "recovered_stale_running": stale_recovery.get("recovered", 0),
@@ -3295,10 +3331,12 @@ class KnowledgeService:
             "job_families": list(job_families) if job_families else None,
             "root_name": root_name,
             "host_agent_roots": host_agent_roots,
+            "worker_id": effective_worker_id,
             "claimed": len(claimed),
             "completed": completed,
             "blocked": blocked,
             "retried": retried,
+            "failed": failed,
             "cancelled_orphaned": cancelled_orphaned,
             "cancelled_missing_source": cancelled_missing_source,
             "recovered_stale_running": stale_recovery.get("recovered", 0),
@@ -3641,6 +3679,7 @@ class KnowledgeService:
         last_governance_at = 0.0
         last_automation_at = 0.0
         mail_orphan_recovery: dict[str, Any] | None = None
+        worker_id = _new_worker_instance_id(component_name)
         if host_agent_roots is not True:
             try:
                 mail_orphan_recovery = database.recover_interrupted_imap_sync_runs(
@@ -3651,6 +3690,19 @@ class KnowledgeService:
                 mail_orphan_recovery = {"status": "failed", "error": str(exc), "worker_id": component_name}
         while True:
             runs += 1
+            _record_worker_instance_heartbeat(
+                worker_id=worker_id,
+                parent_component=component_name,
+                metadata={
+                    "kind": kind,
+                    "limit": limit,
+                    "workers": workers,
+                    "root_name": root_name,
+                    "host_agent_roots": host_agent_roots,
+                    "runs": runs,
+                    "worker_id": worker_id,
+                },
+            )
             database.record_runtime_component_heartbeat(
                 name=component_name,
                 status="running",
@@ -3669,6 +3721,7 @@ class KnowledgeService:
                 workers=workers,
                 root_name=root_name,
                 host_agent_roots=host_agent_roots,
+                worker_id=worker_id,
             )
             if mail_orphan_recovery is not None:
                 last_result["mail_orphan_recovery"] = mail_orphan_recovery
@@ -3713,12 +3766,13 @@ class KnowledgeService:
             database.record_runtime_component_heartbeat(
                 name=component_name,
                 status="running",
-                metadata={"last_result": last_result, "runs": runs},
+                metadata={"last_result": last_result, "runs": runs, "worker_id": worker_id},
             )
             if once:
                 return {
                     "status": "completed_once",
                     "once": True,
+                    "worker_id": worker_id,
                     "kind": kind,
                     "limit": limit,
                     "workers": workers,
@@ -5027,6 +5081,37 @@ def _configured_worker_caps() -> dict[str, int]:
     return caps
 
 
+def _new_worker_instance_id(component_name: str) -> str:
+    return f"{component_name}:{uuid.uuid4().hex}"
+
+
+def _record_worker_instance_heartbeat(
+    *,
+    worker_id: str,
+    parent_component: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    heartbeat_metadata = {"worker_instance": True}
+    if parent_component:
+        heartbeat_metadata["parent_component"] = parent_component
+    heartbeat_metadata.update({key: value for key, value in (metadata or {}).items() if value is not None})
+    try:
+        database.record_runtime_component_heartbeat(
+            name=worker_id,
+            status="running",
+            metadata=heartbeat_metadata,
+        )
+    except Exception:
+        pass
+
+
+def _configured_retry_cooldown_seconds() -> int:
+    try:
+        return int(SettingsService().resolve("worker.retry_cooldown_seconds").raw_value)
+    except Exception:
+        return 300
+
+
 def _configured_lock_retry_cooldown_seconds() -> int:
     try:
         return int(SettingsService().resolve("worker.lock_retry_cooldown_seconds").raw_value)
@@ -5037,6 +5122,13 @@ def _configured_lock_retry_cooldown_seconds() -> int:
 def _configured_lock_max_attempts() -> int:
     try:
         return int(SettingsService().resolve("worker.lock_max_attempts").raw_value)
+    except Exception:
+        return 3
+
+
+def _configured_failure_max_attempts() -> int:
+    try:
+        return int(SettingsService().resolve("worker.failure_max_attempts").raw_value)
     except Exception:
         return 3
 
