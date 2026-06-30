@@ -4,6 +4,7 @@ param(
     [int]$ApiPort = 8765,
     [int]$HostAgentPort = 8799,
     [int]$PostgresPort = 5432,
+    [int]$OllamaHostPort = 11435,
     [string]$PythonExe = "",
     [ValidateSet("auto", "on", "off")]
     [string]$GpuMode = "auto",
@@ -127,6 +128,7 @@ function Write-FluxCompose {
         [string]$ImageTag,
         [int]$ApiPort,
         [int]$PostgresPort,
+        [int]$OllamaHostPort,
         [bool]$GpuEnabled
     )
     $compose = @"
@@ -223,6 +225,8 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       OLLAMA_LOAD_TIMEOUT: 30m
       OLLAMA_KEEP_ALIVE: 2m
+    ports:
+      - "127.0.0.1:${OllamaHostPort}:11434"
     volumes:
       - flux_llm_kb_ollama_models:/root/.ollama
     healthcheck:
@@ -345,7 +349,26 @@ FLUX_KB_VISION_MAX_IMAGE_PIXELS=4096000
 }
 
 function Write-FluxHostScripts {
-    param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort)
+    param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort)
+    if ($GpuEnabled) {
+        $hostAgentAcceleration = @"
+os.environ["FLUX_KB_LOCAL_INFERENCE_ENABLED"] = "true"
+os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://127.0.0.1:${OllamaHostPort}"
+os.environ["FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE"] = "2m"
+os.environ["FLUX_KB_VISION_ENABLED"] = "true"
+os.environ["FLUX_KB_VISION_MODEL"] = "qwen3-vl:8b"
+os.environ["FLUX_KB_VISION_MAX_IMAGE_PIXELS"] = "80000000"
+"@
+    } else {
+        $hostAgentAcceleration = @"
+os.environ["FLUX_KB_LOCAL_INFERENCE_ENABLED"] = "false"
+os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://127.0.0.1:11434"
+os.environ["FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE"] = ""
+os.environ["FLUX_KB_VISION_ENABLED"] = "false"
+os.environ["FLUX_KB_VISION_MODEL"] = ""
+os.environ["FLUX_KB_VISION_MAX_IMAGE_PIXELS"] = "4096000"
+"@
+    }
     $hostAgent = @"
 import os
 import runpy
@@ -359,6 +382,7 @@ os.environ["FLUX_KB_APP_ROOT"] = r"$AppRoot"
 os.environ["FLUX_KB_PRIVATE_DIR"] = r"$InstallRoot\private"
 os.environ["FLUX_KB_DATA_DIR"] = r"$InstallRoot\data"
 os.environ["FLUX_KB_LOG_DIR"] = r"$InstallRoot\logs"
+$hostAgentAcceleration
 
 log_dir = Path(os.environ["FLUX_KB_LOG_DIR"])
 log_dir.mkdir(parents=True, exist_ok=True)
@@ -421,6 +445,20 @@ function Remove-FluxLegacyConsoleLaunchers {
 function Stop-FluxOutlookHostLaunchers {
     param([string]$InstallRoot)
     $launcherPath = Join-Path (Join-Path $InstallRoot "app") "run-outlook-host.pyw"
+    $launcherPattern = [regex]::Escape($launcherPath)
+    $processes = Get-CimInstance Win32_Process | Where-Object {
+        $_.CommandLine -and
+        $_.CommandLine -match $launcherPattern -and
+        ($_.Name -eq "python.exe" -or $_.Name -eq "pythonw.exe")
+    }
+    foreach ($process in $processes) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Stop-FluxHostAgentLaunchers {
+    param([string]$InstallRoot)
+    $launcherPath = Join-Path (Join-Path $InstallRoot "app") "run-host-agent.pyw"
     $launcherPattern = [regex]::Escape($launcherPath)
     $processes = Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and
@@ -524,6 +562,78 @@ function Invoke-FluxMigration {
         $env:FLUX_KB_PRIVATE_DIR = $previousPrivateDir
         $env:FLUX_KB_DATA_DIR = $previousDataDir
         $env:FLUX_KB_LOG_DIR = $previousLogDir
+    }
+}
+
+function Invoke-FluxSettingsCommand {
+    param([string]$VenvPython, [string[]]$Arguments)
+    & $VenvPython -m flux_llm_kb.cli @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Flux runtime settings command failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Set-FluxProductionRuntimeSettings {
+    param([string]$VenvPython, [string]$InstallRoot, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort)
+    $previousDatabaseUrl = $env:FLUX_KB_DATABASE_URL
+    $previousInstallRoot = $env:FLUX_KB_INSTALL_ROOT
+    $previousAppRoot = $env:FLUX_KB_APP_ROOT
+    $previousPrivateDir = $env:FLUX_KB_PRIVATE_DIR
+    $previousDataDir = $env:FLUX_KB_DATA_DIR
+    $previousLogDir = $env:FLUX_KB_LOG_DIR
+    $previousLocalInferenceEnabled = $env:FLUX_KB_LOCAL_INFERENCE_ENABLED
+    $previousLocalInferenceBaseUrl = $env:FLUX_KB_LOCAL_INFERENCE_BASE_URL
+    $previousLocalInferenceKeepAlive = $env:FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE
+    $previousVisionEnabled = $env:FLUX_KB_VISION_ENABLED
+    $previousVisionModel = $env:FLUX_KB_VISION_MODEL
+    $previousVisionMaxImagePixels = $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS
+    try {
+        $env:FLUX_KB_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
+        $env:FLUX_KB_INSTALL_ROOT = $InstallRoot
+        $env:FLUX_KB_APP_ROOT = Join-Path $InstallRoot "app"
+        $env:FLUX_KB_PRIVATE_DIR = Join-Path $InstallRoot "private"
+        $env:FLUX_KB_DATA_DIR = Join-Path $InstallRoot "data"
+        $env:FLUX_KB_LOG_DIR = Join-Path $InstallRoot "logs"
+        if ($GpuEnabled) {
+            $env:FLUX_KB_LOCAL_INFERENCE_ENABLED = "true"
+            $env:FLUX_KB_LOCAL_INFERENCE_BASE_URL = "http://127.0.0.1:$OllamaHostPort"
+            $env:FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE = "2m"
+            $env:FLUX_KB_VISION_ENABLED = "true"
+            $env:FLUX_KB_VISION_MODEL = "qwen3-vl:8b"
+            $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = "80000000"
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.enabled", "true", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.base_url", "http://127.0.0.1:$OllamaHostPort", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.keep_alive", "2m", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.enabled", "true", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.model", "qwen3-vl:8b", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.max_image_pixels", "80000000", "--confirm")
+        } else {
+            $env:FLUX_KB_LOCAL_INFERENCE_ENABLED = "false"
+            $env:FLUX_KB_LOCAL_INFERENCE_BASE_URL = "http://127.0.0.1:11434"
+            $env:FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE = ""
+            $env:FLUX_KB_VISION_ENABLED = "false"
+            $env:FLUX_KB_VISION_MODEL = ""
+            $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = "4096000"
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.enabled", "false", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.base_url", "http://127.0.0.1:11434", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.keep_alive", "", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.enabled", "false", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.model", "", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.max_image_pixels", "4096000", "--confirm")
+        }
+    } finally {
+        $env:FLUX_KB_DATABASE_URL = $previousDatabaseUrl
+        $env:FLUX_KB_INSTALL_ROOT = $previousInstallRoot
+        $env:FLUX_KB_APP_ROOT = $previousAppRoot
+        $env:FLUX_KB_PRIVATE_DIR = $previousPrivateDir
+        $env:FLUX_KB_DATA_DIR = $previousDataDir
+        $env:FLUX_KB_LOG_DIR = $previousLogDir
+        $env:FLUX_KB_LOCAL_INFERENCE_ENABLED = $previousLocalInferenceEnabled
+        $env:FLUX_KB_LOCAL_INFERENCE_BASE_URL = $previousLocalInferenceBaseUrl
+        $env:FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE = $previousLocalInferenceKeepAlive
+        $env:FLUX_KB_VISION_ENABLED = $previousVisionEnabled
+        $env:FLUX_KB_VISION_MODEL = $previousVisionModel
+        $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = $previousVisionMaxImagePixels
     }
 }
 
@@ -814,7 +924,7 @@ if (Test-Path $pluginSource) {
 }
 
 & (Join-Path $PSScriptRoot "migrate-postgres-to-docker-volume.ps1") -InstallRoot $InstallRoot -PostgresPort $PostgresPort
-Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
+Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort -PostgresPort $PostgresPort -OllamaHostPort $OllamaHostPort -GpuEnabled $gpuEnabled
 Set-Content -Path $appEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag`n" -Encoding UTF8
 Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
 Write-FluxEnv -TargetPath $privateEnvPath -InstallRoot $InstallRoot -ImageTag $imageTag -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
@@ -833,8 +943,9 @@ if ($PipIndexUrl) {
 }
 Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("--upgrade", "pip")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip upgrade"
 Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("$SourceRoot[api,corpus,mail,mcp,processors]")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip install production extras"
+Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("--force-reinstall", "--no-deps", "--no-cache-dir", $SourceRoot)) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip install production package"
 Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
-Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
+Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 Stop-FluxOutlookHostLaunchers -InstallRoot $InstallRoot
 
@@ -845,6 +956,7 @@ try {
     Pop-Location
 }
 Invoke-FluxMigration -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort
+Set-FluxProductionRuntimeSettings -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort
 
 foreach ($taskSpec in @(
     @{ Name = "FluxKB Host Agent"; Launcher = (Join-Path $appRoot "run-host-agent.pyw"); Port = $HostAgentPort },
@@ -856,6 +968,7 @@ foreach ($taskSpec in @(
         $wasRunning = $existing.State -eq "Running"
         if ($wasRunning -or $RestartHostTasks) {
             Stop-ScheduledTask -TaskName $taskSpec.Name -ErrorAction SilentlyContinue
+            if ($taskSpec.Port) { Stop-FluxHostAgentLaunchers -InstallRoot $InstallRoot }
             Wait-FluxTaskStopped -TaskName $taskSpec.Name
             if ($taskSpec.Port) { Wait-FluxTcpClosed -Port $taskSpec.Port }
         }
@@ -870,4 +983,5 @@ foreach ($taskSpec in @(
 Write-Host "Flux production runtime updated at $InstallRoot to image tag $imageTag"
 if ($gpuEnabled) {
     Write-Host "Install the Docker Ollama vision model with: docker exec flux-ollama ollama pull qwen3-vl:8b"
+    Write-Host "Docker Ollama host-agent URL: http://127.0.0.1:$OllamaHostPort"
 }

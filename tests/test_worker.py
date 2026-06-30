@@ -795,6 +795,8 @@ def test_process_corpus_job_merges_visual_enrichment_telemetry(monkeypatch, tmp_
                 "metadata": {
                     "decorative": {"status": "skipped"},
                     "vision": {
+                        "status": "failed",
+                        "error": "HTTP Error 500 from qwen",
                         "cache_hits": 1,
                         "cache_misses": 2,
                         "descriptions": 3,
@@ -815,6 +817,8 @@ def test_process_corpus_job_merges_visual_enrichment_telemetry(monkeypatch, tmp_
     assert result.status == "indexed"
     assert result.telemetry == {
         "decorative_image_skips": 1,
+        "vision_status": "failed",
+        "vision_error": "HTTP Error 500 from qwen",
         "vision_cache_hits": 1,
         "vision_cache_misses": 2,
         "vision_descriptions": 3,

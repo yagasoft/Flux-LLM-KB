@@ -68,7 +68,21 @@ docker exec flux-ollama ollama pull qwen3-vl:8b
 ```
 
 Production GPU mode defaults to `qwen3-vl:8b` and a 2-minute Ollama keepalive so
-VRAM is released shortly after Flux vision work goes idle.
+VRAM is released shortly after Flux vision work goes idle. Local vision requests
+allow a cold Docker Qwen load before timing out; failed model attempts are
+recorded in image-job telemetry even when OCR text still lets the job complete.
+Flux submits a bounded 1280-pixel vision copy with a larger answer budget, while
+keeping cache keys tied to the original source file, so Qwen3-VL diagram captions
+do not spend the whole default context on image tokens or internal thinking.
+
+Windows host-agent roots, including watched folders that Docker cannot access
+directly, use the same Docker Ollama service through a loopback-only host port:
+`http://127.0.0.1:11435` by default. API and worker containers continue to use
+the Compose service URL `http://ollama:11434`. The separate host port avoids
+conflicts with any Windows-hosted Ollama process already bound to
+`127.0.0.1:11434`; override it with `-OllamaHostPort` if needed. Install and
+update scripts persist matching runtime settings so host-side diagnostics and
+manual image backfills use `qwen3-vl:8b`.
 
 Update an existing deployment from the current checkout with:
 

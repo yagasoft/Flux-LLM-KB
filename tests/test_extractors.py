@@ -16,7 +16,7 @@ from zipfile import ZipFile
 import zlib
 
 from flux_llm_kb.crawler import AssetChunk, CorpusPolicy
-from flux_llm_kb.extractors import extract_file, extractor_availability
+from flux_llm_kb.extractors import VISION_TIMEOUT_SECONDS, extract_file, extractor_availability
 
 
 PNG_BYTES = base64.b64decode(
@@ -865,6 +865,7 @@ def test_extract_image_sends_configured_local_inference_keep_alive(monkeypatch, 
     def fake_urlopen(request, **_kwargs):
         payload = json.loads(request.data.decode("utf-8"))
         assert payload["keep_alive"] == "2m"
+        assert _kwargs["timeout"] == VISION_TIMEOUT_SECONDS
         return FakeResponse()
 
     monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
@@ -873,6 +874,74 @@ def test_extract_image_sends_configured_local_inference_keep_alive(monkeypatch, 
 
     assert result.status == "indexed"
     assert result.metadata["vision"]["status"] == "completed"
+
+
+def test_extract_image_uses_qwen_thinking_when_ollama_response_is_empty(monkeypatch, tmp_path):
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path, keep_alive="2m")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return json.dumps(
+                {
+                    "response": "",
+                    "thinking": (
+                        "<think>Got it, let's break down the user's request. "
+                        "They want a description for a private local knowledge index. "
+                        "The image is an ER diagram titled Project Data. "
+                        "Need to be concise and factual.</think>"
+                    ),
+                    "done_reason": "length",
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, **_kwargs):
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["options"]["num_predict"] >= 1024
+        return FakeResponse()
+
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].modality == "vision"
+    assert result.chunks[0].body == "The image is an ER diagram titled Project Data."
+    assert result.metadata["vision"]["status"] == "completed"
+    assert result.metadata["vision"]["descriptions"] == 1
+    assert result.metadata["vision"]["fallback_field"] == "thinking"
+
+
+def test_extract_image_resizes_large_payload_for_local_vision(monkeypatch, tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "large-diagram.jpg"
+    Image.new("RGB", (3446, 2086), "white").save(path, quality=95)
+    _configure_vision(monkeypatch, tmp_path, max_pixels=80_000_000)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"response":"Resized diagram caption."}'
+
+    def fake_urlopen(request, **_kwargs):
+        payload = json.loads(request.data.decode("utf-8"))
+        image_bytes = base64.b64decode(payload["images"][0])
+        with Image.open(BytesIO(image_bytes)) as submitted:
+            assert max(submitted.size) <= 1280
+        return FakeResponse()
+
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].body == "Resized diagram caption."
+    assert result.metadata["vision"]["input_width"] == 3446
+    assert result.metadata["vision"]["submitted_max_edge"] == 1280
+    assert result.metadata["vision"]["submitted_width"] <= 1280
 
 
 def test_extract_image_reindexes_combined_ocr_and_vision_chunks(monkeypatch, tmp_path):
@@ -901,6 +970,36 @@ def test_extract_image_reindexes_combined_ocr_and_vision_chunks(monkeypatch, tmp
     assert [chunk.chunk_index for chunk in result.chunks] == [0, 1]
     assert [chunk.modality for chunk in result.chunks] == ["ocr", "vision"]
     assert [chunk.body for chunk in result.chunks] == ["OCR text", "Vision text"]
+
+
+def test_extract_image_records_failed_local_vision_attempt_when_ocr_succeeds(monkeypatch, tmp_path):
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path, keep_alive="2m")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/tesseract.exe"
+        return SimpleNamespace(returncode=0, stdout="OCR text still indexes", stderr="")
+
+    def fake_urlopen(_request, **_kwargs):
+        raise TimeoutError("vision request exceeded cold-load timeout")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].modality == "ocr"
+    assert result.metadata["vision"]["status"] == "failed"
+    assert result.metadata["vision"]["cache_misses"] == 1
+    assert result.metadata["vision"]["descriptions"] == 0
+    assert "cold-load timeout" in result.metadata["vision"]["error"]
+    assert result.metadata["vision_escalation"] == "unavailable"
 
 
 def test_extract_image_uses_local_vision_after_empty_ocr_via_docker_host_gateway(monkeypatch, tmp_path):

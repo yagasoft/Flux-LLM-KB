@@ -11,6 +11,7 @@ import gzip
 import hashlib
 from html import unescape
 import importlib.util
+from io import BytesIO
 import json
 import lzma
 import mailbox
@@ -87,14 +88,16 @@ OCR_CACHE_SCHEMA = "flux-ocr-cache-v1"
 ASR_CACHE_SCHEMA = "flux-asr-cache-v1"
 VISION_CACHE_SCHEMA = "flux-vision-cache-v1"
 THUMBNAIL_CACHE_SCHEMA = "flux-thumbnail-cache-v1"
-VISION_PROMPT_SCHEMA = "flux-vision-caption-v1"
+VISION_PROMPT_SCHEMA = "flux-vision-caption-v3"
 OCR_MAX_PDF_PAGES = 25
 OCR_PDF_DPI = 200
 OCR_MAX_IMAGE_EDGE = 6000
 OCR_TIMEOUT_SECONDS = 30
 ASR_AUDIO_SAMPLE_RATE = 16000
 ASR_FFMPEG_TIMEOUT_SECONDS = 300
-VISION_TIMEOUT_SECONDS = 60
+VISION_TIMEOUT_SECONDS = 180
+VISION_REQUEST_MAX_EDGE = 1280
+VISION_NUM_PREDICT = 1024
 FRAME_SAMPLING_TIMEOUT_SECONDS = 120
 PRACTICAL_TEXT_LIMIT_BYTES = 2 * 1024 * 1024
 PRACTICAL_SUMMARY_LIMIT = 50
@@ -3435,7 +3438,6 @@ def _vision_escalation_status(vision: VisionResult) -> str:
         return "unavailable"
     return status
 
-
 def _extract_media(path: Path, file_kind: str, *, embedded_sidecar: tuple[str, str] | None = None) -> ExtractionResult:
     metadata: dict[str, Any] = {"extractor": file_kind}
     if embedded_sidecar is not None:
@@ -4160,16 +4162,21 @@ def _vision_with_ollama_compatible(
     timeout_seconds: int,
     metadata: dict[str, Any],
 ) -> VisionResult:
+    request_attempted = False
     try:
-        image_b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        image_bytes, submission_metadata = _vision_request_image_bytes(path)
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
         payload = {
             "model": model,
             "stream": False,
             "prompt": (
                 "Describe this image for a private local knowledge index. "
-                "Be concise and factual. Do not infer private identities."
+                "Be concise and factual. If it is a diagram, name the diagram type, visible title, "
+                "key labels, entities, and relationships. Answer directly in plain text. "
+                "Do not infer private identities."
             ),
             "images": [image_b64],
+            "options": {"num_predict": VISION_NUM_PREDICT},
         }
         if keep_alive:
             payload["keep_alive"] = keep_alive
@@ -4179,18 +4186,25 @@ def _vision_with_ollama_compatible(
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        request_attempted = True
         response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
         raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
         decoded = json.loads(raw or "{}")
-        text = _vision_response_text(decoded)
+        text, response_field = _vision_response_text(decoded)
         redacted, _ = redact_text(text)
-        clean = redacted.strip()
-        _write_vision_cache(path, provider=provider, model=model, text=clean)
+        clean = _clean_vision_caption_text(redacted)
+        if clean:
+            _write_vision_cache(path, provider=provider, model=model, text=clean)
+        response_metadata = _vision_response_metadata(decoded)
+        if response_field and response_field != "response":
+            response_metadata["fallback_field"] = response_field
         return VisionResult(
             status="completed",
             text=clean,
             metadata={
                 **metadata,
+                **submission_metadata,
+                **response_metadata,
                 "status": "completed",
                 "cache_hits": 0,
                 "cache_misses": 1,
@@ -4199,27 +4213,119 @@ def _vision_with_ollama_compatible(
             },
         )
     except Exception as exc:
-        return VisionResult(status="failed", metadata={**metadata, "status": "failed"}, message=str(exc))
+        message = str(exc)
+        failed_metadata = {**metadata, "status": "failed", "error": message[:500]}
+        if request_attempted:
+            failed_metadata["cache_misses"] = 1
+        return VisionResult(status="failed", metadata=failed_metadata, message=message)
 
 
-def _vision_response_text(payload: Any) -> str:
+def _vision_request_image_bytes(path: Path) -> tuple[bytes, dict[str, Any]]:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+            metadata: dict[str, Any] = {
+                "input_width": width,
+                "input_height": height,
+                "submitted_max_edge": VISION_REQUEST_MAX_EDGE,
+            }
+            if max(width, height) <= VISION_REQUEST_MAX_EDGE:
+                data = path.read_bytes()
+                metadata.update(
+                    {
+                        "submitted_width": width,
+                        "submitted_height": height,
+                        "submitted_bytes": len(data),
+                        "submitted_resize": "original",
+                    }
+                )
+                return data, metadata
+            resized = image.convert("RGB")
+            resized.thumbnail((VISION_REQUEST_MAX_EDGE, VISION_REQUEST_MAX_EDGE), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            resized.save(buffer, format="JPEG", quality=92, optimize=True)
+            data = buffer.getvalue()
+            metadata.update(
+                {
+                    "submitted_width": resized.width,
+                    "submitted_height": resized.height,
+                    "submitted_bytes": len(data),
+                    "submitted_resize": "scaled",
+                }
+            )
+            return data, metadata
+    except Exception:
+        data = path.read_bytes()
+        return data, {"submitted_resize": "unavailable", "submitted_bytes": len(data)}
+
+
+def _vision_response_text(payload: Any) -> tuple[str, str]:
     if isinstance(payload, dict):
         response = payload.get("response")
         if isinstance(response, str):
-            return response
+            if response.strip():
+                return response, "response"
         message = payload.get("message")
         if isinstance(message, dict) and isinstance(message.get("content"), str):
-            return message["content"]
+            content = message["content"]
+            if content.strip():
+                return content, "message.content"
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
             first = choices[0]
             if isinstance(first, dict):
                 if isinstance(first.get("text"), str):
-                    return first["text"]
+                    text = first["text"]
+                    if text.strip():
+                        return text, "choices[0].text"
                 nested = first.get("message")
                 if isinstance(nested, dict) and isinstance(nested.get("content"), str):
-                    return nested["content"]
-    return ""
+                    content = nested["content"]
+                    if content.strip():
+                        return content, "choices[0].message.content"
+        thinking = payload.get("thinking")
+        if isinstance(thinking, str) and thinking.strip():
+            return _strip_thinking_markup(thinking), "thinking"
+    return "", ""
+
+
+def _strip_thinking_markup(text: str) -> str:
+    stripped = text.strip()
+    stripped = re.sub(r"^\s*<think>\s*", "", stripped, flags=re.IGNORECASE)
+    stripped = re.sub(r"\s*</think>\s*$", "", stripped, flags=re.IGNORECASE)
+    return stripped.strip()
+
+
+def _clean_vision_caption_text(text: str) -> str:
+    cleaned = _strip_thinking_markup(text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    for pattern in (
+        r"\b(?:The image is|This image is|This is|It is|It's|Diagram Type:|Entity[- ]Relationship Diagram)\b",
+    ):
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            cleaned = cleaned[match.start() :]
+            break
+    cleaned = re.split(
+        r"\b(?:Need to|Wait,|Check the user instructions|The user wants|They want)\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    return cleaned
+
+
+def _vision_response_metadata(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key in ("done_reason", "prompt_eval_count", "eval_count"):
+        value = payload.get(key)
+        if isinstance(value, (int, str)):
+            metadata[key] = value
+    return metadata
 
 
 def _read_vision_cache(path: Path, *, provider: str, model: str) -> str | None:

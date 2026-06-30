@@ -267,6 +267,10 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
         telemetry["decorative_image_skips"] = 1
     vision = metadata.get("vision")
     if isinstance(vision, dict):
+        if "status" in vision:
+            telemetry["vision_status"] = str(vision.get("status") or "")[:80]
+        if "error" in vision:
+            telemetry["vision_error"] = str(vision.get("error") or "")[:240]
         if "cache_hits" in vision:
             telemetry["vision_cache_hits"] = int(vision.get("cache_hits") or 0)
         if "cache_misses" in vision:

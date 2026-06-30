@@ -11,6 +11,9 @@ WINDOWS_CREATE_NO_WINDOW = 0x08000000
 def run_no_window(*popenargs: Any, **kwargs: Any) -> subprocess.CompletedProcess:
     if "stdin" not in kwargs and "input" not in kwargs:
         kwargs["stdin"] = subprocess.DEVNULL
+    if kwargs.get("text") or kwargs.get("universal_newlines"):
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
     if sys.platform == "win32":
         kwargs["creationflags"] = int(kwargs.get("creationflags") or 0) | WINDOWS_CREATE_NO_WINDOW
         startupinfo = kwargs.get("startupinfo")

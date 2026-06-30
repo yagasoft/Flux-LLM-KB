@@ -42,6 +42,8 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "Invoke-FluxCodexPluginInstall" in install
     assert "-m flux_llm_kb.cli codex install-plugin" in install
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
+    assert '"--force-reinstall", "--no-deps", "--no-cache-dir", $SourceRoot' in install
+    assert "pip install production package" in install
     assert "GpuMode" in install
     assert "Assert-FluxGpuAvailable" in install
     assert 'Join-Path $appRoot "plugins"' in install
@@ -87,6 +89,8 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "Invoke-FluxCodexPluginInstall" in update
     assert "-m flux_llm_kb.cli codex install-plugin" in update
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
+    assert '"--force-reinstall", "--no-deps", "--no-cache-dir", $SourceRoot' in update
+    assert "pip install production package" in update
     assert "Register-FluxTask" in update
     assert "New-FluxHostTaskTriggers" in update
     assert "New-ScheduledTaskTrigger -Once" in update
@@ -103,12 +107,15 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "run-host-agent.ps1" in update
     assert "run-outlook-host.ps1" in update
     assert "Stop-FluxOutlookHostLaunchers" in update
+    assert "Stop-FluxHostAgentLaunchers" in update
     assert "Get-CimInstance Win32_Process" in update
     assert "run-outlook-host.pyw" in update
+    assert "run-host-agent.pyw" in update
     assert '-Execute "pwsh.exe"' not in update
     assert "[int]$HostAgentPort = 8799" in update
     assert "[int]$PostgresPort = 5432" in update
-    assert "Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort" in update
+    assert "[int]$OllamaHostPort = 11435" in update
+    assert "Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort" in update
     assert "GpuMode" in update
     assert "Write-FluxCompose" in update
     assert "Assert-FluxGpuAvailable" in update
@@ -130,6 +137,7 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert compose.count("OLLAMA_KEEP_ALIVE: 2m") == 1
         assert "flux_llm_kb_ollama_models:/root/.ollama" in compose
         assert "../models/ollama:/root/.ollama" not in compose
+        assert '"127.0.0.1:${OllamaHostPort}:11434"' in compose
         assert 'test: ["CMD", "ollama", "list"]' in compose
         assert "ollama:" in compose
         assert "condition: service_healthy" in compose
@@ -143,6 +151,36 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in compose
         assert "host.docker.internal:11434" not in compose
         assert "0.0.0.0:11434:11434" not in compose
+        assert "127.0.0.1:11434:11434" not in compose
+
+
+def test_production_host_agent_uses_host_loopback_to_docker_ollama():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+
+        assert "[int]$OllamaHostPort = 11435" in script
+        assert "param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort)" in script
+        assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_ENABLED"] = "true"' in script
+        assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://127.0.0.1:${OllamaHostPort}"' in script
+        assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE"] = "2m"' in script
+        assert 'os.environ["FLUX_KB_VISION_ENABLED"] = "true"' in script
+        assert 'os.environ["FLUX_KB_VISION_MODEL"] = "qwen3-vl:8b"' in script
+        assert 'os.environ["FLUX_KB_VISION_MAX_IMAGE_PIXELS"] = "80000000"' in script
+        assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://ollama:11434"' not in script
+
+
+def test_production_deploy_persists_host_side_qwen_runtime_settings():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+
+        assert "function Set-FluxProductionRuntimeSettings" in script
+        assert "Set-FluxProductionRuntimeSettings -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort" in script
+        assert '"settings", "set", "acceleration.local_inference.enabled", "true", "--confirm"' in script
+        assert '"settings", "set", "acceleration.local_inference.base_url", "http://127.0.0.1:$OllamaHostPort", "--confirm"' in script
+        assert '"settings", "set", "acceleration.local_inference.keep_alive", "2m", "--confirm"' in script
+        assert '"settings", "set", "acceleration.vision.enabled", "true", "--confirm"' in script
+        assert '"settings", "set", "acceleration.vision.model", "qwen3-vl:8b", "--confirm"' in script
+        assert '"settings", "set", "acceleration.vision.max_image_pixels", "80000000", "--confirm"' in script
 
 
 def test_production_deploy_scripts_surface_docker_ollama_model_steps():
