@@ -220,7 +220,7 @@ FLUX_KB_IMAGE_TAG=$ImageTag
 FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb
 "@
     if ($GpuEnabled) {
-        $envText += @"
+        $envText += "`n" + @"
 FLUX_KB_ASR_DEVICE=cuda
 FLUX_KB_ASR_COMPUTE_TYPE=float16
 FLUX_KB_LOCAL_INFERENCE_ENABLED=true
@@ -230,7 +230,7 @@ FLUX_KB_VISION_MODEL=qwen2.5vl:7b
 FLUX_KB_VISION_MAX_IMAGE_PIXELS=80000000
 "@
     } else {
-        $envText += @"
+        $envText += "`n" + @"
 FLUX_KB_ASR_DEVICE=auto
 FLUX_KB_ASR_COMPUTE_TYPE=default
 FLUX_KB_LOCAL_INFERENCE_ENABLED=false

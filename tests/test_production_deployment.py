@@ -125,6 +125,17 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
     assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in install_compose
 
 
+def test_production_env_gpu_settings_start_on_new_lines():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        assert '$envText += "`n" + @"' in script
+        assert "\nFLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb\n" in script
+        assert "\n    FLUX_KB_HOST_DATABASE_URL=" not in script
+        assert "FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb`nFLUX_KB_ASR_DEVICE" not in script
+
+
 def test_postgres_compose_uses_performance_first_local_tuning():
     dev_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     install_compose = _embedded_compose_template(_script("install-flux.ps1"))
