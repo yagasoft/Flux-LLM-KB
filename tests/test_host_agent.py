@@ -619,6 +619,43 @@ def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
     assert "message" in result["vss"]
 
 
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
+def test_host_agent_liveness_endpoint_is_minimal(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(host_agent, "_native_browse_supported", lambda: True)
+    monkeypatch.setattr(
+        host_agent,
+        "_host_runtime_checks",
+        lambda: (_ for _ in ()).throw(AssertionError("liveness must not run runtime checks")),
+    )
+    monkeypatch.setattr(
+        host_agent,
+        "_host_codex_status",
+        lambda: (_ for _ in ()).throw(AssertionError("liveness must not run Codex checks")),
+    )
+    monkeypatch.setattr(
+        host_agent,
+        "_runtime_components",
+        lambda: (_ for _ in ()).throw(AssertionError("liveness must not load worker metadata")),
+    )
+
+    response = TestClient(host_agent.create_app()).get("/status/liveness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "running"
+    assert payload["browse_supported"] is True
+    assert "process_id" in payload
+    assert "time" in payload
+    assert "runtime" not in payload
+    assert "codex" not in payload
+    assert "workers" not in payload
+    assert "vss" not in payload
+
+
 def test_run_server_exits_cleanly_when_host_agent_already_owns_port(monkeypatch):
     def fail_run(*_args, **_kwargs):
         raise AssertionError("uvicorn.run should not be called for an already-running host agent")
@@ -661,6 +698,7 @@ def test_remote_browse_folder_allows_user_interaction_time(monkeypatch):
 
 def test_remote_status_keeps_short_timeout(monkeypatch):
     timeouts: list[float | None] = []
+    urls: list[str] = []
 
     class FakeResponse:
         def __enter__(self):
@@ -674,6 +712,7 @@ def test_remote_status_keeps_short_timeout(monkeypatch):
 
     def fake_urlopen(_request, timeout=None):
         timeouts.append(timeout)
+        urls.append(_request.full_url)
         return FakeResponse()
 
     monkeypatch.setattr(host_agent.request, "urlopen", fake_urlopen)
@@ -681,4 +720,5 @@ def test_remote_status_keeps_short_timeout(monkeypatch):
     result = host_agent.remote_status(agent_url="http://127.0.0.1:8799")
 
     assert result["status"] == "running"
+    assert urls == ["http://127.0.0.1:8799/status/liveness"]
     assert timeouts == [host_agent.HOST_AGENT_REQUEST_TIMEOUT_SECONDS]

@@ -404,6 +404,58 @@ def test_collect_crawl_payload_marks_host_agent_roots_offline_when_bridge_is_dow
     assert payload["root_summaries"][0]["watcher"]["status"] == "host_offline"
 
 
+def test_collect_crawl_payload_preserves_fresh_host_agent_root_heartbeat_when_probe_times_out(monkeypatch):
+    host_root = {
+        "name": "watch-test",
+        "root_path": "E:/Temp/watch-test",
+        "watch_enabled": True,
+        "metadata": {"host_access": "host_agent"},
+    }
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [host_root])
+    monkeypatch.setattr(
+        database,
+        "crawl_status",
+        lambda: {
+            "active_watch_roots": 1,
+            "disabled_watch_roots": 0,
+            "recent_errors": [],
+            "watchers": [
+                {
+                    "root_name": "watch-test",
+                    "status": "running",
+                    "heartbeat_age_seconds": 8,
+                    "last_error": None,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        database,
+        "crawl_root_summaries",
+        lambda: [
+            {
+                **host_root,
+                "state": "processing",
+                "watcher": {"status": "running", "heartbeat_age_seconds": 8, "last_error": None},
+                "asset_counts": {"indexed": 10},
+                "job_counts": {"running": 1, "pending": 0},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        health,
+        "remote_status",
+        lambda: {"status": "host_agent_offline", "message": "timed out"},
+    )
+
+    payload = collect_crawl_payload()
+
+    assert payload["watchers"][0]["status"] == "running"
+    assert payload["watchers"][0]["last_error"] is None
+    assert payload["root_summaries"][0]["state"] == "processing"
+    assert payload["root_summaries"][0]["watcher"]["status"] == "running"
+
+
 def test_dashboard_html_contains_health_mount_points():
     html = build_dashboard_html()
 

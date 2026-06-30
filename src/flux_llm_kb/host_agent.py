@@ -98,6 +98,16 @@ def status_payload() -> dict[str, Any]:
     }
 
 
+def liveness_payload() -> dict[str, Any]:
+    return {
+        "status": "running",
+        "platform": platform.system() or "unknown",
+        "process_id": os.getpid(),
+        "browse_supported": _native_browse_supported(),
+        "time": time.time(),
+    }
+
+
 def validate_host_path(path: str, *, require_directory: bool = True) -> dict[str, Any]:
     raw_path = str(path).strip()
     path_style = _path_style(raw_path)
@@ -445,6 +455,10 @@ def create_app(*, start_watcher: bool = False):
     def status():
         return status_payload()
 
+    @app.get("/status/liveness")
+    def liveness():
+        return liveness_payload()
+
     @app.post("/validate-path")
     def validate(req: ValidateRequest = Body(...)):
         return validate_host_path(req.path, require_directory=req.require_directory)
@@ -517,9 +531,15 @@ def run_server(*, host: str = "127.0.0.1", port: int = DEFAULT_HOST_AGENT_PORT) 
 
 
 def remote_status(agent_url: str | None = None) -> dict[str, Any]:
+    url = _agent_url(agent_url)
     try:
-        return _request_json("GET", f"{_agent_url(agent_url)}/status")
+        return _request_json("GET", f"{url}/status/liveness")
     except HostAgentClientError as exc:
+        if "HTTP Error 404" in str(exc):
+            try:
+                return _request_json("GET", f"{url}/status")
+            except HostAgentClientError as fallback_exc:
+                return {"status": "host_agent_offline", "message": str(fallback_exc), "browse_supported": False}
         return {"status": "host_agent_offline", "message": str(exc), "browse_supported": False}
 
 

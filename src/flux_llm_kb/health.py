@@ -20,6 +20,7 @@ from .processes import run_no_window
 from .watcher import summarize_watcher_staleness
 
 DASHBOARD_INDEX = Path(__file__).resolve().parent / "dashboard_static" / "index.html"
+WATCHER_STALE_AFTER_SECONDS = 120
 
 
 def doctor_payload(*, db_report: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -397,7 +398,7 @@ def _overlay_host_agent_crawl_status(
     watchers = []
     for watcher in status.get("watchers", []):
         item = dict(watcher)
-        if item.get("root_name") in host_root_names:
+        if item.get("root_name") in host_root_names and not _watcher_heartbeat_is_fresh(item):
             item["status"] = "host_offline"
             item["last_error"] = item.get("last_error") or message
         watchers.append(item)
@@ -407,8 +408,10 @@ def _overlay_host_agent_crawl_status(
 def _overlay_host_agent_root_summary(root: dict[str, Any], host_agent_status: dict[str, Any]) -> dict[str, Any]:
     if _host_agent_is_running(host_agent_status) or not root.get("watch_enabled") or not _root_uses_host_agent(root):
         return root
-    message = str(host_agent_status.get("message") or host_agent_status.get("status") or "host agent offline")
     watcher = dict(root.get("watcher") or {})
+    if _watcher_heartbeat_is_fresh(watcher):
+        return root
+    message = str(host_agent_status.get("message") or host_agent_status.get("status") or "host agent offline")
     watcher["status"] = "host_offline"
     watcher["last_error"] = watcher.get("last_error") or message
     return {**root, "state": "host_offline", "watcher": watcher}
@@ -416,6 +419,11 @@ def _overlay_host_agent_root_summary(root: dict[str, Any], host_agent_status: di
 
 def _host_agent_is_running(host_agent_status: dict[str, Any]) -> bool:
     return isinstance(host_agent_status, dict) and host_agent_status.get("status") == "running"
+
+
+def _watcher_heartbeat_is_fresh(watcher: dict[str, Any]) -> bool:
+    age = watcher.get("heartbeat_age_seconds")
+    return isinstance(age, (int, float)) and not isinstance(age, bool) and age <= WATCHER_STALE_AFTER_SECONDS
 
 
 def _root_uses_host_agent(root: dict[str, Any]) -> bool:
