@@ -1387,7 +1387,7 @@ def test_search_corpus_chunks_promotes_exact_code_definition():
         "src/flux_llm_kb/acceleration.py _watcher_backend_status",
         streams=streams,
         details=details,
-        filters=None,
+        filters={"file_kinds": ["code"]},
     )
 
     assert ranked[0].item_id == "definition"
@@ -1443,6 +1443,18 @@ def test_generic_policy_query_promotes_exact_non_code_over_weak_code_chunks():
     assert "balanced_non_code_guardrail" in ranked[0].streams
     assert not database._has_code_implementation_intent("failed_step log_path")
     assert "code_rank_adjustment" not in details["code-b"]["raw_scores"]
+
+
+def test_direct_corpus_filters_accept_singular_file_kind_code():
+    assert database._filters_request_code_focus({"file_kind": "code"})
+    assert database._filters_request_code_focus({"file_kinds": ["code"]})
+    assert not database._filters_request_code_focus({"language": "python", "path_glob": "src/*.py"})
+
+    sql, params = database._corpus_code_filter_sql({"file_kind": "code", "path_glob": "src/*.py"})
+
+    assert "AND a.file_kind = ANY(%s::text[])" in sql
+    assert "a.path LIKE %s" in sql
+    assert params[:2] == [["code"], "src/%.py"]
 
 
 def test_embedding_insert_populates_asset_chunk_root_id():

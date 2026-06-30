@@ -492,9 +492,11 @@ definition/reference coverage, and slow/problematic code-index rows without raw
 code content or private root paths. Dedicated code status/search/symbol lookup
 surfaces reuse the stored symbol/reference tables and sanitize path output.
 Code and generic corpus search filters accept `relationship`, `path_glob`, and
-`include_generated`; generated files are excluded when
-`include_generated=false` is part of the active filter set. Sanitized code
-results can include `is_generated`, `relationship`, `target_symbol`,
+`include_generated`; broad search, explain, and brief exclude code by default,
+so callers must include `file_kind=code` / `filters={"file_kinds":["code"]}`
+with the query before those broad surfaces return code results. Generated files
+are excluded when `include_generated=false` is part of the active filter set.
+Sanitized code results can include `is_generated`, `relationship`, `target_symbol`,
 `source_symbol`, `route`, `test_target`, `parser_status`, `language`,
 `symbol_kind`, and line ranges. Code retrieval feedback records only
 hashed/sanitized miss evidence and appears in `code status` as

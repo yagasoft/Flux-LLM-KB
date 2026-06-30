@@ -54,6 +54,9 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert "workspace_boosted" in source
     assert "query mid-turn" in source
     assert "expanded kb.search" in source
+    assert 'filters={"file_kinds":["code"]}' in source
+    assert "Broad kb.search/kb.brief/kb.explain calls exclude code results by default" in source
+    assert "rerun with non-code file kinds" not in source
     assert '@mcp.tool(name="kb.explain")' in source
     assert '@mcp.tool(name="kb.claim_upsert")' in source
     assert '@mcp.tool(name="kb.claim_transition")' in source

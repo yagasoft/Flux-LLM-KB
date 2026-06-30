@@ -192,11 +192,15 @@ External consumers should use one of three read paths:
 Search, explain, and brief reads accept optional `cwd`, `root_name`, and `scope_mode`
 parameters. They also accept per-query retrieval filters without changing global
 settings: `logical_kinds` (`episode`, `file`, `mail`), `current_only`,
-`lifecycle_states`, and `include_suppressed`. REST POST bodies use a `filters`
-object; REST GET accepts `kind`, `current_only`, `lifecycle_state`, and
-`include_suppressed` query parameters; MCP tools accept an optional `filters`
-object; CLI search/explain use `--kind`, `--current-only`,
-`--lifecycle-state`, and `--include-suppressed`.
+`lifecycle_states`, `include_suppressed`, and code filters. Broad search,
+explain, and brief exclude `file_kind=code` results by default; callers that
+want code from these broad surfaces must pass `file_kind=code` /
+`filters={"file_kinds":["code"]}` with the query, or use dedicated code
+search/symbol lookup surfaces. REST POST bodies use a `filters` object; REST GET
+accepts `kind`, `current_only`, `lifecycle_state`, `include_suppressed`, and
+`file_kind=code` query parameters; MCP tools accept an optional `filters` object;
+CLI search/explain use `--kind`, `--current-only`, `--lifecycle-state`,
+`--include-suppressed`, and `--file-kind code`.
 `scope_mode=local_first` is the default: Flux searches matching
 workspace/root evidence first, then falls back to global memory only when local
 results have no lexical or fuzzy evidence. Search and explain responses may

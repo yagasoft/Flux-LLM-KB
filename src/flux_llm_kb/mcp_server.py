@@ -18,10 +18,10 @@ def create_server():
             "scope_mode=\"workspace_boosted\" when "
             "you need prior decisions, unresolved project context, patterns from other "
             "workspaces, general indexed documents, previous fixes, or user-referenced "
-            "history. Use normal kb.brief/search for broad context; use kb.code_search "
-            "or file_kind=code filters for code-specific lookup. If a non-code query "
-            "returns code-heavy results, rerun with non-code file kinds such as text, "
-            "document, and image before injecting context. Skip KB queries when local files, the prompt, or current tool "
+            "history. Broad kb.search/kb.brief/kb.explain calls exclude code results by default. "
+            "When broad lookup should return code, pass filters={\"file_kinds\":[\"code\"]} "
+            "with the query, or use kb.code_search / kb.code_symbol_lookup for symbol-specific lookup. "
+            "Skip KB queries when local files, the prompt, or current tool "
             "output already answer the question. Use kb.remember for concise durable "
             "atomic saves when a verified decision, fix, reusable procedure, command, "
             "or project fact should be retrievable before turn end; do not wait for turn finalization. "
@@ -34,12 +34,12 @@ def create_server():
 
     @mcp.tool(name="kb.search")
     def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
-        """Search Flux memory with balanced broad relevance by default. Use scope_mode="workspace_boosted" for expanded discovery, file_kind=code or kb.code_search for explicit code lookup, and non-code file kinds when broad results are code-heavy."""
+        """Search Flux memory with balanced broad relevance. Broad lookup excludes code results by default; pass filters={"file_kinds":["code"]} with the query or use kb.code_search for code."""
         return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
 
     @mcp.tool(name="kb.explain")
     def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
-        """Search Flux memory and return query snippets, ranking signals, filters, and brief-packing rationale for broad, non-code, mail, episode, or code-focused searches."""
+        """Search Flux memory with explanations. Broad explain excludes code results by default; pass filters={"file_kinds":["code"]} with the query for code."""
         return service.explain(
             query,
             limit=limit,
@@ -52,7 +52,7 @@ def create_server():
 
     @mcp.tool(name="kb.brief")
     def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
-        """Build a compact brief from balanced search. Use kb.code_search or file_kind=code filters for code-specific briefs; rerun with non-code file kinds if a non-code prompt returns code-heavy context."""
+        """Build a compact brief from balanced search. Broad briefs exclude code results by default; pass filters={"file_kinds":["code"]} with the query for code-specific briefs."""
         return service.brief(
             query,
             token_budget=token_budget,

@@ -71,7 +71,7 @@ def test_local_first_uses_scoped_results_when_they_have_lexical_evidence(monkeyp
             return [_episode("local-episode", "Local Flux plan", ["lexical"], score=0.8)]
         return [_episode("global-episode", "Unrelated global memory", ["lexical"], score=0.99)]
 
-    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, url=None):
+    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, url=None):
         calls.append(("corpus", root_name))
         if root_name == "flux":
             return [_chunk("local-chunk", "Local corpus note", ["corpus_lexical"], score=0.7)]
@@ -105,7 +105,7 @@ def test_local_first_falls_back_to_global_when_scoped_results_have_no_lexical_or
             return [_episode("local-vector", "Local semantic-only memory", ["vector"], score=0.8)]
         return [_episode("global-episode", "Global fallback memory", ["lexical"], score=0.5)]
 
-    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, url=None):
+    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, url=None):
         if root_name == "flux":
             return [_chunk("local-trust", "Local trust-only chunk", ["corpus_trust"], score=0.8)]
         return [_chunk("global-chunk", "Global fallback chunk", ["corpus_fuzzy"], score=0.4)]
@@ -151,7 +151,7 @@ def test_root_name_scope_searches_root_workspace_episode(monkeypatch):
             return [_episode("root-episode", "Root-scoped memory", ["lexical"], score=0.9)]
         return []
 
-    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, url=None):
+    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, url=None):
         if root_name == "docs":
             return [_chunk("root-corpus", "Root corpus note", ["corpus_lexical"], score=0.4)]
         return []
@@ -238,7 +238,7 @@ def test_workspace_boosted_blends_local_and_strong_cross_workspace_results(monke
             )
         ]
 
-    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, url=None):
+    def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, url=None):
         if root_name == "flux":
             return [_chunk("local-chunk", "Local corpus note", ["corpus_lexical"], score=0.7)]
         global_chunk = _chunk("global-chunk", "General indexed PC document", ["corpus_vector"], score=0.65)

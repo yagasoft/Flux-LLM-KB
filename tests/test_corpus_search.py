@@ -168,6 +168,148 @@ def test_service_search_forwards_code_filters_and_exposes_code_explanation(monke
     assert results[0]["retrieval_explanation"]["streams"][0] == "code_symbol_exact"
 
 
+def test_service_search_excludes_code_without_explicit_code_filter(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, limit=20, root_name=None, filters=None, **_kwargs):
+        captured["filters"] = filters
+        return [
+            {
+                "id": "chunk-code",
+                "asset_id": "asset-code",
+                "title": "src/orders.py::OrderService.build_invoice",
+                "summary": "def build_invoice(self, order_id): return order_id",
+                "score": 0.99,
+                "streams": ["code_symbol_exact"],
+                "raw_scores": {"code_symbol_exact": 2.5},
+                "source_path": "src/orders.py",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {"primary_symbol": "OrderService.build_invoice", "relationship": "definition"},
+            },
+            {
+                "id": "chunk-policy",
+                "asset_id": "asset-policy",
+                "title": "AGENTS.md",
+                "summary": "Use the billing policy from AGENTS.md.",
+                "score": 0.75,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.9},
+                "source_path": "AGENTS.md",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "text",
+            },
+        ]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    results = KnowledgeService().search("OrderService.build_invoice", root_name="repo")
+
+    assert [result["id"] for result in results] == ["chunk-policy"]
+    assert captured["filters"]["_exclude_file_kinds"] == ["code"]
+    assert all(result.get("file_kind") != "code" for result in results)
+
+
+def test_service_explain_and_brief_exclude_code_without_explicit_code_filter(monkeypatch):
+    captured = []
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, limit=20, root_name=None, filters=None, **_kwargs):
+        captured.append(filters)
+        return [
+            {
+                "id": "chunk-code",
+                "asset_id": "asset-code",
+                "title": "src/hooks.py::failed_step",
+                "summary": "failed_step = result.failed_step",
+                "score": 0.95,
+                "streams": ["code_symbol_exact"],
+                "raw_scores": {"code_symbol_exact": 2.0},
+                "source_path": "src/hooks.py",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {"primary_symbol": "failed_step", "relationship": "definition"},
+            },
+            {
+                "id": "chunk-agents",
+                "asset_id": "asset-agents",
+                "title": "AGENTS.md",
+                "summary": "If closeout fails, report failed_step and log_path from AGENTS.md.",
+                "score": 0.8,
+                "streams": ["corpus_lexical"],
+                "raw_scores": {"corpus_lexical": 0.9},
+                "source_path": "AGENTS.md",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "text",
+            },
+        ]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    explain = KnowledgeService().explain("failed_step log_path", root_name="repo", token_budget=100)
+    brief = KnowledgeService().brief("failed_step log_path", root_name="repo", token_budget=100)
+
+    assert [result["id"] for result in explain["results"]] == ["chunk-agents"]
+    assert "### AGENTS.md" in brief
+    assert "src/hooks.py" not in brief
+    assert captured
+    assert all(filters["_exclude_file_kinds"] == ["code"] for filters in captured)
+
+
+def test_path_glob_alone_does_not_allow_code_results(monkeypatch):
+    captured = []
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, limit=20, root_name=None, filters=None, **_kwargs):
+        captured.append(filters)
+        return [
+            {
+                "id": "chunk-code",
+                "asset_id": "asset-code",
+                "title": "src/orders.py::OrderService.build_invoice",
+                "summary": "def build_invoice(self, order_id): return order_id",
+                "score": 0.97,
+                "streams": ["code_symbol_exact"],
+                "raw_scores": {"code_symbol_exact": 2.5},
+                "source_path": "src/orders.py",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {"primary_symbol": "OrderService.build_invoice", "relationship": "definition"},
+            }
+        ]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    broad_results = KnowledgeService().search(
+        "build_invoice",
+        root_name="repo",
+        scope_mode="local_only",
+        filters={"path_glob": "src/*.py"},
+    )
+    code_results = KnowledgeService().search(
+        "build_invoice",
+        root_name="repo",
+        scope_mode="local_only",
+        filters={"file_kind": "code", "path_glob": "src/*.py"},
+    )
+
+    assert broad_results == []
+    assert [result["id"] for result in code_results] == ["chunk-code"]
+    assert captured[0]["_exclude_file_kinds"] == ["code"]
+    assert "_exclude_file_kinds" not in captured[1]
+
+
 def test_brief_includes_policy_text_for_mixed_non_code_prompt(monkeypatch):
     monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
 

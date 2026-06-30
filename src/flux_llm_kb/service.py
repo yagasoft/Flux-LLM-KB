@@ -54,6 +54,8 @@ from .watcher import WatchEvent, WatchRoot, create_corpus_watcher, probe_watcher
 LOCAL_SCOPE_SCORE_BOOST = 1.15
 STRONG_VECTOR_MIN_SCORE = 0.35
 ALLOWED_RETRIEVAL_LOGICAL_KINDS = {"episode", "file", "mail"}
+CODE_FILE_KIND = "code"
+INTERNAL_EXCLUDE_FILE_KINDS_KEY = "_exclude_file_kinds"
 WATCHER_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
@@ -107,8 +109,16 @@ class KnowledgeService:
         filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
-        raw_results = self._search_raw(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=normalized_filters)
-        filtered_results, _excluded = _apply_retrieval_filters(raw_results, normalized_filters)
+        effective_filters = _effective_retrieval_filters(normalized_filters)
+        raw_results = self._search_raw(
+            query,
+            limit=limit,
+            cwd=cwd,
+            root_name=root_name,
+            scope_mode=scope_mode,
+            filters=effective_filters,
+        )
+        filtered_results, _excluded = _apply_retrieval_filters(raw_results, effective_filters)
         return _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
 
     def _search_raw(
@@ -294,24 +304,8 @@ class KnowledgeService:
         if token_budget is None:
             token_budget = _configured_token_budget()
         result_limit = max(1, min(int(limit or 5), 50))
-        if filters is None:
-            diagnostics: dict[str, Any] = {}
-            raw_results = self._search_raw(
-                query,
-                limit=max(result_limit, 10),
-                cwd=cwd,
-                root_name=root_name,
-                scope_mode=scope_mode,
-                diagnostics=diagnostics,
-            )
-            search_results = _enrich_search_results(query, raw_results)
-            return {
-                "query": query,
-                "results": search_results[:result_limit],
-                "brief": _brief_selection_trace(search_results, token_budget=token_budget),
-                "retrieval_timing": diagnostics,
-            }
         normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
+        effective_filters = _effective_retrieval_filters(normalized_filters)
         diagnostics = {}
         raw_results = self._search_raw(
             query,
@@ -319,10 +313,10 @@ class KnowledgeService:
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,
-            filters=normalized_filters,
+            filters=effective_filters,
             diagnostics=diagnostics,
         )
-        filtered_results, excluded = _apply_retrieval_filters(raw_results, normalized_filters)
+        filtered_results, excluded = _apply_retrieval_filters(raw_results, effective_filters)
         search_results = _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
         payload = {
             "query": query,
@@ -1181,6 +1175,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "path_globs": ["service_impl.py"],
                     },
                 ),
@@ -1192,7 +1187,7 @@ class KnowledgeService:
                     root_name=root_name,
                     source_path="service_impl.py",
                     expected_symbol="_benchmark_private_helper",
-                    filters={"logical_kinds": ["file"], "current_only": True},
+                    filters={"logical_kinds": ["file"], "current_only": True, "file_kinds": ["code"]},
                 ),
                 _retrieval_benchmark_case(
                     self,
@@ -1204,6 +1199,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "relationships": ["test"],
                         "path_globs": ["tests/*"],
                         "include_generated": False,
@@ -1219,6 +1215,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "relationships": ["test"],
                         "path_globs": ["tests/*"],
                         "include_generated": False,
@@ -1234,6 +1231,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "relationships": ["route"],
                         "path_globs": ["web/*"],
                         "include_generated": False,
@@ -1249,6 +1247,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "path_globs": ["generated/*"],
                         "include_generated": True,
                     },
@@ -1263,6 +1262,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "relationships": ["config"],
                         "path_globs": ["config/*"],
                         "include_generated": False,
@@ -1278,6 +1278,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "relationships": ["migration"],
                         "path_globs": ["db/migrations/*"],
                         "include_generated": False,
@@ -1293,6 +1294,7 @@ class KnowledgeService:
                     filters={
                         "logical_kinds": ["file"],
                         "current_only": True,
+                        "file_kinds": ["code"],
                         "path_globs": ["app/*"],
                         "include_generated": False,
                     },
@@ -3803,6 +3805,20 @@ def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[s
     return normalized
 
 
+def _effective_retrieval_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
+    effective = dict(filters) if isinstance(filters, dict) else normalize_retrieval_filters(None)
+    if not _retrieval_filters_request_code_results(effective):
+        effective[INTERNAL_EXCLUDE_FILE_KINDS_KEY] = [CODE_FILE_KIND]
+    return effective
+
+
+def _retrieval_filters_request_code_results(filters: dict[str, Any] | None) -> bool:
+    if not isinstance(filters, dict):
+        return False
+    file_kinds = {str(value).strip().lower().replace("-", "_") for value in filters.get("file_kinds") or []}
+    return CODE_FILE_KIND in file_kinds
+
+
 def _normalize_retrieval_benchmark_suite(value: str | None) -> str:
     normalized = str(value or "standard").strip().lower().replace("_", "-")
     if normalized not in {"standard", "governance-shadow"}:
@@ -4386,12 +4402,16 @@ def _retrieval_filter_exclusion_reason(item: dict[str, Any], filters: dict[str, 
     if filters.get("current_only") and not _is_current_evidence(item):
         return "current_only"
 
-    file_kinds = set(filters.get("file_kinds") or [])
+    code = item.get("code") if isinstance(item.get("code"), dict) else {}
     item_file_kind = str(item.get("file_kind") or "").lower().replace("-", "_")
+    excluded_file_kinds = set(filters.get(INTERNAL_EXCLUDE_FILE_KINDS_KEY) or filters.get("exclude_file_kinds") or [])
+    if excluded_file_kinds and (item_file_kind in excluded_file_kinds or (CODE_FILE_KIND in excluded_file_kinds and code)):
+        return "excluded_file_kind"
+
+    file_kinds = set(filters.get("file_kinds") or [])
     if file_kinds and item_file_kind not in file_kinds:
         return "file_kind"
 
-    code = item.get("code") if isinstance(item.get("code"), dict) else {}
     languages = set(filters.get("languages") or [])
     item_language = str(code.get("language") or item.get("language") or "").lower().replace("-", "_")
     if languages and item_language not in languages:

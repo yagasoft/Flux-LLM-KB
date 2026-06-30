@@ -607,7 +607,9 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
         assert category in by_category
     assert by_category["code_exact_definition"]["expected_ids"] == ["chunk-helper"]
     assert by_category["code_exact_definition"]["expected_symbol"] == "_benchmark_private_helper"
+    assert by_category["code_exact_definition"]["filters"]["file_kinds"] == ["code"]
     assert by_category["code_symbol"]["filters"]["path_globs"] == ["service_impl.py"]
+    assert by_category["code_symbol"]["filters"]["file_kinds"] == ["code"]
     assert by_category["code_route"]["filters"]["relationships"] == ["route"]
     assert by_category["code_test"]["filters"]["relationships"] == ["test"]
     assert by_category["code_generated_suppression"]["filters"]["include_generated"] is True

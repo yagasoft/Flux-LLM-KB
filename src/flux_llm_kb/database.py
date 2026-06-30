@@ -730,7 +730,7 @@ def search_corpus_chunks(
                 plan="sidecar_candidates",
             )
 
-            if query.strip() or _has_code_filters(filters):
+            if _filters_request_code_focus(filters):
                 cur.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)", ("0.20",))
                 started = time.perf_counter()
                 cur.execute(
@@ -8335,7 +8335,7 @@ def _looks_like_filename_token(value: str) -> bool:
 
 
 def _has_explicit_code_focus(query: str, filters: dict[str, Any] | None) -> bool:
-    return _filters_request_code_focus(filters) or _has_code_implementation_intent(query)
+    return _filters_request_code_focus(filters)
 
 
 def _should_balance_generic_corpus_query(query: str, filters: dict[str, Any] | None) -> bool:
@@ -8359,12 +8359,26 @@ def _filters_request_non_implementation_relationship(filters: dict[str, Any] | N
 def _filters_request_code_focus(filters: dict[str, Any] | None) -> bool:
     if not isinstance(filters, dict):
         return False
-    file_kinds = {str(value).lower().replace("-", "_") for value in filters.get("file_kinds") or []}
-    return (
-        "code" in file_kinds
-        or any(filters.get(key) for key in ("languages", "symbol_kinds", "relationships", "path_globs"))
-        or filters.get("include_generated") is not None
-    )
+    file_kinds = set(_filter_text_values(filters, "file_kinds", "file_kind"))
+    return "code" in file_kinds
+
+
+def _filter_text_values(filters: dict[str, Any], plural_key: str, singular_key: str | None = None) -> list[str]:
+    raw_values = filters.get(plural_key)
+    if raw_values is None and singular_key:
+        raw_values = filters.get(singular_key)
+    if raw_values is None:
+        return []
+    values = raw_values if isinstance(raw_values, (list, tuple, set)) else [raw_values]
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip().lower().replace("-", "_")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
 
 
 def _add_ranked_corpus_candidates(
@@ -8499,7 +8513,7 @@ def _search_mail_sidecar_rows(
     filters: dict[str, Any] | None,
     limit: int,
 ) -> list[tuple[Any, ...]]:
-    if _has_code_filters(filters):
+    if _filters_request_code_focus(filters):
         return []
     root_name_sql = "AND r.name = %s" if root_name else ""
     root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
@@ -8556,9 +8570,7 @@ def _search_mail_sidecar_rows(
 
 
 def _has_code_filters(filters: dict[str, Any] | None) -> bool:
-    if not isinstance(filters, dict):
-        return False
-    return any(filters.get(key) for key in ("file_kinds", "languages", "symbol_kinds", "relationships", "path_globs"))
+    return _filters_request_code_focus(filters)
 
 
 def _corpus_code_filter_sql(filters: dict[str, Any] | None) -> tuple[str, list[Any]]:
@@ -8566,19 +8578,31 @@ def _corpus_code_filter_sql(filters: dict[str, Any] | None) -> tuple[str, list[A
         return "", []
     clauses: list[str] = []
     params: list[Any] = []
-    if filters.get("file_kinds"):
+    file_kinds = _filter_text_values(filters, "file_kinds", "file_kind")
+    if file_kinds:
         clauses.append("AND a.file_kind = ANY(%s::text[])")
-        params.append(list(filters["file_kinds"]))
-    if filters.get("languages"):
+        params.append(file_kinds)
+    excluded_file_kinds = _filter_text_values(filters, "_exclude_file_kinds") or _filter_text_values(
+        filters,
+        "exclude_file_kinds",
+        "exclude_file_kind",
+    )
+    if excluded_file_kinds:
+        clauses.append("AND a.file_kind <> ALL(%s::text[])")
+        params.append(excluded_file_kinds)
+    languages = _filter_text_values(filters, "languages", "language")
+    if languages:
         clauses.append("AND (c.metadata -> 'code' ->> 'language') = ANY(%s::text[])")
-        params.append(list(filters["languages"]))
-    if filters.get("symbol_kinds"):
+        params.append(languages)
+    symbol_kinds = _filter_text_values(filters, "symbol_kinds", "symbol_kind")
+    if symbol_kinds:
         clauses.append("AND (c.metadata -> 'code' ->> 'symbol_kind') = ANY(%s::text[])")
-        params.append(list(filters["symbol_kinds"]))
-    if filters.get("relationships"):
+        params.append(symbol_kinds)
+    relationships = _filter_text_values(filters, "relationships", "relationship")
+    if relationships:
         clauses.append("AND (c.metadata -> 'code' ->> 'relationship') = ANY(%s::text[])")
-        params.append(list(filters["relationships"]))
-    path_globs = filters.get("path_globs") or []
+        params.append(relationships)
+    path_globs = _normalize_path_globs(filters.get("path_globs") if filters.get("path_globs") is not None else filters.get("path_glob"))
     if path_globs:
         glob_clauses = []
         for pattern in path_globs:
