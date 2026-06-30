@@ -457,7 +457,12 @@ def _extract_sample_first_workbook(path: Path, *, extractor: str, sample_limit: 
         import openpyxl
     except ImportError:
         return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="openpyxl not installed")
-    workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    except Exception as exc:
+        if _is_invalid_package_error(exc):
+            return _invalid_package_result(exc, extractor=extractor)
+        raise
     rows: list[dict[str, Any]] = []
     row_count = 0
     columns: list[str] = []
@@ -1570,6 +1575,14 @@ def _is_invalid_package_error(exc: Exception) -> bool:
     return exc.__class__.__name__ in {"PackageNotFoundError", "BadZipFile"} or "package not found" in message
 
 
+def _invalid_package_result(exc: Exception, *, extractor: str) -> ExtractionResult:
+    return ExtractionResult(
+        status="blocked_missing_dependency",
+        metadata={"extractor": extractor, "reason": "invalid_package"},
+        message=str(exc),
+    )
+
+
 def _extract_pptx(path: Path, *, extractor: str = "pptx") -> ExtractionResult:
     try:
         from pptx import Presentation
@@ -1594,7 +1607,12 @@ def _extract_xlsx(path: Path, *, extractor: str = "xlsx") -> ExtractionResult:
         import openpyxl
     except ImportError:
         return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="openpyxl not installed")
-    workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    except Exception as exc:
+        if _is_invalid_package_error(exc):
+            return _invalid_package_result(exc, extractor=extractor)
+        raise
     parts: list[str] = []
     for worksheet in workbook.worksheets[:10]:
         parts.append(f"Sheet: {worksheet.title}")

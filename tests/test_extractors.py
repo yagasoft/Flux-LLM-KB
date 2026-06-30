@@ -2364,6 +2364,32 @@ def test_extract_sensitive_metadata_formats_never_index_raw_content(tmp_path):
     assert result.metadata["sensitive"] is True
 
 
+def test_extract_invalid_xlsx_blocks_as_invalid_package(tmp_path):
+    path = tmp_path / "bad.xlsx"
+    path.write_bytes(b"not a zip file")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.chunks == ()
+    assert result.metadata["extractor"] == "xlsx"
+    assert result.metadata["reason"] == "invalid_package"
+    assert "File is not a zip file" in (result.message or "")
+
+
+def test_extract_large_invalid_xlsx_sample_first_blocks_as_invalid_package(tmp_path):
+    path = tmp_path / "bad.xlsx"
+    path.write_bytes(b"not a zip file")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=8))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.chunks == ()
+    assert result.metadata["extractor"] == "xlsx"
+    assert result.metadata["reason"] == "invalid_package"
+    assert "File is not a zip file" in (result.message or "")
+
+
 def test_extract_large_xlsx_uses_sample_first_profile(monkeypatch, tmp_path):
     path = tmp_path / "large.xlsx"
     path.write_bytes(b"xlsx placeholder large enough")

@@ -2245,6 +2245,37 @@ def test_process_corpus_job_reports_locked_file(monkeypatch, tmp_path):
     assert "being used" in result.message
 
 
+def test_process_corpus_job_blocks_invalid_xlsx_package(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "bad.xlsx").write_bytes(b"not a zip file")
+    applied = []
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {},
+    })
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "bad.xlsx"}})
+
+    assert result.status == "blocked_missing_dependency"
+    assert "File is not a zip file" in (result.message or "")
+    assert applied[0]["root_name"] == "docs"
+    assert applied[0]["relative_path"] == "bad.xlsx"
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "blocked_missing_dependency"
+    assert applied_result.metadata["extractor"] == "xlsx"
+    assert applied_result.metadata["reason"] == "invalid_package"
+
+
 def test_process_corpus_job_returns_failed_for_unexpected_extractor_error(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 
