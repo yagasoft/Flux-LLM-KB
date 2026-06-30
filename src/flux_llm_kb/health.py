@@ -22,7 +22,7 @@ from .watcher import summarize_watcher_staleness
 DASHBOARD_INDEX = Path(__file__).resolve().parent / "dashboard_static" / "index.html"
 
 
-def doctor_payload() -> dict[str, Any]:
+def doctor_payload(*, db_report: dict[str, Any] | None = None) -> dict[str, Any]:
     production_mode = bool(os.environ.get("FLUX_KB_INSTALL_ROOT"))
     checks = {
         "python": {
@@ -39,8 +39,21 @@ def doctor_payload() -> dict[str, Any]:
         ),
         "gh": _command_check("gh", "GitHub CLI", required=False),
     }
-    db_status = database.check_database()
-    checks["postgresql"] = {"ok": db_status.ok, "message": db_status.message, "required": True}
+    db_report = db_report or database.database_health_report()
+    db_checks = db_report.get("checks") if isinstance(db_report, dict) else {}
+    service_db = db_checks.get("service") if isinstance(db_checks, dict) else None
+    if isinstance(service_db, dict):
+        checks["postgresql"] = service_db
+    else:
+        checks["postgresql"] = {
+            "ok": bool(db_report.get("ok")) if isinstance(db_report, dict) else False,
+            "message": str(db_report.get("message") or "database status unavailable") if isinstance(db_report, dict) else "database status unavailable",
+            "required": True,
+            "label": "API database",
+        }
+    host_db = db_checks.get("host_published") if isinstance(db_checks, dict) else None
+    if isinstance(host_db, dict) and host_db.get("required", True):
+        checks["host_postgresql"] = host_db
     return {
         "summary": {"ok": all(check["ok"] for check in checks.values() if check.get("required", True))},
         "checks": checks,
@@ -48,7 +61,7 @@ def doctor_payload() -> dict[str, Any]:
 
 
 def collect_dashboard_payload() -> dict[str, Any]:
-    db_status = database.check_database()
+    db_report = database.database_health_report()
     roots = _safe(database.list_monitored_roots, [])
     crawl = _safe(
         database.crawl_status,
@@ -67,7 +80,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
     )
     components = _safe(database.list_runtime_components, [])
     workers = [item for item in components if str(item.get("name", "")).startswith("corpus-worker:")]
-    checks = doctor_payload()["checks"]
+    checks = doctor_payload(db_report=db_report)["checks"]
     host_agent_status = remote_status()
     crawl = _overlay_host_agent_crawl_status(crawl, roots, host_agent_status)
     watcher_summary = summarize_watcher_staleness(crawl.get("watchers", []))
@@ -109,10 +122,11 @@ def collect_dashboard_payload() -> dict[str, Any]:
         host_agent_status=host_agent_status,
         extractors=extractors,
         mail=mail_payload,
+        db_report=db_report,
     )
     acceleration = _safe(collect_acceleration_status, {"capabilities": {}, "cache": {}, "worker_families": []})
     return {
-        "database": {"ok": db_status.ok, "message": db_status.message},
+        "database": db_report,
         "runtime": runtime_checks,
         "watcher": {
             "active_roots": crawl["active_watch_roots"],
@@ -211,8 +225,32 @@ def _dashboard_error_details(
     host_agent_status: dict[str, Any],
     extractors: dict[str, dict[str, Any]],
     mail: dict[str, Any],
+    db_report: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     details: list[dict[str, Any]] = []
+    db_checks = db_report.get("checks") if isinstance(db_report, dict) else {}
+    if isinstance(db_checks, dict):
+        for name, status in db_checks.items():
+            if not isinstance(status, dict):
+                continue
+            if status.get("required", True) is False or status.get("ok") is not False:
+                continue
+            label = str(status.get("label") or name.replace("_", " "))
+            message = str(status.get("message") or f"{label} unreachable")
+            details.append(
+                error_envelope(
+                    code=f"database.{name}_unreachable",
+                    message=message,
+                    severity="error",
+                    component="database",
+                    stage=name,
+                    retryable=True,
+                    user_action="Review the Database health checks; restore the failing PostgreSQL path from the host or container as appropriate.",
+                    technical_detail=message,
+                    target={"type": "database", "id": name},
+                    links=[{"label": "Overview", "tab": "overview"}],
+                )
+            )
     for item in crawl.get("recent_error_details", []) or []:
         details.append(coerce_error_detail(item))
     for message in crawl.get("recent_errors", []) or []:

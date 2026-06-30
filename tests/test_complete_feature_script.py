@@ -21,6 +21,8 @@ def test_complete_feature_script_is_fail_fast_and_structured():
     assert "scripts\\deploy\\update-flux.ps1" in script
     assert "http://127.0.0.1:8765/dashboard" in script
     assert "http://127.0.0.1:8765/api/dashboard/health" in script
+    assert "Dashboard health reported blocked required checks" in script
+    assert "database.checks" in script
 
 
 def test_complete_feature_script_orders_cleanup_after_deploy_probe():
@@ -33,6 +35,14 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
     cleanup_index = script.index('Invoke-FeatureStep -Name "cleanup-worktree"')
 
     assert deploy_index < probe_index < reclaim_index < repair_index < cleanup_index
+
+
+def test_status_script_reports_blocked_required_dashboard_health():
+    script = (ROOT / "scripts" / "deploy" / "status-flux.ps1").read_text(encoding="utf-8")
+
+    assert "Dashboard health reported blocked required checks" in script
+    assert "database.checks" in script
+    assert "required -ne $false" in script
 
 
 def test_complete_feature_script_has_optional_post_deploy_outlook_spool_reclaim():

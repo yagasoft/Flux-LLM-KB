@@ -37,9 +37,11 @@ import {
 import type { FormEvent, ReactNode } from "react";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
+type HealthCheck = { ok?: boolean; message?: string; required?: boolean; label?: string; target?: string | null; probe_target?: string | null };
+
 type HealthPayload = {
-  database?: { ok?: boolean; message?: string };
-  runtime?: Record<string, { ok?: boolean; message?: string; required?: boolean }>;
+  database?: HealthCheck & { checks?: Record<string, HealthCheck> };
+  runtime?: Record<string, HealthCheck>;
   watcher?: { active_roots?: number; disabled_roots?: number; stale_count?: number; roots?: unknown[] };
   jobs?: { pending?: number; failed?: number; blocked?: number };
   retrieval?: { episodes?: number; sources?: number; source_assets?: number; asset_chunks?: number; embeddings?: number };
@@ -1697,6 +1699,9 @@ export default function App() {
 
   const health = state.health;
   const runtime = health.runtime ?? {};
+  const databaseChecks = health.database?.checks ?? {};
+  const apiDatabase = databaseChecks.service ?? runtime.postgresql ?? health.database;
+  const hostDatabase = databaseChecks.host_published;
   const host = state.outlook.host ?? {};
   const hostStatus = host.status ?? "host_offline";
   const mailErrors = state.mail.errored_messages ?? 0;
@@ -1751,9 +1756,9 @@ export default function App() {
             </div>
           </div>
           <div className="top-actions">
-            <StatusChip label="Database" ok={health.database?.ok} />
+            <StatusChip label="API DB" ok={apiDatabase?.ok} />
             <StatusChip label="API" ok />
-            <StatusChip label="PG" ok={runtime.postgresql?.ok} />
+            {hostDatabase && hostDatabase.required !== false && <StatusChip label="Host DB" ok={hostDatabase.ok} />}
             <form className="search-box interactive" onSubmit={(event) => void runSearch(event)}>
               <Search size={17} />
               <label className="sr-only" htmlFor="dashboard-search">Dashboard search</label>
@@ -2227,7 +2232,10 @@ function OverviewTab({
   hostStatus: string;
   onErrorDetail: (error: string) => void;
 }) {
-  const runtimeRows = Object.entries(state.health.runtime ?? {});
+  const databaseChecks = state.health.database?.checks ?? {};
+  const apiDatabase = databaseChecks.service ?? state.health.runtime?.postgresql;
+  const hostDatabase = databaseChecks.host_published;
+  const runtimeRows = Object.entries(state.health.runtime ?? {}).filter(([key]) => key !== "postgresql");
   const hostAgent = state.health.host_agent;
   const codex = state.health.codex;
   const workers = state.health.workers;
@@ -2239,6 +2247,8 @@ function OverviewTab({
       <Panel title="System Overview">
         <div className="status-grid">
           <StatusTile label="Database" ok={state.health.database?.ok} message={state.health.database?.message} />
+          {apiDatabase && <StatusTile label="API DB" ok={apiDatabase.ok} message={apiDatabase.message} />}
+          {hostDatabase && hostDatabase.required !== false && <StatusTile label="Host DB" ok={hostDatabase.ok} message={hostDatabase.message} />}
           {runtimeRows.map(([key, value]) => <StatusTile key={key} label={key} ok={value.ok} message={value.message} />)}
           <StatusTile label="Outlook Host" ok={hostStatus === "running"} message={hostStatusLabel(hostStatus)} />
           <StatusTile label="Host Agent" ok={hostAgent?.status === "running"} message={hostAgent?.status ?? "host_agent_offline"} />
@@ -5363,9 +5373,15 @@ function formatIdentifierWord(word: string) {
 
 function HealthStrip({ health, mail, blockedJobs }: { health: HealthPayload; mail: MailStatus; blockedJobs: number }) {
   const runtime = health.runtime ?? {};
+  const databaseChecks = health.database?.checks ?? {};
+  const apiDatabase = databaseChecks.service ?? runtime.postgresql;
+  const hostDatabase = databaseChecks.host_published;
+  const databaseBlocked = [apiDatabase, hostDatabase].find((check) => check && check.required !== false && check.ok === false);
+  const databaseOk = health.database?.ok ?? apiDatabase?.ok;
+  const databaseHint = databaseBlocked?.message ?? health.database?.message ?? apiDatabase?.message ?? "database";
   return (
     <section className="health-strip" aria-label="Health summary">
-      <MetricCard icon={<Database />} label="PostgreSQL" value={runtime.postgresql?.ok ? "Healthy" : "Blocked"} hint={runtime.postgresql?.message ?? health.database?.message ?? "database"} tone={runtime.postgresql?.ok ? "green" : "red"} />
+      <MetricCard icon={<Database />} label="Database paths" value={databaseOk ? "Healthy" : "Blocked"} hint={databaseHint} tone={databaseOk ? "green" : "red"} />
       <MetricCard icon={<Gauge />} label="Watcher" value={(health.watcher?.active_roots ?? 0) > 0 ? "Running" : "Idle"} hint={`${health.watcher?.active_roots ?? 0} active roots - ${health.watcher?.stale_count ?? 0} stale`} tone="blue" />
       <MetricCard icon={<Mail />} label="Mail Worker" value={(mail.enabled_profiles ?? 0) > 0 ? "Ready" : "Stopped"} hint={`${mail.enabled_profiles ?? 0} profiles enabled`} tone="purple" />
       <MetricCard icon={<BriefcaseBusiness />} label="Blocked Jobs" value={String(blockedJobs)} hint={`${health.jobs?.pending ?? 0} pending - ${health.jobs?.failed ?? 0} failed`} tone="orange" />

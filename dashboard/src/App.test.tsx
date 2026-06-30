@@ -4,7 +4,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import App from "./App";
 
 const health = {
-  database: { ok: true, message: "database reachable" },
+  database: {
+    ok: true,
+    message: "database reachable",
+    checks: {
+      service: { ok: true, message: "database reachable", required: true, label: "API database" },
+      host_published: { ok: true, message: "database reachable", required: true, label: "Host database" }
+    }
+  },
   runtime: {
     python: { ok: true },
     docker: { ok: true },
@@ -1255,7 +1262,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("What needs attention")).toBeInTheDocument();
     expect(screen.getByText("Flux handled automatically")).toBeInTheDocument();
     expect(screen.getByText("Next safe action")).toBeInTheDocument();
-    expect(screen.getByText("PostgreSQL")).toBeInTheDocument();
+    expect(screen.getByText("Database paths")).toBeInTheDocument();
     expect(screen.getByText("Outlook Host")).toBeInTheDocument();
     expect(screen.getByText("Host Agent")).toBeInTheDocument();
     expect(screen.getByText("Codex Integration")).toBeInTheDocument();
@@ -1263,6 +1270,29 @@ describe("Flux dashboard", () => {
     expect(screen.getByText(/Auto-refresh every 1s/i)).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Mail profiles" })).not.toBeInTheDocument();
     expect(screen.queryByText(/"database"/)).not.toBeInTheDocument();
+  });
+
+  test("top health chips distinguish API and host database paths", async () => {
+    healthPayload = {
+      ...health,
+      database: {
+        ok: false,
+        message: "host-published database blocked",
+        checks: {
+          service: { ok: true, message: "database reachable", required: true, label: "API database" },
+          host_published: { ok: false, message: "connection failed", required: true, label: "Host database" }
+        }
+      }
+    };
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    const apiDbChip = screen.getAllByText("API DB").map((item) => item.closest(".status-chip")).find(Boolean);
+    const hostDbChip = screen.getAllByText("Host DB").map((item) => item.closest(".status-chip")).find(Boolean);
+    expect(apiDbChip).toHaveTextContent("Healthy");
+    expect(hostDbChip).toHaveTextContent("Blocked");
+    expect(screen.queryByText("PG")).not.toBeInTheDocument();
   });
 
   test("settings system section exposes Codex hooks deployment and runtime controls", async () => {

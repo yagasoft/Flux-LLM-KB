@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import time
 from typing import Any, Callable, Iterable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import UUID
 
 from .acceleration import (
@@ -162,6 +162,69 @@ def database_url() -> str:
     return os.environ.get("FLUX_KB_DATABASE_URL", DEFAULT_DATABASE_URL)
 
 
+def host_database_url() -> str | None:
+    return os.environ.get("FLUX_KB_HOST_DATABASE_URL")
+
+
+def redact_database_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return url
+    if not parts.netloc or not parts.password:
+        return url
+    return _replace_database_url_auth(parts, password="***")
+
+
+def database_health_report() -> dict[str, Any]:
+    service_url = database_url()
+    service_status = _check_database_for_report(service_url)
+    host_url = host_database_url()
+    host_probe_url = _host_database_probe_url(host_url) if host_url else None
+    service_check = _database_check_payload(
+        service_status,
+        target_url=service_url,
+        label="API database",
+        required=True,
+    )
+    checks: dict[str, dict[str, Any]] = {"service": service_check}
+    if host_url:
+        host_status = _check_database_for_report(host_probe_url)
+        checks["host_published"] = _database_check_payload(
+            host_status,
+            target_url=host_url,
+            probe_url=host_probe_url,
+            label="Host database",
+            required=True,
+        )
+    else:
+        checks["host_published"] = {
+            "ok": True,
+            "message": "host-published database URL not configured",
+            "required": False,
+            "label": "Host database",
+            "target": None,
+            "probe_target": None,
+        }
+
+    blocked = [name for name, check in checks.items() if check.get("required", True) and not check.get("ok")]
+    if not blocked:
+        message = "database reachable"
+    elif blocked == ["service"]:
+        message = "service database blocked"
+    elif blocked == ["host_published"]:
+        message = "host-published database blocked"
+    else:
+        message = "database blocked"
+    return {
+        "ok": not blocked,
+        "message": message,
+        "checks": checks,
+    }
+
+
 def run_migrations(url: str | None = None) -> list[str]:
     psycopg = _load_psycopg()
     applied: list[str] = []
@@ -212,6 +275,89 @@ def check_database(url: str | None = None) -> DatabaseStatus:
         return DatabaseStatus(ok=True, message="database reachable")
     except Exception as exc:  # pragma: no cover - message is environment-specific
         return DatabaseStatus(ok=False, message=str(exc))
+
+
+def _database_check_payload(
+    status: DatabaseStatus,
+    *,
+    target_url: str,
+    label: str,
+    required: bool,
+    probe_url: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "ok": status.ok,
+        "message": _sanitize_database_message(status.message, target_url, probe_url),
+        "required": required,
+        "label": label,
+        "target": redact_database_url(target_url),
+    }
+    if probe_url is not None:
+        payload["probe_target"] = redact_database_url(probe_url)
+    return payload
+
+
+def _check_database_for_report(url: str | None) -> DatabaseStatus:
+    try:
+        return check_database(url)
+    except TypeError:
+        return check_database()
+
+
+def _sanitize_database_message(message: str, *urls: str | None) -> str:
+    sanitized = str(message)
+    for url in urls:
+        if not url:
+            continue
+        redacted_url = redact_database_url(url)
+        if redacted_url:
+            sanitized = sanitized.replace(url, redacted_url)
+        try:
+            password = urlsplit(url).password
+        except Exception:
+            password = None
+        if password:
+            sanitized = sanitized.replace(password, "***")
+    return sanitized
+
+
+def _host_database_probe_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except Exception:
+        return url
+    hostname = (parts.hostname or "").lower()
+    if _running_in_container() and hostname in {"127.0.0.1", "localhost"}:
+        return _replace_database_url_host(parts, "host.docker.internal")
+    return url
+
+
+def _running_in_container() -> bool:
+    return os.environ.get("FLUX_KB_INSTALL_ROOT") == "/app" or os.environ.get("FLUX_KB_APP_ROOT") == "/app"
+
+
+def _replace_database_url_host(parts, host: str) -> str:
+    return _replace_database_url_auth(parts, host=host)
+
+
+def _replace_database_url_auth(parts, *, host: str | None = None, password: str | None = None) -> str:
+    username = parts.username
+    next_password = parts.password if password is None else password
+    hostname = host or parts.hostname
+    if not hostname:
+        return urlunsplit(parts)
+    host_part = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    if parts.port:
+        host_part = f"{host_part}:{parts.port}"
+    if username is None:
+        netloc = host_part
+    elif next_password is None:
+        netloc = f"{quote(username, safe='')}@{host_part}"
+    else:
+        netloc = f"{quote(username, safe='')}:{quote(next_password, safe='*')}@{host_part}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 def _embedding_result_for_text(*, owner_table: str, owner_id: str, text: str) -> EmbeddingResult:

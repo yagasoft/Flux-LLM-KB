@@ -120,6 +120,68 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["acceleration"]["worker_families"][0]["ocr_cache_misses"] == 2
 
 
+def test_collect_dashboard_payload_blocks_when_required_host_database_path_fails(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "/app")
+    monkeypatch.setenv("FLUX_KB_DATABASE_URL", "postgresql://flux:flux@postgres:5432/flux_llm_kb")
+    monkeypatch.setenv("FLUX_KB_HOST_DATABASE_URL", "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb")
+
+    checked_urls: list[str] = []
+
+    def fake_check_database(url=None):
+        checked_urls.append(url)
+        if url == "postgresql://flux:flux@host.docker.internal:5432/flux_llm_kb":
+            return database.DatabaseStatus(False, "connection failed for password flux")
+        return database.DatabaseStatus(True, "database reachable")
+
+    monkeypatch.setattr(database, "check_database", fake_check_database)
+    monkeypatch.setattr(health, "_docker_check", lambda **_kwargs: {"ok": True, "message": "docker ok", "required": False})
+    monkeypatch.setattr(
+        health,
+        "_command_check",
+        lambda command, description, **kwargs: {"ok": True, "message": f"{command} ok", "required": kwargs.get("required", True)},
+    )
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [])
+    monkeypatch.setattr(
+        database,
+        "crawl_status",
+        lambda: {
+            "active_watch_roots": 0,
+            "disabled_watch_roots": 0,
+            "pending_jobs": 0,
+            "failed_jobs": 0,
+            "recent_errors": [],
+            "watchers": [],
+        },
+    )
+    monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "embeddings": 0})
+    monkeypatch.setattr(database, "list_runtime_components", lambda: [], raising=False)
+    monkeypatch.setattr(database, "list_capture_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(health, "remote_status", lambda: {"status": "running"})
+    monkeypatch.setattr(health, "codex_status", lambda: {"status": "ready"})
+    monkeypatch.setattr(health, "extractor_availability", lambda: {})
+    monkeypatch.setattr(health, "collect_acceleration_status", lambda: {"capabilities": {}, "cache": {}, "worker_families": []})
+    monkeypatch.setattr(
+        health,
+        "codex_hook_policy_status",
+        lambda: {"status": "active", "enabled": True, "preflight_enabled": True, "capture_enabled": True, "recent_events": []},
+        raising=False,
+    )
+    monkeypatch.setattr("flux_llm_kb.mail_ingestion.mail_status", lambda: {"enabled_profiles": 0, "profiles": []})
+    monkeypatch.setattr("flux_llm_kb.settings.SettingsService", lambda: type("Settings", (), {"public_list": lambda self: []})())
+
+    payload = collect_dashboard_payload()
+
+    assert payload["database"]["ok"] is False
+    assert payload["database"]["checks"]["service"]["ok"] is True
+    assert payload["database"]["checks"]["host_published"]["ok"] is False
+    assert payload["database"]["checks"]["host_published"]["target"] == "postgresql://flux:***@127.0.0.1:5432/flux_llm_kb"
+    assert payload["database"]["checks"]["host_published"]["probe_target"] == "postgresql://flux:***@host.docker.internal:5432/flux_llm_kb"
+    assert "flux:flux" not in str(payload["database"])
+    assert "password flux" not in str(payload["database"])
+    assert "postgresql://flux:flux@host.docker.internal:5432/flux_llm_kb" in checked_urls
+    assert any(item["code"] == "database.host_published_unreachable" for item in payload["recent_error_details"])
+
+
 def test_dashboard_health_includes_actionable_error_details(monkeypatch):
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(

@@ -35,8 +35,29 @@ foreach ($task in @("FluxKB Host Agent", "FluxKB Outlook Host")) {
     }
 }
 
+$health = $null
 try {
-    Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 5 | ConvertTo-Json -Depth 6
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 5
+    $health | ConvertTo-Json -Depth 6
 } catch {
     Write-Host "Dashboard health endpoint unavailable: $($_.Exception.Message)"
+}
+
+if ($health) {
+    $blocked = @()
+    if (-not $health.database -or -not $health.database.checks) {
+        $blocked += "database.checks missing"
+    } else {
+        foreach ($checkProperty in $health.database.checks.PSObject.Properties) {
+            $check = $checkProperty.Value
+            if ($check.required -ne $false -and $check.ok -ne $true) {
+                $message = if ($check.message) { $check.message } else { "blocked" }
+                $blocked += "$($checkProperty.Name): $message"
+            }
+        }
+    }
+    if ($blocked.Count -gt 0) {
+        Write-Host "Dashboard health reported blocked required checks: $($blocked -join '; ')"
+        exit 1
+    }
 }

@@ -221,12 +221,12 @@ def _write_local_marketplace_config(config_path: Path, source_dir: Path) -> None
 def _write_flux_mcp_server_config(config_path: Path, app_root: Path) -> None:
     existing = config_path.read_text(encoding="utf-8", errors="ignore") if config_path.exists() else ""
     existing = _remove_toml_table(existing, f"mcp_servers.{MCP_SERVER_NAME}")
-    python_command = _resolve_mcp_python(app_root)
+    command, args = _resolve_mcp_command(app_root)
     addition = "\n".join(
         [
             f"[mcp_servers.{MCP_SERVER_NAME}]",
-            f"command = {_toml_string(python_command)}",
-            'args = ["-m", "flux_llm_kb.mcp_server"]',
+            f"command = {_toml_string(command)}",
+            f"args = {json.dumps(args)}",
             f"cwd = {_toml_string(str(app_root))}",
             "enabled = true",
             "startup_timeout_sec = 15",
@@ -235,6 +235,39 @@ def _write_flux_mcp_server_config(config_path: Path, app_root: Path) -> None:
         ]
     )
     config_path.write_text(existing.rstrip() + "\n\n" + addition, encoding="utf-8")
+
+
+def _resolve_mcp_command(app_root: Path) -> tuple[str, list[str]]:
+    if _is_production_app_root(app_root):
+        return "docker", ["exec", "-i", "flux-llm-kb-api", "python", "-m", "flux_llm_kb.mcp_server"]
+    return _resolve_mcp_python(app_root), ["-m", "flux_llm_kb.mcp_server"]
+
+
+def _is_production_app_root(app_root: Path) -> bool:
+    configured_root = os.environ.get("FLUX_KB_APP_ROOT")
+    if configured_root:
+        try:
+            if Path(configured_root).resolve() == app_root.resolve():
+                return (app_root / "docker-compose.yml").exists()
+        except OSError:
+            if Path(configured_root) == app_root:
+                return (app_root / "docker-compose.yml").exists()
+    return (app_root / "docker-compose.yml").exists() and (app_root / "VERSION").exists()
+
+
+def _docker_mcp_available() -> bool:
+    try:
+        result = run_no_window(
+            ["docker", "exec", "flux-llm-kb-api", "python", "-c", "import flux_llm_kb; import mcp.server.fastmcp"],
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            check=False,
+        )
+    except Exception:
+        return False
+    return result.returncode == 0
 
 
 def _resolve_mcp_python(app_root: Path) -> str:
@@ -299,14 +332,18 @@ def _flux_mcp_status(config: str) -> dict[str, Any]:
     values = _parse_simple_toml_table(block)
     command = _optional_str(values.get("command"))
     cwd = _optional_str(values.get("cwd"))
+    args = values.get("args")
     enabled = bool(values.get("enabled", True))
-    dependency_available = bool(command and cwd and enabled and _mcp_dependency_available(command, cwd))
+    dependency_available = bool(command and cwd and enabled and _configured_mcp_dependency_available(command, cwd, args))
     if not enabled:
         message = "Flux MCP server is configured but disabled."
     elif not command or not cwd:
         message = "Flux MCP server config is incomplete."
     elif not dependency_available:
-        message = "MCP optional dependency is not available for the configured Flux Python."
+        if command == "docker":
+            message = "Flux MCP server is configured for the API container, but the container is not available."
+        else:
+            message = "MCP optional dependency is not available for the configured Flux Python."
     else:
         message = "ready"
     return {
@@ -317,6 +354,12 @@ def _flux_mcp_status(config: str) -> dict[str, Any]:
         "dependency_available": dependency_available,
         "message": message,
     }
+
+
+def _configured_mcp_dependency_available(command: str, cwd: str, args: Any) -> bool:
+    if command == "docker" and isinstance(args, list) and args[:3] == ["exec", "-i", "flux-llm-kb-api"]:
+        return _docker_mcp_available()
+    return _mcp_dependency_available(command, cwd)
 
 
 def _read_toml_table_block(config: str, table_name: str) -> str | None:

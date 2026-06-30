@@ -126,6 +126,33 @@ def test_codex_install_plugin_preserves_unrelated_config_and_replaces_stale_mcp_
     assert f"cwd = {json.dumps(str(repo_root))}" in config
 
 
+def test_codex_install_plugin_uses_container_mcp_for_production_app_root(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    app_root = tmp_path / "FluxLLMKB" / "app"
+    plugin = app_root / "plugins" / "flux-llm-kb"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"flux-llm-kb","version":"0.1.0","interface":{"displayName":"Flux LLM-KB"}}',
+        encoding="utf-8",
+    )
+    (plugin / "hooks").mkdir()
+    (plugin / "hooks" / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+    (app_root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (app_root / "VERSION").write_text("abc123\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("FLUX_KB_APP_ROOT", str(app_root))
+    monkeypatch.setattr(codex_integration, "_docker_mcp_available", lambda: False, raising=False)
+
+    install_plugin(repo_root=app_root)
+
+    config = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert 'command = "docker"' in config
+    assert 'args = ["exec", "-i", "flux-llm-kb-api", "python", "-m", "flux_llm_kb.mcp_server"]' in config
+    assert f"cwd = {json.dumps(str(app_root))}" in config
+
+
 def test_resolve_mcp_python_ignores_stale_env_when_app_venv_is_usable(tmp_path, monkeypatch):
     app_root = tmp_path / "app"
     venv_python = app_root / ".venv" / "Scripts" / "python.exe"

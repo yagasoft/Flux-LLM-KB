@@ -271,6 +271,26 @@ git branch -D $Branch
 exit $LASTEXITCODE
 '@
 
+$DashboardHealthProbeCommand = @'
+$dashboardHealthUri = "http://127.0.0.1:8765" + "/api/dashboard/health"
+$health = Invoke-RestMethod -Uri $dashboardHealthUri -TimeoutSec 15
+$blocked = @()
+if (-not $health.database -or -not $health.database.checks) {
+    $blocked += "database.checks missing"
+} else {
+    foreach ($checkProperty in $health.database.checks.PSObject.Properties) {
+        $check = $checkProperty.Value
+        if ($check.required -ne $false -and $check.ok -ne $true) {
+            $message = if ($check.message) { $check.message } else { "blocked" }
+            $blocked += "$($checkProperty.Name): $message"
+        }
+    }
+}
+if ($blocked.Count -gt 0) {
+    throw "Dashboard health reported blocked required checks: $($blocked -join '; ')"
+}
+'@
+
 $FeatureWorktree = (Resolve-Path $FeatureWorktree).Path
 if (-not $MainRoot) {
     $MainRoot = Get-MainWorktreePath -Worktree $FeatureWorktree
@@ -304,7 +324,8 @@ try {
     if (-not $SkipDeploy) {
         Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild' -TimeoutSeconds $DeployStepTimeoutSeconds
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
-        Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/api/dashboard/health" -TimeoutSec 15 | Out-Null'
+        # Probe http://127.0.0.1:8765/api/dashboard/health and fail if required DB paths are blocked.
+        Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command $DashboardHealthProbeCommand
         if ($PostDeployReclaimOutlookProfile) {
             $safeReclaimProfile = $PostDeployReclaimOutlookProfile.Replace("'", "''")
             $reclaimCommand = 'docker exec flux-llm-kb-api python -m flux_llm_kb.cli mail spool-dedupe --profile ''' + $safeReclaimProfile + ''' --apply --purge --json'
