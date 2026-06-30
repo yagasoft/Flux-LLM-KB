@@ -168,6 +168,85 @@ def test_service_search_forwards_code_filters_and_exposes_code_explanation(monke
     assert results[0]["retrieval_explanation"]["streams"][0] == "code_symbol_exact"
 
 
+def test_brief_includes_policy_text_for_mixed_non_code_prompt(monkeypatch):
+    monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, limit=20, **_kwargs):
+        streams = {
+            "corpus_lexical": ["code-a", "code-b", "agents"],
+            "corpus_fuzzy": ["code-a", "agents", "code-b"],
+            "code_symbol_exact": ["code-a", "code-b"],
+            "corpus_trust": ["code-a", "code-b", "agents"],
+            "corpus_freshness": ["code-a", "code-b", "agents"],
+        }
+        details = {
+            "agents": {
+                "title": "AGENTS.md",
+                "summary": "If closeout fails, report failed_step and log_path from AGENTS.md.",
+                "raw_scores": {"corpus_lexical": 0.98, "corpus_fuzzy": 0.84},
+                "asset_id": "asset-agents",
+                "source_path": "AGENTS.md",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "text",
+            },
+            "code-a": {
+                "title": "scripts/dev/complete-feature.ps1::Invoke-FeatureCloseout",
+                "summary": "function Invoke-FeatureCloseout { return $result }",
+                "raw_scores": {"code_symbol_exact": 0.24, "corpus_lexical": 0.12},
+                "asset_id": "asset-code-a",
+                "source_path": "scripts/dev/complete-feature.ps1",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {"primary_symbol": "Invoke-FeatureCloseout", "relationship": "definition"},
+            },
+            "code-b": {
+                "title": "src/flux_llm_kb/hooks.py::failed_step",
+                "summary": "failed_step = result.failed_step",
+                "raw_scores": {"code_symbol_exact": 0.18, "corpus_lexical": 0.11},
+                "asset_id": "asset-code-b",
+                "source_path": "src/flux_llm_kb/hooks.py",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {"primary_symbol": "failed_step", "relationship": "definition"},
+            },
+        }
+        ranked = database._rank_corpus_candidates(query, streams=streams, details=details, filters=None)
+        return [
+            {
+                "id": item.item_id,
+                "title": details[item.item_id]["title"],
+                "summary": details[item.item_id]["summary"],
+                "score": item.score,
+                "streams": list(item.streams),
+                "raw_scores": details[item.item_id]["raw_scores"],
+                "asset_id": details[item.item_id]["asset_id"],
+                "source_path": details[item.item_id]["source_path"],
+                "root_name": details[item.item_id]["root_name"],
+                "duplicate_count": details[item.item_id]["duplicate_count"],
+                "trust_rank": details[item.item_id]["trust_rank"],
+                "file_kind": details[item.item_id]["file_kind"],
+            }
+            for item in ranked[:limit]
+        ]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    brief = KnowledgeService().brief(
+        "If complete-feature.ps1 fails, report the JSON failed_step and log_path from AGENTS.md.",
+        root_name="repo",
+        token_budget=90,
+    )
+
+    assert "### AGENTS.md" in brief
+    assert "failed_step and log_path from AGENTS.md" in brief
+
+
 def test_service_explain_surfaces_semantic_duplicate_suppression_without_raw_duplicate_content(monkeypatch):
     monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])
     monkeypatch.setattr(

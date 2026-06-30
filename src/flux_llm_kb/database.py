@@ -91,7 +91,37 @@ _CODE_IMPLEMENTATION_INTENT_TERMS = {
     "source",
     "where",
 }
+_AMBIGUOUS_CODE_IMPLEMENTATION_INTENT_TERMS = {"config", "source", "where"}
 _CODE_SYMBOL_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$.]*")
+_FILENAME_EXTENSION_TOKENS = {
+    "c",
+    "cc",
+    "cs",
+    "css",
+    "go",
+    "h",
+    "hpp",
+    "html",
+    "java",
+    "js",
+    "json",
+    "jsx",
+    "kt",
+    "md",
+    "mdx",
+    "php",
+    "ps1",
+    "py",
+    "rb",
+    "rs",
+    "sql",
+    "ts",
+    "tsx",
+    "txt",
+    "xml",
+    "yaml",
+    "yml",
+}
 REQUEUE_DOCUMENT_EXTENSIONS = {
     ".doc",
     ".docm",
@@ -763,10 +793,12 @@ def search_corpus_chunks(
             details: dict[str, dict[str, Any]] = {}
             if raw_scores:
                 primary_fused = reciprocal_rank_fusion(streams)
+                code_symbol_backfill_limit = 10 if _has_explicit_code_focus(query, filters) else 0
                 hydrated_candidate_ids = _corpus_hydration_candidate_ids(
                     primary_fused,
                     streams=streams,
                     hydration_limit=hydration_limit,
+                    code_symbol_backfill_limit=code_symbol_backfill_limit,
                 )
                 started = time.perf_counter()
                 details = _hydrate_corpus_candidate_details(
@@ -8090,6 +8122,7 @@ def _corpus_hydration_candidate_ids(
     *,
     streams: dict[str, list[str]],
     hydration_limit: int,
+    code_symbol_backfill_limit: int = 10,
 ) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
@@ -8100,7 +8133,7 @@ def _corpus_hydration_candidate_ids(
         seen.add(item.item_id)
 
     code_symbol_ids = streams.get("code_symbol_exact") or []
-    for item_id in code_symbol_ids[: min(10, hydration_limit)]:
+    for item_id in code_symbol_ids[: min(max(0, code_symbol_backfill_limit), hydration_limit)]:
         if item_id in seen:
             continue
         if len(selected) >= hydration_limit and selected:
@@ -8123,8 +8156,9 @@ def _rank_corpus_candidates(
         return fused
 
     query_symbols = _code_query_symbols(query)
+    explicit_code_focus = _has_explicit_code_focus(query, filters)
     implementation_intent_allowed = (
-        _has_code_implementation_intent(query)
+        explicit_code_focus
         and not _query_requests_non_implementation_code(query)
         and not _filters_request_non_implementation_relationship(filters)
     )
@@ -8137,6 +8171,7 @@ def _rank_corpus_candidates(
         boost = _corpus_code_rank_adjustment(
             detail,
             query_symbols=query_symbols,
+            exact_symbol_allowed=explicit_code_focus,
             implementation_intent_allowed=implementation_intent_allowed,
         )
         if boost <= 0:
@@ -8151,13 +8186,17 @@ def _rank_corpus_candidates(
                 streams=tuple(sorted(set(item.streams) | {"code_rank_adjustment"})),
             )
         )
-    return sorted(adjusted, key=lambda item: (-item.score, item.item_id))
+    ranked = sorted(adjusted, key=lambda item: (-item.score, item.item_id))
+    if _should_balance_generic_corpus_query(query, filters):
+        return _balance_generic_corpus_ranking(ranked, details)
+    return ranked
 
 
 def _corpus_code_rank_adjustment(
     detail: dict[str, Any],
     *,
     query_symbols: set[str],
+    exact_symbol_allowed: bool,
     implementation_intent_allowed: bool,
 ) -> float:
     code = detail.get("code") if isinstance(detail.get("code"), dict) else {}
@@ -8165,11 +8204,63 @@ def _corpus_code_rank_adjustment(
     if relationship not in _CODE_IMPLEMENTATION_RELATIONSHIPS:
         return 0.0
     candidate_symbols = _candidate_code_symbol_aliases(detail)
-    if query_symbols and candidate_symbols.intersection(query_symbols):
+    if exact_symbol_allowed and query_symbols and candidate_symbols.intersection(query_symbols):
         return _CODE_EXACT_SYMBOL_BOOST
     if implementation_intent_allowed:
         return _CODE_IMPLEMENTATION_INTENT_BOOST
     return 0.0
+
+
+def _balance_generic_corpus_ranking(ranked: list[RankedItem], details: dict[str, dict[str, Any]]) -> list[RankedItem]:
+    if not ranked:
+        return ranked
+    top_detail = details.get(ranked[0].item_id, {})
+    if not _is_code_corpus_detail(top_detail):
+        return ranked
+
+    best_index: int | None = None
+    best_quality = 0.0
+    for index, item in enumerate(ranked):
+        detail = details.get(item.item_id, {})
+        if _is_code_corpus_detail(detail):
+            continue
+        quality = _non_code_text_quality(detail)
+        if quality < 0.70:
+            continue
+        if best_index is None or quality > best_quality:
+            best_index = index
+            best_quality = quality
+
+    if best_index is None or best_index == 0:
+        return ranked
+    selected = ranked[best_index]
+    top_score = ranked[0].score
+    if selected.score <= top_score:
+        detail = details.get(selected.item_id)
+        if detail is not None:
+            detail.setdefault("raw_scores", {})["balanced_non_code_guardrail"] = round(best_quality, 6)
+        selected = RankedItem(
+            item_id=selected.item_id,
+            score=top_score + 0.000001,
+            streams=tuple(sorted(set(selected.streams) | {"balanced_non_code_guardrail"})),
+        )
+    return [selected, *ranked[:best_index], *ranked[best_index + 1 :]]
+
+
+def _is_code_corpus_detail(detail: dict[str, Any]) -> bool:
+    file_kind = str(detail.get("file_kind") or "").strip().lower().replace("-", "_")
+    return file_kind == "code" or isinstance(detail.get("code"), dict)
+
+
+def _non_code_text_quality(detail: dict[str, Any]) -> float:
+    raw_scores = detail.get("raw_scores") if isinstance(detail.get("raw_scores"), dict) else {}
+    quality = 0.0
+    for stream in ("corpus_lexical", "corpus_fuzzy", "mail_sidecar", "corpus_vector"):
+        try:
+            quality = max(quality, float(raw_scores.get(stream) or 0.0))
+        except (TypeError, ValueError):
+            continue
+    return quality
 
 
 def _candidate_code_symbol_aliases(detail: dict[str, Any]) -> set[str]:
@@ -8203,21 +8294,52 @@ def _code_symbol_aliases(value: str) -> set[str]:
             if tail_normalized:
                 aliases.add(tail_normalized)
     if "." in normalized:
-        aliases.add(normalized.rsplit(".", 1)[-1])
+        tail = normalized.rsplit(".", 1)[-1]
+        if tail:
+            aliases.add(tail)
     return aliases
 
 
 def _normalize_code_symbol(value: str) -> str:
-    return value.strip().strip("`'\"()[]{}:,;").replace("::", ".").lower()
+    return value.strip().strip("`'\"()[]{}:,;.").replace("::", ".").lower()
 
 
 def _has_code_implementation_intent(query: str) -> bool:
     normalized = f" {str(query or '').lower()} "
-    if any(f" {term} " in normalized for term in _CODE_IMPLEMENTATION_INTENT_TERMS):
+    clear_terms = _CODE_IMPLEMENTATION_INTENT_TERMS - _AMBIGUOUS_CODE_IMPLEMENTATION_INTENT_TERMS
+    if any(f" {term} " in normalized for term in clear_terms):
         return True
-    if any(token in normalized for token in ("/", "\\", "::", ".py", ".ts", ".js", ".cs", ".sql")):
+    has_code_marker = _query_has_code_marker(query)
+    if has_code_marker:
         return True
-    return any("_" in symbol or "." in symbol for symbol in _code_query_symbols(query))
+    return False
+
+
+def _query_has_code_marker(query: str) -> bool:
+    text = str(query or "")
+    normalized = f" {text.lower()} "
+    if re.search(r"[A-Za-z0-9_.-]+[/\\][A-Za-z0-9_.\\/-]+\.[A-Za-z0-9]{1,8}", text):
+        return True
+    if any(token in normalized for token in ("::", " .py ", " .ts ", " .tsx ", " .js ", " .jsx ", " .cs ", " .sql ")):
+        return True
+    if re.search(r"\b[A-Za-z_][A-Za-z0-9_.]*\s*\(", text):
+        return True
+    return any("." in symbol and not _looks_like_filename_token(symbol) for symbol in _code_query_symbols(query))
+
+
+def _looks_like_filename_token(value: str) -> bool:
+    if "." not in value:
+        return False
+    extension = value.rsplit(".", 1)[-1].strip().lower()
+    return extension in _FILENAME_EXTENSION_TOKENS
+
+
+def _has_explicit_code_focus(query: str, filters: dict[str, Any] | None) -> bool:
+    return _filters_request_code_focus(filters) or _has_code_implementation_intent(query)
+
+
+def _should_balance_generic_corpus_query(query: str, filters: dict[str, Any] | None) -> bool:
+    return not _filters_request_code_focus(filters) and not _has_code_implementation_intent(query) and not _query_requests_non_implementation_code(query)
 
 
 def _query_requests_non_implementation_code(query: str) -> bool:
@@ -8232,6 +8354,17 @@ def _filters_request_non_implementation_relationship(filters: dict[str, Any] | N
     if not relationships:
         return False
     return not relationships.issubset(_CODE_IMPLEMENTATION_RELATIONSHIPS)
+
+
+def _filters_request_code_focus(filters: dict[str, Any] | None) -> bool:
+    if not isinstance(filters, dict):
+        return False
+    file_kinds = {str(value).lower().replace("-", "_") for value in filters.get("file_kinds") or []}
+    return (
+        "code" in file_kinds
+        or any(filters.get(key) for key in ("languages", "symbol_kinds", "relationships", "path_globs"))
+        or filters.get("include_generated") is not None
+    )
 
 
 def _add_ranked_corpus_candidates(

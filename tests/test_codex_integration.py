@@ -284,6 +284,12 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "prior decisions" in skill
     assert "workspace_boosted" in skill
     assert "local files, the prompt, or current tool output already answer" in skill
+    assert "normal kb.brief/search for broad context" in skill
+    assert "kb.code_search" in skill
+    assert "file_kind=code" in skill
+    assert "non-code file kinds" in skill
+    assert "kb.code_search" in prompts
+    assert "non-code file kinds" in prompts
     assert "mcp__flux_llm_kb.kb_remember" in skill
     assert "durable atomic saves" in skill
     assert "concise, redacted, and scoped" in skill

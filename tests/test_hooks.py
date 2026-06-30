@@ -117,6 +117,80 @@ def test_user_prompt_hook_injects_real_brief_for_relevant_non_trivial_prompt(mon
     assert audits[-1]["details"]["scope_mode"] == "local_first"
 
 
+def test_user_prompt_hook_reruns_non_code_filters_for_code_heavy_prompt(monkeypatch):
+    install_settings(monkeypatch)
+    calls = []
+    audits = []
+
+    class FakeService:
+        def search(self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first", filters=None):
+            calls.append(("search", filters))
+            if filters and filters.get("file_kinds") == ["text", "document", "image"]:
+                return [
+                    {
+                        "title": "AGENTS.md",
+                        "summary": "If closeout fails, report failed_step and log_path.",
+                        "score": 0.91,
+                        "file_kind": "text",
+                        "streams": ["corpus_lexical"],
+                        "retrieval_scope": "local",
+                    }
+                ]
+            return [
+                {
+                    "title": "src/flux_llm_kb/hooks.py::failed_step",
+                    "summary": "failed_step = result.failed_step",
+                    "score": 0.22,
+                    "file_kind": "code",
+                    "streams": ["code_symbol_exact"],
+                    "retrieval_scope": "local",
+                },
+                {
+                    "title": "src/flux_llm_kb/hooks.py::log_path",
+                    "summary": "log_path = result.log_path",
+                    "score": 0.2,
+                    "file_kind": "code",
+                    "streams": ["code_symbol_exact"],
+                    "retrieval_scope": "local",
+                },
+            ]
+
+        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first", filters=None):
+            calls.append(("brief", filters))
+            if filters and filters.get("file_kinds") == ["text", "document", "image"]:
+                return "### AGENTS.md\nIf closeout fails, report failed_step and log_path."
+            return "### hooks.py\nfailed_step = result.failed_step"
+
+    monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    output = run_hook(
+        "user-prompt-submit",
+        json.dumps(
+            {
+                "session_id": "session-1",
+                "turn_id": "turn-2",
+                "cwd": "E:/Repo",
+                "model": "gpt-5",
+                "prompt": "If complete-feature.ps1 fails, report the JSON failed_step and log_path from AGENTS.md.",
+            }
+        ),
+    )
+
+    context = output["hookSpecificOutput"]["additionalContext"]
+    expected_filters = {
+        "logical_kinds": ["file"],
+        "file_kinds": ["text", "document", "image"],
+    }
+    assert ("search", expected_filters) in calls
+    assert ("brief", expected_filters) in calls
+    assert "AGENTS.md" in context
+    assert "hooks.py" not in context
+    assert audits[-1]["event_type"] == "codex_hook.preflight_injected"
+    assert audits[-1]["details"]["fallback_reason"] == "code_dominated_non_code_prompt"
+    assert "prompt" not in audits[-1]["details"]
+
+
 def test_user_prompt_hook_labels_global_fallback_memory(monkeypatch):
     install_settings(monkeypatch)
     audits = []

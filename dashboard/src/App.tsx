@@ -585,6 +585,7 @@ type RetrievalPayload = {
 type SearchResult = {
   kind?: string;
   logical_kind?: "file" | "mail" | "episode" | string;
+  file_kind?: string;
   title?: string;
   excerpt?: string;
   summary?: string;
@@ -621,6 +622,7 @@ type SearchResult = {
 
 type RetrievalFilters = {
   logical_kinds: string[];
+  file_kinds?: string[];
   current_only: boolean;
   lifecycle_states: string[];
   include_suppressed: boolean;
@@ -1059,7 +1061,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [searchKind, setSearchKind] = useState("all");
+  const [searchKind, setSearchKind] = useState("balanced");
   const [searchCurrentOnly, setSearchCurrentOnly] = useState(false);
   const [searchIncludeSuppressed, setSearchIncludeSuppressed] = useState(false);
   const [searchFilterTrace, setSearchFilterTrace] = useState<RetrievalFilterTrace>({});
@@ -1596,13 +1598,27 @@ export default function App() {
       setToast("Enter a search query first.");
       return;
     }
-    const filters = buildDashboardRetrievalFilters(searchKind, searchCurrentOnly, searchIncludeSuppressed);
+    await executeSearch(query, searchKind);
+  }
+
+  async function executeSearch(query: string, focus: string) {
+    const filters = buildDashboardRetrievalFilters(focus, searchCurrentOnly, searchIncludeSuppressed);
     const payload = await sendJson<ExplainPayload>("/api/explain", "POST", { query, limit: 8, filters });
     setSearchResults(Array.isArray(payload.results) ? payload.results : []);
     setSearchFilterTrace(payload.filter_trace ?? {});
     setSearchSuppression(payload.suppression ?? {});
     setSearchOpen(true);
     setActiveTab("retrieval");
+  }
+
+  async function rerunSearchWithFocus(focus: string) {
+    const query = searchQuery.trim();
+    if (!query) {
+      setToast("Enter a search query first.");
+      return;
+    }
+    setSearchKind(focus);
+    await executeSearch(query, focus);
   }
 
   async function openSearchResult(result: SearchResult) {
@@ -1870,6 +1886,7 @@ export default function App() {
             onSearchKind={setSearchKind}
             onSearchCurrentOnly={setSearchCurrentOnly}
             onSearchIncludeSuppressed={setSearchIncludeSuppressed}
+            onRerunDocsFiles={() => void rerunSearchWithFocus("docs")}
             onErrorDetail={setErrorDetail}
             onOpenResult={(result) => void openSearchResult(result)}
           />
@@ -3659,6 +3676,7 @@ function RetrievalTab({
   onSearchKind,
   onSearchCurrentOnly,
   onSearchIncludeSuppressed,
+  onRerunDocsFiles,
   onErrorDetail,
   onOpenResult
 }: {
@@ -3675,6 +3693,7 @@ function RetrievalTab({
   onSearchKind: (value: string) => void;
   onSearchCurrentOnly: (value: boolean) => void;
   onSearchIncludeSuppressed: (value: boolean) => void;
+  onRerunDocsFiles: () => void;
   onErrorDetail: (error: string) => void;
   onOpenResult: (result: SearchResult) => void;
 }) {
@@ -3732,12 +3751,13 @@ function RetrievalTab({
         ]} />
         <div className="retrieval-filter-grid">
           <label>
-            <span>Evidence kind</span>
+            <span>Search focus</span>
             <select value={searchKind} onChange={(event) => onSearchKind(event.target.value)}>
-              <option value="all">All</option>
-              <option value="episode">Episodes</option>
-              <option value="file">Files</option>
+              <option value="balanced">Balanced</option>
+              <option value="docs">Docs/files</option>
               <option value="mail">Mail</option>
+              <option value="episode">Episodes</option>
+              <option value="code">Code</option>
             </select>
           </label>
           <label className="checkbox-field">
@@ -3752,6 +3772,13 @@ function RetrievalTab({
       </Panel>
       <Panel title={searchOpen ? `Search Results: ${query}` : "Search Results"}>
         <RetrievalDebugTrace trace={filterTrace} suppression={suppression} />
+        {isBalancedCodeHeavySearch(searchKind, searchResults) && (
+          <div className="retrieval-diagnostic">
+            <strong>Balanced results are code-heavy.</strong>
+            <span>Docs/files searches text, documents, and images without code chunks crowding the list.</span>
+            <button className="ghost-action compact" type="button" onClick={onRerunDocsFiles}>Rerun Docs/files</button>
+          </div>
+        )}
         {searchResults.length > 0 ? (
           <div className="search-results">
             {searchResults.map((result, index) => (
@@ -4876,13 +4903,23 @@ function EvidenceList({ title, empty, items, icon }: { title: string; empty: str
 
 function searchResultMeta(result: SearchResult): string {
   const kind = result.logical_kind ?? result.kind ?? "result";
+  const fileKind = result.file_kind ? formatRetrievalReason(result.file_kind) : "";
+  const matchedTerms = result.snippet?.matched_terms?.length ?? 0;
+  const matchedText = `${matchedTerms} matched term${matchedTerms === 1 ? "" : "s"}`;
+  const parts = [kind];
+  if (fileKind && fileKind.toLowerCase() !== String(kind).toLowerCase()) {
+    parts.push(fileKind);
+  }
+  parts.push(matchedText);
   if (result.streams?.length) {
-    return `${kind} - ${result.streams.map(prettyStreamName).join(", ")}`;
+    parts.push(result.streams.map(prettyStreamName).join(", "));
+    return parts.join(" - ");
   }
   if (typeof result.score === "number") {
-    return `${kind} - score ${result.score.toFixed(3)}`;
+    parts.push(`score ${result.score.toFixed(3)}`);
+    return parts.join(" - ");
   }
-  return kind;
+  return parts.join(" - ");
 }
 
 function searchResultKey(result: SearchResult, index: number): string {
@@ -4890,12 +4927,34 @@ function searchResultKey(result: SearchResult, index: number): string {
 }
 
 function buildDashboardRetrievalFilters(kind: string, currentOnly: boolean, includeSuppressed: boolean): RetrievalFilters {
-  return {
-    logical_kinds: kind === "all" ? [] : [kind],
+  const filters: RetrievalFilters = {
+    logical_kinds: [],
     current_only: currentOnly,
     lifecycle_states: [],
     include_suppressed: includeSuppressed
   };
+  if (kind === "docs") {
+    filters.logical_kinds = ["file"];
+    filters.file_kinds = ["text", "document", "image"];
+  } else if (kind === "mail") {
+    filters.logical_kinds = ["mail"];
+  } else if (kind === "episode") {
+    filters.logical_kinds = ["episode"];
+  } else if (kind === "code") {
+    filters.logical_kinds = ["file"];
+    filters.file_kinds = ["code"];
+  }
+  return filters;
+}
+
+function isBalancedCodeHeavySearch(searchKind: string, results: SearchResult[]): boolean {
+  if (searchKind !== "balanced" || results.length === 0) return false;
+  return results.every(isCodeSearchResult);
+}
+
+function isCodeSearchResult(result: SearchResult): boolean {
+  const fileKind = String(result.file_kind ?? "").toLowerCase().replace(/[-_]+/g, "_");
+  return fileKind === "code" || Boolean((result as Record<string, unknown>).code);
 }
 
 function lifecyclePenaltyText(value: unknown): string {

@@ -2490,7 +2490,7 @@ describe("Flux dashboard", () => {
 
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Retrieval" }));
-    await user.selectOptions(screen.getByLabelText("Evidence kind"), "mail");
+    await user.selectOptions(screen.getByLabelText("Search focus"), "mail");
     await user.click(screen.getByLabelText("Current evidence only"));
     await user.click(screen.getByLabelText("Show suppressed diagnostics"));
     await user.type(screen.getByLabelText("Dashboard search"), "customer rfp{enter}");
@@ -2510,6 +2510,146 @@ describe("Flux dashboard", () => {
         current_only: true,
         lifecycle_states: [],
         include_suppressed: true
+      }
+    });
+  });
+
+  test("retrieval search focus maps docs and code filters to explain", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Retrieval" }));
+    await user.selectOptions(screen.getByLabelText("Search focus"), "docs");
+    await user.type(screen.getByLabelText("Dashboard search"), "agent guidance{enter}");
+
+    await waitFor(() => expect(explainRequestPayload).toEqual({
+      query: "agent guidance",
+      limit: 8,
+      filters: {
+        logical_kinds: ["file"],
+        file_kinds: ["text", "document", "image"],
+        current_only: false,
+        lifecycle_states: [],
+        include_suppressed: false
+      }
+    }));
+
+    searchPayload = [
+      {
+        kind: "corpus_chunk",
+        logical_kind: "file",
+        file_kind: "code",
+        title: "OrderService.build_invoice",
+        excerpt: "def build_invoice(order_id): return order_id",
+        score: 0.99,
+        streams: ["code_symbol_exact"],
+        snippet: { text: "def build_invoice(order_id): return order_id", matched_terms: ["build_invoice"] },
+        retrieval_explanation: {
+          score: 0.99,
+          streams: ["code_symbol_exact"],
+          raw_scores: { code_symbol_exact: 2.5 },
+          scope: { label: "local" }
+        }
+      }
+    ];
+    await user.clear(screen.getByLabelText("Dashboard search"));
+    await user.selectOptions(screen.getByLabelText("Search focus"), "code");
+    await user.type(screen.getByLabelText("Dashboard search"), "build_invoice{enter}");
+
+    expect(await screen.findByText("OrderService.build_invoice")).toBeInTheDocument();
+    expect(screen.getByText("Why this result")).toBeInTheDocument();
+    expect(explainRequestPayload).toEqual({
+      query: "build_invoice",
+      limit: 8,
+      filters: {
+        logical_kinds: ["file"],
+        file_kinds: ["code"],
+        current_only: false,
+        lifecycle_states: [],
+        include_suppressed: false
+      }
+    });
+  });
+
+  test("balanced code-heavy results show diagnostic and rerun docs files", async () => {
+    explainPayload = {
+      query: "closeout failed_step log_path",
+      results: [
+        {
+          kind: "corpus_chunk",
+          logical_kind: "file",
+          file_kind: "code",
+          title: "src/hooks.py::failed_step",
+          excerpt: "failed_step = result.failed_step",
+          score: 0.24,
+          streams: ["code_symbol_exact"],
+          snippet: { text: "failed_step = result.failed_step", matched_terms: ["failed_step"] },
+          retrieval_explanation: {
+            score: 0.24,
+            streams: ["code_symbol_exact"],
+            raw_scores: { code_symbol_exact: 0.24 },
+            scope: { label: "local" }
+          }
+        },
+        {
+          kind: "corpus_chunk",
+          logical_kind: "file",
+          file_kind: "code",
+          title: "src/hooks.py::log_path",
+          excerpt: "log_path = result.log_path",
+          score: 0.2,
+          streams: ["code_symbol_exact"],
+          snippet: { text: "log_path = result.log_path", matched_terms: ["log_path"] }
+        }
+      ],
+      brief: { text: "", token_budget: 0, packed: [], excluded: [] },
+      filter_trace: { excluded: [] },
+      suppression: {}
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Retrieval" }));
+    await user.type(screen.getByLabelText("Dashboard search"), "closeout failed_step log_path{enter}");
+
+    expect(await screen.findByText("Balanced results are code-heavy.")).toBeInTheDocument();
+    expect(screen.getAllByText(/code - 1 matched term/i).length).toBeGreaterThanOrEqual(2);
+
+    explainPayload = {
+      query: "closeout failed_step log_path",
+      results: [
+        {
+          kind: "corpus_chunk",
+          logical_kind: "file",
+          file_kind: "text",
+          title: "AGENTS.md",
+          excerpt: "If closeout fails, report failed_step and log_path.",
+          score: 0.91,
+          streams: ["corpus_lexical"],
+          snippet: {
+            text: "If closeout fails, report failed_step and log_path.",
+            matched_terms: ["failed_step", "log_path"]
+          }
+        }
+      ],
+      brief: { text: "", token_budget: 0, packed: [], excluded: [] },
+      filter_trace: { excluded: [] },
+      suppression: {}
+    };
+    await user.click(screen.getByRole("button", { name: "Rerun Docs/files" }));
+
+    expect(await screen.findByText("AGENTS.md")).toBeInTheDocument();
+    expect(explainRequestPayload).toEqual({
+      query: "closeout failed_step log_path",
+      limit: 8,
+      filters: {
+        logical_kinds: ["file"],
+        file_kinds: ["text", "document", "image"],
+        current_only: false,
+        lifecycle_states: [],
+        include_suppressed: false
       }
     });
   });

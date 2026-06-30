@@ -39,6 +39,12 @@ CAPTURE_GUIDANCE = """Make the final assistant message indexable for Flux-LLM-KB
 - Do not include secrets, tokens, credentials, raw private transcripts, or unnecessary noise."""
 
 
+NON_CODE_PREFLIGHT_FILTERS = {
+    "logical_kinds": ["file"],
+    "file_kinds": ["text", "document", "image"],
+}
+
+
 def handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any]:
     settings = load_policy_settings()
     prompt = str(payload.get("prompt") or "")
@@ -52,6 +58,20 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any]:
         service = KnowledgeService()
         scope_mode = "local_first"
         results = service.search(prompt, limit=5, cwd=common["cwd"], scope_mode=scope_mode)
+        fallback_reason: str | None = None
+        brief_filters: dict[str, Any] | None = None
+        if _should_rerun_preflight_with_non_code_filters(prompt, results):
+            fallback_results = service.search(
+                prompt,
+                limit=5,
+                cwd=common["cwd"],
+                scope_mode=scope_mode,
+                filters=NON_CODE_PREFLIGHT_FILTERS,
+            )
+            if _has_relevant_evidence(fallback_results):
+                results = fallback_results
+                brief_filters = NON_CODE_PREFLIGHT_FILTERS
+                fallback_reason = "code_dominated_non_code_prompt"
         retrieval_scope = _retrieval_scope_label(results)
         if not _has_relevant_evidence(results):
             if settings.capture_guidance_enabled:
@@ -78,12 +98,14 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any]:
             )
             return {"continue": True}
 
-        brief = service.brief(
-            prompt,
-            token_budget=settings.token_budget,
-            cwd=common["cwd"],
-            scope_mode=scope_mode,
-        ).strip()
+        brief_kwargs: dict[str, Any] = {
+            "token_budget": settings.token_budget,
+            "cwd": common["cwd"],
+            "scope_mode": scope_mode,
+        }
+        if brief_filters is not None:
+            brief_kwargs["filters"] = brief_filters
+        brief = service.brief(prompt, **brief_kwargs).strip()
         if not brief:
             if settings.capture_guidance_enabled:
                 _audit(
@@ -118,6 +140,7 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any]:
                 "brief_chars": len(brief),
                 "scope_mode": scope_mode,
                 "retrieval_scope": retrieval_scope,
+                **({"fallback_reason": fallback_reason} if fallback_reason else {}),
             },
         )
         prefix = f"{CAPTURE_GUIDANCE}\n\n" if settings.capture_guidance_enabled else ""
@@ -289,6 +312,28 @@ def _has_relevant_evidence(results: list[dict[str, Any]]) -> bool:
         if any("lexical" in stream or "fuzzy" in stream for stream in streams):
             return True
     return False
+
+
+def _should_rerun_preflight_with_non_code_filters(prompt: str, results: list[dict[str, Any]]) -> bool:
+    if database._has_code_implementation_intent(prompt) or _prompt_requests_code_evidence(prompt):
+        return False
+    if not results:
+        return False
+    inspected = results[:5]
+    code_results = [result for result in inspected if _is_code_result(result)]
+    if not code_results:
+        return False
+    return len(code_results) == len(inspected)
+
+
+def _prompt_requests_code_evidence(prompt: str) -> bool:
+    tokens = {token.lower() for token in re.findall(r"[A-Za-z_]+", prompt or "")}
+    return bool(tokens.intersection(database._CODE_NON_IMPLEMENTATION_INTENT_TERMS))
+
+
+def _is_code_result(result: dict[str, Any]) -> bool:
+    file_kind = str(result.get("file_kind") or "").strip().lower().replace("-", "_")
+    return file_kind == "code" or isinstance(result.get("code"), dict)
 
 
 def _retrieval_scope_label(results: list[dict[str, Any]]) -> str:

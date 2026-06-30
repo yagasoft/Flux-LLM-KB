@@ -1397,6 +1397,54 @@ def test_search_corpus_chunks_promotes_exact_code_definition():
     assert "code_rank_adjustment" not in details["test"]["raw_scores"]
 
 
+def test_generic_policy_query_promotes_exact_non_code_over_weak_code_chunks():
+    streams = {
+        "corpus_lexical": ["code-a", "code-b", "agents"],
+        "corpus_fuzzy": ["code-a", "agents", "code-b"],
+        "code_symbol_exact": ["code-a", "code-b"],
+        "corpus_trust": ["code-a", "code-b", "agents"],
+        "corpus_freshness": ["code-a", "code-b", "agents"],
+    }
+    details = {
+        "agents": {
+            "title": "AGENTS.md",
+            "raw_scores": {"corpus_lexical": 0.98, "corpus_fuzzy": 0.84},
+            "file_kind": "text",
+        },
+        "code-a": {
+            "title": "scripts/dev/complete-feature.ps1::Invoke-FeatureCloseout",
+            "raw_scores": {"code_symbol_exact": 0.24, "corpus_lexical": 0.12},
+            "file_kind": "code",
+            "code": {
+                "primary_symbol": "Invoke-FeatureCloseout",
+                "relationship": "definition",
+            },
+        },
+        "code-b": {
+            "title": "src/flux_llm_kb/hooks.py::failed_step",
+            "raw_scores": {"code_symbol_exact": 0.18, "corpus_lexical": 0.11},
+            "file_kind": "code",
+            "code": {
+                "primary_symbol": "failed_step",
+                "relationship": "definition",
+            },
+        },
+    }
+
+    ranked = database._rank_corpus_candidates(
+        "If complete-feature.ps1 fails, report failed_step and log_path from AGENTS.md.",
+        streams=streams,
+        details=details,
+        filters=None,
+    )
+
+    assert ranked[0].item_id == "agents"
+    assert ranked[0].score > ranked[1].score
+    assert "balanced_non_code_guardrail" in ranked[0].streams
+    assert not database._has_code_implementation_intent("failed_step log_path")
+    assert "code_rank_adjustment" not in details["code-b"]["raw_scores"]
+
+
 def test_embedding_insert_populates_asset_chunk_root_id():
     source = Path(database.__file__).read_text(encoding="utf-8")
     function = source.split("def _insert_embedding_result", 1)[1].split("\ndef ", 1)[0]

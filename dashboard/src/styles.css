@@ -1664,6 +1664,34 @@ kbd {
   color: var(--muted);
 }
 
+.retrieval-diagnostic {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--orange) 45%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--orange) 8%, var(--surface));
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.retrieval-diagnostic strong {
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.retrieval-diagnostic span {
+  grid-column: 1;
+}
+
+.retrieval-diagnostic button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
 .search-result-card .result-path {
   display: block;
   width: fit-content;
