@@ -243,6 +243,17 @@ def test_local_inference_base_url_accepts_docker_host_gateway():
         base_url.validate("https://api.openai.com/v1")
 
 
+def test_local_inference_keep_alive_defaults_and_env_override(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("acceleration.local_inference.keep_alive").raw_value == ""
+
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE", "2m")
+
+    assert service.resolve("acceleration.local_inference.keep_alive").raw_value == "2m"
+
+
 def test_container_cap_settings_defaults_and_env_overrides(monkeypatch):
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     service = SettingsService()

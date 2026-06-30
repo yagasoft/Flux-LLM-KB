@@ -689,6 +689,7 @@ def _configure_vision(
     provider: str = "ollama",
     max_pixels: int = 4_096_000,
     base_url: str = "http://127.0.0.1:11434",
+    keep_alive: str = "",
 ) -> None:
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
     monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "true" if enabled else "false")
@@ -697,6 +698,7 @@ def _configure_vision(
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_ENABLED", "true")
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_PROVIDER", provider)
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_BASE_URL", base_url)
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE", keep_alive)
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_PROBE_TIMEOUT_SECONDS", "1")
 
 
@@ -806,6 +808,8 @@ def test_extract_image_uses_local_vision_when_ocr_is_missing_and_reuses_cache(mo
     def fake_urlopen(request, **_kwargs):
         calls["vision"] += 1
         assert request.full_url == "http://127.0.0.1:11434/api/generate"
+        payload = json.loads(request.data.decode("utf-8"))
+        assert "keep_alive" not in payload
         return FakeResponse()
 
     monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
@@ -834,6 +838,29 @@ def test_extract_image_uses_local_vision_when_ocr_is_missing_and_reuses_cache(mo
     assert second.metadata["vision"]["cache_hits"] == 1
     assert second.metadata["vision"]["cache_misses"] == 0
     assert calls == {"vision": 1}
+
+
+def test_extract_image_sends_configured_local_inference_keep_alive(monkeypatch, tmp_path):
+    path = tmp_path / "diagram.png"
+    path.write_bytes(PNG_BYTES)
+    _configure_vision(monkeypatch, tmp_path, keep_alive="2m")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"response":"Diagram shows a workflow."}'
+
+    def fake_urlopen(request, **_kwargs):
+        payload = json.loads(request.data.decode("utf-8"))
+        assert payload["keep_alive"] == "2m"
+        return FakeResponse()
+
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["vision"]["status"] == "completed"
 
 
 def test_extract_image_uses_local_vision_after_empty_ocr_via_docker_host_gateway(monkeypatch, tmp_path):

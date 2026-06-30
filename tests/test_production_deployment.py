@@ -122,7 +122,7 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "image: ollama/ollama:latest" in compose
         assert "container_name: flux-ollama" in compose
         assert compose.count("OLLAMA_LOAD_TIMEOUT: 30m") == 1
-        assert compose.count("OLLAMA_KEEP_ALIVE: 30m") == 1
+        assert compose.count("OLLAMA_KEEP_ALIVE: 2m") == 1
         assert "- ../models/ollama:/root/.ollama" in compose
         assert 'test: ["CMD", "ollama", "list"]' in compose
         assert "ollama:" in compose
@@ -131,8 +131,9 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_ASR_COMPUTE_TYPE: float16" in compose
         assert "FLUX_KB_LOCAL_INFERENCE_ENABLED: \"true\"" in compose
         assert "FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434" in compose
+        assert compose.count("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m") == 2
         assert "FLUX_KB_VISION_ENABLED: \"true\"" in compose
-        assert "FLUX_KB_VISION_MODEL: qwen3-vl:32b" in compose
+        assert "FLUX_KB_VISION_MODEL: qwen3-vl:8b" in compose
         assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in compose
         assert "host.docker.internal:11434" not in compose
         assert "0.0.0.0:11434:11434" not in compose
@@ -143,8 +144,11 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
     update = _script("update-flux.ps1")
 
     for script in (install, update):
-        assert "docker exec flux-ollama ollama pull qwen3-vl:32b" in script
         assert "docker exec flux-ollama ollama pull qwen3-vl:8b" in script
+        assert "docker exec flux-ollama ollama pull qwen3-vl:32b" in script
+        assert script.find("docker exec flux-ollama ollama pull qwen3-vl:8b") < script.find(
+            "docker exec flux-ollama ollama pull qwen3-vl:32b"
+        )
 
 
 def test_production_compose_overrides_host_paths_inside_api_and_worker():

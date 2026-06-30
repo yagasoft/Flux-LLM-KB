@@ -535,6 +535,16 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         validator=_loopback_http_url,
     ),
     SettingDefinition(
+        key="acceleration.local_inference.keep_alive",
+        category="acceleration",
+        default="",
+        value_type="str",
+        description="Optional local model residency duration sent to providers that support per-request keepalive.",
+        env_var="FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
         key="acceleration.local_inference.probe_timeout_seconds",
         category="acceleration",
         default=1,

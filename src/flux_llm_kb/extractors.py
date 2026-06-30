@@ -4024,6 +4024,7 @@ def _vision_image(path: Path, *, source_label: str) -> VisionResult:
         provider=settings["provider"],
         base_url=base_url,
         model=settings["model"],
+        keep_alive=settings["keep_alive"],
         timeout_seconds=settings["timeout_seconds"],
         metadata=metadata,
     )
@@ -4037,6 +4038,7 @@ def _vision_settings() -> dict[str, Any]:
         "local_inference_enabled": False,
         "provider": "ollama",
         "base_url": "http://127.0.0.1:11434",
+        "keep_alive": "",
         "timeout_seconds": 1,
     }
     try:
@@ -4050,6 +4052,7 @@ def _vision_settings() -> dict[str, Any]:
             "local_inference_enabled": bool(service.resolve("acceleration.local_inference.enabled").raw_value),
             "provider": str(service.resolve("acceleration.local_inference.provider").raw_value or "ollama"),
             "base_url": str(service.resolve("acceleration.local_inference.base_url").raw_value or "http://127.0.0.1:11434"),
+            "keep_alive": str(service.resolve("acceleration.local_inference.keep_alive").raw_value or ""),
             "timeout_seconds": int(service.resolve("acceleration.local_inference.probe_timeout_seconds").raw_value or 1),
         }
     except Exception:
@@ -4077,6 +4080,7 @@ def _vision_with_ollama_compatible(
     provider: str,
     base_url: str,
     model: str,
+    keep_alive: str,
     timeout_seconds: int,
     metadata: dict[str, Any],
 ) -> VisionResult:
@@ -4091,6 +4095,8 @@ def _vision_with_ollama_compatible(
             ),
             "images": [image_b64],
         }
+        if keep_alive:
+            payload["keep_alive"] = keep_alive
         request = Request(
             f"{base_url}/api/generate",
             data=json.dumps(payload).encode("utf-8"),

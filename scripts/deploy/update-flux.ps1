@@ -89,7 +89,9 @@ function Remove-FluxGpuComposeAccess {
         if ($line -match "^\s+FLUX_KB_ASR_COMPUTE_TYPE: float16\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_ENABLED: `"true`"\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_ENABLED: `"true`"\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen3-vl:8b\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen3-vl:32b\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_MAX_IMAGE_PIXELS: `"80000000`"\s*$") { continue }
         $line
@@ -155,8 +157,9 @@ services:
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
       FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
+      FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m
       FLUX_KB_VISION_ENABLED: "true"
-      FLUX_KB_VISION_MODEL: qwen3-vl:32b
+      FLUX_KB_VISION_MODEL: qwen3-vl:8b
       FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
     ports:
       - "127.0.0.1:${ApiPort}:8765"
@@ -190,8 +193,9 @@ services:
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
       FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
+      FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m
       FLUX_KB_VISION_ENABLED: "true"
-      FLUX_KB_VISION_MODEL: qwen3-vl:32b
+      FLUX_KB_VISION_MODEL: qwen3-vl:8b
       FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
     volumes:
       - ../private:/app/private
@@ -209,7 +213,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       OLLAMA_LOAD_TIMEOUT: 30m
-      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_KEEP_ALIVE: 2m
     volumes:
       - ../models/ollama:/root/.ollama
     healthcheck:
@@ -277,8 +281,9 @@ FLUX_KB_ASR_DEVICE=cuda
 FLUX_KB_ASR_COMPUTE_TYPE=float16
 FLUX_KB_LOCAL_INFERENCE_ENABLED=true
 FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://ollama:11434
+FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE=2m
 FLUX_KB_VISION_ENABLED=true
-FLUX_KB_VISION_MODEL=qwen3-vl:32b
+FLUX_KB_VISION_MODEL=qwen3-vl:8b
 FLUX_KB_VISION_MAX_IMAGE_PIXELS=80000000
 "@
     } else {
@@ -287,6 +292,7 @@ FLUX_KB_ASR_DEVICE=auto
 FLUX_KB_ASR_COMPUTE_TYPE=default
 FLUX_KB_LOCAL_INFERENCE_ENABLED=false
 FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://127.0.0.1:11434
+FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE=
 FLUX_KB_VISION_ENABLED=false
 FLUX_KB_VISION_MODEL=
 FLUX_KB_VISION_MAX_IMAGE_PIXELS=4096000
@@ -812,6 +818,6 @@ foreach ($taskSpec in @(
 
 Write-Host "Flux production runtime updated at $InstallRoot to image tag $imageTag"
 if ($gpuEnabled) {
-    Write-Host "Install the Docker Ollama vision model with: docker exec flux-ollama ollama pull qwen3-vl:32b"
-    Write-Host "Rollback model pull command: docker exec flux-ollama ollama pull qwen3-vl:8b"
+    Write-Host "Install the Docker Ollama vision model with: docker exec flux-ollama ollama pull qwen3-vl:8b"
+    Write-Host "Optional higher-accuracy model pull command: docker exec flux-ollama ollama pull qwen3-vl:32b"
 }

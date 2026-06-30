@@ -54,14 +54,15 @@ large model blobs. After a GPU deployment, install the configured vision model
 explicitly:
 
 ```powershell
-docker exec flux-ollama ollama pull qwen3-vl:32b
+docker exec flux-ollama ollama pull qwen3-vl:8b
 ```
 
-If the 32B model exceeds the available Docker/WSL memory or creates unacceptable
-pressure, use the rollback model:
+Production GPU mode defaults to `qwen3-vl:8b` and a 2-minute Ollama keepalive so
+VRAM is released shortly after Flux vision work goes idle. If a workload needs
+the larger model for an accuracy check, pull it explicitly:
 
 ```powershell
-docker exec flux-ollama ollama pull qwen3-vl:8b
+docker exec flux-ollama ollama pull qwen3-vl:32b
 ```
 
 Update an existing deployment from the current checkout with:
