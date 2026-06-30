@@ -3546,8 +3546,17 @@ def _asr_media(path: Path, probed: dict[str, Any]) -> AsrResult:
         model=str(settings.get("model") or ""),
         base_url=str(settings.get("base_url") or ""),
     )
+    has_audio_stream = _media_has_audio_stream(probed)
+    if has_audio_stream is not None:
+        metadata["has_audio_stream"] = has_audio_stream
     if not settings["enabled"]:
         return AsrResult(status="completed", metadata={**metadata, "status": "disabled"})
+    if has_audio_stream is False:
+        return AsrResult(
+            status="completed",
+            metadata={**metadata, "status": "skipped_no_audio_stream"},
+            message="media has no audio stream for ASR",
+        )
     if duration is not None and duration > settings["max_duration_seconds"]:
         return AsrResult(status="completed", metadata={**metadata, "status": "skipped_duration_cap"})
     if provider == "openai_compatible":
@@ -3954,6 +3963,13 @@ def _media_duration_seconds(probed: dict[str, Any]) -> float | None:
         if parsed >= 0:
             return parsed
     return None
+
+
+def _media_has_audio_stream(probed: dict[str, Any]) -> bool | None:
+    streams = probed.get("streams")
+    if not isinstance(streams, list):
+        return None
+    return any(isinstance(stream, dict) and stream.get("codec_type") == "audio" for stream in streams)
 
 
 def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingResult:

@@ -743,6 +743,48 @@ def test_extract_media_openai_compatible_asr_blocks_when_service_unavailable(mon
     assert result.metadata["asr"]["status"] == "blocked_missing_dependency"
 
 
+def test_extract_media_treats_video_without_audio_as_metadata_only(monkeypatch, tmp_path):
+    path = tmp_path / "silent.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    calls = {"ffprobe": 0, "ffmpeg": 0, "http": 0}
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            calls["ffprobe"] += 1
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=60, has_audio=False), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            calls["ffmpeg"] += 1
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "Output #0, wav, to 'audio.wav':\n"
+                    "[out#0/wav @ 000001] Output file does not contain any stream\n"
+                    "Error opening output files: Invalid argument"
+                ),
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    def fake_urlopen(*_args, **_kwargs):
+        calls["http"] += 1
+        raise AssertionError("ASR service should not be called for video without audio")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.message == "media has no audio stream for ASR"
+    assert result.metadata["asr"]["status"] == "skipped_no_audio_stream"
+    assert result.metadata["asr"]["has_audio_stream"] is False
+    assert result.metadata["asr"]["cache_hits"] == 0
+    assert result.metadata["asr"]["cache_misses"] == 0
+    assert calls == {"ffprobe": 1, "ffmpeg": 0, "http": 0}
+
+
 def test_extract_media_asr_cache_key_changes_with_provider_model(monkeypatch, tmp_path):
     path = tmp_path / "clip.mp4"
     path.write_bytes(b"fake media")
@@ -874,8 +916,9 @@ def _configure_frame_sampling(
     monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_MAX_DURATION_SECONDS", str(max_duration))
 
 
-def _media_probe_json(*, duration: int | float) -> str:
-    return f'{{"format":{{"duration":"{duration}"}},"streams":[{{"codec_type":"audio","codec_name":"aac"}}]}}'
+def _media_probe_json(*, duration: int | float, has_audio: bool = True) -> str:
+    streams = '[{"codec_type":"audio","codec_name":"aac"}]' if has_audio else '[{"codec_type":"video","codec_name":"h264"}]'
+    return f'{{"format":{{"duration":"{duration}"}},"streams":{streams}}}'
 
 
 def test_extract_image_blocks_when_tesseract_is_missing(monkeypatch, tmp_path):
