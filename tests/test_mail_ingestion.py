@@ -83,6 +83,22 @@ def test_resolve_host_spool_path_maps_container_private_mount(monkeypatch, tmp_p
     assert path == (private_dir / "mail-spool" / "outlook-catchup").resolve()
 
 
+def test_resolve_host_spool_path_keeps_container_private_mount_when_env_is_container_native(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_PRIVATE_DIR", "/app/private")
+
+    path = _resolve_host_spool_path("/app/private/mail-spool/outlook-catchup")
+
+    assert path == Path("/app/private/mail-spool/outlook-catchup").expanduser().resolve()
+
+
+def test_resolve_host_spool_path_ignores_windows_private_dir_outside_windows(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_PRIVATE_DIR", r"D:\FluxLLMKB\private")
+
+    path = _resolve_host_spool_path("/app/private/mail-spool/outlook-catchup", platform_os_name="posix")
+
+    assert path == Path("/app/private/mail-spool/outlook-catchup").expanduser().resolve()
+
+
 def test_export_email_to_spool_uses_host_spool_path_resolver(monkeypatch, tmp_path):
     from flux_llm_kb import mail_ingestion
 

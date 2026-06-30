@@ -122,7 +122,10 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       FLUX_KB_API_HOST: 0.0.0.0
       FLUX_KB_API_PORT: "8765"
+      FLUX_KB_INSTALL_ROOT: /app
       FLUX_KB_APP_ROOT: /app
+      FLUX_KB_PRIVATE_DIR: /app/private
+      FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
@@ -152,7 +155,10 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_INSTALL_ROOT: /app
       FLUX_KB_APP_ROOT: /app
+      FLUX_KB_PRIVATE_DIR: /app/private
+      FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"

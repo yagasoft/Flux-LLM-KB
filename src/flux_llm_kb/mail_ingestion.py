@@ -21,6 +21,9 @@ from . import database
 from .mail_post_process import apply_mail_post_process_policy
 
 
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
 @dataclass(frozen=True)
 class ParsedAttachment:
     filename: str
@@ -280,12 +283,26 @@ def dedupe_outlook_spool(
     return payload
 
 
-def _resolve_host_spool_path(spool_path: str | Path) -> Path:
+def _should_map_container_private_dir(private_dir: str, *, platform_os_name: str | None = None) -> bool:
+    normalized_private = private_dir.replace("\\", "/").rstrip("/")
+    if normalized_private == "/app/private":
+        return False
+    os_name = platform_os_name or os.name
+    if os_name != "nt" and _WINDOWS_DRIVE_PATH_RE.match(private_dir):
+        return False
+    return True
+
+
+def _resolve_host_spool_path(spool_path: str | Path, *, platform_os_name: str | None = None) -> Path:
     raw_path = str(spool_path)
     normalized = raw_path.replace("\\", "/")
     container_private = "/app/private"
     private_dir = os.environ.get("FLUX_KB_PRIVATE_DIR")
-    if private_dir and (normalized == container_private or normalized.startswith(f"{container_private}/")):
+    if (
+        private_dir
+        and _should_map_container_private_dir(private_dir, platform_os_name=platform_os_name)
+        and (normalized == container_private or normalized.startswith(f"{container_private}/"))
+    ):
         suffix = normalized.removeprefix(container_private).lstrip("/")
         root = Path(private_dir).expanduser()
         if suffix:

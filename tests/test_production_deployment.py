@@ -125,6 +125,16 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
     assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in install_compose
 
 
+def test_production_compose_overrides_host_paths_inside_api_and_worker():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        compose = _embedded_compose_template(_script(script_name))
+
+        assert compose.count("FLUX_KB_INSTALL_ROOT: /app") == 2
+        assert compose.count("FLUX_KB_PRIVATE_DIR: /app/private") == 2
+        assert compose.count("FLUX_KB_LOG_DIR: /app/logs") == 2
+        assert "FLUX_KB_PRIVATE_DIR: D:\\FluxLLMKB\\private" not in compose
+
+
 def test_production_env_gpu_settings_start_on_new_lines():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")

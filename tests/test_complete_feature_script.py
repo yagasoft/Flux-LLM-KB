@@ -37,11 +37,15 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
 
 def test_complete_feature_script_has_optional_post_deploy_outlook_spool_reclaim():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+    reclaim_block_start = script.index("$reclaimCommand =")
+    reclaim_block_end = script.index('Invoke-FeatureStep -Name "post-deploy-outlook-spool-reclaim"', reclaim_block_start)
+    reclaim_block = script[reclaim_block_start:reclaim_block_end]
 
     assert "[string]$PostDeployReclaimOutlookProfile" in script
-    assert "flux_llm_kb.cli mail spool-dedupe --profile" in script
+    assert "docker exec flux-llm-kb-api python -m flux_llm_kb.cli mail spool-dedupe --profile" in script
     assert "--apply --purge --json" in script
     assert 'Invoke-FeatureStep -Name "post-deploy-outlook-spool-reclaim"' in script
+    assert '$env:PYTHONPATH = (Join-Path (Get-Location) "src")' not in reclaim_block
 
 
 def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
