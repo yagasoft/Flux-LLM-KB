@@ -44,6 +44,11 @@ processors = [
   "pyarrow>=16.0",
   "faster-whisper==1.2.1",
 ]
+asr_gpu = [
+  "nvidia-cuda-runtime-cu12>=12,<13",
+  "nvidia-cublas-cu12>=12,<13",
+  "nvidia-cudnn-cu12>=9,<10",
+]
 gpu = [
   "onnxruntime-gpu>=1.20",
 ]

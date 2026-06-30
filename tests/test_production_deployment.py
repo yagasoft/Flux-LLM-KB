@@ -350,8 +350,10 @@ def test_dockerfile_installs_practical_extractor_pack():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
 
-    assert 'for extra in ("api", "corpus", "mcp", "processors")' in dockerfile
+    assert 'for extra in ("api", "corpus", "mcp", "processors", "asr_gpu")' in dockerfile
     assert 'for extra in ("api", "corpus", "processors", "gpu")' not in dockerfile
+    assert "nvidia/cublas/lib" in dockerfile
+    assert "nvidia/cudnn/lib" in dockerfile
     for package in (
         "libreoffice",
         "antiword",
@@ -375,7 +377,7 @@ def test_dockerfile_installs_practical_extractor_pack():
         "pandoc",
     ):
         assert package in dockerfile
-    for dependency in ("duckdb", "pyarrow", "faster-whisper", "onnxruntime-gpu"):
+    for dependency in ("duckdb", "pyarrow", "faster-whisper", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
         assert dependency in pyproject
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update

@@ -10,6 +10,7 @@ ARG APT_SECURITY_MIRROR_URL=""
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
 
 WORKDIR /app
 
@@ -63,7 +64,7 @@ from pathlib import Path
 config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 requirements = list(config["project"]["dependencies"])
 optional = config["project"].get("optional-dependencies", {})
-for extra in ("api", "corpus", "mcp", "processors"):
+for extra in ("api", "corpus", "mcp", "processors", "asr_gpu"):
     requirements.extend(optional.get(extra, []))
 Path("/tmp/requirements-docker.txt").write_text(
     "\n".join(requirements) + "\n",

@@ -30,7 +30,9 @@ def test_dockerfile_uses_pip_buildkit_cache() -> None:
 def test_dockerfile_installs_mcp_extra_for_containerized_codex_retrieval() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
-    assert 'for extra in ("api", "corpus", "mcp", "processors")' in dockerfile
+    assert 'for extra in ("api", "corpus", "mcp", "processors", "asr_gpu")' in dockerfile
+    assert "nvidia/cublas/lib" in dockerfile
+    assert "nvidia/cudnn/lib" in dockerfile
 
 
 def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> None:
