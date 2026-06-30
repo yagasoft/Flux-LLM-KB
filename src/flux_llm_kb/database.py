@@ -3005,30 +3005,44 @@ def _capture_job_offset(value: int | str | None) -> int:
     return max(0, numeric)
 
 
+def _capture_job_filter_values(value: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    if value is None:
+        return []
+    raw_values = [value] if isinstance(value, str) else list(value)
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        clean = str(raw or "").strip()
+        if clean and clean not in seen:
+            values.append(clean)
+            seen.add(clean)
+    return values
+
+
 def _capture_job_filter_sql(
     *,
-    status: str | None = None,
-    root_name: str | None = None,
-    job_type: str | None = None,
+    status: str | list[str] | None = None,
+    root_name: str | list[str] | None = None,
+    job_type: str | list[str] | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
 ) -> tuple[str, list[Any]]:
     clauses = ["job_type LIKE 'corpus_%%'"]
     params: list[Any] = []
-    clean_status = str(status or "").strip()
-    clean_root = str(root_name or "").strip()
-    clean_job_type = str(job_type or "").strip()
+    statuses = _capture_job_filter_values(status)
+    roots = _capture_job_filter_values(root_name)
+    job_types = _capture_job_filter_values(job_type)
     clean_updated_from = str(updated_from or "").strip()
     clean_updated_to = str(updated_to or "").strip()
-    if clean_status:
-        clauses.append("status = %s")
-        params.append(clean_status)
-    if clean_root:
-        clauses.append("payload->>'root_name' = %s")
-        params.append(clean_root)
-    if clean_job_type:
-        clauses.append("job_type = %s")
-        params.append(clean_job_type)
+    if statuses:
+        clauses.append("status = ANY(%s::text[])")
+        params.append(statuses)
+    if roots:
+        clauses.append("payload->>'root_name' = ANY(%s::text[])")
+        params.append(roots)
+    if job_types:
+        clauses.append("job_type = ANY(%s::text[])")
+        params.append(job_types)
     if clean_updated_from:
         clauses.append("updated_at >= %s")
         params.append(clean_updated_from)
@@ -3042,9 +3056,9 @@ def list_capture_jobs(
     *,
     limit: int = 50,
     offset: int = 0,
-    status: str | None = None,
-    root_name: str | None = None,
-    job_type: str | None = None,
+    status: str | list[str] | None = None,
+    root_name: str | list[str] | None = None,
+    job_type: str | list[str] | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
     url: str | None = None,
@@ -3102,9 +3116,9 @@ def list_capture_jobs(
 
 def count_capture_jobs(
     *,
-    status: str | None = None,
-    root_name: str | None = None,
-    job_type: str | None = None,
+    status: str | list[str] | None = None,
+    root_name: str | list[str] | None = None,
+    job_type: str | list[str] | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
     url: str | None = None,

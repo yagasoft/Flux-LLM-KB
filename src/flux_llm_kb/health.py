@@ -194,9 +194,9 @@ def _bounded_jobs_offset(value: int | str | None) -> int:
 def collect_jobs_payload(
     limit: int = 50,
     offset: int = 0,
-    status: str | None = None,
-    root_name: str | None = None,
-    job_type: str | None = None,
+    status: str | list[str] | None = None,
+    root_name: str | list[str] | None = None,
+    job_type: str | list[str] | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
 ) -> dict[str, Any]:

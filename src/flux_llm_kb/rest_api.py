@@ -621,9 +621,9 @@ def create_app():
     def dashboard_jobs(
         limit: int = 50,
         offset: int = 0,
-        status: str | None = None,
-        root_name: str | None = None,
-        job_type: str | None = None,
+        status: list[str] | None = Query(None),
+        root_name: list[str] | None = Query(None),
+        job_type: list[str] | None = Query(None),
         updated_from: str | None = None,
         updated_to: str | None = None,
     ):
@@ -1389,9 +1389,9 @@ def create_app():
     def crawl_jobs(
         limit: int = 50,
         offset: int = 0,
-        status: str | None = None,
-        root_name: str | None = None,
-        job_type: str | None = None,
+        status: list[str] | None = Query(None),
+        root_name: list[str] | None = Query(None),
+        job_type: list[str] | None = Query(None),
         updated_from: str | None = None,
         updated_to: str | None = None,
     ):

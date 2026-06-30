@@ -959,15 +959,17 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
     client = fastapi_testclient.TestClient(create_app())
     response = client.get(
         "/api/dashboard/jobs",
-        params={
-            "status": "failed",
-            "root_name": "docs",
-            "job_type": "corpus_extract_pdf",
-            "updated_from": "2026-06-25T00:00:00+00:00",
-            "updated_to": "2026-06-26T00:00:00+00:00",
-            "limit": 25,
-            "offset": 50,
-        },
+        params=[
+            ("status", "failed"),
+            ("status", "retrying_locked"),
+            ("root_name", "docs"),
+            ("root_name", "mail"),
+            ("job_type", "corpus_extract_pdf"),
+            ("updated_from", "2026-06-25T00:00:00+00:00"),
+            ("updated_to", "2026-06-26T00:00:00+00:00"),
+            ("limit", "25"),
+            ("offset", "50"),
+        ],
     )
 
     assert response.status_code == 200
@@ -976,9 +978,9 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
         {
             "limit": 25,
             "offset": 50,
-            "status": "failed",
-            "root_name": "docs",
-            "job_type": "corpus_extract_pdf",
+            "status": ["failed", "retrying_locked"],
+            "root_name": ["docs", "mail"],
+            "job_type": ["corpus_extract_pdf"],
             "updated_from": "2026-06-25T00:00:00+00:00",
             "updated_to": "2026-06-26T00:00:00+00:00",
         }

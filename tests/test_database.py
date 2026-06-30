@@ -2445,27 +2445,27 @@ def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch)
     jobs = database.list_capture_jobs(
         limit=25,
         offset=50,
-        status="failed",
-        root_name="docs",
-        job_type="corpus_extract_pdf",
+        status=["failed", "retrying_locked"],
+        root_name=["docs", "mail"],
+        job_type=["corpus_extract_pdf", "corpus_sync_root"],
         updated_from="2026-06-25T00:00:00+00:00",
         updated_to="2026-06-26T00:00:00+00:00",
     )
 
     sql, params = executed[0]
     assert jobs[0]["id"] == "job-1"
-    assert "status = %s" in sql
-    assert "payload->>'root_name' = %s" in sql
-    assert "job_type = %s" in sql
+    assert "status = ANY(%s::text[])" in sql
+    assert "payload->>'root_name' = ANY(%s::text[])" in sql
+    assert "job_type = ANY(%s::text[])" in sql
     assert "updated_at >= %s" in sql
     assert "updated_at <= %s" in sql
     assert "ORDER BY updated_at DESC, id DESC" in sql
     assert "LIMIT %s" in sql
     assert "OFFSET %s" in sql
     assert params == (
-        "failed",
-        "docs",
-        "corpus_extract_pdf",
+        ["failed", "retrying_locked"],
+        ["docs", "mail"],
+        ["corpus_extract_pdf", "corpus_sync_root"],
         "2026-06-25T00:00:00+00:00",
         "2026-06-26T00:00:00+00:00",
         25,
@@ -2506,9 +2506,9 @@ def test_count_capture_jobs_reuses_job_history_filters(monkeypatch):
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
 
     count = database.count_capture_jobs(
-        status="blocked_missing_dependency",
-        root_name="docs",
-        job_type="corpus_sync_root",
+        status=["blocked_missing_dependency", "failed"],
+        root_name=["docs"],
+        job_type=["corpus_sync_root"],
         updated_from="2026-06-20T00:00:00+00:00",
         updated_to="2026-06-27T00:00:00+00:00",
     )
@@ -2516,18 +2516,60 @@ def test_count_capture_jobs_reuses_job_history_filters(monkeypatch):
     sql, params = executed[0]
     assert count == 7
     assert "SELECT count(*)" in sql
-    assert "status = %s" in sql
-    assert "payload->>'root_name' = %s" in sql
-    assert "job_type = %s" in sql
+    assert "status = ANY(%s::text[])" in sql
+    assert "payload->>'root_name' = ANY(%s::text[])" in sql
+    assert "job_type = ANY(%s::text[])" in sql
     assert "updated_at >= %s" in sql
     assert "updated_at <= %s" in sql
     assert params == (
-        "blocked_missing_dependency",
-        "docs",
-        "corpus_sync_root",
+        ["blocked_missing_dependency", "failed"],
+        ["docs"],
+        ["corpus_sync_root"],
         "2026-06-20T00:00:00+00:00",
         "2026-06-27T00:00:00+00:00",
     )
+
+
+def test_list_capture_jobs_ignores_empty_multi_value_filters(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    jobs = database.list_capture_jobs(status=[], root_name=[], job_type=[], limit=50, offset=0)
+
+    sql, params = executed[0]
+    assert jobs == []
+    assert "status = ANY" not in sql
+    assert "payload->>'root_name' = ANY" not in sql
+    assert "job_type = ANY" not in sql
+    assert params == (50, 0)
 
 
 def test_capture_job_filter_options_lists_distinct_status_roots_and_types(monkeypatch):

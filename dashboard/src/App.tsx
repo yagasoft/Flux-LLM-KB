@@ -1050,16 +1050,16 @@ const DASHBOARD_STATE_KEY = "flux-dashboard-state";
 const DEFAULT_POLL_SECONDS = 10;
 const JOB_PAGE_LIMIT = 50;
 type JobHistoryFilters = {
-  status: string;
-  root_name: string;
-  job_type: string;
+  status: string[];
+  root_name: string[];
+  job_type: string[];
   updated_from: string;
   updated_to: string;
 };
 const emptyJobHistoryFilters: JobHistoryFilters = {
-  status: "",
-  root_name: "",
-  job_type: "",
+  status: [],
+  root_name: [],
+  job_type: [],
   updated_from: "",
   updated_to: ""
 };
@@ -5158,8 +5158,11 @@ function JobHistoryControls({
   useEffect(() => {
     setDraft(filters);
   }, [filters.status, filters.root_name, filters.job_type, filters.updated_from, filters.updated_to]);
-  const updateDraft = (key: keyof JobHistoryFilters, value: string) => {
+  const updateDraftDate = (key: "updated_from" | "updated_to", value: string) => {
     setDraft((current) => ({ ...current, [key]: value }));
+  };
+  const toggleDraftValue = (key: "status" | "root_name" | "job_type", value: string) => {
+    setDraft((current) => ({ ...current, [key]: toggleStringValue(current[key], value) }));
   };
   const pageStart = count > 0 ? offset + 1 : 0;
   const pageEnd = count > 0 ? Math.min(offset + visibleCount, count) : 0;
@@ -5168,29 +5171,44 @@ function JobHistoryControls({
   return (
     <div className="job-history-controls">
       <div className="job-filter-grid">
-        <label>Status
-          <select aria-label="Job status filter" value={draft.status} onChange={(event) => updateDraft("status", event.target.value)}>
-            <option value="">All statuses</option>
-            {(options.statuses ?? []).map((status) => <option key={status} value={status}>{humanizeIdentifier(status)}</option>)}
-          </select>
-        </label>
-        <label>Root
-          <select aria-label="Job root filter" value={draft.root_name} onChange={(event) => updateDraft("root_name", event.target.value)}>
-            <option value="">All roots</option>
-            {(options.roots ?? []).map((root) => <option key={root} value={root}>{root}</option>)}
-          </select>
-        </label>
-        <label>Type
-          <select aria-label="Job type filter" value={draft.job_type} onChange={(event) => updateDraft("job_type", event.target.value)}>
-            <option value="">All types</option>
-            {(options.job_types ?? []).map((type) => <option key={type} value={type}>{jobTypeLabel(type)}</option>)}
-          </select>
-        </label>
+        <JobFilterMultiSelect
+          label="Status"
+          buttonLabel="Job status filter"
+          optionsLabel="Job status options"
+          values={draft.status}
+          options={options.statuses ?? []}
+          allLabel="All statuses"
+          pluralLabel="statuses"
+          optionLabel={humanizeIdentifier}
+          onToggle={(value) => toggleDraftValue("status", value)}
+        />
+        <JobFilterMultiSelect
+          label="Root"
+          buttonLabel="Job root filter"
+          optionsLabel="Job root options"
+          values={draft.root_name}
+          options={options.roots ?? []}
+          allLabel="All roots"
+          pluralLabel="roots"
+          optionLabel={(root) => root}
+          onToggle={(value) => toggleDraftValue("root_name", value)}
+        />
+        <JobFilterMultiSelect
+          label="Type"
+          buttonLabel="Job type filter"
+          optionsLabel="Job type options"
+          values={draft.job_type}
+          options={options.job_types ?? []}
+          allLabel="All types"
+          pluralLabel="types"
+          optionLabel={jobTypeLabel}
+          onToggle={(value) => toggleDraftValue("job_type", value)}
+        />
         <label>Updated from
-          <input aria-label="Updated from filter" type="datetime-local" value={draft.updated_from} onChange={(event) => updateDraft("updated_from", event.target.value)} />
+          <input aria-label="Updated from filter" type="datetime-local" value={draft.updated_from} onChange={(event) => updateDraftDate("updated_from", event.target.value)} />
         </label>
         <label>Updated to
-          <input aria-label="Updated to filter" type="datetime-local" value={draft.updated_to} onChange={(event) => updateDraft("updated_to", event.target.value)} />
+          <input aria-label="Updated to filter" type="datetime-local" value={draft.updated_to} onChange={(event) => updateDraftDate("updated_to", event.target.value)} />
         </label>
         <div className="job-filter-actions">
           <button className="ghost-action compact" type="button" onClick={() => onApply(draft)}><ListFilter size={15} /> Apply job filters</button>
@@ -5206,6 +5224,58 @@ function JobHistoryControls({
           Next <ChevronRight size={15} />
         </button>
       </div>
+    </div>
+  );
+}
+
+function JobFilterMultiSelect({
+  label,
+  buttonLabel,
+  optionsLabel,
+  values,
+  options,
+  allLabel,
+  pluralLabel,
+  optionLabel,
+  onToggle
+}: {
+  label: string;
+  buttonLabel: string;
+  optionsLabel: string;
+  values: string[];
+  options: string[];
+  allLabel: string;
+  pluralLabel: string;
+  optionLabel: (value: string) => string;
+  onToggle: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = new Set(values);
+  const summary = multiFilterSummary(values, allLabel, pluralLabel, optionLabel);
+  return (
+    <div className="job-filter-menu">
+      <span>{label}</span>
+      <button
+        className="job-filter-menu-button"
+        type="button"
+        aria-label={buttonLabel}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <strong>{summary}</strong>
+        <ChevronDown size={15} />
+      </button>
+      {open ? (
+        <div className="job-filter-menu-panel" role="group" aria-label={optionsLabel}>
+          {options.length === 0 ? <p className="muted">No options</p> : null}
+          {options.map((option) => (
+            <label className="checkbox-label" key={option}>
+              <input type="checkbox" checked={selected.has(option)} onChange={() => onToggle(option)} />
+              {optionLabel(option)}
+            </label>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -6128,9 +6198,9 @@ function jobHistoryUrl(filters: JobHistoryFilters, offset: number) {
   const params = new URLSearchParams();
   params.set("limit", String(JOB_PAGE_LIMIT));
   params.set("offset", String(safeOffset));
-  if (filters.status) params.set("status", filters.status);
-  if (filters.root_name) params.set("root_name", filters.root_name);
-  if (filters.job_type) params.set("job_type", filters.job_type);
+  filters.status.forEach((status) => params.append("status", status));
+  filters.root_name.forEach((root) => params.append("root_name", root));
+  filters.job_type.forEach((type) => params.append("job_type", type));
   const updatedFrom = datetimeLocalToIso(filters.updated_from);
   const updatedTo = datetimeLocalToIso(filters.updated_to);
   if (updatedFrom) params.set("updated_from", updatedFrom);
@@ -6139,18 +6209,42 @@ function jobHistoryUrl(filters: JobHistoryFilters, offset: number) {
 }
 
 function hasJobHistoryFilters(filters: JobHistoryFilters) {
-  return Boolean(filters.status || filters.root_name || filters.job_type || filters.updated_from || filters.updated_to);
+  return Boolean(filters.status.length || filters.root_name.length || filters.job_type.length || filters.updated_from || filters.updated_to);
 }
 
 function normalizeJobHistoryFilters(value: unknown): JobHistoryFilters {
   if (!isRecord(value)) return emptyJobHistoryFilters;
   return {
-    status: stringFromUnknown(value.status) ?? "",
-    root_name: stringFromUnknown(value.root_name) ?? "",
-    job_type: stringFromUnknown(value.job_type) ?? "",
+    status: stringListFromUnknown(value.status),
+    root_name: stringListFromUnknown(value.root_name),
+    job_type: stringListFromUnknown(value.job_type),
     updated_from: stringFromUnknown(value.updated_from) ?? "",
     updated_to: stringFromUnknown(value.updated_to) ?? ""
   };
+}
+
+function stringListFromUnknown(value: unknown): string[] {
+  const rawValues = Array.isArray(value) ? value : [value];
+  const values: string[] = [];
+  const seen = new Set<string>();
+  rawValues.forEach((item) => {
+    const clean = stringFromUnknown(item);
+    if (clean && !seen.has(clean)) {
+      values.push(clean);
+      seen.add(clean);
+    }
+  });
+  return values;
+}
+
+function toggleStringValue(values: string[], value: string) {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+}
+
+function multiFilterSummary(values: string[], allLabel: string, pluralLabel: string, optionLabel: (value: string) => string) {
+  if (values.length === 0) return allLabel;
+  if (values.length === 1) return optionLabel(values[0]);
+  return `${values.length} ${pluralLabel}`;
 }
 
 function datetimeLocalToIso(value: string) {

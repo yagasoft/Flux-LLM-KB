@@ -1425,7 +1425,8 @@ kbd {
   align-items: end;
 }
 
-.job-filter-grid label {
+.job-filter-grid > label,
+.job-filter-menu {
   display: grid;
   gap: 5px;
   color: var(--muted);
@@ -1433,8 +1434,8 @@ kbd {
   font-weight: 750;
 }
 
-.job-filter-grid select,
-.job-filter-grid input {
+.job-filter-grid input[type="datetime-local"],
+.job-filter-menu-button {
   min-width: 0;
   height: 36px;
   padding: 0 10px;
@@ -1443,6 +1444,48 @@ kbd {
   color: var(--ink);
   background: var(--surface);
   font-size: 13px;
+}
+
+.job-filter-menu {
+  position: relative;
+}
+
+.job-filter-menu-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  text-align: left;
+}
+
+.job-filter-menu-button strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-filter-menu-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.14);
+}
+
+.job-filter-menu-panel .checkbox-label {
+  width: 100%;
+  padding: 6px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
 }
 
 .job-filter-actions,

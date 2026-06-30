@@ -1812,9 +1812,18 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Jobs" }));
     await screen.findByRole("table", { name: "Extraction jobs" });
 
-    await user.selectOptions(screen.getByLabelText("Job status filter"), "failed");
-    await user.selectOptions(screen.getByLabelText("Job root filter"), "docs");
-    await user.selectOptions(screen.getByLabelText("Job type filter"), "corpus_extract_pdf");
+    await user.click(screen.getByRole("button", { name: "Job status filter" }));
+    const statusOptions = screen.getByRole("group", { name: "Job status options" });
+    await user.click(within(statusOptions).getByRole("checkbox", { name: "Failed" }));
+    await user.click(within(statusOptions).getByRole("checkbox", { name: "Retrying Locked" }));
+    await user.click(screen.getByRole("button", { name: "Job root filter" }));
+    const rootOptions = screen.getByRole("group", { name: "Job root options" });
+    await user.click(within(rootOptions).getByRole("checkbox", { name: "docs" }));
+    await user.click(within(rootOptions).getByRole("checkbox", { name: "mail" }));
+    await user.click(screen.getByRole("button", { name: "Job type filter" }));
+    const typeOptions = screen.getByRole("group", { name: "Job type options" });
+    await user.click(within(typeOptions).getByRole("checkbox", { name: "Extract PDF" }));
+    await user.click(within(typeOptions).getByRole("checkbox", { name: "Sync Root" }));
     await user.type(screen.getByLabelText("Updated from filter"), "2026-06-25T00:00");
     await user.type(screen.getByLabelText("Updated to filter"), "2026-06-26T23:59");
     await user.click(screen.getByRole("button", { name: "Apply job filters" }));
@@ -1823,20 +1832,20 @@ describe("Flux dashboard", () => {
       const queryUrl = jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
       expect(queryUrl).toBeTruthy();
       const params = new URLSearchParams(queryUrl?.split("?")[1]);
-      expect(params.get("status")).toBe("failed");
-      expect(params.get("root_name")).toBe("docs");
-      expect(params.get("job_type")).toBe("corpus_extract_pdf");
+      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
+      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
+      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
       expect(params.get("updated_from")).toBe(updatedFromIso);
       expect(params.get("updated_to")).toBe(updatedToIso);
       expect(params.get("limit")).toBe("50");
       expect(params.get("offset")).toBe("0");
     });
     await waitFor(() => {
-      const savedState = JSON.parse(localStorage.getItem("flux-dashboard-state") ?? "{}") as { jobFilters?: Record<string, string> };
+      const savedState = JSON.parse(localStorage.getItem("flux-dashboard-state") ?? "{}") as { jobFilters?: Record<string, unknown> };
       expect(savedState.jobFilters).toMatchObject({
-        status: "failed",
-        root_name: "docs",
-        job_type: "corpus_extract_pdf",
+        status: ["failed", "retrying_locked"],
+        root_name: ["docs", "mail"],
+        job_type: ["corpus_extract_pdf", "corpus_sync_root"],
         updated_from: "2026-06-25T00:00",
         updated_to: "2026-06-26T23:59"
       });
@@ -1849,7 +1858,9 @@ describe("Flux dashboard", () => {
       const params = new URLSearchParams(latestUrl.split("?")[1]);
       expect(params.get("offset")).toBe("50");
       expect(params.get("limit")).toBe("50");
-      expect(params.get("status")).toBe("failed");
+      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
+      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
+      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
     });
   });
 
@@ -1857,9 +1868,9 @@ describe("Flux dashboard", () => {
     localStorage.setItem("flux-dashboard-state", JSON.stringify({
       activeTab: "jobs",
       jobFilters: {
-        status: "failed",
-        root_name: "docs",
-        job_type: "corpus_extract_pdf",
+        status: ["failed", "retrying_locked"],
+        root_name: ["docs", "mail"],
+        job_type: ["corpus_extract_pdf", "corpus_sync_root"],
         updated_from: "2026-06-25T00:00",
         updated_to: "2026-06-26T23:59"
       }
@@ -1892,22 +1903,60 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("table", { name: "Extraction jobs" });
-    expect(screen.getByLabelText("Job status filter")).toHaveValue("failed");
-    expect(screen.getByLabelText("Job root filter")).toHaveValue("docs");
-    expect(screen.getByLabelText("Job type filter")).toHaveValue("corpus_extract_pdf");
+    expect(screen.getByRole("button", { name: "Job status filter" })).toHaveTextContent("2 statuses");
+    expect(screen.getByRole("button", { name: "Job root filter" })).toHaveTextContent("2 roots");
+    expect(screen.getByRole("button", { name: "Job type filter" })).toHaveTextContent("2 types");
     expect(screen.getByLabelText("Updated from filter")).toHaveValue("2026-06-25T00:00");
     expect(screen.getByLabelText("Updated to filter")).toHaveValue("2026-06-26T23:59");
     await waitFor(() => {
       const queryUrl = jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
       expect(queryUrl).toBeTruthy();
       const params = new URLSearchParams(queryUrl?.split("?")[1]);
-      expect(params.get("status")).toBe("failed");
-      expect(params.get("root_name")).toBe("docs");
-      expect(params.get("job_type")).toBe("corpus_extract_pdf");
+      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
+      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
+      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
       expect(params.get("updated_from")).toBe(updatedFromIso);
       expect(params.get("updated_to")).toBe(updatedToIso);
       expect(params.get("limit")).toBe("50");
       expect(params.get("offset")).toBe("0");
+    });
+  });
+
+  test("job queue restores legacy scalar history filters as single selections", async () => {
+    localStorage.setItem("flux-dashboard-state", JSON.stringify({
+      activeTab: "jobs",
+      jobFilters: {
+        status: "failed",
+        root_name: "docs",
+        job_type: "corpus_extract_pdf"
+      }
+    }));
+    jobsPayload = {
+      jobs: [],
+      count: 0,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["failed", "retrying_locked"],
+        roots: ["docs", "mail"],
+        job_types: ["corpus_extract_pdf", "corpus_sync_root"]
+      }
+    };
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "Job status filter" });
+    expect(screen.getByRole("button", { name: "Job status filter" })).toHaveTextContent("Failed");
+    expect(screen.getByRole("button", { name: "Job root filter" })).toHaveTextContent("docs");
+    expect(screen.getByRole("button", { name: "Job type filter" })).toHaveTextContent("Extract PDF");
+    await waitFor(() => {
+      const queryUrl = jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
+      expect(queryUrl).toBeTruthy();
+      const params = new URLSearchParams(queryUrl?.split("?")[1]);
+      expect(params.getAll("status")).toEqual(["failed"]);
+      expect(params.getAll("root_name")).toEqual(["docs"]);
+      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf"]);
     });
   });
 
