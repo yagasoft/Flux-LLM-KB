@@ -1485,6 +1485,14 @@ def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
     try:
         document = Document(str(path))
     except Exception as exc:
+        missing_package_part = _missing_archive_member_from_key_error(exc) if isinstance(exc, KeyError) else None
+        if missing_package_part is not None:
+            return _extract_docx_package_xml(
+                path,
+                extractor=extractor,
+                missing_package_part=missing_package_part,
+                warning=str(exc),
+            )
         if _is_invalid_package_error(exc):
             return ExtractionResult(
                 status="blocked_missing_dependency",
@@ -1495,6 +1503,62 @@ def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
     text = "\n".join(paragraph.text for paragraph in document.paragraphs).strip()
     chunks = _chunks_from_text(text, path.name)
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": extractor})
+
+
+def _missing_archive_member_from_key_error(exc: KeyError) -> str | None:
+    match = re.search(r"There is no item named '([^']+)' in the archive", str(exc))
+    return match.group(1) if match else None
+
+
+def _extract_docx_package_xml(
+    path: Path,
+    *,
+    extractor: str,
+    missing_package_part: str,
+    warning: str,
+) -> ExtractionResult:
+    metadata = {
+        "extractor": extractor,
+        "fallback": "package_xml",
+        "missing_package_part": missing_package_part,
+        "warnings": [warning],
+    }
+    try:
+        with ZipFile(path) as archive:
+            document_xml = archive.read("word/document.xml")
+    except (BadZipFile, KeyError) as exc:
+        return ExtractionResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "reason": "invalid_package"},
+            message=str(exc),
+        )
+    try:
+        root = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError as exc:
+        return ExtractionResult(status="failed", metadata=metadata, message=f"DOCX XML parse failed: {exc}")
+
+    paragraphs = [
+        paragraph_text
+        for paragraph in root.iter()
+        if _xml_local_name(paragraph.tag) == "p"
+        for paragraph_text in [_docx_paragraph_text(paragraph)]
+        if paragraph_text
+    ]
+    chunks = _chunks_from_text("\n".join(paragraphs), path.name)
+    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
+
+
+def _docx_paragraph_text(paragraph: ElementTree.Element) -> str:
+    parts: list[str] = []
+    for element in paragraph.iter():
+        local_name = _xml_local_name(element.tag)
+        if local_name == "t" and element.text:
+            parts.append(element.text)
+        elif local_name == "tab":
+            parts.append("\t")
+        elif local_name in {"br", "cr"}:
+            parts.append("\n")
+    return "".join(parts).strip()
 
 
 def _is_invalid_package_error(exc: Exception) -> bool:

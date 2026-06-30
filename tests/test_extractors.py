@@ -1219,6 +1219,54 @@ def test_extract_docx_blocks_invalid_package_without_retryable_failure(monkeypat
     assert result.metadata["reason"] == "invalid_package"
 
 
+def test_extract_docx_salvages_text_when_embedded_part_missing(monkeypatch, tmp_path):
+    path = tmp_path / "dangling-ole.docx"
+    path.write_bytes(
+        _zip_payload(
+            {
+                "[Content_Types].xml": """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>""",
+                "_rels/.rels": """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>""",
+                "word/document.xml": """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>System blueprint</w:t><w:tab/><w:t>Recognition guide</w:t></w:r></w:p>
+    <w:p><w:r><w:t>Equivalency notes</w:t><w:br/><w:t>Second line</w:t></w:r></w:p>
+  </w:body>
+</w:document>""",
+                "word/_rels/document.xml.rels": """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/oleObject1.bin"/>
+</Relationships>""",
+            }
+        )
+    )
+
+    def fake_document(_path):
+        raise KeyError("There is no item named 'word/embeddings/oleObject1.bin' in the archive")
+
+    monkeypatch.setitem(sys.modules, "docx", SimpleNamespace(Document=fake_document))
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert "System blueprint\tRecognition guide" in result.chunks[0].body
+    assert "Equivalency notes\nSecond line" in result.chunks[0].body
+    assert result.metadata["extractor"] == "docx"
+    assert result.metadata["fallback"] == "package_xml"
+    assert result.metadata["missing_package_part"] == "word/embeddings/oleObject1.bin"
+    assert result.metadata["warnings"] == [
+        "\"There is no item named 'word/embeddings/oleObject1.bin' in the archive\""
+    ]
+
+
 def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_path):
     path = tmp_path / "scan.pdf"
     path.write_bytes(b"%PDF scanned")
