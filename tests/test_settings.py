@@ -7,6 +7,18 @@ from flux_llm_kb.settings import SettingsService
 from flux_llm_kb.settings_registry import APPLY_REINDEX_REQUIRED, SETTING_REGISTRY
 
 
+EXPECTED_GENERATED_CACHE_EXCLUDES = [
+    "**/.vs/**",
+    "**/CopilotIndices/**",
+    "**/*.db",
+    "**/*.db-wal",
+    "**/*.db-shm",
+    "**/*.sqlite",
+    "**/*.sqlite-*",
+    "desktop.ini",
+]
+
+
 def test_settings_registry_contains_runtime_and_mail_defaults():
     keys = {definition.key for definition in SETTING_REGISTRY}
 
@@ -97,6 +109,29 @@ def test_crawler_global_excludes_skip_dedicated_worktrees(monkeypatch):
     exclude_globs = service.resolve("crawler.global_exclude_globs").raw_value
 
     assert ".worktrees/**" in exclude_globs
+    for pattern in EXPECTED_GENERATED_CACHE_EXCLUDES:
+        assert pattern in exclude_globs
+
+
+def test_crawler_global_excludes_reconcile_db_values_without_removing_custom_patterns(monkeypatch):
+    def fake_get_runtime_setting(key):
+        if key == "crawler.global_exclude_globs":
+            return {
+                "key": key,
+                "value": ["custom/**", "**/.vs/**"],
+                "updated_at": "2026-06-30T00:00:00+00:00",
+            }
+        return None
+
+    monkeypatch.setattr(database, "get_runtime_setting", fake_get_runtime_setting)
+
+    resolved = SettingsService().resolve("crawler.global_exclude_globs")
+
+    assert resolved.source == "db"
+    assert resolved.raw_value[0:2] == ["custom/**", "**/.vs/**"]
+    assert resolved.raw_value.count("**/.vs/**") == 1
+    for pattern in EXPECTED_GENERATED_CACHE_EXCLUDES:
+        assert pattern in resolved.raw_value
 
 
 def test_governance_settings_defaults_and_env_overrides(monkeypatch):
@@ -177,8 +212,9 @@ def test_lock_tolerant_indexing_settings_defaults(monkeypatch):
 
     service = SettingsService()
 
+    assert service.resolve("watcher.debounce_seconds").raw_value == 2.0
     assert service.resolve("watcher.stability_quiet_seconds").raw_value == 2.0
-    assert service.resolve("watcher.large_file_stability_quiet_seconds").raw_value == 10.0
+    assert service.resolve("watcher.large_file_stability_quiet_seconds").raw_value == 30.0
     assert service.resolve("worker.failure_max_attempts").raw_value == 3
     assert service.resolve("worker.lock_retry_cooldown_seconds").raw_value == 300
     assert service.resolve("worker.lock_max_attempts").raw_value == 3

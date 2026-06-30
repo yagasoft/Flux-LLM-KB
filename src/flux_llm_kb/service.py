@@ -1955,8 +1955,36 @@ class KnowledgeService:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         root = _select_root(root_name=root_name, path=path)
-        glob_policy = _configured_glob_policy(root)
-        manifest = _manifest_store(root["name"])
+        return self._sync_corpus_selected_root(
+            root=root,
+            path=path,
+            dry_run=dry_run,
+            reason=reason,
+            progress_callback=progress_callback,
+            manifest=_manifest_store(root["name"]),
+        )
+
+    def _sync_corpus_selected_root(
+        self,
+        *,
+        root: dict[str, Any],
+        path: str | Path | None = None,
+        dry_run: bool = False,
+        reason: str = "manual_sync",
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        manifest: dict[str, dict[str, Any]] | None = None,
+        glob_policy: dict[str, Any] | None = None,
+        container_limits: dict[str, int] | None = None,
+        hash_parallelism: int | None = None,
+    ) -> dict[str, Any]:
+        if glob_policy is None:
+            glob_policy = _configured_glob_policy(root)
+        if manifest is None:
+            manifest = _manifest_store(root["name"])
+        if container_limits is None:
+            container_limits = _configured_container_limits()
+        if hash_parallelism is None:
+            hash_parallelism = _configured_hash_parallelism()
         policy = CorpusPolicy(
             root_path=Path(root["root_path"]),
             recursive=root["recursive"],
@@ -1965,8 +1993,8 @@ class KnowledgeService:
             strict_indexing=strict_indexing_enabled(root.get("metadata") if isinstance(root.get("metadata"), dict) else {}),
             max_inline_bytes=root["max_inline_bytes"],
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
-            **_configured_container_limits(),
-            hash_parallelism=_configured_hash_parallelism(),
+            **container_limits,
+            hash_parallelism=hash_parallelism,
             manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
             stability_quiet_seconds=_configured_stability_quiet_seconds() if reason == "watch_event" else 0.0,
             large_file_stability_quiet_seconds=_configured_large_file_stability_quiet_seconds() if reason == "watch_event" else 0.0,
@@ -3436,6 +3464,11 @@ class KnowledgeService:
                 telemetry["paths_done"] = progress_int(telemetry.get("path_index"))
             if "files_done" not in telemetry and "files_seen" in telemetry:
                 telemetry["files_done"] = progress_int(telemetry.get("files_seen"))
+            if len(paths):
+                if "batch_paths_total" not in telemetry:
+                    telemetry["batch_paths_total"] = len(paths)
+                if "batch_paths_done" not in telemetry and "paths_done" in telemetry:
+                    telemetry["batch_paths_done"] = progress_int(telemetry.get("paths_done"))
             paths_total = progress_int(telemetry.get("paths_total"))
             if paths_total and "path_index" in telemetry:
                 completed_before = max(0, min(progress_int(telemetry.get("path_index")) - 1, paths_total))
@@ -3445,7 +3478,9 @@ class KnowledgeService:
                 telemetry["progress_percent"] = min(100, int(((completed_before + path_fraction) / paths_total) * 100))
             elif "progress_percent" not in telemetry:
                 telemetry["progress_percent"] = 0 if telemetry["stage"] == "starting" else None
-            if not telemetry.get("progress_label"):
+            if paths_total:
+                telemetry["progress_label"] = progress_label(telemetry)
+            elif not telemetry.get("progress_label"):
                 telemetry["progress_label"] = progress_label(telemetry)
             return {key: value for key, value in telemetry.items() if value is not None}
 
@@ -3505,7 +3540,15 @@ class KnowledgeService:
                     "chunks_indexed": 0,
                     "manifest_skipped_unchanged": 0,
                     "paths_total": len(paths),
+                    "batch_paths_total": len(paths),
+                    "batch_paths_done": 0,
+                    "batch_manifest_loaded_once": True,
                 }
+                root = _select_root(root_name=root_name, path=None)
+                glob_policy = _configured_glob_policy(root)
+                manifest = _manifest_store(root["name"])
+                container_limits = _configured_container_limits()
+                hash_parallelism = _configured_hash_parallelism()
                 for index, sync_path in enumerate(paths, start=1):
                     report_progress(
                         {
@@ -3514,6 +3557,10 @@ class KnowledgeService:
                             "path_index": index,
                             "paths_done": index - 1,
                             "paths_total": len(paths),
+                            "batch_paths_done": index - 1,
+                            "batch_paths_total": len(paths),
+                            "batch_manifest_loaded_once": True,
+                            "manifest_skipped_unchanged": int(result.get("manifest_skipped_unchanged") or 0),
                         }
                     )
 
@@ -3522,16 +3569,24 @@ class KnowledgeService:
                         progress_payload["current_path"] = current_path
                         progress_payload["path"] = current_path
                         progress_payload["path_index"] = current_index
-                        progress_payload["paths_done"] = current_index - 1
+                        progress_payload["paths_done"] = current_index
                         progress_payload["paths_total"] = len(paths)
+                        progress_payload["batch_paths_done"] = current_index - 1
+                        progress_payload["batch_paths_total"] = len(paths)
+                        progress_payload["batch_manifest_loaded_once"] = True
+                        progress_payload["manifest_skipped_unchanged"] = int(result.get("manifest_skipped_unchanged") or 0)
                         report_progress(progress_payload)
 
-                    path_result = self.sync_corpus(
-                        root_name=root_name,
+                    path_result = self._sync_corpus_selected_root(
+                        root=root,
                         path=sync_path,
                         dry_run=False,
                         reason=reason,
                         progress_callback=path_progress,
+                        manifest=manifest,
+                        glob_policy=glob_policy,
+                        container_limits=container_limits,
+                        hash_parallelism=hash_parallelism,
                     )
                     for key in (
                         "files_seen",
@@ -3542,6 +3597,7 @@ class KnowledgeService:
                         "manifest_skipped_unchanged",
                     ):
                         result[key] += int(path_result.get(key) or 0)
+                    result["batch_paths_done"] = index
                     report_progress(
                         {
                             "stage": "path_completed",
@@ -3549,8 +3605,12 @@ class KnowledgeService:
                             "path_index": index,
                             "paths_done": index,
                             "paths_total": len(paths),
+                            "batch_paths_done": index,
+                            "batch_paths_total": len(paths),
+                            "batch_manifest_loaded_once": True,
                             "files_done": int(path_result.get("files_seen") or 0),
                             "files_total": int(path_result.get("files_seen") or 0),
+                            "manifest_skipped_unchanged": int(result.get("manifest_skipped_unchanged") or 0),
                         }
                     )
             else:
@@ -3597,6 +3657,9 @@ class KnowledgeService:
         if paths:
             telemetry["paths_total"] = len(paths)
             telemetry["paths_done"] = len(paths)
+            telemetry["batch_paths_total"] = len(paths)
+            telemetry["batch_paths_done"] = len(paths)
+            telemetry["batch_manifest_loaded_once"] = bool(result.get("batch_manifest_loaded_once"))
         telemetry["progress_label"] = progress_label(telemetry)
         return JobProcessResult(status="indexed", telemetry=telemetry)
 
@@ -5036,7 +5099,7 @@ def _configured_watcher_debounce_seconds() -> float:
     try:
         return float(SettingsService().resolve("watcher.debounce_seconds").raw_value)
     except Exception:
-        return 0.75
+        return 2.0
 
 
 def _configured_watcher_max_queue_size() -> int:
@@ -5057,7 +5120,7 @@ def _configured_large_file_stability_quiet_seconds() -> float:
     try:
         return float(SettingsService().resolve("watcher.large_file_stability_quiet_seconds").raw_value)
     except Exception:
-        return 10.0
+        return 30.0
 
 
 def _configured_watcher_backend() -> str:

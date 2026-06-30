@@ -15,6 +15,21 @@ APPLY_RESTART_COMPONENT = "restart_component"
 APPLY_REINDEX_REQUIRED = "reindex_required"
 APPLY_MANUAL_PROCESS_RESTART = "manual_process_restart"
 
+DEFAULT_CRAWLER_GLOBAL_EXCLUDE_GLOBS = [
+    "private/**",
+    "node_modules/**",
+    ".git/**",
+    ".worktrees/**",
+    "**/.vs/**",
+    "**/CopilotIndices/**",
+    "**/*.db",
+    "**/*.db-wal",
+    "**/*.db-shm",
+    "**/*.sqlite",
+    "**/*.sqlite-*",
+    "desktop.ini",
+]
+
 
 @dataclass(frozen=True)
 class SettingDefinition:
@@ -1001,7 +1016,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="crawler.global_exclude_globs",
         category="crawler",
-        default=["private/**", "node_modules/**", ".git/**", ".worktrees/**"],
+        default=DEFAULT_CRAWLER_GLOBAL_EXCLUDE_GLOBS,
         value_type="list[str]",
         description="Global exclude glob defaults inherited by monitored roots unless overridden.",
         env_var="FLUX_KB_CRAWLER_GLOBAL_EXCLUDE_GLOBS",
@@ -1032,7 +1047,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="watcher.debounce_seconds",
         category="watcher",
-        default=0.75,
+        default=2.0,
         value_type="float",
         description="Debounce window for repeated filesystem events.",
         env_var="FLUX_KB_WATCHER_DEBOUNCE_SECONDS",
@@ -1052,7 +1067,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="watcher.large_file_stability_quiet_seconds",
         category="watcher",
-        default=10.0,
+        default=30.0,
         value_type="float",
         description="Longer stability window reserved for large or cloud-synced files.",
         env_var="FLUX_KB_WATCHER_LARGE_FILE_STABILITY_QUIET_SECONDS",

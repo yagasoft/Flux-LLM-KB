@@ -8,6 +8,7 @@ from . import database
 from .settings_registry import (
     APPLY_REINDEX_REQUIRED,
     APPLY_RESTART_COMPONENT,
+    DEFAULT_CRAWLER_GLOBAL_EXCLUDE_GLOBS,
     SettingDefinition,
     get_definition,
     public_definitions,
@@ -64,6 +65,8 @@ class SettingsService:
                 raw_value = stored["value"]
                 source = "db"
         validated = definition.validate(raw_value)
+        if source == "db" and definition.key == "crawler.global_exclude_globs":
+            validated = _append_missing_defaults(validated, DEFAULT_CRAWLER_GLOBAL_EXCLUDE_GLOBS)
         public_value = "***" if definition.sensitive and validated not in {None, ""} else validated
         return _resolved(definition, value=public_value, raw_value=validated, source=source)
 
@@ -117,3 +120,13 @@ def _resolved(definition: SettingDefinition, *, value: Any, raw_value: Any, sour
 
 def _requires_confirmation(definition: SettingDefinition) -> bool:
     return definition.apply_mode in {APPLY_REINDEX_REQUIRED, APPLY_RESTART_COMPONENT}
+
+
+def _append_missing_defaults(value: list[str], defaults: list[str]) -> list[str]:
+    reconciled = list(value)
+    seen = set(reconciled)
+    for pattern in defaults:
+        if pattern not in seen:
+            reconciled.append(pattern)
+            seen.add(pattern)
+    return reconciled

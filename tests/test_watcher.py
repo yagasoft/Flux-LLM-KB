@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from flux_llm_kb import database
 from flux_llm_kb import watcher as watcher_module
+from flux_llm_kb.settings import SettingsService
 from flux_llm_kb.watcher import (
     WatchRoot,
     PollingCorpusWatcher,
@@ -49,6 +51,54 @@ def test_polling_watcher_skips_excluded_subtrees(tmp_path):
     watcher.poll_once()
 
     assert [event.relative_path for event in events] == ["src/indexed.py"]
+
+
+def test_polling_watcher_default_excludes_skip_nested_generated_cache_noise(monkeypatch, tmp_path):
+    root = tmp_path / "watched"
+    root.mkdir()
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices").mkdir(parents=True)
+    (root / "G2B" / "Business").mkdir(parents=True)
+    events = []
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    exclude_globs = tuple(SettingsService().resolve("crawler.global_exclude_globs").raw_value)
+    watcher = PollingCorpusWatcher(
+        [WatchRoot(name="docs", root_path=root, watch_enabled=True, exclude_globs=exclude_globs)],
+        on_change=events.append,
+    )
+
+    watcher.poll_once(seed=True)
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices" / "x.db-wal").write_bytes(b"noise")
+    (root / "G2B" / "Business" / "brief.md").write_text("index this", encoding="utf-8")
+    (root / "desktop.ini").write_text("noise", encoding="utf-8")
+    watcher.poll_once()
+
+    assert [event.relative_path for event in events] == ["G2B/Business/brief.md"]
+
+
+def test_polling_watcher_prunes_gitignore_style_nested_directory_excludes(monkeypatch, tmp_path):
+    root = tmp_path / "watched"
+    root.mkdir()
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices").mkdir(parents=True)
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices" / "x.db-wal").write_bytes(b"noise")
+    (root / "docs").mkdir()
+    (root / "docs" / "brief.md").write_text("index this", encoding="utf-8")
+    events = []
+    original_iterdir = Path.iterdir
+
+    def fail_if_vs_descended(self):
+        if self.name == ".vs":
+            raise AssertionError("watcher should prune nested .vs directories before descent")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fail_if_vs_descended)
+    watcher = PollingCorpusWatcher(
+        [WatchRoot(name="docs", root_path=root, watch_enabled=True, exclude_globs=(".vs/",))],
+        on_change=events.append,
+    )
+
+    watcher.poll_once(seed=True)
+
+    assert events == []
 
 
 def test_polling_watcher_prunes_excluded_directories_before_snapshot_descent(monkeypatch, tmp_path):

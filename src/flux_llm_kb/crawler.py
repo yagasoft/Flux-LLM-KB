@@ -626,12 +626,30 @@ def _matches_directory(relative_path: str, pattern: str) -> bool:
     if not normalized:
         return False
     if normalized.endswith("/"):
-        base = normalized.rstrip("/")
-        return relative_path == base or relative_path.startswith(f"{base}/")
+        return _matches_directory_pattern(relative_path, normalized.rstrip("/"), include_self=True)
     if normalized.endswith("/**"):
-        base = normalized[:-3].rstrip("/")
-        return relative_path == base or relative_path.startswith(f"{base}/")
+        return _matches_directory_pattern(relative_path, normalized[:-3].rstrip("/"), include_self=True)
     return _matches(relative_path, normalized) or _matches(f"{relative_path}/", normalized)
+
+
+def _matches_directory_pattern(relative_path: str, base: str, *, include_self: bool) -> bool:
+    normalized_base = base.replace("\\", "/").strip().strip("/")
+    if not normalized_base:
+        return False
+    parts = [part for part in relative_path.replace("\\", "/").split("/") if part]
+    candidates = parts if include_self else parts[:-1]
+    if not candidates:
+        return False
+    if normalized_base.startswith("**/"):
+        suffix = normalized_base[3:]
+        if "/" not in suffix:
+            return any(fnmatch.fnmatch(part, suffix) for part in candidates)
+        candidate_path = "/".join(candidates)
+        return candidate_path == suffix or candidate_path.endswith(f"/{suffix}") or candidate_path.startswith(f"{suffix}/")
+    if "/" not in normalized_base:
+        return any(fnmatch.fnmatch(part, normalized_base) for part in candidates)
+    candidate_path = "/".join(candidates)
+    return candidate_path == normalized_base or candidate_path.startswith(f"{normalized_base}/")
 
 
 def _has_negated_descendant(relative_path: str, patterns: list[str]) -> bool:
@@ -872,9 +890,9 @@ def _matches(relative_path: str, pattern: str) -> bool:
     if not normalized:
         return False
     if normalized.endswith("/"):
-        return relative_path.startswith(normalized)
+        return _matches_directory_pattern(relative_path, normalized.rstrip("/"), include_self=False)
     if normalized.endswith("/**"):
-        return relative_path == normalized[:-3] or relative_path.startswith(normalized[:-2])
+        return _matches_directory_pattern(relative_path, normalized[:-3].rstrip("/"), include_self=False)
     name = Path(relative_path).name
     return fnmatch.fnmatch(relative_path, normalized) or fnmatch.fnmatch(name, normalized)
 

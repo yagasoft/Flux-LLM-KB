@@ -261,13 +261,32 @@ def test_backfill_processes_batched_corpus_sync_root_paths(monkeypatch):
     monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
     monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
     monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(database, "load_scan_manifest", lambda **_kwargs: {}, raising=False)
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {
+                "name": "docs",
+                "root_path": "E:/docs",
+                "recursive": True,
+                "include_globs": [],
+                "exclude_globs": [],
+                "glob_mode": "extend",
+                "max_inline_bytes": 1024,
+                "heavy_threshold_bytes": 2048,
+                "metadata": {},
+            }
+        ],
+    )
     sync_calls = []
 
-    def fake_sync(self, *, root_name=None, path=None, dry_run=False, reason="manual_sync", progress_callback=None):
-        sync_calls.append({"root_name": root_name, "path": path, "reason": reason})
+    def fake_sync(self, *, root, path=None, dry_run=False, reason="manual_sync", progress_callback=None, **_kwargs):
+        sync_calls.append({"root_name": root["name"], "path": path, "reason": reason})
         progress_callback({"stage": "discovered", "files_total": 1, "files_seen": 1, "jobs_queued": 0})
         return {
-            "root_name": root_name,
+            "root_name": root["name"],
             "files_seen": 1,
             "files_changed": 1 if path == "a.md" else 0,
             "files_deleted": 0,
@@ -276,7 +295,7 @@ def test_backfill_processes_batched_corpus_sync_root_paths(monkeypatch):
             "manifest_skipped_unchanged": 0 if path == "a.md" else 1,
         }
 
-    monkeypatch.setattr(KnowledgeService, "sync_corpus", fake_sync)
+    monkeypatch.setattr(KnowledgeService, "_sync_corpus_selected_root", fake_sync)
 
     result = KnowledgeService().run_corpus_backfill(kind="general", limit=1, workers=1)
 
@@ -293,6 +312,123 @@ def test_backfill_processes_batched_corpus_sync_root_paths(monkeypatch):
     assert calls["completed"][0]["telemetry"]["files_changed"] == 1
     assert calls["completed"][0]["telemetry"]["chunks_indexed"] == 2
     assert calls["completed"][0]["telemetry"]["manifest_skipped_unchanged"] == 1
+
+
+def test_process_batched_corpus_sync_root_paths_reuses_manifest_and_prefers_batch_progress(monkeypatch, tmp_path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    progress_calls = []
+    manifest_loads = []
+    scan_calls = []
+    persist_calls = []
+    monkeypatch.setattr(database, "update_corpus_job_progress", lambda **kwargs: progress_calls.append(kwargs), raising=False)
+    monkeypatch.setattr(database, "heartbeat_corpus_job", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {
+                "name": "docs",
+                "root_path": str(root),
+                "recursive": True,
+                "include_globs": [],
+                "exclude_globs": [],
+                "glob_mode": "extend",
+                "max_inline_bytes": 1024,
+                "heavy_threshold_bytes": 2048,
+                "metadata": {},
+            }
+        ],
+    )
+
+    def fake_load_scan_manifest(**kwargs):
+        manifest_loads.append(kwargs)
+        return {
+            "a.md": {
+                "content_hash": "cached",
+                "source_asset_status": "indexed",
+                "chunk_count": 1,
+            }
+        }
+
+    def fake_scan(_root_path, policy, target_path=None, progress_callback=None):
+        target = str(target_path)
+        scan_calls.append(
+            {
+                "target_path": target,
+                "manifest": policy.manifest_lookup("a.md"),
+                "container_max_depth": policy.container_max_depth,
+                "hash_parallelism": policy.hash_parallelism,
+            }
+        )
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "discovered",
+                    "stage_index": 5,
+                    "stage_total": 6,
+                    "files_total": 1,
+                    "files_seen": 1,
+                    "files_done": 1,
+                    "progress_percent": 83,
+                    "progress_label": "Discovered 1/1 files",
+                }
+            )
+        return SimpleNamespace(
+            root_path=root,
+            scope_relative_path=target,
+            scope_is_file=target.endswith(".md"),
+            assets=[],
+            deferred_jobs=[],
+            errors=[],
+        )
+
+    def fake_persist(**kwargs):
+        plan = kwargs["plan"]
+        persist_calls.append(
+            {
+                "root_name": kwargs["root_name"],
+                "scope_relative_path": plan.scope_relative_path,
+                "scope_is_file": plan.scope_is_file,
+            }
+        )
+        return {
+            "root_name": kwargs["root_name"],
+            "files_seen": 1,
+            "files_changed": 1 if plan.scope_relative_path == "a.md" else 0,
+            "files_deleted": 0,
+            "jobs_queued": 0,
+            "chunks_indexed": 1 if plan.scope_relative_path == "a.md" else 0,
+            "manifest_skipped_unchanged": 0 if plan.scope_relative_path == "a.md" else 1,
+        }
+
+    monkeypatch.setattr(database, "load_scan_manifest", fake_load_scan_manifest, raising=False)
+    monkeypatch.setattr(service_module, "scan_path", fake_scan)
+    monkeypatch.setattr(database, "persist_crawl_plan", fake_persist)
+
+    result = KnowledgeService()._process_corpus_sync_job(
+        {
+            "id": "job-sync",
+            "job_type": "corpus_sync_root",
+            "payload": {"root_name": "docs", "reason": "watch_event", "paths": ["a.md", "folder"]},
+        }
+    )
+
+    assert result.status == "indexed"
+    assert len(manifest_loads) == 1
+    assert [call["target_path"] for call in scan_calls] == ["a.md", "folder"]
+    assert all(call["manifest"]["content_hash"] == "cached" for call in scan_calls)
+    assert persist_calls == [
+        {"root_name": "docs", "scope_relative_path": "a.md", "scope_is_file": True},
+        {"root_name": "docs", "scope_relative_path": "folder", "scope_is_file": False},
+    ]
+    discovered_progress = [call["telemetry"] for call in progress_calls if call["telemetry"].get("stage") == "discovered"]
+    assert discovered_progress[0]["progress_label"] == "Paths 1/2, stage 5/6 discovered, files 1/1"
+    assert result.telemetry["batch_paths_total"] == 2
+    assert result.telemetry["batch_paths_done"] == 2
+    assert result.telemetry["batch_manifest_loaded_once"] is True
+    assert result.telemetry["manifest_skipped_unchanged"] == 1
 
 
 def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch):

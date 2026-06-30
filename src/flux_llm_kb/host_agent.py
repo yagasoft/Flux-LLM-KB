@@ -775,7 +775,7 @@ def _configured_watcher_debounce_seconds() -> float:
 
         return float(SettingsService().resolve("watcher.debounce_seconds").raw_value)
     except Exception:
-        return 0.75
+        return 2.0
 
 
 def _configured_watcher_max_queue_size() -> int:

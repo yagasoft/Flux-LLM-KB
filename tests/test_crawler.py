@@ -5,7 +5,9 @@ import threading
 import time
 
 from flux_llm_kb import crawler
+from flux_llm_kb import database
 from flux_llm_kb.crawler import AssetChunk, CorpusPolicy, classify_file, scan_path
+from flux_llm_kb.settings import SettingsService
 
 
 def test_policy_honors_marker_ignores(tmp_path):
@@ -43,6 +45,43 @@ def test_scan_path_prunes_excluded_directories_before_recursive_descent(monkeypa
     plan = scan_path(root, CorpusPolicy(root_path=root, exclude_globs=(".git/**",)))
 
     assert [asset.relative_path for asset in plan.assets] == ["src/app.py"]
+
+
+def test_scan_path_default_excludes_skip_nested_generated_cache_noise(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices").mkdir(parents=True)
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices" / "x.db-wal").write_bytes(b"noise")
+    (root / "G2B" / "Business").mkdir(parents=True)
+    (root / "G2B" / "Business" / "brief.md").write_text("index this", encoding="utf-8")
+    (root / "desktop.ini").write_text("noise", encoding="utf-8")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+
+    exclude_globs = SettingsService().resolve("crawler.global_exclude_globs").raw_value
+    plan = scan_path(root, CorpusPolicy(root_path=root, exclude_globs=tuple(exclude_globs)))
+
+    assert [asset.relative_path for asset in plan.assets] == ["G2B/Business/brief.md"]
+
+
+def test_scan_path_prunes_gitignore_style_nested_directory_excludes(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices").mkdir(parents=True)
+    (root / "G2B" / "Code" / "foo" / ".vs" / "CopilotIndices" / "x.db-wal").write_bytes(b"noise")
+    (root / "docs").mkdir()
+    (root / "docs" / "brief.md").write_text("index this", encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def fail_if_vs_descended(self):
+        if self.name == ".vs":
+            raise AssertionError("scanner should prune nested .vs directories before descent")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", fail_if_vs_descended)
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, exclude_globs=(".vs/",)))
+
+    assert [asset.relative_path for asset in plan.assets] == ["docs/brief.md"]
 
 
 def test_scan_path_preserves_negated_excludes_when_pruning(tmp_path):
