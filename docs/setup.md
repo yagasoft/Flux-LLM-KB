@@ -155,10 +155,14 @@ python -m pip install -e .[mail]
 External tools are detected at runtime and reported by `flux-kb crawl doctor`.
 `ffprobe`/`ffmpeg`, `tesseract`, and local transcription runtimes are never
 called through cloud services by default.
-Deferred ASR uses local faster-whisper only when `acceleration.asr.model_path`
-points at an existing local model. Flux passes `local_files_only=True`, so it
-does not perform a remote model download; missing `ffmpeg`, `faster-whisper`, or
-model path leaves the related media job in `blocked_missing_dependency`.
+Deferred ASR can either load a local faster-whisper model from
+`acceleration.asr.model_path` or call the local OpenAI-compatible ASR service
+configured through `acceleration.asr.provider`, `acceleration.asr.model`, and
+`acceleration.asr.base_url`. Production GPU deployments use the ASR service with
+`large-v3-turbo`; model download is an explicit deploy step into the Docker
+model volume, and extraction/transcription still use local files only. Missing
+`ffmpeg`, service URL, service readiness, faster-whisper, or local model paths
+leave only the related media job in `blocked_missing_dependency`.
 
 ## Useful Commands
 
@@ -281,7 +285,9 @@ loopback HTTP(S) URLs such as `http://127.0.0.1:11434`, the Docker host gateway
 `http://host.docker.internal:11434`, or the internal production Compose service
 URL `http://ollama:11434`.
 Media ASR is controlled by `acceleration.asr.enabled`,
-`acceleration.asr.model_path`, and `acceleration.asr.max_duration_seconds`.
+`acceleration.asr.provider`, `acceleration.asr.model`,
+`acceleration.asr.base_url`, `acceleration.asr.model_path`, and
+`acceleration.asr.max_duration_seconds`.
 Redacted ASR cache entries live under the configured ASR cache directory and
 worker-family telemetry reports ASR cache hits, misses, and segment counts.
 Recursive archive/container extraction is controlled by

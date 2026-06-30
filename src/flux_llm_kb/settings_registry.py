@@ -119,14 +119,21 @@ def _loopback_http_url(value: Any) -> str:
     hostname = parsed.hostname
     if not hostname:
         raise ValueError("value must include a host")
-    if hostname.lower() in {"localhost", "host.docker.internal", "ollama"}:
+    if hostname.lower() in {"localhost", "host.docker.internal", "ollama", "asr"}:
         return parsed_value.rstrip("/")
     try:
         if ipaddress.ip_address(hostname).is_loopback:
             return parsed_value.rstrip("/")
     except ValueError:
         pass
-    raise ValueError("value must use a local loopback host, Docker host gateway, or the Docker Compose ollama service")
+    raise ValueError("value must use a local loopback host, Docker host gateway, or a Docker Compose local model service")
+
+
+def _optional_loopback_http_url(value: Any) -> str:
+    parsed_value = str(value).strip()
+    if not parsed_value:
+        return ""
+    return _loopback_http_url(parsed_value)
 
 
 SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
@@ -384,6 +391,38 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         env_var="FLUX_KB_ASR_ENABLED",
         apply_mode=APPLY_RELOAD,
         affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
+        key="acceleration.asr.provider",
+        category="acceleration",
+        default="local_faster_whisper",
+        value_type="str",
+        description="ASR provider used for audio and video media jobs.",
+        env_var="FLUX_KB_ASR_PROVIDER",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_choice("local_faster_whisper", "openai_compatible"),
+    ),
+    SettingDefinition(
+        key="acceleration.asr.model",
+        category="acceleration",
+        default="",
+        value_type="str",
+        description="ASR model identifier passed to the configured ASR provider.",
+        env_var="FLUX_KB_ASR_MODEL",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+    ),
+    SettingDefinition(
+        key="acceleration.asr.base_url",
+        category="acceleration",
+        default="",
+        value_type="str",
+        description="Loopback or Docker Compose URL for the OpenAI-compatible local ASR service.",
+        env_var="FLUX_KB_ASR_BASE_URL",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "dashboard"),
+        validator=_optional_loopback_http_url,
     ),
     SettingDefinition(
         key="acceleration.asr.model_path",

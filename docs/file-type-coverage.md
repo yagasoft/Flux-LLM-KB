@@ -51,12 +51,14 @@ installed.
   private OCR cache root with hit/miss telemetry exposed through worker-family
   status.
 - ASR is local and cache-backed when available. Deferred audio/video jobs prefer
-  transcript sidecars, then use `ffprobe`, `ffmpeg`, and faster-whisper only
-  when `acceleration.asr.model_path` points at an existing local model. Flux
-  sets `local_files_only=True` and does not perform a remote model download.
-  Missing ASR tools or model paths report `blocked_missing_dependency`; redacted
-  ASR cache entries stay under the private ASR cache root with hit/miss and
-  segment telemetry exposed through worker-family status. Embedded media
+  transcript sidecars, then use `ffprobe`, caller-side `ffmpeg` audio extraction,
+  and either the local OpenAI-compatible ASR service or the local faster-whisper
+  fallback path. Production GPU deployments serve `large-v3-turbo` from the
+  persistent `flux_llm_kb_asr_models` Docker volume; model download is an
+  explicit deploy command, not part of extraction. Missing ASR tools, service
+  readiness, service URLs, or model paths report `blocked_missing_dependency`;
+  redacted ASR cache entries stay under the private ASR cache root with hit/miss
+  and segment telemetry exposed through worker-family status. Embedded media
   sidecar transcripts inside archives are used before probing or ASR tools.
 - Optional local vision is cache-backed and uses configured loopback local
   inference. Image and sampled video-frame descriptions run only when
@@ -155,7 +157,10 @@ installed.
   thumbnail cache, run optional configured local loopback or Docker
   host-gateway inference captions
   into the vision cache, extract temporary mono 16 kHz audio with `ffmpeg`, and
-  transcribe with faster-whisper using `acceleration.asr.model_path`.
+  transcribe through `acceleration.asr.provider`. The production provider calls
+  the loopback OpenAI-compatible ASR service with `acceleration.asr.model` set to
+  `large-v3-turbo`; the fallback provider loads faster-whisper from
+  `acceleration.asr.model_path`.
   ASR output is redacted before chunking and before ASR cache writes. Cloud
   transcription stays off by default, and raw transcript text is not written to
   public docs or dashboard metadata.

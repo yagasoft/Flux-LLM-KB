@@ -669,6 +669,124 @@ def test_extract_media_passes_configured_gpu_settings_to_faster_whisper(monkeypa
     assert model_kwargs == {"local_files_only": True, "device": "cuda", "compute_type": "float16"}
 
 
+def test_extract_media_uses_openai_compatible_asr_provider(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    calls = {"ffprobe": 0, "ffmpeg": 0, "http": 0}
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            calls["ffprobe"] += 1
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            calls["ffmpeg"] += 1
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"text":"Meeting mentions sk-12345678901234567890","segments":[{"start":0.0,"end":1.0,"text":"Meeting"}]}'
+
+    def fake_urlopen(request, **_kwargs):
+        calls["http"] += 1
+        assert request.full_url == "http://127.0.0.1:8788/v1/audio/transcriptions"
+        assert request.headers["Content-type"].startswith("multipart/form-data; boundary=")
+        body = request.data
+        assert b'name="model"' in body
+        assert b"large-v3-turbo" in body
+        assert b'name="file"; filename="audio.wav"' in body
+        return FakeResponse()
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].modality == "transcript"
+    assert result.chunks[0].body == "Meeting mentions [REDACTED:openai_api_key]"
+    assert result.metadata["asr"]["engine"] == "openai_compatible_asr"
+    assert result.metadata["asr"]["provider"] == "openai_compatible"
+    assert result.metadata["asr"]["model"] == "large-v3-turbo"
+    assert result.metadata["asr"]["base_url"] == "http://127.0.0.1:8788"
+    assert result.metadata["asr"]["status"] == "completed"
+    assert result.metadata["asr"]["cache_hits"] == 0
+    assert result.metadata["asr"]["cache_misses"] == 1
+    assert result.metadata["asr"]["segments"] == 1
+    assert calls == {"ffprobe": 1, "ffmpeg": 1, "http": 1}
+
+
+def test_extract_media_openai_compatible_asr_blocks_when_service_unavailable(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("connection refused")), raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "ASR service unavailable: connection refused"
+    assert result.metadata["asr"]["status"] == "blocked_missing_dependency"
+
+
+def test_extract_media_asr_cache_key_changes_with_provider_model(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path, model="large-v3-turbo")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    calls = {"ffprobe": 0, "ffmpeg": 0, "http": 0}
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            calls["ffprobe"] += 1
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=12), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            calls["ffmpeg"] += 1
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    class FakeResponse:
+        def __init__(self, index: int):
+            self.index = index
+
+        def read(self, _limit=-1):
+            return json.dumps({"text": f"Transcript {self.index}", "segments": [{"text": f"Transcript {self.index}"}]}).encode("utf-8")
+
+    def fake_urlopen(_request, **_kwargs):
+        calls["http"] += 1
+        return FakeResponse(calls["http"])
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    first = extract_file(path, CorpusPolicy(root_path=tmp_path))
+    second = extract_file(path, CorpusPolicy(root_path=tmp_path))
+    monkeypatch.setenv("FLUX_KB_ASR_MODEL", "large-v3-turbo-alt")
+    third = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert first.chunks[0].body == "Transcript 1"
+    assert second.chunks[0].body == "Transcript 1"
+    assert second.metadata["asr"]["status"] == "cache_hit"
+    assert third.chunks[0].body == "Transcript 2"
+    assert third.metadata["asr"]["status"] == "completed"
+    assert calls == {"ffprobe": 3, "ffmpeg": 2, "http": 2}
+
+
 def _configure_asr(
     monkeypatch,
     tmp_path: Path,
@@ -690,6 +808,28 @@ def _configure_asr(
     monkeypatch.setenv("FLUX_KB_ASR_COMPUTE_TYPE", compute_type)
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
     return model_dir
+
+
+def _configure_asr_http(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    model: str = "large-v3-turbo",
+    base_url: str = "http://127.0.0.1:8788",
+    max_duration: int = 3600,
+    device: str = "cuda",
+    compute_type: str = "float16",
+) -> None:
+    monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "true" if enabled else "false")
+    monkeypatch.setenv("FLUX_KB_ASR_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("FLUX_KB_ASR_MODEL", model)
+    monkeypatch.setenv("FLUX_KB_ASR_BASE_URL", base_url)
+    monkeypatch.setenv("FLUX_KB_ASR_MODEL_PATH", "")
+    monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", str(max_duration))
+    monkeypatch.setenv("FLUX_KB_ASR_DEVICE", device)
+    monkeypatch.setenv("FLUX_KB_ASR_COMPUTE_TYPE", compute_type)
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
 
 
 def _configure_vision(

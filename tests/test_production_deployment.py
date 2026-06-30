@@ -115,7 +115,8 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "[int]$HostAgentPort = 8799" in update
     assert "[int]$PostgresPort = 5432" in update
     assert "[int]$OllamaHostPort = 11435" in update
-    assert "Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort" in update
+    assert "[int]$AsrHostPort = 8788" in update
+    assert "Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort -AsrHostPort $AsrHostPort" in update
     assert "GpuMode" in update
     assert "Write-FluxCompose" in update
     assert "Assert-FluxGpuAvailable" in update
@@ -127,9 +128,9 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
     update_compose = _embedded_compose_template(_script("update-flux.ps1"))
 
     for compose in (install_compose, update_compose):
-        assert compose.count("gpus: all") == 3
-        assert compose.count("NVIDIA_VISIBLE_DEVICES: all") == 3
-        assert compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 3
+        assert compose.count("gpus: all") == 4
+        assert compose.count("NVIDIA_VISIBLE_DEVICES: all") == 4
+        assert compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 4
         assert "  ollama:" in compose
         assert "image: ollama/ollama:latest" in compose
         assert "container_name: flux-ollama" in compose
@@ -140,9 +141,19 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert '"127.0.0.1:${OllamaHostPort}:11434"' in compose
         assert 'test: ["CMD", "ollama", "list"]' in compose
         assert "ollama:" in compose
+        assert "  asr:" in compose
+        assert "container_name: flux-llm-kb-asr" in compose
+        assert '"127.0.0.1:${AsrHostPort}:8788"' in compose
+        assert "flux_llm_kb_asr_models:/models" in compose
+        assert "python -m flux_llm_kb.asr_server serve --host 0.0.0.0 --port 8788" in compose
+        assert 'test: ["CMD", "python", "-m", "flux_llm_kb.asr_server", "health"]' in compose
         assert "condition: service_healthy" in compose
-        assert "FLUX_KB_ASR_DEVICE: cuda" in compose
-        assert "FLUX_KB_ASR_COMPUTE_TYPE: float16" in compose
+        assert compose.count("FLUX_KB_ASR_PROVIDER: openai_compatible") == 3
+        assert compose.count("FLUX_KB_ASR_MODEL: large-v3-turbo") == 3
+        assert compose.count("FLUX_KB_ASR_BASE_URL: http://asr:8788") == 2
+        assert "FLUX_KB_ASR_MODEL_PATH: /models/faster-whisper-large-v3-turbo" in compose
+        assert compose.count("FLUX_KB_ASR_DEVICE: cuda") == 3
+        assert compose.count("FLUX_KB_ASR_COMPUTE_TYPE: float16") == 3
         assert "FLUX_KB_LOCAL_INFERENCE_ENABLED: \"true\"" in compose
         assert "FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434" in compose
         assert compose.count("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m") == 2
@@ -159,13 +170,17 @@ def test_production_host_agent_uses_host_loopback_to_docker_ollama():
         script = _script(script_name)
 
         assert "[int]$OllamaHostPort = 11435" in script
-        assert "param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort)" in script
+        assert "[int]$AsrHostPort = 8788" in script
+        assert "param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort, [int]$AsrHostPort)" in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_ENABLED"] = "true"' in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://127.0.0.1:${OllamaHostPort}"' in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE"] = "2m"' in script
         assert 'os.environ["FLUX_KB_VISION_ENABLED"] = "true"' in script
         assert 'os.environ["FLUX_KB_VISION_MODEL"] = "qwen3-vl:8b"' in script
         assert 'os.environ["FLUX_KB_VISION_MAX_IMAGE_PIXELS"] = "80000000"' in script
+        assert 'os.environ["FLUX_KB_ASR_PROVIDER"] = "openai_compatible"' in script
+        assert 'os.environ["FLUX_KB_ASR_MODEL"] = "large-v3-turbo"' in script
+        assert 'os.environ["FLUX_KB_ASR_BASE_URL"] = "http://127.0.0.1:${AsrHostPort}"' in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://ollama:11434"' not in script
 
 
@@ -174,13 +189,16 @@ def test_production_deploy_persists_host_side_qwen_runtime_settings():
         script = _script(script_name)
 
         assert "function Set-FluxProductionRuntimeSettings" in script
-        assert "Set-FluxProductionRuntimeSettings -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort" in script
+        assert "Set-FluxProductionRuntimeSettings -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort -AsrHostPort $AsrHostPort" in script
         assert '"settings", "set", "acceleration.local_inference.enabled", "true", "--confirm"' in script
         assert '"settings", "set", "acceleration.local_inference.base_url", "http://127.0.0.1:$OllamaHostPort", "--confirm"' in script
         assert '"settings", "set", "acceleration.local_inference.keep_alive", "2m", "--confirm"' in script
         assert '"settings", "set", "acceleration.vision.enabled", "true", "--confirm"' in script
         assert '"settings", "set", "acceleration.vision.model", "qwen3-vl:8b", "--confirm"' in script
         assert '"settings", "set", "acceleration.vision.max_image_pixels", "80000000", "--confirm"' in script
+        assert '"settings", "set", "acceleration.asr.provider", "openai_compatible", "--confirm"' in script
+        assert '"settings", "set", "acceleration.asr.model", "large-v3-turbo", "--confirm"' in script
+        assert '"settings", "set", "acceleration.asr.base_url", "http://127.0.0.1:$AsrHostPort", "--confirm"' in script
 
 
 def test_production_deploy_scripts_surface_docker_ollama_model_steps():
@@ -189,6 +207,8 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
 
     for script in (install, update):
         assert "docker exec flux-ollama ollama pull qwen3-vl:8b" in script
+        assert "Invoke-FluxAsrModelDownload" in script
+        assert "python -m flux_llm_kb.asr_server download-model --model large-v3-turbo --output-dir /models/faster-whisper-large-v3-turbo" in script
         assert "qwen3-vl:32b" not in script
 
 
@@ -223,6 +243,9 @@ def test_production_compose_uses_docker_volumes_for_container_owned_state():
         assert "    name: flux_llm_kb_postgres_data" in compose
         assert "  flux_llm_kb_ollama_models:" in compose
         assert "    name: flux_llm_kb_ollama_models" in compose
+        assert "  flux_llm_kb_asr_models:" in compose
+        assert "    name: flux_llm_kb_asr_models" in compose
+        assert compose.count("flux_llm_kb_asr_models:/models") == 1
         assert compose.count("../private:/app/private") == 2
         assert "../logs:/app/logs" not in compose
 
@@ -381,6 +404,7 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     assert "docker start" in update
     assert "flux-llm-kb-api" in update
     assert "flux-llm-kb-worker" in update
+    assert "flux-llm-kb-asr" in update
     assert 'Start-Process -FilePath "docker"' not in update
 
 

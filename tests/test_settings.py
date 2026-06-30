@@ -43,6 +43,9 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "codex.hooks.capture_min_chars" in keys
     assert "codex.hooks.capture_max_chars" in keys
     assert "acceleration.asr.enabled" in keys
+    assert "acceleration.asr.provider" in keys
+    assert "acceleration.asr.model" in keys
+    assert "acceleration.asr.base_url" in keys
     assert "acceleration.asr.model_path" in keys
     assert "acceleration.asr.max_duration_seconds" in keys
     assert "acceleration.vision.enabled" in keys
@@ -189,6 +192,9 @@ def test_asr_settings_defaults_and_env_overrides(monkeypatch, tmp_path):
     service = SettingsService()
 
     assert service.resolve("acceleration.asr.enabled").raw_value is True
+    assert service.resolve("acceleration.asr.provider").raw_value == "local_faster_whisper"
+    assert service.resolve("acceleration.asr.model").raw_value == ""
+    assert service.resolve("acceleration.asr.base_url").raw_value == ""
     assert service.resolve("acceleration.asr.model_path").raw_value == ""
     assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 3600
     assert service.resolve("acceleration.asr.device").raw_value == "auto"
@@ -196,12 +202,18 @@ def test_asr_settings_defaults_and_env_overrides(monkeypatch, tmp_path):
 
     model_dir = tmp_path / "models" / "faster-whisper"
     monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "false")
+    monkeypatch.setenv("FLUX_KB_ASR_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("FLUX_KB_ASR_MODEL", "large-v3-turbo")
+    monkeypatch.setenv("FLUX_KB_ASR_BASE_URL", "http://asr:8788/")
     monkeypatch.setenv("FLUX_KB_ASR_MODEL_PATH", str(model_dir))
     monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", "42")
     monkeypatch.setenv("FLUX_KB_ASR_DEVICE", "cuda")
     monkeypatch.setenv("FLUX_KB_ASR_COMPUTE_TYPE", "float16")
 
     assert service.resolve("acceleration.asr.enabled").raw_value is False
+    assert service.resolve("acceleration.asr.provider").raw_value == "openai_compatible"
+    assert service.resolve("acceleration.asr.model").raw_value == "large-v3-turbo"
+    assert service.resolve("acceleration.asr.base_url").raw_value == "http://asr:8788"
     assert service.resolve("acceleration.asr.model_path").raw_value == str(model_dir)
     assert service.resolve("acceleration.asr.max_duration_seconds").raw_value == 42
     assert service.resolve("acceleration.asr.device").raw_value == "cuda"

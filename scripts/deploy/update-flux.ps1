@@ -5,6 +5,7 @@ param(
     [int]$HostAgentPort = 8799,
     [int]$PostgresPort = 5432,
     [int]$OllamaHostPort = 11435,
+    [int]$AsrHostPort = 8788,
     [string]$PythonExe = "",
     [ValidateSet("auto", "on", "off")]
     [string]$GpuMode = "auto",
@@ -13,6 +14,7 @@ param(
     [switch]$RestartHostTasks,
     [int]$DockerComposeTimeoutSeconds = 120,
     [int]$DockerBuildTimeoutSeconds = 1200,
+    [int]$AsrModelDownloadTimeoutSeconds = 3600,
     [ValidateSet("auto", "local", "python")]
     [string]$DockerBaseMode = "auto",
     [string]$DockerBaseImage = $env:FLUX_KB_DOCKER_BASE_IMAGE,
@@ -61,9 +63,22 @@ function Set-FluxEnvValue {
 
 function Remove-FluxGpuComposeAccess {
     param([string]$ComposeText)
+    $skipAsrService = $false
     $skipOllamaService = $false
+    $skipAsrDependency = 0
     $skipOllamaDependency = 0
     $filtered = foreach ($line in ($ComposeText -split "`r?`n")) {
+        if ($line -match "^  asr:\s*$") {
+            $skipAsrService = $true
+            continue
+        }
+        if ($skipAsrService) {
+            if ($line -match "^  ollama:\s*$") {
+                $skipAsrService = $false
+            } else {
+                continue
+            }
+        }
         if ($line -match "^  ollama:\s*$") {
             $skipOllamaService = $true
             continue
@@ -79,6 +94,14 @@ function Remove-FluxGpuComposeAccess {
             $skipOllamaDependency = 1
             continue
         }
+        if ($line -match "^\s+asr:\s*$") {
+            $skipAsrDependency = 1
+            continue
+        }
+        if ($skipAsrDependency -gt 0) {
+            $skipAsrDependency -= 1
+            continue
+        }
         if ($skipOllamaDependency -gt 0) {
             $skipOllamaDependency -= 1
             continue
@@ -86,6 +109,10 @@ function Remove-FluxGpuComposeAccess {
         if ($line -match "^\s+gpus: all\s*$") { continue }
         if ($line -match "^\s+NVIDIA_VISIBLE_DEVICES: all\s*$") { continue }
         if ($line -match "^\s+NVIDIA_DRIVER_CAPABILITIES: compute,utility\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_ASR_PROVIDER: openai_compatible\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_ASR_MODEL: large-v3-turbo\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_ASR_BASE_URL: http://asr:8788\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_ASR_MODEL_PATH: /models/faster-whisper-large-v3-turbo\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_ASR_DEVICE: cuda\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_ASR_COMPUTE_TYPE: float16\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_ENABLED: `"true`"\s*$") { continue }
@@ -129,6 +156,7 @@ function Write-FluxCompose {
         [int]$ApiPort,
         [int]$PostgresPort,
         [int]$OllamaHostPort,
+        [int]$AsrHostPort,
         [bool]$GpuEnabled
     )
     $compose = @"
@@ -143,6 +171,8 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      asr:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
@@ -156,6 +186,9 @@ services:
       FLUX_KB_DATA_DIR: /app/data
       FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_CACHE_ROOT: /app/cache
+      FLUX_KB_ASR_PROVIDER: openai_compatible
+      FLUX_KB_ASR_MODEL: large-v3-turbo
+      FLUX_KB_ASR_BASE_URL: http://asr:8788
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
@@ -186,6 +219,8 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+      asr:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
@@ -197,6 +232,9 @@ services:
       FLUX_KB_DATA_DIR: /app/data
       FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_CACHE_ROOT: /app/cache
+      FLUX_KB_ASR_PROVIDER: openai_compatible
+      FLUX_KB_ASR_MODEL: large-v3-turbo
+      FLUX_KB_ASR_BASE_URL: http://asr:8788
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
@@ -214,6 +252,32 @@ services:
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5"
+
+  asr:
+    image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-asr
+    restart: unless-stopped
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_ASR_PROVIDER: openai_compatible
+      FLUX_KB_ASR_MODEL: large-v3-turbo
+      FLUX_KB_ASR_MODEL_PATH: /models/faster-whisper-large-v3-turbo
+      FLUX_KB_ASR_DEVICE: cuda
+      FLUX_KB_ASR_COMPUTE_TYPE: float16
+    ports:
+      - "127.0.0.1:${AsrHostPort}:8788"
+    volumes:
+      - flux_llm_kb_asr_models:/models
+    command: >
+      python -m flux_llm_kb.asr_server serve --host 0.0.0.0 --port 8788
+    healthcheck:
+      test: ["CMD", "python", "-m", "flux_llm_kb.asr_server", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
 
   ollama:
     image: ollama/ollama:latest
@@ -288,6 +352,8 @@ volumes:
     name: flux_llm_kb_logs
   flux_llm_kb_ollama_models:
     name: flux_llm_kb_ollama_models
+  flux_llm_kb_asr_models:
+    name: flux_llm_kb_asr_models
 "@
     if (-not $GpuEnabled) {
         $compose = Remove-FluxGpuComposeAccess -ComposeText $compose
@@ -316,6 +382,9 @@ FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_
 "@
     if ($GpuEnabled) {
         $envText += "`n" + @"
+FLUX_KB_ASR_PROVIDER=openai_compatible
+FLUX_KB_ASR_MODEL=large-v3-turbo
+FLUX_KB_ASR_BASE_URL=http://asr:8788
 FLUX_KB_ASR_DEVICE=cuda
 FLUX_KB_ASR_COMPUTE_TYPE=float16
 FLUX_KB_LOCAL_INFERENCE_ENABLED=true
@@ -327,6 +396,9 @@ FLUX_KB_VISION_MAX_IMAGE_PIXELS=80000000
 "@
     } else {
         $envText += "`n" + @"
+FLUX_KB_ASR_PROVIDER=local_faster_whisper
+FLUX_KB_ASR_MODEL=
+FLUX_KB_ASR_BASE_URL=
 FLUX_KB_ASR_DEVICE=auto
 FLUX_KB_ASR_COMPUTE_TYPE=default
 FLUX_KB_LOCAL_INFERENCE_ENABLED=false
@@ -349,9 +421,14 @@ FLUX_KB_VISION_MAX_IMAGE_PIXELS=4096000
 }
 
 function Write-FluxHostScripts {
-    param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort)
+    param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort, [int]$AsrHostPort)
     if ($GpuEnabled) {
         $hostAgentAcceleration = @"
+os.environ["FLUX_KB_ASR_PROVIDER"] = "openai_compatible"
+os.environ["FLUX_KB_ASR_MODEL"] = "large-v3-turbo"
+os.environ["FLUX_KB_ASR_BASE_URL"] = "http://127.0.0.1:${AsrHostPort}"
+os.environ["FLUX_KB_ASR_DEVICE"] = "cuda"
+os.environ["FLUX_KB_ASR_COMPUTE_TYPE"] = "float16"
 os.environ["FLUX_KB_LOCAL_INFERENCE_ENABLED"] = "true"
 os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://127.0.0.1:${OllamaHostPort}"
 os.environ["FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE"] = "2m"
@@ -361,6 +438,11 @@ os.environ["FLUX_KB_VISION_MAX_IMAGE_PIXELS"] = "80000000"
 "@
     } else {
         $hostAgentAcceleration = @"
+os.environ["FLUX_KB_ASR_PROVIDER"] = "local_faster_whisper"
+os.environ["FLUX_KB_ASR_MODEL"] = ""
+os.environ["FLUX_KB_ASR_BASE_URL"] = ""
+os.environ["FLUX_KB_ASR_DEVICE"] = "auto"
+os.environ["FLUX_KB_ASR_COMPUTE_TYPE"] = "default"
 os.environ["FLUX_KB_LOCAL_INFERENCE_ENABLED"] = "false"
 os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://127.0.0.1:11434"
 os.environ["FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE"] = ""
@@ -574,7 +656,7 @@ function Invoke-FluxSettingsCommand {
 }
 
 function Set-FluxProductionRuntimeSettings {
-    param([string]$VenvPython, [string]$InstallRoot, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort)
+    param([string]$VenvPython, [string]$InstallRoot, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort, [int]$AsrHostPort)
     $previousDatabaseUrl = $env:FLUX_KB_DATABASE_URL
     $previousInstallRoot = $env:FLUX_KB_INSTALL_ROOT
     $previousAppRoot = $env:FLUX_KB_APP_ROOT
@@ -587,6 +669,11 @@ function Set-FluxProductionRuntimeSettings {
     $previousVisionEnabled = $env:FLUX_KB_VISION_ENABLED
     $previousVisionModel = $env:FLUX_KB_VISION_MODEL
     $previousVisionMaxImagePixels = $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS
+    $previousAsrProvider = $env:FLUX_KB_ASR_PROVIDER
+    $previousAsrModel = $env:FLUX_KB_ASR_MODEL
+    $previousAsrBaseUrl = $env:FLUX_KB_ASR_BASE_URL
+    $previousAsrDevice = $env:FLUX_KB_ASR_DEVICE
+    $previousAsrComputeType = $env:FLUX_KB_ASR_COMPUTE_TYPE
     try {
         $env:FLUX_KB_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
         $env:FLUX_KB_INSTALL_ROOT = $InstallRoot
@@ -595,12 +682,22 @@ function Set-FluxProductionRuntimeSettings {
         $env:FLUX_KB_DATA_DIR = Join-Path $InstallRoot "data"
         $env:FLUX_KB_LOG_DIR = Join-Path $InstallRoot "logs"
         if ($GpuEnabled) {
+            $env:FLUX_KB_ASR_PROVIDER = "openai_compatible"
+            $env:FLUX_KB_ASR_MODEL = "large-v3-turbo"
+            $env:FLUX_KB_ASR_BASE_URL = "http://127.0.0.1:$AsrHostPort"
+            $env:FLUX_KB_ASR_DEVICE = "cuda"
+            $env:FLUX_KB_ASR_COMPUTE_TYPE = "float16"
             $env:FLUX_KB_LOCAL_INFERENCE_ENABLED = "true"
             $env:FLUX_KB_LOCAL_INFERENCE_BASE_URL = "http://127.0.0.1:$OllamaHostPort"
             $env:FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE = "2m"
             $env:FLUX_KB_VISION_ENABLED = "true"
             $env:FLUX_KB_VISION_MODEL = "qwen3-vl:8b"
             $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = "80000000"
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.provider", "openai_compatible", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.model", "large-v3-turbo", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.base_url", "http://127.0.0.1:$AsrHostPort", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.device", "cuda", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.compute_type", "float16", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.enabled", "true", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.base_url", "http://127.0.0.1:$OllamaHostPort", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.keep_alive", "2m", "--confirm")
@@ -608,12 +705,22 @@ function Set-FluxProductionRuntimeSettings {
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.model", "qwen3-vl:8b", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.vision.max_image_pixels", "80000000", "--confirm")
         } else {
+            $env:FLUX_KB_ASR_PROVIDER = "local_faster_whisper"
+            $env:FLUX_KB_ASR_MODEL = ""
+            $env:FLUX_KB_ASR_BASE_URL = ""
+            $env:FLUX_KB_ASR_DEVICE = "auto"
+            $env:FLUX_KB_ASR_COMPUTE_TYPE = "default"
             $env:FLUX_KB_LOCAL_INFERENCE_ENABLED = "false"
             $env:FLUX_KB_LOCAL_INFERENCE_BASE_URL = "http://127.0.0.1:11434"
             $env:FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE = ""
             $env:FLUX_KB_VISION_ENABLED = "false"
             $env:FLUX_KB_VISION_MODEL = ""
             $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = "4096000"
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.provider", "local_faster_whisper", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.model", "", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.base_url", "", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.device", "auto", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.compute_type", "default", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.enabled", "false", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.base_url", "http://127.0.0.1:11434", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.local_inference.keep_alive", "", "--confirm")
@@ -634,6 +741,11 @@ function Set-FluxProductionRuntimeSettings {
         $env:FLUX_KB_VISION_ENABLED = $previousVisionEnabled
         $env:FLUX_KB_VISION_MODEL = $previousVisionModel
         $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = $previousVisionMaxImagePixels
+        $env:FLUX_KB_ASR_PROVIDER = $previousAsrProvider
+        $env:FLUX_KB_ASR_MODEL = $previousAsrModel
+        $env:FLUX_KB_ASR_BASE_URL = $previousAsrBaseUrl
+        $env:FLUX_KB_ASR_DEVICE = $previousAsrDevice
+        $env:FLUX_KB_ASR_COMPUTE_TYPE = $previousAsrComputeType
     }
 }
 
@@ -720,6 +832,25 @@ function Invoke-FluxNativeCommand {
     if ($process.ExitCode -ne 0) {
         throw "$label failed with exit code $($process.ExitCode)."
     }
+}
+
+function Invoke-FluxAsrModelDownload {
+    param(
+        [string]$AppRoot,
+        [string]$AppEnvPath,
+        [string]$ComposePath,
+        [int]$TimeoutSeconds
+    )
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("volume", "create", "flux_llm_kb_asr_models") -WorkingDirectory $AppRoot -TimeoutSeconds 60 -StepName "docker create ASR model volume"
+    Write-Host "Pre-downloading ASR model with: docker compose run --rm --no-deps asr python -m flux_llm_kb.asr_server download-model --model large-v3-turbo --output-dir /models/faster-whisper-large-v3-turbo"
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @(
+        "compose",
+        "--env-file", $AppEnvPath,
+        "-f", $ComposePath,
+        "run", "--rm", "--no-deps",
+        "asr",
+        "python", "-m", "flux_llm_kb.asr_server", "download-model", "--model", "large-v3-turbo", "--output-dir", "/models/faster-whisper-large-v3-turbo"
+    ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download ASR model large-v3-turbo"
 }
 
 function Test-FluxDockerImageExists {
@@ -823,9 +954,9 @@ function Invoke-FluxDockerComposeUp {
     $recoverableContainers = @("flux-llm-kb-api", "flux-llm-kb-worker")
     $services = @("postgres", "api", "worker")
     if ($GpuEnabled) {
-        $containers = @("flux-llm-kb-postgres", "flux-ollama", "flux-llm-kb-api", "flux-llm-kb-worker")
-        $recoverableContainers = @("flux-ollama", "flux-llm-kb-api", "flux-llm-kb-worker")
-        $services = @("postgres", "ollama", "api", "worker")
+        $containers = @("flux-llm-kb-postgres", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
+        $recoverableContainers = @("flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
+        $services = @("postgres", "ollama", "asr", "api", "worker")
     }
     $arguments = @(
         "compose",
@@ -924,7 +1055,7 @@ if (Test-Path $pluginSource) {
 }
 
 & (Join-Path $PSScriptRoot "migrate-postgres-to-docker-volume.ps1") -InstallRoot $InstallRoot -PostgresPort $PostgresPort
-Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort -PostgresPort $PostgresPort -OllamaHostPort $OllamaHostPort -GpuEnabled $gpuEnabled
+Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort -PostgresPort $PostgresPort -OllamaHostPort $OllamaHostPort -AsrHostPort $AsrHostPort -GpuEnabled $gpuEnabled
 Set-Content -Path $appEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag`n" -Encoding UTF8
 Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
 Write-FluxEnv -TargetPath $privateEnvPath -InstallRoot $InstallRoot -ImageTag $imageTag -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
@@ -945,9 +1076,12 @@ Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "insta
 Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("$SourceRoot[api,corpus,mail,mcp,processors]")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip install production extras"
 Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("--force-reinstall", "--no-deps", "--no-cache-dir", $SourceRoot)) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip install production package"
 Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
-Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort
+Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort -AsrHostPort $AsrHostPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 Stop-FluxOutlookHostLaunchers -InstallRoot $InstallRoot
+if ($gpuEnabled) {
+    Invoke-FluxAsrModelDownload -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -TimeoutSeconds $AsrModelDownloadTimeoutSeconds
+}
 
 Push-Location $appRoot
 try {
@@ -956,7 +1090,7 @@ try {
     Pop-Location
 }
 Invoke-FluxMigration -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort
-Set-FluxProductionRuntimeSettings -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort
+Set-FluxProductionRuntimeSettings -VenvPython $venvPython -InstallRoot $InstallRoot -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort -AsrHostPort $AsrHostPort
 
 foreach ($taskSpec in @(
     @{ Name = "FluxKB Host Agent"; Launcher = (Join-Path $appRoot "run-host-agent.pyw"); Port = $HostAgentPort },
@@ -984,4 +1118,5 @@ Write-Host "Flux production runtime updated at $InstallRoot to image tag $imageT
 if ($gpuEnabled) {
     Write-Host "Install the Docker Ollama vision model with: docker exec flux-ollama ollama pull qwen3-vl:8b"
     Write-Host "Docker Ollama host-agent URL: http://127.0.0.1:$OllamaHostPort"
+    Write-Host "Docker ASR host-agent URL: http://127.0.0.1:$AsrHostPort"
 }

@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 api = [
   "fastapi>=0.115",
+  "python-multipart>=0.0.9",
   "uvicorn>=0.30",
 ]
 mcp = [
@@ -41,7 +42,7 @@ corpus = [
 processors = [
   "duckdb>=1.0",
   "pyarrow>=16.0",
-  "faster-whisper>=1.0",
+  "faster-whisper==1.2.1",
 ]
 gpu = [
   "onnxruntime-gpu>=1.20",

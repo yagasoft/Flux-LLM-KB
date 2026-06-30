@@ -224,8 +224,8 @@ Images are dimensioned locally, decorative-image spacers are skipped before
 heavy enrichment, and optional local vision descriptions run only when
 `acceleration.vision.enabled` and a local model are configured. Media uses
 sidecar transcripts, `ffprobe` metadata, scene-transition video frame sampling
-with thumbnail cache reuse, and optional local faster-whisper ASR when
-`acceleration.asr.model_path` points at an existing local model. EPUB and FB2
+with thumbnail cache reuse, and optional local ASR through either a local
+faster-whisper model path or the loopback OpenAI-compatible ASR service. EPUB and FB2
 publications are parsed locally, MOBI/AZW/LIT use local Calibre `ebook-convert`
 when available, and comic archive formats reuse bounded container extraction.
 Draw.io and modern
@@ -324,10 +324,14 @@ local vision model identifier in `acceleration.vision.model`, and
 host-gateway provider.
 The first implemented vision runtime uses an Ollama-compatible API, so local
 Gemma-class vision models can be selected by model tag when that runtime has
-them installed. ASR requires `ffmpeg`, the `faster-whisper` Python
-module, and `acceleration.asr.model_path`; Flux passes `local_files_only=True`
-and never performs a remote model download. Redacted ASR cache entries live
-under the ASR cache directory and expose cache hit/miss plus segment telemetry.
+them installed. ASR requires `ffmpeg` at the caller, then either a configured
+local faster-whisper path or the local ASR HTTP service. Production GPU mode
+serves `large-v3-turbo` from the `flux_llm_kb_asr_models` Docker volume at the
+loopback-published ASR port; only the explicit deploy download command fetches
+model files. Transcription paths pass `local_files_only=True` when loading
+faster-whisper and never download models implicitly. Redacted ASR cache entries
+live under the ASR cache directory and expose cache hit/miss plus segment
+telemetry.
 Redacted vision cache entries live under the vision cache directory, and sampled
 frame images live under the thumbnail cache directory.
 Cloud transcription remains off by default. Semantic media embeddings are a
