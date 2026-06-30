@@ -12,6 +12,9 @@ param(
     [switch]$RestartHostTasks,
     [int]$DockerComposeTimeoutSeconds = 120,
     [int]$DockerBuildTimeoutSeconds = 1200,
+    [ValidateSet("auto", "local", "python")]
+    [string]$DockerBaseMode = "auto",
+    [string]$DockerBaseImage = $env:FLUX_KB_DOCKER_BASE_IMAGE,
     [int]$PipInstallTimeoutSeconds = 900,
     [int]$PipTimeoutSeconds = 30,
     [int]$PipRetries = 2,
@@ -516,6 +519,39 @@ function Invoke-FluxNativeCommand {
     }
 }
 
+function Test-FluxDockerImageExists {
+    param([string]$Image)
+    if (-not $Image) { return $false }
+    docker image inspect $Image *> $null
+    return $LASTEXITCODE -eq 0
+}
+
+function Resolve-FluxDockerBuildBase {
+    param(
+        [ValidateSet("auto", "local", "python")]
+        [string]$DockerBaseMode,
+        [string]$DockerBaseImage
+    )
+    $pythonBase = "python:3.12-slim"
+    if ($DockerBaseMode -eq "python") {
+        return [pscustomobject]@{ Image = $pythonBase; SkipSystemPackages = $false }
+    }
+
+    $candidateImage = if ($DockerBaseImage) { $DockerBaseImage } else { "flux-llm-kb-api:local" }
+    $candidateExists = Test-FluxDockerImageExists -Image $candidateImage
+    if ($DockerBaseMode -eq "local" -and -not $candidateExists) {
+        throw "Docker base mode 'local' requires an existing image: $candidateImage"
+    }
+    if ($candidateExists) {
+        Write-Host "Reusing Docker base image $candidateImage; Debian system packages will not be reinstalled."
+        return [pscustomobject]@{ Image = $candidateImage; SkipSystemPackages = $true }
+    }
+    if ($DockerBaseImage) {
+        Write-Warning "Requested Docker base image $DockerBaseImage was not found; falling back to $pythonBase."
+    }
+    return [pscustomobject]@{ Image = $pythonBase; SkipSystemPackages = $false }
+}
+
 function Get-FluxContainerStatus {
     param([string]$ContainerName)
     $status = docker inspect --format "{{.State.Status}}" $ContainerName 2>$null
@@ -630,9 +666,13 @@ if (-not $SkipDashboardBuild) {
 
 $resolvedPython = Resolve-FluxPythonExe -InstallRoot $InstallRoot -RequestedPython $PythonExe
 
+$dockerBase = Resolve-FluxDockerBuildBase -DockerBaseMode $DockerBaseMode -DockerBaseImage $DockerBaseImage
+$skipSystemPackages = if ($dockerBase.SkipSystemPackages) { "true" } else { "false" }
 $dockerBuildArgs = @(
     "build",
     "--progress=plain",
+    "--build-arg", "FLUX_KB_DOCKER_BASE_IMAGE=$($dockerBase.Image)",
+    "--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages",
     "--build-arg", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
     "--build-arg", "PIP_RETRIES=$PipRetries"
 )
@@ -676,7 +716,7 @@ if ($PipIndexUrl) {
     $pipIndexArgs += @("--index-url", $PipIndexUrl)
 }
 Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("--upgrade", "pip")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip upgrade"
-Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("$SourceRoot[api,corpus,mail,mcp,processors,gpu]")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip install production extras"
+Invoke-FluxNativeCommand -FilePath $venvPython -Arguments (@("-m", "pip", "install") + $pipCommonArgs + $pipIndexArgs + @("$SourceRoot[api,corpus,mail,mcp,processors]")) -WorkingDirectory $SourceRoot -TimeoutSeconds $PipInstallTimeoutSeconds -StepName "pip install production extras"
 Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot

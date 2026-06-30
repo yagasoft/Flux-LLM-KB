@@ -354,6 +354,8 @@ def _onnxruntime_status(module_importer: Callable[[str], Any]) -> dict[str, Any]
         module = module_importer("onnxruntime")
     except ModuleNotFoundError:
         return {"ok": False, "state": "missing", "providers": [], "message": "onnxruntime not installed"}
+    except (ImportError, OSError) as exc:
+        return {"ok": False, "state": "unavailable", "providers": [], "message": str(exc)}
     try:
         providers = list(module.get_available_providers())
     except Exception as exc:

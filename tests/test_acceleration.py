@@ -199,6 +199,35 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
     }
 
 
+def test_collect_status_reports_onnx_import_failure_without_crashing():
+    def broken_import(name):
+        if name == "onnxruntime":
+            raise ImportError("libcudart.so.13: cannot open shared object file")
+        if name == "watchdog.observers":
+            return SimpleNamespace()
+        raise ModuleNotFoundError(name)
+
+    payload = collect_acceleration_status(
+        settings={
+            "acceleration.cache_root": "",
+            "acceleration.local_inference.enabled": False,
+            "acceleration.local_inference.provider": "ollama",
+            "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+            "acceleration.local_inference.probe_timeout_seconds": 1,
+        },
+        command_runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="missing"),
+        module_importer=broken_import,
+        worker_family_stats=lambda: [],
+        benchmark_stats=lambda: [],
+    )
+
+    onnx = payload["capabilities"]["onnxruntime"]
+    assert onnx["ok"] is False
+    assert onnx["state"] == "unavailable"
+    assert onnx["providers"] == []
+    assert "libcudart.so.13" in onnx["message"]
+
+
 def test_collect_status_adds_watcher_policy_backpressure_and_benchmark_history():
     payload = collect_acceleration_status(
         settings={

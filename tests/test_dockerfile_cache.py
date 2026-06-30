@@ -39,6 +39,18 @@ def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> N
     assert apt_install < pip_index_arg < pyproject_copy
 
 
+def test_dockerfile_can_reuse_existing_runtime_base_for_updates() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "ARG FLUX_KB_DOCKER_BASE_IMAGE=python:3.12-slim" in dockerfile
+    assert "FROM ${FLUX_KB_DOCKER_BASE_IMAGE}" in dockerfile
+    assert "ARG FLUX_KB_SKIP_SYSTEM_PACKAGES=false" in dockerfile
+    assert 'if [ "$FLUX_KB_SKIP_SYSTEM_PACKAGES" = "true" ]' in dockerfile
+    assert "Skipping system package installation" in dockerfile
+    assert "--mount=type=cache,target=/var/cache/apt,sharing=locked" in dockerfile
+    assert "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked" in dockerfile
+
+
 def test_docker_compose_defines_corpus_worker_service() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 

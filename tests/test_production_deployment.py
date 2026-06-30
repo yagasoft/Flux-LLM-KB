@@ -41,7 +41,7 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "-m flux_llm_kb.cli migrate" in install
     assert "Invoke-FluxCodexPluginInstall" in install
     assert "-m flux_llm_kb.cli codex install-plugin" in install
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in install
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
     assert "GpuMode" in install
     assert "Assert-FluxGpuAvailable" in install
     assert 'Join-Path $appRoot "plugins"' in install
@@ -81,7 +81,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "-m flux_llm_kb.cli migrate" in update
     assert "Invoke-FluxCodexPluginInstall" in update
     assert "-m flux_llm_kb.cli codex install-plugin" in update
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in update
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
     assert "Register-FluxTask" in update
     assert "New-FluxHostTaskTriggers" in update
     assert "New-ScheduledTaskTrigger -Once" in update
@@ -145,7 +145,8 @@ def test_dockerfile_installs_practical_extractor_pack():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
 
-    assert 'for extra in ("api", "corpus", "processors", "gpu")' in dockerfile
+    assert 'for extra in ("api", "corpus", "processors")' in dockerfile
+    assert 'for extra in ("api", "corpus", "processors", "gpu")' not in dockerfile
     for package in (
         "libreoffice",
         "antiword",
@@ -171,8 +172,10 @@ def test_dockerfile_installs_practical_extractor_pack():
         assert package in dockerfile
     for dependency in ("duckdb", "pyarrow", "faster-whisper", "onnxruntime-gpu"):
         assert dependency in pyproject
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in install
-    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' in update
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' not in install
+    assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' not in update
 
 
 def test_production_update_bounds_compose_up_and_recovers_created_services():
@@ -215,6 +218,24 @@ def test_production_deploy_bounds_docker_build_and_pip_installs():
         assert "TimeoutSeconds $PipInstallTimeoutSeconds" in script
         assert '"--timeout", ([string]$PipTimeoutSeconds)' in script
         assert '"--retries", ([string]$PipRetries)' in script
+
+
+def test_production_deploy_can_reuse_local_docker_base_for_fast_updates():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "ARG FLUX_KB_DOCKER_BASE_IMAGE=python:3.12-slim" in dockerfile
+    assert "ARG FLUX_KB_SKIP_SYSTEM_PACKAGES=false" in dockerfile
+    for script in (install, update):
+        assert '[ValidateSet("auto", "local", "python")]' in script
+        assert '[string]$DockerBaseMode = "auto"' in script
+        assert "[string]$DockerBaseImage = $env:FLUX_KB_DOCKER_BASE_IMAGE" in script
+        assert "Resolve-FluxDockerBuildBase" in script
+        assert "Test-FluxDockerImageExists" in script
+        assert "flux-llm-kb-api:local" in script
+        assert '"--build-arg", "FLUX_KB_DOCKER_BASE_IMAGE=$($dockerBase.Image)"' in script
+        assert '"--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages"' in script
 
 
 def test_production_deploy_supports_custom_pip_index_for_gpu_wheels():
