@@ -3383,6 +3383,7 @@ class KnowledgeService:
                 retried += 1
         repaired = database.repair_extracted_corpus_asset_statuses(root_name=root_name)
         cleared_errors = database.clear_completed_corpus_job_errors(root_name=root_name)
+        tool_invocation_purge = self._purge_expired_job_tool_invocations()
         database.record_audit_event(
             event_type="corpus.backfill",
             details={
@@ -3404,6 +3405,8 @@ class KnowledgeService:
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
                 "cleared_completed_errors": cleared_errors["cleared"],
+                "purged_tool_invocations": tool_invocation_purge.get("purged", 0),
+                "tool_invocation_purge_error": tool_invocation_purge.get("error_type"),
                 "workers": effective_workers,
             },
         )
@@ -3426,6 +3429,8 @@ class KnowledgeService:
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],
             "cleared_completed_errors": cleared_errors["cleared"],
+            "purged_tool_invocations": tool_invocation_purge.get("purged", 0),
+            "tool_invocation_purge_error": tool_invocation_purge.get("error_type"),
             "jobs": claimed,
         }
 
@@ -3443,16 +3448,18 @@ class KnowledgeService:
         return [result for _, result in sorted(results, key=lambda item: item[0])]
 
     def _process_claimed_corpus_job(self, job: dict[str, Any]) -> tuple[dict[str, Any], int, Any]:
+        from . import processes
         from . import worker
 
         started = time.perf_counter()
         try:
-            if job.get("job_type") == "corpus_sync_root":
-                process_result = self._process_corpus_sync_job(job)
-            elif job.get("job_type") == "corpus_embed":
-                process_result = worker.process_embedding_job(job)
-            else:
-                process_result = worker.process_corpus_job(job)
+            with processes.capture_job_tool_invocations(str(job.get("id") or "")):
+                if job.get("job_type") == "corpus_sync_root":
+                    process_result = self._process_corpus_sync_job(job)
+                elif job.get("job_type") == "corpus_embed":
+                    process_result = worker.process_embedding_job(job)
+                else:
+                    process_result = worker.process_corpus_job(job)
         except Exception as exc:
             process_result = worker.JobProcessResult(
                 status="failed",
@@ -3461,6 +3468,12 @@ class KnowledgeService:
             )
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
         return job, duration_ms, process_result
+
+    def _purge_expired_job_tool_invocations(self) -> dict[str, Any]:
+        try:
+            return database.purge_expired_capture_job_tool_invocations(retention_hours=24)
+        except Exception as exc:
+            return {"purged": 0, "retention_hours": 24, "error_type": exc.__class__.__name__}
 
     def _process_corpus_sync_job(self, job: dict[str, Any]):
         from .worker import JobProcessResult

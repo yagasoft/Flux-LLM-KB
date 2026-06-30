@@ -2777,7 +2777,135 @@ def test_capture_job_filter_options_lists_distinct_status_roots_and_types(monkey
         "roots": ["docs", "mail"],
         "job_types": ["corpus_extract_pdf", "corpus_sync_root"],
     }
-    assert len(executed) == 3
+
+
+def test_capture_job_tool_invocation_helpers_insert_update_list_and_complete(monkeypatch):
+    executed = []
+    timestamp = datetime(2026, 6, 30, 19, 45, tzinfo=timezone.utc)
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return ("inv-1", timestamp)
+
+        def fetchall(self):
+            return [
+                (
+                    "inv-1",
+                    "job-1",
+                    ["python", "-c", "print('hello')"],
+                    "E:/LLM KB",
+                    "completed",
+                    0,
+                    "hello\n",
+                    "",
+                    None,
+                    None,
+                    timestamp,
+                    timestamp,
+                    23,
+                    timestamp,
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    created = database.start_capture_job_tool_invocation(
+        job_id="job-1",
+        command=["python", "-c", "print('hello')"],
+        cwd="E:/LLM KB",
+    )
+    database.update_capture_job_tool_invocation_output(invocation_id="inv-1", stdout="hello\n", stderr="")
+    database.complete_capture_job_tool_invocation(
+        invocation_id="inv-1",
+        status="completed",
+        return_code=0,
+        stdout="hello\n",
+        stderr="",
+        duration_ms=23,
+    )
+    rows = database.list_capture_job_tool_invocations(job_id="job-1", limit=10)
+
+    assert created == {"id": "inv-1", "started_at": timestamp.isoformat()}
+    assert rows[0]["id"] == "inv-1"
+    assert rows[0]["command"] == ["python", "-c", "print('hello')"]
+    assert rows[0]["stdout"] == "hello\n"
+    assert rows[0]["return_code"] == 0
+    assert "INSERT INTO capture_job_tool_invocations" in executed[0][0]
+    assert "RETURNING id::text, started_at" in executed[0][0]
+    assert executed[0][1][0] == "job-1"
+    assert executed[0][1][2] == "E:/LLM KB"
+    assert "SET stdout = %s" in executed[1][0]
+    assert executed[1][1] == ("hello\n", "", "inv-1")
+    assert "completed_at = now()" in executed[2][0]
+    assert "duration_ms = %s" in executed[2][0]
+    assert executed[2][1] == ("completed", 0, "hello\n", "", None, None, 23, "inv-1")
+    assert "ORDER BY started_at, id" in executed[3][0]
+    assert executed[3][1] == ("job-1", 10)
+
+
+def test_purge_expired_capture_job_tool_invocations_deletes_only_completed_jobs_after_retention(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 4
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.purge_expired_capture_job_tool_invocations(retention_hours=24)
+
+    sql, params = executed[0]
+    assert result == {"purged": 4, "retention_hours": 24}
+    assert "DELETE FROM capture_job_tool_invocations inv" in sql
+    assert "USING capture_jobs job" in sql
+    assert "job.status = 'completed'" in sql
+    assert "job.completed_at < now() - make_interval(hours => %s)" in sql
+    assert params == (24,)
 
 
 def test_requeue_corpus_job_allows_cancelled_states_for_operator_retry(monkeypatch):

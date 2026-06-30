@@ -994,6 +994,38 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
     ]
 
 
+def test_dashboard_job_tool_invocations_endpoint_returns_bounded_history(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    def fake_list_capture_job_tool_invocations(**kwargs):
+        calls.append(kwargs)
+        return [
+            {
+                "id": "inv-1",
+                "job_id": kwargs["job_id"],
+                "command": ["python", "-c", "print('hello')"],
+                "cwd": "E:/LLM KB",
+                "status": "running",
+                "return_code": None,
+                "stdout": "hello\n",
+                "stderr": "",
+            }
+        ]
+
+    monkeypatch.setattr(database, "list_capture_job_tool_invocations", fake_list_capture_job_tool_invocations)
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.get("/api/dashboard/jobs/job-1/tool-invocations", params={"limit": "25"})
+
+    assert response.status_code == 200
+    assert response.json()["job_id"] == "job-1"
+    assert response.json()["invocations"][0]["stdout"] == "hello\n"
+    assert calls == [{"job_id": "job-1", "limit": 25}]
+
+
 def test_dashboard_job_retry_endpoint_uses_diagnostic_remediation(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

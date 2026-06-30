@@ -637,6 +637,15 @@ def create_app():
             updated_to=updated_to,
         )
 
+    @app.get("/api/dashboard/jobs/{job_id}/tool-invocations")
+    def dashboard_job_tool_invocations(job_id: str, limit: int = 100):
+        from . import database
+
+        return {
+            "job_id": job_id,
+            "invocations": database.list_capture_job_tool_invocations(job_id=job_id, limit=limit),
+        }
+
     @app.post("/api/dashboard/jobs/{job_id}/cancel")
     def dashboard_job_cancel(job_id: str):
         from . import database

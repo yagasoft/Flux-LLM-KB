@@ -3198,6 +3198,177 @@ def capture_job_filter_options(*, url: str | None = None) -> dict[str, list[str]
             return {"statuses": statuses, "roots": roots, "job_types": job_types}
 
 
+def _capture_job_tool_invocation_limit(limit: int | None) -> int:
+    try:
+        numeric = int(limit or 100)
+    except (TypeError, ValueError):
+        numeric = 100
+    return max(1, min(numeric, 500))
+
+
+def _capture_job_tool_command(command: Any) -> list[str]:
+    if isinstance(command, (list, tuple)):
+        return [str(part) for part in command]
+    return [str(command)]
+
+
+def start_capture_job_tool_invocation(
+    *,
+    job_id: str,
+    command: Any,
+    cwd: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO capture_job_tool_invocations (
+                    job_id, command, cwd, status
+                )
+                VALUES (%s, %s::jsonb, %s, 'running')
+                RETURNING id::text, started_at
+                """,
+                (job_id, _json(_capture_job_tool_command(command)), _postgres_text_or_none(cwd)),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {"id": row[0], "started_at": row[1].isoformat() if row[1] else None}
+
+
+def update_capture_job_tool_invocation_output(
+    *,
+    invocation_id: str,
+    stdout: str,
+    stderr: str,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_job_tool_invocations
+                SET stdout = %s,
+                    stderr = %s,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (_postgres_text_or_none(stdout) or "", _postgres_text_or_none(stderr) or "", invocation_id),
+            )
+
+
+def complete_capture_job_tool_invocation(
+    *,
+    invocation_id: str,
+    status: str,
+    return_code: int | None = None,
+    stdout: str = "",
+    stderr: str = "",
+    duration_ms: int | None = None,
+    exception_type: str | None = None,
+    exception_message: str | None = None,
+    url: str | None = None,
+) -> None:
+    normalized_status = status if status in {"completed", "failed", "timeout", "exception"} else "exception"
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_job_tool_invocations
+                SET status = %s,
+                    return_code = %s,
+                    stdout = %s,
+                    stderr = %s,
+                    exception_type = %s,
+                    exception_message = %s,
+                    duration_ms = %s,
+                    completed_at = now(),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    normalized_status,
+                    return_code,
+                    _postgres_text_or_none(stdout) or "",
+                    _postgres_text_or_none(stderr) or "",
+                    _postgres_text_or_none(exception_type),
+                    _postgres_text_or_none(exception_message),
+                    duration_ms,
+                    invocation_id,
+                ),
+            )
+
+
+def list_capture_job_tool_invocations(
+    *,
+    job_id: str,
+    limit: int = 100,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = _capture_job_tool_invocation_limit(limit)
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, job_id::text, command, cwd, status, return_code,
+                       stdout, stderr, exception_type, exception_message,
+                       started_at, completed_at, duration_ms, updated_at
+                FROM capture_job_tool_invocations
+                WHERE job_id = %s
+                ORDER BY started_at, id
+                LIMIT %s
+                """,
+                (job_id, safe_limit),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "job_id": row[1],
+                    "command": row[2] or [],
+                    "cwd": row[3],
+                    "status": row[4],
+                    "return_code": row[5],
+                    "stdout": row[6] or "",
+                    "stderr": row[7] or "",
+                    "exception_type": row[8],
+                    "exception_message": row[9],
+                    "started_at": row[10].isoformat() if row[10] else None,
+                    "completed_at": row[11].isoformat() if row[11] else None,
+                    "duration_ms": row[12],
+                    "updated_at": row[13].isoformat() if row[13] else None,
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def purge_expired_capture_job_tool_invocations(
+    *,
+    retention_hours: int = 24,
+    url: str | None = None,
+) -> dict[str, Any]:
+    safe_hours = max(1, int(retention_hours or 24))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM capture_job_tool_invocations inv
+                USING capture_jobs job
+                WHERE job.id = inv.job_id
+                  AND job.status = 'completed'
+                  AND job.completed_at IS NOT NULL
+                  AND job.completed_at < now() - make_interval(hours => %s)
+                """,
+                (safe_hours,),
+            )
+            return {"purged": int(cur.rowcount or 0), "retention_hours": safe_hours}
+
+
 _CAPTURE_REVIEW_STATUSES = {
     "pending_review",
     "approved",

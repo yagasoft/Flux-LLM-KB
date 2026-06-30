@@ -365,6 +365,8 @@ let outlookCancelRequests: string[];
 let corpusCancelRequests: string[];
 let corpusRetryRequests: string[];
 let jobsRequestUrls: string[];
+let jobToolInvocationPayload: unknown;
+let jobToolInvocationRequestUrls: string[];
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -735,6 +737,8 @@ describe("Flux dashboard", () => {
     corpusCancelRequests = [];
     corpusRetryRequests = [];
     jobsRequestUrls = [];
+    jobToolInvocationRequestUrls = [];
+    jobToolInvocationPayload = { job_id: "job-pdf", invocations: [] };
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -754,6 +758,10 @@ describe("Flux dashboard", () => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(healthPayload);
       if (url === "/api/dashboard/crawl") return json(crawlPayload);
+      if (url.startsWith("/api/dashboard/jobs/") && url.includes("/tool-invocations")) {
+        jobToolInvocationRequestUrls.push(url);
+        return json(jobToolInvocationPayload);
+      }
       if (url.startsWith("/api/dashboard/jobs") && !url.endsWith("/cancel") && !url.endsWith("/retry")) {
         jobsRequestUrls.push(url);
         return json(jobsPayload);
@@ -2126,6 +2134,77 @@ describe("Flux dashboard", () => {
 
     await user.click(screen.getByRole("button", { name: "Cancel corpus job job-sync-running" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("cannot be cancelled mid-execution");
+  });
+
+  test("expanded job details show live console output refreshed by polling", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-video",
+          job_type: "corpus_extract_video",
+          status: "running",
+          payload: { root_name: "media", path: "clips/demo.mp4" },
+          attempts: 1,
+          telemetry: { stage: "extracting" },
+          updated_at: "2026-06-27T16:31:01+00:00"
+        }
+      ]
+    };
+    jobToolInvocationPayload = {
+      job_id: "job-video",
+      invocations: [
+        {
+          id: "inv-1",
+          job_id: "job-video",
+          command: ["python", "-m", "demo_tool"],
+          cwd: "E:/LLM KB",
+          status: "running",
+          return_code: null,
+          stdout: "first line\n",
+          stderr: "warning line\n",
+          started_at: "2026-06-27T16:31:02+00:00",
+          completed_at: null,
+          duration_ms: null
+        }
+      ]
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await user.click(await screen.findByRole("button", { name: "Show details for job job-video" }));
+
+    expect(await screen.findByText("Console output")).toBeInTheDocument();
+    expect(screen.getByText("python -m demo_tool")).toBeInTheDocument();
+    expect(screen.getAllByText("Running").length).toBeGreaterThan(0);
+    expect(screen.getByText("first line")).toBeInTheDocument();
+    expect(screen.getByText("warning line")).toBeInTheDocument();
+    expect(jobToolInvocationRequestUrls).toContain("/api/dashboard/jobs/job-video/tool-invocations?limit=100");
+
+    jobToolInvocationPayload = {
+      job_id: "job-video",
+      invocations: [
+        {
+          id: "inv-1",
+          job_id: "job-video",
+          command: ["python", "-m", "demo_tool"],
+          cwd: "E:/LLM KB",
+          status: "running",
+          return_code: null,
+          stdout: "first line\nsecond line\n",
+          stderr: "warning line\n",
+          started_at: "2026-06-27T16:31:02+00:00",
+          completed_at: null,
+          duration_ms: null
+        }
+      ]
+    };
+
+    await waitFor(() => {
+      expect(jobToolInvocationRequestUrls.filter((url) => url.includes("job-video/tool-invocations")).length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByText(/second line/)).toBeInTheDocument();
+    }, { timeout: 2500 });
   });
 
   test("job queue keeps the readable empty state when no jobs are queued", async () => {

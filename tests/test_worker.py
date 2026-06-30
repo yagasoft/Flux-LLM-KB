@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -9,8 +10,40 @@ from flux_llm_kb import database, service as service_module, worker
 from flux_llm_kb.service import KnowledgeService
 
 
+def test_process_claimed_corpus_job_wraps_subprocess_capture_context(monkeypatch):
+    from flux_llm_kb import processes
+
+    events = []
+
+    @contextmanager
+    def fake_capture(job_id, **kwargs):
+        events.append(("enter", job_id, kwargs))
+        try:
+            yield
+        finally:
+            events.append(("exit", job_id, kwargs))
+
+    monkeypatch.setattr(processes, "capture_job_tool_invocations", fake_capture)
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda job: events.append(("process", job["id"], {})) or worker.JobProcessResult(status="indexed", telemetry={"parser_cache_hits": 1}),
+    )
+
+    job, duration_ms, result = KnowledgeService()._process_claimed_corpus_job(
+        {"id": "job-1", "job_type": "corpus_extract_pdf", "payload": {"root_name": "docs", "path": "a.pdf"}}
+    )
+
+    assert job["id"] == "job-1"
+    assert duration_ms >= 0
+    assert result.status == "indexed"
+    assert events[0] == ("enter", "job-1", {})
+    assert events[1] == ("process", "job-1", {})
+    assert events[2] == ("exit", "job-1", {})
+
+
 def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
-    calls = {"completed": [], "blocked": [], "retried": [], "progress": [], "recovered": [], "repaired": [], "cleared_errors": []}
+    calls = {"completed": [], "blocked": [], "retried": [], "progress": [], "recovered": [], "repaired": [], "cleared_errors": [], "purged": []}
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
@@ -33,6 +66,11 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
     monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
     monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(
+        database,
+        "purge_expired_capture_job_tool_invocations",
+        lambda **kwargs: calls["purged"].append(kwargs) or {"purged": 3, "retention_hours": 24},
+    )
     monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
 
     sync_calls = []
@@ -82,6 +120,8 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     assert calls["completed"][0]["job_id"] == "job-sync"
     assert calls["completed"][0]["telemetry"]["files_seen"] == 35655
     assert calls["completed"][0]["telemetry"]["jobs_queued"] == 120
+    assert calls["purged"] == [{"retention_hours": 24}]
+    assert result["purged_tool_invocations"] == 3
 
 
 def test_backfill_recovers_stale_jobs_globally(monkeypatch):

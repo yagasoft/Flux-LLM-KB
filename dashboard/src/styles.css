@@ -1637,6 +1637,119 @@ kbd {
   font-size: 12px;
 }
 
+.job-console-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.job-console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.job-console-header h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 14px;
+}
+
+.job-console-list {
+  display: grid;
+  gap: 8px;
+}
+
+.job-console-invocation {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.job-console-invocation summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.job-console-invocation summary span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.job-console-invocation summary em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.job-console-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0 12px 10px;
+}
+
+.job-console-meta div {
+  min-width: 0;
+}
+
+.job-console-meta dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.job-console-meta dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.job-console-exception {
+  margin: 0 12px 10px;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.job-console-streams {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  padding: 0 12px 12px;
+}
+
+.job-console-streams strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.job-console-streams pre {
+  min-height: 56px;
+  max-height: 260px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #0f1a25;
+  color: #d6f2ff;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .search-results {
   display: grid;
   gap: 10px;

@@ -164,6 +164,33 @@ type AccelerationWorkerFamily = {
   embedding_cache_misses?: number;
 };
 
+type JobToolInvocation = {
+  id?: string;
+  job_id?: string;
+  command?: unknown;
+  cwd?: string | null;
+  status?: string;
+  return_code?: number | null;
+  stdout?: string;
+  stderr?: string;
+  exception_type?: string | null;
+  exception_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+};
+
+type JobToolInvocationState = {
+  loading: boolean;
+  error?: string;
+  invocations: JobToolInvocation[];
+};
+
+type JobToolInvocationResponse = {
+  job_id?: string;
+  invocations?: JobToolInvocation[];
+};
+
 type AccelerationBenchmarkRun = {
   id?: string;
   fixture?: string;
@@ -5296,6 +5323,30 @@ function JobQueueTable({
   onRetryCorpusJob?: (jobId: string) => void;
 }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
+  const [toolInvocationsByJob, setToolInvocationsByJob] = useState<Record<string, JobToolInvocationState>>({});
+  const loadToolInvocations = useCallback(async (id: string) => {
+    setToolInvocationsByJob((current) => ({
+      ...current,
+      [id]: { invocations: current[id]?.invocations ?? [], loading: true }
+    }));
+    try {
+      const payload = await fetchRequiredJson<JobToolInvocationResponse>(`/api/dashboard/jobs/${encodeURIComponent(id)}/tool-invocations?limit=100`);
+      setToolInvocationsByJob((current) => ({
+        ...current,
+        [id]: { invocations: payload.invocations ?? [], loading: false }
+      }));
+    } catch (error) {
+      setToolInvocationsByJob((current) => ({
+        ...current,
+        [id]: { invocations: current[id]?.invocations ?? [], loading: false, error: errorMessage(error) }
+      }));
+    }
+  }, []);
+  useEffect(() => {
+    if (expandedJobId) {
+      void loadToolInvocations(expandedJobId);
+    }
+  }, [expandedJobId, jobs, loadToolInvocations]);
   if (jobs.length === 0) return <p className="muted">{empty}</p>;
   return (
     <div className="job-table-wrap">
@@ -5377,7 +5428,7 @@ function JobQueueTable({
                     </button>
                   </td>
                 </tr>
-                {expanded ? <JobDetailRow job={job} payload={payload} target={target} id={id} status={status} /> : null}
+                {expanded ? <JobDetailRow job={job} payload={payload} target={target} id={id} status={status} toolInvocations={toolInvocationsByJob[id]} /> : null}
               </Fragment>
             );
           })}
@@ -5392,13 +5443,15 @@ function JobDetailRow({
   payload,
   target,
   id,
-  status
+  status,
+  toolInvocations
 }: {
   job: Record<string, unknown>;
   payload: Record<string, unknown>;
   target: { path: string; root: string };
   id: string;
   status: string;
+  toolInvocations?: JobToolInvocationState;
 }) {
   const telemetry = jobTelemetry(job);
   const progress = jobProgressSummary(job);
@@ -5448,9 +5501,54 @@ function JobDetailRow({
             <summary>Raw payload</summary>
             <pre>{JSON.stringify(payload, null, 2)}</pre>
           </details>
+          <JobConsoleOutput state={toolInvocations} />
         </div>
       </td>
     </tr>
+  );
+}
+
+function JobConsoleOutput({ state }: { state?: JobToolInvocationState }) {
+  const invocations = state?.invocations ?? [];
+  return (
+    <section className="job-console-panel">
+      <div className="job-console-header">
+        <h3><Terminal size={15} /> Console output</h3>
+        {state?.loading ? <span className="state-pill info">Refreshing</span> : null}
+      </div>
+      {state?.error ? <p className="warning-note">{state.error}</p> : null}
+      {!state || (state.loading && invocations.length === 0) ? <p className="muted">Loading console output.</p> : null}
+      {state && !state.loading && invocations.length === 0 && !state.error ? <p className="muted">No console output captured for this job.</p> : null}
+      <div className="job-console-list">
+        {invocations.map((invocation, index) => (
+          <details className="job-console-invocation" key={invocation.id ?? `invocation-${index}`} open={index === invocations.length - 1}>
+            <summary>
+              <span>{toolInvocationCommand(invocation.command)}</span>
+              <strong>{humanizeIdentifier(invocation.status ?? "unknown")}</strong>
+              {typeof invocation.return_code === "number" ? <em>exit {invocation.return_code}</em> : null}
+            </summary>
+            <dl className="job-console-meta">
+              {invocation.cwd ? <div><dt>Cwd</dt><dd>{invocation.cwd}</dd></div> : null}
+              {invocation.started_at ? <div><dt>Started</dt><dd>{formatDate(invocation.started_at)}</dd></div> : null}
+              {invocation.completed_at ? <div><dt>Completed</dt><dd>{formatDate(invocation.completed_at)}</dd></div> : null}
+              {typeof invocation.duration_ms === "number" ? <div><dt>Duration</dt><dd>{invocation.duration_ms} ms</dd></div> : null}
+              {invocation.exception_type ? <div><dt>Exception</dt><dd>{invocation.exception_type}</dd></div> : null}
+            </dl>
+            {invocation.exception_message ? <p className="job-console-exception">{invocation.exception_message}</p> : null}
+            <div className="job-console-streams">
+              <div>
+                <strong>stdout</strong>
+                <pre>{invocation.stdout || ""}</pre>
+              </div>
+              <div>
+                <strong>stderr</strong>
+                <pre>{invocation.stderr || ""}</pre>
+              </div>
+            </div>
+          </details>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -5477,6 +5575,12 @@ function jobPayload(job: Record<string, unknown>) {
 
 function jobTelemetry(job: Record<string, unknown>) {
   return job.telemetry && typeof job.telemetry === "object" && !Array.isArray(job.telemetry) ? job.telemetry as Record<string, unknown> : {};
+}
+
+function toolInvocationCommand(command: unknown): string {
+  if (Array.isArray(command)) return command.map((part) => String(part)).join(" ");
+  const text = stringFromUnknown(command);
+  return text ?? "command";
 }
 
 function jobProgressSummary(job: Record<string, unknown>) {

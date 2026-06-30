@@ -139,6 +139,13 @@ def test_load_migrations_returns_ordered_sql_files():
     sync_performance_migration = next(item for item in migrations if item.name == "0028_corpus_sync_performance")
     assert "ADD COLUMN IF NOT EXISTS progress_heartbeat_at" in sync_performance_migration.sql
     assert "idx_capture_jobs_stale_running_sync" in sync_performance_migration.sql
+    tool_output_migration = next(item for item in migrations if item.name == "0029_job_tool_invocations")
+    assert "CREATE TABLE IF NOT EXISTS capture_job_tool_invocations" in tool_output_migration.sql
+    assert "job_id uuid NOT NULL REFERENCES capture_jobs" in tool_output_migration.sql
+    assert "stdout text NOT NULL DEFAULT ''" in tool_output_migration.sql
+    assert "stderr text NOT NULL DEFAULT ''" in tool_output_migration.sql
+    assert "idx_capture_job_tool_invocations_job_started" in tool_output_migration.sql
+    assert "idx_capture_job_tool_invocations_retention" in tool_output_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 
