@@ -161,14 +161,14 @@ def validate_local_model_base_url(value: str) -> str:
     hostname = parsed.hostname
     if not hostname:
         raise ValueError("local model base URL requires a host")
-    if hostname.lower() in {"localhost", "host.docker.internal"}:
+    if hostname.lower() in {"localhost", "host.docker.internal", "ollama"}:
         return str(value).strip().rstrip("/")
     try:
         if ipaddress.ip_address(hostname).is_loopback:
             return str(value).strip().rstrip("/")
     except ValueError:
         pass
-    raise ValueError("local model base URL must use a local loopback host or Docker host gateway")
+    raise ValueError("local model base URL must use a local loopback host, Docker host gateway, or the Docker Compose ollama service")
 
 
 def resolve_cache_layout(cache_root: str | None = None) -> dict[str, Any]:

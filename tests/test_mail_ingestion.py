@@ -306,6 +306,7 @@ def test_sync_outlook_profile_includes_child_folders_by_default(monkeypatch, tmp
     monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
     monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: kwargs)
     monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "mail_message_exists", lambda **_kwargs: False, raising=False)
 
     result = mail_ingestion._sync_outlook_profile(
         {
@@ -476,6 +477,7 @@ def test_sync_outlook_profile_stops_after_item_export_error(monkeypatch, tmp_pat
     monkeypatch.setattr(database, "record_mail_message", lambda **kwargs: kwargs)
     monkeypatch.setattr(database, "record_mail_sync_run", lambda **kwargs: runs.append(kwargs) or kwargs)
     monkeypatch.setattr(database, "update_mail_profile_metadata", lambda **kwargs: kwargs)
+    monkeypatch.setattr(database, "mail_message_exists", lambda **_kwargs: False, raising=False)
 
     result = mail_ingestion._sync_outlook_profile(
         {

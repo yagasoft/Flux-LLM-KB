@@ -52,6 +52,7 @@ def test_local_model_base_url_accepts_loopback_and_docker_host_gateway():
     assert validate_local_model_base_url("http://localhost:11434") == "http://localhost:11434"
     assert validate_local_model_base_url("http://[::1]:11434") == "http://[::1]:11434"
     assert validate_local_model_base_url("http://host.docker.internal:11434/") == "http://host.docker.internal:11434"
+    assert validate_local_model_base_url("http://ollama:11434/") == "http://ollama:11434"
 
     with pytest.raises(ValueError, match="local"):
         validate_local_model_base_url("https://api.openai.com/v1")

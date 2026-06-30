@@ -237,6 +237,7 @@ def test_local_inference_base_url_accepts_docker_host_gateway():
     base_url = definitions["acceleration.local_inference.base_url"]
 
     assert base_url.validate("http://host.docker.internal:11434/") == "http://host.docker.internal:11434"
+    assert base_url.validate("http://ollama:11434/") == "http://ollama:11434"
 
     with pytest.raises(ValueError, match="local"):
         base_url.validate("https://api.openai.com/v1")

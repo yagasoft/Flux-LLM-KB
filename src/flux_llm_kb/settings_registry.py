@@ -119,14 +119,14 @@ def _loopback_http_url(value: Any) -> str:
     hostname = parsed.hostname
     if not hostname:
         raise ValueError("value must include a host")
-    if hostname.lower() in {"localhost", "host.docker.internal"}:
+    if hostname.lower() in {"localhost", "host.docker.internal", "ollama"}:
         return parsed_value.rstrip("/")
     try:
         if ipaddress.ip_address(hostname).is_loopback:
             return parsed_value.rstrip("/")
     except ValueError:
         pass
-    raise ValueError("value must use a local loopback host or Docker host gateway")
+    raise ValueError("value must use a local loopback host, Docker host gateway, or the Docker Compose ollama service")
 
 
 SETTING_REGISTRY: tuple[SettingDefinition, ...] = (

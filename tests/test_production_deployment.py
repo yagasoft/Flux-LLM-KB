@@ -112,17 +112,37 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
 
 def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
     install_compose = _embedded_compose_template(_script("install-flux.ps1"))
+    update_compose = _embedded_compose_template(_script("update-flux.ps1"))
 
-    assert install_compose.count("gpus: all") == 2
-    assert install_compose.count("NVIDIA_VISIBLE_DEVICES: all") == 2
-    assert install_compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 2
-    assert "FLUX_KB_ASR_DEVICE: cuda" in install_compose
-    assert "FLUX_KB_ASR_COMPUTE_TYPE: float16" in install_compose
-    assert "FLUX_KB_LOCAL_INFERENCE_ENABLED: \"true\"" in install_compose
-    assert "FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434" in install_compose
-    assert "FLUX_KB_VISION_ENABLED: \"true\"" in install_compose
-    assert "FLUX_KB_VISION_MODEL: qwen2.5vl:7b" in install_compose
-    assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in install_compose
+    for compose in (install_compose, update_compose):
+        assert compose.count("gpus: all") == 3
+        assert compose.count("NVIDIA_VISIBLE_DEVICES: all") == 3
+        assert compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 3
+        assert "  ollama:" in compose
+        assert "image: ollama/ollama:latest" in compose
+        assert "container_name: flux-ollama" in compose
+        assert "- ../models/ollama:/root/.ollama" in compose
+        assert 'test: ["CMD", "ollama", "list"]' in compose
+        assert "ollama:" in compose
+        assert "condition: service_healthy" in compose
+        assert "FLUX_KB_ASR_DEVICE: cuda" in compose
+        assert "FLUX_KB_ASR_COMPUTE_TYPE: float16" in compose
+        assert "FLUX_KB_LOCAL_INFERENCE_ENABLED: \"true\"" in compose
+        assert "FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434" in compose
+        assert "FLUX_KB_VISION_ENABLED: \"true\"" in compose
+        assert "FLUX_KB_VISION_MODEL: qwen3-vl:32b" in compose
+        assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in compose
+        assert "host.docker.internal:11434" not in compose
+        assert "0.0.0.0:11434:11434" not in compose
+
+
+def test_production_deploy_scripts_surface_docker_ollama_model_steps():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        assert "docker exec flux-ollama ollama pull qwen3-vl:32b" in script
+        assert "docker exec flux-ollama ollama pull qwen3-vl:8b" in script
 
 
 def test_production_compose_overrides_host_paths_inside_api_and_worker():

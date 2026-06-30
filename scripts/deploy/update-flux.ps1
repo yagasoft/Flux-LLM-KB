@@ -29,6 +29,8 @@ $appRoot = Join-Path $InstallRoot "app"
 $composePath = Join-Path $appRoot "docker-compose.yml"
 $appEnvPath = Join-Path $appRoot ".env"
 $privateEnvPath = Join-Path $InstallRoot "private\flux.env"
+$modelsRoot = Join-Path $InstallRoot "models"
+$ollamaModelsRoot = Join-Path $modelsRoot "ollama"
 $venvPython = Join-Path $appRoot ".venv\Scripts\python.exe"
 $venvRoot = Join-Path $appRoot ".venv"
 
@@ -58,16 +60,37 @@ function Set-FluxEnvValue {
 
 function Remove-FluxGpuComposeAccess {
     param([string]$ComposeText)
+    $skipOllamaService = $false
+    $skipOllamaDependency = 0
     $filtered = foreach ($line in ($ComposeText -split "`r?`n")) {
+        if ($line -match "^  ollama:\s*$") {
+            $skipOllamaService = $true
+            continue
+        }
+        if ($skipOllamaService) {
+            if ($line -match "^  postgres:\s*$") {
+                $skipOllamaService = $false
+            } else {
+                continue
+            }
+        }
+        if ($line -match "^\s+ollama:\s*$") {
+            $skipOllamaDependency = 1
+            continue
+        }
+        if ($skipOllamaDependency -gt 0) {
+            $skipOllamaDependency -= 1
+            continue
+        }
         if ($line -match "^\s+gpus: all\s*$") { continue }
         if ($line -match "^\s+NVIDIA_VISIBLE_DEVICES: all\s*$") { continue }
         if ($line -match "^\s+NVIDIA_DRIVER_CAPABILITIES: compute,utility\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_ASR_DEVICE: cuda\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_ASR_COMPUTE_TYPE: float16\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_ENABLED: `"true`"\s*$") { continue }
-        if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host\.docker\.internal:11434\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_ENABLED: `"true`"\s*$") { continue }
-        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen2\.5vl:7b\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen3-vl:32b\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_MAX_IMAGE_PIXELS: `"80000000`"\s*$") { continue }
         $line
     }
@@ -115,6 +138,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
@@ -129,9 +154,9 @@ services:
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
-      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
       FLUX_KB_VISION_ENABLED: "true"
-      FLUX_KB_VISION_MODEL: qwen2.5vl:7b
+      FLUX_KB_VISION_MODEL: qwen3-vl:32b
       FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
     ports:
       - "127.0.0.1:${ApiPort}:8765"
@@ -150,6 +175,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
@@ -162,9 +189,9 @@ services:
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
-      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
       FLUX_KB_VISION_ENABLED: "true"
-      FLUX_KB_VISION_MODEL: qwen2.5vl:7b
+      FLUX_KB_VISION_MODEL: qwen3-vl:32b
       FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
     volumes:
       - ../private:/app/private
@@ -172,6 +199,23 @@ services:
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5 --limit 10"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: flux-ollama
+    restart: unless-stopped
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ../models/ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -230,9 +274,9 @@ FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_
 FLUX_KB_ASR_DEVICE=cuda
 FLUX_KB_ASR_COMPUTE_TYPE=float16
 FLUX_KB_LOCAL_INFERENCE_ENABLED=true
-FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://host.docker.internal:11434
+FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://ollama:11434
 FLUX_KB_VISION_ENABLED=true
-FLUX_KB_VISION_MODEL=qwen2.5vl:7b
+FLUX_KB_VISION_MODEL=qwen3-vl:32b
 FLUX_KB_VISION_MAX_IMAGE_PIXELS=80000000
 "@
     } else {
@@ -604,17 +648,23 @@ function Invoke-FluxDockerComposeUp {
         [string]$AppRoot,
         [string]$AppEnvPath,
         [string]$ComposePath,
+        [bool]$GpuEnabled,
         [int]$TimeoutSeconds
     )
     $containers = @("flux-llm-kb-postgres", "flux-llm-kb-api", "flux-llm-kb-worker")
     $recoverableContainers = @("flux-llm-kb-api", "flux-llm-kb-worker")
+    $services = @("postgres", "api", "worker")
+    if ($GpuEnabled) {
+        $containers = @("flux-llm-kb-postgres", "flux-ollama", "flux-llm-kb-api", "flux-llm-kb-worker")
+        $recoverableContainers = @("flux-ollama", "flux-llm-kb-api", "flux-llm-kb-worker")
+        $services = @("postgres", "ollama", "api", "worker")
+    }
     $arguments = @(
         "compose",
         "--env-file", $AppEnvPath,
         "-f", $ComposePath,
-        "up", "-d", "--no-build",
-        "postgres", "api", "worker"
-    )
+        "up", "-d", "--no-build"
+    ) + $services
     $argumentText = ($arguments | ForEach-Object { ConvertTo-FluxCommandArgument $_ }) -join " "
     $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $processInfo.FileName = "docker"
@@ -709,6 +759,7 @@ Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort
 Set-Content -Path $appEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag`n" -Encoding UTF8
 Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
 Write-FluxEnv -TargetPath $privateEnvPath -InstallRoot $InstallRoot -ImageTag $imageTag -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
+New-Item -ItemType Directory -Force -Path $modelsRoot, $ollamaModelsRoot | Out-Null
 
 if ($RecreateVenv -and (Test-Path $venvRoot)) {
     Remove-Item -LiteralPath $venvRoot -Recurse -Force
@@ -730,7 +781,7 @@ Stop-FluxOutlookHostLaunchers -InstallRoot $InstallRoot
 
 Push-Location $appRoot
 try {
-    Invoke-FluxDockerComposeUp -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -TimeoutSeconds $DockerComposeTimeoutSeconds
+    Invoke-FluxDockerComposeUp -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -GpuEnabled $gpuEnabled -TimeoutSeconds $DockerComposeTimeoutSeconds
 } finally {
     Pop-Location
 }
@@ -758,3 +809,7 @@ foreach ($taskSpec in @(
 }
 
 Write-Host "Flux production runtime updated at $InstallRoot to image tag $imageTag"
+if ($gpuEnabled) {
+    Write-Host "Install the Docker Ollama vision model with: docker exec flux-ollama ollama pull qwen3-vl:32b"
+    Write-Host "Rollback model pull command: docker exec flux-ollama ollama pull qwen3-vl:8b"
+}

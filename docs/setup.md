@@ -36,6 +36,7 @@ The production layout is:
 - `D:\FluxLLMKB\private`: local env, OAuth tokens, mail spool, and private config
 - `D:\FluxLLMKB\data`: PostgreSQL bind-mounted data on the D drive
 - `D:\FluxLLMKB\logs`: API, worker, host-agent, and Outlook-host logs
+- `D:\FluxLLMKB\models\ollama`: Docker Ollama model cache for local vision
 - `D:\FluxLLMKB\runtime`: process heartbeat/status files
 - `D:\FluxLLMKB\backups`: future local backup/export target
 
@@ -43,6 +44,25 @@ The repository remains source code only. Production Docker Compose uses prebuilt
 local image tags, not `build.context: .`, and it bind-mounts only the deployed
 private/data/log paths. API access remains local at
 `http://127.0.0.1:8765/dashboard`.
+
+When production GPU mode is available, the generated Compose deployment also
+starts a dedicated `ollama/ollama` service named `flux-ollama`. Flux API and
+worker containers call it through `http://ollama:11434`; Ollama is not baked into
+the Flux image and is not run inside the API or worker containers. Models persist
+under `D:\FluxLLMKB\models\ollama`, so recreate/update cycles do not re-download
+large model blobs. After a GPU deployment, install the configured vision model
+explicitly:
+
+```powershell
+docker exec flux-ollama ollama pull qwen3-vl:32b
+```
+
+If the 32B model exceeds the available Docker/WSL memory or creates unacceptable
+pressure, use the rollback model:
+
+```powershell
+docker exec flux-ollama ollama pull qwen3-vl:8b
+```
 
 Update an existing deployment from the current checkout with:
 
@@ -237,7 +257,9 @@ set, otherwise under the local user cache. `flux-kb acceleration status` and the
 dashboard Performance tab show CPU/disk hints, optional NVIDIA and ONNX Runtime
 availability, local model-server state, cache directories, and worker-family
 queue counts. Local model probing is disabled by default and accepts only
-loopback HTTP(S) URLs such as `http://127.0.0.1:11434`.
+loopback HTTP(S) URLs such as `http://127.0.0.1:11434`, the Docker host gateway
+`http://host.docker.internal:11434`, or the internal production Compose service
+URL `http://ollama:11434`.
 Media ASR is controlled by `acceleration.asr.enabled`,
 `acceleration.asr.model_path`, and `acceleration.asr.max_duration_seconds`.
 Redacted ASR cache entries live under the configured ASR cache directory and

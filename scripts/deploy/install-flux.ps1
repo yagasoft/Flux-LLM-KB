@@ -63,16 +63,37 @@ function Resolve-FluxPythonExe {
 
 function Remove-FluxGpuComposeAccess {
     param([string]$ComposeText)
+    $skipOllamaService = $false
+    $skipOllamaDependency = 0
     $filtered = foreach ($line in ($ComposeText -split "`r?`n")) {
+        if ($line -match "^  ollama:\s*$") {
+            $skipOllamaService = $true
+            continue
+        }
+        if ($skipOllamaService) {
+            if ($line -match "^  postgres:\s*$") {
+                $skipOllamaService = $false
+            } else {
+                continue
+            }
+        }
+        if ($line -match "^\s+ollama:\s*$") {
+            $skipOllamaDependency = 1
+            continue
+        }
+        if ($skipOllamaDependency -gt 0) {
+            $skipOllamaDependency -= 1
+            continue
+        }
         if ($line -match "^\s+gpus: all\s*$") { continue }
         if ($line -match "^\s+NVIDIA_VISIBLE_DEVICES: all\s*$") { continue }
         if ($line -match "^\s+NVIDIA_DRIVER_CAPABILITIES: compute,utility\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_ASR_DEVICE: cuda\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_ASR_COMPUTE_TYPE: float16\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_ENABLED: `"true`"\s*$") { continue }
-        if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host\.docker\.internal:11434\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_ENABLED: `"true`"\s*$") { continue }
-        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen2\.5vl:7b\s*$") { continue }
+        if ($line -match "^\s+FLUX_KB_VISION_MODEL: qwen3-vl:32b\s*$") { continue }
         if ($line -match "^\s+FLUX_KB_VISION_MAX_IMAGE_PIXELS: `"80000000`"\s*$") { continue }
         $line
     }
@@ -120,6 +141,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
@@ -134,9 +157,9 @@ services:
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
-      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
       FLUX_KB_VISION_ENABLED: "true"
-      FLUX_KB_VISION_MODEL: qwen2.5vl:7b
+      FLUX_KB_VISION_MODEL: qwen3-vl:32b
       FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
     ports:
       - "127.0.0.1:${ApiPort}:8765"
@@ -155,6 +178,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
@@ -167,9 +192,9 @@ services:
       FLUX_KB_ASR_DEVICE: cuda
       FLUX_KB_ASR_COMPUTE_TYPE: float16
       FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
-      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://host.docker.internal:11434
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
       FLUX_KB_VISION_ENABLED: "true"
-      FLUX_KB_VISION_MODEL: qwen2.5vl:7b
+      FLUX_KB_VISION_MODEL: qwen3-vl:32b
       FLUX_KB_VISION_MAX_IMAGE_PIXELS: "80000000"
     volumes:
       - ../private:/app/private
@@ -177,6 +202,23 @@ services:
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5 --limit 10"
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: flux-ollama
+    restart: unless-stopped
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - ../models/ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -235,9 +277,9 @@ FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_
 FLUX_KB_ASR_DEVICE=cuda
 FLUX_KB_ASR_COMPUTE_TYPE=float16
 FLUX_KB_LOCAL_INFERENCE_ENABLED=true
-FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://host.docker.internal:11434
+FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://ollama:11434
 FLUX_KB_VISION_ENABLED=true
-FLUX_KB_VISION_MODEL=qwen2.5vl:7b
+FLUX_KB_VISION_MODEL=qwen3-vl:32b
 FLUX_KB_VISION_MAX_IMAGE_PIXELS=80000000
 "@
     } else {
@@ -506,13 +548,15 @@ $appRoot = Join-Path $InstallRoot "app"
 $privateRoot = Join-Path $InstallRoot "private"
 $dataRoot = Join-Path $InstallRoot "data"
 $logsRoot = Join-Path $InstallRoot "logs"
+$modelsRoot = Join-Path $InstallRoot "models"
+$ollamaModelsRoot = Join-Path $modelsRoot "ollama"
 $runtimeRoot = Join-Path $InstallRoot "runtime"
 $backupRoot = Join-Path $InstallRoot "backups"
 
 # Installation is intentionally non-destructive for live runtime state. These
 # calls create missing directories but never remove private data, database
 # files, mail spools, logs, runtime status, or backups.
-foreach ($dir in @($InstallRoot, $appRoot, $privateRoot, $dataRoot, (Join-Path $dataRoot "postgres"), $logsRoot, $runtimeRoot, $backupRoot)) {
+foreach ($dir in @($InstallRoot, $appRoot, $privateRoot, $dataRoot, (Join-Path $dataRoot "postgres"), $logsRoot, $modelsRoot, $ollamaModelsRoot, $runtimeRoot, $backupRoot)) {
     New-FluxDirectory $dir
 }
 
@@ -580,7 +624,11 @@ Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 
 Push-Location $appRoot
 try {
-    docker compose --env-file $appEnvPath -f $composePath up -d --no-build postgres api worker
+    $composeServices = @("postgres", "api", "worker")
+    if ($gpuEnabled) {
+        $composeServices = @("postgres", "ollama", "api", "worker")
+    }
+    docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
 } finally {
     Pop-Location
 }
@@ -593,3 +641,7 @@ if (-not $SkipScheduledTasks) {
 
 Write-Host "Flux production runtime installed at $InstallRoot"
 Write-Host "Dashboard: http://127.0.0.1:$ApiPort/dashboard"
+if ($gpuEnabled) {
+    Write-Host "Install the Docker Ollama vision model with: docker exec flux-ollama ollama pull qwen3-vl:32b"
+    Write-Host "Rollback model pull command: docker exec flux-ollama ollama pull qwen3-vl:8b"
+}
