@@ -192,7 +192,7 @@ def test_dockerfile_installs_practical_extractor_pack():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
 
-    assert 'for extra in ("api", "corpus", "processors")' in dockerfile
+    assert 'for extra in ("api", "corpus", "mcp", "processors")' in dockerfile
     assert 'for extra in ("api", "corpus", "processors", "gpu")' not in dockerfile
     for package in (
         "libreoffice",

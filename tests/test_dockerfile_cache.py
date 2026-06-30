@@ -27,6 +27,12 @@ def test_dockerfile_uses_pip_buildkit_cache() -> None:
     assert "--no-cache-dir" not in dockerfile
 
 
+def test_dockerfile_installs_mcp_extra_for_containerized_codex_retrieval() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert 'for extra in ("api", "corpus", "mcp", "processors")' in dockerfile
+
+
 def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
