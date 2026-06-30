@@ -2412,6 +2412,67 @@ def test_extract_vsdx_indexes_page_text_from_zipped_xml(tmp_path):
     assert "Approve Request" in result.chunks[0].body
 
 
+def test_extract_vsdx_indexes_page_text_when_package_has_many_non_page_members(tmp_path):
+    path = tmp_path / "many-members.vsdx"
+    with ZipFile(path, "w") as archive:
+        archive.writestr(
+            "visio/pages/page1.xml",
+            """
+            <PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main">
+              <Shapes>
+                <Shape ID="1" NameU="Process">
+                  <Text>Large package page text</Text>
+                </Shape>
+              </Shapes>
+            </PageContents>
+            """,
+        )
+        for index in range(225):
+            archive.writestr(f"visio/masters/master{index}.xml", "<Master />")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["page_count"] == 1
+    assert "Large package page text" in result.chunks[0].body
+
+
+def test_extract_vsdx_ignores_oversized_non_page_media_members(tmp_path):
+    path = tmp_path / "large-media.vsdx"
+    with ZipFile(path, "w") as archive:
+        archive.writestr(
+            "visio/pages/page1.xml",
+            """
+            <PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main">
+              <Shapes>
+                <Shape ID="1" NameU="Process">
+                  <Text>Readable page beside large media</Text>
+                </Shape>
+              </Shapes>
+            </PageContents>
+            """,
+        )
+        archive.writestr("visio/media/image1.bmp", b"0" * (6 * 1024 * 1024))
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["page_count"] == 1
+    assert "Readable page beside large media" in result.chunks[0].body
+
+
+def test_extract_vsdx_rejects_too_many_page_xml_members(tmp_path):
+    path = tmp_path / "many-pages.vsdx"
+    with ZipFile(path, "w") as archive:
+        for index in range(201):
+            archive.writestr(f"visio/pages/page{index}.xml", "<PageContents />")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "failed"
+    assert "page XML" in (result.message or "")
+
+
 def test_extract_diagram_returns_metadata_only_when_no_text_exists(tmp_path):
     path = tmp_path / "empty.drawio"
     path.write_text('<mxfile><diagram name="Blank"><mxGraphModel><root /></mxGraphModel></diagram></mxfile>', encoding="utf-8")

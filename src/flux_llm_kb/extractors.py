@@ -66,7 +66,8 @@ from .redaction import redact_text
 from .text_safety import decode_text_bytes, read_text_with_bom
 
 
-DIAGRAM_MAX_ZIP_MEMBERS = 200
+DIAGRAM_MAX_ZIP_MEMBERS = 1024
+DIAGRAM_MAX_PAGE_XML_MEMBERS = 200
 DIAGRAM_MAX_TOTAL_BYTES = 25 * 1024 * 1024
 DIAGRAM_MAX_MEMBER_BYTES = 5 * 1024 * 1024
 
@@ -3152,20 +3153,22 @@ def _extract_vsdx_diagram(path: Path) -> ExtractionResult:
             infos = archive.infolist()
             if len(infos) > DIAGRAM_MAX_ZIP_MEMBERS:
                 raise ValueError(f"diagram container has too many members: {len(infos)}")
-            total_bytes = 0
+            total_page_xml_bytes = 0
             page_members = []
             for info in infos:
                 member_name = _safe_zip_member_name(info.filename)
                 if member_name is None:
                     raise ValueError(f"unsafe diagram container member: {info.filename}")
-                if info.file_size > DIAGRAM_MAX_MEMBER_BYTES:
-                    raise ValueError(f"diagram member exceeds size limit: {member_name}")
-                total_bytes += int(info.file_size or 0)
-                if total_bytes > DIAGRAM_MAX_TOTAL_BYTES:
-                    raise ValueError("diagram container exceeds readable XML limit")
                 normalized = member_name.lower()
                 if normalized.startswith("visio/pages/") and normalized.endswith(".xml"):
+                    if info.file_size > DIAGRAM_MAX_MEMBER_BYTES:
+                        raise ValueError(f"diagram page XML member exceeds size limit: {member_name}")
+                    total_page_xml_bytes += int(info.file_size or 0)
+                    if total_page_xml_bytes > DIAGRAM_MAX_TOTAL_BYTES:
+                        raise ValueError("diagram page XML exceeds readable XML limit")
                     page_members.append((member_name, info))
+                    if len(page_members) > DIAGRAM_MAX_PAGE_XML_MEMBERS:
+                        raise ValueError(f"diagram container has too many page XML members: {len(page_members)}")
 
             page_blocks: list[str] = []
             metadata["page_count"] = len(page_members)
