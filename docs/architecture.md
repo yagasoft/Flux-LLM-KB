@@ -380,6 +380,17 @@ conservative same-document/version-family collapse for common filename variants 
 `v1`, `v2`, `final`, dated copies, and copy suffixes. It suppresses sibling
 versions only in result presentation and exposes the canonical path plus
 suppressed sibling count.
+When a watched-root save or sync makes an indexed path unseen, Flux marks the
+`source_assets` row deleted with `unseen_reason`, `unseen_since`, and
+`purge_after` metadata and cancels matching pending, retry-locked, or running
+per-file corpus jobs as `cancelled_unseen_asset`. Worker extraction checks that
+claimed job rows are still running before and during result application, so a
+cancelled in-flight extractor cannot reinsert chunks or flip the job back to
+completed. Physical unseen-asset purge is a worker cleanup pass controlled by
+`crawler.unseen_asset_purge_grace_seconds` and
+`crawler.unseen_asset_purge_batch_size`; it deletes only Flux database/index
+rows such as chunk embeddings, code metadata, manifests, canonical links, and
+`source_assets`, never files on disk.
 On-demand semantic duplicate refresh extends this with embedding-similar
 near-duplicate clusters across corpus chunks, episodes, and claims. The
 canonical member is selected deterministically from local metadata such as trust,

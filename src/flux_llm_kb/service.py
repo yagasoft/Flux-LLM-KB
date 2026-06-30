@@ -26,7 +26,7 @@ from .acceleration import (
     job_family_for_type,
     kind_to_job_families,
 )
-from .crawler import CorpusPolicy, scan_path, strict_indexing_enabled
+from .crawler import CorpusPolicy, _is_included, scan_path, strict_indexing_enabled
 from . import __version__, database, governance, operator_automation
 from .glob_policy import effective_glob_policy
 from .extractors import extractor_availability
@@ -2006,8 +2006,40 @@ class KnowledgeService:
             plan=plan,
             dry_run=dry_run,
             reason=reason,
+            unseen_purge_grace_seconds=_configured_unseen_asset_purge_grace_seconds(),
             progress_callback=progress_callback,
         )
+
+    def reconcile_unseen_assets_for_root(self, *, root_name: str, reason: str = "root_policy_update") -> dict[str, Any]:
+        root = database.get_monitored_root(root_name)
+        if root is None:
+            raise ValueError(f"monitored root not found: {root_name}")
+        glob_policy = _configured_glob_policy(root)
+        policy = CorpusPolicy(
+            root_path=Path(root["root_path"]),
+            recursive=root["recursive"],
+            include_globs=tuple(glob_policy["include_globs"]),
+            exclude_globs=tuple(glob_policy["exclude_globs"]),
+            strict_indexing=strict_indexing_enabled(root.get("metadata") if isinstance(root.get("metadata"), dict) else {}),
+            max_inline_bytes=root["max_inline_bytes"],
+            heavy_threshold_bytes=root["heavy_threshold_bytes"],
+        )
+        active_paths = database.list_active_source_asset_paths(root_name=root["name"])
+        unseen_paths = [path for path in active_paths if not _is_included(path, policy, [])]
+        if not unseen_paths:
+            return {"root_name": root["name"], "reason": reason, "assets_marked": 0, "jobs_cancelled": 0}
+        result = database.mark_unseen_source_assets(
+            root_name=root["name"],
+            paths=unseen_paths,
+            reason=reason,
+            grace_seconds=_configured_unseen_asset_purge_grace_seconds(),
+        )
+        return {
+            "root_name": root["name"],
+            "reason": reason,
+            "assets_marked": int(result.get("assets_marked") or 0),
+            "jobs_cancelled": int(result.get("jobs_cancelled") or 0),
+        }
 
     def watch_probe(self, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
         return probe_watcher_backend(
@@ -3227,6 +3259,14 @@ class KnowledgeService:
             stale_recovery = database.recover_stale_running_corpus_jobs(root_name=root_name)
         except Exception as exc:
             stale_recovery = {"root_name": root_name, "recovered": 0, "error": str(exc)}
+        try:
+            purged_unseen = database.purge_unseen_corpus_assets(
+                root_name=root_name,
+                grace_seconds=_configured_unseen_asset_purge_grace_seconds(),
+                batch_size=_configured_unseen_asset_purge_batch_size(),
+            )
+        except Exception as exc:
+            purged_unseen = {"root_name": root_name, "assets_purged": 0, "error": str(exc)}
         cancelled = database.cancel_duplicate_corpus_jobs(root_name=root_name)
         effective_kind = family or kind
         job_families = kind_to_job_families(effective_kind)
@@ -3247,6 +3287,7 @@ class KnowledgeService:
         failed = 0
         cancelled_orphaned = 0
         cancelled_missing_source = 0
+        cancelled_unseen_asset = 0
         for job, duration_ms, process_result in self._process_claimed_corpus_jobs(claimed, workers=effective_workers):
             telemetry = {
                 "job_family": job.get("job_family"),
@@ -3276,6 +3317,14 @@ class KnowledgeService:
                     telemetry=telemetry,
                 )
                 cancelled_missing_source += 1
+            elif process_result.status == "cancelled_unseen_asset":
+                database.cancel_unseen_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or "cancelled_unseen_asset",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                cancelled_unseen_asset += 1
             elif process_result.status == "blocked_missing_dependency":
                 database.block_corpus_job(
                     job_id=job["id"],
@@ -3349,7 +3398,9 @@ class KnowledgeService:
                 "failed": failed,
                 "cancelled_orphaned": cancelled_orphaned,
                 "cancelled_missing_source": cancelled_missing_source,
+                "cancelled_unseen_asset": cancelled_unseen_asset,
                 "recovered_stale_running": stale_recovery.get("recovered", 0),
+                "purged_unseen_assets": purged_unseen.get("assets_purged", 0),
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
                 "cleared_completed_errors": cleared_errors["cleared"],
@@ -3369,7 +3420,9 @@ class KnowledgeService:
             "failed": failed,
             "cancelled_orphaned": cancelled_orphaned,
             "cancelled_missing_source": cancelled_missing_source,
+            "cancelled_unseen_asset": cancelled_unseen_asset,
             "recovered_stale_running": stale_recovery.get("recovered", 0),
+            "purged_unseen_assets": purged_unseen.get("assets_purged", 0),
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],
             "cleared_completed_errors": cleared_errors["cleared"],
@@ -5135,6 +5188,20 @@ def _configured_hash_parallelism() -> int:
         return int(SettingsService().resolve("crawler.hash_parallelism").raw_value)
     except Exception:
         return 1
+
+
+def _configured_unseen_asset_purge_grace_seconds() -> int:
+    try:
+        return max(0, int(SettingsService().resolve("crawler.unseen_asset_purge_grace_seconds").raw_value))
+    except Exception:
+        return database.DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS
+
+
+def _configured_unseen_asset_purge_batch_size() -> int:
+    try:
+        return max(1, min(int(SettingsService().resolve("crawler.unseen_asset_purge_batch_size").raw_value), 5000))
+    except Exception:
+        return database.DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE
 
 
 def _configured_worker_caps() -> dict[str, int]:

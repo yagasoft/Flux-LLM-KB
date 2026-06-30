@@ -28,6 +28,8 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "crawler.container_max_members" in keys
     assert "crawler.container_max_total_bytes" in keys
     assert "crawler.container_max_member_bytes" in keys
+    assert "crawler.unseen_asset_purge_grace_seconds" in keys
+    assert "crawler.unseen_asset_purge_batch_size" in keys
     assert "watcher.interval_seconds" in keys
     assert "watcher.stability_quiet_seconds" in keys
     assert "watcher.large_file_stability_quiet_seconds" in keys
@@ -132,6 +134,20 @@ def test_crawler_global_excludes_reconcile_db_values_without_removing_custom_pat
     assert resolved.raw_value.count("**/.vs/**") == 1
     for pattern in EXPECTED_GENERATED_CACHE_EXCLUDES:
         assert pattern in resolved.raw_value
+
+
+def test_unseen_asset_purge_settings_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("crawler.unseen_asset_purge_grace_seconds").raw_value == 86400
+    assert service.resolve("crawler.unseen_asset_purge_batch_size").raw_value == 500
+
+    monkeypatch.setenv("FLUX_KB_UNSEEN_ASSET_PURGE_GRACE_SECONDS", "3600")
+    monkeypatch.setenv("FLUX_KB_UNSEEN_ASSET_PURGE_BATCH_SIZE", "25")
+
+    assert service.resolve("crawler.unseen_asset_purge_grace_seconds").raw_value == 3600
+    assert service.resolve("crawler.unseen_asset_purge_batch_size").raw_value == 25
 
 
 def test_governance_settings_defaults_and_env_overrides(monkeypatch):

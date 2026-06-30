@@ -432,6 +432,7 @@ def test_complete_corpus_job_records_duration_and_telemetry(monkeypatch):
     assert "completed_at = now()" in sql
     assert "last_duration_ms = %s" in sql
     assert "telemetry = telemetry || %s::jsonb" in sql
+    assert "AND status = 'running'" in sql
     assert params == (42, json.dumps({"family": "media"}, sort_keys=True), "job-1")
 
 
@@ -2149,6 +2150,119 @@ def test_cancel_duplicate_corpus_jobs_marks_pending_duplicate_jobs_terminal(monk
     assert "payload->>'root_name' = %s" in sql
 
 
+def test_persist_crawl_plan_marks_unseen_assets_deleted_and_cancels_jobs(monkeypatch, tmp_path):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text FROM monitored_roots" in sql:
+                return ("root-1",)
+            if "INSERT INTO crawl_runs" in sql:
+                return ("run-1",)
+            if "SELECT count(*) FROM cancelled" in sql:
+                return (2,)
+            return None
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "RETURNING path" in sql:
+                return [("old/secret.pdf",)]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    plan = CrawlPlan(root_path=tmp_path, assets=[], deferred_jobs=[], errors=[])
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.persist_crawl_plan(root_name="docs", plan=plan)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result["files_deleted"] == 1
+    assert "extraction_status = 'deleted'" in sql
+    assert "unseen_reason" in sql
+    assert "unseen_since" in sql
+    assert "purge_after" in sql
+    assert "cancelled_unseen_asset" in sql
+    assert "status IN ('pending', 'retrying_locked', 'running')" in sql
+    assert "locked_at = NULL" in sql
+    assert "locked_by = NULL" in sql
+    assert "previous_status" in sql
+    assert any(params and "old/secret.pdf" in str(params) for _statement, params in executed)
+
+
+def test_purge_unseen_corpus_assets_removes_index_rows_after_grace(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (3,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.purge_unseen_corpus_assets(root_name="docs", grace_seconds=86400, batch_size=500)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result == {"root_name": "docs", "assets_purged": 3}
+    assert "metadata ? 'unseen_reason'" in sql
+    assert "make_interval(secs => %s)" in sql
+    assert "LIMIT %s" in sql
+    assert "DELETE FROM embeddings" in sql
+    assert "DELETE FROM code_symbols" in sql
+    assert "DELETE FROM code_references" in sql
+    assert "DELETE FROM asset_chunks" in sql
+    assert "DELETE FROM crawl_path_manifests" in sql
+    assert "DELETE FROM source_assets" in sql
+    assert "unlink" not in sql.lower()
+    assert "remove(" not in sql.lower()
+
+
 def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_indexed(monkeypatch):
     executed = []
 
@@ -2237,6 +2351,7 @@ def test_complete_corpus_job_clears_previous_error(monkeypatch):
 
     sql = "\n".join(item[0] for item in executed)
     assert "last_error = NULL" in sql
+    assert "AND status = 'running'" in sql
 
 
 def test_cancel_orphaned_corpus_job_records_terminal_state(monkeypatch):
@@ -2279,6 +2394,7 @@ def test_cancel_orphaned_corpus_job_records_terminal_state(monkeypatch):
     assert "status = 'cancelled_orphaned_root'" in sql
     assert "completed_at = now()" in sql
     assert "locked_at = NULL" in sql
+    assert "AND status = 'running'" in sql
     assert executed[0][1] == (
         "monitored root not found: smoke",
         12,
@@ -2329,6 +2445,7 @@ def test_cancel_missing_source_corpus_job_records_terminal_state_and_marks_asset
     assert "status = 'cancelled_missing_source'" in sql
     assert "UPDATE source_assets" in sql
     assert "extraction_status = 'deleted'" in sql
+    assert "AND status = 'running'" in sql
     assert executed[0][1] == (
         "source file not found: missing/attachment.docx",
         12,
@@ -2336,6 +2453,48 @@ def test_cancel_missing_source_corpus_job_records_terminal_state_and_marks_asset
         "job-1",
     )
     assert json.loads(executed[1][1][0])["missing_source_deleted"] is True
+
+
+def test_block_corpus_job_only_updates_running_jobs(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.block_corpus_job(
+        job_id="job-1",
+        error="extract failed",
+        status="failed",
+        telemetry={"result_status": "failed"},
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "status = %s" in sql
+    assert "AND status = 'running'" in sql
+    assert executed[0][1][0] == "failed"
 
 
 def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch):
@@ -3197,6 +3356,8 @@ def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
                 return ("asset-parent", None, "root-1", "file:///docs/bundle.zip", 123)
             if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
                 return ("asset-parent", None)
+            if "UPDATE source_assets" in sql:
+                return ("asset-parent",)
             if "SELECT id::text FROM source_assets" in sql:
                 return None
             if "INSERT INTO source_assets" in sql:
@@ -3278,6 +3439,8 @@ def test_apply_extraction_result_strips_stale_strict_blocked_metadata(monkeypatc
             sql = executed[-1][0]
             if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
                 return ("asset-1", None, "root-1", "file:///docs/scan.png", 123)
+            if "UPDATE source_assets" in sql:
+                return ("asset-1",)
             return None
 
     class FakeConnection:
@@ -3309,6 +3472,120 @@ def test_apply_extraction_result_strips_stale_strict_blocked_metadata(monkeypatc
     assert "COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'" in sql
 
 
+def test_apply_extraction_result_for_job_locks_running_job_before_writing(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "FROM capture_jobs" in sql:
+                return ("job-1", "running")
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
+                return ("asset-1", None, "root-1", "file:///docs/readme.md", 123)
+            if "UPDATE source_assets" in sql:
+                return ("asset-1",)
+            if "INSERT INTO asset_chunks" in sql:
+                return ("chunk-1",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    result = SimpleNamespace(
+        status="indexed",
+        metadata={"extractor": "text"},
+        chunks=(AssetChunk(chunk_index=0, title="readme", body="body", token_estimate=1),),
+        child_assets=(),
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
+
+    applied = database.apply_extraction_result_for_job(
+        job_id="job-1",
+        root_name="docs",
+        relative_path="readme.md",
+        result=result,
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert applied is True
+    assert "FOR UPDATE" in sql
+    assert "status = 'running'" in sql
+    assert "UPDATE source_assets" in sql
+    assert "INSERT INTO asset_chunks" in sql
+
+
+def test_apply_extraction_result_for_job_skips_when_job_was_cancelled(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    result = SimpleNamespace(status="indexed", metadata={}, chunks=(), child_assets=())
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    applied = database.apply_extraction_result_for_job(
+        job_id="job-1",
+        root_name="docs",
+        relative_path="readme.md",
+        result=result,
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert applied is False
+    assert "FROM capture_jobs" in sql
+    assert "FOR UPDATE" in sql
+    assert "UPDATE source_assets" not in sql
+    assert "INSERT INTO asset_chunks" not in sql
+
+
 def test_apply_extraction_result_persists_nested_container_child_metadata(monkeypatch):
     executed = []
 
@@ -3330,6 +3607,8 @@ def test_apply_extraction_result_persists_nested_container_child_metadata(monkey
                 return ("asset-parent", None, "root-1", "file:///docs/bundle.zip", 123)
             if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
                 return ("asset-parent", None)
+            if "UPDATE source_assets" in sql:
+                return ("asset-parent",)
             if "SELECT id::text FROM source_assets" in sql:
                 return None
             if "INSERT INTO source_assets" in sql:

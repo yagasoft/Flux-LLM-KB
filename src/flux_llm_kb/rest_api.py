@@ -1340,7 +1340,7 @@ def create_app():
             )
             if request.strict_indexing is not None:
                 metadata["strict_indexing"] = bool(request.strict_indexing)
-            return database.update_monitored_root(
+            updated = database.update_monitored_root(
                 root_id=root_id,
                 name=name,
                 root_path=root_path_text,
@@ -1355,6 +1355,8 @@ def create_app():
                 heavy_threshold_bytes=heavy_threshold_bytes,
                 metadata=metadata,
             )
+            service.reconcile_unseen_assets_for_root(root_name=updated["name"], reason="root_policy_update")
+            return updated
         except ValueError as exc:
             raise FluxApiError(
                 code="crawl.root_not_found",

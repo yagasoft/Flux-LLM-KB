@@ -802,6 +802,12 @@ def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path
     from flux_llm_kb.rest_api import create_app
 
     captured = {}
+    cleanup_calls = []
+
+    class FakeService:
+        def reconcile_unseen_assets_for_root(self, **kwargs):
+            cleanup_calls.append(kwargs)
+            return {"assets_marked": 2, "jobs_cancelled": 2}
 
     def fake_update_monitored_root(**kwargs):
         captured.update(kwargs)
@@ -821,7 +827,7 @@ def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path
         "get_monitored_root_by_identifier",
         lambda _root_id: {"metadata": {"owner": "ops", "strict_indexing": True}},
     )
-    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
 
     client = fastapi_testclient.TestClient(create_app())
     response = client.patch(
@@ -848,6 +854,7 @@ def test_crawl_root_update_endpoint_validates_and_persists(monkeypatch, tmp_path
     assert captured["metadata"]["source"] == "dashboard"
     assert captured["metadata"]["owner"] == "ops"
     assert captured["metadata"]["strict_indexing"] is False
+    assert cleanup_calls == [{"root_name": "docs-edited", "reason": "root_policy_update"}]
 
 
 def test_crawl_root_delete_endpoint_purges_index(monkeypatch):

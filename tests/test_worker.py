@@ -101,6 +101,79 @@ def test_backfill_recovers_stale_jobs_globally(monkeypatch):
     assert calls["cancelled"] == [{"root_name": None}]
 
 
+def test_backfill_purges_unseen_assets_before_claiming_jobs(monkeypatch):
+    order = []
+    calls = {"recovered": [], "purged": [], "cancelled": [], "repaired": [], "cleared_errors": []}
+
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **kwargs: calls["recovered"].append(kwargs) or {"recovered": 0})
+    monkeypatch.setattr(
+        database,
+        "purge_unseen_corpus_assets",
+        lambda **kwargs: order.append("purge") or calls["purged"].append(kwargs) or {"assets_purged": 4},
+        raising=False,
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **kwargs: calls["cancelled"].append(kwargs) or {"cancelled": 0})
+    monkeypatch.setattr(database, "claim_corpus_jobs", lambda **_kwargs: order.append("claim") or [])
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+    monkeypatch.setattr(service_module, "_configured_unseen_asset_purge_grace_seconds", lambda: 86400, raising=False)
+    monkeypatch.setattr(service_module, "_configured_unseen_asset_purge_batch_size", lambda: 500, raising=False)
+
+    result = KnowledgeService().run_corpus_backfill(kind="general", limit=1, workers=1)
+
+    assert order == ["purge", "claim"]
+    assert calls["purged"] == [{"root_name": None, "grace_seconds": 86400, "batch_size": 500}]
+    assert result["purged_unseen_assets"] == 4
+
+
+def test_backfill_records_unseen_asset_cancellation_without_retry(monkeypatch):
+    calls = {"cancelled": [], "completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **_kwargs: {"recovered": 0})
+    monkeypatch.setattr(database, "purge_unseen_corpus_assets", lambda **_kwargs: {"assets_purged": 0}, raising=False)
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-unseen",
+                "job_type": "corpus_extract_document",
+                "job_family": "office",
+                "payload": {"path": "tmp/secret.docx", "root_name": "docs"},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_unseen_corpus_job", lambda **kwargs: calls["cancelled"].append(kwargs), raising=False)
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda _job: worker.JobProcessResult(
+            status="cancelled_unseen_asset",
+            message="source asset is no longer included by root policy: tmp/secret.docx",
+            telemetry={"unseen_reason": "excluded_by_policy"},
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="office", limit=1, workers=1)
+
+    assert result["cancelled_unseen_asset"] == 1
+    assert calls["completed"] == []
+    assert calls["blocked"] == []
+    assert calls["retried"] == []
+    assert calls["cancelled"][0]["job_id"] == "job-unseen"
+    assert calls["cancelled"][0]["error"] == "source asset is no longer included by root policy: tmp/secret.docx"
+    assert calls["cancelled"][0]["telemetry"]["result_status"] == "cancelled_unseen_asset"
+
+
 def test_backfill_marks_failed_job_terminal_after_configured_attempts(monkeypatch):
     calls = {"blocked": [], "retried": [], "recovered": [], "repaired": [], "cleared_errors": []}
 
@@ -708,6 +781,98 @@ def test_corpus_job_cancels_missing_source_file_instead_of_blocking(monkeypatch,
     assert result.status == "cancelled_missing_source"
     assert result.message == "source file not found: missing/attachment.docx"
     assert result.telemetry == {"missing_source": True, "missing_source_deleted": True}
+
+
+def test_corpus_job_cancels_excluded_path_without_extraction(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    excluded_dir = root / "tmp"
+    excluded_dir.mkdir(parents=True)
+    (excluded_dir / "secret.pdf").write_bytes(b"private")
+    extracted = []
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda root_name: {
+            "name": root_name,
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": ["tmp/**"],
+            "max_inline_bytes": 262144,
+            "heavy_threshold_bytes": 10485760,
+            "metadata": {},
+        },
+    )
+    monkeypatch.setattr(worker, "extract_file", lambda *_args: extracted.append(True) or SimpleNamespace(status="indexed"))
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-excluded",
+            "job_type": "corpus_extract_document",
+            "payload": {"root_name": "docs", "path": "tmp/secret.pdf"},
+        }
+    )
+
+    assert result.status == "cancelled_unseen_asset"
+    assert result.message == "source asset is no longer included by root policy: tmp/secret.pdf"
+    assert result.telemetry == {"unseen_reason": "excluded_by_policy", "cancelled_unseen_asset": True}
+    assert extracted == []
+    assert applied == []
+
+
+def test_corpus_job_discards_extraction_result_when_running_job_was_cancelled(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "readme.md").write_text("body", encoding="utf-8")
+    legacy_applied = []
+    guarded_applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda root_name: {
+            "name": root_name,
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 262144,
+            "heavy_threshold_bytes": 10485760,
+            "metadata": {},
+        },
+    )
+    monkeypatch.setattr(database, "corpus_job_is_running", lambda _job_id: True, raising=False)
+    monkeypatch.setattr(
+        database,
+        "apply_extraction_result_for_job",
+        lambda **kwargs: guarded_applied.append(kwargs) or False,
+        raising=False,
+    )
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: legacy_applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda *_args: SimpleNamespace(status="indexed", message=None, metadata={"extractor": "text"}, chunks=(), child_assets=()),
+    )
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-running",
+            "job_type": "corpus_extract_text",
+            "payload": {"root_name": "docs", "path": "readme.md"},
+        }
+    )
+
+    assert result.status == "cancelled_unseen_asset"
+    assert result.message == "corpus job was cancelled before extraction results were applied"
+    assert result.telemetry == {"unseen_reason": "cancelled_during_extraction", "cancelled_unseen_asset": True}
+    assert guarded_applied[0]["job_id"] == "job-running"
+    assert legacy_applied == []
 
 
 def test_backfill_merges_ocr_telemetry_into_completed_jobs(monkeypatch):
@@ -1525,6 +1690,40 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
     assert captured["manifest"]["content_hash"] == "cached"
     assert callable(captured["persist_progress_callback"])
     assert progress == [{"stage": "enumerated", "files_total": 1}, {"stage": "persisted", "files_total": 1}]
+
+
+def test_reconcile_unseen_assets_for_root_marks_paths_excluded_by_effective_policy(monkeypatch, tmp_path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _root_name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": ["tmp/**"],
+            "glob_mode": "extend",
+            "max_inline_bytes": 262144,
+            "heavy_threshold_bytes": 10485760,
+            "metadata": {},
+        },
+    )
+    monkeypatch.setattr(database, "list_active_source_asset_paths", lambda **_kwargs: ["keep/readme.md", "tmp/secret.pdf"], raising=False)
+    monkeypatch.setattr(
+        database,
+        "mark_unseen_source_assets",
+        lambda **kwargs: calls.append(kwargs) or {"assets_marked": len(kwargs["paths"]), "jobs_cancelled": len(kwargs["paths"])},
+        raising=False,
+    )
+    monkeypatch.setattr(service_module, "_configured_unseen_asset_purge_grace_seconds", lambda: 86400, raising=False)
+
+    result = KnowledgeService().reconcile_unseen_assets_for_root(root_name="docs", reason="root_policy_update")
+
+    assert result == {"root_name": "docs", "reason": "root_policy_update", "assets_marked": 1, "jobs_cancelled": 1}
+    assert calls == [{"root_name": "docs", "paths": ["tmp/secret.pdf"], "reason": "root_policy_update", "grace_seconds": 86400}]
 
 
 def test_backfill_passes_configured_worker_family_caps(monkeypatch):

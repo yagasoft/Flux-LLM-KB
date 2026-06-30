@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from . import database
-from .crawler import CorpusPolicy, strict_indexing_enabled, strict_metadata_only_message
+from .crawler import CorpusPolicy, _is_included, strict_indexing_enabled, strict_metadata_only_message
 from .extractors import ExtractionResult, extract_file
+from .glob_policy import effective_glob_policy
 from .settings import SettingsService
 
 
@@ -24,9 +25,40 @@ def process_corpus_job(job: dict) -> JobProcessResult:
     if not root_name or not relative_path:
         return JobProcessResult(status="failed", message="job payload requires root_name and path")
 
+    job_id = str(job.get("id") or "").strip()
+    if job_id:
+        try:
+            job_running = database.corpus_job_is_running(job_id)
+        except Exception:
+            job_running = True
+        if not job_running:
+            return _cancelled_unseen_result(
+                "corpus job was cancelled before extraction started",
+                reason="cancelled_before_extraction",
+            )
+
     root = database.get_monitored_root(root_name)
     if root is None:
         return JobProcessResult(status="cancelled_orphaned_root", message=f"monitored root not found: {root_name}")
+
+    root_metadata = root.get("metadata") if isinstance(root.get("metadata"), dict) else {}
+    strict_indexing = strict_indexing_enabled(root_metadata)
+    glob_policy = _configured_glob_policy(root)
+    policy = CorpusPolicy(
+        root_path=Path(root["root_path"]),
+        recursive=root["recursive"],
+        include_globs=tuple(glob_policy["include_globs"]),
+        exclude_globs=tuple(glob_policy["exclude_globs"]),
+        strict_indexing=strict_indexing,
+        max_inline_bytes=root["max_inline_bytes"],
+        heavy_threshold_bytes=root["heavy_threshold_bytes"],
+        **_configured_container_limits(),
+    )
+    if not _is_included(str(relative_path), policy, []):
+        return _cancelled_unseen_result(
+            f"source asset is no longer included by root policy: {relative_path}",
+            reason="excluded_by_policy",
+        )
 
     path = Path(root["root_path"]) / relative_path
     if not path.exists():
@@ -36,18 +68,6 @@ def process_corpus_job(job: dict) -> JobProcessResult:
             telemetry={"missing_source": True, "missing_source_deleted": True},
         )
 
-    root_metadata = root.get("metadata") if isinstance(root.get("metadata"), dict) else {}
-    strict_indexing = strict_indexing_enabled(root_metadata)
-    policy = CorpusPolicy(
-        root_path=Path(root["root_path"]),
-        recursive=root["recursive"],
-        include_globs=tuple(root["include_globs"]),
-        exclude_globs=tuple(root["exclude_globs"]),
-        strict_indexing=strict_indexing,
-        max_inline_bytes=root["max_inline_bytes"],
-        heavy_threshold_bytes=root["heavy_threshold_bytes"],
-        **_configured_container_limits(),
-    )
     try:
         result = extract_file(path, policy)
     except OSError as exc:
@@ -62,8 +82,21 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         )
     result = _enforce_strict_indexing_result(result, strict_indexing=strict_indexing)
     if result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
-        database.apply_extraction_result(root_name=root_name, relative_path=relative_path, result=result)
-    return JobProcessResult(status=result.status, message=result.message, telemetry=_telemetry_from_extraction_result(result))
+        if job_id:
+            applied = database.apply_extraction_result_for_job(
+                job_id=job_id,
+                root_name=root_name,
+                relative_path=relative_path,
+                result=result,
+            )
+            if not applied:
+                return _cancelled_unseen_result(
+                    "corpus job was cancelled before extraction results were applied",
+                    reason="cancelled_during_extraction",
+                )
+        else:
+            database.apply_extraction_result(root_name=root_name, relative_path=relative_path, result=result)
+    return JobProcessResult(status=result.status, message=getattr(result, "message", None), telemetry=_telemetry_from_extraction_result(result))
 
 
 def process_embedding_job(job: dict) -> JobProcessResult:
@@ -327,6 +360,27 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             if source_key in metadata:
                 telemetry[telemetry_key] = int(metadata.get(source_key) or 0)
     return telemetry
+
+
+def _cancelled_unseen_result(message: str, *, reason: str) -> JobProcessResult:
+    return JobProcessResult(
+        status=database.UNSEEN_ASSET_CANCELLED_STATUS,
+        message=message,
+        telemetry={"unseen_reason": reason, "cancelled_unseen_asset": True},
+    )
+
+
+def _configured_glob_policy(root: dict[str, Any]) -> dict[str, Any]:
+    settings = SettingsService()
+    try:
+        global_include = settings.resolve("crawler.global_include_globs").raw_value
+    except Exception:
+        global_include = []
+    try:
+        global_exclude = settings.resolve("crawler.global_exclude_globs").raw_value
+    except Exception:
+        global_exclude = []
+    return effective_glob_policy(root, global_include=global_include, global_exclude=global_exclude)
 
 
 def _configured_container_limits() -> dict[str, int]:

@@ -49,6 +49,9 @@ _SEMANTIC_DUPLICATE_OWNER_TABLES = {
 }
 _SEMANTIC_DUPLICATE_DEFAULT_THRESHOLD = 0.86
 _SEMANTIC_DUPLICATE_ALGORITHM = f"{DEFAULT_EMBEDDING_MODEL}:cosine"
+UNSEEN_ASSET_CANCELLED_STATUS = "cancelled_unseen_asset"
+DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS = 86400
+DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE = 500
 _CODE_EXACT_SYMBOL_BOOST = 0.10
 _CODE_IMPLEMENTATION_INTENT_BOOST = 0.025
 _CODE_IMPLEMENTATION_RELATIONSHIPS = {"definition", "route", "config", "migration"}
@@ -2520,6 +2523,7 @@ def persist_crawl_plan(
     plan: CrawlPlan,
     dry_run: bool = False,
     reason: str = "manual_sync",
+    unseen_purge_grace_seconds: int = DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     url: str | None = None,
 ) -> dict[str, Any]:
@@ -2788,8 +2792,21 @@ def persist_crawl_plan(
                         current_path=asset.relative_path,
                     )
 
-            _mark_deleted_assets(cur, root_id, seen_paths, plan)
-            deleted = cur.rowcount
+            unseen_paths = _mark_deleted_assets(
+                cur,
+                root_id,
+                seen_paths,
+                plan,
+                reason="sync_unseen",
+                grace_seconds=unseen_purge_grace_seconds,
+            )
+            deleted = len(unseen_paths)
+            _cancel_unseen_corpus_jobs_for_paths(
+                cur,
+                root_name=root_name,
+                paths=unseen_paths,
+                reason="sync_unseen",
+            )
             cur.execute(
                 """
                 UPDATE crawl_runs
@@ -3471,6 +3488,158 @@ def cancel_duplicate_corpus_jobs(*, root_name: str | None = None, url: str | Non
             return {"root_name": root_name, "cancelled": int(cur.fetchone()[0] or 0)}
 
 
+def list_active_source_asset_paths(*, root_name: str, url: str | None = None) -> list[str]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.path
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.name = %s
+                  AND a.deleted_at IS NULL
+                ORDER BY a.path
+                """,
+                (root_name,),
+            )
+            return [str(row[0]) for row in cur.fetchall()]
+
+
+def mark_unseen_source_assets(
+    *,
+    root_name: str,
+    paths: list[str] | tuple[str, ...],
+    reason: str = "root_policy_update",
+    grace_seconds: int = DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS,
+    url: str | None = None,
+) -> dict[str, Any]:
+    normalized_paths = _normalized_relative_paths(paths)
+    if not normalized_paths:
+        return {"root_name": root_name, "reason": reason, "assets_marked": 0, "jobs_cancelled": 0}
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text FROM monitored_roots WHERE name = %s", (root_name,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"monitored root not found: {root_name}")
+            marked_paths = _mark_unseen_assets_by_paths(
+                cur,
+                root_id=row[0],
+                paths=normalized_paths,
+                reason=reason,
+                grace_seconds=grace_seconds,
+            )
+            jobs_cancelled = _cancel_unseen_corpus_jobs_for_paths(
+                cur,
+                root_name=root_name,
+                paths=marked_paths,
+                reason=reason,
+            )
+            return {
+                "root_name": root_name,
+                "reason": reason,
+                "assets_marked": len(marked_paths),
+                "jobs_cancelled": jobs_cancelled,
+            }
+
+
+def purge_unseen_corpus_assets(
+    *,
+    root_name: str | None = None,
+    grace_seconds: int = DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS,
+    batch_size: int = DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE,
+    url: str | None = None,
+) -> dict[str, Any]:
+    bounded_grace = max(0, int(grace_seconds or 0))
+    bounded_batch = max(1, min(int(batch_size or DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE), 5000))
+    root_filter = "AND r.name = %s" if root_name else ""
+    params: list[Any] = [bounded_grace]
+    if root_name:
+        params.append(root_name)
+    params.append(bounded_batch)
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH eligible AS MATERIALIZED (
+                    SELECT a.id, a.root_id, a.path
+                    FROM source_assets a
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE a.deleted_at IS NOT NULL
+                      AND a.metadata ? 'unseen_reason'
+                      AND COALESCE((a.metadata->>'purge_after')::timestamptz, a.deleted_at + make_interval(secs => %s)) <= now()
+                      {root_filter}
+                    ORDER BY a.deleted_at, a.path
+                    LIMIT %s
+                    FOR UPDATE OF a SKIP LOCKED
+                ),
+                canonical_links_cleared AS (
+                    UPDATE source_assets duplicate
+                    SET canonical_asset_id = NULL,
+                        updated_at = now()
+                    WHERE duplicate.canonical_asset_id IN (SELECT id FROM eligible)
+                    RETURNING 1
+                ),
+                code_references_deleted AS (
+                    DELETE FROM code_references
+                    WHERE source_asset_id IN (SELECT id FROM eligible)
+                    RETURNING 1
+                ),
+                code_symbols_deleted AS (
+                    DELETE FROM code_symbols
+                    WHERE source_asset_id IN (SELECT id FROM eligible)
+                    RETURNING 1
+                ),
+                embeddings_deleted AS (
+                    DELETE FROM embeddings
+                    WHERE owner_table = 'asset_chunks'
+                      AND owner_id IN (
+                          SELECT c.id
+                          FROM asset_chunks c
+                          JOIN eligible e ON e.id = c.asset_id
+                      )
+                    RETURNING 1
+                ),
+                chunks_deleted AS (
+                    DELETE FROM asset_chunks
+                    WHERE asset_id IN (SELECT id FROM eligible)
+                    RETURNING 1
+                ),
+                manifests_deleted AS (
+                    DELETE FROM crawl_path_manifests manifest
+                    USING eligible
+                    WHERE manifest.root_id = eligible.root_id
+                      AND manifest.path = eligible.path
+                    RETURNING 1
+                ),
+                assets_deleted AS (
+                    DELETE FROM source_assets
+                    WHERE id IN (SELECT id FROM eligible)
+                    RETURNING id::text
+                ),
+                audit AS (
+                    INSERT INTO audit_events (event_type, target_table, details)
+                    SELECT 'corpus.unseen_assets_purged',
+                           'source_assets',
+                           jsonb_build_object(
+                               'root_name', %s::text,
+                               'assets_purged', (SELECT count(*) FROM assets_deleted),
+                               'grace_seconds', %s::integer,
+                               'batch_size', %s::integer
+                           )
+                    WHERE EXISTS (SELECT 1 FROM assets_deleted)
+                    RETURNING 1
+                )
+                SELECT count(*) FROM assets_deleted
+                """,
+                tuple([*params, root_name, bounded_grace, bounded_batch]),
+            )
+            return {"root_name": root_name, "assets_purged": int(cur.fetchone()[0] or 0)}
+
+
 def claim_corpus_jobs(
     *,
     limit: int = 1,
@@ -3734,6 +3903,7 @@ def complete_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
                 """,
                 (duration_ms, _json(telemetry or {}), job_id),
             )
@@ -3763,6 +3933,7 @@ def cancel_orphaned_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
                 """,
                 (error, duration_ms, _json(telemetry or {}), job_id),
             )
@@ -3794,6 +3965,7 @@ def cancel_missing_source_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
                 """,
                 (error, duration_ms, _json(telemetry or {}), job_id),
             )
@@ -3927,6 +4099,7 @@ def retry_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
                 """,
                 (status, error, max(1, cooldown_seconds), duration_ms, _json(telemetry or {}), job_id),
             )
@@ -4059,8 +4232,48 @@ def block_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
                 """,
                 (status, error, duration_ms, _json(telemetry or {}), job_id),
+            )
+
+
+def cancel_unseen_corpus_job(
+    *,
+    job_id: str,
+    error: str,
+    duration_ms: int | None = None,
+    telemetry: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                WITH cancelled AS (
+                    UPDATE capture_jobs
+                    SET status = '{UNSEEN_ASSET_CANCELLED_STATUS}',
+                        last_error = %s,
+                        completed_at = now(),
+                        last_duration_ms = %s,
+                        telemetry = telemetry || %s::jsonb,
+                        locked_at = NULL,
+                        locked_by = NULL,
+                        updated_at = now()
+                    WHERE id = %s
+                      AND job_type LIKE 'corpus_%%'
+                      AND status = 'running'
+                    RETURNING id::text
+                )
+                INSERT INTO audit_events (event_type, target_table, target_id, details)
+                SELECT 'capture_job.cancelled_unseen_asset',
+                       'capture_jobs',
+                       id,
+                       jsonb_build_object('reason', %s::text)
+                FROM cancelled
+                """,
+                (error, duration_ms, _json(telemetry or {}), job_id, error),
             )
 
 
@@ -5995,52 +6208,125 @@ def apply_extraction_result(
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT a.id::text, a.canonical_asset_id::text, a.root_id::text, a.uri, a.mtime_ns
-                FROM source_assets a
-                JOIN monitored_roots r ON r.id = a.root_id
-                WHERE r.name = %s
-                  AND a.path = %s
-                """,
-                (root_name, relative_path),
+            _apply_extraction_result_with_cursor(
+                cur,
+                root_name=root_name,
+                relative_path=relative_path,
+                result=result,
             )
-            row = cur.fetchone()
-            if not row:
-                raise ValueError(f"source asset not found: {root_name}:{relative_path}")
-            asset_id, canonical_asset_id, root_id, parent_uri, parent_mtime_ns = row
-            status = result.status
-            if canonical_asset_id and status == "indexed":
-                status = "duplicate_suppressed"
-            metadata_json = _json(result.metadata or {})
+
+
+def corpus_job_is_running(job_id: str, *, url: str | None = None) -> bool:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE source_assets
-                SET extraction_status = %s,
-                    metadata = CASE
-                        WHEN %s::jsonb ? 'strict_indexing'
-                             AND COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'
-                        THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
-                        ELSE metadata || %s::jsonb
-                    END,
-                    indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
-                    updated_at = now()
+                SELECT 1
+                FROM capture_jobs
                 WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
                 """,
-                (status, metadata_json, metadata_json, metadata_json, metadata_json, status, asset_id),
+                (job_id,),
             )
-            _replace_asset_chunks(cur, asset_id, () if canonical_asset_id else result.chunks)
-            child_assets = tuple(getattr(result, "child_assets", ()) or ())
-            if not canonical_asset_id and (child_assets or (result.metadata or {}).get("extractor") == "container"):
-                _replace_container_child_assets(
+            return cur.fetchone() is not None
+
+
+def apply_extraction_result_for_job(
+    *,
+    job_id: str,
+    root_name: str,
+    relative_path: str,
+    result: Any,
+    url: str | None = None,
+) -> bool:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, status
+                FROM capture_jobs
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
+                FOR UPDATE
+                """,
+                (job_id,),
+            )
+            if cur.fetchone() is None:
+                return False
+            try:
+                _apply_extraction_result_with_cursor(
                     cur,
-                    root_id=root_id,
-                    parent_asset_id=asset_id,
-                    parent_relative_path=relative_path,
-                    parent_uri=parent_uri,
-                    parent_mtime_ns=int(parent_mtime_ns or 0),
-                    child_assets=child_assets,
+                    root_name=root_name,
+                    relative_path=relative_path,
+                    result=result,
                 )
+            except ValueError:
+                return False
+            return True
+
+
+def _apply_extraction_result_with_cursor(
+    cur: Any,
+    *,
+    root_name: str,
+    relative_path: str,
+    result: Any,
+) -> None:
+    cur.execute(
+        """
+        SELECT a.id::text, a.canonical_asset_id::text, a.root_id::text, a.uri, a.mtime_ns
+        FROM source_assets a
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE r.name = %s
+          AND a.path = %s
+          AND a.deleted_at IS NULL
+        """,
+        (root_name, relative_path),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"source asset not found: {root_name}:{relative_path}")
+    asset_id, canonical_asset_id, root_id, parent_uri, parent_mtime_ns = row
+    status = result.status
+    if canonical_asset_id and status == "indexed":
+        status = "duplicate_suppressed"
+    metadata_json = _json(result.metadata or {})
+    cur.execute(
+        """
+        UPDATE source_assets
+        SET extraction_status = %s,
+            metadata = CASE
+                WHEN %s::jsonb ? 'strict_indexing'
+                     AND COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'
+                THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
+                ELSE metadata || %s::jsonb
+            END,
+            indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
+            updated_at = now()
+        WHERE id = %s
+          AND deleted_at IS NULL
+        RETURNING id::text
+        """,
+        (status, metadata_json, metadata_json, metadata_json, metadata_json, status, asset_id),
+    )
+    if cur.fetchone() is None:
+        raise ValueError(f"source asset not active: {root_name}:{relative_path}")
+    _replace_asset_chunks(cur, asset_id, () if canonical_asset_id else result.chunks)
+    child_assets = tuple(getattr(result, "child_assets", ()) or ())
+    if not canonical_asset_id and (child_assets or (result.metadata or {}).get("extractor") == "container"):
+        _replace_container_child_assets(
+            cur,
+            root_id=root_id,
+            parent_asset_id=asset_id,
+            parent_relative_path=relative_path,
+            parent_uri=parent_uri,
+            parent_mtime_ns=int(parent_mtime_ns or 0),
+            child_assets=child_assets,
+        )
 
 
 def retrieval_stats(*, url: str | None = None) -> dict[str, int]:
@@ -11328,46 +11614,200 @@ def _cancel_duplicate_corpus_job_for_asset(cur: Any, *, root_name: str, relative
     )
 
 
-def _mark_deleted_assets(cur: Any, root_id: str, seen_paths: set[str], plan: CrawlPlan) -> None:
+def _normalized_relative_paths(paths: Iterable[str]) -> list[str]:
+    normalized: list[str] = []
+    for raw_path in paths:
+        path = str(raw_path or "").replace("\\", "/").strip().strip("/")
+        if path:
+            normalized.append(path)
+    return list(dict.fromkeys(normalized))
+
+
+def _mark_unseen_assets_by_paths(
+    cur: Any,
+    *,
+    root_id: str,
+    paths: list[str],
+    reason: str,
+    grace_seconds: int,
+) -> list[str]:
+    if not paths:
+        return []
+    cur.execute(
+        """
+        UPDATE source_assets
+        SET deleted_at = COALESCE(deleted_at, now()),
+            extraction_status = 'deleted',
+            metadata = metadata || jsonb_build_object(
+                'unseen_reason', %s::text,
+                'unseen_since', COALESCE(metadata->>'unseen_since', now()::text),
+                'purge_after', COALESCE(metadata->>'purge_after', (now() + make_interval(secs => %s))::text),
+                'readiness_status', 'deleted',
+                'readiness_reason', %s::text
+            ),
+            updated_at = now()
+        WHERE root_id = %s
+          AND path = ANY(%s)
+          AND (deleted_at IS NULL OR NOT (metadata ? 'unseen_reason'))
+        RETURNING path
+        """,
+        (reason, max(0, int(grace_seconds or 0)), reason, root_id, paths),
+    )
+    try:
+        return [str(row[0]) for row in cur.fetchall()]
+    except AttributeError:
+        return []
+
+
+def _mark_deleted_assets(
+    cur: Any,
+    root_id: str,
+    seen_paths: set[str],
+    plan: CrawlPlan,
+    *,
+    reason: str,
+    grace_seconds: int,
+) -> list[str]:
+    seen_path_list = list(seen_paths) or [""]
     if plan.scope_relative_path is None:
         cur.execute(
             """
             UPDATE source_assets
-            SET deleted_at = now(), updated_at = now()
+            SET deleted_at = COALESCE(deleted_at, now()),
+                extraction_status = 'deleted',
+                metadata = metadata || jsonb_build_object(
+                    'unseen_reason', %s::text,
+                    'unseen_since', COALESCE(metadata->>'unseen_since', now()::text),
+                    'purge_after', COALESCE(metadata->>'purge_after', (now() + make_interval(secs => %s))::text),
+                    'readiness_status', 'deleted',
+                    'readiness_reason', %s::text
+                ),
+                updated_at = now()
             WHERE root_id = %s
-              AND deleted_at IS NULL
+              AND (deleted_at IS NULL OR NOT (metadata ? 'unseen_reason'))
               AND NOT (path = ANY(%s))
+            RETURNING path
             """,
-            (root_id, list(seen_paths) or [""]),
+            (reason, max(0, int(grace_seconds or 0)), reason, root_id, seen_path_list),
         )
-        return
+        try:
+            return [str(row[0]) for row in cur.fetchall()]
+        except AttributeError:
+            return []
 
     if plan.scope_is_file:
         cur.execute(
             """
             UPDATE source_assets
-            SET deleted_at = now(), updated_at = now()
+            SET deleted_at = COALESCE(deleted_at, now()),
+                extraction_status = 'deleted',
+                metadata = metadata || jsonb_build_object(
+                    'unseen_reason', %s::text,
+                    'unseen_since', COALESCE(metadata->>'unseen_since', now()::text),
+                    'purge_after', COALESCE(metadata->>'purge_after', (now() + make_interval(secs => %s))::text),
+                    'readiness_status', 'deleted',
+                    'readiness_reason', %s::text
+                ),
+                updated_at = now()
             WHERE root_id = %s
-              AND deleted_at IS NULL
+              AND (deleted_at IS NULL OR NOT (metadata ? 'unseen_reason'))
               AND path = %s
               AND NOT (path = ANY(%s))
+            RETURNING path
             """,
-            (root_id, plan.scope_relative_path, list(seen_paths) or [""]),
+            (reason, max(0, int(grace_seconds or 0)), reason, root_id, plan.scope_relative_path, seen_path_list),
         )
-        return
+        try:
+            return [str(row[0]) for row in cur.fetchall()]
+        except AttributeError:
+            return []
 
     prefix = f"{plan.scope_relative_path}/"
     cur.execute(
         """
         UPDATE source_assets
-        SET deleted_at = now(), updated_at = now()
+        SET deleted_at = COALESCE(deleted_at, now()),
+            extraction_status = 'deleted',
+            metadata = metadata || jsonb_build_object(
+                'unseen_reason', %s::text,
+                'unseen_since', COALESCE(metadata->>'unseen_since', now()::text),
+                'purge_after', COALESCE(metadata->>'purge_after', (now() + make_interval(secs => %s))::text),
+                'readiness_status', 'deleted',
+                'readiness_reason', %s::text
+            ),
+            updated_at = now()
         WHERE root_id = %s
-          AND deleted_at IS NULL
+          AND (deleted_at IS NULL OR NOT (metadata ? 'unseen_reason'))
           AND (path = %s OR path LIKE %s)
           AND NOT (path = ANY(%s))
+        RETURNING path
         """,
-        (root_id, plan.scope_relative_path, f"{prefix}%", list(seen_paths) or [""]),
+        (reason, max(0, int(grace_seconds or 0)), reason, root_id, plan.scope_relative_path, f"{prefix}%", seen_path_list),
     )
+    try:
+        return [str(row[0]) for row in cur.fetchall()]
+    except AttributeError:
+        return []
+
+
+def _cancel_unseen_corpus_jobs_for_paths(
+    cur: Any,
+    *,
+    root_name: str,
+    paths: list[str] | tuple[str, ...],
+    reason: str,
+) -> int:
+    normalized_paths = _normalized_relative_paths(paths)
+    if not normalized_paths:
+        return 0
+    cur.execute(
+        f"""
+        WITH candidates AS (
+            SELECT id, status
+            FROM capture_jobs
+            WHERE job_type LIKE 'corpus_%%'
+              AND status IN ('pending', 'retrying_locked', 'running')
+              AND payload->>'root_name' = %s
+              AND payload->>'path' = ANY(%s)
+            FOR UPDATE
+        ),
+        cancelled AS (
+            UPDATE capture_jobs job
+            SET status = '{UNSEEN_ASSET_CANCELLED_STATUS}',
+                last_error = %s,
+                completed_at = now(),
+                locked_at = NULL,
+                locked_by = NULL,
+                telemetry = telemetry || jsonb_build_object(
+                    'unseen_reason', %s::text,
+                    'previous_status', candidates.status
+                ),
+                updated_at = now()
+            FROM candidates
+            WHERE job.id = candidates.id
+            RETURNING job.id::text, candidates.status AS previous_status
+        ),
+        audit AS (
+            INSERT INTO audit_events (event_type, target_table, target_id, details)
+            SELECT 'capture_job.cancelled_unseen_asset',
+                   'capture_jobs',
+                   id,
+                   jsonb_build_object('reason', %s::text, 'previous_status', previous_status)
+            FROM cancelled
+            RETURNING 1
+        )
+        SELECT count(*) FROM cancelled
+        """,
+        (
+            root_name,
+            normalized_paths,
+            f"cancelled_unseen_asset: {reason}",
+            reason,
+            reason,
+        ),
+    )
+    row = cur.fetchone()
+    return int(row[0] or 0) if row else 0
 
 
 def _upsert_watcher_state(cur: Any, root_id: str, status: str) -> None:
