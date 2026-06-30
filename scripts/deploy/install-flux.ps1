@@ -211,6 +211,8 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      OLLAMA_LOAD_TIMEOUT: 30m
+      OLLAMA_KEEP_ALIVE: 30m
     volumes:
       - ../models/ollama:/root/.ollama
     healthcheck:

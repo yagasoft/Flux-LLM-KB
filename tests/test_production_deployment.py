@@ -121,6 +121,8 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "  ollama:" in compose
         assert "image: ollama/ollama:latest" in compose
         assert "container_name: flux-ollama" in compose
+        assert compose.count("OLLAMA_LOAD_TIMEOUT: 30m") == 1
+        assert compose.count("OLLAMA_KEEP_ALIVE: 30m") == 1
         assert "- ../models/ollama:/root/.ollama" in compose
         assert 'test: ["CMD", "ollama", "list"]' in compose
         assert "ollama:" in compose
