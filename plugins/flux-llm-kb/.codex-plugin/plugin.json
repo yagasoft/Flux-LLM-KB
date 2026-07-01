@@ -33,6 +33,7 @@
     "defaultPrompt": [
       "Use Flux LLM-KB to retrieve relevant project memory before starting non-trivial work",
       "Use normal kb.brief/search for broad context; broad search/brief excludes code by default, so when broad lookup should return code pass filters={\"file_kinds\":[\"code\"]} as the only file kind or use kb.code_search / kb.code_symbol_lookup; use separate broad non-code and code-specific calls for mixed context",
+      "For code lookup, pass cwd when available. Do not infer root_name from folder names; call kb.code_status(cwd=...) or inspect status roots for the exact configured root_name. Use kb.code_search mode=\"literal_symbol\" for known symbols/paths and mode=\"full_text\" for natural-language terms, stderr fragments, job text, or implementation-body searches",
       "Use Flux LLM-KB for concise redacted durable saves of reusable mid-turn outcomes when decisions, fixes, procedures, commands, or verified project facts should be retrievable before the turn ends",
       "Make final responses indexable for Flux LLM-KB by summarizing decisions, files changed or referenced, commands/tests run, and unresolved gaps without including secrets"
     ],

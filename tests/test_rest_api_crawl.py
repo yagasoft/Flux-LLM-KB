@@ -362,11 +362,19 @@ def test_code_and_operational_diagnostic_routes_forward_to_service(monkeypatch):
 
     client = fastapi_testclient.TestClient(create_app())
 
-    assert client.get("/api/code/status", params={"root_name": "app"}).json()["totals"]["symbol_count"] == 1
+    assert client.get("/api/code/status", params={"root_name": "app", "cwd": "E:/LLM KB"}).json()["totals"]["symbol_count"] == 1
     assert (
         client.get(
             "/api/code/search",
-            params={"query": "OrderService", "language": "python", "relationship": "call", "path_glob": "src/*.py", "include_generated": "true"},
+            params={
+                "query": "OrderService",
+                "mode": "full-text",
+                "cwd": "E:/LLM KB",
+                "language": "python",
+                "relationship": "call",
+                "path_glob": "src/*.py",
+                "include_generated": "true",
+            },
         ).json()["results"][0]["symbol"]
         == "OrderService"
     )
@@ -374,12 +382,14 @@ def test_code_and_operational_diagnostic_routes_forward_to_service(monkeypatch):
     assert client.get("/api/diagnostics/workers", params={"limit": 5}).json()["settings_mutated"] is False
 
     assert calls == [
-        ("code_status", {"root_name": "app"}),
+        ("code_status", {"root_name": "app", "cwd": "E:/LLM KB"}),
         (
             "code_search",
             {
                 "query": "OrderService",
                 "root_name": None,
+                "cwd": "E:/LLM KB",
+                "mode": "full_text",
                 "language": "python",
                 "symbol_kind": None,
                 "relationship": "call",

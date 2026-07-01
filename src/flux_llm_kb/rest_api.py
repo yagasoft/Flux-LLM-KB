@@ -515,13 +515,15 @@ def create_app():
         return service.indexer_root_reliability(root_name)
 
     @app.get("/api/code/status")
-    def code_status(root_name: str | None = None):
-        return service.code_status(root_name=root_name)
+    def code_status(root_name: str | None = None, cwd: str | None = None):
+        return service.code_status(root_name=root_name, cwd=cwd)
 
     @app.get("/api/code/search")
     def code_search(
         query: str,
         root_name: str | None = None,
+        cwd: str | None = None,
+        mode: str = "literal_symbol",
         language: str | None = None,
         symbol_kind: str | None = None,
         relationship: str | None = None,
@@ -532,6 +534,8 @@ def create_app():
         return service.code_search(
             query=query,
             root_name=root_name,
+            cwd=cwd,
+            mode=mode.replace("-", "_"),
             language=language,
             symbol_kind=symbol_kind,
             relationship=relationship,

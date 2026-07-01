@@ -20,7 +20,11 @@ def create_server():
             "workspaces, general indexed documents, previous fixes, or user-referenced "
             "history. Broad kb.search/kb.brief/kb.explain calls exclude code results by default. "
             "When broad lookup should return code, pass filters={\"file_kinds\":[\"code\"]} "
-            "as the only file_kinds value, or use kb.code_search / kb.code_symbol_lookup for symbol-specific lookup. "
+            "as the only file_kinds value, or use kb.code_search / kb.code_symbol_lookup for code lookup. "
+            "Do not infer root_name from folder names; pass cwd when available, or call kb.code_status(cwd=...) "
+            "and use the exact returned root_name. Use kb.code_search mode=\"literal_symbol\" for known symbols, "
+            "definitions, relationships, or paths. Use mode=\"full_text\" for natural-language terms, stderr fragments, "
+            "job text, or implementation-body searches over indexed code chunks. "
             "For mixed memory and code context, run separate broad non-code and code-specific calls. "
             "Skip KB queries when local files, the prompt, or current tool "
             "output already answer the question. Use kb.remember for concise durable "
@@ -296,16 +300,18 @@ def create_server():
         )
 
     @mcp.tool(name="kb.code_status")
-    def code_status(root_name: str | None = None):
-        """Return privacy-safe code index coverage, parser status, and fallback summaries."""
-        return service.code_status(root_name=root_name)
+    def code_status(root_name: str | None = None, cwd: str | None = None):
+        """Return privacy-safe code index coverage, parser status, and fallback summaries; pass cwd to resolve the exact root_name."""
+        return service.code_status(root_name=root_name, cwd=cwd)
 
     @mcp.tool(name="kb.code_search")
-    def code_search(query: str, root_name: str | None = None, language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, path_glob: str | None = None, include_generated: bool = False, limit: int = 20):
-        """Search code symbols and definitions without returning raw private code."""
+    def code_search(query: str, root_name: str | None = None, cwd: str | None = None, mode: str = "literal_symbol", language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, path_glob: str | None = None, include_generated: bool = False, limit: int = 20):
+        """Search code in literal_symbol mode for symbols/paths or full_text mode for indexed code chunks; pass cwd rather than guessing root_name."""
         return service.code_search(
             query=query,
             root_name=root_name,
+            cwd=cwd,
+            mode=mode,
             language=language,
             symbol_kind=symbol_kind,
             relationship=relationship,

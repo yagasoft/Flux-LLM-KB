@@ -444,9 +444,9 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
 
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
-    assert cli.main(["code", "status", "--root", "app"]) == 0
+    assert cli.main(["code", "status", "--root", "app", "--cwd", "E:/LLM KB"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
-    assert cli.main(["code", "search", "OrderService", "--language", "python", "--relationship", "call", "--path-glob", "src/*.py", "--include-generated"]) == 0
+    assert cli.main(["code", "search", "OrderService", "--mode", "full-text", "--cwd", "E:/LLM KB", "--language", "python", "--relationship", "call", "--path-glob", "src/*.py", "--include-generated"]) == 0
     search_payload = json.loads(capsys.readouterr().out)
     assert cli.main(["code", "symbol", "OrderService", "--no-references"]) == 0
     symbol_payload = json.loads(capsys.readouterr().out)
@@ -470,12 +470,14 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
     assert remediation_payload["action"] == "retry_corpus_job"
     assert backfill_payload["backfill"] == {"kind": "office", "limit": 4, "workers": None, "root_name": "app"}
     assert calls == [
-        ("code_status", {"root_name": "app"}),
+        ("code_status", {"root_name": "app", "cwd": "E:/LLM KB"}),
         (
             "code_search",
             {
                 "query": "OrderService",
                 "root_name": None,
+                "cwd": "E:/LLM KB",
+                "mode": "full_text",
                 "language": "python",
                 "symbol_kind": None,
                 "relationship": "call",

@@ -42,8 +42,8 @@ Tools:
 | `kb.operator_evidence` | Return combined reliability, code, and diagnostic evidence gates without mutating settings. |
 | `kb.indexer_root_reliability` | Show a monitored-root reliability card with sanitized counts and latest scoped benchmark evidence. |
 | `kb.indexer_reliability_roots` | Show sanitized multi-root reliability readiness for enabled monitored roots. |
-| `kb.code_status` | Return privacy-safe code index coverage, parser/fallback, generated-file, and slow-row summaries. |
-| `kb.code_search` | Search indexed code symbols and references without returning raw code content. |
+| `kb.code_status` | Return privacy-safe code index coverage, parser/fallback, generated-file, and slow-row summaries; `cwd` can resolve the exact monitored root. |
+| `kb.code_search` | Search code in `literal_symbol` mode for symbols/paths or `full_text` mode over indexed code chunks. |
 | `kb.code_symbol_lookup` | Look up definitions and references for a code symbol. |
 | `kb.code_feedback_record` | Record hashed/sanitized code retrieval miss feedback without raw query, code, or path persistence. |
 | `kb.code_feedback_summary` | Summarize code retrieval feedback by category and root. |
@@ -101,8 +101,8 @@ Endpoints:
 - `GET /api/acceleration/evidence?label=<label>&deployment_label=<label>&compare_label=<label>&freshness_hours=<n>&limit=<n>`
 - `GET /api/acceleration/reliability/root/{root_name}`
 - `GET /api/acceleration/reliability/roots`
-- `GET /api/code/status?root_name=<name>`
-- `GET /api/code/search?query=<q>&root_name=<name>&language=<language>&symbol_kind=<kind>&relationship=<definition|call|import|route|test|fixture|config|migration|notebook_cell>&path_glob=<glob>&include_generated=<true|false>&limit=<n>`
+- `GET /api/code/status?root_name=<name>&cwd=<workspace-path>`
+- `GET /api/code/search?query=<q>&mode=<literal_symbol|full_text>&root_name=<name>&cwd=<workspace-path>&language=<language>&symbol_kind=<kind>&relationship=<definition|call|import|route|test|fixture|config|migration|notebook_cell>&path_glob=<glob>&include_generated=<true|false>&limit=<n>`
 - `GET /api/code/symbols?symbol=<name>&root_name=<name>&language=<language>&include_references=<true|false>`
 - `POST /api/code/feedback` with `query`, optional `root_name`, `result_count`, `surface`, `miss_category`, optional `expected_symbol`, optional `path`, and optional metadata; only hashes/safe leaves are persisted
 - `GET /api/code/feedback/summary?root_name=<name>&limit=<n>`
@@ -203,6 +203,14 @@ accepts `kind`, `current_only`, `lifecycle_state`, `include_suppressed`, and
 `file_kind=code` query parameters; MCP tools accept an optional `filters` object;
 CLI search/explain use `--kind`, `--current-only`, `--lifecycle-state`,
 `--include-suppressed`, and `--file-kind code`.
+
+For code tools, prefer passing `cwd` when the agent knows the workspace path.
+Do not derive `root_name` from a display folder name; call `kb.code_status` or
+`flux-kb code status --cwd <path>` and use the exact returned root name when an
+explicit root is needed. `kb.code_search` defaults to `mode=literal_symbol`,
+which matches symbols, qualified names, and paths. Use `mode=full_text` for
+natural-language terms, stderr fragments, job text, and implementation-body
+phrases that may only appear inside indexed code chunks.
 `scope_mode=local_first` is the default: Flux searches matching
 workspace/root evidence first, then falls back to global memory only when local
 results have no lexical or fuzzy evidence. Search and explain responses may
@@ -256,8 +264,9 @@ flux-kb acceleration benchmark history --fixture text-heavy --mode scan --warm-s
 flux-kb acceleration evidence --compare-label baseline
 flux-kb acceleration reliability roots
 flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
-flux-kb code status --root docs
-flux-kb code search build_invoice --root app --language python --relationship call --path-glob "src/*.py"
+flux-kb code status --cwd "E:/LLM KB"
+flux-kb code search build_invoice --root app --mode literal-symbol --language python --relationship call --path-glob "src/*.py"
+flux-kb code search "Tesseract stderr worker" --cwd "E:/LLM KB" --mode full-text --language python
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
@@ -417,7 +426,10 @@ Code diagnostics use the existing `source_assets`, `asset_chunks`,
 expose coverage summaries, parser/fallback rates, generated counts,
 symbol/reference lookup, feedback summaries, benchmark-derived code gaps, and
 sanitized file labels without raw code content. Code search accepts optional
-`relationship`, `path_glob`, and `include_generated` filters; generic
+`mode`, `cwd`, `relationship`, `path_glob`, and `include_generated` filters.
+`mode=literal_symbol` uses the stored symbol/reference metadata and remains the
+default. `mode=full_text` delegates to indexed code corpus chunks and may return
+bounded snippets/excerpts, but not complete source files. Generic
 `kb.search`, REST search, CLI search, and explain filters accept the same code
 filter fields through the normal `filters` contract. Sanitized result metadata
 may include generated status, relationship, source/target symbols, route or test

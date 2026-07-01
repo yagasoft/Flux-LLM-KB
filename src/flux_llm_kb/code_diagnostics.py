@@ -24,31 +24,36 @@ def build_code_status_report(*, roots: list[dict[str, Any]], totals: dict[str, A
 
 
 def sanitize_code_result(row: dict[str, Any]) -> dict[str, Any]:
-    result = {
-        key: row.get(key)
-        for key in (
-            "symbol",
-            "name",
-            "qualified_name",
-            "target",
-            "symbol_kind",
-            "relationship",
-            "relationship_kind",
-            "language",
-            "path",
-            "line_start",
-            "line_end",
-            "parser_status",
-            "confidence",
-            "root_name",
-            "is_generated",
-            "target_symbol",
-            "source_symbol",
-            "route",
-            "test_target",
-        )
-        if row.get(key) not in {None, ""}
-    }
+    result = {}
+    for key in (
+        "symbol",
+        "name",
+        "qualified_name",
+        "target",
+        "symbol_kind",
+        "relationship",
+        "relationship_kind",
+        "language",
+        "path",
+        "line_start",
+        "line_end",
+        "parser_status",
+        "confidence",
+        "root_name",
+        "is_generated",
+        "target_symbol",
+        "source_symbol",
+        "route",
+        "test_target",
+        "excerpt",
+        "snippet",
+        "score",
+        "streams",
+    ):
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        result[key] = value
     if "qualified_name" in result and "symbol" not in result:
         result["symbol"] = result["qualified_name"]
     if "name" in result and "symbol" not in result:

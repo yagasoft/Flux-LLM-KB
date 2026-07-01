@@ -170,3 +170,153 @@ def test_service_code_search_and_symbol_lookup_use_database_helpers(monkeypatch)
     assert feedback_calls[0]["miss_category"] == "missing_symbol"
     assert summary["rows"][0]["miss_category"] == "missing_symbol"
     assert json.dumps(search).find("E:/private") == -1
+
+
+def test_service_code_status_resolves_root_from_cwd_without_guessing(monkeypatch):
+    status_calls = []
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {"name": "other", "root_path": "E:/Other", "enabled": True},
+            {"name": "llm-kb", "root_path": "E:/LLM KB", "enabled": True},
+        ],
+    )
+    monkeypatch.setattr(
+        database,
+        "code_index_status",
+        lambda **kwargs: status_calls.append(kwargs)
+        or {
+            "roots": [{"root_name": kwargs["root_name"], "asset_count": 1, "symbol_count": 1, "reference_count": 0}],
+            "totals": {"asset_count": 1, "symbol_count": 1, "reference_count": 0},
+        },
+    )
+    monkeypatch.setattr(database, "code_feedback_summary", lambda **kwargs: {"settings_mutated": False, "rows": [], "totals": {"event_count": 0}})
+    monkeypatch.setattr(database, "list_retrieval_benchmark_runs", lambda **kwargs: [])
+
+    status = KnowledgeService().code_status(cwd="E:/LLM KB/src/flux_llm_kb")
+
+    assert status["roots"][0]["root_name"] == "llm-kb"
+    assert status_calls == [{"root_name": "llm-kb"}]
+
+
+def test_service_code_status_prefers_explicit_root_name_over_cwd(monkeypatch):
+    status_calls = []
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {"name": "llm-kb", "root_path": "E:/LLM KB", "enabled": True},
+            {"name": "docs", "root_path": "E:/Docs", "enabled": True},
+        ],
+    )
+    monkeypatch.setattr(
+        database,
+        "code_index_status",
+        lambda **kwargs: status_calls.append(kwargs)
+        or {
+            "roots": [{"root_name": kwargs["root_name"], "asset_count": 1, "symbol_count": 1, "reference_count": 0}],
+            "totals": {"asset_count": 1, "symbol_count": 1, "reference_count": 0},
+        },
+    )
+    monkeypatch.setattr(database, "code_feedback_summary", lambda **kwargs: {"settings_mutated": False, "rows": [], "totals": {"event_count": 0}})
+    monkeypatch.setattr(database, "list_retrieval_benchmark_runs", lambda **kwargs: [])
+
+    status = KnowledgeService().code_status(root_name="docs", cwd="E:/LLM KB/src")
+
+    assert status["roots"][0]["root_name"] == "docs"
+    assert status_calls == [{"root_name": "docs"}]
+
+
+def test_service_code_search_full_text_uses_indexed_code_chunks(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [{"name": "llm-kb", "root_path": "E:/LLM KB", "enabled": True}],
+    )
+    monkeypatch.setattr(database, "search_episodes", lambda *_args, **_kwargs: [])
+
+    def fake_search_corpus_chunks(query, limit=20, root_name=None, filters=None, **_kwargs):
+        captured.update({"query": query, "limit": limit, "root_name": root_name, "filters": filters})
+        return [
+            {
+                "id": "chunk-code",
+                "asset_id": "asset-code",
+                "title": "extractors.py::_ocr_image",
+                "summary": "Tesseract exits with stderr when image OCR fails in the worker.",
+                "score": 0.91,
+                "streams": ["corpus_lexical", "corpus_fuzzy"],
+                "raw_scores": {"corpus_lexical": 1.0},
+                "source_path": "src/flux_llm_kb/extractors.py",
+                "root_name": "llm-kb",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {
+                    "language": "python",
+                    "primary_symbol": "_ocr_image",
+                    "symbol_kind": "function",
+                    "relationship": "definition",
+                    "range": {"line_start": 120, "line_end": 140},
+                    "parser_status": "parsed",
+                },
+            }
+        ]
+
+    monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
+
+    result = KnowledgeService().code_search(
+        "Tesseract stderr worker",
+        cwd="E:/LLM KB/src",
+        mode="full_text",
+        language="python",
+        symbol_kind="function",
+        relationship="definition",
+        path_glob="src/**/*.py",
+        include_generated=False,
+        limit=3,
+    )
+
+    assert result["mode"] == "full_text"
+    assert captured["root_name"] == "llm-kb"
+    assert captured["filters"] == {
+        "logical_kinds": ["file"],
+        "current_only": False,
+        "lifecycle_states": [],
+        "include_suppressed": False,
+        "file_kinds": ["code"],
+        "languages": ["python"],
+        "symbol_kinds": ["function"],
+        "relationships": ["definition"],
+        "path_globs": ["src/**/*.py"],
+        "include_generated": False,
+    }
+    item = result["results"][0]
+    assert item["symbol"] == "_ocr_image"
+    assert item["symbol_kind"] == "function"
+    assert item["relationship"] == "definition"
+    assert item["language"] == "python"
+    assert item["path"] == "extractors.py"
+    assert item["line_start"] == 120
+    assert item["line_end"] == 140
+    assert item["parser_status"] == "parsed"
+    assert item["root_name"] == "llm-kb"
+    assert item["excerpt"] == "Tesseract exits with stderr when image OCR fails in the worker."
+    assert item["snippet"]["text"] == item["excerpt"]
+    assert item["snippet"]["matched_terms"] == ["tesseract", "stderr", "worker"]
+    assert item["snippet"]["source_path"] == "src/flux_llm_kb/extractors.py"
+    assert item["score"] == 0.91
+    assert item["streams"] == ["corpus_lexical", "corpus_fuzzy"]
+    assert "summary" not in item
+
+
+def test_service_code_search_rejects_unknown_mode():
+    service = KnowledgeService()
+
+    try:
+        service.code_search("query", mode="semantic")
+    except ValueError as exc:
+        assert "mode must be one of" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("unknown code search mode should fail")

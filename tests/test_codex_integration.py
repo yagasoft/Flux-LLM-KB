@@ -313,11 +313,17 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "local files, the prompt, or current tool output already answer" in skill
     assert "normal kb.brief/search for broad context" in skill
     assert "kb.code_search" in skill
+    assert "Do not infer `root_name` from folder names" in skill
+    assert "kb.code_status(cwd=" in skill
+    assert 'mode="literal_symbol"' in skill
+    assert 'mode="full_text"' in skill
     assert 'filters={"file_kinds":["code"]}' in skill
     assert "as the only file kind" in skill
     assert "mixed code plus non-code file kinds are rejected" in skill
     assert "Broad `kb.search`, `kb.brief`, and `kb.explain` exclude code results by default" in skill
     assert "kb.code_search" in prompts
+    assert "Do not infer root_name from folder names" in prompts
+    assert "mode=\"full_text\"" in prompts
     assert 'filters={"file_kinds":["code"]}' in prompts
     assert "as the only file kind" in prompts
     assert "separate broad non-code and code-specific calls" in prompts

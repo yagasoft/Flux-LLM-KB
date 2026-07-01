@@ -57,6 +57,8 @@ STRONG_VECTOR_MIN_SCORE = 0.35
 ALLOWED_RETRIEVAL_LOGICAL_KINDS = {"episode", "file", "mail"}
 CODE_FILE_KIND = "code"
 INTERNAL_EXCLUDE_FILE_KINDS_KEY = "_exclude_file_kinds"
+CODE_SEARCH_LITERAL_SYMBOL_MODE = "literal_symbol"
+CODE_SEARCH_FULL_TEXT_MODE = "full_text"
 WATCHER_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
@@ -2351,12 +2353,13 @@ class KnowledgeService:
             diagnostics=diagnostics,
         )
 
-    def code_status(self, *, root_name: str | None = None) -> dict[str, Any]:
-        payload = database.code_index_status(root_name=root_name)
+    def code_status(self, *, root_name: str | None = None, cwd: str | None = None) -> dict[str, Any]:
+        effective_root_name = _resolve_code_root_name(root_name=root_name, cwd=cwd)
+        payload = database.code_index_status(root_name=effective_root_name)
         roots = payload.get("roots") if isinstance(payload, dict) else []
         totals = payload.get("totals") if isinstance(payload, dict) else {}
         report = build_code_status_report(roots=roots or [], totals=totals or {})
-        feedback = self.code_feedback_summary(root_name=root_name)
+        feedback = self.code_feedback_summary(root_name=effective_root_name)
         report["feedback_summary"] = feedback
         try:
             latest_retrieval = database.list_retrieval_benchmark_runs(suite="standard", limit=1)
@@ -2371,6 +2374,8 @@ class KnowledgeService:
         query: str,
         *,
         root_name: str | None = None,
+        cwd: str | None = None,
+        mode: str = CODE_SEARCH_LITERAL_SYMBOL_MODE,
         language: str | None = None,
         symbol_kind: str | None = None,
         relationship: str | None = None,
@@ -2378,18 +2383,43 @@ class KnowledgeService:
         include_generated: bool = False,
         limit: int = 20,
     ) -> dict[str, Any]:
+        normalized_mode = _normalize_code_search_mode(mode)
+        effective_root_name = _resolve_code_root_name(root_name=root_name, cwd=cwd)
+        capped_limit = max(1, min(int(limit or 20), 100))
+        if normalized_mode == CODE_SEARCH_FULL_TEXT_MODE:
+            filters = _code_full_text_filters(
+                language=language,
+                symbol_kind=symbol_kind,
+                relationship=relationship,
+                path_glob=path_glob,
+                include_generated=include_generated,
+            )
+            results = self.search(
+                query,
+                limit=capped_limit,
+                root_name=effective_root_name,
+                scope_mode="local_only" if effective_root_name else "global",
+                filters=filters,
+            )
+            return {
+                "query": query,
+                "mode": normalized_mode,
+                "settings_mutated": False,
+                "results": [_sanitize_full_text_code_result(row) for row in results],
+            }
         rows = database.search_code_symbols(
             query=query,
-            root_name=root_name,
+            root_name=effective_root_name,
             language=language,
             symbol_kind=symbol_kind,
             relationship=relationship,
             path_glob=path_glob,
             include_generated=include_generated,
-            limit=max(1, min(int(limit or 20), 100)),
+            limit=capped_limit,
         )
         return {
             "query": query,
+            "mode": normalized_mode,
             "settings_mutated": False,
             "results": [sanitize_code_result(row) for row in rows],
         }
@@ -3991,6 +4021,70 @@ def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[s
     if "include_generated" in filters:
         normalized["include_generated"] = bool(filters.get("include_generated"))
     return normalized
+
+
+def _normalize_code_search_mode(mode: str | None) -> str:
+    normalized = str(mode or CODE_SEARCH_LITERAL_SYMBOL_MODE).strip().lower().replace("-", "_")
+    if normalized not in {CODE_SEARCH_LITERAL_SYMBOL_MODE, CODE_SEARCH_FULL_TEXT_MODE}:
+        raise ValueError("mode must be one of: literal_symbol, full_text")
+    return normalized
+
+
+def _resolve_code_root_name(*, root_name: str | None, cwd: str | None) -> str | None:
+    cleaned_root_name = _clean_optional_text(root_name)
+    if cleaned_root_name:
+        return cleaned_root_name
+    root = _retrieval_root(None, _clean_optional_text(cwd))
+    if root is None:
+        return None
+    return _clean_optional_text(str(root.get("name") or ""))
+
+
+def _code_full_text_filters(
+    *,
+    language: str | None,
+    symbol_kind: str | None,
+    relationship: str | None,
+    path_glob: str | None,
+    include_generated: bool,
+) -> dict[str, Any]:
+    filters: dict[str, Any] = {
+        "logical_kinds": ["file"],
+        "file_kinds": [CODE_FILE_KIND],
+        "include_generated": include_generated,
+    }
+    if language:
+        filters["language"] = language
+    if symbol_kind:
+        filters["symbol_kind"] = symbol_kind
+    if relationship:
+        filters["relationship"] = relationship
+    if path_glob:
+        filters["path_glob"] = path_glob
+    return normalize_retrieval_filters(filters)
+
+
+def _sanitize_full_text_code_result(item: dict[str, Any]) -> dict[str, Any]:
+    code = item.get("code") if isinstance(item.get("code"), dict) else {}
+    code_range = code.get("range") if isinstance(code.get("range"), dict) else {}
+    payload: dict[str, Any] = {
+        "symbol": code.get("primary_symbol") or item.get("title"),
+        "symbol_kind": code.get("symbol_kind"),
+        "relationship": code.get("relationship"),
+        "language": code.get("language"),
+        "path": item.get("source_path") or code.get("source_path") or item.get("path"),
+        "line_start": code_range.get("line_start") or code.get("line_start"),
+        "line_end": code_range.get("line_end") or code.get("line_end"),
+        "parser_status": code.get("parser_status"),
+        "root_name": item.get("root_name"),
+        "excerpt": item.get("excerpt"),
+        "snippet": item.get("snippet"),
+        "score": item.get("score"),
+        "streams": item.get("streams"),
+    }
+    if code.get("generated") is not None:
+        payload["is_generated"] = bool(code.get("generated"))
+    return sanitize_code_result(payload)
 
 
 def _validate_code_file_kind_filter(file_kinds: list[str]) -> None:

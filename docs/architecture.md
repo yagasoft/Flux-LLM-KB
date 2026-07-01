@@ -102,7 +102,10 @@ Code-aware retrieval adds an exact symbol stream over `code_symbols`, preserves
 the normal corpus chunk result shape, and exposes code metadata in retrieval
 explanations. Callers can keep using `kb.search`, REST search, and CLI search
 while narrowing by file kind, language, symbol kind, relationship, path glob,
-and monitored root.
+and monitored root. Dedicated code search has two modes: `literal_symbol`
+matches symbol/path metadata for known names, while `full_text` searches
+indexed code chunks for prose, stderr fragments, job text, and implementation
+body phrases.
 Embedding rows carry redacted provider metadata such as model, dimensions,
 source hash, and cache key, but not raw source text. Existing synchronous writes
 still create vectors for new episodes, claims, and chunks, while `corpus_embed`
@@ -523,7 +526,9 @@ Code diagnostics are read-only and privacy-safe. They aggregate coverage from
 per-root language counts, parser status/fallback counts, generated-file counts,
 definition/reference coverage, and slow/problematic code-index rows without raw
 code content or private root paths. Dedicated code status/search/symbol lookup
-surfaces reuse the stored symbol/reference tables and sanitize path output.
+surfaces sanitize path output, and `code_status` / `code_search` accept `cwd`
+so callers can resolve the configured monitored root instead of guessing
+`root_name` from a folder label.
 Code and generic corpus search filters accept `relationship`, `path_glob`, and
 `include_generated`; broad search, explain, and brief exclude code by default,
 so callers must include `file_kind=code` / `filters={"file_kinds":["code"]}`
@@ -531,9 +536,12 @@ as the only requested file kind before those broad surfaces return code results.
 Mixed code plus non-code file-kind filters are rejected; use separate broad
 non-code and code-specific calls when both contexts are needed. Generated files
 are excluded when `include_generated=false` is part of the active filter set.
-Sanitized code results can include `is_generated`, `relationship`, `target_symbol`,
-`source_symbol`, `route`, `test_target`, `parser_status`, `language`,
-`symbol_kind`, and line ranges. Code retrieval feedback records only
+Dedicated `code_search` defaults to `mode=literal_symbol`, which reuses
+`code_symbols` / `code_references`. `mode=full_text` delegates to indexed code
+corpus chunks and can return bounded snippets/excerpts, but not complete source
+files. Sanitized code results can include `is_generated`, `relationship`,
+`target_symbol`, `source_symbol`, `route`, `test_target`, `parser_status`, `language`,
+`symbol_kind`, score/stream metadata, snippets, and line ranges. Code retrieval feedback records only
 hashed/sanitized miss evidence and appears in `code status` as
 `feedback_summary`, `gaps[]`, retrieval benchmark summary metadata, and
 benchmark-derived code gap priorities when available.
@@ -578,8 +586,9 @@ flux-kb acceleration benchmark run --scenario tuning --mode scan --passes 2
 flux-kb acceleration evidence --compare-label baseline
 flux-kb acceleration reliability roots
 flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
-flux-kb code status --root docs
-flux-kb code search build_invoice --root app --language python --relationship call --path-glob "src/*.py"
+flux-kb code status --cwd "E:/LLM KB"
+flux-kb code search build_invoice --root app --mode literal-symbol --language python --relationship call --path-glob "src/*.py"
+flux-kb code search "Tesseract stderr worker" --cwd "E:/LLM KB" --mode full-text --language python
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app

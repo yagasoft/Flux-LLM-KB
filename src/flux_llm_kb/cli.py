@@ -205,9 +205,17 @@ def main(argv: list[str] | None = None) -> int:
     code_subparsers = code_parser.add_subparsers(dest="code_command", required=True)
     code_status = code_subparsers.add_parser("status", help="Show code index coverage and parser status")
     code_status.add_argument("--root", dest="root_name")
-    code_search = code_subparsers.add_parser("search", help="Search code symbols and definitions")
+    code_status.add_argument("--cwd", help="Workspace directory used to resolve the monitored root when --root is omitted")
+    code_search = code_subparsers.add_parser("search", help="Search code symbols or indexed code text")
     code_search.add_argument("query")
     code_search.add_argument("--root", dest="root_name")
+    code_search.add_argument("--cwd", help="Workspace directory used to resolve the monitored root when --root is omitted")
+    code_search.add_argument(
+        "--mode",
+        choices=["literal-symbol", "literal_symbol", "full-text", "full_text"],
+        default="literal_symbol",
+        help="Search literal symbol/path metadata or indexed code chunk text",
+    )
     code_search.add_argument("--language")
     code_search.add_argument("--symbol-kind")
     code_search.add_argument("--relationship")
@@ -885,11 +893,13 @@ def _code(args: argparse.Namespace) -> int:
 
     service = KnowledgeService()
     if args.code_command == "status":
-        payload = service.code_status(root_name=args.root_name)
+        payload = service.code_status(root_name=args.root_name, cwd=args.cwd)
     elif args.code_command == "search":
         payload = service.code_search(
             query=args.query,
             root_name=args.root_name,
+            cwd=args.cwd,
+            mode=args.mode.replace("-", "_"),
             language=args.language,
             symbol_kind=args.symbol_kind,
             relationship=args.relationship,
