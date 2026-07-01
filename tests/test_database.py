@@ -2354,6 +2354,8 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
     assert "EXISTS" in sql
     assert "asset_chunks" in sql
     assert "extraction_status = 'queued'" in sql
+    assert "a.extraction_status NOT IN ('indexed', 'processing_staged')" in sql
+    assert "a.extraction_status <> 'indexed'" not in sql
     assert "r.name = %s" in sql
 
 
@@ -4434,7 +4436,8 @@ def test_repair_extracted_corpus_asset_statuses_purges_stale_chunks_and_mail_int
     assert "stale_chunks" in repair_function
     assert "DELETE FROM embeddings" in repair_function
     assert "DELETE FROM asset_chunks" in repair_function
-    assert "a.extraction_status <> 'indexed'" in repair_function
+    assert "a.extraction_status NOT IN ('indexed', 'processing_staged')" in repair_function
+    assert "a.extraction_status <> 'indexed'" not in repair_function
     assert "message.eml" in repair_function
     assert "message.msg" in repair_function
     assert "body.html" in repair_function

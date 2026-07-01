@@ -4510,7 +4510,7 @@ def repair_extracted_corpus_asset_statuses(
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE (
                         a.deleted_at IS NOT NULL
-                        OR a.extraction_status <> 'indexed'
+                        OR a.extraction_status NOT IN ('indexed', 'processing_staged')
                         OR (
                             array_length(string_to_array(a.path, '/'), 1) = 2
                             AND lower(split_part(a.path, '/', 2)) IN ('message.eml', 'message.msg', 'body.html')
@@ -4539,7 +4539,7 @@ def repair_extracted_corpus_asset_statuses(
                     JOIN monitored_roots r ON r.id = a.root_id
                     WHERE (
                         a.deleted_at IS NOT NULL
-                        OR a.extraction_status <> 'indexed'
+                        OR a.extraction_status NOT IN ('indexed', 'processing_staged')
                         OR (
                             array_length(string_to_array(a.path, '/'), 1) = 2
                             AND lower(split_part(a.path, '/', 2)) IN ('message.eml', 'message.msg', 'body.html')
