@@ -212,7 +212,17 @@ if ($result.ShadowID) {
 """
     try:
         completed = run_no_window(
-            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script, volume],
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _scriptblock_command(script),
+                "-Volume",
+                volume,
+            ],
             text=True,
             capture_output=True,
             timeout=max(1, int(timeout_seconds)),
@@ -258,14 +268,25 @@ def _delete_shadow_copy(shadow_id: str, *, timeout_seconds: int) -> None:
     script = r"""
 param([string]$ShadowId)
 $ErrorActionPreference = 'Stop'
-$shadow = Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object { $_.ID -eq $ShadowId } | Select-Object -First 1
+$targetShadowId = ([string]$ShadowId).Trim('{}')
+$shadow = Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object { ([string]$_.ID).Trim('{}') -eq $targetShadowId } | Select-Object -First 1
 if ($shadow) {
     $shadow | Remove-CimInstance
 }
 """
     try:
         completed = run_no_window(
-            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script, shadow_id],
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _scriptblock_command(script),
+                "-ShadowId",
+                shadow_id,
+            ],
             text=True,
             capture_output=True,
             timeout=max(1, int(timeout_seconds)),
@@ -326,6 +347,10 @@ def _payload_value(payload: dict[str, Any], *keys: str) -> Any:
         if lowered in lower_payload:
             return lower_payload[lowered]
     return None
+
+
+def _scriptblock_command(script: str) -> str:
+    return f"& {{\n{script.strip()}\n}}"
 
 
 def _powershell_executable() -> str | None:

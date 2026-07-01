@@ -71,6 +71,27 @@ def test_create_shadow_copy_raises_vss_error_for_access_denied(monkeypatch):
     assert exc_info.value.telemetry["return_value"] == 1
 
 
+def test_create_shadow_copy_binds_volume_as_scriptblock_parameter(monkeypatch):
+    calls = []
+    monkeypatch.setattr(host_vss.shutil, "which", lambda _name: "pwsh.exe")
+
+    def capture(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"return_value":0,"shadow_id":"{shadow-1}","device_object":"\\\\\\\\?\\\\GLOBALROOT\\\\Device\\\\HarddiskVolumeShadowCopy1"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr(host_vss, "run_no_window", capture)
+
+    host_vss._create_shadow_copy("E:\\", timeout_seconds=7)
+
+    command = calls[0]
+    assert command[command.index("-Command") + 1].lstrip().startswith("& {")
+    assert command[-2:] == ["-Volume", "E:\\"]
+
+
 def test_delete_shadow_copy_wraps_timeout(monkeypatch):
     monkeypatch.setattr(host_vss.shutil, "which", lambda _name: "powershell.exe")
 
@@ -84,3 +105,21 @@ def test_delete_shadow_copy_wraps_timeout(monkeypatch):
 
     assert exc_info.value.reason == "delete_timeout"
 
+
+def test_delete_shadow_copy_binds_shadow_id_as_scriptblock_parameter(monkeypatch):
+    calls = []
+    monkeypatch.setattr(host_vss.shutil, "which", lambda _name: "pwsh.exe")
+
+    def capture(command, **_kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(host_vss, "run_no_window", capture)
+
+    host_vss._delete_shadow_copy("{shadow-2}", timeout_seconds=11)
+
+    command = calls[0]
+    script = command[command.index("-Command") + 1]
+    assert script.lstrip().startswith("& {")
+    assert "Trim('{}')" in script
+    assert command[-2:] == ["-ShadowId", "{shadow-2}"]
