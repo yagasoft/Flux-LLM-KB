@@ -100,7 +100,7 @@ installed.
 | Draw.io and diagrams | `drawio`, `dio`, `drawio.svg`, `drawio.png`, embedded draw.io XML, `mmd`, `mermaid`, `puml`, `plantuml`, `iuml`, `dot`, `gv`, `graphml`, `gml`, `cyjs`, `bpmn`, `dmn`, `excalidraw`, `xmind`, `mm`, `mmap` | local_parser/enriched |
 | Visio | `vsdx`, `vsdm`, `vssx`, `vssm`, `vstx`, `vstm`, `vdx`, `vsd`, `vss`, `vst` | local_parser/local_tool |
 | Images and raster assets | `png`, `jpg`, `jpeg`, `jpe`, `webp`, `gif`, `tif`, `tiff`, `bmp`, `dib`, `heic`, `heif`, `avif`, `ico`, `icns`, `jp2`, `j2k`, `raw`, `cr2`, `nef`, `arw`, `dng` | metadata/local_parser/enriched |
-| Vector and design assets | `svg`, `ai`, `eps`, `pdf` vector pages, `psd`, `psb`, `xcf`, `afdesign`, `sketch`, `fig`, `xd`, `indd`, `idml`, `cdr` | metadata/local_tool/enriched |
+| Vector and design assets | `svg`, `ai`, `eps`, `pdf` vector pages, `psd`, `psb`, `xcf`, `afdesign`, `sketch`, `fig`, `xd`, `indd`, `idml`, `cdr` | local_parser/local_tool/enriched for SVG; metadata/local_tool for others |
 | Audio | `mp3`, `wav`, `m4a`, `aac`, `flac`, `ogg`, `oga`, `opus`, `wma`, `aiff`, `aif`, `amr`, `mid`, `midi` | metadata/local_tool/enriched |
 | Video | `mp4`, `m4v`, `mov`, `mkv`, `webm`, `avi`, `wmv`, `mpeg`, `mpg`, `ts`, `m2ts`, `mts`, `3gp`, `flv`, `ogv` | metadata/local_tool/enriched |
 | Subtitles and transcripts | `srt`, `vtt`, `ass`, `ssa`, `ttml`, `dfxp`, `sbv`, transcript `txt/md/json` sidecars | inline/local_parser |
@@ -153,6 +153,11 @@ installed.
   conversion is available and otherwise report `blocked_missing_dependency`.
   Comic archive formats reuse bounded container extraction and preserve
   `comic_archive` metadata.
+- SVG files are parsed as vector XML before any raster processing. Embedded
+  titles, descriptions, text, tspans, and ARIA labels index as `svg_text`
+  chunks; SVG fonts complete as metadata-only/no-content; visual SVGs require
+  `rsvg-convert` or `resvg` and are rasterized to a capped PNG before local OCR
+  or local vision. Raw SVG/XML is not sent to Tesseract or Ollama.
 - Image and scanned-PDF OCR uses local tools only. Image files can be OCRed with
   Tesseract in deferred image jobs after decorative-image skip checks;
   scanned and mixed PDFs use staged `pdftoppm` page-batch rendering plus

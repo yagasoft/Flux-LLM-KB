@@ -37,6 +37,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             libemail-address-perl \
             libemail-outlook-message-perl \
             libimage-exiftool-perl \
+            librsvg2-bin \
             libreoffice \
             lz4 \
             pandoc \

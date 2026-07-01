@@ -467,6 +467,9 @@ os.environ["FLUX_KB_APP_ROOT"] = r"$AppRoot"
 os.environ["FLUX_KB_PRIVATE_DIR"] = r"$InstallRoot\private"
 os.environ["FLUX_KB_DATA_DIR"] = r"$InstallRoot\data"
 os.environ["FLUX_KB_LOG_DIR"] = r"$InstallRoot\logs"
+svg_renderer = Path(os.environ["FLUX_KB_INSTALL_ROOT"]) / "tools" / "resvg" / "resvg.exe"
+if svg_renderer.exists():
+    os.environ["FLUX_KB_SVG_RENDERER"] = str(svg_renderer)
 $hostAgentAcceleration
 
 log_dir = Path(os.environ["FLUX_KB_LOG_DIR"])

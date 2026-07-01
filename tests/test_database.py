@@ -4075,6 +4075,72 @@ def test_requeue_metadata_only_source_assets_creates_extract_jobs(monkeypatch):
     assert "corpus_extract_document" in params_json
 
 
+def test_requeue_svg_source_assets_resets_svg_assets_and_creates_image_jobs(monkeypatch):
+    executed = []
+    rows = [
+        ("asset-svg-1", "docs", "icons/logo.svg"),
+        ("asset-svg-2", "docs", "fonts/glyphicons.svg"),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "FROM source_assets" in sql:
+                return rows
+            return []
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "INSERT INTO capture_jobs" in sql:
+                return (f"job-{len([item for item in executed if 'INSERT INTO capture_jobs' in item[0]])}",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.requeue_svg_source_assets(root_name="docs", limit=25)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    params_json = "\n".join(str(params) for _statement, params in executed)
+    assert result["queued"] == 2
+    assert result["root_name"] == "docs"
+    assert result["limit"] == 25
+    assert "LOWER(a.extension) = '.svg'" in sql
+    assert "COALESCE(a.metadata->>'svg_requeue_reason', '') <> 'svg_renderer_reparse'" in sql
+    assert "r.name = %s" in sql
+    assert "DELETE FROM asset_chunks WHERE asset_id = %s" in sql
+    assert "extraction_status = 'queued'" in sql
+    assert "indexed_at = NULL" in sql
+    assert "metadata - 'svg' - 'svg_parse' - 'svg_raster' - 'ocr' - 'vision' - 'vision_escalation'" in sql
+    assert "INSERT INTO capture_jobs" in sql
+    assert "corpus_extract_image" in params_json
+    assert "svg_renderer_reparse" in params_json
+    assert "icons/logo.svg" in params_json
+    assert "fonts/glyphicons.svg" in params_json
+
+
 def test_apply_extraction_result_persists_nested_container_child_metadata(monkeypatch):
     executed = []
 

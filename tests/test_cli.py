@@ -831,6 +831,24 @@ def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
     assert captured["root_name"] == "repo"
 
 
+def test_cli_crawl_requeue_svg_uses_svg_scoped_database_operation(monkeypatch, capsys):
+    from flux_llm_kb import database
+
+    calls = []
+
+    def fake_requeue_svg_source_assets(**kwargs):
+        calls.append(kwargs)
+        return {"queued": 2, "root_name": kwargs["root_name"], "limit": kwargs["limit"]}
+
+    monkeypatch.setattr(database, "requeue_svg_source_assets", fake_requeue_svg_source_assets)
+
+    assert cli.main(["crawl", "requeue-svg", "--root", "docs", "--limit", "25"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"queued": 2, "root_name": "docs", "limit": 25}
+    assert calls == [{"root_name": "docs", "limit": 25}]
+
+
 def test_cli_episodes_scope_backfill_requires_explicit_ids(monkeypatch, capsys):
     from flux_llm_kb import service
 

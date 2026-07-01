@@ -9121,6 +9121,98 @@ def requeue_metadata_only_source_assets(
     return {"queued": len(jobs), "jobs": jobs, "limit": row_limit, "root_name": root_name}
 
 
+def requeue_svg_source_assets(
+    *,
+    root_name: str | None = None,
+    limit: int = 1000,
+    url: str | None = None,
+) -> dict[str, Any]:
+    row_limit = max(1, min(int(limit or 1000), 10000))
+    filters = [
+        "a.deleted_at IS NULL",
+        "LOWER(a.extension) = '.svg'",
+        "COALESCE(a.metadata->>'svg_requeue_reason', '') <> 'svg_renderer_reparse'",
+    ]
+    params: list[Any] = []
+    if root_name:
+        filters.append("r.name = %s")
+        params.append(root_name)
+    params.append(row_limit)
+    psycopg = _load_psycopg()
+    jobs: list[dict[str, Any]] = []
+    schedule = _job_schedule_metadata("corpus_extract_image")
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT a.id::text, r.name, a.path
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE {" AND ".join(filters)}
+                ORDER BY a.updated_at ASC, a.id ASC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+            for asset_id, row_root_name, path in rows:
+                payload = {
+                    "root_name": row_root_name,
+                    "path": path,
+                    "reason": "svg_renderer_reparse",
+                }
+                cur.execute(
+                    """
+                    INSERT INTO capture_jobs (
+                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
+                    )
+                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
+                    RETURNING id::text
+                    """,
+                    (
+                        "corpus_extract_image",
+                        _json(payload),
+                        schedule["job_family"],
+                        schedule["resource_class"],
+                        schedule["priority"],
+                        schedule["time_budget_seconds"],
+                        _json({"stage": "queued", "root_name": row_root_name, "path": path, "reason": "svg_renderer_reparse"}),
+                    ),
+                )
+                job_id = cur.fetchone()[0]
+                cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s", (asset_id,))
+                cur.execute(
+                    """
+                    UPDATE source_assets
+                    SET extraction_status = 'queued',
+                        indexed_at = NULL,
+                        metadata = (
+                            metadata - 'svg' - 'svg_parse' - 'svg_raster' - 'ocr' - 'vision' - 'vision_escalation'
+                                     - 'decorative'
+                        ) || %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s
+                      AND deleted_at IS NULL
+                    """,
+                    (
+                        _json({"svg_requeued": True, "svg_requeue_reason": "svg_renderer_reparse", "svg_requeue_job_id": job_id}),
+                        asset_id,
+                    ),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO audit_events (event_type, target_table, target_id, details)
+                    VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
+                    """,
+                    (
+                        job_id,
+                        _json({"job_type": "corpus_extract_image", "root_name": row_root_name, "path": path, "reason": "svg_renderer_reparse"}),
+                    ),
+                )
+                jobs.append({"job_id": job_id, "root_name": row_root_name, "path": path, "job_type": "corpus_extract_image"})
+    return {"queued": len(jobs), "jobs": jobs, "limit": row_limit, "root_name": root_name}
+
+
 def _corpus_extract_job_type_for_file_kind(file_kind: str) -> str:
     normalized = str(file_kind or "").strip().lower()
     if normalized == "pdf":

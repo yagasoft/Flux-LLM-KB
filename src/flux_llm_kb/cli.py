@@ -335,6 +335,10 @@ def main(argv: list[str] | None = None) -> int:
     crawl_requeue_metadata.add_argument("--root", dest="root_name")
     crawl_requeue_metadata.add_argument("--limit", type=int, default=1000)
 
+    crawl_requeue_svg = crawl_subparsers.add_parser("requeue-svg", help="Requeue active SVG source assets for renderer-backed extraction")
+    crawl_requeue_svg.add_argument("--root", dest="root_name")
+    crawl_requeue_svg.add_argument("--limit", type=int, default=1000)
+
     crawl_backfill = crawl_subparsers.add_parser("backfill", help="Claim deferred corpus extraction jobs")
     crawl_kind_choices = ["text", "images", "diagrams", "archives", "containers", "media", "embeddings", "data", "mail", "reports", "metadata", "all"]
     crawl_backfill.add_argument(
@@ -1044,6 +1048,8 @@ def _crawl(args: argparse.Namespace) -> int:
         payload = {"jobs": database.list_capture_jobs(limit=args.limit)}
     elif args.crawl_command == "requeue-metadata-only":
         payload = database.requeue_metadata_only_source_assets(root_name=args.root_name, limit=args.limit)
+    elif args.crawl_command == "requeue-svg":
+        payload = database.requeue_svg_source_assets(root_name=args.root_name, limit=args.limit)
     elif args.crawl_command == "backfill":
         from .service import KnowledgeService
 

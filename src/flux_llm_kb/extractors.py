@@ -96,6 +96,10 @@ OCR_PDF_PAGE_BATCH_SIZE = 5
 OCR_PDF_DPI = 200
 OCR_MAX_IMAGE_EDGE = 6000
 OCR_TIMEOUT_SECONDS = 30
+SVG_MAX_BYTES = 25 * 1024 * 1024
+SVG_RASTER_MAX_EDGE = 2048
+SVG_RASTER_TIMEOUT_SECONDS = 30
+SVG_RENDERER_ENV = "FLUX_KB_SVG_RENDERER"
 ASR_AUDIO_SAMPLE_RATE = 16000
 ASR_FFMPEG_TIMEOUT_SECONDS = 300
 MEDIA_ASR_SEGMENT_SECONDS = 15 * 60
@@ -229,6 +233,7 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "python_pptx": _module_check("pptx"),
         "openpyxl": _module_check("openpyxl"),
         "pillow": _module_check("PIL"),
+        "defusedxml": _module_check("defusedxml"),
         "watchdog": _module_check("watchdog"),
         "libreoffice": _first_tool_check("LibreOffice", ("soffice", "libreoffice")),
         "antiword": _tool_check("antiword"),
@@ -262,6 +267,7 @@ def extractor_availability() -> dict[str, dict[str, Any]]:
         "blender": _tool_check("blender"),
         "exiftool": _tool_check("exiftool"),
         "pandoc": _tool_check("pandoc"),
+        "svg_renderer": _svg_renderer_check(),
     }
 
 
@@ -3670,15 +3676,70 @@ def _local_name(tag: str) -> str:
     return str(tag).rsplit("}", 1)[-1]
 
 
+def _extract_svg_image(path: Path) -> ExtractionResult:
+    metadata = image_metadata(path)
+    try:
+        svg = _parse_svg(path)
+    except ImportError:
+        metadata["svg_parse"] = {"status": "blocked_missing_dependency", "parser": "defusedxml"}
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message="defusedxml module not installed")
+    except ValueError as exc:
+        metadata["svg_parse"] = {"status": "failed", "error": str(exc)}
+        return ExtractionResult(status="failed", metadata=metadata, message=str(exc))
+
+    metadata["svg"] = svg["metadata"]
+    metadata["svg_parse"] = svg["parse"]
+    if svg.get("width") is not None and svg.get("height") is not None:
+        metadata["width"] = int(svg["width"])
+        metadata["height"] = int(svg["height"])
+
+    if svg["metadata"]["kind"] == "font":
+        return ExtractionResult(status="metadata_only", metadata=metadata)
+
+    embedded_text = str(svg.get("text") or "").strip()
+    if embedded_text:
+        chunks = _chunks_from_text(embedded_text, path.name, modality="svg_text")
+        return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata)
+
+    with tempfile.TemporaryDirectory(prefix="flux-kb-svg-render-") as temp_dir:
+        raster = _render_svg_to_png(path, svg=svg, temp_root=Path(temp_dir))
+        metadata["svg_raster"] = raster["metadata"]
+        if raster["status"] != "completed":
+            return ExtractionResult(status=raster["status"], metadata=metadata, message=raster["message"])
+        rendered_path = Path(raster["path"])
+        tesseract = shutil.which("tesseract")
+        if tesseract is None:
+            ocr = OcrResult(
+                status="blocked_missing_dependency",
+                metadata={
+                    "engine": "tesseract",
+                    "status": "blocked_missing_dependency",
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                },
+                message="tesseract command not found",
+            )
+        else:
+            ocr = _ocr_image_with_tesseract(rendered_path, tesseract, cache_path=path)
+        vision = _vision_image(rendered_path, source_label=path.name, cache_path=path)
+        return _image_ocr_vision_result(path, metadata=metadata, ocr=ocr, vision=vision)
+
+
 def _extract_image(path: Path) -> ExtractionResult:
+    if path.suffix.lower() == ".svg":
+        return _extract_svg_image(path)
     metadata = image_metadata(path)
     decorative = _decorative_image_metadata(metadata)
     if decorative is not None:
         metadata["decorative"] = decorative
         return ExtractionResult(status="indexed", metadata=metadata)
     ocr = _ocr_image(path)
-    metadata["ocr"] = ocr.metadata
     vision = _vision_image(path, source_label=path.name)
+    return _image_ocr_vision_result(path, metadata=metadata, ocr=ocr, vision=vision)
+
+
+def _image_ocr_vision_result(path: Path, *, metadata: dict[str, Any], ocr: OcrResult, vision: VisionResult) -> ExtractionResult:
+    metadata["ocr"] = ocr.metadata
     if vision.status != "disabled":
         metadata["vision"] = vision.metadata
         metadata["vision_escalation"] = _vision_escalation_status(vision)
@@ -3705,6 +3766,346 @@ def _extract_image(path: Path) -> ExtractionResult:
             return ExtractionResult(status="metadata_only", metadata=metadata, message=vision.message)
         return ExtractionResult(status="failed", metadata=metadata, message=vision.message)
     return ExtractionResult(status="metadata_only", metadata=metadata)
+
+
+def _parse_svg(path: Path) -> dict[str, Any]:
+    try:
+        from defusedxml import ElementTree as SafeElementTree
+    except ImportError:
+        raise
+
+    size = path.stat().st_size
+    if size > SVG_MAX_BYTES:
+        raise ValueError("SVG file exceeds readable size limit")
+    try:
+        root = SafeElementTree.fromstring(path.read_bytes())
+    except Exception as exc:
+        raise ValueError(f"SVG XML parse failed: {exc}") from exc
+    if _local_name(root.tag).lower() != "svg":
+        raise ValueError("SVG root element is not <svg>")
+
+    titles: list[str] = []
+    descriptions: list[str] = []
+    text_values: list[str] = []
+    aria_values: list[str] = []
+    font_families: list[str] = []
+    glyph_names: list[str] = []
+    element_count = 0
+    visual_element_count = 0
+    font_count = 0
+    font_face_count = 0
+    glyph_count = 0
+    script_count = 0
+    foreign_object_count = 0
+    external_resource_count = 0
+    visual_tags = {
+        "circle",
+        "ellipse",
+        "image",
+        "line",
+        "path",
+        "polygon",
+        "polyline",
+        "rect",
+        "use",
+    }
+
+    for element in root.iter():
+        element_count += 1
+        tag = _local_name(element.tag).lower()
+        if tag in visual_tags:
+            visual_element_count += 1
+        if tag == "script":
+            script_count += 1
+        elif tag == "foreignobject":
+            foreign_object_count += 1
+        elif tag == "font":
+            font_count += 1
+        elif tag == "font-face":
+            font_face_count += 1
+            family = _clean_svg_text(_svg_attr(element, "font-family"))
+            if family:
+                font_families.append(family)
+        elif tag == "glyph":
+            glyph_count += 1
+            glyph_name = _clean_svg_text(_svg_attr(element, "glyph-name"))
+            if glyph_name:
+                glyph_names.append(glyph_name)
+        elif tag == "title":
+            value = _clean_svg_text(" ".join(element.itertext()))
+            if value:
+                titles.append(value)
+        elif tag == "desc":
+            value = _clean_svg_text(" ".join(element.itertext()))
+            if value:
+                descriptions.append(value)
+        elif tag in {"text", "tspan"}:
+            value = _clean_svg_text(" ".join(element.itertext()))
+            if value:
+                text_values.append(value)
+
+        for key, raw_value in element.attrib.items():
+            attr = _local_name(key).lower()
+            value = str(raw_value or "").strip()
+            if attr in {"aria-label", "aria-description"} and value:
+                aria_values.append(_clean_svg_text(value))
+            if attr == "href" and _svg_href_is_external(value):
+                external_resource_count += 1
+
+    width_raw = _svg_attr(root, "width")
+    height_raw = _svg_attr(root, "height")
+    view_box = _svg_attr(root, "viewBox") or _svg_attr(root, "viewbox")
+    width = _svg_length_to_float(width_raw)
+    height = _svg_length_to_float(height_raw)
+    view_box_dimensions = _svg_viewbox_dimensions(view_box)
+    if (width is None or height is None) and view_box_dimensions is not None:
+        width = width or view_box_dimensions[0]
+        height = height or view_box_dimensions[1]
+
+    font_families = _dedupe_svg_strings(font_families)
+    glyph_names = _dedupe_svg_strings(glyph_names)
+    lines: list[str] = []
+    lines.extend(f"Title: {value}" for value in titles)
+    lines.extend(f"Description: {value}" for value in descriptions)
+    lines.extend(text_values)
+    lines.extend(aria_values)
+    text = "\n".join(_dedupe_svg_strings(lines)).strip()
+    kind = "font" if font_count or font_face_count or glyph_count else "text" if text else "visual"
+    svg_metadata: dict[str, Any] = {
+        "kind": kind,
+        "element_count": element_count,
+        "visual_element_count": visual_element_count,
+        "title_count": len(_dedupe_svg_strings(titles)),
+        "description_count": len(_dedupe_svg_strings(descriptions)),
+        "text_count": len(_dedupe_svg_strings(text_values)),
+        "aria_label_count": len(_dedupe_svg_strings(aria_values)),
+        "font_count": font_count,
+        "font_face_count": font_face_count,
+        "glyph_count": glyph_count,
+        "font_families": font_families,
+        "script_count": script_count,
+        "foreign_object_count": foreign_object_count,
+        "external_resource_count": external_resource_count,
+    }
+    if glyph_names:
+        svg_metadata["glyph_names_sample"] = glyph_names[:25]
+    if width_raw:
+        svg_metadata["declared_width"] = width_raw
+    if height_raw:
+        svg_metadata["declared_height"] = height_raw
+    if view_box:
+        svg_metadata["view_box"] = view_box
+    if width is not None and height is not None:
+        svg_metadata["width"] = int(max(1, round(width)))
+        svg_metadata["height"] = int(max(1, round(height)))
+    return {
+        "metadata": svg_metadata,
+        "parse": {
+            "status": "completed",
+            "parser": "defusedxml",
+            "bytes": size,
+            "element_count": element_count,
+        },
+        "text": text,
+        "width": svg_metadata.get("width"),
+        "height": svg_metadata.get("height"),
+    }
+
+
+def _svg_attr(element: Any, name: str) -> str:
+    for key, value in element.attrib.items():
+        if _local_name(key) == name:
+            return str(value or "")
+    return ""
+
+
+def _clean_svg_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", unescape(str(value or ""))).strip()
+
+
+def _dedupe_svg_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        cleaned = _clean_svg_text(value)
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+    return deduped
+
+
+def _svg_href_is_external(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    if not normalized or normalized.startswith("#") or normalized.startswith("data:"):
+        return False
+    return normalized.startswith(("http://", "https://", "file://", "\\\\", "/"))
+
+
+def _svg_length_to_float(value: str) -> float | None:
+    match = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)", str(value or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _svg_viewbox_dimensions(value: str) -> tuple[float, float] | None:
+    parts = re.split(r"[\s,]+", str(value or "").strip())
+    if len(parts) != 4:
+        return None
+    try:
+        width = abs(float(parts[2]))
+        height = abs(float(parts[3]))
+    except ValueError:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _render_svg_to_png(path: Path, *, svg: dict[str, Any], temp_root: Path) -> dict[str, Any]:
+    renderer = _find_svg_renderer()
+    base_metadata: dict[str, Any] = {
+        "status": "pending",
+        "max_edge": SVG_RASTER_MAX_EDGE,
+    }
+    if renderer is None:
+        return {
+            "status": "blocked_missing_dependency",
+            "metadata": {**base_metadata, "status": "blocked_missing_dependency"},
+            "message": "SVG renderer command not found",
+        }
+    width, height = _svg_raster_dimensions(svg)
+    output_path = temp_root / f"{path.stem or 'svg'}.png"
+    command = _svg_render_command(renderer, path=path, output_path=output_path, width=width, height=height)
+    try:
+        result = run_no_window(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=SVG_RASTER_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "status": "blocked_missing_dependency",
+            "metadata": {**base_metadata, **renderer, "status": "blocked_timeout", "width": width, "height": height},
+            "message": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "metadata": {**base_metadata, **renderer, "status": "failed", "width": width, "height": height, "error": str(exc)},
+            "message": str(exc),
+        }
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "metadata": {**base_metadata, **renderer, "status": "failed", "width": width, "height": height},
+            "message": result.stderr.strip() or "SVG renderer failed",
+        }
+    if not output_path.exists():
+        return {
+            "status": "failed",
+            "metadata": {**base_metadata, **renderer, "status": "failed", "width": width, "height": height},
+            "message": "SVG renderer did not produce a PNG output",
+        }
+    dimensions = _image_dimensions(output_path)
+    output_metadata = {
+        **base_metadata,
+        **renderer,
+        "status": "completed",
+        "width": width,
+        "height": height,
+        "output_bytes": output_path.stat().st_size,
+    }
+    if dimensions:
+        output_metadata["output_width"] = dimensions[0]
+        output_metadata["output_height"] = dimensions[1]
+    return {"status": "completed", "path": str(output_path), "metadata": output_metadata, "message": None}
+
+
+def _svg_raster_dimensions(svg: dict[str, Any]) -> tuple[int, int]:
+    metadata = svg.get("metadata") if isinstance(svg.get("metadata"), dict) else {}
+    width = _int_or_none(metadata.get("width"))
+    height = _int_or_none(metadata.get("height"))
+    if width is None or height is None or width <= 0 or height <= 0:
+        width, height = 1024, 1024
+    max_edge = max(width, height)
+    if max_edge > SVG_RASTER_MAX_EDGE:
+        scale = SVG_RASTER_MAX_EDGE / max_edge
+        width = max(1, int(round(width * scale)))
+        height = max(1, int(round(height * scale)))
+    return width, height
+
+
+def _svg_render_command(renderer: dict[str, str], *, path: Path, output_path: Path, width: int, height: int) -> list[str]:
+    command = renderer["command"]
+    name = renderer["renderer"]
+    if name == "resvg":
+        return [command, "--width", str(width), "--height", str(height), str(path), str(output_path)]
+    return [
+        command,
+        "--keep-aspect-ratio",
+        "--width",
+        str(width),
+        "--height",
+        str(height),
+        "--format",
+        "png",
+        "--output",
+        str(output_path),
+        str(path),
+    ]
+
+
+def _find_svg_renderer() -> dict[str, str] | None:
+    configured = str(os.environ.get(SVG_RENDERER_ENV) or "").strip()
+    if configured:
+        resolved = _resolve_configured_svg_renderer(configured)
+        if resolved:
+            return resolved
+    for command in ("rsvg-convert", "resvg"):
+        path = shutil.which(command)
+        if path:
+            return {"command": path, "renderer": command, "source": "path"}
+    return None
+
+
+def _resolve_configured_svg_renderer(configured: str) -> dict[str, str] | None:
+    candidate = Path(configured)
+    has_path_separator = any(separator in configured for separator in ("\\", "/"))
+    if has_path_separator or candidate.suffix:
+        if candidate.exists():
+            return {"command": str(candidate), "renderer": _svg_renderer_name(candidate.name), "source": "env"}
+        return None
+    path = shutil.which(configured)
+    if path:
+        return {"command": path, "renderer": _svg_renderer_name(configured), "source": "env"}
+    return None
+
+
+def _svg_renderer_name(command: str) -> str:
+    name = Path(command).stem.lower()
+    if "resvg" == name or name.endswith("resvg"):
+        return "resvg"
+    if "rsvg-convert" in name or name == "rsvg":
+        return "rsvg-convert"
+    return name or "svg-renderer"
+
+
+def _svg_renderer_check() -> dict[str, Any]:
+    renderer = _find_svg_renderer()
+    if renderer is None:
+        return {"ok": False, "message": "SVG renderer command not found"}
+    return {"ok": True, "message": renderer["command"], "renderer": renderer["renderer"], "source": renderer["source"]}
+
 
 
 def _vision_escalation_status(vision: VisionResult) -> str:
@@ -5115,7 +5516,7 @@ def _decorative_image_metadata(metadata: dict[str, Any]) -> dict[str, Any] | Non
     return None
 
 
-def _vision_image(path: Path, *, source_label: str) -> VisionResult:
+def _vision_image(path: Path, *, source_label: str, cache_path: Path | None = None) -> VisionResult:
     settings = _vision_settings()
     metadata = _vision_metadata(
         status="pending",
@@ -5158,7 +5559,8 @@ def _vision_image(path: Path, *, source_label: str) -> VisionResult:
             metadata={**metadata, "status": "blocked_config", "blocked_dependency_count": 1},
             message=str(exc),
         )
-    cached = _read_vision_cache(path, provider=settings["provider"], model=settings["model"])
+    cache_source = cache_path or path
+    cached = _read_vision_cache(cache_source, provider=settings["provider"], model=settings["model"])
     if cached is not None:
         return VisionResult(
             status="completed",
@@ -5174,6 +5576,7 @@ def _vision_image(path: Path, *, source_label: str) -> VisionResult:
         keep_alive=settings["keep_alive"],
         timeout_seconds=settings["timeout_seconds"],
         metadata=metadata,
+        cache_path=cache_source,
     )
 
 
@@ -5230,6 +5633,7 @@ def _vision_with_ollama_compatible(
     keep_alive: str,
     timeout_seconds: int,
     metadata: dict[str, Any],
+    cache_path: Path | None = None,
 ) -> VisionResult:
     request_attempted = False
     try:
@@ -5263,7 +5667,7 @@ def _vision_with_ollama_compatible(
         redacted, _ = redact_text(text)
         clean = _clean_vision_caption_text(redacted)
         if clean:
-            _write_vision_cache(path, provider=provider, model=model, text=clean)
+            _write_vision_cache(cache_path or path, provider=provider, model=model, text=clean)
         response_metadata = _vision_response_metadata(decoded)
         if response_field and response_field != "response":
             response_metadata["fallback_field"] = response_field

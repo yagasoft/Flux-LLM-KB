@@ -38,6 +38,7 @@ corpus = [
   "python-pptx>=0.6",
   "openpyxl>=3.1",
   "pillow>=10.0",
+  "defusedxml>=0.7",
 ]
 processors = [
   "duckdb>=1.0",

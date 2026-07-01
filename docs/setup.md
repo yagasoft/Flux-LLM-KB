@@ -137,14 +137,17 @@ families you expect to rely on. Common go-live dependencies are LibreOffice for
 legacy/OpenDocument Office conversion, Poppler plus Tesseract for image-only
 PDF/OCR, `ffmpeg`/`ffprobe` plus a local faster-whisper model for media, Calibre
 `ebook-convert` for MOBI/AZW/LIT, archive tools such as 7-Zip/bsdtar/unar/unrar,
-DuckDB/PyArrow for columnar data, and mail export helpers such as `readpst` or
-`msgconvert` when you plan to index exported mail stores. Missing dependencies
-leave the affected jobs in `blocked_missing_dependency` instead of silently
-pretending content was indexed.
+DuckDB/PyArrow for columnar data, an SVG renderer (`rsvg-convert` from
+`librsvg2-bin` in Docker, or portable `resvg.exe` on Windows host-agent roots),
+and mail export helpers such as `readpst` or `msgconvert` when you plan to
+index exported mail stores. Missing dependencies leave the affected jobs in
+`blocked_missing_dependency` instead of silently pretending content was indexed.
 The production Docker image installs this practical processor pack. Windows
 host-agent installs use the `processors` Python extra and still depend on host
 tools such as Office COM, LibreOffice, archive tools, and media utilities being
-available on the host PATH.
+available on the host PATH. Production host launchers also use
+`%FLUX_KB_INSTALL_ROOT%\tools\resvg\resvg.exe` as `FLUX_KB_SVG_RENDERER` when
+that portable renderer exists.
 
 Install Outlook COM support on Windows when you want local Outlook catch-up:
 
@@ -214,6 +217,7 @@ flux-kb diagnostics all --root docs --status blocked_missing_dependency --family
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
 flux-kb diagnostics remediate repair_asset_statuses --target-type root --root docs --reason "operator cleanup"
 flux-kb diagnostics remediate clear_completed_errors --target-type root --root docs --reason "operator cleanup"
+flux-kb crawl requeue-svg --root docs --limit 1000
 flux-kb automation status
 flux-kb automation run --mode guarded --limit 25
 flux-kb automation actions --status all --limit 25

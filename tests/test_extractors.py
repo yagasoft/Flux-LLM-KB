@@ -1067,6 +1067,157 @@ def test_extract_image_blocks_when_tesseract_is_missing(monkeypatch, tmp_path):
     assert result.metadata["ocr"]["cache_misses"] == 0
 
 
+def test_extract_svg_embedded_text_without_ocr_or_vision(monkeypatch, tmp_path):
+    path = tmp_path / "workflow.svg"
+    path.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" width="400" height="120" viewBox="0 0 400 120">
+  <title>Admissions workflow</title>
+  <desc>Applicant request lifecycle</desc>
+  <text x="10" y="20">Submit application</text>
+  <text x="10" y="50"><tspan>Review documents</tspan></text>
+</svg>""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("embedded SVG text should not run OCR tools")),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("embedded SVG text should not call vision")),
+        raising=False,
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert [chunk.modality for chunk in result.chunks] == ["svg_text"]
+    assert "Admissions workflow" in result.chunks[0].body
+    assert "Applicant request lifecycle" in result.chunks[0].body
+    assert "Submit application" in result.chunks[0].body
+    assert "Review documents" in result.chunks[0].body
+    assert result.metadata["extractor"] == "image"
+    assert result.metadata["svg"]["kind"] == "text"
+    assert result.metadata["svg_parse"]["status"] == "completed"
+    assert "ocr" not in result.metadata
+    assert "vision" not in result.metadata
+
+
+def test_extract_svg_font_completes_metadata_only_without_ocr_or_vision(monkeypatch, tmp_path):
+    path = tmp_path / "glyphicons-halflings-regular.svg"
+    path.write_text(
+        """<?xml version="1.0" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <font id="Glyphicons" horiz-adv-x="1200">
+      <font-face font-family="Glyphicons Halflings" units-per-em="1200"/>
+      <glyph unicode="&#xe001;" glyph-name="glass" d="M10 20"/>
+      <glyph unicode="&#xe002;" glyph-name="music" d="M30 40"/>
+    </font>
+  </defs>
+</svg>""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("SVG font should not run OCR tools")),
+    )
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("SVG font should not call vision")),
+        raising=False,
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.chunks == ()
+    assert result.metadata["extractor"] == "image"
+    assert result.metadata["svg"]["kind"] == "font"
+    assert result.metadata["svg"]["glyph_count"] == 2
+    assert result.metadata["svg"]["font_families"] == ["Glyphicons Halflings"]
+    assert result.metadata["svg_parse"]["status"] == "completed"
+    assert "ocr" not in result.metadata
+    assert "vision" not in result.metadata
+
+
+def test_extract_visual_svg_renders_png_before_ocr_and_vision(monkeypatch, tmp_path):
+    path = tmp_path / "logo.svg"
+    path.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80">
+  <path d="M0 0h120v80H0z"/>
+</svg>""",
+        encoding="utf-8",
+    )
+    _configure_vision(monkeypatch, tmp_path)
+    commands = []
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: {
+            "rsvg-convert": "C:/tools/rsvg-convert.exe",
+            "tesseract": "C:/tools/tesseract.exe",
+        }.get(command),
+    )
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[0] == "C:/tools/rsvg-convert.exe":
+            output_path = Path(command[command.index("--output") + 1])
+            output_path.write_bytes(PNG_BYTES)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[0] == "C:/tools/tesseract.exe":
+            assert Path(command[1]).suffix.lower() == ".png"
+            assert Path(command[1]) != path
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"response":"Rendered SVG logo with a dark rectangular mark."}'
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", lambda *_args, **_kwargs: FakeResponse(), raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].modality == "vision"
+    assert result.chunks[0].body == "Rendered SVG logo with a dark rectangular mark."
+    assert result.metadata["svg"]["kind"] == "visual"
+    assert result.metadata["svg_raster"]["status"] == "completed"
+    assert result.metadata["svg_raster"]["renderer"] == "rsvg-convert"
+    assert result.metadata["ocr"]["status"] == "completed"
+    assert result.metadata["vision"]["status"] == "completed"
+    assert [Path(command[0]).name for command in commands] == ["rsvg-convert.exe", "tesseract.exe"]
+
+
+def test_extract_visual_svg_blocks_when_renderer_is_missing(monkeypatch, tmp_path):
+    path = tmp_path / "shape.svg"
+    path.write_text(
+        """<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+  <circle cx="50" cy="50" r="40"/>
+</svg>""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.run_no_window",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("missing SVG renderer must block before OCR")),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "SVG renderer command not found"
+    assert result.metadata["svg"]["kind"] == "visual"
+    assert result.metadata["svg_parse"]["status"] == "completed"
+    assert result.metadata["svg_raster"]["status"] == "blocked_missing_dependency"
+    assert "ocr" not in result.metadata
+
+
 def test_extract_image_skips_decorative_one_pixel_assets_before_ocr_or_vision(monkeypatch, tmp_path):
     path = tmp_path / "spacer.png"
     path.write_bytes(ONE_PIXEL_PNG_BYTES)

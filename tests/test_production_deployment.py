@@ -182,6 +182,8 @@ def test_production_host_agent_uses_host_loopback_to_docker_ollama():
         assert 'os.environ["FLUX_KB_ASR_MODEL"] = "large-v3-turbo"' in script
         assert 'os.environ["FLUX_KB_ASR_BASE_URL"] = "http://127.0.0.1:${AsrHostPort}"' in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://ollama:11434"' not in script
+        assert 'svg_renderer = Path(os.environ["FLUX_KB_INSTALL_ROOT"]) / "tools" / "resvg" / "resvg.exe"' in script
+        assert 'os.environ["FLUX_KB_SVG_RENDERER"] = str(svg_renderer)' in script
 
 
 def test_production_deploy_persists_host_side_qwen_runtime_settings():
@@ -374,10 +376,11 @@ def test_dockerfile_installs_practical_extractor_pack():
         "libemail-address-perl",
         "libemail-outlook-message-perl",
         "libimage-exiftool-perl",
+        "librsvg2-bin",
         "pandoc",
     ):
         assert package in dockerfile
-    for dependency in ("duckdb", "pyarrow", "faster-whisper", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
+    for dependency in ("defusedxml", "duckdb", "pyarrow", "faster-whisper", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
         assert dependency in pyproject
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update

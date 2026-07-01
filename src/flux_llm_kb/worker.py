@@ -459,6 +459,9 @@ def _strict_completed_no_content_reason(metadata: dict[str, Any]) -> str | None:
             return "archive_members_exceeded_size_limit"
         return None
     if extractor == "image":
+        svg = metadata.get("svg")
+        if isinstance(svg, dict) and str(svg.get("kind") or "") == "font":
+            return "svg_font_metadata_only"
         ocr = metadata.get("ocr")
         vision = metadata.get("vision")
         vision_escalation = str(metadata.get("vision_escalation") or "")
