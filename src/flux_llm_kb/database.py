@@ -6440,6 +6440,217 @@ def apply_extraction_result_for_job(
             return True
 
 
+def apply_staged_extraction_plan_for_job(
+    *,
+    job_id: str,
+    root_name: str,
+    relative_path: str,
+    result: Any,
+    url: str | None = None,
+) -> bool:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, status
+                FROM capture_jobs
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
+                FOR UPDATE
+                """,
+                (job_id,),
+            )
+            if cur.fetchone() is None:
+                return False
+            try:
+                asset_id, canonical_asset_id = _staged_asset_for_update(
+                    cur,
+                    root_name=root_name,
+                    relative_path=relative_path,
+                )
+            except ValueError:
+                return False
+            status = "duplicate_suppressed" if canonical_asset_id else "processing_staged"
+            metadata_json = _json(result.metadata or {})
+            cur.execute(
+                """
+                UPDATE source_assets
+                SET extraction_status = %s,
+                    metadata = metadata || %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                  AND deleted_at IS NULL
+                RETURNING id::text
+                """,
+                (status, metadata_json, asset_id),
+            )
+            if cur.fetchone() is None:
+                return False
+            if not canonical_asset_id:
+                _replace_asset_chunks(cur, asset_id, ())
+                _enqueue_staged_jobs_with_cursor(
+                    cur,
+                    root_name=root_name,
+                    relative_path=relative_path,
+                    jobs=_staged_jobs_from_result(result, plan=True),
+                )
+            return True
+
+
+def apply_staged_extraction_piece_for_job(
+    *,
+    job_id: str,
+    root_name: str,
+    relative_path: str,
+    result: Any,
+    url: str | None = None,
+) -> bool:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, status
+                FROM capture_jobs
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND status = 'running'
+                FOR UPDATE
+                """,
+                (job_id,),
+            )
+            if cur.fetchone() is None:
+                return False
+            try:
+                asset_id, canonical_asset_id = _staged_asset_for_update(
+                    cur,
+                    root_name=root_name,
+                    relative_path=relative_path,
+                )
+            except ValueError:
+                return False
+            result_status = str(getattr(result, "status", "") or "metadata_only")
+            status = "processing_staged" if result_status == "staged" else result_status
+            if canonical_asset_id and status == "indexed":
+                status = "duplicate_suppressed"
+            metadata_json = _json(getattr(result, "metadata", {}) or {})
+            cur.execute(
+                """
+                UPDATE source_assets
+                SET extraction_status = %s,
+                    metadata = CASE
+                        WHEN %s::jsonb ? 'strict_indexing'
+                             AND COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'
+                        THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
+                        ELSE metadata || %s::jsonb
+                    END,
+                    indexed_at = CASE WHEN %s = 'indexed' THEN now() ELSE indexed_at END,
+                    updated_at = now()
+                WHERE id = %s
+                  AND deleted_at IS NULL
+                RETURNING id::text
+                """,
+                (status, metadata_json, metadata_json, metadata_json, metadata_json, status, asset_id),
+            )
+            if cur.fetchone() is None:
+                return False
+            if not canonical_asset_id:
+                _append_or_upsert_asset_chunks(cur, asset_id, tuple(getattr(result, "chunks", ()) or ()))
+                _enqueue_staged_jobs_with_cursor(
+                    cur,
+                    root_name=root_name,
+                    relative_path=relative_path,
+                    jobs=_staged_jobs_from_result(result, plan=False),
+                )
+            return True
+
+
+def _staged_asset_for_update(cur: Any, *, root_name: str, relative_path: str) -> tuple[str, str | None]:
+    cur.execute(
+        """
+        SELECT a.id::text, a.canonical_asset_id::text
+        FROM source_assets a
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE r.name = %s
+          AND a.path = %s
+          AND a.deleted_at IS NULL
+        FOR UPDATE
+        """,
+        (root_name, relative_path),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"source asset not found: {root_name}:{relative_path}")
+    return row[0], row[1]
+
+
+def _staged_jobs_from_result(result: Any, *, plan: bool) -> list[dict[str, Any]]:
+    metadata = getattr(result, "metadata", None)
+    if not isinstance(metadata, dict):
+        return []
+    jobs: list[dict[str, Any]] = []
+    if plan and isinstance(metadata.get("staged_jobs"), list):
+        raw_jobs = metadata.get("staged_jobs") or []
+        jobs.extend(item for item in raw_jobs if isinstance(item, dict))
+    staged = metadata.get("staged_extraction")
+    if isinstance(staged, dict) and isinstance(staged.get("next_job"), dict):
+        jobs.append(staged["next_job"])
+    return jobs
+
+
+def _enqueue_staged_jobs_with_cursor(
+    cur: Any,
+    *,
+    root_name: str,
+    relative_path: str,
+    jobs: list[dict[str, Any]],
+) -> list[str]:
+    job_ids: list[str] = []
+    for job in jobs:
+        job_type = str(job.get("job_type") or "").strip()
+        if not job_type:
+            continue
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        job_payload = {
+            **payload,
+            "root_name": root_name,
+            "path": relative_path,
+        }
+        schedule = _job_schedule_metadata(job_type)
+        cur.execute(
+            """
+            INSERT INTO capture_jobs (
+                job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
+            )
+            VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
+            RETURNING id::text, status
+            """,
+            (
+                job_type,
+                _json(job_payload),
+                schedule["job_family"],
+                schedule["resource_class"],
+                schedule["priority"],
+                schedule["time_budget_seconds"],
+                _json({"stage": "queued", "root_name": root_name, "path": relative_path, "staged": True}),
+            ),
+        )
+        row = cur.fetchone()
+        if row:
+            job_id = row[0]
+            job_ids.append(job_id)
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, target_table, target_id, details)
+                VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
+                """,
+                (job_id, _json({"job_type": job_type, "root_name": root_name, "path": relative_path, "staged": True})),
+            )
+    return job_ids
+
+
 def _apply_extraction_result_with_cursor(
     cur: Any,
     *,
@@ -8737,6 +8948,97 @@ def enqueue_capture_job(
                 (job_id, _json({"job_type": job_type})),
             )
             return job_id
+
+
+def requeue_metadata_only_source_assets(
+    *,
+    root_name: str | None = None,
+    limit: int = 1000,
+    url: str | None = None,
+) -> dict[str, Any]:
+    row_limit = max(1, min(int(limit or 1000), 10000))
+    filters = ["a.deleted_at IS NULL", "a.extraction_status = 'metadata_only'"]
+    params: list[Any] = []
+    if root_name:
+        filters.append("r.name = %s")
+        params.append(root_name)
+    params.append(row_limit)
+    psycopg = _load_psycopg()
+    jobs: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT a.id::text, r.name, a.path, a.file_kind
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE {" AND ".join(filters)}
+                ORDER BY a.updated_at ASC, a.id ASC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+            for asset_id, row_root_name, path, file_kind in rows:
+                job_type = _corpus_extract_job_type_for_file_kind(str(file_kind or ""))
+                schedule = _job_schedule_metadata(job_type)
+                payload = {
+                    "root_name": row_root_name,
+                    "path": path,
+                    "reason": "metadata_only_requeue",
+                }
+                cur.execute(
+                    """
+                    INSERT INTO capture_jobs (
+                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
+                    )
+                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
+                    RETURNING id::text
+                    """,
+                    (
+                        job_type,
+                        _json(payload),
+                        schedule["job_family"],
+                        schedule["resource_class"],
+                        schedule["priority"],
+                        schedule["time_budget_seconds"],
+                        _json({"stage": "queued", "root_name": row_root_name, "path": path, "reason": "metadata_only_requeue"}),
+                    ),
+                )
+                job_id = cur.fetchone()[0]
+                cur.execute(
+                    """
+                    UPDATE source_assets
+                    SET extraction_status = 'queued',
+                        metadata = metadata || %s::jsonb,
+                        updated_at = now()
+                    WHERE id = %s
+                      AND extraction_status = 'metadata_only'
+                    """,
+                    (
+                        _json({"metadata_only_requeued": True, "metadata_only_requeue_job_id": job_id}),
+                        asset_id,
+                    ),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO audit_events (event_type, target_table, target_id, details)
+                    VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
+                    """,
+                    (
+                        job_id,
+                        _json({"job_type": job_type, "root_name": row_root_name, "path": path, "reason": "metadata_only_requeue"}),
+                    ),
+                )
+                jobs.append({"job_id": job_id, "root_name": row_root_name, "path": path, "job_type": job_type})
+    return {"queued": len(jobs), "jobs": jobs, "limit": row_limit, "root_name": root_name}
+
+
+def _corpus_extract_job_type_for_file_kind(file_kind: str) -> str:
+    normalized = str(file_kind or "").strip().lower()
+    if normalized == "pdf":
+        return "corpus_extract_pdf"
+    return f"corpus_extract_{normalized or 'binary'}"
 
 
 def _path_scope_sql(
@@ -11294,6 +11596,82 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
             (
                 asset_id,
                 chunk.chunk_index,
+                chunk_title,
+                db_body,
+                chunk_modality,
+                chunk_locator,
+                chunk.token_estimate,
+                _json(_sanitize_operational_metadata(chunk_metadata)),
+            ),
+        )
+        chunk_id = cur.fetchone()[0]
+        _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
+        _insert_embedding_result(
+            cur,
+            _embedding_result_for_text(
+                owner_table="asset_chunks",
+                owner_id=chunk_id,
+                text=f"{chunk_title}\n{chunk_body}",
+            ),
+        )
+        inserted += 1
+    return inserted
+
+
+def _append_or_upsert_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> int:
+    if not chunks:
+        return 0
+    mail_context = _managed_mail_asset_context(cur, asset_id)
+    inserted = 0
+    for chunk in chunks:
+        chunk_index = int(chunk.chunk_index)
+        cur.execute(
+            """
+            SELECT id::text FROM asset_chunks
+            WHERE asset_id = %s
+              AND chunk_index = %s
+            """,
+            (asset_id, chunk_index),
+        )
+        previous = cur.fetchone()
+        if previous:
+            cur.execute(
+                """
+                DELETE FROM embeddings
+                WHERE owner_table = 'asset_chunks'
+                  AND owner_id = %s
+                """,
+                (previous[0],),
+            )
+            cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s AND chunk_index = %s", (asset_id, chunk_index))
+        chunk_title = strip_postgres_nul(str(chunk.title))
+        chunk_body = strip_postgres_nul(str(chunk.body))
+        chunk_modality = strip_postgres_nul(str(chunk.modality))
+        chunk_locator = _postgres_text_or_none(chunk.locator)
+        chunk_metadata = sanitize_postgres_text_value(dict(getattr(chunk, "metadata", {}) or {}))
+        db_body = chunk_body
+        if mail_context is not None:
+            content_ref = mail_content_store.write_mail_content(
+                root_name=mail_context["root_name"],
+                asset_path=mail_context["asset_path"],
+                chunk_index=chunk_index,
+                title=chunk_title,
+                text=chunk_body,
+                kind=mail_context["kind"],
+            )
+            chunk_metadata["sidecar_ref"] = {"source": "managed_mail", **content_ref}
+            db_body = ""
+        cur.execute(
+            """
+            INSERT INTO asset_chunks (
+                asset_id, chunk_index, title, body, modality, locator, token_estimate, metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            RETURNING id::text
+            """,
+            (
+                asset_id,
+                chunk_index,
                 chunk_title,
                 db_body,
                 chunk_modality,

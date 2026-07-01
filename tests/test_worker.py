@@ -1019,6 +1019,186 @@ def test_process_corpus_job_merges_asr_telemetry(monkeypatch, tmp_path):
     assert applied[0]["root_name"] == "media"
 
 
+def test_process_corpus_job_plans_staged_media_extraction(monkeypatch, tmp_path):
+    root = tmp_path / "media"
+    root.mkdir()
+    (root / "clip.mp4").write_bytes(b"fake media")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "media",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+        },
+    )
+    monkeypatch.setattr(database, "corpus_job_is_running", lambda _job_id: True)
+    monkeypatch.setattr(database, "apply_staged_extraction_plan_for_job", lambda **kwargs: applied.append(kwargs) or True)
+    monkeypatch.setattr(worker, "extract_file", lambda *_args: (_ for _ in ()).throw(AssertionError("parent media job should plan staged work")))
+    monkeypatch.setattr(
+        worker,
+        "plan_staged_media_extraction",
+        lambda *_args, **_kwargs: worker.ExtractionResult(
+            status="staged",
+            metadata={
+                "extractor": "video",
+                "staged_extraction": {
+                    "status": "planned",
+                    "pending_job_count": 1,
+                    "next_job_type": "corpus_extract_media_segment",
+                },
+                "staged_jobs": [
+                    {
+                        "job_type": "corpus_extract_media_segment",
+                        "payload": {"segment_index": 0},
+                    }
+                ],
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-video",
+            "job_type": "corpus_extract_video",
+            "payload": {"root_name": "media", "path": "clip.mp4"},
+        }
+    )
+
+    assert result.status == "staged"
+    assert result.telemetry["staged_job_count"] == 1
+    assert result.telemetry["next_job_type"] == "corpus_extract_media_segment"
+    assert applied[0]["job_id"] == "job-video"
+    assert applied[0]["result"].status == "staged"
+
+
+def test_process_corpus_segment_job_appends_piece_and_queues_next(monkeypatch, tmp_path):
+    root = tmp_path / "media"
+    root.mkdir()
+    (root / "clip.mp4").write_bytes(b"fake media")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "media",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+        },
+    )
+    monkeypatch.setattr(database, "corpus_job_is_running", lambda _job_id: True)
+    monkeypatch.setattr(database, "apply_staged_extraction_piece_for_job", lambda **kwargs: applied.append(kwargs) or True)
+    monkeypatch.setattr(worker, "extract_file", lambda *_args: (_ for _ in ()).throw(AssertionError("segment job should use staged extractor")))
+    monkeypatch.setattr(
+        worker,
+        "extract_media_segment",
+        lambda *_args, **_kwargs: worker.ExtractionResult(
+            status="staged",
+            chunks=(
+                worker.AssetChunk(
+                    chunk_index=0,
+                    title="clip.mp4 segment 1",
+                    body="segment transcript",
+                    modality="transcript",
+                ),
+            ),
+            metadata={
+                "extractor": "media_segment",
+                "asr": {"status": "completed", "segments": 1},
+                "staged_extraction": {
+                    "status": "piece_completed",
+                    "complete": False,
+                    "next_job": {
+                        "job_type": "corpus_extract_media_segment",
+                        "payload": {"segment_index": 1},
+                    },
+                },
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-segment",
+            "job_type": "corpus_extract_media_segment",
+            "payload": {"root_name": "media", "path": "clip.mp4", "segment_index": 0},
+        }
+    )
+
+    assert result.status == "staged"
+    assert result.telemetry["asr_segments"] == 1
+    assert result.telemetry["next_job_type"] == "corpus_extract_media_segment"
+    assert applied[0]["job_id"] == "job-segment"
+    assert applied[0]["result"].chunks[0].body == "segment transcript"
+
+
+def test_process_corpus_job_plans_staged_pdf_ocr(monkeypatch, tmp_path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "scan.pdf").write_bytes(b"%PDF")
+    applied = []
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+        },
+    )
+    monkeypatch.setattr(database, "corpus_job_is_running", lambda _job_id: True)
+    monkeypatch.setattr(database, "apply_staged_extraction_plan_for_job", lambda **kwargs: applied.append(kwargs) or True)
+    monkeypatch.setattr(worker, "extract_file", lambda *_args: (_ for _ in ()).throw(AssertionError("PDF parent job should plan OCR pages")))
+    monkeypatch.setattr(
+        worker,
+        "plan_staged_pdf_extraction",
+        lambda *_args, **_kwargs: worker.ExtractionResult(
+            status="staged",
+            metadata={
+                "extractor": "pdf",
+                "page_count": 42,
+                "staged_extraction": {
+                    "status": "planned",
+                    "pending_job_count": 1,
+                    "next_job_type": "corpus_extract_pdf_ocr_pages",
+                },
+                "staged_jobs": [
+                    {
+                        "job_type": "corpus_extract_pdf_ocr_pages",
+                        "payload": {"page_start": 1, "page_end": 5},
+                    }
+                ],
+            },
+        ),
+    )
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-pdf",
+            "job_type": "corpus_extract_document",
+            "payload": {"root_name": "docs", "path": "scan.pdf"},
+        }
+    )
+
+    assert result.status == "staged"
+    assert result.telemetry["staged_job_count"] == 1
+    assert result.telemetry["next_job_type"] == "corpus_extract_pdf_ocr_pages"
+    assert applied[0]["result"].metadata["page_count"] == 42
+
+
 def test_process_corpus_job_merges_parser_and_media_diagnostics(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 

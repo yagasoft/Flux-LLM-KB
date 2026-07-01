@@ -3550,9 +3550,9 @@ function RootStateBadge({ state }: { state?: string }) {
   const label = LOCK_TOLERANT_STATE_LABELS[normalized] ?? normalized;
   const tone = ["watching", "indexed", "completed"].includes(normalized)
     ? "enabled"
-    : ["queued", "processing", "crawling", "changed", "watch_enabled", "pending_stable", "retrying_locked"].includes(normalized)
+    : ["queued", "processing", "processing_staged", "crawling", "changed", "watch_enabled", "pending_stable", "retrying_locked"].includes(normalized)
       ? "info"
-      : ["blocked", "failed", "stale", "deleted", "blocked_missing_dependency", "blocked_locked"].includes(normalized)
+      : ["blocked", "failed", "stale", "deleted", "metadata_only", "blocked_missing_dependency", "blocked_locked"].includes(normalized)
         ? "warning"
         : "";
   return <span className={`state-pill ${tone}`}>{label}</span>;
@@ -3561,7 +3561,9 @@ function RootStateBadge({ state }: { state?: string }) {
 const LOCK_TOLERANT_STATE_LABELS: Record<string, string> = {
   pending_stable: "Pending Stable",
   retrying_locked: "Retrying Locked",
-  blocked_locked: "Blocked Locked"
+  blocked_locked: "Blocked Locked",
+  processing_staged: "Processing Staged",
+  metadata_only: "Metadata Only"
 };
 
 function CrawlRootDialog({ root, onClose, onSave }: { root?: RootSummary; onClose: () => void; onSave: (form: CrawlRootForm) => void }) {
@@ -5370,6 +5372,7 @@ function JobQueueTable({
             const payload = jobPayload(job);
             const target = jobTarget(job, payload);
             const status = stringFromUnknown(job.status) ?? "unknown";
+            const displayStatus = jobDisplayStatus(job, status);
             const expanded = expandedJobId === id;
             const outlookRequest = stringFromUnknown(job.job_type) === "outlook_sync_request";
             const cancellableCorpusJob = isCancelableCorpusJob(job, status);
@@ -5378,7 +5381,7 @@ function JobQueueTable({
             return (
               <Fragment key={id}>
                 <tr>
-                  <td><JobStatusBadge status={status} /></td>
+                  <td><JobStatusBadge status={displayStatus} /></td>
                   <td><strong>{jobTypeLabel(stringFromUnknown(job.job_type))}</strong></td>
                   <td className="job-target" title={target.path}>{target.path}</td>
                   <td>{target.root}</td>
@@ -5428,7 +5431,7 @@ function JobQueueTable({
                     </button>
                   </td>
                 </tr>
-                {expanded ? <JobDetailRow job={job} payload={payload} target={target} id={id} status={status} toolInvocations={toolInvocationsByJob[id]} /> : null}
+                {expanded ? <JobDetailRow job={job} payload={payload} target={target} id={id} status={displayStatus} toolInvocations={toolInvocationsByJob[id]} /> : null}
               </Fragment>
             );
           })}
@@ -5458,6 +5461,7 @@ function JobDetailRow({
   const details = [
     ["Job id", id],
     ["Status", humanizeIdentifier(status)],
+    ["Result", humanizeIdentifier(stringFromUnknown(telemetry.result_status) ?? "")],
     ["Job type", jobTypeLabel(stringFromUnknown(job.job_type))],
     ["Root", target.root],
     ["Path", target.path],
@@ -5553,13 +5557,13 @@ function JobConsoleOutput({ state }: { state?: JobToolInvocationState }) {
 }
 
 function JobStatusBadge({ status }: { status: string }) {
-  const tone = ["completed", "metadata_only"].includes(status)
+  const tone = ["completed", "indexed"].includes(status)
     ? "enabled"
-    : ["pending", "running", "processing", "retrying_locked"].includes(status)
+    : ["pending", "running", "processing", "processing_staged", "completed_staged", "retrying_locked", "staged"].includes(status)
       ? "info"
       : status === "failed"
         ? "error"
-        : status.startsWith("blocked") || status.startsWith("cancelled")
+        : status.startsWith("blocked") || status.startsWith("cancelled") || status === "metadata_only" || status === "completed_metadata_only"
           ? "warning"
           : "";
   return <span className={`state-pill ${tone}`}>{humanizeIdentifier(status)}</span>;
@@ -5575,6 +5579,14 @@ function jobPayload(job: Record<string, unknown>) {
 
 function jobTelemetry(job: Record<string, unknown>) {
   return job.telemetry && typeof job.telemetry === "object" && !Array.isArray(job.telemetry) ? job.telemetry as Record<string, unknown> : {};
+}
+
+function jobDisplayStatus(job: Record<string, unknown>, status: string) {
+  const telemetry = jobTelemetry(job);
+  const resultStatus = stringFromUnknown(telemetry.result_status);
+  if (status === "completed" && resultStatus === "metadata_only") return "completed_metadata_only";
+  if (status === "completed" && resultStatus === "staged") return "completed_staged";
+  return status;
 }
 
 function toolInvocationCommand(command: unknown): string {

@@ -280,14 +280,16 @@ root resolves under the production install root when `FLUX_KB_INSTALL_ROOT` is
 set, otherwise under the local user cache. `flux-kb acceleration status` and the
 dashboard Performance tab show CPU/disk hints, optional NVIDIA and ONNX Runtime
 availability, local model-server state, cache directories, and worker-family
-queue counts. Local model probing is disabled by default and accepts only
-loopback HTTP(S) URLs such as `http://127.0.0.1:11434`, the Docker host gateway
+queue counts. Local vision inference is enabled by default for the local
+loopback/Ollama path and accepts only loopback HTTP(S) URLs such as
+`http://127.0.0.1:11434`, the Docker host gateway
 `http://host.docker.internal:11434`, or the internal production Compose service
 URL `http://ollama:11434`.
 Media ASR is controlled by `acceleration.asr.enabled`,
 `acceleration.asr.provider`, `acceleration.asr.model`,
 `acceleration.asr.base_url`, `acceleration.asr.model_path`, and
-`acceleration.asr.max_duration_seconds`.
+`acceleration.asr.max_duration_seconds`, which now bounds one staged ASR segment
+rather than the total media duration.
 Redacted ASR cache entries live under the configured ASR cache directory and
 worker-family telemetry reports ASR cache hits, misses, and segment counts.
 Recursive archive/container extraction is controlled by

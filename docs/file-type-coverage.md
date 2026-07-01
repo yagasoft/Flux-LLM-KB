@@ -45,36 +45,43 @@ installed.
   grouping, and optional sidecar extraction.
 - Cloud OCR, cloud transcription, and provider LLM calls are off by default.
 - OCR is local and cache-backed when available. Deferred image jobs use
-  Tesseract; image-only PDFs first try embedded PDF text, then render bounded
-  pages with `pdftoppm` and run Tesseract. Missing OCR tools report
-  `blocked_missing_dependency`, and redacted OCR cache entries stay under the
-  private OCR cache root with hit/miss telemetry exposed through worker-family
-  status.
+  Tesseract; image-only PDFs first try embedded PDF text, then queue staged
+  `corpus_extract_pdf_ocr_pages` jobs that render page batches with `pdftoppm`
+  and run Tesseract until all pages have been attempted. Missing OCR tools
+  report `blocked_missing_dependency`, and redacted OCR cache entries stay under
+  the private OCR cache root with hit/miss and per-page telemetry exposed
+  through worker-family status.
 - ASR is local and cache-backed when available. Deferred audio/video jobs prefer
-  transcript sidecars, then use `ffprobe`, caller-side `ffmpeg` audio extraction,
-  and either the local OpenAI-compatible ASR service or the local faster-whisper
-  fallback path. Production GPU deployments serve `large-v3-turbo` from the
-  persistent `flux_llm_kb_asr_models` Docker volume; model download is an
-  explicit deploy command, not part of extraction. Missing ASR tools, service
-  readiness, service URLs, or model paths report `blocked_missing_dependency`;
-  redacted ASR cache entries stay under the private ASR cache root with hit/miss
-  and segment telemetry exposed through worker-family status. Embedded media
-  sidecar transcripts inside archives are used before probing or ASR tools.
-- Optional local vision is cache-backed and uses configured loopback local
-  inference. Image and sampled video-frame descriptions run only when
+  transcript sidecars, then use `ffprobe` to plan sequential
+  `corpus_extract_media_segment` jobs. Each segment extracts temporary mono 16
+  kHz audio with caller-side `ffmpeg` and transcribes through either the local
+  OpenAI-compatible ASR service or the local faster-whisper fallback path until
+  the full duration is covered. Production GPU deployments serve
+  `large-v3-turbo` from the persistent `flux_llm_kb_asr_models` Docker volume;
+  model download is an explicit deploy command, not part of extraction. Missing
+  ASR tools, service readiness, service URLs, or model paths report
+  `blocked_missing_dependency`; redacted ASR cache entries stay under the
+  private ASR cache root with hit/miss and segment telemetry exposed through
+  worker-family status. Embedded media sidecar transcripts inside archives are
+  used before probing or ASR tools.
+- Optional local vision is cache-backed and uses configured local loopback or Docker
+  host-gateway inference. Image and sampled video-frame descriptions run only when
   `acceleration.vision.enabled` is true, `acceleration.vision.model` is
   configured, and `acceleration.local_inference.*` points at a healthy local
-  provider/runtime. The first implemented runtime path uses an
-  Ollama-compatible API; Gemma-class local vision models can be selected through
-  `acceleration.vision.model` when installed in the configured runtime.
+  provider/runtime. Production defaults enable local inference and use
+  `qwen3-vl:8b` with a short keepalive. The first implemented runtime path uses
+  an Ollama-compatible API; Gemma-class local vision models can be selected
+  through `acceleration.vision.model` when installed in the configured runtime.
   Redacted captions stay under the private vision cache, sampled frames stay
   under the private thumbnail cache, and decorative-image spacers are skipped
   before OCR or vision.
-- Video frame sampling is scene-transition based, not fixed-position sampling.
-  Deferred video jobs use local `ffmpeg` scene detection with
+- Video frame sampling is enabled by default for video jobs. Direct extraction
+  can still use local `ffmpeg` scene detection with
   `acceleration.video.scene_threshold`, sample up to
   `acceleration.video.frame_sample_count` transition frames, and use one midpoint
-  fallback frame only when no transition is detected.
+  fallback frame only when no transition is detected. Staged corpus video jobs
+  enqueue `corpus_extract_video_frames` with a bounded timestamp set so frame
+  vision cannot race ASR chunk writes for the same asset.
 
 ## Coverage Matrix
 
@@ -148,19 +155,18 @@ installed.
   `comic_archive` metadata.
 - Image and scanned-PDF OCR uses local tools only. Image files can be OCRed with
   Tesseract in deferred image jobs after decorative-image skip checks;
-  image-only PDFs use `pdftoppm` page rendering plus Tesseract up to the
-  configured page cap. OCR output is redacted before chunking and before cache
-  writes. Cache hit/miss counts are stored as sanitized job telemetry; raw OCR
-  text is not written to public docs or dashboard metadata.
+  image-only PDFs use staged `pdftoppm` page-batch rendering plus Tesseract until
+  all pages are processed. OCR output is redacted before chunking and before
+  cache writes. Cache hit/miss counts are stored as sanitized job telemetry; raw
+  OCR text is not written to public docs or dashboard metadata.
 - Audio/video ASR uses local tools only. Sidecar transcripts remain preferred;
-  otherwise bounded media jobs can sample scene-transition video frames into the
-  thumbnail cache, run optional configured local loopback or Docker
-  host-gateway inference captions
-  into the vision cache, extract temporary mono 16 kHz audio with `ffmpeg`, and
-  transcribe through `acceleration.asr.provider`. The production provider calls
-  the loopback OpenAI-compatible ASR service with `acceleration.asr.model` set to
-  `large-v3-turbo`; the fallback provider loads faster-whisper from
-  `acceleration.asr.model_path`.
+  otherwise parent media jobs probe once, queue sequential audio chunks, append
+  transcript chunks by stable segment locators, and then queue video frame vision
+  work for the same asset when applicable. Each chunk extracts temporary mono 16
+  kHz audio with `ffmpeg` and transcribes through `acceleration.asr.provider`.
+  The production provider calls the loopback OpenAI-compatible ASR service with
+  `acceleration.asr.model` set to `large-v3-turbo`; the fallback provider loads
+  faster-whisper from `acceleration.asr.model_path`.
   ASR output is redacted before chunking and before ASR cache writes. Cloud
   transcription stays off by default, and raw transcript text is not written to
   public docs or dashboard metadata.

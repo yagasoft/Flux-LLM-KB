@@ -331,6 +331,10 @@ def main(argv: list[str] | None = None) -> int:
     crawl_jobs = crawl_subparsers.add_parser("jobs", help="List corpus extraction jobs")
     crawl_jobs.add_argument("--limit", type=int, default=50)
 
+    crawl_requeue_metadata = crawl_subparsers.add_parser("requeue-metadata-only", help="Requeue active metadata-only source assets")
+    crawl_requeue_metadata.add_argument("--root", dest="root_name")
+    crawl_requeue_metadata.add_argument("--limit", type=int, default=1000)
+
     crawl_backfill = crawl_subparsers.add_parser("backfill", help="Claim deferred corpus extraction jobs")
     crawl_kind_choices = ["text", "images", "diagrams", "archives", "containers", "media", "embeddings", "data", "mail", "reports", "metadata", "all"]
     crawl_backfill.add_argument(
@@ -1038,6 +1042,8 @@ def _crawl(args: argparse.Namespace) -> int:
         payload = KnowledgeService().sync_corpus(root_name=args.root, path=args.path, dry_run=args.dry_run)
     elif args.crawl_command == "jobs":
         payload = {"jobs": database.list_capture_jobs(limit=args.limit)}
+    elif args.crawl_command == "requeue-metadata-only":
+        payload = database.requeue_metadata_only_source_assets(root_name=args.root_name, limit=args.limit)
     elif args.crawl_command == "backfill":
         from .service import KnowledgeService
 

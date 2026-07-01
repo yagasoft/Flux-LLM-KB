@@ -3714,6 +3714,146 @@ def test_apply_extraction_result_for_job_skips_when_job_was_cancelled(monkeypatc
     assert "INSERT INTO asset_chunks" not in sql
 
 
+def test_apply_staged_extraction_piece_upserts_chunks_and_enqueues_next(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "FROM capture_jobs" in sql and "FOR UPDATE" in sql:
+                return ("job-1", "running")
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
+                return ("asset-1", None)
+            if "UPDATE source_assets" in sql:
+                return ("asset-1",)
+            if "SELECT id::text FROM asset_chunks" in sql:
+                return ("old-chunk",)
+            if "INSERT INTO asset_chunks" in sql:
+                return ("new-chunk",)
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-next", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    result = SimpleNamespace(
+        status="staged",
+        metadata={
+            "extractor": "media_segment",
+            "staged_extraction": {
+                "status": "piece_completed",
+                "complete": False,
+                "next_job": {
+                    "job_type": "corpus_extract_media_segment",
+                    "payload": {"segment_index": 1},
+                },
+            },
+        },
+        chunks=(AssetChunk(chunk_index=0, title="segment", body="body", modality="transcript"),),
+        child_assets=(),
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
+
+    applied = database.apply_staged_extraction_piece_for_job(
+        job_id="job-1",
+        root_name="media",
+        relative_path="clip.mp4",
+        result=result,
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    params_json = "\n".join(str(params) for _statement, params in executed)
+    assert applied is True
+    assert "FOR UPDATE" in sql
+    assert "extraction_status = %s" in sql
+    assert "DELETE FROM embeddings" in sql
+    assert "DELETE FROM asset_chunks WHERE asset_id = %s AND chunk_index = %s" in sql
+    assert "INSERT INTO asset_chunks" in sql
+    assert "INSERT INTO capture_jobs" in sql
+    assert "corpus_extract_media_segment" in params_json
+    assert "segment_index" in params_json
+
+
+def test_requeue_metadata_only_source_assets_creates_extract_jobs(monkeypatch):
+    executed = []
+    rows = [
+        ("asset-video", "media", "clip.mp4", "video"),
+        ("asset-pdf", "docs", "scan.pdf", "document"),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "FROM source_assets" in sql:
+                return rows
+            return []
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "INSERT INTO capture_jobs" in sql:
+                return (f"job-{len([item for item in executed if 'INSERT INTO capture_jobs' in item[0]])}",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.requeue_metadata_only_source_assets(root_name=None, limit=10)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    params_json = "\n".join(str(params) for _statement, params in executed)
+    assert result["queued"] == 2
+    assert "a.extraction_status = 'metadata_only'" in sql
+    assert "a.deleted_at IS NULL" in sql
+    assert "INSERT INTO capture_jobs" in sql
+    assert "corpus_extract_video" in params_json
+    assert "corpus_extract_document" in params_json
+
+
 def test_apply_extraction_result_persists_nested_container_child_metadata(monkeypatch):
     executed = []
 

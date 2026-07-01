@@ -16,7 +16,15 @@ from zipfile import ZipFile
 import zlib
 
 from flux_llm_kb.crawler import AssetChunk, CorpusPolicy
-from flux_llm_kb.extractors import VISION_TIMEOUT_SECONDS, extract_file, extractor_availability
+from flux_llm_kb.extractors import (
+    PDF_OCR_CHUNK_INDEX_BASE,
+    VISION_TIMEOUT_SECONDS,
+    extract_file,
+    extract_media_segment,
+    extract_pdf_ocr_pages,
+    extractor_availability,
+    plan_staged_media_extraction,
+)
 
 
 PNG_BYTES = base64.b64decode(
@@ -447,7 +455,7 @@ def test_extract_media_blocks_when_ffprobe_is_missing(monkeypatch, tmp_path):
 
 
 def test_extract_media_skips_asr_when_disabled(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
     monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "false")
     monkeypatch.setenv("FLUX_KB_ASR_MAX_DURATION_SECONDS", "3600")
@@ -515,7 +523,7 @@ def test_extract_media_blocks_when_ffmpeg_is_missing(monkeypatch, tmp_path):
 
 
 def test_extract_media_blocks_when_faster_whisper_is_missing(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
     _configure_asr(monkeypatch, tmp_path)
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
@@ -540,31 +548,123 @@ def test_extract_media_blocks_when_faster_whisper_is_missing(monkeypatch, tmp_pa
     assert run_calls == ["C:/tools/ffprobe.exe"]
 
 
-def test_extract_media_skips_asr_when_duration_exceeds_cap(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+def test_extract_media_runs_asr_when_duration_exceeds_legacy_cap(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
-    _configure_asr(monkeypatch, tmp_path, max_duration=10)
+    _configure_asr_http(monkeypatch, tmp_path, max_duration=10)
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
-    calls = []
+    calls = {"ffprobe": 0, "ffmpeg": 0, "http": 0}
 
     def fake_run(command, **_kwargs):
-        calls.append(command[0])
-        assert command[0].endswith("ffprobe.exe")
-        return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=75), stderr="")
+        if command[0].endswith("ffprobe.exe"):
+            calls["ffprobe"] += 1
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=75), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            calls["ffmpeg"] += 1
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"text":"Long meeting transcript","segments":[{"start":0.0,"end":1.0,"text":"Long"}]}'
+
+    def fake_urlopen(_request, **_kwargs):
+        calls["http"] += 1
+        return FakeResponse()
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
-    assert result.status == "metadata_only"
-    assert result.metadata["asr"]["status"] == "skipped_duration_cap"
+    assert result.status == "indexed"
+    assert result.chunks[0].body == "Long meeting transcript"
+    assert result.metadata["asr"]["status"] == "completed"
     assert result.metadata["asr"]["duration_seconds"] == 75.0
     assert result.metadata["asr"]["max_duration_seconds"] == 10
-    assert calls == ["C:/tools/ffprobe.exe"]
+    assert calls == {"ffprobe": 1, "ffmpeg": 1, "http": 1}
+
+
+def test_plan_staged_video_extraction_queues_asr_then_frames(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLING_ENABLED", "true")
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLE_COUNT", "3")
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: "C:/tools/ffprobe.exe" if command == "ffprobe" else None)
+
+    def fake_run(command, **_kwargs):
+        assert command[0].endswith("ffprobe.exe")
+        return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=1200), stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = plan_staged_media_extraction(path, "video")
+
+    assert result.status == "staged"
+    assert result.metadata["asr"]["status"] == "planned"
+    assert result.metadata["asr"]["duration_seconds"] == 1200.0
+    assert result.metadata["frame_sampling"]["status"] == "planned"
+    assert result.metadata["frame_sampling"]["timestamps"] == [300.0, 600.0, 900.0]
+    first_job = result.metadata["staged_jobs"][0]
+    assert first_job["job_type"] == "corpus_extract_media_segment"
+    assert first_job["payload"]["segment_duration_seconds"] == 900.0
+    assert first_job["payload"]["followup_jobs"][0]["job_type"] == "corpus_extract_video_frames"
+    assert result.metadata["staged_extraction"]["pending_job_count"] == 3
+
+
+def test_extract_media_segment_queues_next_audio_chunk(monkeypatch, tmp_path):
+    path = tmp_path / "meeting.mp3"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    calls = {"ffprobe": 0, "ffmpeg": 0, "http": 0}
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            calls["ffprobe"] += 1
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=75), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            calls["ffmpeg"] += 1
+            assert "-ss" not in command
+            assert command[command.index("-t") + 1] == "30.000"
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(command)
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"text":"Chunk one transcript","segments":[{"text":"Chunk one"}]}'
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", lambda *_args, **_kwargs: calls.__setitem__("http", calls["http"] + 1) or FakeResponse(), raising=False)
+
+    result = extract_media_segment(
+        path,
+        {
+            "file_kind": "audio",
+            "segment_index": 0,
+            "segment_start_seconds": 0,
+            "segment_duration_seconds": 30,
+            "duration_seconds": 75,
+            "chunks_seen": 0,
+        },
+    )
+
+    assert result.status == "staged"
+    assert result.chunks[0].chunk_index == 0
+    assert result.chunks[0].body == "Chunk one transcript"
+    next_job = result.metadata["staged_extraction"]["next_job"]
+    assert next_job["job_type"] == "corpus_extract_media_segment"
+    assert next_job["payload"]["segment_index"] == 1
+    assert next_job["payload"]["segment_start_seconds"] == 30.0
+    assert next_job["payload"]["chunks_seen"] == 1
+    assert calls == {"ffprobe": 1, "ffmpeg": 1, "http": 1}
 
 
 def test_extract_media_runs_local_asr_and_reuses_redacted_cache(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
     model_path = _configure_asr(monkeypatch, tmp_path)
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
@@ -630,7 +730,7 @@ def test_extract_media_runs_local_asr_and_reuses_redacted_cache(monkeypatch, tmp
 
 
 def test_extract_media_passes_configured_gpu_settings_to_faster_whisper(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
     model_path = _configure_asr(monkeypatch, tmp_path, device="cuda", compute_type="float16")
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
@@ -670,7 +770,7 @@ def test_extract_media_passes_configured_gpu_settings_to_faster_whisper(monkeypa
 
 
 def test_extract_media_uses_openai_compatible_asr_provider(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
     _configure_asr_http(monkeypatch, tmp_path)
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
@@ -720,7 +820,7 @@ def test_extract_media_uses_openai_compatible_asr_provider(monkeypatch, tmp_path
 
 
 def test_extract_media_openai_compatible_asr_blocks_when_service_unavailable(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
     _configure_asr_http(monkeypatch, tmp_path)
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
@@ -747,6 +847,7 @@ def test_extract_media_treats_video_without_audio_as_metadata_only(monkeypatch, 
     path = tmp_path / "silent.mp4"
     path.write_bytes(b"fake media")
     _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLING_ENABLED", "false")
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
     calls = {"ffprobe": 0, "ffmpeg": 0, "http": 0}
 
@@ -786,7 +887,7 @@ def test_extract_media_treats_video_without_audio_as_metadata_only(monkeypatch, 
 
 
 def test_extract_media_asr_cache_key_changes_with_provider_model(monkeypatch, tmp_path):
-    path = tmp_path / "clip.mp4"
+    path = tmp_path / "clip.mp3"
     path.write_bytes(b"fake media")
     _configure_asr_http(monkeypatch, tmp_path, model="large-v3-turbo")
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
@@ -1746,9 +1847,10 @@ def test_extract_image_only_pdf_blocks_pdftoppm_timeout_without_retryable_failur
     assert result.metadata["ocr"]["pages_attempted"] == 0
 
 
-def test_extract_large_scanned_pdf_skips_ocr_by_page_cap(monkeypatch, tmp_path):
+def test_extract_large_scanned_pdf_ocr_all_pages_without_page_cap(monkeypatch, tmp_path):
     path = tmp_path / "large-scan.pdf"
     path.write_bytes(b"%PDF large")
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
 
     class EmptyPage:
         def extract_text(self):
@@ -1760,16 +1862,90 @@ def test_extract_large_scanned_pdf_skips_ocr_by_page_cap(monkeypatch, tmp_path):
 
     monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
     monkeypatch.setattr(
-        "flux_llm_kb.extractors.run_no_window",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("page-capped PDF should not render OCR pages")),
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: {
+            "pdftoppm": "C:/tools/pdftoppm.exe",
+            "tesseract": "C:/tools/tesseract.exe",
+        }.get(command),
     )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        if command[0] == "C:/tools/pdftoppm.exe":
+            page = command[command.index("-f") + 1]
+            output_prefix = Path(command[-1])
+            output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[0] == "C:/tools/tesseract.exe":
+            page_name = Path(command[1]).stem
+            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
-    assert result.status == "metadata_only"
-    assert result.metadata["ocr"]["status"] == "skipped_page_cap"
+    assert result.status == "indexed"
+    assert "OCR text from page-1" in result.chunks[0].body
+    assert "OCR text from page-26" in result.chunks[0].body
+    assert result.metadata["ocr"]["status"] == "completed"
     assert result.metadata["ocr"]["page_count"] == 26
-    assert result.metadata["ocr"]["pages_attempted"] == 0
+    assert result.metadata["ocr"]["pages_attempted"] == 26
+    assert [Path(command[0]).name for command in calls].count("pdftoppm.exe") == 26
+    assert [Path(command[0]).name for command in calls].count("tesseract.exe") == 26
+
+
+def test_extract_pdf_ocr_pages_queues_next_batch(monkeypatch, tmp_path):
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(b"%PDF staged")
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: {
+            "pdftoppm": "C:/tools/pdftoppm.exe",
+            "tesseract": "C:/tools/tesseract.exe",
+        }.get(command),
+    )
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        if command[0] == "C:/tools/pdftoppm.exe":
+            page = command[command.index("-f") + 1]
+            output_prefix = Path(command[-1])
+            output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[0] == "C:/tools/tesseract.exe":
+            page_name = Path(command[1]).stem
+            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_pdf_ocr_pages(
+        path,
+        {
+            "page_start": 1,
+            "page_end": 2,
+            "page_count": 3,
+            "page_batch_size": 2,
+            "chunks_seen": 0,
+        },
+    )
+
+    assert result.status == "staged"
+    assert result.chunks[0].chunk_index == PDF_OCR_CHUNK_INDEX_BASE
+    assert "OCR text from page-1" in result.chunks[0].body
+    assert "OCR text from page-2" in result.chunks[0].body
+    assert result.metadata["ocr"]["pages_attempted"] == 2
+    next_job = result.metadata["staged_extraction"]["next_job"]
+    assert next_job["job_type"] == "corpus_extract_pdf_ocr_pages"
+    assert next_job["payload"]["page_start"] == 3
+    assert next_job["payload"]["page_end"] == 3
+    assert next_job["payload"]["chunks_seen"] == 1
+    assert [Path(command[0]).name for command in calls].count("pdftoppm.exe") == 2
+    assert [Path(command[0]).name for command in calls].count("tesseract.exe") == 2
 
 
 def test_extractor_availability_reports_container_tools():

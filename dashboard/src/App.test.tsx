@@ -2025,6 +2025,47 @@ describe("Flux dashboard", () => {
     expect(await screen.findByText("Corpus job queued for retry.")).toBeInTheDocument();
   });
 
+  test("job queue distinguishes completed metadata-only corpus jobs", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-metadata",
+          job_type: "corpus_extract_video",
+          status: "completed",
+          payload: { root_name: "docs", path: "meetings/long.mp4" },
+          attempts: 1,
+          updated_at: "2026-07-01T10:04:00+00:00",
+          telemetry: {
+            result_status: "metadata_only",
+            asr_duration_seconds: 5856,
+            asr_segments: 0
+          }
+        }
+      ],
+      count: 1,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["completed"],
+        roots: ["docs"],
+        job_types: ["corpus_extract_video"]
+      }
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    expect(await screen.findByText("Completed Metadata Only")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show details for job job-metadata" }));
+
+    expect(screen.getByText("Result")).toBeInTheDocument();
+    expect(screen.getByText("Metadata Only")).toBeInTheDocument();
+  });
+
   test("job queue shows Outlook COM requests and cancel feedback", async () => {
     const user = userEvent.setup();
     outlook.pending_requests = [

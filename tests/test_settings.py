@@ -276,13 +276,14 @@ def test_vision_and_video_settings_defaults_and_env_overrides(monkeypatch, tmp_p
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     service = SettingsService()
 
-    assert service.resolve("acceleration.vision.enabled").raw_value is False
-    assert service.resolve("acceleration.vision.model").raw_value == ""
+    assert service.resolve("acceleration.vision.enabled").raw_value is True
+    assert service.resolve("acceleration.vision.model").raw_value == "qwen3-vl:8b"
     assert service.resolve("acceleration.vision.max_image_pixels").raw_value == 4_096_000
-    assert service.resolve("acceleration.video.frame_sampling.enabled").raw_value is False
+    assert service.resolve("acceleration.video.frame_sampling.enabled").raw_value is True
     assert service.resolve("acceleration.video.frame_sample_count").raw_value == 3
     assert service.resolve("acceleration.video.scene_threshold").raw_value == 0.35
     assert service.resolve("acceleration.video.frame_max_duration_seconds").raw_value == 1800
+    assert service.resolve("acceleration.local_inference.enabled").raw_value is True
 
     monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "true")
     monkeypatch.setenv("FLUX_KB_VISION_MODEL", "llava:latest")
@@ -325,7 +326,7 @@ def test_local_inference_keep_alive_defaults_and_env_override(monkeypatch):
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     service = SettingsService()
 
-    assert service.resolve("acceleration.local_inference.keep_alive").raw_value == ""
+    assert service.resolve("acceleration.local_inference.keep_alive").raw_value == "2m"
 
     monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE", "2m")
 

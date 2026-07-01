@@ -464,8 +464,8 @@ are based on container-visible limits.
 The V2.8 acceleration status model is read-only. It detects CPU count, Windows
 memory when available, cache-root disk space, NVIDIA/CUDA through `nvidia-smi`,
 optional ONNX Runtime providers, selected watcher backend policy/native state,
-and optional local model servers. Local model probing is disabled by default
-and accepts only loopback HTTP(S) URLs. The permanent cache layout is resolved from
+and optional local model servers. Local vision inference is enabled by default
+for the configured local provider and accepts only loopback HTTP(S) URLs. The permanent cache layout is resolved from
 `acceleration.cache_root`, `FLUX_KB_CACHE_ROOT`, `FLUX_KB_INSTALL_ROOT`, or the
 user cache, and exposes named directories for models, OCR, ASR, vision,
 thumbnails, parser output, embeddings, private mail content sidecars, and temp

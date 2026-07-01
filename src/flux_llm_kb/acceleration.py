@@ -93,6 +93,7 @@ def job_family_for_type(job_type: str | None) -> str:
         "corpus_extract_pdf",
         "corpus_extract_spreadsheet",
         "corpus_extract_presentation",
+        "corpus_extract_pdf_ocr_pages",
     }:
         return "office"
     if normalized == "corpus_extract_image":
@@ -101,7 +102,7 @@ def job_family_for_type(job_type: str | None) -> str:
         return "diagram"
     if normalized in {"corpus_extract_archive", "corpus_extract_container"}:
         return "archive"
-    if normalized in {"corpus_extract_audio", "corpus_extract_video"}:
+    if normalized in {"corpus_extract_audio", "corpus_extract_video", "corpus_extract_media_segment", "corpus_extract_video_frames"}:
         return "media"
     if normalized == "corpus_embed":
         return "embedding"

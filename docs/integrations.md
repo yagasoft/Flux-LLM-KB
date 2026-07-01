@@ -366,8 +366,8 @@ or override them; effective globs are returned in dashboard crawl payloads.
 Acceleration settings define the permanent cache root, explicit watcher backend
 policy (`watcher.backend`, with `FLUX_KB_WATCHER_BACKEND` override),
 local loopback or Docker host-gateway model probing, per-family worker caps,
-hash parallelism, and recursive container caps. Local inference probing is
-disabled by default and rejects non-local URLs. The read-only acceleration status is available
+hash parallelism, and recursive container caps. Local inference is enabled by
+default for the configured local provider and rejects non-local URLs. The read-only acceleration status is available
 through `flux-kb acceleration status`, `GET /api/acceleration/status`,
 `kb.acceleration_status`, and the dashboard Performance tab. The payload includes
 selected watcher backend, native/fallback state, fallback reason,

@@ -15,6 +15,7 @@ from io import BytesIO
 import json
 import lzma
 import mailbox
+import math
 import mimetypes
 import os
 from pathlib import Path
@@ -91,11 +92,16 @@ VISION_CACHE_SCHEMA = "flux-vision-cache-v1"
 THUMBNAIL_CACHE_SCHEMA = "flux-thumbnail-cache-v1"
 VISION_PROMPT_SCHEMA = "flux-vision-caption-v3"
 OCR_MAX_PDF_PAGES = 25
+OCR_PDF_PAGE_BATCH_SIZE = 5
 OCR_PDF_DPI = 200
 OCR_MAX_IMAGE_EDGE = 6000
 OCR_TIMEOUT_SECONDS = 30
 ASR_AUDIO_SAMPLE_RATE = 16000
 ASR_FFMPEG_TIMEOUT_SECONDS = 300
+MEDIA_ASR_SEGMENT_SECONDS = 15 * 60
+MEDIA_SEGMENT_CHUNK_INDEX_STRIDE = 1000
+VIDEO_FRAME_CHUNK_INDEX_BASE = 100_000
+PDF_OCR_CHUNK_INDEX_BASE = 200_000
 VISION_TIMEOUT_SECONDS = 180
 VISION_REQUEST_MAX_EDGE = 1280
 VISION_NUM_PREDICT = 1024
@@ -1310,6 +1316,155 @@ def _extract_pdf(path: Path) -> ExtractionResult:
         return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
     chunks = _chunks_from_text(ocr.text, path.name, modality="ocr")
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata, message=ocr.message)
+
+
+def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = None) -> ExtractionResult:
+    file_path = Path(path).expanduser().resolve()
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pdf"}, message="pypdf not installed")
+    try:
+        reader = PdfReader(str(file_path))
+    except Exception as exc:
+        if exc.__class__.__name__ == "DependencyError":
+            message = str(exc) or "pypdf missing required dependency"
+            metadata = {"extractor": "pdf"}
+            if "cryptography" in message.lower():
+                metadata["dependency"] = "cryptography"
+            return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=message)
+        raise
+    page_count = len(reader.pages)
+    text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    chunks = _chunks_from_text(text, file_path.name)
+    if chunks:
+        return ExtractionResult(
+            status="indexed",
+            chunks=chunks,
+            metadata={
+                "extractor": "pdf",
+                "page_count": page_count,
+                "ocr": {
+                    "status": "skipped_embedded_text",
+                    "page_count": page_count,
+                    "pages_attempted": 0,
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                },
+            },
+        )
+    if page_count <= 0:
+        return ExtractionResult(
+            status="metadata_only",
+            metadata={
+                "extractor": "pdf",
+                "page_count": 0,
+                "ocr": {"status": "completed", "page_count": 0, "pages_attempted": 0, "cache_hits": 0, "cache_misses": 0},
+            },
+        )
+    page_end = min(page_count, OCR_PDF_PAGE_BATCH_SIZE)
+    staged_job = {
+        "job_type": "corpus_extract_pdf_ocr_pages",
+        "payload": {
+            "page_start": 1,
+            "page_end": page_end,
+            "page_count": page_count,
+            "page_batch_size": OCR_PDF_PAGE_BATCH_SIZE,
+            "chunks_seen": 0,
+        },
+    }
+    batch_count = math.ceil(page_count / OCR_PDF_PAGE_BATCH_SIZE)
+    metadata = {
+        "extractor": "pdf",
+        "page_count": page_count,
+        "ocr": {
+            "engine": "tesseract",
+            "renderer": "pdftoppm",
+            "status": "planned",
+            "page_count": page_count,
+            "pages_attempted": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "page_batch_size": OCR_PDF_PAGE_BATCH_SIZE,
+        },
+        "staged_extraction": {
+            "status": "planned",
+            "content_extracted": False,
+            "pending_job_count": batch_count,
+            "next_job_type": staged_job["job_type"],
+            "unit": "pdf_pages",
+            "page_count": page_count,
+            "page_batch_size": OCR_PDF_PAGE_BATCH_SIZE,
+        },
+        "staged_jobs": [staged_job],
+    }
+    return ExtractionResult(status="staged", metadata=metadata)
+
+
+def extract_pdf_ocr_pages(path: str | Path, payload: dict[str, Any] | None = None) -> ExtractionResult:
+    file_path = Path(path).expanduser().resolve()
+    payload = payload or {}
+    page_count = _optional_int(payload.get("page_count"))
+    if page_count is None:
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pdf"}, message="pypdf not installed")
+        page_count = len(PdfReader(str(file_path)).pages)
+    page_start = max(1, _optional_int(payload.get("page_start")) or 1)
+    page_batch_size = max(1, _optional_int(payload.get("page_batch_size")) or OCR_PDF_PAGE_BATCH_SIZE)
+    page_end = min(page_count, _optional_int(payload.get("page_end")) or (page_start + page_batch_size - 1))
+    chunks_seen = max(0, _optional_int(payload.get("chunks_seen")) or 0)
+    ocr = _ocr_pdf_pages(file_path, page_start=page_start, page_end=page_end, page_count=page_count)
+    metadata = {
+        "extractor": "pdf_ocr_pages",
+        "page_count": page_count,
+        "ocr": ocr.metadata,
+    }
+    if ocr.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
+    if ocr.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
+    local_chunks = _chunks_from_text(ocr.text, f"{file_path.name} pages {page_start}-{page_end}", modality="ocr")
+    chunks = _offset_chunks(
+        local_chunks,
+        PDF_OCR_CHUNK_INDEX_BASE + ((page_start - 1) * MEDIA_SEGMENT_CHUNK_INDEX_STRIDE),
+        locator_prefix=f"page:{page_start}-{page_end}",
+    )
+    total_chunks_seen = chunks_seen + len(chunks)
+    next_job: dict[str, Any] | None = None
+    if page_end < page_count:
+        next_start = page_end + 1
+        next_end = min(page_count, next_start + page_batch_size - 1)
+        next_job = {
+            "job_type": "corpus_extract_pdf_ocr_pages",
+            "payload": {
+                "page_start": next_start,
+                "page_end": next_end,
+                "page_count": page_count,
+                "page_batch_size": page_batch_size,
+                "chunks_seen": total_chunks_seen,
+            },
+        }
+    metadata["staged_extraction"] = {
+        "status": "piece_completed",
+        "complete": next_job is None,
+        "unit": "pdf_pages",
+        "page_start": page_start,
+        "page_end": page_end,
+        "page_count": page_count,
+        "chunks_written": len(chunks),
+        "chunks_seen": total_chunks_seen,
+    }
+    if next_job is not None:
+        metadata["staged_extraction"]["next_job"] = next_job
+        return ExtractionResult(status="staged", chunks=chunks, metadata=metadata, message=ocr.message)
+    return ExtractionResult(
+        status="indexed" if total_chunks_seen > 0 else "metadata_only",
+        chunks=chunks,
+        metadata=metadata,
+        message=ocr.message,
+    )
 
 
 def _extract_epub(path: Path, policy: CorpusPolicy) -> ExtractionResult:
@@ -3457,6 +3612,363 @@ def _vision_escalation_status(vision: VisionResult) -> str:
         return "unavailable"
     return status
 
+def plan_staged_media_extraction(path: str | Path, file_kind: str | None = None) -> ExtractionResult:
+    file_path = Path(path).expanduser().resolve()
+    kind = str(file_kind or ("video" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "audio"))
+    metadata: dict[str, Any] = {"extractor": kind}
+    sidecar = _read_sidecar_transcript(file_path)
+    if sidecar:
+        chunks = _chunks_from_text(sidecar, file_path.name, modality="transcript")
+        return ExtractionResult(status="indexed", chunks=chunks, metadata={**metadata, "transcript_source": "sidecar"})
+    probe_error, probed = _probe_media(file_path, metadata)
+    if probe_error is not None:
+        return probe_error
+    duration = _media_duration_seconds(probed)
+    first_job: dict[str, Any] | None = None
+    followup_jobs: list[dict[str, Any]] = []
+    frame_job = _planned_video_frame_job(file_path, probed) if kind == "video" else None
+    if frame_job is not None:
+        metadata["frame_sampling"] = frame_job["metadata"]
+        followup_jobs.append({"job_type": frame_job["job_type"], "payload": frame_job["payload"]})
+    elif kind == "video":
+        frame_settings = _frame_sampling_settings()
+        frame_status = "disabled" if not frame_settings["enabled"] else "skipped_no_duration"
+        metadata["frame_sampling"] = _frame_sampling_metadata(
+            status=frame_status,
+            duration_seconds=duration,
+            max_duration_seconds=frame_settings["max_duration_seconds"],
+            frame_sample_count=frame_settings["frame_sample_count"],
+            scene_threshold=frame_settings["scene_threshold"],
+        )
+    asr_job, asr_metadata, asr_message = _planned_media_asr_job(probed, kind)
+    metadata["asr"] = asr_metadata
+    if asr_job is not None:
+        if followup_jobs:
+            asr_job["payload"]["followup_jobs"] = followup_jobs
+        first_job = asr_job
+    elif followup_jobs:
+        first_job = followup_jobs[0]
+    if first_job is None:
+        return ExtractionResult(status="metadata_only", metadata=metadata, message=asr_message)
+    pending_job_count = _estimated_staged_media_job_count(first_job, duration)
+    metadata["staged_jobs"] = [first_job]
+    metadata["staged_extraction"] = {
+        "status": "planned",
+        "content_extracted": False,
+        "pending_job_count": pending_job_count,
+        "next_job_type": first_job["job_type"],
+        "unit": "media",
+        "duration_seconds": duration,
+    }
+    return ExtractionResult(status="staged", metadata=metadata)
+
+
+def extract_media_segment(path: str | Path, payload: dict[str, Any] | None = None) -> ExtractionResult:
+    file_path = Path(path).expanduser().resolve()
+    payload = payload or {}
+    kind = str(payload.get("file_kind") or ("video" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "audio"))
+    metadata: dict[str, Any] = {"extractor": "media_segment", "file_kind": kind}
+    probe_error, probed = _probe_media(file_path, metadata)
+    if probe_error is not None:
+        return probe_error
+    total_duration = _float_or_none(payload.get("duration_seconds"))
+    if total_duration is None:
+        total_duration = _media_duration_seconds(probed)
+    segment_index = max(0, _optional_int(payload.get("segment_index")) or 0)
+    segment_start = max(0.0, _float_or_none(payload.get("segment_start_seconds")) or 0.0)
+    segment_duration = _float_or_none(payload.get("segment_duration_seconds"))
+    asr = _asr_media(
+        file_path,
+        probed,
+        segment_start_seconds=segment_start,
+        segment_duration_seconds=segment_duration,
+        segment_index=segment_index,
+    )
+    metadata["asr"] = asr.metadata
+    if asr.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=asr.message)
+    if asr.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=asr.message)
+    local_chunks = _chunks_from_text(asr.text, f"{file_path.name} segment {segment_index + 1}", modality="transcript")
+    chunks = _offset_chunks(
+        local_chunks,
+        segment_index * MEDIA_SEGMENT_CHUNK_INDEX_STRIDE,
+        locator_prefix=f"media:{segment_start:g}-{_segment_end_label(segment_start, segment_duration)}",
+        metadata={"media_segment_index": segment_index, "segment_start_seconds": segment_start},
+    )
+    chunks_seen = max(0, _optional_int(payload.get("chunks_seen")) or 0) + len(chunks)
+    followup_jobs = _normalised_followup_jobs(payload.get("followup_jobs"))
+    next_job = _next_media_segment_job(
+        payload,
+        total_duration=total_duration,
+        segment_index=segment_index,
+        segment_start=segment_start,
+        segment_duration=segment_duration,
+        chunks_seen=chunks_seen,
+        followup_jobs=followup_jobs,
+    )
+    metadata["staged_extraction"] = {
+        "status": "piece_completed",
+        "complete": next_job is None,
+        "unit": "media_segment",
+        "segment_index": segment_index,
+        "segment_start_seconds": segment_start,
+        "segment_duration_seconds": segment_duration,
+        "duration_seconds": total_duration,
+        "chunks_written": len(chunks),
+        "chunks_seen": chunks_seen,
+    }
+    if next_job is not None:
+        metadata["staged_extraction"]["next_job"] = next_job
+        return ExtractionResult(status="staged", chunks=chunks, metadata=metadata, message=asr.message)
+    return ExtractionResult(
+        status="indexed" if chunks_seen > 0 else "metadata_only",
+        chunks=chunks,
+        metadata=metadata,
+        message=asr.message,
+    )
+
+
+def extract_video_frames(path: str | Path, payload: dict[str, Any] | None = None) -> ExtractionResult:
+    file_path = Path(path).expanduser().resolve()
+    payload = payload or {}
+    metadata: dict[str, Any] = {"extractor": "video_frames", "file_kind": "video"}
+    probe_error, probed = _probe_media(file_path, metadata)
+    if probe_error is not None:
+        return probe_error
+    raw_timestamps = payload.get("timestamps")
+    timestamps = [float(value) for value in raw_timestamps] if isinstance(raw_timestamps, list) else []
+    if not timestamps:
+        timestamps = _planned_frame_timestamps(_media_duration_seconds(probed), _frame_sampling_settings()["frame_sample_count"])
+    frame_sampling = _sample_video_frames_at_timestamps(file_path, probed, timestamps=timestamps)
+    metadata["frame_sampling"] = frame_sampling.metadata
+    vision_summary = _vision_summary_from_frame_sampling(frame_sampling)
+    if vision_summary is not None:
+        metadata["vision"] = vision_summary
+    if frame_sampling.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=frame_sampling.message)
+    if frame_sampling.status == "failed":
+        return ExtractionResult(status="failed", metadata=metadata, message=frame_sampling.message)
+    chunks = _offset_chunks(
+        frame_sampling.chunks,
+        VIDEO_FRAME_CHUNK_INDEX_BASE,
+        metadata={"video_frame_sampling": True},
+    )
+    chunks_seen = max(0, _optional_int(payload.get("chunks_seen")) or 0) + len(chunks)
+    followup_jobs = _normalised_followup_jobs(payload.get("followup_jobs"))
+    next_job = followup_jobs[0] if followup_jobs else None
+    if next_job is not None:
+        remaining = followup_jobs[1:]
+        payload_value = dict(next_job.get("payload") or {})
+        payload_value["chunks_seen"] = chunks_seen
+        if remaining:
+            payload_value["followup_jobs"] = remaining
+        next_job = {"job_type": str(next_job.get("job_type") or ""), "payload": payload_value}
+    metadata["staged_extraction"] = {
+        "status": "piece_completed",
+        "complete": next_job is None,
+        "unit": "video_frames",
+        "chunks_written": len(chunks),
+        "chunks_seen": chunks_seen,
+    }
+    if next_job is not None:
+        metadata["staged_extraction"]["next_job"] = next_job
+        return ExtractionResult(status="staged", chunks=chunks, metadata=metadata, message=frame_sampling.message)
+    return ExtractionResult(
+        status="indexed" if chunks_seen > 0 else "metadata_only",
+        chunks=chunks,
+        metadata=metadata,
+        message=frame_sampling.message,
+    )
+
+
+def _probe_media(path: Path, metadata: dict[str, Any]) -> tuple[ExtractionResult | None, dict[str, Any]]:
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message="ffprobe command not found"), {}
+    try:
+        result = run_no_window(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_format",
+                "-show_streams",
+                "-of",
+                "json",
+                str(path),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - environment-specific
+        return ExtractionResult(status="failed", metadata=metadata, message=str(exc)), {}
+    if result.returncode != 0:
+        return ExtractionResult(status="failed", metadata=metadata, message=result.stderr.strip() or "ffprobe failed"), {}
+    try:
+        probed = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        probed = {}
+    metadata["ffprobe"] = probed
+    return None, probed
+
+
+def _planned_media_asr_job(probed: dict[str, Any], file_kind: str) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
+    settings = _asr_settings()
+    duration = _media_duration_seconds(probed)
+    provider = str(settings["provider"] or "local_faster_whisper")
+    metadata = _asr_metadata(
+        status="planned",
+        duration_seconds=duration,
+        max_duration_seconds=settings["max_duration_seconds"],
+        device=settings["device"],
+        compute_type=settings["compute_type"],
+        provider=provider,
+        model=str(settings.get("model") or ""),
+        base_url=str(settings.get("base_url") or ""),
+    )
+    has_audio_stream = _media_has_audio_stream(probed)
+    if has_audio_stream is not None:
+        metadata["has_audio_stream"] = has_audio_stream
+    if not settings["enabled"]:
+        return None, {**metadata, "status": "disabled"}, None
+    if has_audio_stream is False:
+        return None, {**metadata, "status": "skipped_no_audio_stream"}, "media has no audio stream for ASR"
+    segment_duration = _media_asr_segment_seconds(settings, duration)
+    payload: dict[str, Any] = {
+        "file_kind": file_kind,
+        "segment_index": 0,
+        "segment_start_seconds": 0.0,
+        "duration_seconds": duration,
+        "chunks_seen": 0,
+    }
+    if segment_duration is not None:
+        payload["segment_duration_seconds"] = segment_duration
+    return {"job_type": "corpus_extract_media_segment", "payload": payload}, metadata, None
+
+
+def _planned_video_frame_job(_path: Path, probed: dict[str, Any]) -> dict[str, Any] | None:
+    settings = _frame_sampling_settings()
+    duration = _media_duration_seconds(probed)
+    metadata = _frame_sampling_metadata(
+        status="planned",
+        duration_seconds=duration,
+        max_duration_seconds=settings["max_duration_seconds"],
+        frame_sample_count=settings["frame_sample_count"],
+        scene_threshold=settings["scene_threshold"],
+    )
+    if not settings["enabled"]:
+        return None
+    timestamps = _planned_frame_timestamps(duration, settings["frame_sample_count"])
+    if not timestamps:
+        return None
+    metadata.update(
+        {
+            "status": "planned",
+            "sampling_strategy": "staged_evenly_spaced",
+            "timestamps": timestamps,
+            "frame_count": len(timestamps),
+        }
+    )
+    return {
+        "job_type": "corpus_extract_video_frames",
+        "payload": {
+            "file_kind": "video",
+            "timestamps": timestamps,
+            "duration_seconds": duration,
+            "chunks_seen": 0,
+        },
+        "metadata": metadata,
+    }
+
+
+def _media_asr_segment_seconds(settings: dict[str, Any], duration: float | None) -> float | None:
+    if duration is None:
+        return None
+    configured = _optional_int(settings.get("max_duration_seconds")) or MEDIA_ASR_SEGMENT_SECONDS
+    segment_seconds = max(60, min(MEDIA_ASR_SEGMENT_SECONDS, configured))
+    return min(float(segment_seconds), max(0.0, duration))
+
+
+def _planned_frame_timestamps(duration: float | None, count: int) -> list[float]:
+    if duration is None or duration <= 0 or count <= 0:
+        return []
+    if count == 1:
+        return [round(max(0.0, duration / 2), 3)]
+    step = duration / (count + 1)
+    return [round(max(0.0, min(duration, step * index)), 3) for index in range(1, count + 1)]
+
+
+def _estimated_staged_media_job_count(first_job: dict[str, Any], duration: float | None) -> int:
+    count = 1
+    payload = first_job.get("payload") if isinstance(first_job.get("payload"), dict) else {}
+    segment_duration = _float_or_none(payload.get("segment_duration_seconds")) if isinstance(payload, dict) else None
+    if first_job.get("job_type") == "corpus_extract_media_segment" and duration is not None and segment_duration and segment_duration > 0:
+        count = max(1, math.ceil(duration / segment_duration))
+    followups = _normalised_followup_jobs(payload.get("followup_jobs") if isinstance(payload, dict) else None)
+    return count + len(followups)
+
+
+def _normalised_followup_jobs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    jobs: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        job_type = str(item.get("job_type") or "").strip()
+        if not job_type:
+            continue
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        jobs.append({"job_type": job_type, "payload": dict(payload)})
+    return jobs
+
+
+def _next_media_segment_job(
+    payload: dict[str, Any],
+    *,
+    total_duration: float | None,
+    segment_index: int,
+    segment_start: float,
+    segment_duration: float | None,
+    chunks_seen: int,
+    followup_jobs: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if total_duration is not None and segment_duration is not None and segment_duration > 0:
+        next_start = segment_start + segment_duration
+        if next_start < total_duration - 0.001:
+            next_payload = dict(payload)
+            next_payload.update(
+                {
+                    "segment_index": segment_index + 1,
+                    "segment_start_seconds": round(next_start, 3),
+                    "segment_duration_seconds": min(segment_duration, total_duration - next_start),
+                    "duration_seconds": total_duration,
+                    "chunks_seen": chunks_seen,
+                }
+            )
+            if followup_jobs:
+                next_payload["followup_jobs"] = followup_jobs
+            return {"job_type": "corpus_extract_media_segment", "payload": next_payload}
+    if followup_jobs:
+        next_job = followup_jobs[0]
+        remaining = followup_jobs[1:]
+        next_payload = dict(next_job.get("payload") or {})
+        next_payload["chunks_seen"] = chunks_seen
+        if remaining:
+            next_payload["followup_jobs"] = remaining
+        return {"job_type": str(next_job.get("job_type") or ""), "payload": next_payload}
+    return None
+
+
+def _segment_end_label(segment_start: float, segment_duration: float | None) -> str:
+    if segment_duration is None:
+        return "end"
+    return f"{segment_start + segment_duration:g}"
+
+
 def _extract_media(path: Path, file_kind: str, *, embedded_sidecar: tuple[str, str] | None = None) -> ExtractionResult:
     metadata: dict[str, Any] = {"extractor": file_kind}
     if embedded_sidecar is not None:
@@ -3532,7 +4044,14 @@ def _extract_media(path: Path, file_kind: str, *, embedded_sidecar: tuple[str, s
     )
 
 
-def _asr_media(path: Path, probed: dict[str, Any]) -> AsrResult:
+def _asr_media(
+    path: Path,
+    probed: dict[str, Any],
+    *,
+    segment_start_seconds: float | None = None,
+    segment_duration_seconds: float | None = None,
+    segment_index: int | None = None,
+) -> AsrResult:
     settings = _asr_settings()
     duration = _media_duration_seconds(probed)
     provider = str(settings["provider"] or "local_faster_whisper")
@@ -3549,6 +4068,12 @@ def _asr_media(path: Path, probed: dict[str, Any]) -> AsrResult:
     has_audio_stream = _media_has_audio_stream(probed)
     if has_audio_stream is not None:
         metadata["has_audio_stream"] = has_audio_stream
+    if segment_index is not None:
+        metadata["segment_index"] = int(segment_index)
+    if segment_start_seconds is not None:
+        metadata["segment_start_seconds"] = float(segment_start_seconds)
+    if segment_duration_seconds is not None:
+        metadata["segment_duration_seconds"] = float(segment_duration_seconds)
     if not settings["enabled"]:
         return AsrResult(status="completed", metadata={**metadata, "status": "disabled"})
     if has_audio_stream is False:
@@ -3557,14 +4082,31 @@ def _asr_media(path: Path, probed: dict[str, Any]) -> AsrResult:
             metadata={**metadata, "status": "skipped_no_audio_stream"},
             message="media has no audio stream for ASR",
         )
-    if duration is not None and duration > settings["max_duration_seconds"]:
-        return AsrResult(status="completed", metadata={**metadata, "status": "skipped_duration_cap"})
     if provider == "openai_compatible":
-        return _asr_media_openai_compatible(path, settings=settings, metadata=metadata)
-    return _asr_media_local_faster_whisper(path, settings=settings, metadata=metadata)
+        return _asr_media_openai_compatible(
+            path,
+            settings=settings,
+            metadata=metadata,
+            segment_start_seconds=segment_start_seconds,
+            segment_duration_seconds=segment_duration_seconds,
+        )
+    return _asr_media_local_faster_whisper(
+        path,
+        settings=settings,
+        metadata=metadata,
+        segment_start_seconds=segment_start_seconds,
+        segment_duration_seconds=segment_duration_seconds,
+    )
 
 
-def _asr_media_local_faster_whisper(path: Path, *, settings: dict[str, Any], metadata: dict[str, Any]) -> AsrResult:
+def _asr_media_local_faster_whisper(
+    path: Path,
+    *,
+    settings: dict[str, Any],
+    metadata: dict[str, Any],
+    segment_start_seconds: float | None = None,
+    segment_duration_seconds: float | None = None,
+) -> AsrResult:
     configured_model = str(settings["model_path"] or "").strip()
     if not configured_model:
         return AsrResult(
@@ -3579,7 +4121,7 @@ def _asr_media_local_faster_whisper(path: Path, *, settings: dict[str, Any], met
             metadata={**metadata, "status": "blocked_missing_dependency"},
             message="ASR model path not found",
         )
-    model_key = _asr_model_key(model_path)
+    model_key = _asr_segment_cache_key(_asr_model_key(model_path), metadata)
     cached = _read_asr_cache(path, model_key)
     if cached is not None:
         text, segments = cached
@@ -3609,10 +4151,19 @@ def _asr_media_local_faster_whisper(path: Path, *, settings: dict[str, Any], met
         metadata=metadata,
         device=settings["device"],
         compute_type=settings["compute_type"],
+        segment_start_seconds=segment_start_seconds,
+        segment_duration_seconds=segment_duration_seconds,
     )
 
 
-def _asr_media_openai_compatible(path: Path, *, settings: dict[str, Any], metadata: dict[str, Any]) -> AsrResult:
+def _asr_media_openai_compatible(
+    path: Path,
+    *,
+    settings: dict[str, Any],
+    metadata: dict[str, Any],
+    segment_start_seconds: float | None = None,
+    segment_duration_seconds: float | None = None,
+) -> AsrResult:
     model = str(settings.get("model") or "").strip()
     base_url = str(settings.get("base_url") or "").strip().rstrip("/")
     if not model:
@@ -3627,7 +4178,7 @@ def _asr_media_openai_compatible(path: Path, *, settings: dict[str, Any], metada
             metadata={**metadata, "status": "blocked_missing_dependency"},
             message="ASR service base URL is not configured",
         )
-    model_key = _asr_provider_model_key("openai_compatible", model)
+    model_key = _asr_segment_cache_key(_asr_provider_model_key("openai_compatible", model), metadata)
     cached = _read_asr_cache(path, model_key)
     if cached is not None:
         text, segments = cached
@@ -3658,6 +4209,8 @@ def _asr_media_openai_compatible(path: Path, *, settings: dict[str, Any], metada
         model_key=model_key,
         metadata={**metadata, "base_url": base_url},
         max_duration_seconds=int(settings["max_duration_seconds"]),
+        segment_start_seconds=segment_start_seconds,
+        segment_duration_seconds=segment_duration_seconds,
     )
 
 
@@ -3699,10 +4252,19 @@ def _asr_with_faster_whisper(
     metadata: dict[str, Any],
     device: str,
     compute_type: str,
+    segment_start_seconds: float | None = None,
+    segment_duration_seconds: float | None = None,
 ) -> AsrResult:
     with tempfile.TemporaryDirectory(prefix="flux-kb-asr-") as temp_dir:
         audio_path = Path(temp_dir) / "audio.wav"
-        extract_error = _extract_asr_audio(path, ffmpeg=ffmpeg, audio_path=audio_path, metadata=metadata)
+        extract_error = _extract_asr_audio(
+            path,
+            ffmpeg=ffmpeg,
+            audio_path=audio_path,
+            metadata=metadata,
+            segment_start_seconds=segment_start_seconds,
+            segment_duration_seconds=segment_duration_seconds,
+        )
         if extract_error is not None:
             return extract_error
         try:
@@ -3748,18 +4310,28 @@ def _asr_with_openai_compatible(
     model_key: str,
     metadata: dict[str, Any],
     max_duration_seconds: int,
+    segment_start_seconds: float | None = None,
+    segment_duration_seconds: float | None = None,
 ) -> AsrResult:
     with tempfile.TemporaryDirectory(prefix="flux-kb-asr-") as temp_dir:
         audio_path = Path(temp_dir) / "audio.wav"
-        extract_error = _extract_asr_audio(path, ffmpeg=ffmpeg, audio_path=audio_path, metadata=metadata)
+        extract_error = _extract_asr_audio(
+            path,
+            ffmpeg=ffmpeg,
+            audio_path=audio_path,
+            metadata=metadata,
+            segment_start_seconds=segment_start_seconds,
+            segment_duration_seconds=segment_duration_seconds,
+        )
         if extract_error is not None:
             return extract_error
         try:
+            timeout_seconds = int(segment_duration_seconds or max_duration_seconds)
             payload = _post_openai_compatible_asr(
                 audio_path,
                 base_url=base_url,
                 model=model,
-                timeout=max(ASR_FFMPEG_TIMEOUT_SECONDS, max_duration_seconds + 60),
+                timeout=max(ASR_FFMPEG_TIMEOUT_SECONDS, timeout_seconds + 60),
             )
         except _AsrServiceUnavailable as exc:
             return AsrResult(
@@ -3791,12 +4363,31 @@ def _asr_with_openai_compatible(
         )
 
 
-def _extract_asr_audio(path: Path, *, ffmpeg: str, audio_path: Path, metadata: dict[str, Any]) -> AsrResult | None:
+def _extract_asr_audio(
+    path: Path,
+    *,
+    ffmpeg: str,
+    audio_path: Path,
+    metadata: dict[str, Any],
+    segment_start_seconds: float | None = None,
+    segment_duration_seconds: float | None = None,
+) -> AsrResult | None:
     command = [
         ffmpeg,
         "-y",
+    ]
+    if segment_start_seconds is not None and segment_start_seconds > 0:
+        command.extend(["-ss", f"{segment_start_seconds:.3f}"])
+    command.extend(
+        [
         "-i",
         str(path),
+        ]
+    )
+    if segment_duration_seconds is not None and segment_duration_seconds > 0:
+        command.extend(["-t", f"{segment_duration_seconds:.3f}"])
+    command.extend(
+        [
         "-vn",
         "-ac",
         "1",
@@ -3805,13 +4396,15 @@ def _extract_asr_audio(path: Path, *, ffmpeg: str, audio_path: Path, metadata: d
         "-f",
         "wav",
         str(audio_path),
-    ]
+        ]
+    )
+    timeout_seconds = int(segment_duration_seconds or metadata.get("duration_seconds") or ASR_FFMPEG_TIMEOUT_SECONDS)
     try:
         extract = run_no_window(
             command,
             text=True,
             capture_output=True,
-            timeout=ASR_FFMPEG_TIMEOUT_SECONDS,
+            timeout=max(ASR_FFMPEG_TIMEOUT_SECONDS, timeout_seconds + 60),
             check=False,
         )
     except Exception as exc:  # pragma: no cover - environment-specific
@@ -3984,8 +4577,6 @@ def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingRes
     )
     if not settings["enabled"]:
         return FrameSamplingResult(status="disabled", metadata={**metadata, "status": "disabled"})
-    if duration is not None and duration > settings["max_duration_seconds"]:
-        return FrameSamplingResult(status="completed", metadata={**metadata, "status": "skipped_duration_cap"})
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         return FrameSamplingResult(
@@ -4057,9 +4648,82 @@ def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingRes
     return FrameSamplingResult(status="completed", chunks=_reindexed_chunks(chunks), metadata=final_metadata)
 
 
+def _sample_video_frames_at_timestamps(path: Path, probed: dict[str, Any], *, timestamps: list[float]) -> FrameSamplingResult:
+    settings = _frame_sampling_settings()
+    duration = _media_duration_seconds(probed)
+    metadata = _frame_sampling_metadata(
+        status="pending",
+        duration_seconds=duration,
+        max_duration_seconds=settings["max_duration_seconds"],
+        frame_sample_count=settings["frame_sample_count"],
+        scene_threshold=settings["scene_threshold"],
+    )
+    metadata["sampling_strategy"] = "staged_timestamps"
+    if not settings["enabled"]:
+        return FrameSamplingResult(status="disabled", metadata={**metadata, "status": "disabled"})
+    if not timestamps:
+        return FrameSamplingResult(status="completed", metadata={**metadata, "status": "skipped_no_timestamps"})
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return FrameSamplingResult(
+            status="blocked_missing_dependency",
+            metadata={**metadata, "status": "blocked_missing_dependency"},
+            message="ffmpeg command not found",
+        )
+    chunks: list[AssetChunk] = []
+    thumbnail_hits = 0
+    thumbnail_misses = 0
+    sampled: list[float] = []
+    vision_summary = {
+        "engine": "local_vision",
+        "provider": _vision_settings()["provider"],
+        "model": _vision_settings()["model"],
+        "prompt_schema": VISION_PROMPT_SCHEMA,
+        "status": "disabled",
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "descriptions": 0,
+        "blocked_dependency_count": 0,
+    }
+    for timestamp in timestamps:
+        thumbnail = _thumbnail_for_frame(path, ffmpeg=ffmpeg, timestamp=timestamp)
+        if thumbnail["status"] == "failed":
+            return FrameSamplingResult(
+                status="failed",
+                metadata={**metadata, "status": "failed", "frame_count": len(sampled)},
+                message=str(thumbnail.get("message") or "thumbnail extraction failed"),
+            )
+        if thumbnail["cache_hit"]:
+            thumbnail_hits += 1
+        else:
+            thumbnail_misses += 1
+        sampled.append(round(float(timestamp), 3))
+        vision = _vision_image(Path(thumbnail["path"]), source_label=f"{path.name}@{timestamp:.3f}s")
+        if vision.status != "disabled":
+            vision_summary["status"] = "completed" if vision.status == "completed" else str(vision.metadata.get("status") or vision.status)
+            vision_summary["cache_hits"] += int(vision.metadata.get("cache_hits") or 0)
+            vision_summary["cache_misses"] += int(vision.metadata.get("cache_misses") or 0)
+            vision_summary["descriptions"] += int(vision.metadata.get("descriptions") or 0)
+            vision_summary["blocked_dependency_count"] += int(vision.metadata.get("blocked_dependency_count") or 0)
+        if vision.text:
+            chunks.extend(_chunks_from_text(vision.text, f"{path.name} frame {timestamp:.3f}s", modality="vision"))
+    final_metadata = {
+        **metadata,
+        "status": "completed",
+        "timestamps": sampled,
+        "scene_scores": [],
+        "frame_count": len(sampled),
+        "thumbnail_cache_hits": thumbnail_hits,
+        "thumbnail_cache_misses": thumbnail_misses,
+    }
+    if vision_summary["status"] != "disabled":
+        final_metadata["vision"] = vision_summary
+    return FrameSamplingResult(status="completed", chunks=_reindexed_chunks(chunks), metadata=final_metadata)
+
+
 def _frame_sampling_settings() -> dict[str, Any]:
     defaults = {
-        "enabled": False,
+        "enabled": True,
         "frame_sample_count": 3,
         "scene_threshold": 0.35,
         "max_duration_seconds": 1800,
@@ -4263,6 +4927,14 @@ def _asr_provider_model_key(provider: str, model: str) -> str:
     return f"{provider}:{model}"
 
 
+def _asr_segment_cache_key(model_key: str, metadata: dict[str, Any]) -> str:
+    if "segment_index" not in metadata:
+        return model_key
+    start = metadata.get("segment_start_seconds")
+    duration = metadata.get("segment_duration_seconds")
+    return f"{model_key}:segment:{metadata.get('segment_index')}:{start}:{duration}"
+
+
 def _chunks_from_text(text: str, title: str, *, modality: str = "text") -> tuple[AssetChunk, ...]:
     cleaned = text.strip()
     if not cleaned:
@@ -4291,6 +4963,32 @@ def _reindexed_chunks(*groups: Iterable[AssetChunk]) -> tuple[AssetChunk, ...]:
         for chunk in group:
             chunks.append(replace(chunk, chunk_index=len(chunks)))
     return tuple(chunks)
+
+
+def _offset_chunks(
+    chunks: Iterable[AssetChunk],
+    offset: int,
+    *,
+    locator_prefix: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[AssetChunk, ...]:
+    adjusted: list[AssetChunk] = []
+    for chunk in chunks:
+        locator = chunk.locator
+        if locator_prefix:
+            locator = f"{locator_prefix}:{locator}" if locator else locator_prefix
+        chunk_metadata = dict(chunk.metadata or {})
+        if metadata:
+            chunk_metadata.update(metadata)
+        adjusted.append(
+            replace(
+                chunk,
+                chunk_index=offset + int(chunk.chunk_index),
+                locator=locator,
+                metadata=chunk_metadata,
+            )
+        )
+    return tuple(adjusted)
 
 
 def _decorative_image_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
@@ -4376,13 +5074,13 @@ def _vision_image(path: Path, *, source_label: str) -> VisionResult:
 
 def _vision_settings() -> dict[str, Any]:
     defaults = {
-        "enabled": False,
-        "model": "",
+        "enabled": True,
+        "model": "qwen3-vl:8b",
         "max_image_pixels": 4_096_000,
-        "local_inference_enabled": False,
+        "local_inference_enabled": True,
         "provider": "ollama",
         "base_url": "http://127.0.0.1:11434",
-        "keep_alive": "",
+        "keep_alive": "2m",
         "timeout_seconds": 1,
     }
     try:
@@ -4642,6 +5340,17 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _optional_int(value: Any) -> int | None:
+    return _int_or_none(value)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _image_dimensions(path: Path) -> tuple[int, int] | None:
     try:
         from PIL import Image
@@ -4706,20 +5415,22 @@ def _ocr_image(path: Path) -> OcrResult:
 
 
 def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
+    return _ocr_pdf_pages(path, page_start=1, page_end=page_count, page_count=page_count)
+
+
+def _ocr_pdf_pages(path: Path, *, page_start: int, page_end: int, page_count: int) -> OcrResult:
+    page_start = max(1, page_start)
+    page_end = min(page_count, max(page_start, page_end))
     base_metadata: dict[str, Any] = {
         "engine": "tesseract",
         "renderer": "pdftoppm",
         "page_count": page_count,
+        "page_start": page_start,
+        "page_end": page_end,
         "pages_attempted": 0,
         "cache_hits": 0,
         "cache_misses": 0,
     }
-    if page_count > OCR_MAX_PDF_PAGES:
-        return OcrResult(
-            status="completed",
-            metadata={**base_metadata, "status": "skipped_page_cap"},
-            message=f"PDF has {page_count} pages; OCR cap is {OCR_MAX_PDF_PAGES}",
-        )
     renderer = shutil.which("pdftoppm")
     if renderer is None:
         return OcrResult(
@@ -4737,7 +5448,7 @@ def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
     parts: list[str] = []
     with tempfile.TemporaryDirectory(prefix="flux-kb-pdf-ocr-") as temp_dir:
         temp_root = Path(temp_dir)
-        for page_number in range(1, page_count + 1):
+        for page_number in range(page_start, page_end + 1):
             output_prefix = temp_root / "page"
             try:
                 render = run_no_window(
@@ -4763,24 +5474,24 @@ def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
             except subprocess.TimeoutExpired as exc:
                 return OcrResult(
                     status="blocked_missing_dependency",
-                    metadata={**base_metadata, "pages_attempted": page_number - 1, "status": "blocked_timeout"},
+                    metadata={**base_metadata, "pages_attempted": max(0, page_number - page_start), "status": "blocked_timeout"},
                     message=str(exc),
                 )
             except Exception as exc:  # pragma: no cover - environment-specific
                 return OcrResult(
                     status="failed",
-                    metadata={**base_metadata, "pages_attempted": page_number - 1, "status": "failed"},
+                    metadata={**base_metadata, "pages_attempted": max(0, page_number - page_start), "status": "failed"},
                     message=str(exc),
                 )
             if render.returncode != 0:
                 return OcrResult(
                     status="failed",
-                    metadata={**base_metadata, "pages_attempted": page_number - 1, "status": "failed"},
+                    metadata={**base_metadata, "pages_attempted": max(0, page_number - page_start), "status": "failed"},
                     message=render.stderr.strip() or "pdftoppm failed",
                 )
             rendered_path = output_prefix.with_name(f"{output_prefix.name}-{page_number}.png")
             page_ocr = _ocr_image_with_tesseract(rendered_path, tesseract)
-            base_metadata["pages_attempted"] = page_number
+            base_metadata["pages_attempted"] = page_number - page_start + 1
             base_metadata["cache_hits"] += int(page_ocr.metadata.get("cache_hits") or 0)
             base_metadata["cache_misses"] += int(page_ocr.metadata.get("cache_misses") or 0)
             if page_ocr.status == "failed":

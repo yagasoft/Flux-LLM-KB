@@ -5,8 +5,16 @@ from pathlib import Path
 from typing import Any
 
 from . import database
-from .crawler import CorpusPolicy, _is_included, strict_indexing_enabled, strict_metadata_only_message
-from .extractors import ExtractionResult, extract_file
+from .crawler import AssetChunk, CorpusPolicy, _is_included, strict_indexing_enabled, strict_metadata_only_message
+from .extractors import (
+    ExtractionResult,
+    extract_file,
+    extract_media_segment,
+    extract_pdf_ocr_pages,
+    extract_video_frames,
+    plan_staged_media_extraction,
+    plan_staged_pdf_extraction,
+)
 from .glob_policy import effective_glob_policy
 from .settings import SettingsService
 
@@ -68,8 +76,9 @@ def process_corpus_job(job: dict) -> JobProcessResult:
             telemetry={"missing_source": True, "missing_source_deleted": True},
         )
 
+    job_type = str(job.get("job_type") or "")
     try:
-        result = extract_file(path, policy)
+        result = _extract_for_corpus_job(job_type, path, policy, payload)
     except OSError as exc:
         if _is_locked_error(exc):
             return JobProcessResult(status="retrying_locked", message=str(exc))
@@ -81,7 +90,35 @@ def process_corpus_job(job: dict) -> JobProcessResult:
             telemetry={"error_type": exc.__class__.__name__},
         )
     result = _enforce_strict_indexing_result(result, strict_indexing=strict_indexing)
-    if result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
+    staged_child = _is_staged_child_job(job_type)
+    if result.status == "staged":
+        if job_id:
+            apply = database.apply_staged_extraction_piece_for_job if staged_child else database.apply_staged_extraction_plan_for_job
+            applied = apply(
+                job_id=job_id,
+                root_name=root_name,
+                relative_path=relative_path,
+                result=result,
+            )
+            if not applied:
+                return _cancelled_unseen_result(
+                    "corpus job was cancelled before staged extraction results were applied",
+                    reason="cancelled_during_extraction",
+                )
+    elif staged_child and result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
+        if job_id:
+            applied = database.apply_staged_extraction_piece_for_job(
+                job_id=job_id,
+                root_name=root_name,
+                relative_path=relative_path,
+                result=result,
+            )
+            if not applied:
+                return _cancelled_unseen_result(
+                    "corpus job was cancelled before staged extraction results were applied",
+                    reason="cancelled_during_extraction",
+                )
+    elif result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
         if job_id:
             applied = database.apply_extraction_result_for_job(
                 job_id=job_id,
@@ -97,6 +134,26 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         else:
             database.apply_extraction_result(root_name=root_name, relative_path=relative_path, result=result)
     return JobProcessResult(status=result.status, message=getattr(result, "message", None), telemetry=_telemetry_from_extraction_result(result))
+
+
+def _extract_for_corpus_job(job_type: str, path: Path, policy: CorpusPolicy, payload: dict[str, Any]) -> ExtractionResult:
+    if job_type == "corpus_extract_media_segment":
+        return extract_media_segment(path, payload)
+    if job_type == "corpus_extract_video_frames":
+        return extract_video_frames(path, payload)
+    if job_type == "corpus_extract_pdf_ocr_pages":
+        return extract_pdf_ocr_pages(path, payload)
+    if job_type == "corpus_extract_audio":
+        return plan_staged_media_extraction(path, "audio")
+    if job_type == "corpus_extract_video":
+        return plan_staged_media_extraction(path, "video")
+    if job_type == "corpus_extract_pdf" or (job_type == "corpus_extract_document" and path.suffix.lower() == ".pdf"):
+        return plan_staged_pdf_extraction(path, policy)
+    return extract_file(path, policy)
+
+
+def _is_staged_child_job(job_type: str) -> bool:
+    return job_type in {"corpus_extract_media_segment", "corpus_extract_video_frames", "corpus_extract_pdf_ocr_pages"}
 
 
 def process_embedding_job(job: dict) -> JobProcessResult:
@@ -322,6 +379,31 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             telemetry["thumbnail_cache_misses"] = int(frame_sampling.get("thumbnail_cache_misses") or 0)
         if isinstance(frame_sampling.get("timestamps"), list):
             telemetry["frame_sample_timestamps"] = [float(value) for value in frame_sampling.get("timestamps", [])[:20]]
+    staged = metadata.get("staged_extraction")
+    if isinstance(staged, dict):
+        telemetry["stage"] = str(staged.get("status") or "staged")[:80]
+        telemetry["staged_complete"] = bool(staged.get("complete")) if "complete" in staged else False
+        if "pending_job_count" in staged:
+            telemetry["staged_job_count"] = int(staged.get("pending_job_count") or 0)
+        if "chunks_written" in staged:
+            telemetry["chunks_written"] = int(staged.get("chunks_written") or 0)
+        if "chunks_seen" in staged:
+            telemetry["chunks_seen"] = int(staged.get("chunks_seen") or 0)
+        if "page_start" in staged:
+            telemetry["page_start"] = int(staged.get("page_start") or 0)
+        if "page_end" in staged:
+            telemetry["page_end"] = int(staged.get("page_end") or 0)
+        if "page_count" in staged:
+            telemetry["page_count"] = int(staged.get("page_count") or 0)
+        if "segment_index" in staged:
+            telemetry["segment_index"] = int(staged.get("segment_index") or 0)
+        if "duration_seconds" in staged and staged.get("duration_seconds") is not None:
+            telemetry["duration_seconds"] = int(float(staged.get("duration_seconds") or 0))
+        next_job = staged.get("next_job")
+        if isinstance(next_job, dict):
+            telemetry["next_job_type"] = str(next_job.get("job_type") or "")[:120]
+        elif "next_job_type" in staged:
+            telemetry["next_job_type"] = str(staged.get("next_job_type") or "")[:120]
     if metadata.get("blocked_dependency_reason"):
         telemetry["blocked_dependency_reason"] = str(metadata.get("blocked_dependency_reason"))[:120]
     for source_key, telemetry_key in {

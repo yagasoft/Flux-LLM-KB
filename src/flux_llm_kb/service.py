@@ -3325,7 +3325,7 @@ class KnowledgeService:
                 "result_status": process_result.status,
             }
             telemetry.update(process_result.telemetry or {})
-            if process_result.status in {"indexed", "metadata_only"}:
+            if process_result.status in {"indexed", "metadata_only", "staged"}:
                 database.complete_corpus_job(job_id=job["id"], duration_ms=duration_ms, telemetry=telemetry)
                 completed += 1
             elif process_result.status == "cancelled_orphaned_root":
