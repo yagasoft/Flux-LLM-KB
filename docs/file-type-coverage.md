@@ -45,12 +45,12 @@ installed.
   grouping, and optional sidecar extraction.
 - Cloud OCR, cloud transcription, and provider LLM calls are off by default.
 - OCR is local and cache-backed when available. Deferred image jobs use
-  Tesseract; image-only PDFs first try embedded PDF text, then queue staged
-  `corpus_extract_pdf_ocr_pages` jobs that render page batches with `pdftoppm`
-  and run Tesseract until all pages have been attempted. Missing OCR tools
-  report `blocked_missing_dependency`, and redacted OCR cache entries stay under
-  the private OCR cache root with hit/miss and per-page telemetry exposed
-  through worker-family status.
+  Tesseract; PDFs first keep embedded text when present, then queue staged
+  `corpus_extract_pdf_ocr_pages` jobs for scanned pages that need OCR. Those
+  page batches render with `pdftoppm` and run Tesseract until all planned pages
+  have been attempted. Missing OCR tools report `blocked_missing_dependency`,
+  and redacted OCR cache entries stay under the private OCR cache root with
+  hit/miss and per-page telemetry exposed through worker-family status.
 - ASR is local and cache-backed when available. Deferred audio/video jobs prefer
   transcript sidecars, then use `ffprobe` to plan sequential
   `corpus_extract_media_segment` jobs. Each segment extracts temporary mono 16
@@ -155,10 +155,11 @@ installed.
   `comic_archive` metadata.
 - Image and scanned-PDF OCR uses local tools only. Image files can be OCRed with
   Tesseract in deferred image jobs after decorative-image skip checks;
-  image-only PDFs use staged `pdftoppm` page-batch rendering plus Tesseract until
-  all pages are processed. OCR output is redacted before chunking and before
-  cache writes. Cache hit/miss counts are stored as sanitized job telemetry; raw
-  OCR text is not written to public docs or dashboard metadata.
+  scanned and mixed PDFs use staged `pdftoppm` page-batch rendering plus
+  Tesseract until all pages needing OCR are processed. OCR output is redacted
+  before chunking and before cache writes. Cache hit/miss counts are stored as
+  sanitized job telemetry; raw OCR text is not written to public docs or
+  dashboard metadata.
 - Audio/video ASR uses local tools only. Sidecar transcripts remain preferred;
   otherwise parent media jobs probe once, queue sequential audio chunks, append
   transcript chunks by stable segment locators, and then queue video frame vision

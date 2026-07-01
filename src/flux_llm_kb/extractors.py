@@ -1290,54 +1290,11 @@ def _extract_pdf(path: Path) -> ExtractionResult:
             return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=message)
         raise
     page_count = len(reader.pages)
-    text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    page_texts = _pdf_page_texts(reader)
+    text = "\n".join(text for _page_number, text in page_texts if text).strip()
     chunks = _chunks_from_text(text, path.name)
-    if chunks:
-        return ExtractionResult(
-            status="indexed",
-            chunks=chunks,
-            metadata={
-                "extractor": "pdf",
-                "page_count": page_count,
-                "ocr": {
-                    "status": "skipped_embedded_text",
-                    "page_count": page_count,
-                    "pages_attempted": 0,
-                    "cache_hits": 0,
-                    "cache_misses": 0,
-                },
-            },
-        )
-    ocr = _ocr_pdf(path, page_count=page_count)
-    metadata = {"extractor": "pdf", "page_count": page_count, "ocr": ocr.metadata}
-    if ocr.status == "blocked_missing_dependency":
-        return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
-    if ocr.status == "failed":
-        return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
-    chunks = _chunks_from_text(ocr.text, path.name, modality="ocr")
-    return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata=metadata, message=ocr.message)
-
-
-def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = None) -> ExtractionResult:
-    file_path = Path(path).expanduser().resolve()
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pdf"}, message="pypdf not installed")
-    try:
-        reader = PdfReader(str(file_path))
-    except Exception as exc:
-        if exc.__class__.__name__ == "DependencyError":
-            message = str(exc) or "pypdf missing required dependency"
-            metadata = {"extractor": "pdf"}
-            if "cryptography" in message.lower():
-                metadata["dependency"] = "cryptography"
-            return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=message)
-        raise
-    page_count = len(reader.pages)
-    text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-    chunks = _chunks_from_text(text, file_path.name)
-    if chunks:
+    ocr_pages = _pdf_pages_requiring_ocr(page_texts)
+    if chunks and not ocr_pages:
         return ExtractionResult(
             status="indexed",
             chunks=chunks,
@@ -1362,18 +1319,86 @@ def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = 
                 "ocr": {"status": "completed", "page_count": 0, "pages_attempted": 0, "cache_hits": 0, "cache_misses": 0},
             },
         )
-    page_end = min(page_count, OCR_PDF_PAGE_BATCH_SIZE)
+    if not ocr_pages:
+        ocr_pages = list(range(1, page_count + 1))
+    ocr = _ocr_pdf_pages(path, page_start=ocr_pages[0], page_end=ocr_pages[-1], page_count=page_count, page_numbers=ocr_pages)
+    metadata = {"extractor": "pdf", "page_count": page_count, "ocr": ocr.metadata}
+    if ocr.status == "blocked_missing_dependency":
+        return ExtractionResult(status="blocked_missing_dependency", chunks=chunks, metadata=metadata, message=ocr.message)
+    if ocr.status == "failed":
+        return ExtractionResult(status="failed", chunks=chunks, metadata=metadata, message=ocr.message)
+    ocr_chunks = _offset_chunks(
+        _chunks_from_text(ocr.text, path.name, modality="ocr"),
+        PDF_OCR_CHUNK_INDEX_BASE,
+        locator_prefix=_pdf_page_locator(ocr_pages),
+    )
+    all_chunks = tuple(chunks) + ocr_chunks
+    return ExtractionResult(status="indexed" if all_chunks else "metadata_only", chunks=all_chunks, metadata=metadata, message=ocr.message)
+
+
+def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = None) -> ExtractionResult:
+    file_path = Path(path).expanduser().resolve()
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pdf"}, message="pypdf not installed")
+    try:
+        reader = PdfReader(str(file_path))
+    except Exception as exc:
+        if exc.__class__.__name__ == "DependencyError":
+            message = str(exc) or "pypdf missing required dependency"
+            metadata = {"extractor": "pdf"}
+            if "cryptography" in message.lower():
+                metadata["dependency"] = "cryptography"
+            return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=message)
+        raise
+    page_count = len(reader.pages)
+    page_texts = _pdf_page_texts(reader)
+    text = "\n".join(text for _page_number, text in page_texts if text).strip()
+    chunks = _chunks_from_text(text, file_path.name)
+    ocr_pages = _pdf_pages_requiring_ocr(page_texts)
+    if chunks and not ocr_pages:
+        return ExtractionResult(
+            status="indexed",
+            chunks=chunks,
+            metadata={
+                "extractor": "pdf",
+                "page_count": page_count,
+                "ocr": {
+                    "status": "skipped_embedded_text",
+                    "page_count": page_count,
+                    "pages_attempted": 0,
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                },
+            },
+        )
+    if page_count <= 0:
+        return ExtractionResult(
+            status="metadata_only",
+            metadata={
+                "extractor": "pdf",
+                "page_count": 0,
+                "ocr": {"status": "completed", "page_count": 0, "pages_attempted": 0, "cache_hits": 0, "cache_misses": 0},
+            },
+        )
+    if not ocr_pages:
+        ocr_pages = list(range(1, page_count + 1))
+    page_batch = ocr_pages[:OCR_PDF_PAGE_BATCH_SIZE]
+    remaining_pages = ocr_pages[OCR_PDF_PAGE_BATCH_SIZE:]
     staged_job = {
         "job_type": "corpus_extract_pdf_ocr_pages",
         "payload": {
-            "page_start": 1,
-            "page_end": page_end,
+            "pages": page_batch,
             "page_count": page_count,
             "page_batch_size": OCR_PDF_PAGE_BATCH_SIZE,
-            "chunks_seen": 0,
+            "chunks_seen": len(chunks),
+            "embedded_chunk_count": len(chunks),
         },
     }
-    batch_count = math.ceil(page_count / OCR_PDF_PAGE_BATCH_SIZE)
+    if remaining_pages:
+        staged_job["payload"]["remaining_pages"] = remaining_pages
+    batch_count = math.ceil(len(ocr_pages) / OCR_PDF_PAGE_BATCH_SIZE)
     metadata = {
         "extractor": "pdf",
         "page_count": page_count,
@@ -1383,13 +1408,15 @@ def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = 
             "status": "planned",
             "page_count": page_count,
             "pages_attempted": 0,
+            "pages_planned": len(ocr_pages),
+            "pages_with_embedded_text": page_count - len(ocr_pages),
             "cache_hits": 0,
             "cache_misses": 0,
             "page_batch_size": OCR_PDF_PAGE_BATCH_SIZE,
         },
         "staged_extraction": {
             "status": "planned",
-            "content_extracted": False,
+            "content_extracted": bool(chunks),
             "pending_job_count": batch_count,
             "next_job_type": staged_job["job_type"],
             "unit": "pdf_pages",
@@ -1398,7 +1425,7 @@ def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = 
         },
         "staged_jobs": [staged_job],
     }
-    return ExtractionResult(status="staged", metadata=metadata)
+    return ExtractionResult(status="staged", chunks=chunks, metadata=metadata)
 
 
 def extract_pdf_ocr_pages(path: str | Path, payload: dict[str, Any] | None = None) -> ExtractionResult:
@@ -1411,11 +1438,27 @@ def extract_pdf_ocr_pages(path: str | Path, payload: dict[str, Any] | None = Non
         except ImportError:
             return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": "pdf"}, message="pypdf not installed")
         page_count = len(PdfReader(str(file_path)).pages)
-    page_start = max(1, _optional_int(payload.get("page_start")) or 1)
+    if page_count <= 0:
+        metadata = {
+            "extractor": "pdf_ocr_pages",
+            "page_count": 0,
+            "ocr": {"status": "completed", "page_count": 0, "pages_attempted": 0, "cache_hits": 0, "cache_misses": 0},
+            "staged_extraction": {
+                "status": "piece_completed",
+                "complete": True,
+                "unit": "pdf_pages",
+                "page_count": 0,
+                "chunks_written": 0,
+                "chunks_seen": max(0, _optional_int(payload.get("chunks_seen")) or 0),
+            },
+        }
+        return ExtractionResult(status="metadata_only", metadata=metadata)
+    explicit_pages = _normalised_page_numbers(payload.get("pages"), page_count)
+    page_start = min(explicit_pages) if explicit_pages else max(1, _optional_int(payload.get("page_start")) or 1)
     page_batch_size = max(1, _optional_int(payload.get("page_batch_size")) or OCR_PDF_PAGE_BATCH_SIZE)
-    page_end = min(page_count, _optional_int(payload.get("page_end")) or (page_start + page_batch_size - 1))
+    page_end = max(explicit_pages) if explicit_pages else min(page_count, _optional_int(payload.get("page_end")) or (page_start + page_batch_size - 1))
     chunks_seen = max(0, _optional_int(payload.get("chunks_seen")) or 0)
-    ocr = _ocr_pdf_pages(file_path, page_start=page_start, page_end=page_end, page_count=page_count)
+    ocr = _ocr_pdf_pages(file_path, page_start=page_start, page_end=page_end, page_count=page_count, page_numbers=explicit_pages or None)
     metadata = {
         "extractor": "pdf_ocr_pages",
         "page_count": page_count,
@@ -1425,15 +1468,32 @@ def extract_pdf_ocr_pages(path: str | Path, payload: dict[str, Any] | None = Non
         return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message=ocr.message)
     if ocr.status == "failed":
         return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
-    local_chunks = _chunks_from_text(ocr.text, f"{file_path.name} pages {page_start}-{page_end}", modality="ocr")
+    page_label = _pdf_page_locator(explicit_pages or list(range(page_start, page_end + 1)))
+    local_chunks = _chunks_from_text(ocr.text, f"{file_path.name} {page_label}", modality="ocr")
     chunks = _offset_chunks(
         local_chunks,
         PDF_OCR_CHUNK_INDEX_BASE + ((page_start - 1) * MEDIA_SEGMENT_CHUNK_INDEX_STRIDE),
-        locator_prefix=f"page:{page_start}-{page_end}",
+        locator_prefix=page_label,
     )
     total_chunks_seen = chunks_seen + len(chunks)
     next_job: dict[str, Any] | None = None
-    if page_end < page_count:
+    remaining_pages = _normalised_page_numbers(payload.get("remaining_pages"), page_count)
+    if remaining_pages:
+        next_pages = remaining_pages[:page_batch_size]
+        next_remaining = remaining_pages[page_batch_size:]
+        next_job = {
+            "job_type": "corpus_extract_pdf_ocr_pages",
+            "payload": {
+                "pages": next_pages,
+                "page_count": page_count,
+                "page_batch_size": page_batch_size,
+                "chunks_seen": total_chunks_seen,
+                "embedded_chunk_count": _optional_int(payload.get("embedded_chunk_count")) or 0,
+            },
+        }
+        if next_remaining:
+            next_job["payload"]["remaining_pages"] = next_remaining
+    elif not explicit_pages and page_end < page_count:
         next_start = page_end + 1
         next_end = min(page_count, next_start + page_batch_size - 1)
         next_job = {
@@ -1452,6 +1512,7 @@ def extract_pdf_ocr_pages(path: str | Path, payload: dict[str, Any] | None = Non
         "unit": "pdf_pages",
         "page_start": page_start,
         "page_end": page_end,
+        "pages": explicit_pages or list(range(page_start, page_end + 1)),
         "page_count": page_count,
         "chunks_written": len(chunks),
         "chunks_seen": total_chunks_seen,
@@ -1465,6 +1526,38 @@ def extract_pdf_ocr_pages(path: str | Path, payload: dict[str, Any] | None = Non
         metadata=metadata,
         message=ocr.message,
     )
+
+
+def _pdf_page_texts(reader: Any) -> list[tuple[int, str]]:
+    return [(index, (page.extract_text() or "").strip()) for index, page in enumerate(reader.pages, start=1)]
+
+
+def _pdf_pages_requiring_ocr(page_texts: Iterable[tuple[int, str]]) -> list[int]:
+    return [page_number for page_number, text in page_texts if not text.strip()]
+
+
+def _normalised_page_numbers(value: Any, page_count: int) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    pages: list[int] = []
+    for item in value:
+        page_number = _optional_int(item)
+        if page_number is not None and 1 <= page_number <= page_count and page_number not in pages:
+            pages.append(page_number)
+    return pages
+
+
+def _pdf_page_locator(pages: list[int]) -> str:
+    if not pages:
+        return "page:unknown"
+    if len(pages) == 1:
+        return f"page:{pages[0]}"
+    if pages == list(range(pages[0], pages[-1] + 1)):
+        return f"page:{pages[0]}-{pages[-1]}"
+    preview = ",".join(str(page) for page in pages[:8])
+    if len(pages) > 8:
+        preview += ",..."
+    return f"page:{preview}"
 
 
 def _extract_epub(path: Path, policy: CorpusPolicy) -> ExtractionResult:
@@ -5418,15 +5511,24 @@ def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
     return _ocr_pdf_pages(path, page_start=1, page_end=page_count, page_count=page_count)
 
 
-def _ocr_pdf_pages(path: Path, *, page_start: int, page_end: int, page_count: int) -> OcrResult:
+def _ocr_pdf_pages(
+    path: Path,
+    *,
+    page_start: int,
+    page_end: int,
+    page_count: int,
+    page_numbers: list[int] | None = None,
+) -> OcrResult:
     page_start = max(1, page_start)
     page_end = min(page_count, max(page_start, page_end))
+    pages = page_numbers or list(range(page_start, page_end + 1))
     base_metadata: dict[str, Any] = {
         "engine": "tesseract",
         "renderer": "pdftoppm",
         "page_count": page_count,
         "page_start": page_start,
         "page_end": page_end,
+        "pages": pages,
         "pages_attempted": 0,
         "cache_hits": 0,
         "cache_misses": 0,
@@ -5448,7 +5550,7 @@ def _ocr_pdf_pages(path: Path, *, page_start: int, page_end: int, page_count: in
     parts: list[str] = []
     with tempfile.TemporaryDirectory(prefix="flux-kb-pdf-ocr-") as temp_dir:
         temp_root = Path(temp_dir)
-        for page_number in range(page_start, page_end + 1):
+        for page_index, page_number in enumerate(pages, start=1):
             output_prefix = temp_root / "page"
             try:
                 render = run_no_window(
@@ -5474,24 +5576,24 @@ def _ocr_pdf_pages(path: Path, *, page_start: int, page_end: int, page_count: in
             except subprocess.TimeoutExpired as exc:
                 return OcrResult(
                     status="blocked_missing_dependency",
-                    metadata={**base_metadata, "pages_attempted": max(0, page_number - page_start), "status": "blocked_timeout"},
+                    metadata={**base_metadata, "pages_attempted": page_index - 1, "status": "blocked_timeout"},
                     message=str(exc),
                 )
             except Exception as exc:  # pragma: no cover - environment-specific
                 return OcrResult(
                     status="failed",
-                    metadata={**base_metadata, "pages_attempted": max(0, page_number - page_start), "status": "failed"},
+                    metadata={**base_metadata, "pages_attempted": page_index - 1, "status": "failed"},
                     message=str(exc),
                 )
             if render.returncode != 0:
                 return OcrResult(
                     status="failed",
-                    metadata={**base_metadata, "pages_attempted": max(0, page_number - page_start), "status": "failed"},
+                    metadata={**base_metadata, "pages_attempted": page_index - 1, "status": "failed"},
                     message=render.stderr.strip() or "pdftoppm failed",
                 )
             rendered_path = output_prefix.with_name(f"{output_prefix.name}-{page_number}.png")
             page_ocr = _ocr_image_with_tesseract(rendered_path, tesseract)
-            base_metadata["pages_attempted"] = page_number - page_start + 1
+            base_metadata["pages_attempted"] = page_index
             base_metadata["cache_hits"] += int(page_ocr.metadata.get("cache_hits") or 0)
             base_metadata["cache_misses"] += int(page_ocr.metadata.get("cache_misses") or 0)
             if page_ocr.status == "failed":

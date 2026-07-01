@@ -3797,6 +3797,84 @@ def test_apply_staged_extraction_piece_upserts_chunks_and_enqueues_next(monkeypa
     assert "segment_index" in params_json
 
 
+def test_apply_staged_extraction_plan_persists_parent_chunks_before_child_jobs(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "FROM capture_jobs" in sql and "FOR UPDATE" in sql:
+                return ("job-1", "running")
+            if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
+                return ("asset-1", None)
+            if "UPDATE source_assets" in sql:
+                return ("asset-1",)
+            if "SELECT id::text FROM asset_chunks" in sql:
+                return None
+            if "INSERT INTO asset_chunks" in sql:
+                return ("embedded-chunk",)
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-next", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    result = SimpleNamespace(
+        status="staged",
+        metadata={
+            "extractor": "pdf",
+            "staged_jobs": [
+                {
+                    "job_type": "corpus_extract_pdf_ocr_pages",
+                    "payload": {"pages": [2], "page_count": 2, "chunks_seen": 1},
+                }
+            ],
+        },
+        chunks=(AssetChunk(chunk_index=0, title="mixed.pdf", body="Embedded text", modality="text"),),
+        child_assets=(),
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
+
+    applied = database.apply_staged_extraction_plan_for_job(
+        job_id="job-1",
+        root_name="docs",
+        relative_path="mixed.pdf",
+        result=result,
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    params_json = "\n".join(str(params) for _statement, params in executed)
+    assert applied is True
+    assert "DELETE FROM asset_chunks WHERE asset_id = %s" in sql
+    assert "INSERT INTO asset_chunks" in sql
+    assert "INSERT INTO capture_jobs" in sql
+    assert "Embedded text" in params_json
+    assert "corpus_extract_pdf_ocr_pages" in params_json
+
+
 def test_requeue_metadata_only_source_assets_creates_extract_jobs(monkeypatch):
     executed = []
     rows = [

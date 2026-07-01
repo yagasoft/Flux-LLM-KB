@@ -17,6 +17,7 @@ import zlib
 
 from flux_llm_kb.crawler import AssetChunk, CorpusPolicy
 from flux_llm_kb.extractors import (
+    MEDIA_SEGMENT_CHUNK_INDEX_STRIDE,
     PDF_OCR_CHUNK_INDEX_BASE,
     VISION_TIMEOUT_SECONDS,
     extract_file,
@@ -24,6 +25,7 @@ from flux_llm_kb.extractors import (
     extract_pdf_ocr_pages,
     extractor_availability,
     plan_staged_media_extraction,
+    plan_staged_pdf_extraction,
 )
 
 
@@ -1642,6 +1644,36 @@ def test_extract_pdf_with_embedded_text_skips_ocr(monkeypatch, tmp_path):
     assert result.metadata["ocr"]["pages_attempted"] == 0
 
 
+def test_plan_staged_mixed_pdf_keeps_embedded_text_and_queues_scanned_pages(monkeypatch, tmp_path):
+    path = tmp_path / "mixed.pdf"
+    path.write_bytes(b"%PDF mixed")
+
+    class FakePage:
+        def __init__(self, text):
+            self.text = text
+
+        def extract_text(self):
+            return self.text
+
+    class FakePdfReader:
+        def __init__(self, _path):
+            self.pages = [FakePage("Embedded first page"), FakePage(""), FakePage("Embedded third page"), FakePage("")]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
+
+    result = plan_staged_pdf_extraction(path)
+
+    assert result.status == "staged"
+    assert [chunk.body for chunk in result.chunks] == ["Embedded first page\nEmbedded third page"]
+    assert result.metadata["ocr"]["pages_planned"] == 2
+    assert result.metadata["ocr"]["pages_with_embedded_text"] == 2
+    first_job = result.metadata["staged_jobs"][0]
+    assert first_job["job_type"] == "corpus_extract_pdf_ocr_pages"
+    assert first_job["payload"]["pages"] == [2, 4]
+    assert first_job["payload"]["chunks_seen"] == 1
+    assert result.metadata["staged_extraction"]["pending_job_count"] == 1
+
+
 def test_extract_pdf_blocks_when_pypdf_needs_crypto_dependency(monkeypatch, tmp_path):
     path = tmp_path / "encrypted.pdf"
     path.write_bytes(b"%PDF encrypted")
@@ -1946,6 +1978,55 @@ def test_extract_pdf_ocr_pages_queues_next_batch(monkeypatch, tmp_path):
     assert next_job["payload"]["chunks_seen"] == 1
     assert [Path(command[0]).name for command in calls].count("pdftoppm.exe") == 2
     assert [Path(command[0]).name for command in calls].count("tesseract.exe") == 2
+
+
+def test_extract_pdf_ocr_pages_accepts_explicit_mixed_page_batches(monkeypatch, tmp_path):
+    path = tmp_path / "mixed.pdf"
+    path.write_bytes(b"%PDF staged mixed")
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: {
+            "pdftoppm": "C:/tools/pdftoppm.exe",
+            "tesseract": "C:/tools/tesseract.exe",
+        }.get(command),
+    )
+    rendered_pages = []
+
+    def fake_run(command, **_kwargs):
+        if command[0] == "C:/tools/pdftoppm.exe":
+            page = command[command.index("-f") + 1]
+            rendered_pages.append(int(page))
+            output_prefix = Path(command[-1])
+            output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[0] == "C:/tools/tesseract.exe":
+            page_name = Path(command[1]).stem
+            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
+        raise AssertionError(command)
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extract_pdf_ocr_pages(
+        path,
+        {
+            "pages": [2],
+            "remaining_pages": [4],
+            "page_count": 4,
+            "page_batch_size": 1,
+            "chunks_seen": 1,
+            "embedded_chunk_count": 1,
+        },
+    )
+
+    assert result.status == "staged"
+    assert rendered_pages == [2]
+    assert result.chunks[0].chunk_index == PDF_OCR_CHUNK_INDEX_BASE + MEDIA_SEGMENT_CHUNK_INDEX_STRIDE
+    assert result.metadata["ocr"]["pages"] == [2]
+    assert result.metadata["staged_extraction"]["chunks_seen"] == 2
+    next_job = result.metadata["staged_extraction"]["next_job"]
+    assert next_job["payload"]["pages"] == [4]
+    assert next_job["payload"]["chunks_seen"] == 2
 
 
 def test_extractor_availability_reports_container_tools():

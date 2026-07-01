@@ -6490,6 +6490,7 @@ def apply_staged_extraction_plan_for_job(
                 return False
             if not canonical_asset_id:
                 _replace_asset_chunks(cur, asset_id, ())
+                _append_or_upsert_asset_chunks(cur, asset_id, tuple(getattr(result, "chunks", ()) or ()))
                 _enqueue_staged_jobs_with_cursor(
                     cur,
                     root_name=root_name,
