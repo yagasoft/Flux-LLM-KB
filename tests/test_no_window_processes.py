@@ -28,7 +28,7 @@ def test_windows_run_no_window_sets_creation_flags(monkeypatch):
     monkeypatch.setattr(processes.sys, "platform", "win32")
     monkeypatch.setattr(processes.subprocess, "run", fake_run)
 
-    result = processes.run_no_window(["tesseract", "image.png", "stdout"], text=True, capture_output=True)
+    result = processes.run_no_window(["paddleocr", "image.png", "stdout"], text=True, capture_output=True)
 
     assert result.stdout == "ok"
     assert calls
@@ -72,7 +72,7 @@ def test_run_no_window_text_mode_decodes_with_replacement_by_default(monkeypatch
 
     monkeypatch.setattr(processes.subprocess, "run", fake_run)
 
-    processes.run_no_window(["tesseract", "image.png", "stdout"], text=True, capture_output=True)
+    processes.run_no_window(["paddleocr", "image.png", "stdout"], text=True, capture_output=True)
     processes.run_no_window(["tool"], text=True, capture_output=True, encoding="utf-16", errors="strict")
 
     assert calls[0]["encoding"] == "utf-8"

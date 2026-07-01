@@ -104,7 +104,7 @@ def job_family_for_type(job_type: str | None) -> str:
         return "archive"
     if normalized in {"corpus_extract_audio", "corpus_extract_video", "corpus_extract_media_segment", "corpus_extract_video_frames"}:
         return "media"
-    if normalized == "corpus_embed":
+    if normalized in {"corpus_embed", "search_index_sync"}:
         return "embedding"
     if normalized == "corpus_preview":
         return "preview"

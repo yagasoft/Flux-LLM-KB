@@ -23,6 +23,19 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     keys = {definition.key for definition in SETTING_REGISTRY}
 
     assert "retrieval.token_budget" in keys
+    assert "retrieval.search_engine" in keys
+    assert "retrieval.vespa_base_url" in keys
+    assert "retrieval.embedding_model" in keys
+    assert "retrieval.embedding_dimensions" in keys
+    assert "retrieval.reranker_model" in keys
+    assert "retrieval.reranker_quantization" in keys
+    assert "retrieval.rerank_top_n" in keys
+    assert "retrieval.max_rerank_passage_tokens" in keys
+    assert "retrieval.gpu_vram_budget_mb" in keys
+    assert "model_runner.base_url" in keys
+    assert "ocr.engine" in keys
+    assert "ocr.simple_model" in keys
+    assert "ocr.document_model" in keys
     assert "crawler.max_inline_bytes" in keys
     assert "crawler.container_max_depth" in keys
     assert "crawler.container_max_members" in keys

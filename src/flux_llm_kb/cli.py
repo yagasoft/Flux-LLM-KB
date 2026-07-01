@@ -59,6 +59,18 @@ def main(argv: list[str] | None = None) -> int:
     retrieval_benchmark_history.add_argument("--label")
     retrieval_benchmark_history.add_argument("--limit", type=int, default=20)
 
+    search_index_parser = subparsers.add_parser("search-index", help="Manage the active Vespa search index")
+    search_index_subparsers = search_index_parser.add_subparsers(dest="search_index_command", required=True)
+    search_index_sync = search_index_subparsers.add_parser("sync", help="Queue Vespa search-index sync work")
+    search_index_sync.add_argument("--owner-class", choices=["all", "corpus", "episodes", "claims"], default="all")
+    search_index_sync.add_argument("--root", dest="root_name")
+    search_index_sync.add_argument("--limit", type=int, default=100)
+    search_index_status = search_index_subparsers.add_parser("status", help="Show Vespa search-index sync state")
+    search_index_status.add_argument("--root", dest="root_name")
+    search_index_rebuild = search_index_subparsers.add_parser("rebuild", help="Mark Vespa search-index records pending for rebuild")
+    search_index_rebuild.add_argument("--root", dest="root_name")
+    search_index_rebuild.add_argument("--confirm", action="store_true")
+
     automation_parser = subparsers.add_parser("automation", help="Inspect or run guarded operator automation")
     automation_subparsers = automation_parser.add_subparsers(dest="automation_command", required=True)
     automation_subparsers.add_parser("status", help="Show guarded automation status and eligible actions")
@@ -587,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         "search": _search,
         "explain": _explain,
         "retrieval": _retrieval,
+        "search-index": _search_index,
         "automation": _automation,
         "governance": _governance,
         "remember": _remember,
@@ -1206,6 +1219,22 @@ def _retrieval(args: argparse.Namespace) -> int:
             raise ValueError(args.retrieval_benchmark_command)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.retrieval_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _search_index(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    service = KnowledgeService()
+    if args.search_index_command == "status":
+        payload = service.search_index_status(root_name=args.root_name)
+    elif args.search_index_command == "sync":
+        payload = service.search_index_sync(owner_class=args.owner_class, root_name=args.root_name, limit=args.limit)
+    elif args.search_index_command == "rebuild":
+        payload = service.search_index_rebuild(root_name=args.root_name, confirmed=args.confirm)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.search_index_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

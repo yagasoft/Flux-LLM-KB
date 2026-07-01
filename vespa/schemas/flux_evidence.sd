@@ -1,0 +1,112 @@
+schema flux_evidence {
+    document flux_evidence {
+        field owner_table type string {
+            indexing: summary | attribute
+        }
+        field owner_id type string {
+            indexing: summary | attribute
+        }
+        field root_id type string {
+            indexing: summary | attribute
+        }
+        field root_name type string {
+            indexing: summary | attribute
+            attribute: fast-search
+        }
+        field title type string {
+            indexing: index | summary
+            index: enable-bm25
+        }
+        field body type string {
+            indexing: index | summary
+            index: enable-bm25
+        }
+        field source_path type string {
+            indexing: index | summary | attribute
+            index: enable-bm25
+        }
+        field symbols type array<string> {
+            indexing: index | summary
+            index: enable-bm25
+        }
+        field language type string {
+            indexing: summary | attribute
+            attribute: fast-search
+        }
+        field file_kind type string {
+            indexing: summary | attribute
+            attribute: fast-search
+        }
+        field lifecycle_state type string {
+            indexing: summary | attribute
+            attribute: fast-search
+        }
+        field deleted type bool {
+            indexing: summary | attribute
+            attribute: fast-search
+        }
+        field canonical type bool {
+            indexing: summary | attribute
+            attribute: fast-search
+        }
+        field source_hash type string {
+            indexing: summary | attribute
+        }
+        field model_generation type string {
+            indexing: summary | attribute
+        }
+        field embedding_model type string {
+            indexing: summary | attribute
+        }
+        field embedding_dimensions type int {
+            indexing: summary | attribute
+        }
+        field embedding type tensor<float>(x[1024]) {
+            indexing: attribute | index
+            attribute {
+                distance-metric: angular
+            }
+            index {
+                hnsw {
+                    max-links-per-node: 16
+                    neighbors-to-explore-at-insert: 200
+                }
+            }
+        }
+    }
+
+    fieldset default {
+        fields: title, body, source_path, symbols
+    }
+
+    rank-profile bm25 inherits default {
+        first-phase {
+            expression: bm25(title) + bm25(body) + bm25(source_path) + bm25(symbols)
+        }
+        match-features: bm25(title) bm25(body) bm25(source_path) bm25(symbols)
+    }
+
+    rank-profile dense inherits default {
+        inputs {
+            query(query_embedding) tensor<float>(x[1024])
+        }
+        first-phase {
+            expression: closeness(field, embedding)
+        }
+        match-features: closeness(field, embedding)
+    }
+
+    rank-profile hybrid inherits default {
+        inputs {
+            query(query_embedding) tensor<float>(x[1024])
+        }
+        first-phase {
+            expression: 0.55 * closeness(field, embedding) + 0.45 * (bm25(title) + bm25(body) + bm25(source_path) + bm25(symbols))
+        }
+        second-phase {
+            expression: firstPhase
+            rerank-count: 200
+        }
+        match-features: bm25(title) bm25(body) bm25(source_path) bm25(symbols) closeness(field, embedding) firstPhase
+    }
+}

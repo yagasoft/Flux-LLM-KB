@@ -164,6 +164,19 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "status = 'blocked_by_policy'" in blocked_taxonomy_migration.sql
     assert "status = 'blocked_invalid_source'" in blocked_taxonomy_migration.sql
     assert "status <> 'blocked_missing_dependency'" not in blocked_taxonomy_migration.sql
+    search_index_migration = next(item for item in migrations if item.name == "0032_vespa_search_index_records")
+    assert "CREATE TABLE IF NOT EXISTS search_index_records" in search_index_migration.sql
+    assert "vespa_document_id text NOT NULL" in search_index_migration.sql
+    assert "embedding_model text NOT NULL" in search_index_migration.sql
+    assert "embedding_dimensions integer NOT NULL" in search_index_migration.sql
+    assert "index_status text NOT NULL" in search_index_migration.sql
+    assert "sync_started_at timestamptz" in search_index_migration.sql
+    assert "sync_completed_at timestamptz" in search_index_migration.sql
+    assert "idx_search_index_records_owner" in search_index_migration.sql
+    assert "idx_search_index_records_root_status" in search_index_migration.sql
+    assert "idx_search_index_records_source_hash" in search_index_migration.sql
+    assert "idx_capture_jobs_search_index_sync_claim" in search_index_migration.sql
+    assert "WHERE job_type = 'search_index_sync'" in search_index_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

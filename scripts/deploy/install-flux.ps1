@@ -13,6 +13,7 @@ param(
     [switch]$SkipScheduledTasks,
     [int]$DockerBuildTimeoutSeconds = 1200,
     [int]$AsrModelDownloadTimeoutSeconds = 3600,
+    [int]$ModelRunnerModelDownloadTimeoutSeconds = 3600,
     [ValidateSet("auto", "local", "python")]
     [string]$DockerBaseMode = "auto",
     [string]$DockerBaseImage = $env:FLUX_KB_DOCKER_BASE_IMAGE,
@@ -172,6 +173,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      vespa:
+        condition: service_healthy
+      model-runner:
+        condition: service_healthy
       ollama:
         condition: service_healthy
       asr:
@@ -189,6 +194,19 @@ services:
       FLUX_KB_DATA_DIR: /app/data
       FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_CACHE_ROOT: /app/cache
+      FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_RETRIEVAL_SEARCH_ENGINE: vespa
+      FLUX_KB_RETRIEVAL_VESPA_BASE_URL: http://vespa:8080
+      FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
+      FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
+      FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
+      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq
+      FLUX_KB_RETRIEVAL_RERANK_TOP_N: "80"
+      FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS: "1536"
+      FLUX_KB_RETRIEVAL_GPU_VRAM_BUDGET_MB: "10240"
+      FLUX_KB_OCR_ENGINE: paddleocr
+      FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
+      FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
       FLUX_KB_ASR_PROVIDER: openai_compatible
       FLUX_KB_ASR_MODEL: large-v3-turbo
       FLUX_KB_ASR_BASE_URL: http://asr:8788
@@ -220,6 +238,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      vespa:
+        condition: service_healthy
+      model-runner:
+        condition: service_healthy
       ollama:
         condition: service_healthy
       asr:
@@ -235,6 +257,19 @@ services:
       FLUX_KB_DATA_DIR: /app/data
       FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_CACHE_ROOT: /app/cache
+      FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_RETRIEVAL_SEARCH_ENGINE: vespa
+      FLUX_KB_RETRIEVAL_VESPA_BASE_URL: http://vespa:8080
+      FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
+      FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
+      FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
+      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq
+      FLUX_KB_RETRIEVAL_RERANK_TOP_N: "80"
+      FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS: "1536"
+      FLUX_KB_RETRIEVAL_GPU_VRAM_BUDGET_MB: "10240"
+      FLUX_KB_OCR_ENGINE: paddleocr
+      FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
+      FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
       FLUX_KB_ASR_PROVIDER: openai_compatible
       FLUX_KB_ASR_MODEL: large-v3-turbo
       FLUX_KB_ASR_BASE_URL: http://asr:8788
@@ -282,6 +317,36 @@ services:
       retries: 30
       start_period: 10s
 
+  model-runner:
+    image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-model-runner
+    restart: unless-stopped
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
+      FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
+      FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
+      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq
+      FLUX_KB_OCR_ENGINE: paddleocr
+      FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
+      FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
+      HF_HOME: /models/huggingface
+      PADDLEOCR_HOME: /root/.paddleocr
+    volumes:
+      - flux_llm_kb_model_runner_models:/models
+      - flux_llm_kb_paddle_cache:/root/.paddleocr
+    command: >
+      python -m flux_llm_kb.model_runner serve --host 0.0.0.0 --port 8790
+    healthcheck:
+      test: ["CMD", "python", "-m", "flux_llm_kb.model_runner", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
   ollama:
     image: ollama/ollama:latest
     container_name: flux-ollama
@@ -302,6 +367,22 @@ services:
       timeout: 10s
       retries: 30
       start_period: 10s
+
+  vespa:
+    image: vespaengine/vespa:8
+    container_name: flux-vespa
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - flux_llm_kb_vespa_var:/opt/vespa/var
+      - flux_llm_kb_vespa_logs:/opt/vespa/logs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/ApplicationStatus >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
 
   postgres:
     image: pgvector/pgvector:pg16
@@ -353,6 +434,14 @@ volumes:
     name: flux_llm_kb_runtime
   flux_llm_kb_logs:
     name: flux_llm_kb_logs
+  flux_llm_kb_vespa_var:
+    name: flux_llm_kb_vespa_var
+  flux_llm_kb_vespa_logs:
+    name: flux_llm_kb_vespa_logs
+  flux_llm_kb_model_runner_models:
+    name: flux_llm_kb_model_runner_models
+  flux_llm_kb_paddle_cache:
+    name: flux_llm_kb_paddle_cache
   flux_llm_kb_ollama_models:
     name: flux_llm_kb_ollama_models
   flux_llm_kb_asr_models:
@@ -612,6 +701,19 @@ function Set-FluxProductionRuntimeSettings {
         $env:FLUX_KB_PRIVATE_DIR = Join-Path $InstallRoot "private"
         $env:FLUX_KB_DATA_DIR = Join-Path $InstallRoot "data"
         $env:FLUX_KB_LOG_DIR = Join-Path $InstallRoot "logs"
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.search_engine", "vespa", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.vespa_base_url", "http://127.0.0.1:8080", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.embedding_model", "Snowflake/snowflake-arctic-embed-l-v2.0", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.embedding_dimensions", "1024", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.reranker_model", "Qwen/Qwen3-Reranker-4B", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.reranker_quantization", "int4_awq", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.rerank_top_n", "80", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.max_rerank_passage_tokens", "1536", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.gpu_vram_budget_mb", "10240", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "model_runner.base_url", "http://127.0.0.1:8790", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "ocr.engine", "paddleocr", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "ocr.simple_model", "PP-OCRv5", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "ocr.document_model", "PaddleOCR-VL", "--confirm")
         if ($GpuEnabled) {
             $env:FLUX_KB_ASR_PROVIDER = "openai_compatible"
             $env:FLUX_KB_ASR_MODEL = "large-v3-turbo"
@@ -784,6 +886,51 @@ function Invoke-FluxAsrModelDownload {
     ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download ASR model large-v3-turbo"
 }
 
+function Invoke-FluxModelRunnerModelDownload {
+    param(
+        [string]$AppRoot,
+        [string]$AppEnvPath,
+        [string]$ComposePath,
+        [int]$TimeoutSeconds
+    )
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("volume", "create", "flux_llm_kb_model_runner_models") -WorkingDirectory $AppRoot -TimeoutSeconds 60 -StepName "docker create model-runner model volume"
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("volume", "create", "flux_llm_kb_paddle_cache") -WorkingDirectory $AppRoot -TimeoutSeconds 60 -StepName "docker create PaddleOCR cache volume"
+    Write-Host "Pre-downloading Snowflake, Qwen reranker, PP-OCRv5, and PaddleOCR-VL models with model-runner."
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @(
+        "compose",
+        "--env-file", $AppEnvPath,
+        "-f", $ComposePath,
+        "run", "--rm", "--no-deps",
+        "model-runner",
+        "python", "-m", "flux_llm_kb.model_runner", "download-models", "--models-dir", "/models"
+    ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download model-runner models"
+}
+
+function Copy-FluxVespaApplication {
+    param([string]$SourceRoot, [string]$AppRoot)
+    $vespaSource = Join-Path $SourceRoot "vespa"
+    $vespaTarget = Join-Path $AppRoot "vespa"
+    if (-not (Test-Path (Join-Path $vespaSource "services.xml"))) {
+        throw "Vespa application package not found at $vespaSource"
+    }
+    if (Test-Path $vespaTarget) { Remove-Item -LiteralPath $vespaTarget -Recurse -Force }
+    Copy-Item -Path $vespaSource -Destination $vespaTarget -Recurse -Force
+}
+
+function Invoke-FluxVespaApplicationDeploy {
+    param([string]$AppRoot, [int]$TimeoutSeconds = 300)
+    $vespaApp = Join-Path $AppRoot "vespa"
+    if (-not (Test-Path (Join-Path $vespaApp "services.xml"))) {
+        throw "Vespa application package not found at $vespaApp"
+    }
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @(
+        "exec", "flux-vespa", "sh", "-lc",
+        "for i in $(seq 1 120); do curl -fsS http://127.0.0.1:8080/ApplicationStatus >/dev/null && exit 0; sleep 2; done; exit 1"
+    ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "wait for Vespa application endpoint"
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("cp", $vespaApp, "flux-vespa:/tmp/flux-vespa-app") -WorkingDirectory $AppRoot -TimeoutSeconds 120 -StepName "copy Vespa application package"
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("exec", "flux-vespa", "sh", "-lc", "vespa deploy --wait 300 /tmp/flux-vespa-app") -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "deploy Vespa application package"
+}
+
 function Test-FluxDockerImageExists {
     param([string]$Image)
     if (-not $Image) { return $false }
@@ -886,6 +1033,7 @@ if (Test-Path $pluginSource) {
     if (Test-Path $pluginTarget) { Remove-Item -LiteralPath $pluginTarget -Recurse -Force }
     Copy-Item -Path $pluginSource -Destination $pluginTarget -Recurse -Force
 }
+Copy-FluxVespaApplication -SourceRoot $SourceRoot -AppRoot $appRoot
 
 $composePath = Join-Path $appRoot "docker-compose.yml"
 $envPath = Join-Path $privateRoot "flux.env"
@@ -913,13 +1061,17 @@ Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 if ($gpuEnabled) {
     Invoke-FluxAsrModelDownload -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -TimeoutSeconds $AsrModelDownloadTimeoutSeconds
+    Invoke-FluxModelRunnerModelDownload -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -TimeoutSeconds $ModelRunnerModelDownloadTimeoutSeconds
 }
 
 Push-Location $appRoot
 try {
-    $composeServices = @("postgres", "api", "worker")
+    $composeServices = @("postgres", "vespa")
+    docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
+    Invoke-FluxVespaApplicationDeploy -AppRoot $appRoot -TimeoutSeconds 300
+    $composeServices = @("model-runner", "api", "worker")
     if ($gpuEnabled) {
-        $composeServices = @("postgres", "ollama", "asr", "api", "worker")
+        $composeServices = @("model-runner", "ollama", "asr", "api", "worker")
     }
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
 } finally {

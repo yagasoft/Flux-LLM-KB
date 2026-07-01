@@ -244,7 +244,7 @@ def test_service_code_search_full_text_uses_indexed_code_chunks(monkeypatch):
                 "id": "chunk-code",
                 "asset_id": "asset-code",
                 "title": "extractors.py::_ocr_image",
-                "summary": "Tesseract exits with stderr when image OCR fails in the worker.",
+                "summary": "PaddleOCR exits with stderr when image OCR fails in the worker.",
                 "score": 0.91,
                 "streams": ["corpus_lexical", "corpus_fuzzy"],
                 "raw_scores": {"corpus_lexical": 1.0},
@@ -267,7 +267,7 @@ def test_service_code_search_full_text_uses_indexed_code_chunks(monkeypatch):
     monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
 
     result = KnowledgeService().code_search(
-        "Tesseract stderr worker",
+        "PaddleOCR stderr worker",
         cwd="E:/LLM KB/src",
         mode="full_text",
         language="python",
@@ -302,9 +302,9 @@ def test_service_code_search_full_text_uses_indexed_code_chunks(monkeypatch):
     assert item["line_end"] == 140
     assert item["parser_status"] == "parsed"
     assert item["root_name"] == "llm-kb"
-    assert item["excerpt"] == "Tesseract exits with stderr when image OCR fails in the worker."
+    assert item["excerpt"] == "PaddleOCR exits with stderr when image OCR fails in the worker."
     assert item["snippet"]["text"] == item["excerpt"]
-    assert item["snippet"]["matched_terms"] == ["tesseract", "stderr", "worker"]
+    assert item["snippet"]["matched_terms"] == ["paddleocr", "stderr", "worker"]
     assert item["snippet"]["source_path"] == "src/flux_llm_kb/extractors.py"
     assert item["score"] == 0.91
     assert item["streams"] == ["corpus_lexical", "corpus_fuzzy"]

@@ -2333,7 +2333,7 @@ def test_benchmark_model_mode_records_local_readiness_without_private_content(mo
         service_module,
         "extractor_availability",
         lambda: {
-            "tesseract": {"ok": True, "message": "available"},
+            "paddleocr": {"ok": True, "message": "available"},
             "ffmpeg": {"ok": False, "message": "ffmpeg command not found"},
             "faster_whisper": {"ok": False, "message": "module not installed"},
         },
@@ -2367,7 +2367,7 @@ def test_benchmark_cache_readiness_scenario_reports_tool_blocks_without_private_
         service_module,
         "extractor_availability",
         lambda: {
-            "tesseract": {"ok": True, "message": "available"},
+            "paddleocr": {"ok": True, "message": "available"},
             "pdftoppm": {"ok": True, "message": "available"},
             "ffmpeg": {"ok": False, "message": "ffmpeg command not found"},
             "faster_whisper": {"ok": False, "message": "module not installed"},

@@ -1070,18 +1070,23 @@ def _media_probe_json(*, duration: int | float, has_audio: bool = True) -> str:
     return f'{{"format":{{"duration":"{duration}"}},"streams":{streams}}}'
 
 
-def test_extract_image_blocks_when_tesseract_is_missing(monkeypatch, tmp_path):
+def test_extract_image_blocks_when_paddleocr_is_missing(monkeypatch, tmp_path):
     path = tmp_path / "scan.png"
     path.write_bytes(PNG_BYTES)
-    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModuleNotFoundError("paddleocr")),
+    )
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
     assert result.status == "blocked_missing_dependency"
-    assert result.message == "tesseract command not found"
+    assert result.message == "paddleocr module not installed"
     assert result.metadata["ocr"]["status"] == "blocked_missing_dependency"
+    assert result.metadata["ocr"]["engine"] == "paddleocr"
     assert result.metadata["ocr"]["cache_hits"] == 0
-    assert result.metadata["ocr"]["cache_misses"] == 0
+    assert result.metadata["ocr"]["cache_misses"] == 1
 
 
 def test_extract_svg_embedded_text_without_ocr_or_vision(monkeypatch, tmp_path):
@@ -1175,7 +1180,6 @@ def test_extract_visual_svg_renders_png_before_ocr_and_vision(monkeypatch, tmp_p
         "flux_llm_kb.extractors.shutil.which",
         lambda command: {
             "rsvg-convert": "C:/tools/rsvg-convert.exe",
-            "tesseract": "C:/tools/tesseract.exe",
         }.get(command),
     )
 
@@ -1185,10 +1189,6 @@ def test_extract_visual_svg_renders_png_before_ocr_and_vision(monkeypatch, tmp_p
             output_path = Path(command[command.index("--output") + 1])
             output_path.write_bytes(PNG_BYTES)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command[0] == "C:/tools/tesseract.exe":
-            assert Path(command[1]).suffix.lower() == ".png"
-            assert Path(command[1]) != path
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(f"unexpected command: {command}")
 
     class FakeResponse:
@@ -1196,6 +1196,7 @@ def test_extract_visual_svg_renders_png_before_ocr_and_vision(monkeypatch, tmp_p
             return b'{"response":"Rendered SVG logo with a dark rectangular mark."}'
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: "")
     monkeypatch.setattr("flux_llm_kb.extractors.urlopen", lambda *_args, **_kwargs: FakeResponse(), raising=False)
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
@@ -1207,8 +1208,9 @@ def test_extract_visual_svg_renders_png_before_ocr_and_vision(monkeypatch, tmp_p
     assert result.metadata["svg_raster"]["status"] == "completed"
     assert result.metadata["svg_raster"]["renderer"] == "rsvg-convert"
     assert result.metadata["ocr"]["status"] == "completed"
+    assert result.metadata["ocr"]["engine"] == "paddleocr"
     assert result.metadata["vision"]["status"] == "completed"
-    assert [Path(command[0]).name for command in commands] == ["rsvg-convert.exe", "tesseract.exe"]
+    assert [Path(command[0]).name for command in commands] == ["rsvg-convert.exe"]
 
 
 def test_extract_visual_svg_blocks_when_renderer_is_missing(monkeypatch, tmp_path):
@@ -1219,7 +1221,7 @@ def test_extract_visual_svg_blocks_when_renderer_is_missing(monkeypatch, tmp_pat
 </svg>""",
         encoding="utf-8",
     )
-    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
     monkeypatch.setattr(
         "flux_llm_kb.extractors.run_no_window",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("missing SVG renderer must block before OCR")),
@@ -1296,7 +1298,10 @@ def test_extract_image_uses_local_vision_when_ocr_is_missing_and_reuses_cache(mo
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)
     _configure_vision(monkeypatch, tmp_path)
-    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModuleNotFoundError("paddleocr")),
+    )
     calls = {"vision": 0}
 
     class FakeResponse:
@@ -1342,7 +1347,10 @@ def test_extract_image_sends_configured_local_inference_keep_alive(monkeypatch, 
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)
     _configure_vision(monkeypatch, tmp_path, keep_alive="2m")
-    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModuleNotFoundError("paddleocr")),
+    )
 
     class FakeResponse:
         def read(self, _limit=-1):
@@ -1366,7 +1374,10 @@ def test_extract_image_uses_qwen_thinking_when_ollama_response_is_empty(monkeypa
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)
     _configure_vision(monkeypatch, tmp_path, keep_alive="2m")
-    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModuleNotFoundError("paddleocr")),
+    )
 
     class FakeResponse:
         def read(self, _limit=-1):
@@ -1406,7 +1417,10 @@ def test_extract_image_resizes_large_payload_for_local_vision(monkeypatch, tmp_p
     path = tmp_path / "large-diagram.jpg"
     Image.new("RGB", (3446, 2086), "white").save(path, quality=95)
     _configure_vision(monkeypatch, tmp_path, max_pixels=80_000_000)
-    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModuleNotFoundError("paddleocr")),
+    )
 
     class FakeResponse:
         def read(self, _limit=-1):
@@ -1434,20 +1448,11 @@ def test_extract_image_reindexes_combined_ocr_and_vision_chunks(monkeypatch, tmp
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)
     _configure_vision(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
-    )
-
-    def fake_run(command, **_kwargs):
-        assert command[0] == "C:/tools/tesseract.exe"
-        return SimpleNamespace(returncode=0, stdout="OCR text", stderr="")
-
     class FakeResponse:
         def read(self, _limit=-1):
             return b'{"response":"Vision text"}'
 
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda *_args, **_kwargs: "OCR text")
     monkeypatch.setattr("flux_llm_kb.extractors.urlopen", lambda *_args, **_kwargs: FakeResponse(), raising=False)
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
@@ -1462,19 +1467,10 @@ def test_extract_image_records_failed_local_vision_attempt_when_ocr_succeeds(mon
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)
     _configure_vision(monkeypatch, tmp_path, keep_alive="2m")
-    monkeypatch.setattr(
-        "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
-    )
-
-    def fake_run(command, **_kwargs):
-        assert command[0] == "C:/tools/tesseract.exe"
-        return SimpleNamespace(returncode=0, stdout="OCR text still indexes", stderr="")
-
     def fake_urlopen(_request, **_kwargs):
         raise TimeoutError("vision request exceeded cold-load timeout")
 
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda *_args, **_kwargs: "OCR text still indexes")
     monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
@@ -1497,15 +1493,6 @@ def test_extract_image_uses_local_vision_after_empty_ocr_via_docker_host_gateway
         model="qwen2.5vl:7b",
         base_url="http://host.docker.internal:11434",
     )
-    monkeypatch.setattr(
-        "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
-    )
-
-    def fake_run(command, **_kwargs):
-        assert command[0] == "C:/tools/tesseract.exe"
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
     class FakeResponse:
         def read(self, _limit=-1):
             return b'{"response":"Diagram shows an approvals workflow and inbox attachments."}'
@@ -1514,7 +1501,7 @@ def test_extract_image_uses_local_vision_after_empty_ocr_via_docker_host_gateway
         assert request.full_url == "http://host.docker.internal:11434/api/generate"
         return FakeResponse()
 
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda *_args, **_kwargs: "")
     monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
@@ -1532,7 +1519,10 @@ def test_extract_image_blocks_unsupported_vision_provider_without_remote_call(mo
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)
     _configure_vision(monkeypatch, tmp_path, provider="openai_compatible")
-    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda _command: None)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ModuleNotFoundError("paddleocr")),
+    )
     monkeypatch.setattr(
         "flux_llm_kb.extractors.urlopen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unsupported provider must not call network")),
@@ -1552,20 +1542,12 @@ def test_extract_image_keeps_ocr_indexing_when_vision_provider_is_blocked(monkey
     path.write_bytes(PNG_BYTES)
     _configure_vision(monkeypatch, tmp_path, provider="openai_compatible")
     monkeypatch.setattr(
-        "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
-    )
-    monkeypatch.setattr(
         "flux_llm_kb.extractors.urlopen",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("blocked provider must not call network")),
         raising=False,
     )
 
-    def fake_run(command, **_kwargs):
-        assert command[0] == "C:/tools/tesseract.exe"
-        return SimpleNamespace(returncode=0, stdout="OCR text survives blocked vision", stderr="")
-
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda *_args, **_kwargs: "OCR text survives blocked vision")
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -1577,16 +1559,13 @@ def test_extract_image_keeps_ocr_indexing_when_vision_provider_is_blocked(monkey
     assert result.metadata["vision"]["provider"] == "openai_compatible"
 
 
-def test_extract_image_blocks_tesseract_timeout_without_retryable_failure(monkeypatch, tmp_path):
+def test_extract_image_blocks_paddleocr_timeout_without_retryable_failure(monkeypatch, tmp_path):
     path = tmp_path / "scan.png"
     path.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
     monkeypatch.setattr(
-        "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
-    )
-    monkeypatch.setattr(
-        "flux_llm_kb.extractors.run_no_window",
-        lambda command, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(command, 30)),
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("paddleocr", 30)),
     )
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
@@ -1594,25 +1573,21 @@ def test_extract_image_blocks_tesseract_timeout_without_retryable_failure(monkey
     assert result.status == "blocked_missing_dependency"
     assert "timed out" in result.message
     assert result.metadata["ocr"]["status"] == "blocked_timeout"
-    assert result.metadata["ocr"]["engine"] == "tesseract"
+    assert result.metadata["ocr"]["engine"] == "paddleocr"
 
 
 def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_path):
     path = tmp_path / "scan.png"
     path.write_bytes(PNG_BYTES)
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
-    monkeypatch.setattr(
-        "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
-    )
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
     calls = []
 
-    def fake_run(command, **_kwargs):
-        calls.append(command)
-        assert command[0] == "C:/tools/tesseract.exe"
-        return SimpleNamespace(returncode=0, stdout="Scanned image text", stderr="")
+    def fake_paddle(image_path, **_kwargs):
+        calls.append(Path(image_path))
+        return "Scanned image text"
 
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", fake_paddle)
 
     first = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -1622,10 +1597,10 @@ def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_pat
     assert first.metadata["ocr"]["cache_misses"] == 1
     assert len(calls) == 1
 
-    def fail_run(_command, **_kwargs):
+    def fail_run(_image_path, **_kwargs):
         raise AssertionError("second extraction should use the OCR cache")
 
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fail_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", fail_run)
 
     second = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -1635,27 +1610,24 @@ def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_pat
     assert second.metadata["ocr"]["cache_misses"] == 0
 
 
-def test_extract_large_image_downscales_tesseract_input_and_reuses_original_cache(monkeypatch, tmp_path):
+def test_extract_large_image_downscales_paddleocr_input_and_reuses_original_cache(monkeypatch, tmp_path):
     from PIL import Image
 
     path = tmp_path / "tall-scan.png"
     Image.new("RGB", (16, 7000), "white").save(path)
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
-    monkeypatch.setattr(
-        "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
-    )
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
     calls = []
 
-    def fake_run(command, **_kwargs):
-        calls.append(command)
-        tesseract_input = Path(command[1])
-        assert tesseract_input != path
-        with Image.open(tesseract_input) as image:
+    def fake_paddle(image_path, **_kwargs):
+        calls.append(Path(image_path))
+        ocr_input = Path(image_path)
+        assert ocr_input != path
+        with Image.open(ocr_input) as image:
             assert max(image.size) <= 6000
-        return SimpleNamespace(returncode=0, stdout="Large scan text", stderr="")
+        return "Large scan text"
 
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", fake_paddle)
 
     first = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -1667,10 +1639,10 @@ def test_extract_large_image_downscales_tesseract_input_and_reuses_original_cach
     assert first.metadata["ocr"]["preprocess"]["max_edge"] == 6000
     assert len(calls) == 1
 
-    def fail_run(_command, **_kwargs):
+    def fail_run(_image_path, **_kwargs):
         raise AssertionError("second extraction should use original-source OCR cache")
 
-    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fail_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", fail_run)
 
     second = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -1964,7 +1936,7 @@ def test_extract_docx_salvages_text_when_embedded_part_missing(monkeypatch, tmp_
     ]
 
 
-def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_path):
+def test_extract_image_only_pdf_uses_pdftoppm_and_paddleocr_vl(monkeypatch, tmp_path):
     path = tmp_path / "scan.pdf"
     path.write_bytes(b"%PDF scanned")
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
@@ -1982,7 +1954,6 @@ def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_pat
         "flux_llm_kb.extractors.shutil.which",
         lambda command: {
             "pdftoppm": "C:/tools/pdftoppm.exe",
-            "tesseract": "C:/tools/tesseract.exe",
         }.get(command),
     )
     calls = []
@@ -1995,12 +1966,10 @@ def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_pat
             output_prefix = Path(command[-1])
             output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command[0] == "C:/tools/tesseract.exe":
-            page_name = Path(command[1]).stem
-            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -2008,12 +1977,13 @@ def test_extract_image_only_pdf_uses_pdftoppm_and_tesseract(monkeypatch, tmp_pat
     assert "OCR text from page-1" in result.chunks[0].body
     assert "OCR text from page-2" in result.chunks[0].body
     assert result.metadata["ocr"]["renderer"] == "pdftoppm"
+    assert result.metadata["ocr"]["engine"] == "paddleocr"
+    assert result.metadata["ocr"]["model"] == "PaddleOCR-VL"
     assert result.metadata["ocr"]["page_count"] == 2
     assert result.metadata["ocr"]["pages_attempted"] == 2
     assert result.metadata["ocr"]["cache_hits"] == 0
     assert result.metadata["ocr"]["cache_misses"] == 2
     assert [Path(command[0]).name for command in calls].count("pdftoppm.exe") == 2
-    assert [Path(command[0]).name for command in calls].count("tesseract.exe") == 2
 
 
 def test_extract_image_only_pdf_blocks_when_renderer_is_missing(monkeypatch, tmp_path):
@@ -2031,7 +2001,7 @@ def test_extract_image_only_pdf_blocks_when_renderer_is_missing(monkeypatch, tmp
     monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakePdfReader))
     monkeypatch.setattr(
         "flux_llm_kb.extractors.shutil.which",
-        lambda command: "C:/tools/tesseract.exe" if command == "tesseract" else None,
+        lambda _command: None,
     )
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
@@ -2059,7 +2029,6 @@ def test_extract_image_only_pdf_blocks_pdftoppm_timeout_without_retryable_failur
         "flux_llm_kb.extractors.shutil.which",
         lambda command: {
             "pdftoppm": "C:/tools/pdftoppm.exe",
-            "tesseract": "C:/tools/tesseract.exe",
         }.get(command),
     )
     monkeypatch.setattr(
@@ -2094,7 +2063,6 @@ def test_extract_large_scanned_pdf_ocr_all_pages_without_page_cap(monkeypatch, t
         "flux_llm_kb.extractors.shutil.which",
         lambda command: {
             "pdftoppm": "C:/tools/pdftoppm.exe",
-            "tesseract": "C:/tools/tesseract.exe",
         }.get(command),
     )
     calls = []
@@ -2106,12 +2074,10 @@ def test_extract_large_scanned_pdf_ocr_all_pages_without_page_cap(monkeypatch, t
             output_prefix = Path(command[-1])
             output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command[0] == "C:/tools/tesseract.exe":
-            page_name = Path(command[1]).stem
-            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -2122,7 +2088,6 @@ def test_extract_large_scanned_pdf_ocr_all_pages_without_page_cap(monkeypatch, t
     assert result.metadata["ocr"]["page_count"] == 26
     assert result.metadata["ocr"]["pages_attempted"] == 26
     assert [Path(command[0]).name for command in calls].count("pdftoppm.exe") == 26
-    assert [Path(command[0]).name for command in calls].count("tesseract.exe") == 26
 
 
 def test_extract_pdf_ocr_pages_queues_next_batch(monkeypatch, tmp_path):
@@ -2133,7 +2098,6 @@ def test_extract_pdf_ocr_pages_queues_next_batch(monkeypatch, tmp_path):
         "flux_llm_kb.extractors.shutil.which",
         lambda command: {
             "pdftoppm": "C:/tools/pdftoppm.exe",
-            "tesseract": "C:/tools/tesseract.exe",
         }.get(command),
     )
     calls = []
@@ -2145,12 +2109,10 @@ def test_extract_pdf_ocr_pages_queues_next_batch(monkeypatch, tmp_path):
             output_prefix = Path(command[-1])
             output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command[0] == "C:/tools/tesseract.exe":
-            page_name = Path(command[1]).stem
-            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_pdf_ocr_pages(
         path,
@@ -2174,7 +2136,6 @@ def test_extract_pdf_ocr_pages_queues_next_batch(monkeypatch, tmp_path):
     assert next_job["payload"]["page_end"] == 3
     assert next_job["payload"]["chunks_seen"] == 1
     assert [Path(command[0]).name for command in calls].count("pdftoppm.exe") == 2
-    assert [Path(command[0]).name for command in calls].count("tesseract.exe") == 2
 
 
 def test_extract_pdf_ocr_pages_accepts_explicit_mixed_page_batches(monkeypatch, tmp_path):
@@ -2185,7 +2146,6 @@ def test_extract_pdf_ocr_pages_accepts_explicit_mixed_page_batches(monkeypatch, 
         "flux_llm_kb.extractors.shutil.which",
         lambda command: {
             "pdftoppm": "C:/tools/pdftoppm.exe",
-            "tesseract": "C:/tools/tesseract.exe",
         }.get(command),
     )
     rendered_pages = []
@@ -2197,12 +2157,10 @@ def test_extract_pdf_ocr_pages_accepts_explicit_mixed_page_batches(monkeypatch, 
             output_prefix = Path(command[-1])
             output_prefix.with_name(f"{output_prefix.name}-{page}.png").write_bytes(PNG_BYTES + page.encode("ascii"))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if command[0] == "C:/tools/tesseract.exe":
-            page_name = Path(command[1]).stem
-            return SimpleNamespace(returncode=0, stdout=f"OCR text from {page_name}", stderr="")
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_pdf_ocr_pages(
         path,

@@ -36,7 +36,7 @@ from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciproca
 from .text_safety import sanitize_postgres_text_value, strip_postgres_nul
 
 
-DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
+DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb?connect_timeout=1"
 _MIGRATION_ADVISORY_LOCK_ID = 570_221_876_500_815
 DEFAULT_IMAP_SYNC_STALE_AFTER_SECONDS = 3600
 _RETENTION_MEMORY_CLASSES = {"episode", "claim", "corpus"}
@@ -1027,6 +1027,232 @@ def search_corpus_chunks(
             results[-1]["code"] = result["code"]
         if "semantic_duplicate_cluster" in result:
             results[-1]["semantic_duplicate_cluster"] = result["semantic_duplicate_cluster"]
+    return results
+
+
+def search_corpus_chunks_postgres_diagnostic(
+    query: str,
+    *,
+    limit: int = 5,
+    root_name: str | None = None,
+    filters: dict[str, Any] | None = None,
+    url: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Lexical-only degraded retrieval when Vespa or model-runner is unavailable."""
+    psycopg = _load_psycopg()
+    limit = max(1, min(limit, 50))
+    candidate_limit = max(limit * 4, 12)
+    root_name_sql = "AND r.name = %s" if root_name else ""
+    root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    code_filter_sql, code_filter_params = _corpus_code_filter_sql(filters)
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            streams: dict[str, list[str]] = {}
+            raw_scores: dict[str, dict[str, float]] = {}
+            started = time.perf_counter()
+            cur.execute(
+                f"""
+                SELECT c.id::text,
+                       ts_rank(c.search_vector, plainto_tsquery('english', %s)) AS score
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.enabled
+                  AND a.deleted_at IS NULL
+                  AND a.canonical_asset_id IS NULL
+                  AND a.extraction_status = 'indexed'
+                  AND c.search_vector @@ plainto_tsquery('english', %s)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM semantic_duplicate_members sm
+                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                      WHERE sc.status = 'active'
+                        AND sm.owner_table = 'asset_chunks'
+                        AND sm.owner_id = c.id
+                        AND sm.member_role = 'duplicate'
+                  )
+                  {root_name_sql}
+                  {code_filter_sql}
+                ORDER BY score DESC, c.updated_at DESC
+                LIMIT %s
+                """,
+                (query, query, *root_name_params, *code_filter_params, candidate_limit),
+            )
+            rows = cur.fetchall()
+            _add_ranked_corpus_candidates("postgres_lexical_diagnostic", rows, streams, raw_scores)
+            _record_corpus_stream_diagnostics(
+                diagnostics,
+                "postgres_lexical_diagnostic",
+                started,
+                rows=len(rows),
+                plan="degraded_tsquery_only",
+            )
+            started = time.perf_counter()
+            path_pattern = f"%{query}%"
+            cur.execute(
+                f"""
+                SELECT c.id::text,
+                       CASE
+                         WHEN lower(c.title) = lower(%s) THEN 1.0
+                         WHEN lower(a.path) = lower(%s) THEN 0.95
+                         WHEN c.title ILIKE %s THEN 0.65
+                         WHEN a.path ILIKE %s THEN 0.55
+                         ELSE 0.0
+                       END AS score
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.enabled
+                  AND a.deleted_at IS NULL
+                  AND a.canonical_asset_id IS NULL
+                  AND a.extraction_status = 'indexed'
+                  AND (c.title ILIKE %s OR a.path ILIKE %s)
+                  {root_name_sql}
+                  {code_filter_sql}
+                ORDER BY score DESC, c.updated_at DESC
+                LIMIT %s
+                """,
+                (
+                    query,
+                    query,
+                    path_pattern,
+                    path_pattern,
+                    path_pattern,
+                    path_pattern,
+                    *root_name_params,
+                    *code_filter_params,
+                    candidate_limit,
+                ),
+            )
+            rows = cur.fetchall()
+            _add_ranked_corpus_candidates("postgres_metadata_diagnostic", rows, streams, raw_scores)
+            _record_corpus_stream_diagnostics(
+                diagnostics,
+                "postgres_metadata_diagnostic",
+                started,
+                rows=len(rows),
+                plan="degraded_title_path_only",
+            )
+            details: dict[str, dict[str, Any]] = {}
+            if raw_scores:
+                fused = reciprocal_rank_fusion(streams)
+                candidate_ids = _corpus_hydration_candidate_ids(
+                    fused,
+                    streams=streams,
+                    hydration_limit=min(max(limit * 2, 20), 100),
+                    code_symbol_backfill_limit=0,
+                )
+                details = _hydrate_corpus_candidate_details(
+                    cur,
+                    candidate_ids=candidate_ids,
+                    root_name=root_name,
+                    filters=filters,
+                    raw_scores=raw_scores,
+                )
+                for item_id, detail in details.items():
+                    detail["raw_scores"] = dict(raw_scores.get(item_id, {}))
+                _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=details)
+    fused = _rank_corpus_candidates(query, streams=streams, details=details, filters=filters)
+    return _corpus_results_from_fused(fused[:limit], details)
+
+
+def search_corpus_chunks_vespa(
+    query: str,
+    *,
+    limit: int = 5,
+    root_name: str | None = None,
+    filters: dict[str, Any] | None = None,
+    vespa_base_url: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    from .embeddings import EmbeddingInput, SnowflakeEmbeddingProvider
+    from .reranking import QwenReranker
+    from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, VespaSearchAdapter
+
+    limit = max(1, min(limit, 50))
+    file_kinds = list(filters.get("file_kinds") or []) if isinstance(filters, dict) else []
+    languages = list(filters.get("languages") or []) if isinstance(filters, dict) else []
+    started = time.perf_counter()
+    embedding_result = SnowflakeEmbeddingProvider(
+        model=SNOWFLAKE_EMBEDDING_MODEL,
+        dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+    ).embed_batch(
+        [
+            EmbeddingInput(
+                owner_table="query",
+                owner_id="query",
+                text=query,
+                model=SNOWFLAKE_EMBEDDING_MODEL,
+                dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            )
+        ]
+    )[0]
+    candidates = VespaSearchAdapter(base_url=vespa_base_url or "http://127.0.0.1:8080").query(
+        query,
+        embedding=embedding_result.vector,
+        root_name=root_name,
+        file_kinds=file_kinds,
+        languages=languages,
+        limit=max(limit * 8, 80),
+    )
+    _record_corpus_stream_diagnostics(
+        diagnostics,
+        "vespa_hybrid",
+        started,
+        rows=len(candidates),
+        plan="vespa_hybrid_bm25_dense",
+    )
+    candidate_ids = [str(item.get("owner_id") or "") for item in candidates if str(item.get("owner_table") or "") == "asset_chunks"]
+    raw_scores = {str(item.get("owner_id")): {"vespa_hybrid": float(item.get("score") or 0.0)} for item in candidates}
+    streams = {"vespa_hybrid": candidate_ids}
+    if not candidate_ids:
+        return []
+    psycopg = _load_psycopg()
+    with psycopg.connect(database_url()) as conn:
+        with conn.cursor() as cur:
+            details = _hydrate_corpus_candidate_details(
+                cur,
+                candidate_ids=candidate_ids[: min(max(limit * 4, 20), 200)],
+                root_name=root_name,
+                filters=filters,
+                raw_scores=raw_scores,
+            )
+            for item_id, detail in details.items():
+                detail["raw_scores"] = dict(raw_scores.get(item_id, {}))
+            _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=details)
+    fused = _rank_corpus_candidates(query, streams=streams, details=details, filters=filters)
+    hydrated = _corpus_results_from_fused(fused[: max(limit, min(len(fused), 80))], details)
+    reranked = QwenReranker(top_n=min(80, max(limit, len(hydrated)))).rerank(query, hydrated)
+    return reranked[:limit]
+
+
+def _corpus_results_from_fused(fused: list[Any], details: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for item in fused:
+        if item.item_id not in details:
+            continue
+        result = details[item.item_id]
+        payload = {
+            "id": item.item_id,
+            "title": result["title"],
+            "summary": result["summary"],
+            "score": item.score,
+            "streams": list(item.streams),
+            "raw_scores": result["raw_scores"],
+            "asset_id": result["asset_id"],
+            "source_path": result["source_path"],
+            "root_name": result["root_name"],
+            "duplicate_count": result["duplicate_count"],
+            "trust_rank": result["trust_rank"],
+        }
+        if result.get("file_kind") is not None:
+            payload["file_kind"] = result["file_kind"]
+        if isinstance(result.get("code"), dict):
+            payload["code"] = result["code"]
+        if "semantic_duplicate_cluster" in result:
+            payload["semantic_duplicate_cluster"] = result["semantic_duplicate_cluster"]
+        results.append(payload)
     return results
 
 
@@ -2346,7 +2572,7 @@ def update_monitored_root(
                     UPDATE capture_jobs
                     SET payload = jsonb_set(payload, '{root_name}', to_jsonb(%s::text), true),
                         updated_at = now()
-                    WHERE job_type LIKE 'corpus_%%'
+                    WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                       AND payload->>'root_name' = %s
                     """,
                     (name, previous_name),
@@ -4040,7 +4266,7 @@ def claim_corpus_jobs(
     claim_selection = f"""
                     SELECT id
                     FROM capture_jobs
-                    WHERE job_type LIKE 'corpus_%%'
+                    WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                       AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                       AND next_attempt_at <= now()
                       {family_filter}
@@ -4057,7 +4283,7 @@ def claim_corpus_jobs(
                      running_family_counts AS (
                          SELECT job_family AS family, count(*)::integer AS running_count
                          FROM capture_jobs
-                         WHERE job_type LIKE 'corpus_%%'
+                         WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                            AND status = 'running'
                          GROUP BY job_family
                      ),
@@ -4073,7 +4299,7 @@ def claim_corpus_jobs(
                                 COALESCE(NULLIF(family_caps.caps ->> capture_jobs.job_family, '')::integer, 2147483647) AS family_cap
                          FROM capture_jobs
                          CROSS JOIN family_caps
-                         WHERE capture_jobs.job_type LIKE 'corpus_%%'
+                         WHERE (capture_jobs.job_type LIKE 'corpus_%%' OR capture_jobs.job_type = 'search_index_sync')
                            AND capture_jobs.status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                            AND capture_jobs.next_attempt_at <= now()
                            {family_filter}
@@ -4241,7 +4467,7 @@ def complete_corpus_job(
                     locked_by = NULL,
                     updated_at = now()
                 WHERE id = %s
-                  AND job_type LIKE 'corpus_%%'
+                  AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                   AND status = 'running'
                 """,
                 (duration_ms, _json(telemetry or {}), job_id),
@@ -4390,7 +4616,7 @@ def recover_stale_running_corpus_jobs(
                         locked_by = NULL,
                         telemetry = telemetry || jsonb_build_object('stale_running_recovered', true),
                         updated_at = now()
-                    WHERE job.job_type LIKE 'corpus_%%'
+                    WHERE (job.job_type LIKE 'corpus_%%' OR job.job_type = 'search_index_sync')
                       AND job.status = 'running'
                       AND COALESCE(job.progress_heartbeat_at, job.locked_at, job.started_at, job.updated_at)
                           < now() - make_interval(secs => GREATEST(%s, COALESCE(job.time_budget_seconds, 0)))
@@ -4437,7 +4663,7 @@ def retry_corpus_job(
                     locked_by = NULL,
                     updated_at = now()
                 WHERE id = %s
-                  AND job_type LIKE 'corpus_%%'
+                  AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                   AND status = 'running'
                 """,
                 (status, error, max(1, cooldown_seconds), duration_ms, _json(telemetry or {}), job_id),
@@ -4574,7 +4800,7 @@ def block_corpus_job(
                     locked_by = NULL,
                     updated_at = now()
                 WHERE id = %s
-                  AND job_type LIKE 'corpus_%%'
+                  AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                   AND status = 'running'
                 """,
                 (status, error, duration_ms, _json(telemetry or {}), job_id),
@@ -12395,6 +12621,728 @@ def embedding_status(*, root_name: str | None = None, url: str | None = None) ->
             "metadata_missing": sum(item["metadata_missing"] for item in rows.values()),
         },
     }
+
+
+def search_index_status(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    root_sql = "WHERE root_name = %s" if root_name else ""
+    params: tuple[Any, ...] = (root_name,) if root_name else ()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT index_status, count(*)::integer
+                FROM search_index_records
+                {root_sql}
+                GROUP BY index_status
+                ORDER BY index_status
+                """,
+                params,
+            )
+            by_status = {str(row[0]): int(row[1] or 0) for row in cur.fetchall()}
+            cur.execute(
+                f"""
+                SELECT vespa_document_id, owner_table, owner_id::text, root_name,
+                       source_hash, embedding_model, embedding_dimensions,
+                       index_status, last_error, sync_started_at, sync_completed_at, updated_at
+                FROM search_index_records
+                {root_sql}
+                ORDER BY updated_at DESC
+                LIMIT 20
+                """,
+                params,
+            )
+            recent = [
+                {
+                    "vespa_document_id": row[0],
+                    "owner_table": row[1],
+                    "owner_id": row[2],
+                    "root_name": row[3],
+                    "source_hash": row[4],
+                    "embedding_model": row[5],
+                    "embedding_dimensions": row[6],
+                    "index_status": row[7],
+                    "last_error": row[8],
+                    "sync_started_at": row[9].isoformat() if row[9] else None,
+                    "sync_completed_at": row[10].isoformat() if row[10] else None,
+                    "updated_at": row[11].isoformat() if row[11] else None,
+                }
+                for row in cur.fetchall()
+            ]
+    return {
+        "root_name": root_name,
+        "search_engine": "vespa",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+        "summary": {
+            "total": sum(by_status.values()),
+            "by_status": by_status,
+        },
+        "recent": recent,
+    }
+
+
+def enqueue_search_index_sync(
+    *,
+    owner_class: str = "all",
+    root_name: str | None = None,
+    limit: int = 100,
+    url: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "owner_class": str(owner_class or "all"),
+        "root_name": root_name,
+        "limit": max(1, min(int(limit or 100), 5000)),
+        "search_engine": "vespa",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+    }
+    schedule = _job_schedule_metadata("search_index_sync")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO capture_jobs (
+                    job_type, payload, job_family, resource_class, priority, time_budget_seconds
+                )
+                VALUES (%s, %s::jsonb, %s, %s, %s, %s)
+                RETURNING id::text
+                """,
+                (
+                    "search_index_sync",
+                    _json(payload),
+                    schedule["job_family"],
+                    schedule["resource_class"],
+                    schedule["priority"],
+                    schedule["time_budget_seconds"],
+                ),
+            )
+            job_id = cur.fetchone()[0]
+    return {"queued": 1, "job_id": job_id, **payload}
+
+
+def mark_search_index_rebuild(
+    *,
+    root_name: str | None = None,
+    confirmed: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    if not confirmed:
+        raise ValueError("search index rebuild requires --confirm")
+    root_sql = "WHERE root_name = %s" if root_name else ""
+    params: tuple[Any, ...] = (root_name,) if root_name else ()
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE search_index_records
+                   SET index_status = 'pending',
+                       last_error = NULL,
+                       sync_started_at = NULL,
+                       sync_completed_at = NULL,
+                       updated_at = now()
+                {root_sql}
+                """,
+                params,
+            )
+            marked = int(cur.rowcount or 0)
+    return {"marked_pending": marked, "root_name": root_name, "confirmed": True}
+
+
+def sync_search_index(
+    *,
+    owner_class: str = "all",
+    root_name: str | None = None,
+    limit: int = 100,
+    embedding_provider: Any | None = None,
+    adapter: Any | None = None,
+    vespa_base_url: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    from .embeddings import SnowflakeEmbeddingProvider
+    from .search_index import (
+        SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        SNOWFLAKE_EMBEDDING_MODEL,
+        VespaSearchAdapter,
+        build_vespa_document,
+    )
+
+    normalized_class = _normalize_embedding_owner_class(owner_class)
+    row_limit = max(1, min(int(limit or 100), 5000))
+    provider = embedding_provider or SnowflakeEmbeddingProvider(
+        model=SNOWFLAKE_EMBEDDING_MODEL,
+        dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+    )
+    vespa = adapter or VespaSearchAdapter(base_url=vespa_base_url or "http://127.0.0.1:8080")
+    result: dict[str, Any] = {
+        "owner_class": normalized_class,
+        "root_name": root_name,
+        "limit": row_limit,
+        "search_engine": "vespa",
+        "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+        "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        "model_generation": "snowflake-qwen-paddleocr-v1",
+        "requested": 0,
+        "indexed": 0,
+        "deleted": 0,
+        "skipped_unchanged": 0,
+        "failed": 0,
+        "errors": [],
+    }
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            stale_records = _fetch_stale_search_index_records(
+                cur,
+                owner_class=normalized_class,
+                root_name=root_name,
+                limit=row_limit,
+            )
+            for record in stale_records:
+                try:
+                    vespa.delete(str(record["vespa_document_id"]))
+                except Exception as exc:
+                    result["failed"] += 1
+                    result["errors"].append(str(exc)[:300])
+                    _mark_search_index_record_failed(cur, record=record, error=str(exc))
+                    continue
+                _mark_search_index_record_deleted(cur, record=record)
+                result["deleted"] += 1
+
+            remaining = max(0, row_limit - len(stale_records))
+            if remaining == 0:
+                return result
+            rows = _fetch_search_index_rows(
+                cur,
+                owner_class=normalized_class,
+                root_name=root_name,
+                limit=remaining,
+                embedding_model=SNOWFLAKE_EMBEDDING_MODEL,
+            )
+            result["requested"] = len(rows)
+            pending = [
+                row
+                for row in rows
+                if row.get("existing_source_hash") != row.get("source_hash")
+                or row.get("existing_index_status") != "indexed"
+                or row.get("existing_embedding_model") != SNOWFLAKE_EMBEDDING_MODEL
+            ]
+            result["skipped_unchanged"] = len(rows) - len(pending)
+            for row in pending:
+                _upsert_search_index_record(
+                    cur,
+                    row=row,
+                    status="syncing",
+                    last_error=None,
+                    metadata={"sync_reason": "search_index_sync"},
+                )
+            if not pending:
+                return result
+
+            inputs = [
+                EmbeddingInput(
+                    owner_table=str(row["owner_table"]),
+                    owner_id=str(row["owner_id"]),
+                    text=str(row["index_text"]),
+                    model=SNOWFLAKE_EMBEDDING_MODEL,
+                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                )
+                for row in pending
+            ]
+            try:
+                embeddings = provider.embed_batch(inputs)
+            except Exception as exc:
+                for row in pending:
+                    _upsert_search_index_record(
+                        cur,
+                        row=row,
+                        status="failed",
+                        last_error=str(exc),
+                        metadata={"failed_stage": "embedding"},
+                    )
+                result["failed"] += len(pending)
+                result["errors"].append(str(exc)[:300])
+                return result
+
+            for row, embedding in zip(pending, embeddings):
+                row = {
+                    **row,
+                    "embedding": embedding.vector,
+                    "embedding_model": embedding.model,
+                    "embedding_dimensions": embedding.dimensions,
+                    "source_hash": str(embedding.metadata.get("source_hash") or row["source_hash"]),
+                }
+                try:
+                    vespa.feed(build_vespa_document(row))
+                except Exception as exc:
+                    result["failed"] += 1
+                    result["errors"].append(str(exc)[:300])
+                    _upsert_search_index_record(
+                        cur,
+                        row=row,
+                        status="failed",
+                        last_error=str(exc),
+                        metadata={"failed_stage": "feed"},
+                    )
+                    continue
+                _upsert_search_index_record(
+                    cur,
+                    row=row,
+                    status="indexed",
+                    last_error=None,
+                    metadata={"rank_profile": "hybrid", "source": "search_index_sync"},
+                )
+                result["indexed"] += 1
+    result["errors"] = list(dict.fromkeys(result["errors"]))[:20]
+    return result
+
+
+def _fetch_search_index_rows(
+    cur: Any,
+    *,
+    owner_class: str,
+    root_name: str | None,
+    limit: int,
+    embedding_model: str,
+) -> list[dict[str, Any]]:
+    remaining = max(1, min(int(limit or 100), 5000))
+    classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
+    rows: list[dict[str, Any]] = []
+    for item_class in classes:
+        if remaining <= 0:
+            break
+        if item_class == "corpus":
+            batch = _fetch_corpus_search_index_rows(cur, root_name=root_name, limit=remaining, embedding_model=embedding_model)
+        elif item_class == "episodes":
+            batch = _fetch_episode_search_index_rows(cur, root_name=root_name, limit=remaining, embedding_model=embedding_model)
+        else:
+            batch = _fetch_claim_search_index_rows(cur, root_name=root_name, limit=remaining, embedding_model=embedding_model)
+        rows.extend(batch)
+        remaining -= len(batch)
+    return rows
+
+
+def _fetch_corpus_search_index_rows(
+    cur: Any,
+    *,
+    root_name: str | None,
+    limit: int,
+    embedding_model: str,
+) -> list[dict[str, Any]]:
+    from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, vespa_document_id
+
+    root_sql = "AND r.name = %s" if root_name else ""
+    root_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    cur.execute(
+        f"""
+        SELECT c.id::text, a.id::text, r.id::text, r.name,
+               c.title, c.body, a.path, a.file_kind, c.metadata,
+               rec.source_hash, rec.index_status, rec.embedding_model
+        FROM asset_chunks c
+        JOIN source_assets a ON a.id = c.asset_id
+        JOIN monitored_roots r ON r.id = a.root_id
+        LEFT JOIN search_index_records rec ON rec.owner_table = 'asset_chunks'
+                                          AND rec.owner_id = c.id
+                                          AND rec.embedding_model = %s
+        WHERE r.enabled
+          AND a.deleted_at IS NULL
+          AND a.canonical_asset_id IS NULL
+          AND a.extraction_status = 'indexed'
+          {root_sql}
+        ORDER BY c.updated_at DESC, c.id
+        LIMIT %s
+        """,
+        (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
+    )
+    items: list[dict[str, Any]] = []
+    for owner_id, asset_id, row_root_id, row_root_name, title, body, source_path, file_kind, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
+        item_metadata = metadata if isinstance(metadata, dict) else {}
+        hydrated_body = mail_content_store.hydrate_chunk_body({"body": body, "metadata": item_metadata})
+        symbols = _search_index_symbols(item_metadata)
+        text = _search_index_text(title=title, body=hydrated_body, source_path=source_path, symbols=symbols)
+        items.append(
+            {
+                "vespa_document_id": vespa_document_id("asset_chunks", str(owner_id)),
+                "owner_table": "asset_chunks",
+                "owner_id": str(owner_id),
+                "asset_id": str(asset_id or ""),
+                "root_id": str(row_root_id or ""),
+                "root_name": str(row_root_name or ""),
+                "title": str(title or ""),
+                "body": hydrated_body,
+                "source_path": str(source_path or ""),
+                "symbols": symbols,
+                "language": _search_index_language(item_metadata),
+                "file_kind": str(file_kind or ""),
+                "lifecycle_state": "active",
+                "deleted": False,
+                "canonical": True,
+                "source_hash": embedding_source_hash(text),
+                "index_text": text,
+                "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+                "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                "existing_source_hash": existing_hash,
+                "existing_index_status": existing_status,
+                "existing_embedding_model": existing_model,
+            }
+        )
+    return items
+
+
+def _fetch_episode_search_index_rows(
+    cur: Any,
+    *,
+    root_name: str | None,
+    limit: int,
+    embedding_model: str,
+) -> list[dict[str, Any]]:
+    from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, vespa_document_id
+
+    root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
+    root_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    cur.execute(
+        f"""
+        SELECT e.id::text, e.title, e.summary, e.metadata,
+               rec.source_hash, rec.index_status, rec.embedding_model
+        FROM episodes e
+        LEFT JOIN search_index_records rec ON rec.owner_table = 'episodes'
+                                          AND rec.owner_id = e.id
+                                          AND rec.embedding_model = %s
+        WHERE e.superseded_by IS NULL
+          {root_sql}
+        ORDER BY e.updated_at DESC, e.id
+        LIMIT %s
+        """,
+        (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
+    )
+    items: list[dict[str, Any]] = []
+    for owner_id, title, summary, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
+        item_metadata = metadata if isinstance(metadata, dict) else {}
+        symbols = _search_index_symbols(item_metadata)
+        source_path = str(item_metadata.get("source_path") or item_metadata.get("source") or "")
+        text = _search_index_text(title=title, body=summary, source_path=source_path, symbols=symbols)
+        items.append(
+            {
+                "vespa_document_id": vespa_document_id("episodes", str(owner_id)),
+                "owner_table": "episodes",
+                "owner_id": str(owner_id),
+                "root_id": str(item_metadata.get("root_id") or ""),
+                "root_name": str(item_metadata.get("root_name") or ""),
+                "title": str(title or ""),
+                "body": str(summary or ""),
+                "source_path": source_path,
+                "symbols": symbols,
+                "language": _search_index_language(item_metadata),
+                "file_kind": "episode",
+                "lifecycle_state": "active",
+                "deleted": False,
+                "canonical": True,
+                "source_hash": embedding_source_hash(text),
+                "index_text": text,
+                "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+                "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                "existing_source_hash": existing_hash,
+                "existing_index_status": existing_status,
+                "existing_embedding_model": existing_model,
+            }
+        )
+    return items
+
+
+def _fetch_claim_search_index_rows(
+    cur: Any,
+    *,
+    root_name: str | None,
+    limit: int,
+    embedding_model: str,
+) -> list[dict[str, Any]]:
+    from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, vespa_document_id
+
+    root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
+    root_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    cur.execute(
+        f"""
+        SELECT c.id::text, concat_ws(' ', e.name, c.predicate) AS title,
+               c.object_text, c.lifecycle_state, c.metadata,
+               rec.source_hash, rec.index_status, rec.embedding_model
+        FROM claims c
+        LEFT JOIN entities e ON e.id = c.subject_entity_id
+        LEFT JOIN search_index_records rec ON rec.owner_table = 'claims'
+                                          AND rec.owner_id = c.id
+                                          AND rec.embedding_model = %s
+        WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
+          AND c.retention_action = 'keep'
+          {root_sql}
+        ORDER BY c.updated_at DESC, c.id
+        LIMIT %s
+        """,
+        (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
+    )
+    items: list[dict[str, Any]] = []
+    for owner_id, title, object_text, lifecycle_state, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
+        item_metadata = metadata if isinstance(metadata, dict) else {}
+        symbols = _search_index_symbols(item_metadata)
+        source_path = str(item_metadata.get("source_path") or item_metadata.get("source") or "")
+        text = _search_index_text(title=title, body=object_text, source_path=source_path, symbols=symbols)
+        items.append(
+            {
+                "vespa_document_id": vespa_document_id("claims", str(owner_id)),
+                "owner_table": "claims",
+                "owner_id": str(owner_id),
+                "root_id": str(item_metadata.get("root_id") or ""),
+                "root_name": str(item_metadata.get("root_name") or ""),
+                "title": str(title or ""),
+                "body": str(object_text or ""),
+                "source_path": source_path,
+                "symbols": symbols,
+                "language": _search_index_language(item_metadata),
+                "file_kind": "claim",
+                "lifecycle_state": str(lifecycle_state or "active"),
+                "deleted": False,
+                "canonical": True,
+                "source_hash": embedding_source_hash(text),
+                "index_text": text,
+                "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+                "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                "existing_source_hash": existing_hash,
+                "existing_index_status": existing_status,
+                "existing_embedding_model": existing_model,
+            }
+        )
+    return items
+
+
+def _fetch_stale_search_index_records(
+    cur: Any,
+    *,
+    owner_class: str,
+    root_name: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    remaining = max(1, min(int(limit or 100), 5000))
+    classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
+    rows: list[dict[str, Any]] = []
+    for item_class in classes:
+        if remaining <= 0:
+            break
+        if item_class == "corpus":
+            batch = _fetch_stale_corpus_search_index_records(cur, root_name=root_name, limit=remaining)
+        elif item_class == "episodes":
+            batch = _fetch_stale_episode_search_index_records(cur, root_name=root_name, limit=remaining)
+        else:
+            batch = _fetch_stale_claim_search_index_records(cur, root_name=root_name, limit=remaining)
+        rows.extend(batch)
+        remaining -= len(batch)
+    return rows
+
+
+def _fetch_stale_corpus_search_index_records(cur: Any, *, root_name: str | None, limit: int) -> list[dict[str, Any]]:
+    root_sql = "AND rec.root_name = %s" if root_name else ""
+    root_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    cur.execute(
+        f"""
+        SELECT rec.vespa_document_id, rec.owner_table, rec.owner_id::text, rec.root_name
+        FROM search_index_records rec
+        LEFT JOIN asset_chunks c ON c.id = rec.owner_id
+        LEFT JOIN source_assets a ON a.id = c.asset_id
+        WHERE rec.owner_table = 'asset_chunks'
+          AND rec.index_status <> 'deleted'
+          AND (
+              c.id IS NULL
+              OR a.id IS NULL
+              OR a.deleted_at IS NOT NULL
+              OR a.canonical_asset_id IS NOT NULL
+              OR a.extraction_status <> 'indexed'
+          )
+          {root_sql}
+        ORDER BY rec.updated_at
+        LIMIT %s
+        """,
+        (*root_params, max(1, min(int(limit or 100), 5000))),
+    )
+    return [_search_index_record_row(row) for row in cur.fetchall()]
+
+
+def _fetch_stale_episode_search_index_records(cur: Any, *, root_name: str | None, limit: int) -> list[dict[str, Any]]:
+    root_sql = "AND rec.root_name = %s" if root_name else ""
+    root_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    cur.execute(
+        f"""
+        SELECT rec.vespa_document_id, rec.owner_table, rec.owner_id::text, rec.root_name
+        FROM search_index_records rec
+        LEFT JOIN episodes e ON e.id = rec.owner_id
+        WHERE rec.owner_table = 'episodes'
+          AND rec.index_status <> 'deleted'
+          AND (e.id IS NULL OR e.superseded_by IS NOT NULL)
+          {root_sql}
+        ORDER BY rec.updated_at
+        LIMIT %s
+        """,
+        (*root_params, max(1, min(int(limit or 100), 5000))),
+    )
+    return [_search_index_record_row(row) for row in cur.fetchall()]
+
+
+def _fetch_stale_claim_search_index_records(cur: Any, *, root_name: str | None, limit: int) -> list[dict[str, Any]]:
+    root_sql = "AND rec.root_name = %s" if root_name else ""
+    root_params: tuple[Any, ...] = (root_name,) if root_name else ()
+    cur.execute(
+        f"""
+        SELECT rec.vespa_document_id, rec.owner_table, rec.owner_id::text, rec.root_name
+        FROM search_index_records rec
+        LEFT JOIN claims c ON c.id = rec.owner_id
+        WHERE rec.owner_table = 'claims'
+          AND rec.index_status <> 'deleted'
+          AND (
+              c.id IS NULL
+              OR c.lifecycle_state NOT IN ('active', 'confirmed', 'reinforced')
+              OR c.retention_action <> 'keep'
+          )
+          {root_sql}
+        ORDER BY rec.updated_at
+        LIMIT %s
+        """,
+        (*root_params, max(1, min(int(limit or 100), 5000))),
+    )
+    return [_search_index_record_row(row) for row in cur.fetchall()]
+
+
+def _search_index_record_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "vespa_document_id": str(row[0] or ""),
+        "owner_table": str(row[1] or ""),
+        "owner_id": str(row[2] or ""),
+        "root_name": row[3],
+    }
+
+
+def _search_index_text(*, title: Any, body: Any, source_path: Any, symbols: list[str]) -> str:
+    return "\n".join(
+        part
+        for part in (
+            str(title or "").strip(),
+            str(source_path or "").strip(),
+            " ".join(symbols).strip(),
+            str(body or "").strip(),
+        )
+        if part
+    )
+
+
+def _search_index_language(metadata: dict[str, Any]) -> str:
+    code = metadata.get("code")
+    if isinstance(code, dict) and code.get("language"):
+        return str(code.get("language") or "")
+    return str(metadata.get("language") or metadata.get("mime_language") or "")
+
+
+def _search_index_symbols(metadata: dict[str, Any]) -> list[str]:
+    raw_symbols: list[Any] = []
+    for key in ("symbols", "symbol_names"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            raw_symbols.extend(value)
+    code = metadata.get("code")
+    if isinstance(code, dict):
+        for key in ("symbol", "symbol_name", "qualified_name", "name"):
+            if code.get(key):
+                raw_symbols.append(code.get(key))
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for value in raw_symbols:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        symbols.append(text[:240])
+    return symbols[:32]
+
+
+def _upsert_search_index_record(
+    cur: Any,
+    *,
+    row: dict[str, Any],
+    status: str,
+    last_error: str | None,
+    metadata: dict[str, Any],
+) -> None:
+    completed = status in {"indexed", "deleted", "failed", "skipped"}
+    cur.execute(
+        """
+        INSERT INTO search_index_records (
+            vespa_document_id, owner_table, owner_id, root_id, root_name,
+            source_hash, embedding_model, embedding_dimensions, model_generation,
+            index_status, last_error, sync_started_at, sync_completed_at, metadata
+        )
+        VALUES (
+            %s, %s, %s, NULLIF(%s, '')::uuid, NULLIF(%s, ''),
+            NULLIF(%s, ''), %s, %s, %s,
+            %s, %s, now(), CASE WHEN %s THEN now() ELSE NULL END, %s::jsonb
+        )
+        ON CONFLICT (vespa_document_id) DO UPDATE SET
+            owner_table = EXCLUDED.owner_table,
+            owner_id = EXCLUDED.owner_id,
+            root_id = EXCLUDED.root_id,
+            root_name = EXCLUDED.root_name,
+            source_hash = EXCLUDED.source_hash,
+            embedding_model = EXCLUDED.embedding_model,
+            embedding_dimensions = EXCLUDED.embedding_dimensions,
+            model_generation = EXCLUDED.model_generation,
+            index_status = EXCLUDED.index_status,
+            last_error = EXCLUDED.last_error,
+            sync_started_at = EXCLUDED.sync_started_at,
+            sync_completed_at = EXCLUDED.sync_completed_at,
+            metadata = search_index_records.metadata || EXCLUDED.metadata,
+            updated_at = now()
+        """,
+        (
+            row["vespa_document_id"],
+            row["owner_table"],
+            row["owner_id"],
+            str(row.get("root_id") or ""),
+            str(row.get("root_name") or ""),
+            str(row.get("source_hash") or ""),
+            row.get("embedding_model") or "Snowflake/snowflake-arctic-embed-l-v2.0",
+            int(row.get("embedding_dimensions") or 1024),
+            str(row.get("model_generation") or "snowflake-qwen-paddleocr-v1"),
+            status,
+            last_error[:1000] if last_error else None,
+            completed,
+            _json(metadata),
+        ),
+    )
+
+
+def _mark_search_index_record_deleted(cur: Any, *, record: dict[str, Any]) -> None:
+    cur.execute(
+        """
+        UPDATE search_index_records
+        SET index_status = 'deleted',
+            last_error = NULL,
+            sync_completed_at = now(),
+            updated_at = now(),
+            metadata = metadata || jsonb_build_object('deleted_from_vespa', true)
+        WHERE vespa_document_id = %s
+        """,
+        (record["vespa_document_id"],),
+    )
+
+
+def _mark_search_index_record_failed(cur: Any, *, record: dict[str, Any], error: str) -> None:
+    cur.execute(
+        """
+        UPDATE search_index_records
+        SET index_status = 'failed',
+            last_error = %s,
+            sync_completed_at = now(),
+            updated_at = now(),
+            metadata = metadata || jsonb_build_object('failed_stage', 'delete')
+        WHERE vespa_document_id = %s
+        """,
+        (str(error or "")[:1000], record["vespa_document_id"]),
+    )
 
 
 def _fetch_embedding_inputs(

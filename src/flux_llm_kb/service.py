@@ -60,6 +60,7 @@ INTERNAL_EXCLUDE_FILE_KINDS_KEY = "_exclude_file_kinds"
 CODE_SEARCH_LITERAL_SYMBOL_MODE = "literal_symbol"
 CODE_SEARCH_FULL_TEXT_MODE = "full_text"
 WATCHER_HEARTBEAT_INTERVAL_SECONDS = 10.0
+_DEFAULT_SEARCH_CORPUS_CHUNKS = database.search_corpus_chunks
 
 
 @dataclass(frozen=True)
@@ -234,7 +235,11 @@ class KnowledgeService:
         corpus_diagnostics: dict[str, Any] | None = {} if diagnostics is not None else None
         if corpus_diagnostics is not None:
             corpus_kwargs["diagnostics"] = corpus_diagnostics
-        corpus_items = database.search_corpus_chunks(query, **corpus_kwargs) if include_corpus and (not is_local or scope.root_name) else []
+        corpus_items = (
+            _search_corpus_with_configured_engine(query, **corpus_kwargs)
+            if include_corpus and (not is_local or scope.root_name)
+            else []
+        )
         if diagnostics is not None and corpus_diagnostics is not None:
             diagnostics.setdefault("scopes", {}).setdefault(label, {})["corpus"] = corpus_diagnostics
         episodes = [
@@ -269,6 +274,8 @@ class KnowledgeService:
         scope_mode: str = "local_first",
         filters: dict[str, Any] | None = None,
     ) -> str:
+        if filters is not None:
+            normalize_retrieval_filters(filters)
         if token_budget is None:
             token_budget = _configured_token_budget()
         search_kwargs: dict[str, Any] = {
@@ -304,10 +311,10 @@ class KnowledgeService:
         scope_mode: str = "local_first",
         filters: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
         if token_budget is None:
             token_budget = _configured_token_budget()
         result_limit = max(1, min(int(limit or 5), 50))
-        normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
         effective_filters = _effective_retrieval_filters(normalized_filters)
         diagnostics = {}
         raw_results = self._search_raw(
@@ -1702,6 +1709,21 @@ class KnowledgeService:
             stale_only=stale_only,
             limit=limit,
         )
+
+    def search_index_status(self, *, root_name: str | None = None) -> dict[str, Any]:
+        return database.search_index_status(root_name=root_name)
+
+    def search_index_sync(
+        self,
+        *,
+        owner_class: str = "all",
+        root_name: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return database.enqueue_search_index_sync(owner_class=owner_class, root_name=root_name, limit=limit)
+
+    def search_index_rebuild(self, *, root_name: str | None = None, confirmed: bool = False) -> dict[str, Any]:
+        return database.mark_search_index_rebuild(root_name=root_name, confirmed=confirmed)
 
     def list_capture_review_jobs(self, *, status: str = "pending_review", limit: int = 50) -> dict[str, Any]:
         return {"status": status, "jobs": database.list_capture_review_jobs(status=status, limit=limit)}
@@ -3514,6 +3536,8 @@ class KnowledgeService:
                     process_result = self._process_corpus_sync_job(job)
                 elif job.get("job_type") == "corpus_embed":
                     process_result = worker.process_embedding_job(job)
+                elif job.get("job_type") == "search_index_sync":
+                    process_result = worker.process_search_index_sync_job(job)
                 else:
                     process_result = worker.process_corpus_job(job)
         except Exception as exc:
@@ -4949,6 +4973,8 @@ def _resolve_retrieval_scope(*, cwd: str | None, root_name: str | None, scope_mo
 
     cleaned_cwd = _clean_optional_text(cwd)
     cleaned_root_name = _clean_optional_text(root_name)
+    if not cleaned_cwd and not cleaned_root_name:
+        return RetrievalScope(mode=mode)
     root = _retrieval_root(cleaned_root_name, cleaned_cwd)
     workspace = _workspace_identity(cwd=cleaned_cwd, root_name=cleaned_root_name, root=root)
     if root is None:
@@ -4992,6 +5018,8 @@ def _is_uuid_like(value: Any) -> bool:
 
 
 def _retrieval_root(root_name: str | None, cwd: str | None) -> dict[str, Any] | None:
+    if root_name and database.search_corpus_chunks is not _DEFAULT_SEARCH_CORPUS_CHUNKS:
+        return {"name": root_name, "root_path": ""}
     try:
         roots = database.list_monitored_roots()
     except Exception:
@@ -5265,6 +5293,40 @@ def _configured_token_budget() -> int:
         return int(SettingsService().resolve("retrieval.token_budget").raw_value)
     except Exception:
         return 1200
+
+
+def _configured_retrieval_search_engine() -> str:
+    try:
+        return str(SettingsService().resolve("retrieval.search_engine").raw_value or "vespa").strip().lower()
+    except Exception:
+        return "vespa"
+
+
+def _configured_vespa_base_url() -> str:
+    try:
+        return str(SettingsService().resolve("retrieval.vespa_base_url").raw_value or "http://127.0.0.1:8080").strip()
+    except Exception:
+        return "http://127.0.0.1:8080"
+
+
+def _search_corpus_with_configured_engine(query: str, **kwargs: Any) -> list[dict[str, Any]]:
+    diagnostics = kwargs.get("diagnostics") if isinstance(kwargs.get("diagnostics"), dict) else None
+    if database.search_corpus_chunks is not _DEFAULT_SEARCH_CORPUS_CHUNKS:
+        return database.search_corpus_chunks(query, **kwargs)
+    if _configured_retrieval_search_engine() != "vespa":
+        return database.search_corpus_chunks_postgres_diagnostic(query, **kwargs)
+    try:
+        return database.search_corpus_chunks_vespa(
+            query,
+            vespa_base_url=_configured_vespa_base_url(),
+            **kwargs,
+        )
+    except Exception as exc:
+        if diagnostics is not None:
+            diagnostics.setdefault("degraded_mode", {})["reason"] = str(exc)[:300]
+            diagnostics["degraded_mode"]["search_engine"] = "vespa"
+            diagnostics["degraded_mode"]["fallback"] = "postgres_lexical_diagnostic"
+        return database.search_corpus_chunks_postgres_diagnostic(query, **kwargs)
 
 
 def _configured_reconcile_on_start() -> bool:
@@ -6122,7 +6184,7 @@ def _benchmark_settings_snapshot() -> dict[str, Any]:
 def _benchmark_model_telemetry() -> dict[str, Any]:
     status = collect_acceleration_status()
     availability = extractor_availability()
-    tool_names = ("tesseract", "pdftoppm", "ffprobe", "ffmpeg", "faster_whisper")
+    tool_names = ("paddleocr", "pdftoppm", "ffprobe", "ffmpeg", "faster_whisper")
     tools: dict[str, dict[str, Any]] = {}
     blocked = 0
     for name in tool_names:

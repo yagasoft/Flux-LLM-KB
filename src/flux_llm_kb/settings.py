@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import time
 from typing import Any
 
 from . import database
@@ -13,6 +14,10 @@ from .settings_registry import (
     get_definition,
     public_definitions,
 )
+
+
+_RUNTIME_SETTINGS_DB_RETRY_AFTER = 0.0
+_RUNTIME_SETTINGS_DB_READER = database.get_runtime_setting
 
 
 @dataclass(frozen=True)
@@ -50,6 +55,7 @@ class SettingsService:
         return [setting.to_public_dict() for setting in self.list()]
 
     def resolve(self, key: str) -> ResolvedSetting:
+        global _RUNTIME_SETTINGS_DB_RETRY_AFTER
         definition = get_definition(key)
         source = "default"
         raw_value = definition.default
@@ -57,10 +63,18 @@ class SettingsService:
             raw_value = os.environ[definition.env_var]
             source = "env"
         else:
-            try:
-                stored = database.get_runtime_setting(key)
-            except Exception:
-                stored = None
+            stored = None
+            now = time.monotonic()
+            reader = database.get_runtime_setting
+            reader_replaced = reader is not _RUNTIME_SETTINGS_DB_READER
+            if reader_replaced or now >= _RUNTIME_SETTINGS_DB_RETRY_AFTER:
+                try:
+                    stored = reader(key)
+                    if not reader_replaced:
+                        _RUNTIME_SETTINGS_DB_RETRY_AFTER = 0.0
+                except Exception:
+                    if not reader_replaced:
+                        _RUNTIME_SETTINGS_DB_RETRY_AFTER = now + 30.0
             if stored is not None:
                 raw_value = stored["value"]
                 source = "db"

@@ -267,6 +267,42 @@ def process_embedding_job(job: dict) -> JobProcessResult:
     return JobProcessResult(status="indexed", telemetry=telemetry)
 
 
+def process_search_index_sync_job(job: dict) -> JobProcessResult:
+    payload = job.get("payload") or {}
+    try:
+        result = database.sync_search_index(
+            owner_class=str(payload.get("owner_class") or "all"),
+            root_name=payload.get("root_name"),
+            limit=int(payload.get("limit") or 100),
+        )
+    except ValueError as exc:
+        return JobProcessResult(status="failed", message=str(exc))
+    except Exception as exc:
+        return JobProcessResult(
+            status="failed",
+            message=str(exc),
+            telemetry={"error_type": exc.__class__.__name__},
+        )
+    telemetry = {
+        "search_index_engine": result.get("search_engine"),
+        "search_index_requested": int(result.get("requested") or 0),
+        "search_index_indexed": int(result.get("indexed") or 0),
+        "search_index_deleted": int(result.get("deleted") or 0),
+        "search_index_skipped_unchanged": int(result.get("skipped_unchanged") or 0),
+        "search_index_failed": int(result.get("failed") or 0),
+        "search_index_embedding_model": result.get("embedding_model"),
+        "search_index_embedding_dimensions": int(result.get("embedding_dimensions") or 0),
+        "search_index_model_generation": result.get("model_generation"),
+    }
+    if result.get("errors"):
+        telemetry["search_index_errors"] = list(result.get("errors") or [])[:5]
+    failed = int(result.get("failed") or 0)
+    if failed:
+        message = "; ".join(str(item) for item in (result.get("errors") or [])[:3]) or f"{failed} search-index documents failed"
+        return JobProcessResult(status="failed", message=message, telemetry=telemetry)
+    return JobProcessResult(status="indexed", telemetry=telemetry)
+
+
 def _is_locked_error(exc: OSError) -> bool:
     text = str(exc).lower()
     return isinstance(exc, PermissionError) or "locked" in text or "being used by another process" in text

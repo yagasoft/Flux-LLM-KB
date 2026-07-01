@@ -45,8 +45,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             poppler-utils \
             pst-utils \
             rpm2cpio \
-            tesseract-ocr \
-            tesseract-ocr-eng \
             unar \
             wv \
             zstd; \

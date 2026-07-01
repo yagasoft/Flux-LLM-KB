@@ -78,7 +78,8 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "docker build" in update
     assert "flux-llm-kb-api:" in update
     assert '"up", "-d", "--no-build"' in update
-    assert '"postgres", "api", "worker"' in update
+    assert '"postgres", "vespa"' in update
+    assert '"model-runner", "api", "worker"' in update
     assert "FLUX_KB_IMAGE_TAG" in update
     assert "private\\flux.env" in update
     assert 'Join-Path $appRoot "plugins"' in update
@@ -128,9 +129,28 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
     update_compose = _embedded_compose_template(_script("update-flux.ps1"))
 
     for compose in (install_compose, update_compose):
-        assert compose.count("gpus: all") == 4
-        assert compose.count("NVIDIA_VISIBLE_DEVICES: all") == 4
-        assert compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 4
+        assert compose.count("gpus: all") == 5
+        assert compose.count("NVIDIA_VISIBLE_DEVICES: all") == 5
+        assert compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 5
+        assert "  vespa:" in compose
+        assert "image: vespaengine/vespa:8" in compose
+        assert "container_name: flux-vespa" in compose
+        assert "flux_llm_kb_vespa_var:/opt/vespa/var" in compose
+        assert "flux_llm_kb_vespa_logs:/opt/vespa/logs" in compose
+        assert "  model-runner:" in compose
+        assert "container_name: flux-llm-kb-model-runner" in compose
+        assert "python -m flux_llm_kb.model_runner serve --host 0.0.0.0 --port 8790" in compose
+        assert 'test: ["CMD", "python", "-m", "flux_llm_kb.model_runner", "health"]' in compose
+        assert "FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790" in compose
+        assert "FLUX_KB_RETRIEVAL_SEARCH_ENGINE: vespa" in compose
+        assert "FLUX_KB_RETRIEVAL_VESPA_BASE_URL: http://vespa:8080" in compose
+        assert "FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0" in compose
+        assert "FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: \"1024\"" in compose
+        assert "FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B" in compose
+        assert "FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq" in compose
+        assert "FLUX_KB_OCR_ENGINE: paddleocr" in compose
+        assert "FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5" in compose
+        assert "FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL" in compose
         assert "  ollama:" in compose
         assert "image: ollama/ollama:latest" in compose
         assert "container_name: flux-ollama" in compose
@@ -201,6 +221,18 @@ def test_production_deploy_persists_host_side_qwen_runtime_settings():
         assert '"settings", "set", "acceleration.asr.provider", "openai_compatible", "--confirm"' in script
         assert '"settings", "set", "acceleration.asr.model", "large-v3-turbo", "--confirm"' in script
         assert '"settings", "set", "acceleration.asr.base_url", "http://127.0.0.1:$AsrHostPort", "--confirm"' in script
+        assert '"settings", "set", "retrieval.search_engine", "vespa", "--confirm"' in script
+        assert '"settings", "set", "retrieval.vespa_base_url", "http://127.0.0.1:8080", "--confirm"' in script
+        assert '"settings", "set", "retrieval.embedding_model", "Snowflake/snowflake-arctic-embed-l-v2.0", "--confirm"' in script
+        assert '"settings", "set", "retrieval.embedding_dimensions", "1024", "--confirm"' in script
+        assert '"settings", "set", "retrieval.reranker_model", "Qwen/Qwen3-Reranker-4B", "--confirm"' in script
+        assert '"settings", "set", "retrieval.reranker_quantization", "int4_awq", "--confirm"' in script
+        assert '"settings", "set", "retrieval.rerank_top_n", "80", "--confirm"' in script
+        assert '"settings", "set", "retrieval.max_rerank_passage_tokens", "1536", "--confirm"' in script
+        assert '"settings", "set", "retrieval.gpu_vram_budget_mb", "10240", "--confirm"' in script
+        assert '"settings", "set", "ocr.engine", "paddleocr", "--confirm"' in script
+        assert '"settings", "set", "ocr.simple_model", "PP-OCRv5", "--confirm"' in script
+        assert '"settings", "set", "ocr.document_model", "PaddleOCR-VL", "--confirm"' in script
 
 
 def test_production_deploy_scripts_surface_docker_ollama_model_steps():
@@ -211,6 +243,12 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
         assert "docker exec flux-ollama ollama pull qwen3-vl:8b" in script
         assert "Invoke-FluxAsrModelDownload" in script
         assert "python -m flux_llm_kb.asr_server download-model --model large-v3-turbo --output-dir /models/faster-whisper-large-v3-turbo" in script
+        assert "Invoke-FluxModelRunnerModelDownload" in script
+        assert '"flux_llm_kb.model_runner", "download-models", "--models-dir", "/models"' in script
+        assert "Snowflake, Qwen reranker, PP-OCRv5, and PaddleOCR-VL" in script
+        assert "Invoke-FluxVespaApplicationDeploy" in script
+        assert "vespa deploy --wait 300 /tmp/flux-vespa-app" in script
+        assert "Copy-FluxVespaApplication -SourceRoot $SourceRoot -AppRoot $appRoot" in script
         assert "qwen3-vl:32b" not in script
 
 
@@ -241,6 +279,14 @@ def test_production_compose_uses_docker_volumes_for_container_owned_state():
             assert compose.count(f"{volume_name}:{mount_path}") == 2
             assert f"  {volume_name}:" in compose
             assert f"    name: {volume_name}" in compose
+        assert "flux_llm_kb_vespa_var:/opt/vespa/var" in compose
+        assert "flux_llm_kb_vespa_logs:/opt/vespa/logs" in compose
+        assert "flux_llm_kb_model_runner_models:/models" in compose
+        assert "flux_llm_kb_paddle_cache:/root/.paddleocr" in compose
+        assert "  flux_llm_kb_vespa_var:" in compose
+        assert "  flux_llm_kb_vespa_logs:" in compose
+        assert "  flux_llm_kb_model_runner_models:" in compose
+        assert "  flux_llm_kb_paddle_cache:" in compose
         assert "  flux_llm_kb_postgres_data:" in compose
         assert "    name: flux_llm_kb_postgres_data" in compose
         assert "  flux_llm_kb_ollama_models:" in compose
@@ -362,7 +408,6 @@ def test_dockerfile_installs_practical_extractor_pack():
         "catdoc",
         "wv",
         "poppler-utils",
-        "tesseract-ocr",
         "p7zip-full",
         "libarchive-tools",
         "unar",
@@ -380,7 +425,8 @@ def test_dockerfile_installs_practical_extractor_pack():
         "pandoc",
     ):
         assert package in dockerfile
-    for dependency in ("defusedxml", "duckdb", "pyarrow", "faster-whisper", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
+    assert "tesseract-ocr" not in dockerfile
+    for dependency in ("defusedxml", "duckdb", "pyarrow", "faster-whisper", "paddleocr", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
         assert dependency in pyproject
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update

@@ -24,6 +24,9 @@ system rather than a large prompt-injected memory file.
   and duplicate/canonical tracking.
 - `asset_chunks`: extracted text/code/document snippets for retrieval without turning
   every file into an interaction episode.
+- `search_index_records`: synchronisation state for the private Vespa search
+  sidecar, keyed by owner table/id, root, source hash, embedding model,
+  dimension, Vespa document id, status, and sync timestamps.
 - `code_symbols` and `code_references`: parser-derived code definitions,
   imports, calls, routes, SQL objects, and configuration facts tied back to
   `source_assets` and `asset_chunks`.
@@ -77,27 +80,37 @@ system rather than a large prompt-injected memory file.
 
 ## Retrieval
 
-Queries combine four signals:
+Queries combine local-first signals:
 
-- lexical retrieval from PostgreSQL full-text search
-- semantic retrieval from pgvector
-- graph traversal through typed relations
+- active corpus retrieval from a private Vespa sidecar using BM25 fields and
+  Snowflake `snowflake-arctic-embed-l-v2.0` 1024-dimensional dense vectors
+- PostgreSQL hydration, root/file-kind/language/lifecycle filtering,
+  permissions, graph traversal, and duplicate/version suppression
+- Qwen `Qwen3-Reranker-4B` INT4-scored reranking over the top hydrated
+  candidates when the local model runner is healthy
+- bounded PostgreSQL lexical diagnostics when Vespa or the model runner is not
+  available; this fallback is not the active semantic path
 - lifecycle scoring from confidence, recency, reinforcement, and supersession
 
 The merged result uses reciprocal rank fusion and then packs a compact task brief
 within a strict token budget.
 
-Corpus chunks use the same `embeddings` table as episodes with
-`owner_table = 'asset_chunks'`. Corpus retrieval fuses PostgreSQL full-text,
-trigram fuzzy matching, pgvector similarity, source trust rank, and freshness.
-Deleted assets and non-canonical duplicate assets are suppressed from retrieval.
+Corpus chunks, episodes, and claims are synchronised into Vespa by
+`search_index_sync` jobs, with `search_index_records` tracking stale, indexed,
+failed, and deleted sidecar documents. Active corpus search no longer depends on
+pgvector or the deterministic hash-vector provider, and broad body trigram
+matching is kept out of runtime retrieval. PostgreSQL remains the source of
+truth for metadata, lifecycle state, graph facts, auditability, and result
+hydration. Deleted assets and non-canonical duplicate assets are suppressed from
+retrieval before or during hydration.
 For managed IMAP/Outlook mail exports, `asset_chunks.body` is intentionally
 blank for canonical `body.txt` and attachment chunks. The extracted plaintext is
 stored in private disk sidecars under the cache root, while PostgreSQL stores
-only metadata, sidecar reference hashes, and vectors. Mail search and detail
-views hydrate sidecar content from disk when needed, and vector refresh reads
-the same sidecars before embedding so the database does not become the plaintext
-mail body/attachment store.
+only metadata and sidecar reference hashes. Mail search, detail views, and
+search-index sync hydrate sidecar content from disk when needed so the database
+does not become the plaintext mail body/attachment store. Vespa may index that
+private text locally as a deployment-private search sidecar; public telemetry,
+benchmarks, exports, and docs stay metadata-only.
 Code-aware retrieval adds an exact symbol stream over `code_symbols`, preserves
 the normal corpus chunk result shape, and exposes code metadata in retrieval
 explanations. Callers can keep using `kb.search`, REST search, and CLI search
@@ -107,10 +120,10 @@ matches symbol/path metadata for known names, while `full_text` searches
 indexed code chunks for prose, stderr fragments, job text, and implementation
 body phrases.
 Embedding rows carry redacted provider metadata such as model, dimensions,
-source hash, and cache key, but not raw source text. Existing synchronous writes
-still create vectors for new episodes, claims, and chunks, while `corpus_embed`
-jobs can batch-refresh missing or stale vectors for corpus chunks, episodes, and
-claims through the same local deterministic provider boundary.
+source hash, and cache key, but not raw source text. The legacy `embeddings`
+table remains for compatibility, duplicate-cluster metadata, and repair jobs;
+active corpus search-index sync writes Snowflake vectors to Vespa instead of
+depending on pgvector candidate selection.
 Semantic near-duplicate clusters are stored as advisory metadata in
 `semantic_duplicate_clusters` and `semantic_duplicate_members` for corpus
 chunks, episodes, and claims. Refreshes retire prior active clusters and create
@@ -246,7 +259,7 @@ File coverage is intentionally broad but tiered. Flux should first record stable
 metadata for every encountered file: path, size, timestamps, hashes, MIME/signature,
 source root, trust rank, and provenance. Extraction then escalates only when a
 safe local path exists: inline UTF/code parsing; local document/data libraries;
-optional local tools such as LibreOffice, Calibre `ebook-convert`, Tesseract,
+optional local tools such as LibreOffice, Calibre `ebook-convert`, PaddleOCR,
 ffprobe/ffmpeg, or faster-whisper; bounded archive/container expansion; and
 finally metadata-only
 terminal states for unsafe, encrypted, proprietary, or unsupported binaries.
@@ -320,8 +333,10 @@ The media backfill path is deliberately local and staged. Flux should prefer
 cheap structural signals first: file hash caches, dimensions, SVG/draw.io
 and modern Visio structure, sidecar transcripts including embedded media
 sidecar files from archives, and decorative-image skips.
-Optional richer stages can then run as bounded jobs: Tesseract or PaddleOCR OCR,
-configured local inference for image descriptions, scene-transition
+Optional richer stages can then run as bounded jobs: PaddleOCR OCR, using
+PP-OCRv5 for ordinary images/SVG raster outputs and PaddleOCR-VL-labelled page
+batches for scanned or complex documents, configured local inference for image
+descriptions, scene-transition
 frame sampling with thumbnail cache reuse, and faster-whisper audio/video
 transcription. Vision requires `acceleration.vision.enabled`, a configured
 local vision model identifier in `acceleration.vision.model`, and
@@ -474,7 +489,8 @@ Production deployments are intentionally not repo-coupled. The default Windows
 PC install root is `D:\FluxLLMKB`, with deployed app files under `app`, private
 runtime/config/spool data under `private`, host logs under `logs`, and backups
 under `backups`. Container-owned persistent state lives in Docker named volumes:
-PostgreSQL data, cache/data/runtime/logs, and the Docker Ollama model cache.
+PostgreSQL data, Vespa var/log state, model-runner Hugging Face/Paddle caches,
+cache/data/runtime/logs, and the Docker Ollama model cache.
 Docker runs PostgreSQL/API/dashboard/worker from prebuilt local images and bind
 mounts only Windows-host-owned paths such as private config, mail spool, and
 host-accessed watched roots. Host-agent and Outlook-host run as Windows
@@ -527,7 +543,8 @@ and monitored-root crawl summaries. It reports `ready`, `partial`, `blocked`, or
 `not_run` readiness, required check status, latest run references, selected-root
 cards, and evidence-scored manual candidates. It does not create a separate
 evidence table, store private paths or raw content, mutate settings, or
-automatically change VSS settings or unblock provider-specific acceleration.
+automatically change VSS settings or unblock additional provider-specific
+acceleration.
 
 The multi-root reliability view applies that same interpretation across enabled
 monitored roots and returns sanitized root cards plus readiness totals,
@@ -613,7 +630,7 @@ flux-kb acceleration reliability roots
 flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
 flux-kb code status --cwd "E:/LLM KB"
 flux-kb code search build_invoice --root app --mode literal-symbol --language python --relationship call --path-glob "src/*.py"
-flux-kb code search "Tesseract stderr worker" --cwd "E:/LLM KB" --mode full-text --language python
+flux-kb code search "PaddleOCR timeout worker" --cwd "E:/LLM KB" --mode full-text --language python
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
