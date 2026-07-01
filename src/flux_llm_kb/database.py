@@ -3850,7 +3850,7 @@ def claim_corpus_jobs(
                               SELECT first_sync.id
                               FROM capture_jobs first_sync
                               WHERE first_sync.job_type = 'corpus_sync_root'
-                                AND first_sync.status IN ('pending', 'retrying_locked')
+                                AND first_sync.status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                                 AND first_sync.next_attempt_at <= now()
                                 AND first_sync.payload->>'root_name' = capture_jobs.payload->>'root_name'
                               ORDER BY first_sync.priority DESC, first_sync.created_at
@@ -3873,7 +3873,7 @@ def claim_corpus_jobs(
                     SELECT id
                     FROM capture_jobs
                     WHERE job_type LIKE 'corpus_%%'
-                      AND status IN ('pending', 'retrying_locked')
+                      AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                       AND next_attempt_at <= now()
                       {family_filter}
                       {root_filter}
@@ -3906,7 +3906,7 @@ def claim_corpus_jobs(
                          FROM capture_jobs
                          CROSS JOIN family_caps
                          WHERE capture_jobs.job_type LIKE 'corpus_%%'
-                           AND capture_jobs.status IN ('pending', 'retrying_locked')
+                           AND capture_jobs.status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                            AND capture_jobs.next_attempt_at <= now()
                            {family_filter}
                            {root_filter}
@@ -4304,6 +4304,7 @@ def requeue_corpus_job(
                       status = 'failed'
                       OR status LIKE 'blocked_%%'
                       OR status = 'retrying_locked'
+                      OR status = 'retrying_vss_failed'
                       OR status LIKE 'cancelled_%%'
                   )
                 RETURNING id::text, status, attempts
@@ -4346,7 +4347,7 @@ def cancel_corpus_job(
                     "cancelled": False,
                     "error": "Corpus job is running and cannot be cancelled mid-execution.",
                 }
-            if status not in {"pending", "retrying_locked"}:
+            if status not in {"pending", "retrying_locked", "retrying_vss_failed"}:
                 return {
                     "job_id": row[0],
                     "status": status,
@@ -4364,7 +4365,7 @@ def cancel_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
-                  AND status IN ('pending', 'retrying_locked')
+                  AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                 """,
                 (f"cancelled by {clean_actor}", row[0]),
             )
@@ -8722,7 +8723,7 @@ def enqueue_corpus_sync_job(
                 FROM capture_jobs
                 WHERE job_type = 'corpus_sync_root'
                   AND payload->>'root_name' = %s
-                  AND status IN ('pending', 'retrying_locked')
+                  AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
@@ -10491,7 +10492,7 @@ def _corpus_quality_candidate(row: tuple[Any, ...], policy: dict[str, Any] | Non
     elif not is_canonical:
         reason = "duplicate"
         bucket = "deprioritize"
-    elif str(status).startswith("blocked") or status in {"failed", "retrying_locked"}:
+    elif str(status).startswith("blocked") or status in {"failed", "retrying_locked", "retrying_vss_failed"}:
         reason = status
         bucket = "review"
     elif status == "metadata_only" or tier == "metadata_only":
@@ -10977,9 +10978,11 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
         SELECT
             count(*) FILTER (WHERE status = 'pending') AS pending,
             count(*) FILTER (WHERE status = 'retrying_locked') AS retrying_locked,
+            count(*) FILTER (WHERE status = 'retrying_vss_failed') AS retrying_vss_failed,
             count(*) FILTER (WHERE status = 'running') AS running,
             count(*) FILTER (WHERE status LIKE 'blocked%%') AS blocked,
             count(*) FILTER (WHERE status = 'blocked_locked') AS blocked_locked,
+            count(*) FILTER (WHERE status = 'blocked_vss_failed') AS blocked_vss_failed,
             count(*) FILTER (WHERE status = 'failed') AS failed,
             count(*) FILTER (WHERE status = 'completed') AS completed,
             count(*) FILTER (WHERE status = 'cancelled_duplicate') AS duplicate_suppressed
@@ -10990,7 +10993,18 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
         (root_name,),
     )
     row = cur.fetchone()
-    keys = ["pending", "retrying_locked", "running", "blocked", "blocked_locked", "failed", "completed", "duplicate_suppressed"]
+    keys = [
+        "pending",
+        "retrying_locked",
+        "retrying_vss_failed",
+        "running",
+        "blocked",
+        "blocked_locked",
+        "blocked_vss_failed",
+        "failed",
+        "completed",
+        "duplicate_suppressed",
+    ]
     return {key: int(row[index] or 0) for index, key in enumerate(keys)}
 
 
@@ -12316,7 +12330,7 @@ def _cancel_unseen_corpus_jobs_for_paths(
             SELECT id, status
             FROM capture_jobs
             WHERE job_type LIKE 'corpus_%%'
-              AND status IN ('pending', 'retrying_locked', 'running')
+              AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'running')
               AND payload->>'root_name' = %s
               AND payload->>'path' = ANY(%s)
             FOR UPDATE

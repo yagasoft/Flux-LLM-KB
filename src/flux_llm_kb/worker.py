@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import database
+from . import database, host_vss
 from .crawler import AssetChunk, CorpusPolicy, _is_included, strict_indexing_enabled, strict_metadata_only_message
 from .extractors import (
     ExtractionResult,
@@ -81,8 +81,23 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         result = _extract_for_corpus_job(job_type, path, policy, payload)
     except OSError as exc:
         if _is_locked_error(exc):
-            return JobProcessResult(status="retrying_locked", message=str(exc))
-        raise
+            vss_result = _extract_locked_file_with_vss(
+                job_type=job_type,
+                path=path,
+                policy=policy,
+                payload=payload,
+                root_metadata=root_metadata,
+            )
+            if isinstance(vss_result, JobProcessResult):
+                return vss_result
+            if vss_result is not None:
+                result = vss_result
+            else:
+                return JobProcessResult(status="retrying_locked", message=str(exc))
+        else:
+            raise
+    except host_vss.VssSnapshotError as exc:
+        return JobProcessResult(status="retrying_vss_failed", message=str(exc), telemetry=_telemetry_from_vss_error(exc))
     except Exception as exc:
         return JobProcessResult(
             status="failed",
@@ -136,6 +151,49 @@ def process_corpus_job(job: dict) -> JobProcessResult:
     return JobProcessResult(status=result.status, message=getattr(result, "message", None), telemetry=_telemetry_from_extraction_result(result))
 
 
+def _extract_locked_file_with_vss(
+    *,
+    job_type: str,
+    path: Path,
+    policy: CorpusPolicy,
+    payload: dict[str, Any],
+    root_metadata: dict[str, Any],
+) -> ExtractionResult | JobProcessResult | None:
+    if not _configured_host_vss_enabled() or not _root_uses_host_agent(root_metadata):
+        return None
+    try:
+        with host_vss.snapshot_path(
+            path,
+            max_file_bytes=_configured_host_vss_max_file_bytes(),
+            timeout_seconds=_configured_host_vss_timeout_seconds(),
+        ) as snapshot:
+            result = _extract_for_corpus_job(job_type, snapshot.path, policy, payload)
+    except host_vss.VssSnapshotError as exc:
+        telemetry = _telemetry_from_vss_error(exc)
+        if exc.reason in {"not_windows", "not_local_volume"}:
+            return None
+        return JobProcessResult(status="retrying_vss_failed", message=str(exc), telemetry=telemetry)
+    except OSError as exc:
+        if _is_locked_error(exc):
+            return JobProcessResult(
+                status="retrying_vss_failed",
+                message=str(exc),
+                telemetry={"vss_status": "failed", "vss_reason": "shadow_locked"},
+            )
+        return JobProcessResult(
+            status="failed",
+            message=str(exc),
+            telemetry={"error_type": exc.__class__.__name__, "vss_status": "completed", "vss_reason": "snapshot_created"},
+        )
+    except Exception as exc:
+        return JobProcessResult(
+            status="failed",
+            message=str(exc),
+            telemetry={"error_type": exc.__class__.__name__},
+        )
+    return _with_vss_fallback_metadata(result, snapshot.telemetry)
+
+
 def _extract_for_corpus_job(job_type: str, path: Path, policy: CorpusPolicy, payload: dict[str, Any]) -> ExtractionResult:
     if job_type == "corpus_extract_media_segment":
         return extract_media_segment(path, payload)
@@ -183,6 +241,68 @@ def process_embedding_job(job: dict) -> JobProcessResult:
 def _is_locked_error(exc: OSError) -> bool:
     text = str(exc).lower()
     return isinstance(exc, PermissionError) or "locked" in text or "being used by another process" in text
+
+
+def _root_uses_host_agent(root_metadata: dict[str, Any]) -> bool:
+    return str(root_metadata.get("host_access") or "") == "host_agent"
+
+
+def _with_vss_fallback_metadata(result: ExtractionResult, telemetry: dict[str, Any]) -> ExtractionResult:
+    metadata = dict(getattr(result, "metadata", {}) or {})
+    metadata["vss_fallback"] = _sanitize_vss_telemetry(telemetry)
+    return ExtractionResult(
+        status=result.status,
+        chunks=tuple(getattr(result, "chunks", ()) or ()),
+        child_assets=tuple(getattr(result, "child_assets", ()) or ()),
+        metadata=metadata,
+        message=getattr(result, "message", None),
+    )
+
+
+def _sanitize_vss_telemetry(telemetry: dict[str, Any] | None) -> dict[str, Any]:
+    source = telemetry if isinstance(telemetry, dict) else {}
+    sanitized: dict[str, Any] = {}
+    for key in (
+        "status",
+        "reason",
+        "shadow_id",
+        "volume",
+        "return_value",
+        "return_code",
+        "size_bytes",
+        "max_file_bytes",
+        "error_type",
+    ):
+        if key not in source:
+            continue
+        value = source[key]
+        if key in {"return_value", "return_code", "size_bytes", "max_file_bytes"}:
+            try:
+                sanitized[key] = int(value)
+            except (TypeError, ValueError):
+                continue
+        else:
+            sanitized[key] = str(value or "")[:120]
+    return sanitized
+
+
+def _telemetry_from_vss_error(exc: host_vss.VssSnapshotError) -> dict[str, Any]:
+    vss = _sanitize_vss_telemetry(exc.telemetry)
+    vss.setdefault("status", "failed")
+    vss.setdefault("reason", exc.reason)
+    telemetry: dict[str, Any] = {
+        "vss_status": str(vss.get("status") or "failed")[:80],
+        "vss_reason": str(vss.get("reason") or exc.reason)[:120],
+    }
+    if "return_value" in vss:
+        telemetry["vss_return_value"] = int(vss["return_value"])
+    if "return_code" in vss:
+        telemetry["vss_return_code"] = int(vss["return_code"])
+    if "size_bytes" in vss:
+        telemetry["vss_size_bytes"] = int(vss["size_bytes"])
+    if "max_file_bytes" in vss:
+        telemetry["vss_max_file_bytes"] = int(vss["max_file_bytes"])
+    return telemetry
 
 
 def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) -> object:
@@ -324,6 +444,14 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         return {}
     telemetry: dict[str, Any] = {}
+    vss = metadata.get("vss_fallback")
+    if isinstance(vss, dict):
+        if "status" in vss:
+            telemetry["vss_status"] = str(vss.get("status") or "")[:80]
+        if "reason" in vss:
+            telemetry["vss_reason"] = str(vss.get("reason") or "")[:120]
+        if "return_value" in vss:
+            telemetry["vss_return_value"] = int(vss.get("return_value") or 0)
     parser_cache = metadata.get("parser_cache")
     if isinstance(parser_cache, dict):
         if "hits" in parser_cache:
@@ -481,3 +609,24 @@ def _configured_container_limits() -> dict[str, int]:
         except Exception:
             resolved[field_name] = int(getattr(defaults, field_name))
     return resolved
+
+
+def _configured_host_vss_enabled() -> bool:
+    try:
+        return bool(SettingsService().resolve("host_agent.vss_enabled").raw_value)
+    except Exception:
+        return True
+
+
+def _configured_host_vss_max_file_bytes() -> int:
+    try:
+        return int(SettingsService().resolve("host_agent.vss_max_file_bytes").raw_value)
+    except Exception:
+        return 512 * 1024 * 1024
+
+
+def _configured_host_vss_timeout_seconds() -> int:
+    try:
+        return int(SettingsService().resolve("host_agent.vss_timeout_seconds").raw_value)
+    except Exception:
+        return 30

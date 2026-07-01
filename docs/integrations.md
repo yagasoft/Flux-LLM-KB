@@ -408,9 +408,9 @@ cache readiness, and tuning comparison evidence. `root-status`,
 `root/{root_name}`, and `kb.indexer_root_reliability` expose a per-root
 readiness card. `flux-kb acceleration evidence`,
 `GET /api/acceleration/evidence`, and `kb.operator_evidence` combine
-reliability, code, and diagnostic evidence into VSS/provider gate decisions.
-VSS extraction, provider-specific acceleration, and automatic settings changes
-remain outside these gates.
+reliability, code, and diagnostic evidence into VSS validation/provider gate
+decisions. VSS settings changes, provider-specific acceleration, and automatic
+settings changes remain outside these gates.
 `flux-kb acceleration reliability roots`,
 `GET /api/acceleration/reliability/roots`, and
 `kb.indexer_reliability_roots` summarize enabled monitored roots as sanitized

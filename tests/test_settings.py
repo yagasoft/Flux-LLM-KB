@@ -234,7 +234,7 @@ def test_lock_tolerant_indexing_settings_defaults(monkeypatch):
     assert service.resolve("worker.failure_max_attempts").raw_value == 3
     assert service.resolve("worker.lock_retry_cooldown_seconds").raw_value == 300
     assert service.resolve("worker.lock_max_attempts").raw_value == 3
-    assert service.resolve("host_agent.vss_enabled").raw_value is False
+    assert service.resolve("host_agent.vss_enabled").raw_value is True
     assert service.resolve("host_agent.vss_max_file_bytes").raw_value == 512 * 1024 * 1024
     assert service.resolve("host_agent.vss_timeout_seconds").raw_value == 30
 

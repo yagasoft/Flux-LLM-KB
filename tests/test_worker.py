@@ -2569,6 +2569,52 @@ def test_backfill_retries_locked_jobs_with_lock_state(monkeypatch):
     assert calls["retried"][0]["cooldown_seconds"] > 0
 
 
+def test_backfill_retries_vss_failed_jobs_with_vss_state(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
+            {
+                "id": "job-1",
+                "job_type": "corpus_extract_document",
+                "job_family": "office",
+                "payload": {"path": "open.docx", "root_name": "docs"},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda job: worker.JobProcessResult(
+            status="retrying_vss_failed",
+            message="VSS access denied",
+            telemetry={"vss_status": "failed", "vss_reason": "access_denied"},
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="all", limit=1, workers=1)
+
+    assert result["retried"] == 1
+    assert calls["completed"] == []
+    assert calls["blocked"] == []
+    assert calls["retried"][0]["job_id"] == "job-1"
+    assert calls["retried"][0]["status"] == "retrying_vss_failed"
+    assert calls["retried"][0]["cooldown_seconds"] > 0
+    assert calls["retried"][0]["telemetry"]["vss_reason"] == "access_denied"
+
+
 def test_backfill_blocks_persistently_locked_jobs(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(
@@ -2602,6 +2648,50 @@ def test_backfill_blocks_persistently_locked_jobs(monkeypatch):
     assert calls["retried"] == []
     assert calls["blocked"][0]["job_id"] == "job-1"
     assert calls["blocked"][0]["status"] == "blocked_locked"
+
+
+def test_backfill_blocks_persistently_vss_failed_jobs(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
+            {
+                "id": "job-1",
+                "job_type": "corpus_extract_document",
+                "job_family": "office",
+                "payload": {"path": "open.docx", "root_name": "docs"},
+                "attempts": 5,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda job: worker.JobProcessResult(
+            status="retrying_vss_failed",
+            message="VSS provider failed",
+            telemetry={"vss_status": "failed", "vss_reason": "provider_failure"},
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="all", limit=1, workers=1)
+
+    assert result["blocked"] == 1
+    assert calls["retried"] == []
+    assert calls["blocked"][0]["job_id"] == "job-1"
+    assert calls["blocked"][0]["status"] == "blocked_vss_failed"
+    assert calls["blocked"][0]["telemetry"]["vss_reason"] == "provider_failure"
 
 
 def test_backfill_diagrams_kind_processes_only_diagram_jobs(monkeypatch):
@@ -2798,6 +2888,213 @@ def test_process_corpus_job_reports_locked_file(monkeypatch, tmp_path):
 
     assert result.status == "retrying_locked"
     assert "being used" in result.message
+
+
+def test_process_corpus_job_uses_vss_for_locked_text_file(monkeypatch, tmp_path):
+    from flux_llm_kb import host_vss, worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    source = root / "open.txt"
+    source.write_text("locked", encoding="utf-8")
+    shadow = tmp_path / "shadow" / "open.txt"
+    shadow.parent.mkdir()
+    shadow.write_text("shadow body", encoding="utf-8")
+    applied = []
+    extract_paths = []
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {"host_access": "host_agent"},
+    })
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(worker, "_configured_host_vss_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_max_file_bytes", lambda: 4096, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_timeout_seconds", lambda: 5, raising=False)
+
+    @contextmanager
+    def fake_snapshot(path, *, max_file_bytes, timeout_seconds):
+        assert path == source
+        assert max_file_bytes == 4096
+        assert timeout_seconds == 5
+        yield host_vss.VssSnapshot(path=shadow, telemetry={"status": "completed", "reason": "snapshot_created"})
+
+    def fake_extract(path, _policy):
+        extract_paths.append(path)
+        if path == source:
+            raise PermissionError("being used by another process")
+        assert path == shadow
+        return worker.ExtractionResult(
+            status="indexed",
+            chunks=(worker.AssetChunk(title="open.txt", body="shadow body", chunk_index=0),),
+            metadata={"extractor": "text"},
+        )
+
+    monkeypatch.setattr(host_vss, "snapshot_path", fake_snapshot)
+    monkeypatch.setattr(worker, "extract_file", fake_extract)
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "open.txt"}})
+
+    assert result.status == "indexed"
+    assert extract_paths == [source, shadow]
+    applied_result = applied[0]["result"]
+    assert applied_result.chunks[0].body == "shadow body"
+    assert applied_result.metadata["vss_fallback"]["status"] == "completed"
+    assert result.telemetry["vss_status"] == "completed"
+
+
+def test_process_corpus_job_uses_same_vss_path_for_locked_docx(monkeypatch, tmp_path):
+    from flux_llm_kb import host_vss, worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    source = root / "open.docx"
+    source.write_bytes(b"locked docx")
+    shadow = tmp_path / "shadow" / "open.docx"
+    shadow.parent.mkdir()
+    shadow.write_bytes(b"shadow docx")
+    applied = []
+    extract_paths = []
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {"host_access": "host_agent"},
+    })
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(worker, "_configured_host_vss_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_max_file_bytes", lambda: 4096, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_timeout_seconds", lambda: 5, raising=False)
+
+    @contextmanager
+    def fake_snapshot(path, *, max_file_bytes, timeout_seconds):
+        yield host_vss.VssSnapshot(path=shadow, telemetry={"status": "completed", "reason": "snapshot_created"})
+
+    def fake_extract_for_job(job_type, path, policy, payload):
+        extract_paths.append((job_type, path))
+        if path == source:
+            raise PermissionError("being used by another process")
+        assert path == shadow
+        return worker.ExtractionResult(
+            status="indexed",
+            chunks=(worker.AssetChunk(title="open.docx", body="docx body", chunk_index=0),),
+            metadata={"extractor": "docx"},
+        )
+
+    monkeypatch.setattr(host_vss, "snapshot_path", fake_snapshot)
+    monkeypatch.setattr(worker, "_extract_for_corpus_job", fake_extract_for_job)
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "open.docx"}})
+
+    assert result.status == "indexed"
+    assert extract_paths == [("", source), ("", shadow)]
+    assert applied[0]["result"].metadata["vss_fallback"]["status"] == "completed"
+
+
+def test_process_corpus_job_does_not_persist_shadow_path_in_staged_jobs(monkeypatch, tmp_path):
+    from flux_llm_kb import host_vss, worker
+
+    root = tmp_path / "media"
+    root.mkdir()
+    source = root / "clip.mp4"
+    source.write_bytes(b"locked video")
+    shadow = tmp_path / "shadow" / "clip.mp4"
+    shadow.parent.mkdir()
+    shadow.write_bytes(b"shadow video")
+    staged_results = []
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "media",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {"host_access": "host_agent"},
+    })
+    monkeypatch.setattr(database, "corpus_job_is_running", lambda _job_id: True)
+    monkeypatch.setattr(database, "apply_staged_extraction_plan_for_job", lambda **kwargs: staged_results.append(kwargs["result"]) or True)
+    monkeypatch.setattr(worker, "_configured_host_vss_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_max_file_bytes", lambda: 4096, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_timeout_seconds", lambda: 5, raising=False)
+
+    @contextmanager
+    def fake_snapshot(path, *, max_file_bytes, timeout_seconds):
+        yield host_vss.VssSnapshot(path=shadow, telemetry={"status": "completed", "reason": "snapshot_created"})
+
+    def fake_plan(path, file_kind):
+        if path == source:
+            raise PermissionError("being used by another process")
+        assert path == shadow
+        return worker.ExtractionResult(
+            status="staged",
+            chunks=(),
+            metadata={
+                "extractor": "video",
+                "staged_jobs": [{"job_type": "corpus_extract_media_segment", "payload": {"file_kind": "video"}}],
+                "staged_extraction": {"status": "planned", "next_job_type": "corpus_extract_media_segment"},
+            },
+        )
+
+    monkeypatch.setattr(host_vss, "snapshot_path", fake_snapshot)
+    monkeypatch.setattr(worker, "plan_staged_media_extraction", fake_plan)
+
+    result = worker.process_corpus_job(
+        {"id": "job-video", "job_type": "corpus_extract_video", "payload": {"root_name": "media", "path": "clip.mp4"}}
+    )
+
+    assert result.status == "staged"
+    serialized = json.dumps(staged_results[0].metadata)
+    assert str(shadow) not in serialized
+    assert staged_results[0].metadata["vss_fallback"]["status"] == "completed"
+
+
+def test_process_corpus_job_reports_vss_failure_for_locked_file(monkeypatch, tmp_path):
+    from flux_llm_kb import host_vss, worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "open.txt").write_text("locked", encoding="utf-8")
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {"host_access": "host_agent"},
+    })
+    monkeypatch.setattr(worker, "_configured_host_vss_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_max_file_bytes", lambda: 4096, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_timeout_seconds", lambda: 5, raising=False)
+    monkeypatch.setattr(worker, "extract_file", lambda *_args: (_ for _ in ()).throw(PermissionError("being used by another process")))
+
+    @contextmanager
+    def failing_snapshot(path, *, max_file_bytes, timeout_seconds):
+        raise host_vss.VssSnapshotError(
+            "VSS access denied",
+            reason="access_denied",
+            telemetry={"status": "failed", "reason": "access_denied", "return_value": 1},
+        )
+        yield
+
+    monkeypatch.setattr(host_vss, "snapshot_path", failing_snapshot)
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "open.txt"}})
+
+    assert result.status == "retrying_vss_failed"
+    assert result.message == "VSS access denied"
+    assert result.telemetry["vss_reason"] == "access_denied"
 
 
 def test_process_corpus_job_blocks_invalid_xlsx_package(monkeypatch, tmp_path):

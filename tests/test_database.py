@@ -2207,7 +2207,7 @@ def test_persist_crawl_plan_marks_unseen_assets_deleted_and_cancels_jobs(monkeyp
     assert "unseen_since" in sql
     assert "purge_after" in sql
     assert "cancelled_unseen_asset" in sql
-    assert "status IN ('pending', 'retrying_locked', 'running')" in sql
+    assert "status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'running')" in sql
     assert "locked_at = NULL" in sql
     assert "locked_by = NULL" in sql
     assert "previous_status" in sql
@@ -2583,6 +2583,7 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert "status = 'failed'" in sql
     assert "status LIKE 'blocked_%%'" in sql
     assert "status = 'retrying_locked'" in sql
+    assert "status = 'retrying_vss_failed'" in sql
     assert "status LIKE 'cancelled_%%'" in sql
     assert executed[0][1] == ("operator retry", "job-1")
 
@@ -2988,6 +2989,7 @@ def test_requeue_corpus_job_allows_cancelled_states_for_operator_retry(monkeypat
     assert "status = 'failed'" in sql
     assert "status LIKE 'blocked_%%'" in sql
     assert "status = 'retrying_locked'" in sql
+    assert "status = 'retrying_vss_failed'" in sql
     assert "status LIKE 'cancelled_%%'" in sql
 
 
@@ -3029,7 +3031,7 @@ def test_cancel_corpus_job_marks_pending_jobs_cancelled(monkeypatch):
     sql = "\n".join(item[0] for item in executed)
     assert result == {"job_id": "job-1", "status": "cancelled_operator", "cancelled": True}
     assert "status = 'cancelled_operator'" in sql
-    assert "status IN ('pending', 'retrying_locked')" in sql
+    assert "status IN ('pending', 'retrying_locked', 'retrying_vss_failed')" in sql
     assert executed[1][1] == ("cancelled by dashboard", "job-1")
 
 
@@ -3153,7 +3155,7 @@ def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
             sql = executed[-1][0]
             if "status = 'running'" in sql:
                 return None
-            if "status IN ('pending', 'retrying_locked')" in sql:
+            if "status IN ('pending', 'retrying_locked', 'retrying_vss_failed')" in sql:
                 return ("job-existing", "pending", {"root_name": "mail-outlook-mohesr"})
             if "UPDATE capture_jobs" in sql:
                 return ("job-existing", "pending")
@@ -3210,7 +3212,7 @@ def test_enqueue_corpus_sync_job_batches_pending_path_job_for_different_watch_pa
             sql = executed[-1][0]
             if "status = 'running'" in sql:
                 return None
-            if "status IN ('pending', 'retrying_locked')" in sql:
+            if "status IN ('pending', 'retrying_locked', 'retrying_vss_failed')" in sql:
                 return ("job-existing", "pending", {"root_name": "docs", "reason": "watch_event", "path": "a.md"})
             if "UPDATE capture_jobs" in sql:
                 return ("job-existing", "pending")
@@ -3258,7 +3260,7 @@ def test_enqueue_corpus_sync_job_creates_pending_followup_for_running_path_job(m
             sql = executed[-1][0]
             if "status = 'running'" in sql:
                 return ("job-running", "running", {"root_name": "docs", "reason": "watch_event", "path": "a.md"})
-            if "status IN ('pending', 'retrying_locked')" in sql:
+            if "status IN ('pending', 'retrying_locked', 'retrying_vss_failed')" in sql:
                 return None
             if "INSERT INTO capture_jobs" in sql:
                 return ("job-followup", "pending")
@@ -4453,7 +4455,9 @@ def test_corpus_status_queries_include_lock_tolerant_states():
     assert "pending_stable" in source
     assert "retrying_locked" in source
     assert "blocked_locked" in source
-    assert "status IN ('pending', 'retrying_locked')" in source
+    assert "retrying_vss_failed" in source
+    assert "blocked_vss_failed" in source
+    assert "status IN ('pending', 'retrying_locked', 'retrying_vss_failed')" in source
 
 
 def test_imap_mail_schedule_has_due_query_and_advances_after_sync_run():

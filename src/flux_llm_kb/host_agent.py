@@ -16,7 +16,7 @@ from urllib import error, request
 
 from pydantic import BaseModel, ConfigDict
 
-from . import database
+from . import database, host_vss
 from .glob_policy import effective_glob_policy
 from .processes import run_no_window
 from .runtime_heartbeat import WatcherHeartbeatRunner
@@ -805,32 +805,14 @@ def _vss_status() -> dict[str, Any]:
         max_file_bytes = int(settings.resolve("host_agent.vss_max_file_bytes").raw_value)
         timeout_seconds = int(settings.resolve("host_agent.vss_timeout_seconds").raw_value)
     except Exception:
-        enabled = False
+        enabled = True
         max_file_bytes = 512 * 1024 * 1024
         timeout_seconds = 30
-    if not enabled:
-        return {
-            "enabled": False,
-            "status": "disabled",
-            "max_file_bytes": max_file_bytes,
-            "timeout_seconds": timeout_seconds,
-            "message": "VSS fallback is disabled; locked files use retry/cooldown states.",
-        }
-    if platform.system() != "Windows":
-        return {
-            "enabled": True,
-            "status": "unavailable",
-            "max_file_bytes": max_file_bytes,
-            "timeout_seconds": timeout_seconds,
-            "message": "VSS fallback is only available on Windows host-agent roots.",
-        }
-    return {
-        "enabled": True,
-        "status": "unavailable",
-        "max_file_bytes": max_file_bytes,
-        "timeout_seconds": timeout_seconds,
-        "message": "VSS fallback is not implemented yet; locked files use retry/cooldown states.",
-    }
+    return host_vss.capability_status(
+        enabled=enabled,
+        max_file_bytes=max_file_bytes,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def _is_host_agent_root(root: dict[str, Any]) -> bool:

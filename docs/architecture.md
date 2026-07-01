@@ -346,6 +346,11 @@ state in `capture_jobs`, and do not call cloud providers by default. Jobs move t
 explicit terminal states such as `completed`, `metadata_only`, or
 `blocked_missing_dependency`; locked reads move through `retrying_locked` with
 `next_attempt_at` cooldown and then `blocked_locked` after configured attempts.
+If a Windows host-agent local file is locked and `host_agent.vss_enabled` is
+true, the worker first retries that extraction through a short-lived VSS
+snapshot. VSS create/read/delete failures move through `retrying_vss_failed`
+using the same lock cooldown and become `blocked_vss_failed` after configured
+locked-file attempts.
 Corpus jobs are classified into fixed worker families (`text`, `office`,
 `image`, `diagram`, `archive`, `media`, `embedding`, `preview`, and `general`)
 with resource class, priority, and time budget metadata. Worker/backfill
@@ -439,12 +444,17 @@ hashes with bounded concurrency while keeping deterministic asset ordering,
 manifest reuse, stability gating, lock fallback behavior, and local parser
 extraction serial.
 
-VSS is a host-agent controlled future fallback for Windows local NTFS roots, not
-a Docker/API desktop action. The setting is disabled by default; the host agent
-reports disabled or unavailable capability, size and timeout limits, and locked
-files fall back to retry/cooldown states until snapshot extraction is
-implemented. Future VSS use must be opt-in, permission-aware, audited, bounded
-by file size and timeout, and must fall back cleanly when unavailable.
+VSS is a host-agent controlled fallback for locked Windows local-volume files,
+not a Docker/API desktop action. Direct extraction is always attempted first.
+When a lock-like `OSError` occurs on an eligible host-agent root, the worker
+creates a `Win32_ShadowCopy` with the `ClientAccessible` context, maps the
+original path onto the returned device object for that attempt only, applies
+`host_agent.vss_max_file_bytes` and `host_agent.vss_timeout_seconds`, and
+deletes the shadow copy by `ShadowID` in `finally`. Staged PDF/media follow-up
+jobs keep the original root and relative path, so shadow-copy paths are not
+persisted. Unsupported platforms or non-local roots keep the normal locked-file
+retry path. Snapshot content reflects the committed on-disk state, not unsaved
+application edits held only in memory.
 
 Production deployments are intentionally not repo-coupled. The default Windows
 PC install root is `D:\FluxLLMKB`, with deployed app files under `app`, private
@@ -503,7 +513,7 @@ and monitored-root crawl summaries. It reports `ready`, `partial`, `blocked`, or
 `not_run` readiness, required check status, latest run references, selected-root
 cards, and evidence-scored manual candidates. It does not create a separate
 evidence table, store private paths or raw content, mutate settings, or
-automatically unblock VSS/provider-specific acceleration.
+automatically change VSS settings or unblock provider-specific acceleration.
 
 The multi-root reliability view applies that same interpretation across enabled
 monitored roots and returns sanitized root cards plus readiness totals,
@@ -518,8 +528,9 @@ code diagnostics, and operational diagnostics. It reports the
 `settings_mutated` field as `false`, plus root readiness totals, freshness,
 latest benchmark references, top blockers, manual follow-up commands, and the
 explicit `vss_snapshot` and `provider_acceleration` gates. Gate states are
-`blocked`, `hold`, or `eligible_for_design`; they never enable VSS, provider
-acceleration, worker caps, hash parallelism, or any setting automatically.
+`blocked`, `hold`, or `eligible_for_design`; they never change VSS settings,
+provider acceleration, worker caps, hash parallelism, or any setting
+automatically.
 
 Code diagnostics are read-only and privacy-safe. They aggregate coverage from
 `source_assets`, `asset_chunks`, `code_symbols`, and `code_references`, reporting

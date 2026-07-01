@@ -90,6 +90,50 @@ def test_host_agent_backfill_endpoint_omits_default_parallelism_knobs(monkeypatc
     }
 
 
+def test_host_agent_vss_status_uses_helper_capability(monkeypatch):
+    from flux_llm_kb import host_vss
+    from flux_llm_kb import settings as settings_module
+
+    class FakeSettings:
+        def resolve(self, key):
+            values = {
+                "host_agent.vss_enabled": True,
+                "host_agent.vss_max_file_bytes": 4096,
+                "host_agent.vss_timeout_seconds": 7,
+            }
+            return SimpleNamespace(raw_value=values[key])
+
+    calls = []
+
+    def fake_capability_status(*, enabled, max_file_bytes, timeout_seconds):
+        calls.append(
+            {
+                "enabled": enabled,
+                "max_file_bytes": max_file_bytes,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return {
+            "enabled": enabled,
+            "status": "ready",
+            "max_file_bytes": max_file_bytes,
+            "timeout_seconds": timeout_seconds,
+            "message": "VSS fallback is available for Windows local host-agent files.",
+        }
+
+    monkeypatch.setattr(settings_module, "SettingsService", FakeSettings)
+    monkeypatch.setattr(host_vss, "capability_status", fake_capability_status)
+
+    status = host_agent._vss_status()
+
+    assert status["enabled"] is True
+    assert status["status"] == "ready"
+    assert status["max_file_bytes"] == 4096
+    assert status["timeout_seconds"] == 7
+    assert "not implemented" not in status["message"].lower()
+    assert calls == [{"enabled": True, "max_file_bytes": 4096, "timeout_seconds": 7}]
+
+
 @pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
 )
@@ -631,6 +675,7 @@ def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
         "flux_llm_kb.codex_integration.codex_status",
         lambda: {"status": "ready", "installed": True},
     )
+    monkeypatch.setattr("flux_llm_kb.database.get_runtime_setting", lambda _key: None)
 
     result = host_agent.status_payload()
 
@@ -639,8 +684,8 @@ def test_host_agent_status_reports_platform_and_browse_capability(monkeypatch):
     assert "platform" in result
     assert result["codex"]["status"] == "ready"
     assert result["runtime"]["git"]["ok"] is True
-    assert result["vss"]["enabled"] is False
-    assert result["vss"]["status"] in {"disabled", "unavailable"}
+    assert result["vss"]["enabled"] is True
+    assert result["vss"]["status"] in {"ready", "unavailable"}
     assert "message" in result["vss"]
 
 

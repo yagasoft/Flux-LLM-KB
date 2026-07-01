@@ -39,7 +39,7 @@ def build_operator_evidence_report(
         "gates": {
             "vss_snapshot": {
                 "state": gate_state,
-                "reason": "VSS snapshot extraction remains a design-only candidate until live reliability evidence requires it.",
+                "reason": "VSS snapshot fallback is implemented; this gate reports live reliability validation and never mutates settings.",
                 "requirements": gate_reasons,
                 "settings_mutated": False,
             },

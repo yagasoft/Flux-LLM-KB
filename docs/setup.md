@@ -342,14 +342,15 @@ host/cloud evidence for enabled roots, cache readiness, and tuning comparison
 evidence in one pass. The gate reports `ready`, `partial`, `blocked`, or
 `not_run`, keeps `settings_mutated: false`, and emits manual follow-up commands
 for tuning candidates. It does not apply settings, change worker caps, read raw
-content, or unblock VSS/provider-specific acceleration without fresh operator
-evidence.
+content, or change VSS settings/provider-specific acceleration without fresh
+operator evidence.
 Use `flux-kb acceleration reliability roots` to inspect sanitized readiness for
 all enabled monitored roots, and `flux-kb acceleration reliability run --scope
 all-roots --full` when you need a read-only all-root evidence pass. Use
 `flux-kb acceleration evidence` to inspect the combined operator evidence report
-with VSS/provider gate decisions; those gates can become `eligible_for_design`
-but never enable VSS or provider acceleration.
+with VSS validation/provider gate decisions; those gates can become
+`eligible_for_design` but never change VSS settings or enable provider
+acceleration.
 Code index diagnostics are available with `flux-kb code status`, `flux-kb code
 search`, and `flux-kb code symbol`; privacy-safe miss feedback is available with
 `flux-kb code feedback add|summary`. Operational evidence summaries are

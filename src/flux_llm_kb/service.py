@@ -3383,6 +3383,26 @@ class KnowledgeService:
                         telemetry=telemetry,
                     )
                     retried += 1
+            elif process_result.status == "retrying_vss_failed":
+                if int(job.get("attempts") or 0) >= _configured_lock_max_attempts():
+                    database.block_corpus_job(
+                        job_id=job["id"],
+                        error=process_result.message or "blocked_vss_failed",
+                        status="blocked_vss_failed",
+                        duration_ms=duration_ms,
+                        telemetry=telemetry,
+                    )
+                    blocked += 1
+                else:
+                    database.retry_corpus_job(
+                        job_id=job["id"],
+                        error=process_result.message or "retrying_vss_failed",
+                        cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
+                        status="retrying_vss_failed",
+                        duration_ms=duration_ms,
+                        telemetry=telemetry,
+                    )
+                    retried += 1
             elif process_result.status == "failed":
                 if int(job.get("attempts") or 0) >= _configured_failure_max_attempts():
                     database.block_corpus_job(
