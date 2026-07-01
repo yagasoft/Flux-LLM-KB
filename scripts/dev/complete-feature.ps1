@@ -72,6 +72,23 @@ function Write-FeatureStepOutput {
     }
 }
 
+function New-FeatureStepScript {
+    param([string]$Command)
+    return @"
+`$ErrorActionPreference = "Stop"
+try {
+$Command
+    if (`$global:LASTEXITCODE -is [int] -and `$global:LASTEXITCODE -ne 0) {
+        exit `$global:LASTEXITCODE
+    }
+    exit 0
+} catch {
+    Write-Error `$_
+    exit 1
+}
+"@
+}
+
 function Write-SummaryAndExit {
     param([int]$ExitCode)
     $summary = [ordered]@{
@@ -111,7 +128,8 @@ function Invoke-FeatureStep {
     $stderrTask = $null
     $effectiveTimeoutSeconds = if ($TimeoutSeconds -gt 0) { $TimeoutSeconds } else { $StepTimeoutSeconds }
     try {
-        $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Command))
+        $stepScript = New-FeatureStepScript -Command $Command
+        $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($stepScript))
         # Process-level redirection avoids nested PowerShell stream parsing failures
         # such as ProcessStreamReader_CliXmlError from merging native stderr with *>.
         $processArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encodedCommand)
@@ -313,7 +331,7 @@ try {
     Invoke-FeatureStep -Name "compileall" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m compileall -q src tests'
     Invoke-FeatureStep -Name "flux-lint" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli lint'
     Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci --include=dev'
-    Invoke-FeatureStep -Name "dashboard-test" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/vitest.mjs run } finally { Pop-Location }'
+    Invoke-FeatureStep -Name "dashboard-test" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/dist/cli.js run } finally { Pop-Location }'
     Invoke-FeatureStep -Name "dashboard-build" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'
     Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A; if ((git status --porcelain) -ne `$null) { git commit -m '$CommitMessage' }"
     Invoke-FeatureStep -Name "sync-main" -Cwd $MainRoot -Command 'git pull --ff-only origin main'

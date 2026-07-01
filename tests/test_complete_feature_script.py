@@ -67,7 +67,7 @@ def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
     )
     test_step = (
         'Invoke-FeatureStep -Name "dashboard-test" '
-        "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/vitest.mjs run } finally { Pop-Location }'"
+        "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/dist/cli.js run } finally { Pop-Location }'"
     )
     build_step = (
         'Invoke-FeatureStep -Name "dashboard-build" '
@@ -117,6 +117,17 @@ def test_complete_feature_script_bounds_step_processes_without_powershell_stream
     assert "ProcessStreamReader_CliXmlError" in script
     assert "Start-Process" not in script
     assert "*> $logPath" not in script
+
+
+def test_complete_feature_script_propagates_nested_native_exit_codes():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "function New-FeatureStepScript" in script
+    assert "$stepScript = New-FeatureStepScript -Command $Command" in script
+    assert "$global:LASTEXITCODE -is [int]" in script
+    assert "$global:LASTEXITCODE -ne 0" in script
+    assert "exit `$global:LASTEXITCODE" in script
+    assert "exit 1" in script
 
 
 def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
