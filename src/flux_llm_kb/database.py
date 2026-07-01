@@ -4435,7 +4435,7 @@ def cancel_unseen_corpus_job(
                     WHERE id = %s
                       AND job_type LIKE 'corpus_%%'
                       AND status = 'running'
-                    RETURNING id::text
+                    RETURNING id
                 )
                 INSERT INTO audit_events (event_type, target_table, target_id, details)
                 SELECT 'capture_job.cancelled_unseen_asset',
@@ -12335,7 +12335,7 @@ def _cancel_unseen_corpus_jobs_for_paths(
                 updated_at = now()
             FROM candidates
             WHERE job.id = candidates.id
-            RETURNING job.id::text, candidates.status AS previous_status
+            RETURNING job.id, candidates.status AS previous_status
         ),
         audit AS (
             INSERT INTO audit_events (event_type, target_table, target_id, details)

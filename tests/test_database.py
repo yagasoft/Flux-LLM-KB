@@ -2211,7 +2211,46 @@ def test_persist_crawl_plan_marks_unseen_assets_deleted_and_cancels_jobs(monkeyp
     assert "locked_at = NULL" in sql
     assert "locked_by = NULL" in sql
     assert "previous_status" in sql
+    assert "RETURNING job.id::text" not in sql
+    assert "RETURNING job.id, candidates.status AS previous_status" in sql
     assert any(params and "old/secret.pdf" in str(params) for _statement, params in executed)
+
+
+def test_cancel_unseen_corpus_job_audit_target_id_keeps_uuid_type(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.cancel_unseen_corpus_job(job_id="job-1", error="asset disappeared")
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "INSERT INTO audit_events (event_type, target_table, target_id, details)" in sql
+    assert "RETURNING id::text" not in sql
+    assert "RETURNING id" in sql
 
 
 def test_purge_unseen_corpus_assets_removes_index_rows_after_grace(monkeypatch):
