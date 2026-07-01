@@ -135,13 +135,10 @@ def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
 
     deploy_step = (
         'Invoke-FeatureStep -Name "deploy-production" '
-        "-Cwd $MainRoot -Command $deployCommand "
+        "-Cwd $MainRoot -Command '.\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild' "
         "-TimeoutSeconds $DeployStepTimeoutSeconds"
     )
 
-    assert "$deployCommand = '.\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild'" in script
-    assert "$deployDockerBaseMode = \"$env:FLUX_KB_DEPLOY_DOCKER_BASE_MODE\".Trim()" in script
-    assert "$deployCommand = \"$deployCommand -DockerBaseMode $deployDockerBaseMode\"" in script
     assert deploy_step in script
 
 

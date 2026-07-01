@@ -340,15 +340,7 @@ try {
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
     if (-not $SkipDeploy) {
-        $deployCommand = '.\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild'
-        $deployDockerBaseMode = "$env:FLUX_KB_DEPLOY_DOCKER_BASE_MODE".Trim()
-        if ($deployDockerBaseMode) {
-            if ($deployDockerBaseMode -notin @("auto", "local", "python")) {
-                throw "FLUX_KB_DEPLOY_DOCKER_BASE_MODE must be one of: auto, local, python."
-            }
-            $deployCommand = "$deployCommand -DockerBaseMode $deployDockerBaseMode"
-        }
-        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds
+        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command '.\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild' -TimeoutSeconds $DeployStepTimeoutSeconds
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         # Probe http://127.0.0.1:8765/api/dashboard/health and fail if required DB paths are blocked.
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command $DashboardHealthProbeCommand
