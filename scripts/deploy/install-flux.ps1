@@ -11,9 +11,9 @@ param(
     [string]$GpuMode = "auto",
     [switch]$SkipDashboardBuild,
     [switch]$SkipScheduledTasks,
-    [int]$DockerBuildTimeoutSeconds = 1200,
+    [int]$DockerBuildTimeoutSeconds = 3600,
     [int]$AsrModelDownloadTimeoutSeconds = 3600,
-    [int]$ModelRunnerModelDownloadTimeoutSeconds = 3600,
+    [int]$ModelRunnerModelDownloadTimeoutSeconds = 7200,
     [ValidateSet("auto", "local", "python")]
     [string]$DockerBaseMode = "auto",
     [string]$DockerBaseImage = $env:FLUX_KB_DOCKER_BASE_IMAGE,

@@ -45,11 +45,12 @@ processors = [
   "pyarrow>=16.0",
   "faster-whisper==1.2.1",
   "huggingface-hub>=0.24",
-  "sentence-transformers>=3.0",
-  "transformers>=4.45",
-  "accelerate>=0.33",
-  "bitsandbytes>=0.43; platform_system != 'Windows'",
-  "paddleocr>=3.0",
+  "torch==2.6.0; platform_system == 'Linux'",
+  "sentence-transformers>=3.0,<6.0",
+  "transformers>=4.51,<5.0",
+  "accelerate>=0.33,<2.0",
+  "bitsandbytes>=0.43,<0.50; platform_system != 'Windows'",
+  "paddleocr>=3.0,<4.0",
 ]
 asr_gpu = [
   "nvidia-cuda-runtime-cu12>=12,<13",
