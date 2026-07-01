@@ -265,7 +265,10 @@ def test_claim_corpus_jobs_skips_sync_root_when_same_root_is_running(monkeypatch
 def test_code_index_status_filters_selected_root_without_join_leakage(monkeypatch):
     executed: list[tuple[str, tuple]] = []
     result_sets = [
-        [("app", 3, 5, 7, 11, 1, 2)],
+        [("app", 3, 1, 2)],
+        [("app", 5)],
+        [("app", 7)],
+        [("app", 11)],
         [("python", 4)],
         [("parsed", 6), ("fallback", 1)],
         [("src/app.py", 1200)],
@@ -302,11 +305,21 @@ def test_code_index_status_filters_selected_root_without_join_leakage(monkeypatc
 
     report = database.code_index_status(root_name="app")
 
-    main_sql, main_params = executed[0]
-    assert "LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL" in main_sql
-    assert "WHERE r.name = %s" in main_sql
-    assert "LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL AND r.name" not in main_sql
-    assert main_params == ("app",)
+    asset_sql, asset_params = executed[0]
+    joined_sql = "\n".join(sql for sql, _params in executed)
+    assert "COUNT(a.id)::integer AS asset_count" in asset_sql
+    assert "WHERE r.name = %s" in asset_sql
+    assert asset_params == ("app",)
+    assert "LEFT JOIN code_symbols cs" not in asset_sql
+    assert "LEFT JOIN code_references cr" not in asset_sql
+    assert all(
+        not (
+            "LEFT JOIN asset_chunks c" in sql
+            and "LEFT JOIN code_symbols cs" in sql
+            and "LEFT JOIN code_references cr" in sql
+        )
+        for sql, _params in executed
+    )
     assert report["roots"] == [
         {
             "root_name": "app",
@@ -1453,6 +1466,93 @@ def test_search_corpus_chunks_hydrates_candidates_once_and_records_diagnostics(m
     assert rows[0]["raw_scores"]["corpus_vector"] == 0.8
     assert diagnostics["streams"]["corpus_vector"]["plan"] == "root_scoped_hnsw_candidates"
     assert diagnostics["streams"]["corpus_hydration"]["rows"] == 1
+
+
+def test_search_corpus_chunks_skips_fuzzy_when_cheaper_streams_satisfy_result_target(monkeypatch):
+    executed: list[tuple[str, tuple[object, ...]]] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, tuple(params)))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text FROM monitored_roots" in sql:
+                return ("root-1",)
+            return None
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "plainto_tsquery" in sql and "SELECT c.id::text" in sql:
+                return [(f"chunk-{index}", 1.0 - index / 100.0) for index in range(3)]
+            if "greatest(similarity(c.title" in sql:
+                raise AssertionError("fuzzy corpus search should be skipped once cheap streams are sufficient")
+            if "nearest_embeddings" in sql:
+                return []
+            if "WHERE c.id = ANY" in sql:
+                return [
+                    (
+                        "chunk-0",
+                        "asset-1",
+                        "Scholarship_ER_Analysis_Summary.xlsx",
+                        "Scholarship lookup and equivalency summary",
+                        "G2B/Analysis/Scholarship_ER_Analysis_Summary.xlsx",
+                        0,
+                        500,
+                        "mohesr-documents",
+                        0.5,
+                        0.75,
+                        "document",
+                        {},
+                        {},
+                    )
+                ]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    diagnostics: dict[str, object] = {}
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
+    monkeypatch.setattr(database, "to_pgvector_literal", lambda _vector: "[0,0,0]")
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(database, "_search_mail_sidecar_rows", lambda *_args, **_kwargs: [])
+
+    rows = database.search_corpus_chunks(
+        "student scholarship equivalency university",
+        limit=3,
+        root_name="mohesr-documents",
+        diagnostics=diagnostics,
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "greatest(similarity(c.title" not in sql
+    assert rows[0]["id"] == "chunk-0"
+    assert diagnostics["streams"]["corpus_fuzzy"] == {
+        "duration_ms": 0.0,
+        "rows": 0,
+        "plan": "skipped_sufficient_candidates",
+        "candidate_limit": 12,
+        "available_candidates": 3,
+    }
 
 
 def test_search_corpus_chunks_promotes_exact_code_definition():

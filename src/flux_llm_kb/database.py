@@ -750,47 +750,6 @@ def search_corpus_chunks(
                 plan="tsquery_candidates",
             )
 
-            cur.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)", ("0.10",))
-            started = time.perf_counter()
-            cur.execute(
-                f"""
-                SELECT c.id::text,
-                       greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score,
-                       c.updated_at
-                FROM asset_chunks c
-                JOIN source_assets a ON a.id = c.asset_id
-                JOIN monitored_roots r ON r.id = a.root_id
-                WHERE r.enabled
-                  AND a.deleted_at IS NULL
-                  AND a.canonical_asset_id IS NULL
-                  AND a.extraction_status = 'indexed'
-                  AND (c.title %% %s OR c.body %% %s)
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM semantic_duplicate_members sm
-                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
-                      WHERE sc.status = 'active'
-                        AND sm.owner_table = 'asset_chunks'
-                        AND sm.owner_id = c.id
-                        AND sm.member_role = 'duplicate'
-                  )
-                  {root_name_sql}
-                  {code_filter_sql}
-                ORDER BY score DESC, c.updated_at DESC
-                LIMIT %s
-                """,
-                (query, query, query, query, *root_name_params, *code_filter_params, candidate_limit),
-            )
-            rows = [(row[0], row[1]) for row in cur.fetchall()]
-            _add_ranked_corpus_candidates("corpus_fuzzy", rows, streams, raw_scores)
-            _record_corpus_stream_diagnostics(
-                diagnostics,
-                "corpus_fuzzy",
-                started,
-                rows=len(rows),
-                plan="trigram_candidates",
-            )
-
             if root_name and root_id is None:
                 streams["corpus_vector"] = []
                 _record_corpus_stream_diagnostics(
@@ -938,6 +897,58 @@ def search_corpus_chunks(
                     started,
                     rows=len(rows),
                     plan="trigram_symbol_candidates",
+                )
+
+            if len(raw_scores) >= limit:
+                streams["corpus_fuzzy"] = []
+                if diagnostics is not None:
+                    diagnostics.setdefault("streams", {})["corpus_fuzzy"] = {
+                        "duration_ms": 0.0,
+                        "rows": 0,
+                        "plan": "skipped_sufficient_candidates",
+                        "candidate_limit": candidate_limit,
+                        "available_candidates": len(raw_scores),
+                    }
+            else:
+                cur.execute("SELECT set_config('pg_trgm.similarity_threshold', %s, true)", ("0.10",))
+                started = time.perf_counter()
+                cur.execute(
+                    f"""
+                    SELECT c.id::text,
+                           greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score,
+                           c.updated_at
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE r.enabled
+                      AND a.deleted_at IS NULL
+                      AND a.canonical_asset_id IS NULL
+                      AND a.extraction_status = 'indexed'
+                      AND (c.title %% %s OR c.body %% %s)
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM semantic_duplicate_members sm
+                          JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
+                          WHERE sc.status = 'active'
+                            AND sm.owner_table = 'asset_chunks'
+                            AND sm.owner_id = c.id
+                            AND sm.member_role = 'duplicate'
+                      )
+                      {root_name_sql}
+                      {code_filter_sql}
+                    ORDER BY score DESC, c.updated_at DESC
+                    LIMIT %s
+                    """,
+                    (query, query, query, query, *root_name_params, *code_filter_params, candidate_limit),
+                )
+                rows = [(row[0], row[1]) for row in cur.fetchall()]
+                _add_ranked_corpus_candidates("corpus_fuzzy", rows, streams, raw_scores)
+                _record_corpus_stream_diagnostics(
+                    diagnostics,
+                    "corpus_fuzzy",
+                    started,
+                    rows=len(rows),
+                    plan="trigram_candidates",
                 )
 
             details: dict[str, dict[str, Any]] = {}
@@ -4759,54 +4770,128 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
 def code_index_status(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
     psycopg = _load_psycopg()
     root_filter = "WHERE r.name = %s" if root_name else ""
-    params: list[Any] = []
-    if root_name:
-        params.append(root_name)
+    root_params: tuple[Any, ...] = (root_name,) if root_name else ()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT r.name,
-                       count(DISTINCT a.id)::integer AS asset_count,
-                       count(DISTINCT c.id)::integer AS chunk_count,
-                       count(DISTINCT cs.id)::integer AS symbol_count,
-                       count(DISTINCT cr.id)::integer AS reference_count,
-                       count(DISTINCT a.id) FILTER (
+                       COUNT(a.id)::integer AS asset_count,
+                       COUNT(a.id) FILTER (
                          WHERE a.metadata->'code'->>'parser_status' = 'fallback'
-                            OR c.metadata->'code'->>'parser_status' = 'fallback'
-                            OR cs.parser_status = 'fallback'
+                            OR EXISTS (
+                                SELECT 1
+                                FROM asset_chunks c_fallback
+                                WHERE c_fallback.asset_id = a.id
+                                  AND c_fallback.metadata->'code'->>'parser_status' = 'fallback'
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM code_symbols cs_fallback
+                                WHERE cs_fallback.source_asset_id = a.id
+                                  AND cs_fallback.parser_status = 'fallback'
+                            )
                        )::integer AS fallback_count,
-                       count(DISTINCT a.id) FILTER (
+                       COUNT(a.id) FILTER (
                          WHERE a.metadata->'code'->>'generated' = 'true'
-                            OR c.metadata->>'generated' = 'true'
-                            OR c.metadata->'code'->>'generated' = 'true'
-                            OR cs.metadata->>'generated' = 'true'
+                            OR EXISTS (
+                                SELECT 1
+                                FROM asset_chunks c_generated
+                                WHERE c_generated.asset_id = a.id
+                                  AND (
+                                      c_generated.metadata->>'generated' = 'true'
+                                      OR c_generated.metadata->'code'->>'generated' = 'true'
+                                  )
+                            )
+                            OR EXISTS (
+                                SELECT 1
+                                FROM code_symbols cs_generated
+                                WHERE cs_generated.source_asset_id = a.id
+                                  AND cs_generated.metadata->>'generated' = 'true'
+                            )
                        )::integer AS generated_count
                 FROM monitored_roots r
                 LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL
-                LEFT JOIN asset_chunks c ON c.asset_id = a.id
-                LEFT JOIN code_symbols cs ON cs.source_asset_id = a.id
-                LEFT JOIN code_references cr ON cr.source_asset_id = a.id
                 {root_filter}
                 GROUP BY r.name
                 ORDER BY r.name
                 """,
-                tuple(params),
+                root_params,
             )
+            roots_by_name: dict[str, dict[str, Any]] = {
+                str(row[0]): {
+                    "root_name": row[0],
+                    "asset_count": int(row[1] or 0),
+                    "chunk_count": 0,
+                    "symbol_count": 0,
+                    "reference_count": 0,
+                    "fallback_count": int(row[2] or 0),
+                    "generated_count": int(row[3] or 0),
+                }
+                for row in cur.fetchall()
+            }
+
+            count_queries = [
+                (
+                    "chunk_count",
+                    f"""
+                    SELECT r.name, COUNT(c.id)::integer
+                    FROM monitored_roots r
+                    LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL
+                    LEFT JOIN asset_chunks c ON c.asset_id = a.id
+                    {root_filter}
+                    GROUP BY r.name
+                    """,
+                ),
+                (
+                    "symbol_count",
+                    f"""
+                    SELECT r.name, COUNT(cs.id)::integer
+                    FROM monitored_roots r
+                    LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL
+                    LEFT JOIN code_symbols cs ON cs.source_asset_id = a.id
+                    {root_filter}
+                    GROUP BY r.name
+                    """,
+                ),
+                (
+                    "reference_count",
+                    f"""
+                    SELECT r.name, COUNT(cr.id)::integer
+                    FROM monitored_roots r
+                    LEFT JOIN source_assets a ON a.root_id = r.id AND a.deleted_at IS NULL
+                    LEFT JOIN code_references cr ON cr.source_asset_id = a.id
+                    {root_filter}
+                    GROUP BY r.name
+                    """,
+                ),
+            ]
+            for field, sql in count_queries:
+                cur.execute(sql, root_params)
+                for row in cur.fetchall():
+                    root = roots_by_name.setdefault(
+                        str(row[0]),
+                        {
+                            "root_name": row[0],
+                            "asset_count": 0,
+                            "chunk_count": 0,
+                            "symbol_count": 0,
+                            "reference_count": 0,
+                            "fallback_count": 0,
+                            "generated_count": 0,
+                        },
+                    )
+                    root[field] = int(row[1] or 0)
+
             roots = []
-            for row in cur.fetchall():
+            for root in sorted(roots_by_name.values(), key=lambda item: str(item["root_name"])):
+                root_name_value = str(root["root_name"])
                 roots.append(
                     {
-                        "root_name": row[0],
-                        "asset_count": row[1],
-                        "chunk_count": row[2],
-                        "symbol_count": row[3],
-                        "reference_count": row[4],
-                        "fallback_count": row[5],
-                        "generated_count": row[6],
-                        "languages": _code_language_counts(cur, row[0]),
-                        "parser_statuses": _code_parser_status_counts(cur, row[0]),
-                        "slow_files": _code_slow_files(cur, row[0]),
+                        **root,
+                        "languages": _code_language_counts(cur, root_name_value),
+                        "parser_statuses": _code_parser_status_counts(cur, root_name_value),
+                        "slow_files": _code_slow_files(cur, root_name_value),
                     }
                 )
             return {
