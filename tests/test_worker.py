@@ -68,8 +68,8 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
     monkeypatch.setattr(
         database,
-        "purge_expired_capture_job_tool_invocations",
-        lambda **kwargs: calls["purged"].append(kwargs) or {"purged": 3, "retention_hours": 24},
+        "purge_expired_capture_jobs",
+        lambda **kwargs: calls["purged"].append(kwargs) or {"purged": 3, "retention_days": 7},
     )
     monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
 
@@ -120,8 +120,9 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     assert calls["completed"][0]["job_id"] == "job-sync"
     assert calls["completed"][0]["telemetry"]["files_seen"] == 35655
     assert calls["completed"][0]["telemetry"]["jobs_queued"] == 120
-    assert calls["purged"] == [{"retention_hours": 24}]
-    assert result["purged_tool_invocations"] == 3
+    assert calls["purged"] == [{"retention_days": 7}]
+    assert result["purged_capture_jobs"] == 3
+    assert result["capture_job_retention_days"] == 7
 
 
 def test_backfill_recovers_stale_jobs_globally(monkeypatch):
@@ -544,7 +545,15 @@ def test_process_batched_corpus_sync_root_paths_reuses_manifest_and_prefers_batc
     assert result.telemetry["manifest_skipped_unchanged"] == 1
 
 
-def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch):
+@pytest.mark.parametrize(
+    ("blocked_status", "message"),
+    [
+        ("blocked_missing_dependency", "ffprobe command not found"),
+        ("blocked_by_policy", "text file exceeds inline extraction limit"),
+        ("blocked_invalid_source", "Package not found"),
+    ],
+)
+def test_backfill_blocks_terminal_blocked_jobs_without_completing(monkeypatch, blocked_status, message):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(
         database,
@@ -581,8 +590,8 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
         worker,
         "process_corpus_job",
         lambda job: worker.JobProcessResult(
-            status="blocked_missing_dependency",
-            message="ffprobe command not found",
+            status=blocked_status,
+            message=message,
             telemetry={"ocr_cache_hits": 0, "ocr_cache_misses": 0},
         ),
     )
@@ -593,6 +602,11 @@ def test_backfill_blocks_missing_dependency_jobs_without_completing(monkeypatch)
     assert calls["completed"] == []
     assert calls["retried"] == []
     assert calls["blocked"][0]["job_id"] == "job-1"
+    assert calls["blocked"][0]["error"] == message
+    if blocked_status == "blocked_missing_dependency":
+        assert "status" not in calls["blocked"][0]
+    else:
+        assert calls["blocked"][0]["status"] == blocked_status
     assert calls["blocked"][0]["telemetry"]["ocr_cache_hits"] == 0
     assert calls["blocked"][0]["telemetry"]["ocr_cache_misses"] == 0
     assert calls["repaired"] == [{"root_name": None}]
@@ -1453,13 +1467,14 @@ def test_process_corpus_job_blocks_metadata_only_for_strict_roots(monkeypatch, t
 
     result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "unknown.bin"}})
 
-    assert result.status == "blocked_missing_dependency"
+    assert result.status == "blocked_by_policy"
     assert "Strict indexing" in result.message
     applied_result = applied[0]["result"]
-    assert applied_result.status == "blocked_missing_dependency"
+    assert applied_result.status == "blocked_by_policy"
     assert applied_result.chunks == ()
     assert applied_result.metadata["strict_indexing"] is True
     assert applied_result.metadata["metadata_only_blocked"] is True
+    assert applied_result.metadata["readiness_status"] == "blocked_by_policy"
     assert applied_result.metadata["original_status"] == "metadata_only"
 
 
@@ -1601,7 +1616,7 @@ def test_process_corpus_job_marks_strict_indexed_vision_result_ready(monkeypatch
                 "ocr": {"status": "completed", "text_length": 0},
                 "vision": {"status": "completed", "descriptions": 1},
                 "vision_escalation": "completed",
-                "readiness_status": "blocked_missing_dependency",
+                "readiness_status": "blocked_by_policy",
                 "metadata_only_blocked": True,
             },
         ),
@@ -3211,14 +3226,54 @@ def test_process_corpus_job_blocks_invalid_xlsx_package(monkeypatch, tmp_path):
 
     result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "bad.xlsx"}})
 
-    assert result.status == "blocked_missing_dependency"
+    assert result.status == "blocked_invalid_source"
     assert "File is not a zip file" in (result.message or "")
     assert applied[0]["root_name"] == "docs"
     assert applied[0]["relative_path"] == "bad.xlsx"
     applied_result = applied[0]["result"]
-    assert applied_result.status == "blocked_missing_dependency"
+    assert applied_result.status == "blocked_invalid_source"
     assert applied_result.metadata["extractor"] == "xlsx"
     assert applied_result.metadata["reason"] == "invalid_package"
+
+
+def test_process_corpus_job_persists_policy_block(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "large.txt").write_text("large text\n", encoding="utf-8")
+    applied = []
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {},
+    })
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+    monkeypatch.setattr(
+        worker,
+        "extract_file",
+        lambda _path, _policy: SimpleNamespace(
+            status="blocked_by_policy",
+            message="text file exceeds inline extraction limit",
+            chunks=(),
+            child_assets=(),
+            metadata={"extractor": "text", "reason": "inline_extraction_limit"},
+        ),
+    )
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "large.txt"}})
+
+    assert result.status == "blocked_by_policy"
+    assert applied[0]["root_name"] == "docs"
+    assert applied[0]["relative_path"] == "large.txt"
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "blocked_by_policy"
+    assert applied_result.metadata["reason"] == "inline_extraction_limit"
 
 
 def test_process_corpus_job_returns_failed_for_unexpected_extractor_error(monkeypatch, tmp_path):
@@ -3354,6 +3409,23 @@ def test_host_agent_corpus_worker_does_not_process_imap_mail_profiles(monkeypatc
 
     assert mail_sync_limits == []
     assert "mail_sync" not in result["last_result"]
+
+
+def test_corpus_backfill_reports_expired_job_purge(monkeypatch):
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **_kwargs: {"recovered": 0})
+    monkeypatch.setattr(database, "purge_unseen_corpus_assets", lambda **_kwargs: {"assets_purged": 0})
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "claim_corpus_jobs", lambda **_kwargs: [])
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **_kwargs: {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **_kwargs: {"cleared": 0})
+    monkeypatch.setattr(database, "purge_expired_capture_jobs", lambda **_kwargs: {"purged": 3, "retention_days": 7})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: {"id": "audit-1"})
+
+    result = KnowledgeService().run_corpus_backfill(limit=2, worker_id="worker-test")
+
+    assert result["purged_capture_jobs"] == 3
+    assert result["capture_job_retention_days"] == 7
+    assert "purged_tool_invocations" not in result
 
 
 def test_corpus_worker_governance_librarian_is_disabled_by_default(monkeypatch):

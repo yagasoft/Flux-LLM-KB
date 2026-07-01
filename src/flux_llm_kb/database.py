@@ -2611,14 +2611,14 @@ def persist_crawl_plan(
                 recovered_indexed_asset = (
                     previous is not None
                     and not changed_asset
-                    and previous[2] in {"metadata_only", "blocked_missing_dependency"}
+                    and (previous[2] == "metadata_only" or str(previous[2]).startswith("blocked_"))
                     and status == "indexed"
                     and canonical_id is None
                 )
                 recovered_deferred_asset = (
                     previous is not None
                     and not changed_asset
-                    and previous[2] in {"metadata_only", "blocked_missing_dependency"}
+                    and (previous[2] == "metadata_only" or str(previous[2]).startswith("blocked_"))
                     and status == "queued"
                     and canonical_id is None
                 )
@@ -2662,7 +2662,7 @@ def persist_crawl_plan(
                         extraction_status = CASE
                             WHEN EXCLUDED.extraction_status = 'duplicate_suppressed'
                                 THEN EXCLUDED.extraction_status
-                            WHEN EXCLUDED.extraction_status = 'blocked_missing_dependency'
+                            WHEN EXCLUDED.extraction_status LIKE 'blocked_%%'
                                  AND EXCLUDED.metadata ? 'metadata_only_blocked'
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
@@ -2671,10 +2671,12 @@ def persist_crawl_plan(
                                  AND source_assets.extension = ANY(%s)
                                  AND EXCLUDED.extraction_status = 'queued'
                                 THEN EXCLUDED.extraction_status
-                            WHEN source_assets.extraction_status IN ('metadata_only', 'blocked_missing_dependency')
+                            WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
                                  AND EXCLUDED.extraction_status IN ('indexed', 'queued')
                                 THEN EXCLUDED.extraction_status
-                            WHEN source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')
+                            WHEN source_assets.extraction_status = 'indexed'
+                                 OR source_assets.extraction_status = 'metadata_only'
+                                 OR source_assets.extraction_status LIKE 'blocked_%%'
                                 THEN source_assets.extraction_status
                             ELSE EXCLUDED.extraction_status
                         END,
@@ -2683,14 +2685,14 @@ def persist_crawl_plan(
                         indexed_at = CASE
                             WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
                                 THEN EXCLUDED.indexed_at
-                            WHEN source_assets.extraction_status IN ('metadata_only', 'blocked_missing_dependency')
+                            WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
                                  AND EXCLUDED.extraction_status = 'indexed'
                                 THEN EXCLUDED.indexed_at
                             ELSE source_assets.indexed_at
                         END,
                         deleted_at = NULL,
                         metadata = CASE
-                            WHEN source_assets.extraction_status IN ('metadata_only', 'blocked_missing_dependency')
+                            WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
                                  AND EXCLUDED.extraction_status IN ('indexed', 'queued')
                                 THEN (
                                     source_assets.metadata
@@ -2896,7 +2898,7 @@ def crawl_status(*, url: str | None = None) -> dict[str, Any]:
             pending_jobs = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status = 'failed'")
             failed_jobs = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status = 'blocked_missing_dependency'")
+            cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status LIKE 'blocked_%%'")
             blocked_jobs = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM capture_jobs WHERE job_type LIKE 'corpus_%%' AND status = 'cancelled_duplicate'")
             duplicate_jobs = cur.fetchone()[0]
@@ -3080,6 +3082,10 @@ def _capture_job_filter_sql(
     return " AND ".join(clauses), params
 
 
+def _capture_job_delete_markable(status: str) -> bool:
+    return status in {"completed", "failed"} or status.startswith("blocked_") or status.startswith("cancelled_")
+
+
 def list_capture_jobs(
     *,
     limit: int = 50,
@@ -3107,7 +3113,8 @@ def list_capture_jobs(
                 SELECT id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
                        status, payload, attempts, last_error, created_at, updated_at,
                        started_at, completed_at, last_duration_ms, telemetry,
-                       locked_at, locked_by, progress_heartbeat_at
+                       locked_at, locked_by, progress_heartbeat_at,
+                       delete_requested_at, delete_requested_by, delete_reason
                 FROM capture_jobs
                 WHERE {where_sql}
                 ORDER BY updated_at DESC, id DESC
@@ -3137,6 +3144,9 @@ def list_capture_jobs(
                     "locked_at": row[16].isoformat() if row[16] else None,
                     "locked_by": row[17],
                     "progress_heartbeat_at": row[18].isoformat() if row[18] else None,
+                    "delete_requested_at": row[19].isoformat() if row[19] else None,
+                    "delete_requested_by": row[20],
+                    "delete_reason": row[21],
                 }
                 for row in cur.fetchall()
             ]
@@ -3378,6 +3388,153 @@ def purge_expired_capture_job_tool_invocations(
                 (safe_hours,),
             )
             return {"purged": int(cur.rowcount or 0), "retention_hours": safe_hours}
+
+
+def mark_capture_job_for_deletion(
+    *,
+    job_id: str,
+    actor: str = "operator",
+    reason: str = "operator_cleanup",
+    url: str | None = None,
+) -> dict[str, Any]:
+    clean_actor = str(actor or "operator").strip() or "operator"
+    clean_reason = str(reason or "operator_cleanup").strip() or "operator_cleanup"
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, status, delete_requested_at, delete_requested_by, delete_reason
+                FROM capture_jobs
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {
+                    "job_id": job_id,
+                    "status": "not_found",
+                    "delete_requested": False,
+                    "error": f"corpus job not found: {job_id}",
+                }
+            status = str(row[1] or "unknown")
+            if not _capture_job_delete_markable(status):
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "delete_requested": False,
+                    "error": f"Corpus job status {status} cannot be marked for deletion.",
+                }
+            if row[2] is not None:
+                requested_at = row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2])
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "delete_requested": True,
+                    "delete_requested_at": requested_at,
+                    "delete_requested_by": row[3],
+                    "delete_reason": row[4],
+                }
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET delete_requested_at = COALESCE(delete_requested_at, now()),
+                    delete_requested_by = COALESCE(delete_requested_by, %s),
+                    delete_reason = COALESCE(delete_reason, %s)
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND (
+                      status = 'completed'
+                      OR status = 'failed'
+                      OR status LIKE 'blocked_%%'
+                      OR status LIKE 'cancelled_%%'
+                  )
+                RETURNING id::text, status, delete_requested_at, delete_requested_by, delete_reason
+                """,
+                (clean_actor, clean_reason, row[0]),
+            )
+            updated = cur.fetchone()
+            if updated is None:
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "delete_requested": False,
+                    "error": "Corpus job could not be marked for deletion because its status changed.",
+                }
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, target_table, target_id, details)
+                VALUES ('capture_job.deletion_requested', 'capture_jobs', %s, %s::jsonb)
+                """,
+                (
+                    row[0],
+                    _json(
+                        {
+                            "actor": clean_actor,
+                            "reason": clean_reason,
+                            "previous_status": status,
+                        }
+                    ),
+                ),
+            )
+            requested_at = updated[2].isoformat() if hasattr(updated[2], "isoformat") else str(updated[2])
+            return {
+                "job_id": updated[0],
+                "status": updated[1],
+                "delete_requested": True,
+                "delete_requested_at": requested_at,
+                "delete_requested_by": updated[3],
+                "delete_reason": updated[4],
+            }
+
+
+def purge_expired_capture_jobs(
+    *,
+    retention_days: int = 7,
+    url: str | None = None,
+) -> dict[str, Any]:
+    safe_days = max(1, int(retention_days or 7))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH deleted AS (
+                    DELETE FROM capture_jobs job
+                    WHERE job.job_type LIKE 'corpus_%%'
+                      AND COALESCE(job.completed_at, job.updated_at) < now() - make_interval(days => %s)
+                      AND (
+                          job.status = 'completed'
+                          OR (
+                              job.delete_requested_at IS NOT NULL
+                              AND (
+                                  job.status = 'failed'
+                                  OR job.status LIKE 'blocked_%%'
+                                  OR job.status LIKE 'cancelled_%%'
+                              )
+                          )
+                      )
+                    RETURNING 1
+                ),
+                audit AS (
+                    INSERT INTO audit_events (event_type, target_table, details)
+                    SELECT 'capture_job.retention_purged',
+                           'capture_jobs',
+                           jsonb_build_object(
+                               'purged', (SELECT count(*) FROM deleted),
+                               'retention_days', %s::integer
+                           )
+                    WHERE EXISTS (SELECT 1 FROM deleted)
+                    RETURNING 1
+                )
+                SELECT count(*) FROM deleted
+                """,
+                (safe_days, safe_days),
+            )
+            row = cur.fetchone()
+            return {"purged": int(row[0] or 0) if row else 0, "retention_days": safe_days}
 
 
 _CAPTURE_REVIEW_STATUSES = {
@@ -4307,6 +4464,9 @@ def requeue_corpus_job(
                     next_attempt_at = now(),
                     locked_at = NULL,
                     locked_by = NULL,
+                    delete_requested_at = NULL,
+                    delete_requested_by = NULL,
+                    delete_reason = NULL,
                     telemetry = telemetry || jsonb_build_object('remediation_reason', %s::text),
                     updated_at = now()
                 WHERE id = %s
@@ -6629,7 +6789,7 @@ def apply_staged_extraction_piece_for_job(
                 SET extraction_status = %s,
                     metadata = CASE
                         WHEN %s::jsonb ? 'strict_indexing'
-                             AND COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'
+                             AND COALESCE(%s::jsonb->>'readiness_status', '') NOT LIKE 'blocked_%%'
                         THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
                         ELSE metadata || %s::jsonb
                     END,
@@ -6770,7 +6930,7 @@ def _apply_extraction_result_with_cursor(
         SET extraction_status = %s,
             metadata = CASE
                 WHEN %s::jsonb ? 'strict_indexing'
-                     AND COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'
+                     AND COALESCE(%s::jsonb->>'readiness_status', '') NOT LIKE 'blocked_%%'
                 THEN (metadata - 'metadata_only_blocked' - 'readiness_reason') || %s::jsonb
                 ELSE metadata || %s::jsonb
             END,
@@ -7035,6 +7195,40 @@ def get_source_asset_for_file_action(asset_id: str, *, url: str | None = None) -
                 "deleted_at": row[4].isoformat() if row[4] else None,
                 "metadata": row[5] or {},
                 "root_metadata": row[6] or {},
+            }
+
+
+def get_capture_job_for_file_action(job_id: str, *, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT job.id::text, job.job_type, job.status, job.payload,
+                       root.name, root.root_path
+                FROM capture_jobs job
+                LEFT JOIN monitored_roots root
+                  ON root.name = job.payload->>'root_name'
+                WHERE job.id = %s
+                  AND job.job_type LIKE 'corpus_%%'
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            payload = row[3] or {}
+            relative_path = str(payload.get("path") or "").strip() if isinstance(payload, dict) else ""
+            if not relative_path or not row[5]:
+                return None
+            return {
+                "id": row[0],
+                "job_type": row[1],
+                "status": row[2],
+                "payload": payload,
+                "root_name": row[4],
+                "root_path": row[5],
+                "path": relative_path,
             }
 
 
@@ -11625,7 +11819,7 @@ def _block_metadata_only_assets_for_strict_root(cur: Any, *, root_id: str) -> in
     cur.execute(
         """
         UPDATE source_assets
-        SET extraction_status = 'blocked_missing_dependency',
+        SET extraction_status = 'blocked_by_policy',
             metadata = metadata || %s::jsonb,
             updated_at = now()
         WHERE id = ANY(%s::uuid[])
@@ -11635,7 +11829,7 @@ def _block_metadata_only_assets_for_strict_root(cur: Any, *, root_id: str) -> in
                 {
                     "strict_indexing": True,
                     "metadata_only_blocked": True,
-                    "readiness_status": "blocked_missing_dependency",
+                    "readiness_status": "blocked_by_policy",
                     "readiness_reason": "Strict indexing root does not allow metadata-only assets.",
                     "original_status": "metadata_only",
                 }

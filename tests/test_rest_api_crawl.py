@@ -1080,6 +1080,121 @@ def test_dashboard_job_retry_endpoint_reports_ineligible_job_conflict(monkeypatc
     assert "retryable corpus job not found" in response.json()["detail"]
 
 
+def test_dashboard_job_delete_request_endpoint_marks_terminal_job(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "mark_capture_job_for_deletion",
+        lambda **kwargs: calls.append(kwargs)
+        or {
+            "job_id": kwargs["job_id"],
+            "status": "failed",
+            "delete_requested": True,
+            "delete_requested_at": "2026-07-01T09:00:00+00:00",
+            "delete_requested_by": "dashboard",
+            "delete_reason": kwargs["reason"],
+        },
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-failed/delete-request", json={"reason": "operator_cleanup"})
+
+    assert response.status_code == 200
+    assert response.json()["delete_requested"] is True
+    assert calls == [{"job_id": "job-failed", "actor": "dashboard", "reason": "operator_cleanup"}]
+
+
+def test_dashboard_job_delete_request_endpoint_reports_missing_job(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr(
+        database,
+        "mark_capture_job_for_deletion",
+        lambda **kwargs: {
+            "job_id": kwargs["job_id"],
+            "status": "not_found",
+            "delete_requested": False,
+            "error": f"corpus job not found: {kwargs['job_id']}",
+        },
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-missing/delete-request")
+
+    assert response.status_code == 404
+    assert "corpus job not found" in response.json()["detail"]
+
+
+def test_dashboard_job_delete_request_endpoint_reports_active_job_conflict(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr(
+        database,
+        "mark_capture_job_for_deletion",
+        lambda **kwargs: {
+            "job_id": kwargs["job_id"],
+            "status": "running",
+            "delete_requested": False,
+            "error": "Corpus job status running cannot be marked for deletion.",
+        },
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-running/delete-request")
+
+    assert response.status_code == 409
+    assert "cannot be marked for deletion" in response.json()["detail"]
+
+
+def test_dashboard_job_file_action_endpoint_routes_to_host_agent(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    monkeypatch.setattr(
+        "flux_llm_kb.rest_api.host_agent_job_file_action",
+        lambda **kwargs: calls.append(kwargs) or {"job_id": kwargs["job_id"], "action": kwargs["action"], "state": "opened"},
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-failed/file-actions", json={"action": "reveal"})
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "opened"
+    assert calls == [{"job_id": "job-failed", "action": "reveal"}]
+
+
+def test_dashboard_job_file_action_endpoint_rejects_unknown_action(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/job-failed/file-actions", json={"action": "delete"})
+
+    assert response.status_code == 400
+    assert "file action must be open or reveal" in response.json()["detail"]
+
+
+def test_dashboard_job_file_action_endpoint_rejects_browser_supplied_path(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post(
+        "/api/dashboard/jobs/job-failed/file-actions",
+        json={"action": "open", "path": "E:\\Unsafe\\from-browser.txt"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_crawl_backfill_endpoint_proxies_host_agent_root(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

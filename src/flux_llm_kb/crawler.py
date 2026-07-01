@@ -458,10 +458,10 @@ def discover_asset(
         if extraction.status != "indexed":
             extraction_status = extraction.status
             if policy.strict_indexing and extraction.status == "metadata_only":
-                extraction_status = "blocked_missing_dependency"
+                extraction_status = "blocked_by_policy"
                 metadata.update(_strict_metadata_only_metadata(extraction.message))
     if policy.strict_indexing and classification.extraction_tier == "metadata_only":
-        extraction_status = "blocked_missing_dependency"
+        extraction_status = "blocked_by_policy"
         metadata.update(_strict_metadata_only_metadata())
     return DiscoveredAsset(
         path=resolved,
@@ -806,7 +806,7 @@ def _strict_metadata_only_metadata(message: str | None = None) -> dict[str, obje
     return {
         "strict_indexing": True,
         "metadata_only_blocked": True,
-        "readiness_status": "blocked_missing_dependency",
+        "readiness_status": "blocked_by_policy",
         "readiness_reason": strict_metadata_only_message(message),
         "original_status": "metadata_only",
     }
@@ -826,6 +826,7 @@ def _blocking_policy_value(value: object) -> bool:
         "error",
         "fail",
         "fail_closed",
+        "blocked_by_policy",
         "blocked_missing_dependency",
     }
 

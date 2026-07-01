@@ -125,3 +125,26 @@ def test_operational_diagnostics_items_include_safe_remediation_actions():
     serialized = json.dumps(report).lower()
     assert "e:/private" not in serialized
     assert "budget.xls" in serialized
+
+
+def test_operational_diagnostics_distinguishes_blocked_status_guidance():
+    report = summarize_operational_diagnostics(
+        jobs={
+            "jobs": [
+                {"id": "job-policy", "job_family": "code", "status": "blocked_by_policy", "root_name": "docs", "last_error": "inline limit"},
+                {"id": "job-invalid", "job_family": "office", "status": "blocked_invalid_source", "root_name": "docs", "last_error": "Package not found"},
+                {"id": "job-dep", "job_family": "media", "status": "blocked_missing_dependency", "root_name": "docs", "last_error": "ffprobe missing"},
+            ]
+        },
+        root_name="docs",
+        include_details=True,
+    )
+
+    by_id = {item["target"]["id"]: item for item in report["items"]}
+
+    assert "include/exclude globs" in by_id["job-policy"]["user_action"]
+    assert "size limits" in by_id["job-policy"]["user_action"]
+    assert "repair, resave, rehydrate, or exclude" in by_id["job-invalid"]["user_action"]
+    assert "Install or configure" in by_id["job-dep"]["user_action"]
+    assert "retry_corpus_job" in {action["id"] for action in by_id["job-policy"]["remediation_actions"]}
+    assert "retry_corpus_job" in {action["id"] for action in by_id["job-invalid"]["remediation_actions"]}

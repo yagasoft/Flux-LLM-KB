@@ -18,6 +18,9 @@ from .extractors import (
 from .glob_policy import effective_glob_policy
 from .settings import SettingsService
 
+BLOCKED_EXTRACTION_STATUSES = frozenset({"blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source"})
+APPLIED_EXTRACTION_STATUSES = frozenset({"indexed", "metadata_only", *BLOCKED_EXTRACTION_STATUSES})
+
 
 @dataclass(frozen=True)
 class JobProcessResult:
@@ -120,7 +123,7 @@ def process_corpus_job(job: dict) -> JobProcessResult:
                     "corpus job was cancelled before staged extraction results were applied",
                     reason="cancelled_during_extraction",
                 )
-    elif staged_child and result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
+    elif staged_child and result.status in APPLIED_EXTRACTION_STATUSES:
         if job_id:
             applied = database.apply_staged_extraction_piece_for_job(
                 job_id=job_id,
@@ -133,7 +136,7 @@ def process_corpus_job(job: dict) -> JobProcessResult:
                     "corpus job was cancelled before staged extraction results were applied",
                     reason="cancelled_during_extraction",
                 )
-    elif result.status in {"indexed", "metadata_only", "blocked_missing_dependency"}:
+    elif result.status in APPLIED_EXTRACTION_STATUSES:
         if job_id:
             applied = database.apply_extraction_result_for_job(
                 job_id=job_id,
@@ -419,18 +422,18 @@ def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) ->
         {
             "strict_indexing": True,
             "metadata_only_blocked": True,
-            "readiness_status": "blocked_missing_dependency",
+            "readiness_status": "blocked_by_policy",
             "readiness_reason": message,
             "original_status": "metadata_only",
         }
     )
-    return ExtractionResult(status="blocked_missing_dependency", chunks=(), child_assets=(), metadata=metadata, message=message)
+    return ExtractionResult(status="blocked_by_policy", chunks=(), child_assets=(), metadata=metadata, message=message)
 
 
 def _strict_metadata_only_container_has_extracted_children(metadata: dict[str, Any], child_assets: tuple[Any, ...]) -> bool:
     if metadata.get("extractor") != "container":
         return False
-    if _metadata_int(metadata, "blocked_dependency_count") > 0:
+    if _metadata_int(metadata, "blocked_child_count") > 0 or _metadata_int(metadata, "blocked_dependency_count") > 0:
         return False
     if _metadata_int(metadata, "parsed_child_count") > 0:
         return True
@@ -439,7 +442,7 @@ def _strict_metadata_only_container_has_extracted_children(metadata: dict[str, A
 
 def _strict_indexed_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     metadata.pop("metadata_only_blocked", None)
-    if metadata.get("readiness_status") == "blocked_missing_dependency":
+    if metadata.get("readiness_status") in {"blocked_missing_dependency", "blocked_by_policy"}:
         metadata["readiness_status"] = "indexed"
         metadata["readiness_reason"] = "content_extracted"
     metadata["strict_indexing"] = True

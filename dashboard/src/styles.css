@@ -550,6 +550,11 @@ kbd {
   background: var(--surface-soft);
 }
 
+.icon-button.compact {
+  width: 28px;
+  height: 28px;
+}
+
 .table-toolbar {
   display: flex;
   justify-content: space-between;
@@ -1532,6 +1537,25 @@ kbd {
 
 .job-table .job-target {
   color: var(--ink);
+}
+
+.job-target-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.job-target-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-target-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
 }
 
 .job-table .job-error {

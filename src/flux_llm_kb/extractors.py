@@ -288,10 +288,16 @@ def image_metadata(path: str | Path) -> dict[str, Any]:
 
 
 def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str, relative_path: str | None = None) -> ExtractionResult:
-    if path.stat().st_size > policy.max_inline_bytes:
+    size_bytes = path.stat().st_size
+    if size_bytes > policy.max_inline_bytes:
         return ExtractionResult(
-            status="blocked_missing_dependency",
-            metadata={"extractor": extractor},
+            status="blocked_by_policy",
+            metadata={
+                "extractor": extractor,
+                "reason": "inline_extraction_limit",
+                "size_bytes": size_bytes,
+                "max_inline_bytes": policy.max_inline_bytes,
+            },
             message="text file exceeds inline extraction limit",
         )
     if extractor == "code":
@@ -1770,11 +1776,7 @@ def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
                 warning=str(exc),
             )
         if _is_invalid_package_error(exc):
-            return ExtractionResult(
-                status="blocked_missing_dependency",
-                metadata={"extractor": extractor, "reason": "invalid_package"},
-                message=str(exc),
-            )
+            return _invalid_package_result(exc, extractor=extractor)
         raise
     text = "\n".join(paragraph.text for paragraph in document.paragraphs).strip()
     chunks = _chunks_from_text(text, path.name)
@@ -1803,11 +1805,7 @@ def _extract_docx_package_xml(
         with ZipFile(path) as archive:
             document_xml = archive.read("word/document.xml")
     except (BadZipFile, KeyError) as exc:
-        return ExtractionResult(
-            status="blocked_missing_dependency",
-            metadata={**metadata, "reason": "invalid_package"},
-            message=str(exc),
-        )
+        return ExtractionResult(status="blocked_invalid_source", metadata={**metadata, "reason": "invalid_package"}, message=str(exc))
     try:
         root = ElementTree.fromstring(document_xml)
     except ElementTree.ParseError as exc:
@@ -1844,7 +1842,7 @@ def _is_invalid_package_error(exc: Exception) -> bool:
 
 def _invalid_package_result(exc: Exception, *, extractor: str) -> ExtractionResult:
     return ExtractionResult(
-        status="blocked_missing_dependency",
+        status="blocked_invalid_source",
         metadata={"extractor": extractor, "reason": "invalid_package"},
         message=str(exc),
     )
@@ -1855,7 +1853,12 @@ def _extract_pptx(path: Path, *, extractor: str = "pptx") -> ExtractionResult:
         from pptx import Presentation
     except ImportError:
         return ExtractionResult(status="blocked_missing_dependency", metadata={"extractor": extractor}, message="python-pptx not installed")
-    presentation = Presentation(str(path))
+    try:
+        presentation = Presentation(str(path))
+    except Exception as exc:
+        if _is_invalid_package_error(exc):
+            return _invalid_package_result(exc, extractor=extractor)
+        raise
     parts: list[str] = []
     for slide in presentation.slides:
         for shape in slide.shapes:
@@ -3274,6 +3277,7 @@ def _container_metadata(
         "max_depth": policy.container_max_depth,
         "parsed_child_count": 0,
         "skipped_child_count": 0,
+        "blocked_child_count": 0,
         "blocked_dependency_count": 0,
     }
     if member_prefix:
@@ -3294,9 +3298,10 @@ def _final_container_result(
     metadata["child_asset_count"] = len(children)
     metadata["total_uncompressed_bytes"] = total_uncompressed_bytes
     metadata["parsed_child_count"] = sum(1 for child in children if child.extraction_status == "indexed")
+    metadata["blocked_child_count"] = sum(1 for child in children if child.extraction_status.startswith("blocked_"))
     metadata["blocked_dependency_count"] = sum(1 for child in children if child.extraction_status == "blocked_missing_dependency")
     metadata["skipped_child_count"] = sum(
-        1 for child in children if child.extraction_status not in {"indexed", "blocked_missing_dependency"}
+        1 for child in children if child.extraction_status != "indexed" and not child.extraction_status.startswith("blocked_")
     )
     metadata.update(_container_visual_telemetry(children))
     return ExtractionResult(status="metadata_only", child_assets=tuple(children), metadata=metadata)

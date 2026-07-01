@@ -75,6 +75,13 @@ class FileActionRequest(BaseModel):
     action: str
 
 
+class JobFileActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    action: str
+
+
 @dataclass(frozen=True)
 class HostAgentClientError(RuntimeError):
     message: str
@@ -199,6 +206,35 @@ def perform_file_action(*, asset_id: str, action: str) -> dict[str, Any]:
         state = "locked" if _is_locked_error(exc) else "not_allowed"
         return _file_action_result(asset_id=asset_id, action=action, state=state, asset=asset, target=target, error=str(exc))
     return _file_action_result(asset_id=asset_id, action=action, state="opened", asset=asset, target=target)
+
+
+def perform_job_file_action(*, job_id: str, action: str) -> dict[str, Any]:
+    if action not in {"open", "reveal"}:
+        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed")
+
+    job = database.get_capture_job_for_file_action(job_id)
+    if job is None:
+        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed")
+
+    target = _resolve_known_asset_path(job)
+    if target is None:
+        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed", job=job)
+    if action == "open" and not target.exists():
+        return _job_file_action_result(job_id=job_id, action=action, state="missing", job=job, target=target)
+    if action == "reveal" and not target.exists() and not target.parent.exists():
+        return _job_file_action_result(job_id=job_id, action=action, state="missing", job=job, target=target)
+
+    try:
+        if action == "open":
+            _launch_default_app(target)
+        else:
+            _open_containing_folder(target)
+    except FileNotFoundError:
+        return _job_file_action_result(job_id=job_id, action=action, state="missing", job=job, target=target)
+    except (PermissionError, OSError) as exc:
+        state = "locked" if _is_locked_error(exc) else "not_allowed"
+        return _job_file_action_result(job_id=job_id, action=action, state=state, job=job, target=target, error=str(exc))
+    return _job_file_action_result(job_id=job_id, action=action, state="opened", job=job, target=target)
 
 
 class HostAgentWatcherLoop:
@@ -471,6 +507,10 @@ def create_app(*, start_watcher: bool = False):
     def file_action(req: FileActionRequest = Body(...)):
         return perform_file_action(asset_id=req.asset_id, action=req.action)
 
+    @app.post("/job-file-actions")
+    def job_file_action(req: JobFileActionRequest = Body(...)):
+        return perform_job_file_action(job_id=req.job_id, action=req.action)
+
     @app.post("/crawl/sync")
     def crawl_sync(req: SyncRequest = Body(...)):
         return _service().sync_corpus(root_name=req.root_name, path=req.path, dry_run=req.dry_run)
@@ -677,6 +717,22 @@ def remote_file_action(
         return {"state": "host_agent_offline", "message": str(exc), "asset_id": asset_id, "action": action}
 
 
+def remote_job_file_action(
+    *,
+    job_id: str,
+    action: str,
+    agent_url: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return _request_json(
+            "POST",
+            f"{_agent_url(agent_url)}/job-file-actions",
+            {"job_id": job_id, "action": action},
+        )
+    except HostAgentClientError as exc:
+        return {"state": "host_agent_offline", "message": str(exc), "job_id": job_id, "action": action}
+
+
 def path_requires_host_agent(path: str) -> bool:
     style = _path_style(path)
     if style in {"windows_drive", "windows_unc"} and platform.system() != "Windows":
@@ -880,6 +936,39 @@ def _file_action_result(
     }
 
 
+def _job_file_action_result(
+    *,
+    job_id: str,
+    action: str,
+    state: str,
+    job: dict[str, Any] | None = None,
+    target: Path | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    details = {
+        "job_id": job_id,
+        "action": action,
+        "state": state,
+        "root_name": str(job.get("root_name")) if job else None,
+        "path": str(job.get("path")) if job else None,
+        "target_path": str(target) if target else None,
+        "error": error,
+    }
+    database.record_audit_event(
+        event_type="host.job_file_action",
+        target_table="capture_jobs",
+        target_id=job_id,
+        details={key: value for key, value in details.items() if value is not None},
+    )
+    return {
+        "state": state,
+        "job_id": job_id,
+        "action": action,
+        "path": str(target) if target else None,
+        "message": error,
+    }
+
+
 def _launch_default_app(path: Path) -> None:
     system = platform.system()
     if system == "Windows":
@@ -903,6 +992,13 @@ def _reveal_in_folder(path: Path) -> None:
         result = run_no_window(["xdg-open", str(path.parent)], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise OSError(result.stderr.strip() or result.stdout.strip() or "reveal failed")
+
+
+def _open_containing_folder(path: Path) -> None:
+    if path.exists():
+        _reveal_in_folder(path)
+        return
+    _launch_default_app(path.parent)
 
 
 def _is_locked_error(exc: OSError) -> bool:

@@ -295,6 +295,23 @@ def test_host_file_action_endpoint_rejects_browser_supplied_path(monkeypatch):
     assert response.status_code == 422
 
 
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
+def test_host_job_file_action_endpoint_rejects_browser_supplied_path(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(host_agent, "perform_job_file_action", lambda **_kwargs: {"state": "opened"})
+    client = TestClient(host_agent.create_app())
+
+    response = client.post(
+        "/job-file-actions",
+        json={"job_id": "job-1", "action": "open", "path": "E:\\Unsafe\\from-browser.txt"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_host_file_action_rejects_unknown_asset(monkeypatch):
     audits: list[dict] = []
     monkeypatch.setattr(host_agent.database, "get_source_asset_for_file_action", lambda asset_id: None, raising=False)
@@ -392,6 +409,36 @@ def test_host_file_action_opens_known_asset_and_audits(monkeypatch, tmp_path):
     assert result["state"] == "opened"
     assert launched == [str(target.resolve())]
     assert audits[0]["details"]["state"] == "opened"
+
+
+def test_host_job_file_action_opens_containing_folder_for_missing_file(monkeypatch, tmp_path):
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    target = folder / "missing.pdf"
+    revealed: list[str] = []
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        host_agent.database,
+        "get_capture_job_for_file_action",
+        lambda job_id: {
+            "id": job_id,
+            "root_path": str(tmp_path),
+            "path": "docs/missing.pdf",
+            "status": "blocked_missing_dependency",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent, "_open_containing_folder", lambda path: revealed.append(str(path)), raising=False)
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    result = host_agent.perform_job_file_action(job_id="job-1", action="reveal")
+
+    assert result["state"] == "opened"
+    assert result["path"] == str(target.resolve())
+    assert revealed == [str(target.resolve())]
+    assert audits[0]["event_type"] == "host.job_file_action"
+    assert audits[0]["target_table"] == "capture_jobs"
+    assert audits[0]["target_id"] == "job-1"
 
 
 def test_host_file_action_reports_locked_when_os_denies_open(monkeypatch, tmp_path):

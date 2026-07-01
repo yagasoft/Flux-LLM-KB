@@ -109,6 +109,7 @@ Endpoints:
 - `GET /api/diagnostics/{section}` where `section` is `all`, `retrieval`, `watcher`, `workers`, `jobs`, or `mail`, with optional `root_name`, `status`, `family`, `since_hours`, and `include_details`
 - `POST /api/diagnostics/actions` with `action`, `target_type`, optional `target_id`, `root_name`, `family`, and `reason`; supported actions are confirmation-gated and never mutate settings
 - `POST /api/crawl/roots` and `PATCH /api/crawl/roots/{root_id}` accept `strict_indexing` to block metadata-only indexing behavior for go-live roots
+  - Corpus extraction blockers are stored as `blocked_by_policy` for configured policy/limit blocks, `blocked_invalid_source` for corrupt or invalid package/source inputs, and `blocked_missing_dependency` for real missing tools, modules, services, or configuration.
 - `GET /api/automation/status`
 - `POST /api/automation/run` with optional `mode`, `limit`, and `dry_run`
 - `GET /api/automation/actions?run_id=<id>&status=<proposed|applied|skipped|blocked|failed|all>&action=<name>&limit=<n>`
@@ -270,7 +271,7 @@ flux-kb code search "Tesseract stderr worker" --cwd "E:/LLM KB" --mode full-text
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
-flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
+flux-kb diagnostics all --root docs --status blocked_by_policy --family office --include-details
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
 flux-kb automation status
 flux-kb automation run --mode guarded --limit 25
@@ -448,6 +449,8 @@ clearing stale completed-job errors. Those actions run through `flux-kb
 diagnostics remediate`, `POST /api/diagnostics/actions`, or
 `kb.diagnostics_remediate`, append audit events, and always return
 `settings_mutated: false`.
+Diagnostic items include operator guidance that distinguishes policy blockers
+from invalid source/package inputs and real missing dependencies.
 Guarded operator automation is available through `flux-kb automation
 status|run|actions`, `GET /api/automation/status`, `POST
 /api/automation/run`, `GET /api/automation/actions`, and

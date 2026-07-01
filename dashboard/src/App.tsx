@@ -1292,6 +1292,16 @@ export default function App() {
     }
   }
 
+  async function markCorpusJobForDeletion(jobId: string) {
+    try {
+      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/delete-request`, "POST", { reason: "operator_cleanup" });
+      setToast("Corpus job marked for deletion after retention.");
+      await load();
+    } catch (error) {
+      setToast(`Corpus job deletion mark failed: ${errorMessage(error)}`);
+    }
+  }
+
   async function applyJobFilters(filters: JobHistoryFilters) {
     setJobFilters(filters);
     setJobOffset(0);
@@ -1784,6 +1794,15 @@ export default function App() {
     }
   }
 
+  async function runJobFileAction(jobId: string, action: "open" | "reveal") {
+    try {
+      const payload = await sendJson<FileActionResponse>(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/file-actions`, "POST", { action });
+      setToast(fileActionToast(action, payload.state, action === "reveal" ? "Open containing folder" : undefined));
+    } catch (error) {
+      setToast(`Job file action failed: ${errorMessage(error)}`);
+    }
+  }
+
   const health = state.health;
   const runtime = health.runtime ?? {};
   const databaseChecks = health.database?.checks ?? {};
@@ -2026,6 +2045,8 @@ export default function App() {
             onCancelOutlookRequest={(requestId) => void cancelOutlookRequest(requestId)}
             onCancelCorpusJob={(jobId) => void cancelCorpusJob(jobId)}
             onRetryCorpusJob={(jobId) => void retryCorpusJob(jobId)}
+            onMarkCorpusJobForDeletion={(jobId) => void markCorpusJobForDeletion(jobId)}
+            onJobFileAction={(jobId, action) => void runJobFileAction(jobId, action)}
           />
         )}
       </main>
@@ -3547,12 +3568,12 @@ function JobRows({ jobs }: { jobs: Array<Record<string, unknown>> }) {
 
 function RootStateBadge({ state }: { state?: string }) {
   const normalized = state ?? "unknown";
-  const label = LOCK_TOLERANT_STATE_LABELS[normalized] ?? normalized;
+  const label = LOCK_TOLERANT_STATE_LABELS[normalized] ?? STATUS_LABELS[normalized] ?? normalized;
   const tone = ["watching", "indexed", "completed"].includes(normalized)
     ? "enabled"
     : ["queued", "processing", "processing_staged", "crawling", "changed", "watch_enabled", "pending_stable", "retrying_locked"].includes(normalized)
       ? "info"
-      : ["blocked", "failed", "stale", "deleted", "metadata_only", "blocked_missing_dependency", "blocked_locked"].includes(normalized)
+      : ["blocked", "failed", "stale", "deleted", "metadata_only", "blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source", "blocked_locked"].includes(normalized)
         ? "warning"
         : "";
   return <span className={`state-pill ${tone}`}>{label}</span>;
@@ -5103,7 +5124,9 @@ function JobsTab({
   onPageJobHistory,
   onCancelOutlookRequest,
   onCancelCorpusJob,
-  onRetryCorpusJob
+  onRetryCorpusJob,
+  onMarkCorpusJobForDeletion,
+  onJobFileAction
 }: {
   state: LoadState;
   jobFilters: JobHistoryFilters;
@@ -5114,6 +5137,8 @@ function JobsTab({
   onCancelOutlookRequest: (requestId: string) => void;
   onCancelCorpusJob: (jobId: string) => void;
   onRetryCorpusJob: (jobId: string) => void;
+  onMarkCorpusJobForDeletion: (jobId: string) => void;
+  onJobFileAction: (jobId: string, action: "open" | "reveal") => void;
 }) {
   const outlookJobs = activeOutlookRequests(state.outlook.pending_requests).map(outlookRequestJob);
   const corpusJobs = state.jobs.jobs ?? [];
@@ -5150,6 +5175,8 @@ function JobsTab({
           onCancelOutlookRequest={onCancelOutlookRequest}
           onCancelCorpusJob={onCancelCorpusJob}
           onRetryCorpusJob={onRetryCorpusJob}
+          onMarkCorpusJobForDeletion={onMarkCorpusJobForDeletion}
+          onJobFileAction={onJobFileAction}
         />
       </Panel>
       <Panel title="Worker Family Status">
@@ -5208,7 +5235,7 @@ function JobHistoryControls({
           options={options.statuses ?? []}
           allLabel="All statuses"
           pluralLabel="statuses"
-          optionLabel={humanizeIdentifier}
+          optionLabel={statusLabel}
           onToggle={(value) => toggleDraftValue("status", value)}
         />
         <JobFilterMultiSelect
@@ -5315,7 +5342,9 @@ function JobQueueTable({
   empty,
   onCancelOutlookRequest,
   onCancelCorpusJob,
-  onRetryCorpusJob
+  onRetryCorpusJob,
+  onMarkCorpusJobForDeletion,
+  onJobFileAction
 }: {
   jobs: Array<Record<string, unknown>>;
   label: string;
@@ -5323,6 +5352,8 @@ function JobQueueTable({
   onCancelOutlookRequest?: (requestId: string) => void;
   onCancelCorpusJob?: (jobId: string) => void;
   onRetryCorpusJob?: (jobId: string) => void;
+  onMarkCorpusJobForDeletion?: (jobId: string) => void;
+  onJobFileAction?: (jobId: string, action: "open" | "reveal") => void;
 }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   const [toolInvocationsByJob, setToolInvocationsByJob] = useState<Record<string, JobToolInvocationState>>({});
@@ -5377,13 +5408,42 @@ function JobQueueTable({
             const outlookRequest = stringFromUnknown(job.job_type) === "outlook_sync_request";
             const cancellableCorpusJob = isCancelableCorpusJob(job, status);
             const retryableCorpusJob = isRetryableCorpusJob(job, status);
+            const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
+            const deletionMarkableCorpusJob = isDeletionMarkableCorpusJob(job, status) && !deletionRequested;
+            const targetActionable = isActionableJobTarget(job, payload, target);
             const progress = jobProgressSummary(job);
             return (
               <Fragment key={id}>
                 <tr>
                   <td><JobStatusBadge status={displayStatus} /></td>
                   <td><strong>{jobTypeLabel(stringFromUnknown(job.job_type))}</strong></td>
-                  <td className="job-target" title={target.path}>{target.path}</td>
+                  <td className="job-target" title={target.path}>
+                    <div className="job-target-cell">
+                      <span className="job-target-path">{target.path}</span>
+                      {targetActionable ? (
+                        <span className="job-target-actions">
+                          <button
+                            className="icon-button compact"
+                            type="button"
+                            title="Open file"
+                            aria-label={`Open job target file ${target.path}`}
+                            onClick={() => onJobFileAction?.(id, "open")}
+                          >
+                            <ExternalLink size={15} />
+                          </button>
+                          <button
+                            className="icon-button compact"
+                            type="button"
+                            title="Open containing folder"
+                            aria-label={`Open containing folder for job target ${target.path}`}
+                            onClick={() => onJobFileAction?.(id, "reveal")}
+                          >
+                            <FolderOpen size={15} />
+                          </button>
+                        </span>
+                      ) : null}
+                    </div>
+                  </td>
                   <td>{target.root}</td>
                   <td>{numberFromUnknown(job.attempts) ?? 0}</td>
                   <td>{formatDate(stringFromUnknown(job.updated_at))}</td>
@@ -5420,6 +5480,17 @@ function JobQueueTable({
                         <Trash2 size={15} /> Cancel
                       </button>
                     ) : null}
+                    {deletionMarkableCorpusJob ? (
+                      <button
+                        className="row-button warning"
+                        type="button"
+                        aria-label={`Mark corpus job ${id} for deletion`}
+                        onClick={() => onMarkCorpusJobForDeletion?.(id)}
+                      >
+                        <Trash2 size={15} /> Mark for deletion
+                      </button>
+                    ) : null}
+                    {deletionRequested ? <span className="state-pill warning">Marked for deletion</span> : null}
                     <button
                       className="row-button"
                       type="button"
@@ -5460,8 +5531,8 @@ function JobDetailRow({
   const progress = jobProgressSummary(job);
   const details = [
     ["Job id", id],
-    ["Status", humanizeIdentifier(status)],
-    ["Result", humanizeIdentifier(stringFromUnknown(telemetry.result_status) ?? "")],
+    ["Status", statusLabel(status)],
+    ["Result", statusLabel(stringFromUnknown(telemetry.result_status) ?? "")],
     ["Job type", jobTypeLabel(stringFromUnknown(job.job_type))],
     ["Root", target.root],
     ["Path", target.path],
@@ -5479,6 +5550,9 @@ function JobDetailRow({
     ["Files seen", stringFromUnknown(telemetry.files_seen) ?? numberFromUnknown(telemetry.files_seen)?.toString()],
     ["Files changed", stringFromUnknown(telemetry.files_changed) ?? numberFromUnknown(telemetry.files_changed)?.toString()],
     ["Jobs queued", stringFromUnknown(telemetry.jobs_queued) ?? numberFromUnknown(telemetry.jobs_queued)?.toString()],
+    ["Delete requested", formatDate(stringFromUnknown(job.delete_requested_at))],
+    ["Delete requested by", stringFromUnknown(job.delete_requested_by)],
+    ["Delete reason", stringFromUnknown(job.delete_reason)],
     ["Attempts", String(numberFromUnknown(job.attempts) ?? 0)],
     ["Created", formatDate(stringFromUnknown(job.created_at))],
     ["Updated", formatDate(stringFromUnknown(job.updated_at))]
@@ -5566,7 +5640,7 @@ function JobStatusBadge({ status }: { status: string }) {
         : status.startsWith("blocked") || status.startsWith("cancelled") || status === "metadata_only" || status === "completed_metadata_only"
           ? "warning"
           : "";
-  return <span className={`state-pill ${tone}`}>{humanizeIdentifier(status)}</span>;
+  return <span className={`state-pill ${tone}`}>{statusLabel(status)}</span>;
 }
 
 function jobId(job: Record<string, unknown>, index: number) {
@@ -5641,6 +5715,11 @@ function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown
   return { path, root };
 }
 
+function isActionableJobTarget(job: Record<string, unknown>, payload: Record<string, unknown>, target: { path: string; root: string }) {
+  const type = stringFromUnknown(job.job_type) ?? "";
+  return type.startsWith("corpus_") && Boolean(stringFromUnknown(payload.path)) && target.path !== "Root sync" && target.path !== "No path";
+}
+
 function jobTypeLabel(value?: string) {
   return humanizeIdentifier(value?.replace(/^corpus_/, "") ?? "job");
 }
@@ -5655,6 +5734,15 @@ function isRetryableCorpusJob(job: Record<string, unknown>, status: string) {
   return type.startsWith("corpus_") && (
     status === "failed"
     || status === "retrying_locked"
+    || status.startsWith("blocked_")
+    || status.startsWith("cancelled_")
+  );
+}
+
+function isDeletionMarkableCorpusJob(job: Record<string, unknown>, status: string) {
+  const type = stringFromUnknown(job.job_type) ?? "";
+  return type.startsWith("corpus_") && (
+    status === "failed"
     || status.startsWith("blocked_")
     || status.startsWith("cancelled_")
   );
@@ -5683,6 +5771,16 @@ function outlookRequestJob(request: OutlookSyncRequest): Record<string, unknown>
       result: request.result
     }
   };
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  blocked_by_policy: "Blocked by policy",
+  blocked_invalid_source: "Invalid source",
+  blocked_missing_dependency: "Missing dependency"
+};
+
+function statusLabel(value: string) {
+  return STATUS_LABELS[value] ?? humanizeIdentifier(value);
 }
 
 function humanizeIdentifier(value: string) {
@@ -6535,8 +6633,8 @@ function toastTone(message: string): "success" | "warning" | "error" {
   return "success";
 }
 
-function fileActionToast(action: "open" | "reveal", state?: FileActionResponse["state"]) {
-  const label = action === "open" ? "Open" : "Reveal";
+function fileActionToast(action: "open" | "reveal", state?: FileActionResponse["state"], labelOverride?: string) {
+  const label = labelOverride ?? (action === "open" ? "Open" : "Reveal");
   if (state === "opened") return `${label} request opened.`;
   if (state === "missing") return `${label} request could not find the file.`;
   if (state === "deleted") return `${label} request is unavailable because the asset is deleted from the index.`;

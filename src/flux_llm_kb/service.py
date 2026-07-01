@@ -3355,12 +3355,16 @@ class KnowledgeService:
                     telemetry=telemetry,
                 )
                 cancelled_unseen_asset += 1
-            elif process_result.status == "blocked_missing_dependency":
+            elif process_result.status in {"blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source"}:
+                kwargs: dict[str, Any] = {}
+                if process_result.status != "blocked_missing_dependency":
+                    kwargs["status"] = process_result.status
                 database.block_corpus_job(
                     job_id=job["id"],
-                    error=process_result.message or "blocked_missing_dependency",
+                    error=process_result.message or process_result.status,
                     duration_ms=duration_ms,
                     telemetry=telemetry,
+                    **kwargs,
                 )
                 blocked += 1
             elif process_result.status == "retrying_locked":
@@ -3433,7 +3437,7 @@ class KnowledgeService:
                 retried += 1
         repaired = database.repair_extracted_corpus_asset_statuses(root_name=root_name)
         cleared_errors = database.clear_completed_corpus_job_errors(root_name=root_name)
-        tool_invocation_purge = self._purge_expired_job_tool_invocations()
+        capture_job_purge = self._purge_expired_capture_jobs()
         database.record_audit_event(
             event_type="corpus.backfill",
             details={
@@ -3455,8 +3459,9 @@ class KnowledgeService:
                 "cancelled_duplicate": cancelled["cancelled"],
                 "repaired_assets": repaired["repaired"],
                 "cleared_completed_errors": cleared_errors["cleared"],
-                "purged_tool_invocations": tool_invocation_purge.get("purged", 0),
-                "tool_invocation_purge_error": tool_invocation_purge.get("error_type"),
+                "purged_capture_jobs": capture_job_purge.get("purged", 0),
+                "capture_job_retention_days": capture_job_purge.get("retention_days", 7),
+                "capture_job_purge_error": capture_job_purge.get("error_type"),
                 "workers": effective_workers,
             },
         )
@@ -3479,8 +3484,9 @@ class KnowledgeService:
             "cancelled_duplicate": cancelled["cancelled"],
             "repaired_assets": repaired["repaired"],
             "cleared_completed_errors": cleared_errors["cleared"],
-            "purged_tool_invocations": tool_invocation_purge.get("purged", 0),
-            "tool_invocation_purge_error": tool_invocation_purge.get("error_type"),
+            "purged_capture_jobs": capture_job_purge.get("purged", 0),
+            "capture_job_retention_days": capture_job_purge.get("retention_days", 7),
+            "capture_job_purge_error": capture_job_purge.get("error_type"),
             "jobs": claimed,
         }
 
@@ -3519,11 +3525,11 @@ class KnowledgeService:
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
         return job, duration_ms, process_result
 
-    def _purge_expired_job_tool_invocations(self) -> dict[str, Any]:
+    def _purge_expired_capture_jobs(self) -> dict[str, Any]:
         try:
-            return database.purge_expired_capture_job_tool_invocations(retention_hours=24)
+            return database.purge_expired_capture_jobs(retention_days=7)
         except Exception as exc:
-            return {"purged": 0, "retention_hours": 24, "error_type": exc.__class__.__name__}
+            return {"purged": 0, "retention_days": 7, "error_type": exc.__class__.__name__}
 
     def _process_corpus_sync_job(self, job: dict[str, Any]):
         from .worker import JobProcessResult

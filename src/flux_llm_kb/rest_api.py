@@ -13,6 +13,7 @@ from .host_agent import (
     remote_sync,
     remote_validate_path,
     remote_file_action,
+    remote_job_file_action,
     validate_host_path,
 )
 from .error_diagnostics import (
@@ -128,6 +129,14 @@ def create_app():
         root_name: str | None = None
         scope_mode: str = "local_first"
         filters: dict | None = None
+
+    class JobDeleteRequest(BaseModel):
+        reason: str = "operator_cleanup"
+
+    class JobFileActionRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        action: str
 
     class RetrievalBenchmarkRunRequest(BaseModel):
         suite: str = "standard"
@@ -674,6 +683,24 @@ def create_app():
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/dashboard/jobs/{job_id}/delete-request")
+    def dashboard_job_delete_request(job_id: str, request: JobDeleteRequest | None = Body(None)):
+        payload = database.mark_capture_job_for_deletion(
+            job_id=job_id,
+            actor="dashboard",
+            reason=(request.reason if request else "operator_cleanup"),
+        )
+        if not payload.get("delete_requested"):
+            status_code = 404 if payload.get("status") == "not_found" else 409
+            raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job cannot be marked for deletion.")
+        return payload
+
+    @app.post("/api/dashboard/jobs/{job_id}/file-actions")
+    def dashboard_job_file_action(job_id: str, request: JobFileActionRequest = Body(...)):
+        if request.action not in {"open", "reveal"}:
+            raise HTTPException(status_code=400, detail="job file action must be open or reveal")
+        return host_agent_job_file_action(job_id=job_id, action=request.action)
 
     @app.get("/api/dashboard/retrieval-stats")
     def dashboard_retrieval_stats():
@@ -1812,6 +1839,10 @@ def _run_indexer_reliability_with_benchmark_proxy(service: KnowledgeService, req
 
 def host_agent_file_action(*, asset_id: str, action: str) -> dict:
     return remote_file_action(asset_id=asset_id, action=action)
+
+
+def host_agent_job_file_action(*, job_id: str, action: str) -> dict:
+    return remote_job_file_action(job_id=job_id, action=action)
 
 
 def _crawl_root_error(message: str, *, root_name: str | None = None, root_path: str | None = None) -> FluxApiError:

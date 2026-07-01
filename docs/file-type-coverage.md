@@ -9,8 +9,9 @@ parser or local tool exists.
 For broad or important go-live roots, enable strict indexing. In that mode,
 metadata-only outcomes are not treated as searchable indexed knowledge:
 unsupported files must be excluded by glob policy or recorded as visible
-`blocked_missing_dependency` work until the required local extractor is
-installed.
+`blocked_by_policy` work. Real missing tools, modules, services, or local
+configuration still use `blocked_missing_dependency`; corrupt, placeholder, or
+invalid package/source files use `blocked_invalid_source`.
 
 ## Support Tiers
 

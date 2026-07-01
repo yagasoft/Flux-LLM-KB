@@ -147,7 +147,10 @@ host-agent installs use the `processors` Python extra and still depend on host
 tools such as Office COM, LibreOffice, archive tools, and media utilities being
 available on the host PATH. Production host launchers also use
 `%FLUX_KB_INSTALL_ROOT%\tools\resvg\resvg.exe` as `FLUX_KB_SVG_RENDERER` when
-that portable renderer exists.
+that portable renderer exists. Policy limits such as strict-indexing
+metadata-only outcomes or text/code files over the configured inline size limit
+are reported as `blocked_by_policy`; corrupt or placeholder Office/package
+inputs are reported as `blocked_invalid_source`.
 
 Install Outlook COM support on Windows when you want local Outlook catch-up:
 
@@ -213,7 +216,7 @@ flux-kb code search build_invoice --root app --language python --relationship ca
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
-flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
+flux-kb diagnostics all --root docs --status blocked_by_policy --family office --include-details
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
 flux-kb diagnostics remediate repair_asset_statuses --target-type root --root docs --reason "operator cleanup"
 flux-kb diagnostics remediate clear_completed_errors --target-type root --root docs --reason "operator cleanup"
@@ -247,9 +250,11 @@ flux-kb mail sync --profile gmail-capture
 ```
 
 Use `--strict-indexing` for go-live roots. Strict roots do not treat
-`metadata_only` files as indexed knowledge: unsupported or dependency-missing
-files are blocked visibly as `blocked_missing_dependency` or excluded by glob
-policy, and retrieval filters out any remaining legacy metadata-only chunks.
+`metadata_only` files as indexed knowledge: unsupported metadata-only outcomes
+are blocked visibly as `blocked_by_policy`, real missing extractor dependencies
+remain `blocked_missing_dependency`, invalid/corrupt source files are
+`blocked_invalid_source`, and retrieval filters out any remaining legacy
+metadata-only chunks.
 Use `flux-kb crawl edit <root> --allow-metadata-only` only for a limited pilot
 root where metadata-only discovery is intentional.
 

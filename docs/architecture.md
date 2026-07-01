@@ -262,10 +262,12 @@ cloud services or blocking normal watch/crawl loops.
 Go-live roots should set `strict_indexing=true` in root metadata, usually via
 `flux-kb crawl add <path> --name <root> --strict-indexing` or `flux-kb crawl edit
 <root> --strict-indexing`. Under strict indexing, foreground scans and deferred
-workers convert metadata-only extraction outcomes to `blocked_missing_dependency`
+workers convert metadata-only extraction outcomes to `blocked_by_policy`
 with diagnostic metadata, and corpus retrieval excludes any remaining legacy
-`metadata_only` assets. Operators must either install the missing local extractor
-or exclude that file family with glob policy before treating the root as ready.
+`metadata_only` assets. Operators must either adjust strict-indexing/glob/size
+policy, install a real missing local extractor where one is reported as
+`blocked_missing_dependency`, or exclude that file family before treating the
+root as ready.
 
 Code-like files use parser-backed chunking when a reliable local parser exists.
 The first parser layer uses Python `ast` for modules, classes, functions,
@@ -344,7 +346,9 @@ loops.
 Deferred workers claim jobs with `FOR UPDATE SKIP LOCKED`, use retry/cooldown
 state in `capture_jobs`, and do not call cloud providers by default. Jobs move to
 explicit terminal states such as `completed`, `metadata_only`, or
-`blocked_missing_dependency`; locked reads move through `retrying_locked` with
+`blocked_missing_dependency`; policy limits and strict metadata-only outcomes
+use `blocked_by_policy`, corrupt or invalid package/source inputs use
+`blocked_invalid_source`, and locked reads move through `retrying_locked` with
 `next_attempt_at` cooldown and then `blocked_locked` after configured attempts.
 If a Windows host-agent local file is locked and `host_agent.vss_enabled` is
 true, the worker first retries that extraction through a short-lived VSS
@@ -370,6 +374,13 @@ is not fresh, so a restarted deployment using the same aggregate component name
 does not hide interrupted work. Non-lock worker failures retry through
 `worker.failure_max_attempts` and then become terminal `failed` jobs with
 duration and telemetry instead of cycling forever as pending work.
+Worker cleanup deletes completed corpus job rows after seven days, measured from
+`completed_at` with `updated_at` as the legacy fallback. Operators can mark
+terminal failed, blocked, or cancelled corpus jobs with `delete_requested_at`,
+`delete_requested_by`, and `delete_reason`; those marked rows use the same
+seven-day terminal-age window. Deleting a `capture_jobs` row also deletes its
+job-scoped console stdout/stderr records through the
+`capture_job_tool_invocations` foreign-key cascade.
 `corpus_embed` jobs route to vector refresh instead of file extraction and
 support owner class, optional root scoping, stale-only refresh, and bounded
 limits. Completion, retry, failed, and blocked transitions record last duration
@@ -606,7 +617,7 @@ flux-kb code search "Tesseract stderr worker" --cwd "E:/LLM KB" --mode full-text
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
-flux-kb diagnostics all --root docs --status blocked_missing_dependency --family office --include-details
+flux-kb diagnostics all --root docs --status blocked_by_policy --family office --include-details
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
 flux-kb crawl backfill --root docs --family office --limit 20
 ```

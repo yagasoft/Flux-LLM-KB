@@ -146,6 +146,24 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "stderr text NOT NULL DEFAULT ''" in tool_output_migration.sql
     assert "idx_capture_job_tool_invocations_job_started" in tool_output_migration.sql
     assert "idx_capture_job_tool_invocations_retention" in tool_output_migration.sql
+    job_retention_migration = next(item for item in migrations if item.name == "0030_capture_job_retention")
+    assert "ADD COLUMN IF NOT EXISTS delete_requested_at" in job_retention_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS delete_requested_by" in job_retention_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS delete_reason" in job_retention_migration.sql
+    assert "idx_capture_jobs_completed_retention" in job_retention_migration.sql
+    assert "idx_capture_jobs_marked_retention" in job_retention_migration.sql
+    blocked_taxonomy_migration = next(item for item in migrations if item.name == "0031_capture_job_blocked_status_taxonomy")
+    assert "blocked_by_policy" in blocked_taxonomy_migration.sql
+    assert "blocked_invalid_source" in blocked_taxonomy_migration.sql
+    assert "inline_extraction_limit" in blocked_taxonomy_migration.sql
+    assert "metadata_only_blocked" in blocked_taxonomy_migration.sql
+    assert "Package not found" in blocked_taxonomy_migration.sql
+    assert "BadZipFile" in blocked_taxonomy_migration.sql
+    assert "invalid_package" in blocked_taxonomy_migration.sql
+    assert "WHERE status = 'blocked_missing_dependency'" in blocked_taxonomy_migration.sql
+    assert "status = 'blocked_by_policy'" in blocked_taxonomy_migration.sql
+    assert "status = 'blocked_invalid_source'" in blocked_taxonomy_migration.sql
+    assert "status <> 'blocked_missing_dependency'" not in blocked_taxonomy_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

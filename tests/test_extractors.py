@@ -15,6 +15,8 @@ from urllib.parse import quote
 from zipfile import ZipFile
 import zlib
 
+import pytest
+
 from flux_llm_kb import extractors
 from flux_llm_kb.crawler import AssetChunk, CorpusPolicy
 from flux_llm_kb.extractors import (
@@ -232,6 +234,21 @@ def test_extract_msg_blocks_when_msgconvert_is_missing(monkeypatch, tmp_path):
     assert result.metadata["extractor"] == "mail"
     assert result.metadata["mail_format"] == "msg"
     assert result.metadata["dependency"] == "msgconvert"
+
+
+@pytest.mark.parametrize(("filename", "extractor"), [("large.txt", "text"), ("large.py", "code")])
+def test_extract_large_text_and_code_blocks_by_policy(tmp_path, filename, extractor):
+    path = tmp_path / filename
+    path.write_text("print('large')\n" * 10, encoding="utf-8")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=8))
+
+    assert result.status == "blocked_by_policy"
+    assert result.message == "text file exceeds inline extraction limit"
+    assert result.metadata["extractor"] == extractor
+    assert result.metadata["reason"] == "inline_extraction_limit"
+    assert result.metadata["max_inline_bytes"] == 8
+    assert result.metadata["size_bytes"] == path.stat().st_size
 
 
 def test_extract_calendar_and_contact_files_use_conservative_text_summaries(tmp_path):
@@ -1893,7 +1910,7 @@ def test_extract_docx_blocks_invalid_package_without_retryable_failure(monkeypat
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
-    assert result.status == "blocked_missing_dependency"
+    assert result.status == "blocked_invalid_source"
     assert "Package not found" in result.message
     assert result.metadata["extractor"] == "docx"
     assert result.metadata["reason"] == "invalid_package"
@@ -2993,7 +3010,7 @@ def test_extract_invalid_xlsx_blocks_as_invalid_package(tmp_path):
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
-    assert result.status == "blocked_missing_dependency"
+    assert result.status == "blocked_invalid_source"
     assert result.chunks == ()
     assert result.metadata["extractor"] == "xlsx"
     assert result.metadata["reason"] == "invalid_package"
@@ -3006,7 +3023,7 @@ def test_extract_large_invalid_xlsx_sample_first_blocks_as_invalid_package(tmp_p
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path, max_inline_bytes=8))
 
-    assert result.status == "blocked_missing_dependency"
+    assert result.status == "blocked_invalid_source"
     assert result.chunks == ()
     assert result.metadata["extractor"] == "xlsx"
     assert result.metadata["reason"] == "invalid_package"

@@ -156,6 +156,7 @@ def _item(
         "family": family,
         "root_name": root_name,
         "summary": summary,
+        "user_action": _user_action(section=section, status=status),
         "evidence": evidence,
         "follow_up_command": _follow_up_command(section, row),
         "target": {"type": "job" if section == "jobs" else section.rstrip("s"), "id": target_id},
@@ -179,6 +180,20 @@ def _summary(*, section: str, status: str, row: dict[str, Any]) -> str:
     if section == "mail":
         return f"Mail sync {row.get('profile_name') or 'profile'} is {status}."
     return f"{section} diagnostic is {status}."
+
+
+def _user_action(*, section: str, status: str) -> str:
+    if section == "jobs" and status == "blocked_by_policy":
+        return "Review include/exclude globs, strict indexing rules, and size limits before retrying or excluding the file."
+    if section == "jobs" and status == "blocked_invalid_source":
+        return "Try to repair, resave, rehydrate, or exclude the source file before retrying."
+    if section == "jobs" and status == "blocked_missing_dependency":
+        return "Install or configure the missing extractor dependency before retrying."
+    if section == "jobs" and status.startswith("blocked_"):
+        return "Inspect the blocker details and retry only after the underlying condition is resolved."
+    if section == "jobs" and status == "failed":
+        return "Inspect the last error and retry after correcting the failed extraction condition."
+    return "Review the diagnostic evidence and run only the scoped remediation actions that match the issue."
 
 
 def _follow_up_command(section: str, row: dict[str, Any]) -> str:
@@ -205,7 +220,14 @@ def _remediation_actions(
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     normalized_family = family or None
-    if section == "jobs" and target_id and status in {"failed", "blocked_missing_dependency", "blocked_locked", "retrying_locked"}:
+    if section == "jobs" and target_id and status in {
+        "failed",
+        "blocked_missing_dependency",
+        "blocked_by_policy",
+        "blocked_invalid_source",
+        "blocked_locked",
+        "retrying_locked",
+    }:
         actions.append(
             _action(
                 action_id="retry_corpus_job",

@@ -105,14 +105,15 @@ def test_update_monitored_root_blocks_existing_metadata_only_assets_when_strict(
     assert result["metadata"]["strict_indexing"] is True
     assert "extraction_status = 'metadata_only'" in sql
     assert "DELETE FROM asset_chunks WHERE asset_id = ANY(%s::uuid[])" in sql
-    assert "SET extraction_status = 'blocked_missing_dependency'" in sql
+    assert "SET extraction_status = 'blocked_by_policy'" in sql
     update_params = next(
         params
         for statement, params in executed
-        if "SET extraction_status = 'blocked_missing_dependency'" in statement
+        if "SET extraction_status = 'blocked_by_policy'" in statement
     )
     assert update_params[1] == ["asset-1", "asset-2"]
     assert json.loads(update_params[0])["metadata_only_blocked"] is True
+    assert json.loads(update_params[0])["readiness_status"] == "blocked_by_policy"
 
 
 def test_backfill_episode_workspace_scope_updates_explicit_episode_ids(monkeypatch):
@@ -2724,6 +2725,9 @@ def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch)
                     None,
                     None,
                     None,
+                    timestamp,
+                    "dashboard",
+                    "operator_cleanup",
                 )
             ]
 
@@ -2755,6 +2759,9 @@ def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch)
 
     sql, params = executed[0]
     assert jobs[0]["id"] == "job-1"
+    assert jobs[0]["delete_requested_at"] == timestamp.isoformat()
+    assert jobs[0]["delete_requested_by"] == "dashboard"
+    assert jobs[0]["delete_reason"] == "operator_cleanup"
     assert "status = ANY(%s::text[])" in sql
     assert "payload->>'root_name' = ANY(%s::text[])" in sql
     assert "job_type = ANY(%s::text[])" in sql
@@ -3050,6 +3057,199 @@ def test_purge_expired_capture_job_tool_invocations_deletes_only_completed_jobs_
     assert params == (24,)
 
 
+def test_purge_expired_capture_jobs_deletes_completed_and_marked_terminal_jobs(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (5,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.purge_expired_capture_jobs(retention_days=7)
+
+    sql, params = executed[0]
+    assert result == {"purged": 5, "retention_days": 7}
+    assert "DELETE FROM capture_jobs job" in sql
+    assert "job.job_type LIKE 'corpus_%%'" in sql
+    assert "job.status = 'completed'" in sql
+    assert "job.delete_requested_at IS NOT NULL" in sql
+    assert "job.status LIKE 'blocked_%%'" in sql
+    assert "job.status LIKE 'cancelled_%%'" in sql
+    assert "job.status = 'failed'" in sql
+    assert "COALESCE(job.completed_at, job.updated_at) < now() - make_interval(days => %s)" in sql
+    assert "job.status IN ('pending', 'running', 'retrying_locked', 'retrying_vss_failed')" not in sql
+    assert params == (7, 7)
+
+
+def test_mark_capture_job_for_deletion_marks_terminal_jobs_and_audits(monkeypatch):
+    executed = []
+    rows = [
+        ("job-1", "blocked_missing_dependency", None, None, None),
+        ("job-1", "blocked_missing_dependency", "2026-07-01T09:00:00+00:00", "dashboard", "operator_cleanup"),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.mark_capture_job_for_deletion(job_id="job-1", actor="dashboard", reason="operator_cleanup")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {
+        "job_id": "job-1",
+        "status": "blocked_missing_dependency",
+        "delete_requested": True,
+        "delete_requested_at": "2026-07-01T09:00:00+00:00",
+        "delete_requested_by": "dashboard",
+        "delete_reason": "operator_cleanup",
+    }
+    assert "SELECT id::text, status, delete_requested_at" in sql
+    assert "UPDATE capture_jobs" in sql
+    assert "delete_requested_at = COALESCE(delete_requested_at, now())" in sql
+    assert "delete_requested_by = COALESCE(delete_requested_by, %s)" in sql
+    assert "VALUES ('capture_job.deletion_requested', 'capture_jobs', %s, %s::jsonb)" in sql
+    assert "updated_at = now()" not in executed[1][0]
+    assert executed[1][1] == ("dashboard", "operator_cleanup", "job-1")
+
+
+def test_mark_capture_job_for_deletion_is_idempotent_for_already_marked_jobs(monkeypatch):
+    executed = []
+    rows = [("job-1", "failed", "2026-07-01T09:00:00+00:00", "dashboard", "operator_cleanup")]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.mark_capture_job_for_deletion(job_id="job-1", actor="dashboard")
+
+    assert result == {
+        "job_id": "job-1",
+        "status": "failed",
+        "delete_requested": True,
+        "delete_requested_at": "2026-07-01T09:00:00+00:00",
+        "delete_requested_by": "dashboard",
+        "delete_reason": "operator_cleanup",
+    }
+    assert len(executed) == 1
+    assert "SELECT id::text, status, delete_requested_at" in executed[0][0]
+
+
+def test_mark_capture_job_for_deletion_rejects_active_jobs(monkeypatch):
+    executed = []
+    rows = [("job-running", "running", None, None, None)]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.mark_capture_job_for_deletion(job_id="job-running", actor="dashboard")
+
+    assert result["job_id"] == "job-running"
+    assert result["status"] == "running"
+    assert result["delete_requested"] is False
+    assert "cannot be marked for deletion" in result["error"]
+    assert len(executed) == 1
+
+
 def test_requeue_corpus_job_allows_cancelled_states_for_operator_retry(monkeypatch):
     executed = []
 
@@ -3091,6 +3291,9 @@ def test_requeue_corpus_job_allows_cancelled_states_for_operator_retry(monkeypat
     assert "status = 'retrying_locked'" in sql
     assert "status = 'retrying_vss_failed'" in sql
     assert "status LIKE 'cancelled_%%'" in sql
+    assert "delete_requested_at = NULL" in sql
+    assert "delete_requested_by = NULL" in sql
+    assert "delete_reason = NULL" in sql
 
 
 def test_cancel_corpus_job_marks_pending_jobs_cancelled(monkeypatch):
@@ -3740,7 +3943,7 @@ def test_apply_extraction_result_strips_stale_strict_blocked_metadata(monkeypatc
 
     sql = "\n".join(statement for statement, _params in executed)
     assert "metadata - 'metadata_only_blocked' - 'readiness_reason'" in sql
-    assert "COALESCE(%s::jsonb->>'readiness_status', '') <> 'blocked_missing_dependency'" in sql
+    assert "COALESCE(%s::jsonb->>'readiness_status', '') NOT LIKE 'blocked_%%'" in sql
 
 
 def test_apply_extraction_result_for_job_locks_running_job_before_writing(monkeypatch):
@@ -4272,7 +4475,7 @@ def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
     source = Path(database.__file__).read_text(encoding="utf-8")
 
     assert "source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash" in source
-    assert "source_assets.extraction_status IN ('indexed', 'metadata_only', 'blocked_missing_dependency')" in source
+    assert "source_assets.extraction_status LIKE 'blocked_%%'" in source
 
 
 def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypatch, tmp_path):

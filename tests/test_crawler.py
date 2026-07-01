@@ -160,10 +160,11 @@ def test_scan_path_blocks_metadata_only_files_when_strict_indexing_enabled(tmp_p
     asset = plan.assets[0]
     assert asset.file_kind == "binary"
     assert asset.extraction_tier == "metadata_only"
-    assert asset.extraction_status == "blocked_missing_dependency"
+    assert asset.extraction_status == "blocked_by_policy"
     assert asset.chunks == ()
     assert asset.metadata["strict_indexing"] is True
     assert asset.metadata["metadata_only_blocked"] is True
+    assert asset.metadata["readiness_status"] == "blocked_by_policy"
     assert "Strict indexing" in asset.metadata["readiness_reason"]
     assert plan.deferred_jobs == []
 
