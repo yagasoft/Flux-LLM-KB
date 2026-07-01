@@ -15,6 +15,7 @@ from urllib.parse import quote
 from zipfile import ZipFile
 import zlib
 
+from flux_llm_kb import extractors
 from flux_llm_kb.crawler import AssetChunk, CorpusPolicy
 from flux_llm_kb.extractors import (
     MEDIA_SEGMENT_CHUNK_INDEX_STRIDE,
@@ -44,6 +45,34 @@ def _zip_payload(entries: dict[str, str | bytes]) -> bytes:
         for name, data in entries.items():
             archive.writestr(name, data)
     return buffer.getvalue()
+
+
+def test_extractor_path_keeps_vss_shadow_paths_unresolved(monkeypatch, tmp_path):
+    shadow = Path(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7\Docs\open.txt")
+
+    def fail_resolve(self):
+        raise AssertionError(f"unexpected resolve for {self}")
+
+    monkeypatch.setattr(Path, "resolve", fail_resolve)
+
+    assert extractors._extractor_path(shadow) == shadow
+
+
+def test_extractor_path_resolves_normal_paths(tmp_path):
+    path = tmp_path / "normal.txt"
+    path.write_text("body", encoding="utf-8")
+
+    assert extractors._extractor_path(path) == path.resolve()
+
+
+def test_extract_code_uses_payload_relative_path_for_shadow_sources(tmp_path):
+    path = tmp_path / "shadow.py"
+    path.write_text("def run():\n    return 1\n", encoding="utf-8")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path / "unrelated"), relative_path="src/app.py")
+
+    assert result.status == "indexed"
+    assert any(chunk.title == "src/app.py::run" for chunk in result.chunks)
 
 
 def test_extract_file_reads_text_chunks(tmp_path):

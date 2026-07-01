@@ -239,10 +239,13 @@ def language_for_path(path: str | Path) -> str:
     return DEVELOPER_ARTIFACT_NAMES.get(file_path.name.lower()) or CODE_LANGUAGE_EXTENSIONS.get(file_path.suffix.lower(), "text")
 
 
-def parse_code_file(path: str | Path, *, root: str | Path | None = None) -> CodeIndexResult:
+def parse_code_file(path: str | Path, *, root: str | Path | None = None, relative_path: str | None = None) -> CodeIndexResult:
     file_path = Path(path)
-    root_path = Path(root).resolve() if root is not None else file_path.parent.resolve()
-    relative_path = _relative_path(file_path, root_path)
+    if relative_path is None:
+        root_path = Path(root).resolve() if root is not None else file_path.parent.resolve()
+        relative_path = _relative_path(file_path, root_path)
+    else:
+        relative_path = _normalise_relative_path(relative_path)
     language = language_for_path(file_path)
     raw_text = read_text_with_bom(file_path)
 
@@ -1585,11 +1588,16 @@ def _line_for_offset(offsets: list[int], offset: int) -> int:
 
 
 def _relative_path(path: Path, root: Path) -> str:
-    resolved = path.resolve()
     try:
+        resolved = path.resolve()
         return resolved.relative_to(root).as_posix()
-    except ValueError:
-        return resolved.name
+    except (OSError, ValueError):
+        return path.name
+
+
+def _normalise_relative_path(path: str) -> str:
+    normalised = str(path).replace("\\", "/").strip("/")
+    return normalised or Path(path).name
 
 
 def scope_hash(root_name: str | None, path: str) -> str:

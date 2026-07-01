@@ -168,14 +168,26 @@ class FrameSamplingResult:
     message: str | None = None
 
 
-def extract_file(path: str | Path, policy: CorpusPolicy) -> ExtractionResult:
-    file_path = Path(path).expanduser().resolve()
+def _is_vss_shadow_path(path: str | Path) -> bool:
+    text = str(path).replace("/", "\\").lower()
+    return text.startswith("\\\\?\\globalroot\\device\\harddiskvolumeshadowcopy")
+
+
+def _extractor_path(path: str | Path) -> Path:
+    file_path = Path(path).expanduser()
+    if _is_vss_shadow_path(file_path):
+        return file_path
+    return file_path.resolve()
+
+
+def extract_file(path: str | Path, policy: CorpusPolicy, *, relative_path: str | None = None) -> ExtractionResult:
+    file_path = _extractor_path(path)
     classification = classify_file(file_path, policy)
     sample_first = _extract_sample_first_structured(file_path, policy)
     if sample_first is not None:
         return sample_first
     if classification.file_kind in {"text", "code"}:
-        return _extract_text(file_path, policy, extractor=classification.file_kind)
+        return _extract_text(file_path, policy, extractor=classification.file_kind, relative_path=relative_path)
     if classification.file_kind == "subtitle":
         return _extract_subtitle(file_path)
     if classification.file_kind == "mail":
@@ -269,7 +281,7 @@ def image_metadata(path: str | Path) -> dict[str, Any]:
     return metadata
 
 
-def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str) -> ExtractionResult:
+def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str, relative_path: str | None = None) -> ExtractionResult:
     if path.stat().st_size > policy.max_inline_bytes:
         return ExtractionResult(
             status="blocked_missing_dependency",
@@ -277,7 +289,7 @@ def _extract_text(path: Path, policy: CorpusPolicy, *, extractor: str) -> Extrac
             message="text file exceeds inline extraction limit",
         )
     if extractor == "code":
-        parsed = parse_code_file(path, root=policy.root_path)
+        parsed = parse_code_file(path, root=policy.root_path, relative_path=relative_path)
         symbol_metadata = symbols_to_metadata(parsed.symbols)
         reference_metadata = references_to_metadata(parsed.references)
         chunks = tuple(
@@ -1036,7 +1048,7 @@ def _extract_database(path: Path) -> ExtractionResult:
                 "tool_candidates": _domain_tool_candidates("database", ext),
             },
         )
-    uri_path = quote(str(path.resolve()).replace("\\", "/"), safe="/:")
+    uri_path = quote(str(_extractor_path(path)).replace("\\", "/"), safe="/:")
     conn = sqlite3.connect(f"file:{uri_path}?mode=ro", uri=True)
     try:
         rows = conn.execute(
@@ -1337,7 +1349,7 @@ def _extract_pdf(path: Path) -> ExtractionResult:
 
 
 def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = None) -> ExtractionResult:
-    file_path = Path(path).expanduser().resolve()
+    file_path = _extractor_path(path)
     try:
         from pypdf import PdfReader
     except ImportError:
@@ -1429,7 +1441,7 @@ def plan_staged_pdf_extraction(path: str | Path, _policy: CorpusPolicy | None = 
 
 
 def extract_pdf_ocr_pages(path: str | Path, payload: dict[str, Any] | None = None) -> ExtractionResult:
-    file_path = Path(path).expanduser().resolve()
+    file_path = _extractor_path(path)
     payload = payload or {}
     page_count = _optional_int(payload.get("page_count"))
     if page_count is None:
@@ -3706,7 +3718,7 @@ def _vision_escalation_status(vision: VisionResult) -> str:
     return status
 
 def plan_staged_media_extraction(path: str | Path, file_kind: str | None = None) -> ExtractionResult:
-    file_path = Path(path).expanduser().resolve()
+    file_path = _extractor_path(path)
     kind = str(file_kind or ("video" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "audio"))
     metadata: dict[str, Any] = {"extractor": kind}
     sidecar = _read_sidecar_transcript(file_path)
@@ -3757,7 +3769,7 @@ def plan_staged_media_extraction(path: str | Path, file_kind: str | None = None)
 
 
 def extract_media_segment(path: str | Path, payload: dict[str, Any] | None = None) -> ExtractionResult:
-    file_path = Path(path).expanduser().resolve()
+    file_path = _extractor_path(path)
     payload = payload or {}
     kind = str(payload.get("file_kind") or ("video" if file_path.suffix.lower() in VIDEO_EXTENSIONS else "audio"))
     metadata: dict[str, Any] = {"extractor": "media_segment", "file_kind": kind}
@@ -3823,7 +3835,7 @@ def extract_media_segment(path: str | Path, payload: dict[str, Any] | None = Non
 
 
 def extract_video_frames(path: str | Path, payload: dict[str, Any] | None = None) -> ExtractionResult:
-    file_path = Path(path).expanduser().resolve()
+    file_path = _extractor_path(path)
     payload = payload or {}
     metadata: dict[str, Any] = {"extractor": "video_frames", "file_kind": "video"}
     probe_error, probed = _probe_media(file_path, metadata)

@@ -161,13 +161,17 @@ def _extract_locked_file_with_vss(
 ) -> ExtractionResult | JobProcessResult | None:
     if not _configured_host_vss_enabled() or not _root_uses_host_agent(root_metadata):
         return None
+    snapshot_telemetry: dict[str, Any] = {}
     try:
         with host_vss.snapshot_path(
             path,
             max_file_bytes=_configured_host_vss_max_file_bytes(),
             timeout_seconds=_configured_host_vss_timeout_seconds(),
         ) as snapshot:
+            snapshot_telemetry = snapshot.telemetry
             result = _extract_for_corpus_job(job_type, snapshot.path, policy, payload)
+            if _extraction_result_rejected_vss_tool_path(result):
+                return _vss_tool_rejection_result(getattr(result, "message", None), snapshot_telemetry)
     except host_vss.VssSnapshotError as exc:
         telemetry = _telemetry_from_vss_error(exc)
         if exc.reason in {"not_windows", "not_local_volume"}:
@@ -180,12 +184,16 @@ def _extract_locked_file_with_vss(
                 message=str(exc),
                 telemetry={"vss_status": "failed", "vss_reason": "shadow_locked"},
             )
+        if _is_vss_tool_path_rejection(exc):
+            return _vss_tool_rejection_result(str(exc), snapshot_telemetry)
         return JobProcessResult(
             status="failed",
             message=str(exc),
             telemetry={"error_type": exc.__class__.__name__, "vss_status": "completed", "vss_reason": "snapshot_created"},
         )
     except Exception as exc:
+        if _is_vss_tool_path_rejection(exc):
+            return _vss_tool_rejection_result(str(exc), snapshot_telemetry)
         return JobProcessResult(
             status="failed",
             message=str(exc),
@@ -207,11 +215,29 @@ def _extract_for_corpus_job(job_type: str, path: Path, policy: CorpusPolicy, pay
         return plan_staged_media_extraction(path, "video")
     if job_type == "corpus_extract_pdf" or (job_type == "corpus_extract_document" and path.suffix.lower() == ".pdf"):
         return plan_staged_pdf_extraction(path, policy)
+    relative_path = _payload_relative_path_for_extraction(path, policy, payload)
+    if relative_path is not None:
+        return extract_file(path, policy, relative_path=relative_path)
     return extract_file(path, policy)
 
 
 def _is_staged_child_job(job_type: str) -> bool:
     return job_type in {"corpus_extract_media_segment", "corpus_extract_video_frames", "corpus_extract_pdf_ocr_pages"}
+
+
+def _payload_relative_path_for_extraction(path: Path, policy: CorpusPolicy, payload: dict[str, Any]) -> str | None:
+    relative_path = str(payload.get("path") or "").strip()
+    if not relative_path:
+        return None
+    original_path = Path(policy.root_path) / relative_path
+    if path == original_path:
+        return None
+    try:
+        if path.resolve() == original_path.resolve():
+            return None
+    except OSError:
+        pass
+    return relative_path
 
 
 def process_embedding_job(job: dict) -> JobProcessResult:
@@ -303,6 +329,39 @@ def _telemetry_from_vss_error(exc: host_vss.VssSnapshotError) -> dict[str, Any]:
     if "max_file_bytes" in vss:
         telemetry["vss_max_file_bytes"] = int(vss["max_file_bytes"])
     return telemetry
+
+
+def _telemetry_from_vss_snapshot(telemetry: dict[str, Any]) -> dict[str, Any]:
+    vss = _sanitize_vss_telemetry(telemetry)
+    result: dict[str, Any] = {}
+    if "status" in vss:
+        result["vss_status"] = str(vss.get("status") or "")[:80]
+    if "reason" in vss:
+        result["vss_reason"] = str(vss.get("reason") or "")[:120]
+    if "return_value" in vss:
+        result["vss_return_value"] = int(vss["return_value"])
+    return result
+
+
+def _vss_tool_rejection_result(message: object, telemetry: dict[str, Any]) -> JobProcessResult:
+    return JobProcessResult(
+        status="retrying_locked",
+        message=str(message or "tool rejected VSS shadow path"),
+        telemetry={**_telemetry_from_vss_snapshot(telemetry), "vss_tool_path_rejected": True},
+    )
+
+
+def _extraction_result_rejected_vss_tool_path(result: ExtractionResult) -> bool:
+    return str(getattr(result, "status", "") or "") == "failed" and _is_vss_tool_path_rejection_text(getattr(result, "message", None))
+
+
+def _is_vss_tool_path_rejection(exc: BaseException) -> bool:
+    return _is_vss_tool_path_rejection_text(str(exc))
+
+
+def _is_vss_tool_path_rejection_text(value: object) -> bool:
+    text = str(value or "").lower().replace("/", "\\")
+    return "globalroot\\device" in text or "harddiskvolumeshadowcopy" in text
 
 
 def _enforce_strict_indexing_result(result: object, *, strict_indexing: bool) -> object:

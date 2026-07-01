@@ -2924,11 +2924,13 @@ def test_process_corpus_job_uses_vss_for_locked_text_file(monkeypatch, tmp_path)
         assert timeout_seconds == 5
         yield host_vss.VssSnapshot(path=shadow, telemetry={"status": "completed", "reason": "snapshot_created"})
 
-    def fake_extract(path, _policy):
+    def fake_extract(path, _policy, *, relative_path=None):
         extract_paths.append(path)
         if path == source:
+            assert relative_path is None
             raise PermissionError("being used by another process")
         assert path == shadow
+        assert relative_path == "open.txt"
         return worker.ExtractionResult(
             status="indexed",
             chunks=(worker.AssetChunk(title="open.txt", body="shadow body", chunk_index=0),),
@@ -3056,6 +3058,97 @@ def test_process_corpus_job_does_not_persist_shadow_path_in_staged_jobs(monkeypa
     serialized = json.dumps(staged_results[0].metadata)
     assert str(shadow) not in serialized
     assert staged_results[0].metadata["vss_fallback"]["status"] == "completed"
+
+
+def test_process_corpus_job_retries_locked_when_tool_rejects_vss_path(monkeypatch, tmp_path):
+    from flux_llm_kb import host_vss, worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    source = root / "open.pdf"
+    source.write_bytes(b"locked pdf")
+    shadow = tmp_path / "shadow" / "open.pdf"
+    shadow.parent.mkdir()
+    shadow.write_bytes(b"shadow pdf")
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {"host_access": "host_agent"},
+    })
+    monkeypatch.setattr(worker, "_configured_host_vss_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_max_file_bytes", lambda: 4096, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_timeout_seconds", lambda: 5, raising=False)
+
+    @contextmanager
+    def fake_snapshot(path, *, max_file_bytes, timeout_seconds):
+        assert path == source
+        yield host_vss.VssSnapshot(path=shadow, telemetry={"status": "completed", "reason": "snapshot_created", "return_value": 0})
+
+    def fake_extract_for_job(job_type, path, policy, payload):
+        if path == source:
+            raise PermissionError("being used by another process")
+        assert path == shadow
+        raise OSError(r"tool rejected \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7")
+
+    monkeypatch.setattr(host_vss, "snapshot_path", fake_snapshot)
+    monkeypatch.setattr(worker, "_extract_for_corpus_job", fake_extract_for_job)
+
+    result = worker.process_corpus_job({"job_type": "corpus_extract_document", "payload": {"root_name": "docs", "path": "open.pdf"}})
+
+    assert result.status == "retrying_locked"
+    assert result.telemetry["vss_status"] == "completed"
+    assert result.telemetry["vss_reason"] == "snapshot_created"
+    assert result.telemetry["vss_tool_path_rejected"] is True
+
+
+def test_process_corpus_job_retries_locked_when_vss_extractor_returns_tool_failure(monkeypatch, tmp_path):
+    from flux_llm_kb import host_vss, worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    source = root / "scan.pdf"
+    source.write_bytes(b"locked pdf")
+    shadow = tmp_path / "shadow" / "scan.pdf"
+    shadow.parent.mkdir()
+    shadow.write_bytes(b"shadow pdf")
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {"host_access": "host_agent"},
+    })
+    monkeypatch.setattr(worker, "_configured_host_vss_enabled", lambda: True, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_max_file_bytes", lambda: 4096, raising=False)
+    monkeypatch.setattr(worker, "_configured_host_vss_timeout_seconds", lambda: 5, raising=False)
+
+    @contextmanager
+    def fake_snapshot(path, *, max_file_bytes, timeout_seconds):
+        assert path == source
+        yield host_vss.VssSnapshot(path=shadow, telemetry={"status": "completed", "reason": "snapshot_created"})
+
+    def fake_extract_for_job(job_type, path, policy, payload):
+        if path == source:
+            raise PermissionError("being used by another process")
+        assert path == shadow
+        return worker.ExtractionResult(status="failed", message=r"pdftoppm rejected \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7")
+
+    monkeypatch.setattr(host_vss, "snapshot_path", fake_snapshot)
+    monkeypatch.setattr(worker, "_extract_for_corpus_job", fake_extract_for_job)
+
+    result = worker.process_corpus_job({"job_type": "corpus_extract_pdf", "payload": {"root_name": "docs", "path": "scan.pdf"}})
+
+    assert result.status == "retrying_locked"
+    assert result.telemetry["vss_status"] == "completed"
+    assert result.telemetry["vss_tool_path_rejected"] is True
 
 
 def test_process_corpus_job_reports_vss_failure_for_locked_file(monkeypatch, tmp_path):

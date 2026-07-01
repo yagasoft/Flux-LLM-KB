@@ -448,13 +448,16 @@ VSS is a host-agent controlled fallback for locked Windows local-volume files,
 not a Docker/API desktop action. Direct extraction is always attempted first.
 When a lock-like `OSError` occurs on an eligible host-agent root, the worker
 creates a `Win32_ShadowCopy` with the `ClientAccessible` context, maps the
-original path onto the returned device object for that attempt only, applies
+original path onto the returned device object for that attempt only, extracts
+directly from the `GLOBALROOT` shadow path without copying the file, applies
 `host_agent.vss_max_file_bytes` and `host_agent.vss_timeout_seconds`, and
 deletes the shadow copy by `ShadowID` in `finally`. Staged PDF/media follow-up
 jobs keep the original root and relative path, so shadow-copy paths are not
-persisted. Unsupported platforms or non-local roots keep the normal locked-file
-retry path. Snapshot content reflects the committed on-disk state, not unsaved
-application edits held only in memory.
+persisted. If an extractor or external tool rejects the shadow device path, the
+job returns to the normal locked-file retry path so a later attempt can process
+the original path after the lock clears. Unsupported platforms or non-local
+roots keep the normal locked-file retry path. Snapshot content reflects the
+committed on-disk state, not unsaved application edits held only in memory.
 
 Production deployments are intentionally not repo-coupled. The default Windows
 PC install root is `D:\FluxLLMKB`, with deployed app files under `app`, private
