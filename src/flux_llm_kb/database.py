@@ -13212,6 +13212,29 @@ def _mark_search_index_record_failed(cur: Any, *, record: dict[str, Any], error:
     )
 
 
+def _delete_search_index_records_for_root(
+    *,
+    root_name: str,
+    statuses: list[str] | tuple[str, ...] | None = None,
+    url: str | None = None,
+) -> int:
+    normalized_root = str(root_name or "").strip()
+    if not normalized_root:
+        raise ValueError("root_name is required")
+    clauses = ["root_name = %s"]
+    params: list[Any] = [normalized_root]
+    normalized_statuses = [str(status or "").strip().lower() for status in statuses or [] if str(status or "").strip()]
+    if normalized_statuses:
+        clauses.append("index_status = ANY(%s::text[])")
+        params.append(normalized_statuses)
+
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM search_index_records WHERE {' AND '.join(clauses)}", tuple(params))
+            return int(cur.rowcount or 0)
+
+
 def _cancel_duplicate_corpus_job_for_asset(cur: Any, *, root_name: str, relative_path: str) -> None:
     cur.execute(
         """

@@ -1987,6 +1987,53 @@ def test_sync_search_index_batches_candidates_and_feeds_vespa(monkeypatch):
     assert fed[0]["fields"]["owner_table"] == "asset_chunks"
 
 
+def test_delete_search_index_records_for_root_requires_root_and_filters_statuses(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 29
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    with pytest.raises(ValueError, match="root_name is required"):
+        database._delete_search_index_records_for_root(root_name=" ")
+
+    deleted = database._delete_search_index_records_for_root(
+        root_name="__retrieval_benchmark_deadbeef",
+        statuses=["deleted", ""],
+    )
+
+    sql, params = executed[0]
+    assert deleted == 29
+    assert "DELETE FROM search_index_records" in sql
+    assert "root_name = %s" in sql
+    assert "index_status = ANY(%s::text[])" in sql
+    assert params == ("__retrieval_benchmark_deadbeef", ["deleted"])
+
+
 def test_corpus_search_index_rows_hydrate_managed_mail_sidecar(monkeypatch):
     class FakeCursor:
         def execute(self, _sql, _params=()):

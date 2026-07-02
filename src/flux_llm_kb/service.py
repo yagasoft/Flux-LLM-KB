@@ -1010,11 +1010,20 @@ class KnowledgeService:
         root_created = False
 
         def cleanup() -> None:
-            for episode_id in episode_ids:
-                database.forget_episode(episode_id)
-            if root_created:
-                database.delete_monitored_root(root_id=root_name, purge_index=True, actor="retrieval_benchmark")
-            temp_dir.cleanup()
+            try:
+                for episode_id in episode_ids:
+                    database.forget_episode(episode_id)
+                if root_created:
+                    database.delete_monitored_root(root_id=root_name, purge_index=True, actor="retrieval_benchmark")
+                    cleanup_index_result = database.sync_search_index(owner_class="all", root_name=root_name, limit=1000)
+                    if int(cleanup_index_result.get("failed") or 0):
+                        errors = "; ".join(str(item) for item in (cleanup_index_result.get("errors") or [])[:3])
+                        raise RuntimeError(
+                            f"retrieval benchmark search-index cleanup failed: {errors or cleanup_index_result['failed']}"
+                        )
+                    database._delete_search_index_records_for_root(root_name=root_name, statuses=["deleted"])
+            finally:
+                temp_dir.cleanup()
 
         try:
             marker = uuid4().hex

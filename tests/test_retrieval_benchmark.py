@@ -558,6 +558,12 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     )
     monkeypatch.setattr(
         database,
+        "_delete_search_index_records_for_root",
+        lambda **kwargs: calls.append(("delete_search_index_records", kwargs)) or 29,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
         "list_source_assets",
         lambda **kwargs: [{"id": f"asset-{kwargs['path']}", "path": kwargs["path"], "canonical_asset_id": None}],
     )
@@ -628,8 +634,15 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     assert refresh_calls[0][1]["memory_class"] == "corpus"
     assert refresh_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
     search_index_calls = [call for call in calls if call[0] == "sync_search_index"]
-    assert search_index_calls
+    assert len(search_index_calls) == 2
     assert search_index_calls[0][1]["owner_class"] == "all"
     assert search_index_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
     assert search_index_calls[0][1]["limit"] == 1000
+    assert search_index_calls[1][1]["owner_class"] == "all"
+    assert search_index_calls[1][1]["root_name"].startswith("__retrieval_benchmark_")
+    assert search_index_calls[1][1]["limit"] == 1000
+    delete_index_calls = [call for call in calls if call[0] == "delete_search_index_records"]
+    assert delete_index_calls
+    assert delete_index_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
+    assert delete_index_calls[0][1]["statuses"] == ["deleted"]
     assert any(call[0] == "delete_root" for call in calls)
