@@ -1,4 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -67,16 +66,6 @@ CREATE TABLE IF NOT EXISTS relations (
     relation_type text NOT NULL,
     confidence double precision NOT NULL DEFAULT 0.5,
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS embeddings (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    owner_table text NOT NULL,
-    owner_id uuid NOT NULL,
-    model text NOT NULL,
-    dimensions integer NOT NULL,
-    embedding vector(1536) NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 

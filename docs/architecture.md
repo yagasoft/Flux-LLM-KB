@@ -11,7 +11,6 @@ system rather than a large prompt-injected memory file.
 - `entities`: typed people, projects, files, concepts, systems, and decisions.
 - `relations`: typed graph edges such as uses, depends_on, supersedes, contradicts,
   caused, fixed, and mentions.
-- `embeddings`: vector representations for semantic retrieval.
 - `audit_events`: append-only record of memory writes, deletes, redactions, and queries.
 - `capture_jobs`: asynchronous ingestion, review, and consolidation jobs,
   including corpus worker-family metadata, resource class, priority, time
@@ -97,12 +96,11 @@ within a strict token budget.
 
 Corpus chunks, episodes, and claims are synchronised into Vespa by
 `search_index_sync` jobs, with `search_index_records` tracking stale, indexed,
-failed, and deleted sidecar documents. Active corpus search no longer depends on
-pgvector or the deterministic hash-vector provider, and broad body trigram
-matching is kept out of runtime retrieval. PostgreSQL remains the source of
-truth for metadata, lifecycle state, graph facts, auditability, and result
-hydration. Deleted assets and non-canonical duplicate assets are suppressed from
-retrieval before or during hydration.
+failed, and deleted sidecar documents. Active search no longer depends on the
+legacy persisted embedding table or broad body trigram matching. PostgreSQL
+remains the source of truth for metadata, lifecycle state, graph facts,
+auditability, and result hydration. Deleted assets and non-canonical duplicate
+assets are suppressed from retrieval before or during hydration.
 For managed IMAP/Outlook mail exports, `asset_chunks.body` is intentionally
 blank for canonical `body.txt` and attachment chunks. The extracted plaintext is
 stored in private disk sidecars under the cache root, while PostgreSQL stores
@@ -119,16 +117,15 @@ and monitored root. Dedicated code search has two modes: `literal_symbol`
 matches symbol/path metadata for known names, while `full_text` searches
 indexed code chunks for prose, stderr fragments, job text, and implementation
 body phrases.
-Embedding rows carry redacted provider metadata such as model, dimensions,
-source hash, and cache key, but not raw source text. The legacy `embeddings`
-table remains for compatibility, duplicate-cluster metadata, and repair jobs;
-active corpus search-index sync writes Snowflake vectors to Vespa instead of
-depending on pgvector candidate selection.
+Search-index records carry redacted provider metadata such as model,
+dimensions, source hash, and cache key, but not raw source text. Active
+search-index sync writes Snowflake vectors to Vespa and stores only sync state
+and metadata in PostgreSQL.
 Semantic near-duplicate clusters are stored as advisory metadata in
 `semantic_duplicate_clusters` and `semantic_duplicate_members` for corpus
 chunks, episodes, and claims. Refreshes retire prior active clusters and create
-new active metadata clusters from local embeddings; they do not delete or modify
-the underlying memories. Retrieval suppresses only noncanonical members of
+new active metadata clusters from temporary Snowflake similarities; they do not
+delete or modify the underlying memories. Retrieval suppresses only noncanonical members of
 active semantic clusters and exposes sanitized cluster counts, paths, and
 canonical identifiers when callers request suppressed metadata.
 Retrieval explanations keep ranking score separate from confidence. Search and
@@ -396,12 +393,12 @@ terminal failed, blocked, or cancelled corpus jobs with `delete_requested_at`,
 seven-day terminal-age window. Deleting a `capture_jobs` row also deletes its
 job-scoped console stdout/stderr records through the
 `capture_job_tool_invocations` foreign-key cascade.
-`corpus_embed` jobs route to vector refresh instead of file extraction and
-support owner class, optional root scoping, stale-only refresh, and bounded
-limits. Completion, retry, failed, and blocked transitions record last duration
-and sanitized telemetry for queue
-observability, including OCR/ASR cache counters, embedding vector/cache
-counters, recursive container member, parsed-child, skipped-child, and
+`search_index_sync` jobs route model-backed evidence refresh instead of file
+extraction and support owner class, optional root scoping, stale-only refresh,
+and bounded limits. Completion, retry, failed, and blocked transitions record
+last duration and sanitized telemetry for queue observability, including OCR/ASR
+cache counters, search-index counters, recursive container member,
+parsed-child, skipped-child, and
 blocked-dependency counts, practical parser counts for mail, calendar/contact,
 reports, BOMs, coverage, HAR, database schema extraction, sensitive metadata,
 ASR segment totals, frame sample counts/timestamps, thumbnail cache counters,
@@ -423,9 +420,9 @@ cancelled in-flight extractor cannot reinsert chunks or flip the job back to
 completed. Physical unseen-asset purge is a worker cleanup pass controlled by
 `crawler.unseen_asset_purge_grace_seconds` and
 `crawler.unseen_asset_purge_batch_size`; it deletes only Flux database/index
-rows such as chunk embeddings, code metadata, manifests, canonical links, and
+rows such as search-index records, code metadata, manifests, canonical links, and
 `source_assets`, never files on disk.
-On-demand semantic duplicate refresh extends this with embedding-similar
+On-demand semantic duplicate refresh extends this with Snowflake-similar
 near-duplicate clusters across corpus chunks, episodes, and claims. The
 canonical member is selected deterministically from local metadata such as trust,
 confidence, reinforcement/usage, text size, recency, and stable identifiers.
@@ -684,7 +681,7 @@ The settings catalog is an application catalog stored in code and PostgreSQL; it
 does not use the Windows Registry.
 
 Settings that affect live behavior are picked up on the next service call.
-Settings that require reload, component restart, or embedding reindex create
+Settings that require reload, component restart, or search-index rebuild create
 runtime control requests and require confirmation before mutation.
 Governance settings are catalog-backed and follow the same precedence, but
 governance apply/recover never mutates runtime settings; it mutates only memory
@@ -710,6 +707,7 @@ indexes canonical `body.txt` plus attachment files under `attachments/` through
 private disk content sidecars. For those managed mail body/attachment chunks,
 PostgreSQL `asset_chunks.body` is blank; chunk metadata contains a sidecar
 reference and content hash, and embeddings contain only vector/provider/source
+reference and content hash, and search-index records contain only model/source
 hash metadata. Raw message backups (`message.eml` and `message.msg`) and
 duplicate `body.html` artifacts remain in the private spool for operator
 inspection/re-export but are skipped by normal crawl and repair paths so they do

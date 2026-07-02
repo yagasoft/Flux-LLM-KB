@@ -4,7 +4,8 @@ Flux-LLM-KB is a local-first knowledge kernel for agent workflows. It is designe
 to help coding agents recall prior work without injecting large, noisy memory
 files into every conversation.
 
-The project targets PostgreSQL with pgvector as the primary durable store, with
+The project targets PostgreSQL as the durable metadata and lifecycle store, with
+Vespa/Snowflake/Qwen as the active searchable-evidence stack and
 interfaces for:
 
 - MCP tools for Codex and other MCP-capable agents
@@ -15,13 +16,12 @@ interfaces for:
 
 ## Current Kernel
 
-- PostgreSQL schema for episodes, sources, entities, claims, relations,
-  embeddings, audit events, capture jobs, workspace scopes, and retention
+- PostgreSQL schema for episodes, sources, entities, claims, relations, audit
+  events, capture jobs, workspace scopes, search-index state, and retention
   policies.
-- pgvector, full-text search, JSONB/GIN, trigram fuzzy matching, and hybrid RRF
-  ranking.
-- Deterministic local `flux-hash-v1` embeddings so the vector pipeline works
-  without sending private text to an external service.
+- Vespa BM25+dense retrieval with Snowflake embeddings, Qwen reranking,
+  PostgreSQL hydration, and bounded PostgreSQL lexical/title/path degraded
+  fallback.
 - CLI commands for init, migration, status, search, remember, audit, forget,
   Codex backfill queueing, wiki export, runtime settings, mail ingestion, lint,
   and doctor checks.
@@ -40,8 +40,8 @@ python -m pip install -e .[dev]
 .\scripts\start-postgres.ps1
 flux-kb migrate
 flux-kb doctor
-flux-kb remember "Project decision" "Use PostgreSQL and pgvector from day one."
-flux-kb search "pgvector decision"
+flux-kb remember "Project decision" "Use PostgreSQL for metadata and Vespa for active retrieval."
+flux-kb search "Vespa retrieval decision"
 .\scripts\start-dashboard-dev.ps1
 ```
 

@@ -346,6 +346,8 @@ services:
       PADDLE_PDX_CACHE_HOME: /root/.paddleocr/paddlex
       PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
       PADDLE_PDX_MODEL_SOURCE: bos
+    ports:
+      - "127.0.0.1:8790:8790"
     volumes:
       - flux_llm_kb_model_runner_models:/models
       - flux_llm_kb_paddle_cache:/root/.paddleocr
@@ -427,7 +429,7 @@ services:
       start_period: 60s
 
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     container_name: flux-llm-kb-postgres
     restart: unless-stopped
     shm_size: "4gb"

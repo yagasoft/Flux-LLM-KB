@@ -36,7 +36,7 @@ class ModelRunnerError(RuntimeError):
 
 class ModelRunnerClient:
     def __init__(self, base_url: str | None = None, *, timeout_seconds: int | None = None) -> None:
-        self.base_url = (base_url or os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL") or DEFAULT_MODEL_RUNNER_BASE_URL).rstrip("/")
+        self.base_url = _resolve_model_runner_base_url(base_url).rstrip("/")
         resolved_timeout = timeout_seconds
         if resolved_timeout is None:
             resolved_timeout = int(os.environ.get("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS") or DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS)
@@ -92,6 +92,23 @@ class ModelRunnerClient:
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return _post_json_to_base_url(self.base_url, path, payload, self.timeout_seconds)
+
+
+def _resolve_model_runner_base_url(explicit_base_url: str | None = None) -> str:
+    if explicit_base_url:
+        return explicit_base_url
+    env_base_url = os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL")
+    if env_base_url:
+        return env_base_url
+    try:
+        from .settings import SettingsService
+
+        configured = SettingsService().resolve("model_runner.base_url").raw_value
+    except Exception:
+        configured = None
+    if configured:
+        return str(configured)
+    return DEFAULT_MODEL_RUNNER_BASE_URL
 
 
 class ModelRunnerRerankScorer:

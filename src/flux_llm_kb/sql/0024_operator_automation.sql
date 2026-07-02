@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS operator_automation_actions (
             'refresh_retrieval_evidence',
             'ingest_approved_capture',
             'safe_diagnostic_recovery',
-            'enqueue_embedding_refresh',
+            'sync_search_index',
             'run_governance_shadow'
         )),
     CONSTRAINT operator_automation_actions_risk_allowed

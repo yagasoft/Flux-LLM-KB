@@ -101,7 +101,10 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "operator.automation.auto_refresh_evidence" in keys
     assert "operator.automation.auto_ingest_approved_capture" in keys
     assert "operator.automation.auto_remediate_diagnostics" in keys
-    assert "operator.automation.auto_refresh_embeddings" in keys
+    assert "operator.automation.auto_sync_search_index" in keys
+    assert "operator.automation.auto_refresh_embeddings" not in keys
+    assert "embedding.model" not in keys
+    assert "embedding.dimensions" not in keys
     assert "operator.automation.auto_run_governance_shadow" in keys
     assert "worker.default_workers" in keys
 
@@ -202,7 +205,7 @@ def test_operator_automation_settings_defaults_and_env_overrides(monkeypatch):
     assert service.resolve("operator.automation.auto_refresh_evidence").raw_value is True
     assert service.resolve("operator.automation.auto_ingest_approved_capture").raw_value is True
     assert service.resolve("operator.automation.auto_remediate_diagnostics").raw_value is True
-    assert service.resolve("operator.automation.auto_refresh_embeddings").raw_value is True
+    assert service.resolve("operator.automation.auto_sync_search_index").raw_value is True
     assert service.resolve("operator.automation.auto_run_governance_shadow").raw_value is True
 
     monkeypatch.setenv("FLUX_KB_OPERATOR_AUTOMATION_ENABLED", "true")
@@ -387,7 +390,7 @@ def test_settings_service_uses_env_over_database_and_masks_secret(monkeypatch):
 
 def test_setting_update_requires_confirmation_for_reindex(monkeypatch):
     calls = []
-    monkeypatch.delenv("FLUX_KB_EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("FLUX_KB_RETRIEVAL_EMBEDDING_MODEL", raising=False)
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     monkeypatch.setattr(database, "set_runtime_setting", lambda **kwargs: calls.append(kwargs) or {"key": kwargs["key"]})
     monkeypatch.setattr(database, "enqueue_runtime_control_request", lambda **_kwargs: {"id": "request-1"})
@@ -395,13 +398,18 @@ def test_setting_update_requires_confirmation_for_reindex(monkeypatch):
     service = SettingsService()
 
     with pytest.raises(ValueError, match="confirmation"):
-        service.set("embedding.model", "flux-hash-v2", actor="tester")
+        service.set("retrieval.embedding_model", "Snowflake/snowflake-arctic-embed-l-v2.1", actor="tester")
 
-    result = service.set("embedding.model", "flux-hash-v2", actor="tester", confirmed=True)
+    result = service.set(
+        "retrieval.embedding_model",
+        "Snowflake/snowflake-arctic-embed-l-v2.1",
+        actor="tester",
+        confirmed=True,
+    )
 
     assert result["apply_mode"] == APPLY_REINDEX_REQUIRED
-    assert calls[0]["key"] == "embedding.model"
-    assert calls[0]["value"] == "flux-hash-v2"
+    assert calls[0]["key"] == "retrieval.embedding_model"
+    assert calls[0]["value"] == "Snowflake/snowflake-arctic-embed-l-v2.1"
 
 
 def test_setting_reset_removes_database_override(monkeypatch):

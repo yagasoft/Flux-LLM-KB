@@ -60,9 +60,6 @@ Tools:
 | `kb.governance_recover` | Recover one applied governance action from captured before-state with rationale and audit evidence. |
 | `kb.governance_digest` | Return the latest bounded local governance digest. |
 | `kb.governance_policy` | Return the effective sanitized governance policy and defaults. |
-| `kb.embeddings_status` | Return embedding vector coverage and missing or stale metadata counts. |
-| `kb.embeddings_enqueue` | Queue a local `corpus_embed` job for missing or stale vectors. |
-| `kb.embeddings_backfill` | Refresh missing or stale vectors immediately with the local deterministic provider. |
 | `kb.audit` | List recent audit events. |
 | `kb.forget` | Forget a memory item by id with an audit reason. |
 | `kb.status` | Return Flux health and runtime status. |
@@ -165,9 +162,6 @@ Endpoints:
 - `POST /api/capture/review/{job_id}/decision`
 - `POST /api/semantic-duplicates/refresh`
 - `GET /api/semantic-duplicates?memory_class=<corpus|episode|claim>&root_name=<name>&limit=<n>`
-- `GET /api/embeddings/status`
-- `POST /api/embeddings/enqueue`
-- `POST /api/embeddings/backfill`
 - `GET /api/corpus/assets`
 - `GET /api/corpus/assets/{asset_id}`
 - `GET /api/corpus/chunks/{chunk_id}`
@@ -267,7 +261,7 @@ flux-kb acceleration reliability roots
 flux-kb acceleration reliability run --scope all-roots --full --compare-label baseline
 flux-kb code status --cwd "E:/LLM KB"
 flux-kb code search build_invoice --root app --mode literal-symbol --language python --relationship call --path-glob "src/*.py"
-flux-kb code search "Tesseract stderr worker" --cwd "E:/LLM KB" --mode full-text --language python
+flux-kb code search "PaddleOCR stderr worker" --cwd "E:/LLM KB" --mode full-text --language python
 flux-kb code symbol OrderService.build_invoice
 flux-kb code feedback add --query "redacted local query" --root app --miss-category missing_symbol --expected-symbol OrderService.build_invoice
 flux-kb code feedback summary --root app
@@ -353,12 +347,11 @@ Registry.
 flux-kb settings list
 flux-kb settings get retrieval.token_budget
 flux-kb settings set retrieval.token_budget 1600
-flux-kb settings set embedding.model flux-hash-v2 --confirm
 flux-kb settings reset retrieval.token_budget
 flux-kb settings apply --component watcher
-flux-kb embeddings status --root projects
-flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
-flux-kb embeddings backfill --owner-class all --limit 100
+flux-kb search-index status --root projects
+flux-kb search-index sync --owner-class all --root projects --limit 100
+flux-kb search-index rebuild --owner-class all --root projects --limit 100
 ```
 
 Crawler glob settings are global defaults. Monitored roots can inherit, extend,
@@ -372,7 +365,7 @@ default for the configured local provider and rejects non-local URLs. The read-o
 through `flux-kb acceleration status`, `GET /api/acceleration/status`,
 `kb.acceleration_status`, and the dashboard Performance tab. The payload includes
 selected watcher backend, native/fallback state, fallback reason,
-worker-family OCR/ASR/container/parser/embedding telemetry, worker-family
+worker-family OCR/ASR/container/parser/search-index telemetry, worker-family
 backpressure, cap usage, retry/lock transitions, `manifest_skipped_unchanged`
 counters, and deterministic benchmark fixture summaries for text-heavy,
 Office/PDF-heavy, archive/container-heavy, image-heavy, and audio/video-heavy
@@ -457,8 +450,8 @@ status|run|actions`, `GET /api/automation/status`, `POST
 `kb.automation_status`, `kb.automation_run`, and `kb.automation_actions`.
 Recurring automation is controlled by default-off `operator.automation.*`
 settings. A manually triggered guarded pass may refresh retrieval evidence,
-ingest already-approved capture jobs, run safe diagnostic recovery, enqueue or
-backfill embeddings, and run governance in shadow mode. Deletes, destructive
+ingest already-approved capture jobs, run safe diagnostic recovery, sync or
+rebuild the search index, and run governance in shadow mode. Deletes, destructive
 mail policies, OAuth, host startup, restart/reindex settings, capture decisions,
 high-risk governance, opening/revealing files, and ambiguous actions remain
 manual. Automation history stores sanitized evidence and reports
@@ -483,11 +476,6 @@ precision-style summaries, sanitized failed cases, and `settings_mutated:
 false`; benchmark output is advisory evidence for later calibration and
 governance apply gates, not automatic ranking, threshold, semantic-cluster,
 lifecycle, settings, or policy mutation.
-Embedding status, enqueue, and immediate backfill are also exposed through
-`GET /api/embeddings/status`, `POST /api/embeddings/enqueue`,
-`POST /api/embeddings/backfill`, and the MCP tools `kb.embeddings_status`,
-`kb.embeddings_enqueue`, and `kb.embeddings_backfill`.
-
 ## Host Filesystem Agent
 
 Use the host agent when the dashboard/API is Docker-hosted but watched paths live
@@ -507,8 +495,8 @@ IMAP is the preferred ongoing capture path. Configure a Gmail label or IMAP
 folder as the capture queue, then export into a private spool that Flux indexes.
 For managed IMAP/Outlook mail, canonical body and attachment plaintext is kept
 in private disk content sidecars and hydrated from disk for search, previews,
-and embedding refresh. PostgreSQL stores blank chunk bodies plus sidecar
-references, hashes, metadata, and vectors, not plaintext body/attachment chunk
+and search-index sync. PostgreSQL stores blank chunk bodies plus sidecar
+references, hashes, and metadata, not plaintext body/attachment chunk
 text.
 
 ```powershell

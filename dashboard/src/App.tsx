@@ -46,7 +46,7 @@ type HealthPayload = {
   runtime?: Record<string, HealthCheck>;
   watcher?: { active_roots?: number; disabled_roots?: number; stale_count?: number; roots?: unknown[] };
   jobs?: { pending?: number; failed?: number; blocked?: number };
-  retrieval?: { episodes?: number; sources?: number; source_assets?: number; asset_chunks?: number; embeddings?: number };
+  retrieval?: { episodes?: number; sources?: number; source_assets?: number; asset_chunks?: number; search_index_records?: number };
   acceleration?: AccelerationStatus;
   workers?: {
     active?: number;
@@ -2090,7 +2090,7 @@ export default function App() {
       {deleteRoot && (
         <ConfirmDialog
           title="Delete watched path"
-          body={`Delete watched path ${deleteRoot.name} and purge its indexed files, chunks, embeddings, jobs, crawl runs, and watcher state. This does not delete files from disk.`}
+          body={`Delete watched path ${deleteRoot.name} and purge its indexed files, chunks, search-index records, jobs, crawl runs, and watcher state. This does not delete files from disk.`}
           confirmLabel="Delete watched path and purge index"
           onCancel={() => setDeleteRoot(null)}
           onConfirm={() => void deleteSelectedRoot(deleteRoot)}
@@ -2329,7 +2329,7 @@ function MailPostProcessPanel({ mail, selectedProfile, onDryRun }: { mail: MailS
 }
 
 function isMailOperationalError(error: string): boolean {
-  if (/mail-spool|corpus_|pdftoppm|tesseract|ffprobe|ffmpeg|strict indexing|metadata-only/i.test(error)) {
+  if (/mail-spool|corpus_|pdftoppm|paddleocr|ffprobe|ffmpeg|strict indexing|metadata-only/i.test(error)) {
     return false;
   }
   return /imap|oauth|gmail|outlook sync|outlook host|mail ingestion|mail profile|mail scheduler|blocked_auth/i.test(error);
@@ -2977,7 +2977,7 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
     if (hasVisionTelemetry) parts.push(`Vision ${visionHits} hit / ${visionMisses} miss; ${visionDescriptions} descriptions; ${visionBlocked} blocked`);
     if (hasDecorativeTelemetry) parts.push(`${decorativeSkips} decorative skips`);
     if (hasFrameTelemetry) parts.push(`Frames ${frameSamples} sampled; thumbnails ${thumbnailHits} hit / ${thumbnailMisses} miss`);
-    if (hasEmbeddingTelemetry) parts.push(`Embeddings ${embeddingVectors} vectors; ${embeddingSkipped} skipped; ${embeddingBatches} batches; cache ${embeddingHits} hit / ${embeddingMisses} miss`);
+    if (hasEmbeddingTelemetry) parts.push(`Search index ${embeddingVectors} vectors; ${embeddingSkipped} skipped; ${embeddingBatches} batches; cache ${embeddingHits} hit / ${embeddingMisses} miss`);
     const status = parts.join("; ");
     return [
       name,
@@ -3891,7 +3891,7 @@ function RetrievalTab({
           ["Episodes", "memory", String(retrieval.episodes ?? 0)],
           ["Sources", "memory", String(retrieval.sources ?? 0)],
           ["Corpus chunks", "assets", String(retrieval.asset_chunks ?? 0)],
-          ["Embeddings", "pgvector", String(retrieval.embeddings ?? 0)],
+          ["Search index", "Vespa", String(retrieval.search_index_records ?? 0)],
           ["Duplicates", "suppressed", String(state.retrieval.duplicate_assets ?? state.retrieval.duplicate_count ?? 0)]
         ]} />
         <div className="retrieval-filter-grid">
@@ -6282,7 +6282,7 @@ function BacklogPanel({ health, blockedJobs }: { health: HealthPayload; blockedJ
       <MiniTable rows={[
         ["OCR", "mail", "queued"],
         ["Video", "corpus", blockedJobs ? "blocked" : "idle"],
-        ["Embeddings", "retrieval", `${health.retrieval?.embeddings ?? 0} vectors`],
+        ["Search index", "retrieval", `${health.retrieval?.search_index_records ?? 0} records`],
         ["Assets", "corpus", `${health.retrieval?.asset_chunks ?? 0} chunks`]
       ]} />
     </Panel>

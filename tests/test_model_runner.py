@@ -15,6 +15,23 @@ def test_model_runner_client_timeout_allows_cold_model_start(monkeypatch):
     assert model_runner.ModelRunnerClient().timeout_seconds == 900
 
 
+def test_model_runner_client_uses_catalog_base_url_when_env_is_absent(monkeypatch):
+    from flux_llm_kb import settings
+
+    class FakeSettingsService:
+        def resolve(self, key):
+            assert key == "model_runner.base_url"
+            return SimpleNamespace(raw_value="http://configured-model-runner:8790")
+
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(settings, "SettingsService", FakeSettingsService)
+
+    assert model_runner.ModelRunnerClient().base_url == "http://configured-model-runner:8790"
+    monkeypatch.setenv("FLUX_KB_MODEL_RUNNER_BASE_URL", "http://env-model-runner:8790")
+    assert model_runner.ModelRunnerClient().base_url == "http://env-model-runner:8790"
+    assert model_runner.ModelRunnerClient("http://explicit-model-runner:8790").base_url == "http://explicit-model-runner:8790"
+
+
 def test_download_models_retries_hf_snapshots_and_skips_embedding_onnx(tmp_path, monkeypatch):
     calls: list[dict[str, object]] = []
     qwen_attempts = 0

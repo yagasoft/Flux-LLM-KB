@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS semantic_duplicate_clusters (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     memory_class text NOT NULL,
     status text NOT NULL DEFAULT 'active',
-    algorithm text NOT NULL DEFAULT 'flux-hash-v1:cosine',
+    algorithm text NOT NULL DEFAULT 'snowflake-vespa-cosine-v1',
     threshold double precision NOT NULL,
     workspace_key text NOT NULL DEFAULT '',
     root_name text,

@@ -5,6 +5,7 @@ import pytest
 
 from flux_llm_kb import database
 from flux_llm_kb.database import forget_episode, insert_episode, run_migrations, search_episodes
+from flux_llm_kb.embeddings import EmbeddingResult
 from flux_llm_kb.service import KnowledgeService
 
 
@@ -16,17 +17,17 @@ if not TEST_DATABASE_URL:
 
 def test_postgres_hybrid_search_smoke():
     run_migrations(TEST_DATABASE_URL)
-    marker = f"pgvector-smoke-{uuid4()}"
+    marker = f"postgres-search-smoke-{uuid4()}"
     episode_id = insert_episode(
         title=f"Hybrid retrieval {marker}",
-        summary="PostgreSQL full text, pg_trgm fuzzy search, and pgvector ranking are enabled.",
+        summary="PostgreSQL full text and pg_trgm fuzzy search are enabled for degraded retrieval.",
         url=TEST_DATABASE_URL,
     )
 
     results = search_episodes(marker, limit=5, url=TEST_DATABASE_URL)
 
     assert any(result["id"] == episode_id for result in results)
-    assert any("vector" in result["streams"] for result in results)
+    assert any({"lexical", "fuzzy"} & set(result["streams"]) for result in results)
     assert forget_episode(episode_id, url=TEST_DATABASE_URL) is True
 
 
@@ -129,21 +130,21 @@ def test_postgres_duplicate_assets_preserve_paths_but_return_one_canonical_hit(t
                 cur.execute("DELETE FROM monitored_roots WHERE name = %s", (name,))
 
 
-def test_postgres_corpus_search_includes_vector_stream(tmp_path, monkeypatch):
+def test_postgres_corpus_search_includes_lexical_stream(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUX_KB_DATABASE_URL", TEST_DATABASE_URL)
     run_migrations(TEST_DATABASE_URL)
-    root = tmp_path / "vector"
+    root = tmp_path / "lexical"
     root.mkdir()
-    marker = f"vector-{uuid4()}"
+    marker = f"lexical-{uuid4()}"
     (root / "note.md").write_text(f"{marker} corpus semantic retrieval", encoding="utf-8")
-    name = f"vector-{uuid4()}"
+    name = f"lexical-{uuid4()}"
     database.add_monitored_root(name=name, root_path=root, url=TEST_DATABASE_URL)
 
     try:
         KnowledgeService().sync_corpus(root_name=name)
         results = database.search_corpus_chunks(marker, limit=5, url=TEST_DATABASE_URL)
 
-        assert any("corpus_vector" in result["streams"] for result in results)
+        assert any("corpus_lexical" in result["streams"] for result in results)
     finally:
         psycopg = database._load_psycopg()
         with psycopg.connect(TEST_DATABASE_URL) as conn:
@@ -154,15 +155,35 @@ def test_postgres_corpus_search_includes_vector_stream(tmp_path, monkeypatch):
 def test_postgres_semantic_duplicate_refresh_suppresses_corpus_and_episode_results(tmp_path, monkeypatch):
     monkeypatch.setenv("FLUX_KB_DATABASE_URL", TEST_DATABASE_URL)
     run_migrations(TEST_DATABASE_URL)
+
+    class FakeSnowflakeEmbeddingProvider:
+        def __init__(self, *, model, dimensions):
+            self.model = model
+            self.dimensions = dimensions
+
+        def embed_batch(self, inputs):
+            return [
+                EmbeddingResult(
+                    owner_table=item.owner_table,
+                    owner_id=item.owner_id,
+                    model=item.model,
+                    dimensions=item.dimensions,
+                    vector=[1.0, 0.0],
+                )
+                for item in inputs
+            ]
+
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeSnowflakeEmbeddingProvider)
+
     marker = f"semantic-dupe-{uuid4()}"
     root = tmp_path / "semantic-dupes"
     root.mkdir()
     (root / "alpha.md").write_text(
-        f"{marker} semantic duplicate architecture pgvector retrieval local ranking canonical",
+        f"{marker} semantic duplicate architecture Vespa retrieval local ranking canonical",
         encoding="utf-8",
     )
     (root / "bravo.md").write_text(
-        f"{marker} semantic duplicate architecture pgvector retrieval local ranking duplicate extra",
+        f"{marker} semantic duplicate architecture Vespa retrieval local ranking duplicate extra",
         encoding="utf-8",
     )
     name = f"semantic-dupes-{uuid4()}"
@@ -262,7 +283,7 @@ def test_postgres_claim_lifecycle_and_graph_traversal_are_migration_backed():
             subject_type="project",
             subject_name=f"{marker}-flux",
             predicate="uses",
-            object_text=f"{marker} PostgreSQL pgvector",
+            object_text=f"{marker} PostgreSQL lifecycle graph",
             confidence=0.82,
             url=TEST_DATABASE_URL,
         )
@@ -331,7 +352,7 @@ def test_postgres_claim_review_list_counts_and_graph_work_together():
         )
         replacement = database.upsert_claim(
             subject_type="system",
-            subject_name=f"{marker}-pgvector",
+            subject_name=f"{marker}-graph",
             predicate="supports",
             object_text=f"{marker} graph review traversal",
             confidence=0.9,

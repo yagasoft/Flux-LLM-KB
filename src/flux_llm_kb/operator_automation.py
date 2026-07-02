@@ -7,7 +7,7 @@ ALLOWED_ACTIONS = [
     "refresh_retrieval_evidence",
     "ingest_approved_capture",
     "safe_diagnostic_recovery",
-    "enqueue_embedding_refresh",
+    "sync_search_index",
     "run_governance_shadow",
 ]
 
@@ -33,7 +33,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "auto_refresh_evidence": True,
     "auto_ingest_approved_capture": True,
     "auto_remediate_diagnostics": True,
-    "auto_refresh_embeddings": True,
+    "auto_sync_search_index": True,
     "auto_run_governance_shadow": True,
 }
 
@@ -52,7 +52,7 @@ def normalized_policy(settings: dict[str, Any] | None) -> dict[str, Any]:
         "auto_refresh_evidence": bool(raw.get("auto_refresh_evidence")),
         "auto_ingest_approved_capture": bool(raw.get("auto_ingest_approved_capture")),
         "auto_remediate_diagnostics": bool(raw.get("auto_remediate_diagnostics")),
-        "auto_refresh_embeddings": bool(raw.get("auto_refresh_embeddings")),
+        "auto_sync_search_index": bool(raw.get("auto_sync_search_index")),
         "auto_run_governance_shadow": bool(raw.get("auto_run_governance_shadow")),
         "allowed_actions": list(ALLOWED_ACTIONS),
         "manual_actions": list(MANUAL_ACTIONS),
@@ -65,7 +65,7 @@ def guarded_action_labels() -> dict[str, str]:
         "refresh_retrieval_evidence": "Refresh retrieval evidence",
         "ingest_approved_capture": "Ingest approved captures",
         "safe_diagnostic_recovery": "Run safe diagnostic recovery",
-        "enqueue_embedding_refresh": "Queue embedding refresh",
+        "sync_search_index": "Queue search-index sync",
         "run_governance_shadow": "Run governance shadow proposals",
     }
 

@@ -10,8 +10,8 @@ database, not in this repository.
 - GitHub CLI for repository work (optional after bootstrap)
 - Docker Desktop with `docker compose`
 
-The default PostgreSQL runtime uses `pgvector/pgvector:pg16`. If Docker or
-Compose is not available, `scripts/check-docker.ps1` exits with a clear error.
+The default PostgreSQL runtime uses the repository Docker Compose profile. If
+Docker or Compose is not available, `scripts/check-docker.ps1` exits with a clear error.
 The normal application runtime is Docker-backed: PostgreSQL, FastAPI, the
 dashboard, IMAP workers, corpus crawlers, and extraction workers live in
 containers. Outlook COM is the exception; it runs as a Windows host process
@@ -134,8 +134,8 @@ python -m pip install -e .[dev,corpus,processors]
 
 Before adding broad private folders, install and verify the local extractor
 families you expect to rely on. Common go-live dependencies are LibreOffice for
-legacy/OpenDocument Office conversion, Poppler plus Tesseract for image-only
-PDF/OCR, `ffmpeg`/`ffprobe` plus a local faster-whisper model for media, Calibre
+legacy/OpenDocument Office conversion, Poppler plus PaddleOCR/PaddleOCR-VL for
+image-only PDF/OCR, `ffmpeg`/`ffprobe` plus a local faster-whisper model for media, Calibre
 `ebook-convert` for MOBI/AZW/LIT, archive tools such as 7-Zip/bsdtar/unar/unrar,
 DuckDB/PyArrow for columnar data, an SVG renderer (`rsvg-convert` from
 `librsvg2-bin` in Docker, or portable `resvg.exe` on Windows host-agent roots),
@@ -159,7 +159,7 @@ python -m pip install -e .[mail]
 ```
 
 External tools are detected at runtime and reported by `flux-kb crawl doctor`.
-`ffprobe`/`ffmpeg`, `tesseract`, and local transcription runtimes are never
+`ffprobe`/`ffmpeg`, PaddleOCR/PaddleOCR-VL, and local transcription runtimes are never
 called through cloud services by default.
 Deferred ASR can either load a local faster-whisper model from
 `acceleration.asr.model_path` or call the local OpenAI-compatible ASR service
@@ -199,8 +199,10 @@ flux-kb crawl watch run
 flux-kb host-agent status
 flux-kb host-agent run
 flux-kb crawl backfill --kind all --limit 20
-flux-kb crawl backfill --kind embeddings --limit 20
 flux-kb crawl backfill --root docs --family office --limit 20
+flux-kb search-index status --root projects
+flux-kb search-index sync --owner-class all --root projects --limit 100
+flux-kb search-index rebuild --owner-class all --root projects --limit 100
 flux-kb crawl worker status --family all
 flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
 flux-kb acceleration benchmark run --fixture image-heavy --files 20 --mode soak --workers 2 --family media
@@ -224,9 +226,9 @@ flux-kb crawl requeue-svg --root docs --limit 1000
 flux-kb automation status
 flux-kb automation run --mode guarded --limit 25
 flux-kb automation actions --status all --limit 25
-flux-kb embeddings status
-flux-kb embeddings enqueue --owner-class corpus --root projects --limit 100
-flux-kb embeddings backfill --owner-class all --limit 100
+flux-kb search-index status --root projects
+flux-kb search-index sync --owner-class all --root projects --limit 100
+flux-kb search-index rebuild --owner-class all --root projects --limit 100
 flux-kb governance run --mode shadow --limit 25
 flux-kb governance actions list --status proposed --limit 25
 flux-kb governance actions apply <action-id> --rationale "reviewed sanitized evidence" --confirm
@@ -277,7 +279,7 @@ Most operational values are exposed through `flux-kb settings` and the dashboard
 Settings tab. Configuration is settings catalog-backed and cross-platform; it
 does not use the Windows Registry. Environment variables override database
 settings and appear as read-only effective values. Settings that require reload,
-component restart, or embedding reindex require confirmation and create runtime
+component restart, or search-index rebuild require confirmation and create runtime
 control requests.
 
 Global crawler include/exclude globs are also settings. Per-root glob policy can
@@ -376,7 +378,7 @@ status|run|actions` and the dashboard Automation tab. Recurring automation is
 default disabled through `operator.automation.enabled=false`; the default mode is
 `operator.automation.mode=guarded`. The allowlist is intentionally narrow:
 evidence refreshes, already-approved capture ingestion, safe diagnostic
-recovery, embedding refresh enqueue/backfill, and governance shadow proposal
+recovery, search-index sync/rebuild, and governance shadow proposal
 runs. Deletes, destructive mail policies, OAuth, host startup, restart or
 reindex settings, capture approve/reject decisions, high-risk governance, local
 file open/reveal, and ambiguous actions remain manual. Guarded automation audit
@@ -402,13 +404,23 @@ the same sample-first workbook profiling when the converted workbook is still
 too large for inline extraction. The stored chunk contains a bounded
 schema/profile/sample with row estimates and truncation metadata rather than a
 full-file dump.
-Embedding refresh uses the local deterministic `flux-hash-v1` provider by
-default. New vectors keep source hashes and cache keys in embedding metadata
-without raw source text. Use `flux-kb embeddings status` to inspect coverage,
-`flux-kb embeddings enqueue` to queue `corpus_embed` jobs, or `flux-kb
-embeddings backfill` for an immediate bounded refresh. The same counters appear
-in the dashboard Performance tab as vectors processed, unchanged
-items skipped, batches, and cache hits/misses.
+Search-index refresh uses local Snowflake embeddings through the model-runner
+boundary and writes active evidence documents to Vespa. PostgreSQL keeps
+source hashes, model identity, dimensions, and sync state without raw source
+text. Use `flux-kb search-index status` to inspect coverage,
+`flux-kb search-index sync` for bounded refresh work, or
+`flux-kb search-index rebuild` when Vespa documents need rebuilding. The same
+counters appear in the dashboard Performance tab as indexed, skipped, deleted,
+failed, and stale records.
+
+The destructive legacy retrieval purge is deliberately not run by ordinary
+database migration. Migration `0033_legacy_retrieval_purge` installs
+`run_legacy_retrieval_purge()` for operators to call only after a fresh database
+backup, passing retrieval benchmark, PaddleOCR replacement/exclusion for legacy
+OCR assets, and search-index coverage for corpus chunks, episodes, and claims.
+The procedure retires old hash-vector duplicate clusters and drops the obsolete
+embedding table, related indexes, broad body trigram index, and vector extension
+when no remaining object depends on it.
 
 Governance librarian settings are catalog-backed and default conservative:
 `governance.librarian.enabled=false`,
@@ -487,7 +499,7 @@ During rollout, start mail profiles with `none`, `remove_label`, or
 post-process event review, and a small pilot label/folder have all succeeded.
 Before adding important mailboxes, run diagnostics and the managed-mail repair
 path so any legacy plaintext mail chunks are converted to sidecar-backed chunks
-and embedding backfill can rebuild vectors from disk sidecars.
+and search-index sync can rebuild Vespa documents from disk sidecars.
 
 Outlook COM profiles are for catch-up from selected classic Outlook folder
 paths. They do not need an IMAP server or account value in Flux; classic Outlook

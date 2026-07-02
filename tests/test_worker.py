@@ -2819,18 +2819,18 @@ def test_backfill_archive_kinds_process_archive_and_container_jobs(monkeypatch):
     assert calls["retried"] == []
 
 
-def test_backfill_embedding_jobs_uses_embedding_processor(monkeypatch):
+def test_backfill_search_index_jobs_uses_search_index_processor(monkeypatch):
     calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
         lambda *, limit, worker_id, root_name=None, job_families=None, family_caps=None, host_agent_roots=None: [
             {
-                "id": "job-embed",
-                "job_type": "corpus_embed",
+                "id": "job-search-index",
+                "job_type": "search_index_sync",
                 "job_family": "embedding",
                 "resource_class": "gpu",
-                "payload": {"owner_class": "corpus", "root_name": "docs", "stale_only": True, "limit": 25},
+                "payload": {"owner_class": "all", "root_name": "docs", "limit": 25},
                 "attempts": 1,
             }
         ],
@@ -2848,38 +2848,32 @@ def test_backfill_embedding_jobs_uses_embedding_processor(monkeypatch):
     monkeypatch.setattr(
         worker,
         "process_corpus_job",
-        lambda _job: (_ for _ in ()).throw(AssertionError("embedding jobs must not use file extraction")),
+        lambda _job: (_ for _ in ()).throw(AssertionError("search-index jobs must not use file extraction")),
     )
     monkeypatch.setattr(
         worker,
-        "process_embedding_job",
+        "process_search_index_sync_job",
         lambda job: worker.JobProcessResult(
             status="indexed",
             telemetry={
-                "embedding_vectors": 3,
-                "embedding_skipped_unchanged": 2,
-                "embedding_batches": 1,
-                "embedding_cache_hits": 2,
-                "embedding_cache_misses": 3,
-                "embedding_provider": "hash",
-                "embedding_model": "flux-hash-v1",
-                "embedding_dimensions": 1536,
+                "search_index_indexed": 3,
+                "search_index_skipped_unchanged": 2,
+                "search_index_engine": "vespa",
+                "search_index_embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+                "search_index_embedding_dimensions": 1024,
             },
         ),
     )
 
-    result = KnowledgeService().run_corpus_backfill(kind="embeddings", limit=1, workers=1)
+    result = KnowledgeService().run_corpus_backfill(kind="search-index", limit=1, workers=1)
 
     assert result["completed"] == 1
     telemetry = calls["completed"][0]["telemetry"]
     assert telemetry["job_family"] == "embedding"
     assert telemetry["resource_class"] == "gpu"
-    assert telemetry["embedding_vectors"] == 3
-    assert telemetry["embedding_skipped_unchanged"] == 2
-    assert telemetry["embedding_batches"] == 1
-    assert telemetry["embedding_cache_hits"] == 2
-    assert telemetry["embedding_cache_misses"] == 3
-    assert telemetry["embedding_provider"] == "hash"
+    assert telemetry["search_index_indexed"] == 3
+    assert telemetry["search_index_skipped_unchanged"] == 2
+    assert telemetry["search_index_engine"] == "vespa"
 
 
 def test_process_corpus_job_reports_locked_file(monkeypatch, tmp_path):

@@ -21,14 +21,9 @@ from .acceleration import (
 from .crawler import CrawlPlan
 from .code_index import scope_hash as code_scope_hash
 from .embeddings import (
-    DEFAULT_EMBEDDING_DIMENSIONS,
-    DEFAULT_EMBEDDING_MODEL,
     EmbeddingInput,
     EmbeddingResult,
-    HashEmbeddingProvider,
-    embed_text,
     embedding_source_hash,
-    to_pgvector_literal,
 )
 from . import mail_content_store
 from .migrations import load_migrations
@@ -48,7 +43,7 @@ _SEMANTIC_DUPLICATE_OWNER_TABLES = {
     "claim": "claims",
 }
 _SEMANTIC_DUPLICATE_DEFAULT_THRESHOLD = 0.86
-_SEMANTIC_DUPLICATE_ALGORITHM = f"{DEFAULT_EMBEDDING_MODEL}:cosine"
+_SEMANTIC_DUPLICATE_ALGORITHM = "snowflake-vespa-cosine-v1"
 UNSEEN_ASSET_CANCELLED_STATUS = "cancelled_unseen_asset"
 DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS = 86400
 DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE = 500
@@ -364,53 +359,6 @@ def _replace_database_url_auth(parts, *, host: str | None = None, password: str 
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-def _embedding_result_for_text(*, owner_table: str, owner_id: str, text: str) -> EmbeddingResult:
-    return HashEmbeddingProvider().embed_batch(
-        [
-            EmbeddingInput(
-                owner_table=owner_table,
-                owner_id=owner_id,
-                text=text,
-                model=DEFAULT_EMBEDDING_MODEL,
-                dimensions=DEFAULT_EMBEDDING_DIMENSIONS,
-            )
-        ]
-    )[0]
-
-
-def _insert_embedding_result(cur: Any, result: EmbeddingResult) -> None:
-    cur.execute(
-        """
-        INSERT INTO embeddings (owner_table, owner_id, model, dimensions, embedding, metadata, root_id, updated_at)
-        VALUES (
-            %s,
-            %s,
-            %s,
-            %s,
-            %s::vector,
-            %s::jsonb,
-            CASE WHEN %s = 'asset_chunks' THEN (
-                SELECT a.root_id
-                FROM asset_chunks c
-                JOIN source_assets a ON a.id = c.asset_id
-                WHERE c.id = %s::uuid
-            ) ELSE NULL END,
-            now()
-        )
-        """,
-        (
-            result.owner_table,
-            result.owner_id,
-            result.model,
-            result.dimensions,
-            to_pgvector_literal(result.vector),
-            _json(result.metadata),
-            result.owner_table,
-            result.owner_id,
-        ),
-    )
-
-
 def insert_episode(
     *,
     title: str,
@@ -431,14 +379,6 @@ def insert_episode(
                 (title, summary, source_kind, _json(metadata or {})),
             )
             episode_id = cur.fetchone()[0]
-            _insert_embedding_result(
-                cur,
-                _embedding_result_for_text(
-                    owner_table="episodes",
-                    owner_id=episode_id,
-                    text=f"{title}\n{summary}",
-                ),
-            )
             cur.execute(
                 """
                 INSERT INTO audit_events (event_type, target_table, target_id, details)
@@ -461,7 +401,6 @@ def search_episodes(
     psycopg = _load_psycopg()
     limit = max(1, min(limit, 50))
     candidate_limit = max(limit * 4, 12)
-    query_vector = to_pgvector_literal(embed_text(query))
     scope_sql, scope_params = _episode_scope_sql(
         "metadata->>'cwd'",
         "metadata->>'workspace_key'",
@@ -529,33 +468,6 @@ def search_episodes(
                 (query, query, query, query, *scope_params, candidate_limit),
             )
             _add_ranked_rows("fuzzy", cur.fetchall(), streams, details)
-
-            cur.execute(
-                f"""
-                SELECT e.id::text, e.title, e.summary,
-                       1 - (emb.embedding <=> %s::vector) AS score,
-                       jsonb_build_object('metadata', e.metadata) AS metadata
-                FROM embeddings emb
-                JOIN episodes e
-                  ON emb.owner_table = 'episodes'
-                 AND emb.owner_id = e.id
-                WHERE emb.model = %s
-                  {aliased_scope_sql}
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM semantic_duplicate_members sm
-                      JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
-                      WHERE sc.status = 'active'
-                        AND sm.owner_table = 'episodes'
-                        AND sm.owner_id = e.id
-                        AND sm.member_role = 'duplicate'
-                  )
-                ORDER BY emb.embedding <=> %s::vector
-                LIMIT %s
-                """,
-                (query_vector, DEFAULT_EMBEDDING_MODEL, *aliased_scope_params, query_vector, candidate_limit),
-            )
-            _add_ranked_rows("vector", cur.fetchall(), streams, details)
 
             cur.execute(
                 f"""
@@ -699,8 +611,6 @@ def search_corpus_chunks(
     limit = max(1, min(limit, 50))
     candidate_limit = max(limit * 4, 12)
     hydration_limit = min(max(limit * 2, 20), 100)
-    max_vector_candidate_limit = min(max(candidate_limit * 2, 240), 400)
-    query_vector = to_pgvector_literal(embed_text(query))
     root_name_sql = "AND r.name = %s" if root_name else ""
     root_name_params: tuple[Any, ...] = (root_name,) if root_name else ()
     code_filter_sql, code_filter_params = _corpus_code_filter_sql(filters)
@@ -751,80 +661,12 @@ def search_corpus_chunks(
             )
 
             if root_name and root_id is None:
-                streams["corpus_vector"] = []
                 _record_corpus_stream_diagnostics(
                     diagnostics,
-                    "corpus_vector",
+                    "postgres_metadata_diagnostic",
                     time.perf_counter(),
                     rows=0,
                     plan="root_not_found",
-                )
-            else:
-                vector_root_sql = "AND (nearest.root_id = %s::uuid OR nearest.root_id IS NULL)" if root_id else ""
-                vector_root_params: tuple[Any, ...] = (root_id,) if root_id else ()
-                non_vector_candidate_count = len(raw_scores)
-                vector_candidate_limit = 80 if non_vector_candidate_count >= candidate_limit else max_vector_candidate_limit
-                cur.execute("SELECT set_config('hnsw.ef_search', %s, true)", (str(vector_candidate_limit),))
-                started = time.perf_counter()
-                cur.execute(
-                    f"""
-                    WITH nearest_embeddings AS MATERIALIZED (
-                        SELECT emb.owner_id,
-                               emb.root_id,
-                               1 - (emb.embedding <=> %s::vector) AS score,
-                               emb.embedding <=> %s::vector AS distance
-                        FROM embeddings emb
-                        WHERE emb.owner_table = 'asset_chunks'
-                          AND emb.model = %s
-                        ORDER BY emb.embedding <=> %s::vector
-                        LIMIT %s
-                    )
-                    SELECT c.id::text, nearest.score
-                    FROM nearest_embeddings nearest
-                    JOIN asset_chunks c ON c.id = nearest.owner_id
-                    JOIN source_assets a ON a.id = c.asset_id
-                    JOIN monitored_roots r ON r.id = a.root_id
-                    WHERE r.enabled
-                      AND a.deleted_at IS NULL
-                      AND a.canonical_asset_id IS NULL
-                      AND a.extraction_status = 'indexed'
-                      AND nearest.score > 0.25
-                      {vector_root_sql}
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM semantic_duplicate_members sm
-                          JOIN semantic_duplicate_clusters sc ON sc.id = sm.cluster_id
-                          WHERE sc.status = 'active'
-                            AND sm.owner_table = 'asset_chunks'
-                            AND sm.owner_id = c.id
-                            AND sm.member_role = 'duplicate'
-                      )
-                      {root_name_sql}
-                      {code_filter_sql}
-                    ORDER BY nearest.distance
-                    LIMIT %s
-                    """,
-                    (
-                        query_vector,
-                        query_vector,
-                        DEFAULT_EMBEDDING_MODEL,
-                        query_vector,
-                        vector_candidate_limit,
-                        *vector_root_params,
-                        *root_name_params,
-                        *code_filter_params,
-                        candidate_limit,
-                    ),
-                )
-                rows = cur.fetchall()
-                _add_ranked_corpus_candidates("corpus_vector", rows, streams, raw_scores)
-                _record_corpus_stream_diagnostics(
-                    diagnostics,
-                    "corpus_vector",
-                    started,
-                    rows=len(rows),
-                    plan="root_scoped_hnsw_candidates" if root_id else "global_hnsw_candidates",
-                    candidate_limit=vector_candidate_limit,
                 )
 
             started = time.perf_counter()
@@ -915,7 +757,7 @@ def search_corpus_chunks(
                 cur.execute(
                     f"""
                     SELECT c.id::text,
-                           greatest(similarity(c.title, %s), similarity(c.body, %s)) AS score,
+                           greatest(similarity(c.title, %s), similarity(a.path, %s)) AS score,
                            c.updated_at
                     FROM asset_chunks c
                     JOIN source_assets a ON a.id = c.asset_id
@@ -924,7 +766,7 @@ def search_corpus_chunks(
                       AND a.deleted_at IS NULL
                       AND a.canonical_asset_id IS NULL
                       AND a.extraction_status = 'indexed'
-                      AND (c.title %% %s OR c.body %% %s)
+                      AND (c.title %% %s OR a.path %% %s)
                       AND NOT EXISTS (
                           SELECT 1
                           FROM semantic_duplicate_members sm
@@ -1278,6 +1120,290 @@ def search_corpus_chunks_vespa(
     return reranked[:limit]
 
 
+def search_evidence_vespa(
+    query: str,
+    *,
+    limit: int = 5,
+    root_name: str | None = None,
+    filters: dict[str, Any] | None = None,
+    vespa_base_url: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    from .embeddings import SnowflakeEmbeddingProvider
+    from .reranking import QwenReranker
+    from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, VespaSearchAdapter
+
+    limit = max(1, min(limit, 50))
+    file_kinds = list(filters.get("file_kinds") or []) if isinstance(filters, dict) else []
+    languages = list(filters.get("languages") or []) if isinstance(filters, dict) else []
+    started = time.perf_counter()
+    embedding_started = time.perf_counter()
+    embedding_result = SnowflakeEmbeddingProvider(
+        model=SNOWFLAKE_EMBEDDING_MODEL,
+        dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+    ).embed_batch(
+        [
+            EmbeddingInput(
+                owner_table="query",
+                owner_id="query",
+                text=query,
+                model=SNOWFLAKE_EMBEDDING_MODEL,
+                dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            )
+        ]
+    )[0]
+    embedding_elapsed_ms = max(0, int((time.perf_counter() - embedding_started) * 1000))
+    rank_profile = "hybrid"
+    candidate_limit = max(limit * 8, 80)
+    query_started = time.perf_counter()
+    resolved_vespa_base_url = vespa_base_url or "http://127.0.0.1:8080"
+    candidates = VespaSearchAdapter(base_url=resolved_vespa_base_url).query(
+        query,
+        embedding=embedding_result.vector,
+        root_name=root_name,
+        file_kinds=file_kinds,
+        languages=languages,
+        limit=candidate_limit,
+        rank_profile=rank_profile,
+    )
+    query_elapsed_ms = max(0, int((time.perf_counter() - query_started) * 1000))
+    _record_corpus_stream_diagnostics(
+        diagnostics,
+        "vespa_hybrid",
+        started,
+        rows=len(candidates),
+        plan="vespa_hybrid_bm25_dense_all_evidence",
+    )
+    owner_counts: dict[str, int] = {}
+    match_feature_keys = sorted(
+        {
+            str(key)
+            for item in candidates
+            if isinstance(item.get("match_features"), dict)
+            for key in item["match_features"].keys()
+        }
+    )
+    grouped_ids: dict[str, list[str]] = {"asset_chunks": [], "episodes": [], "claims": []}
+    raw_scores: dict[str, dict[str, float]] = {}
+    for item in candidates:
+        owner_table = str(item.get("owner_table") or "")
+        owner_id = str(item.get("owner_id") or "")
+        if owner_table not in grouped_ids or not owner_id:
+            continue
+        owner_counts[owner_table] = owner_counts.get(owner_table, 0) + 1
+        grouped_ids[owner_table].append(owner_id)
+        raw_scores[owner_id] = {"vespa_hybrid": float(item.get("score") or 0.0)}
+    if diagnostics is not None:
+        diagnostics["vespa"] = {
+            "search_engine": "vespa",
+            "base_url": resolved_vespa_base_url,
+            "rank_profile": rank_profile,
+            "candidate_limit": candidate_limit,
+            "candidate_count": len(candidates),
+            "owner_counts": owner_counts,
+            "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+            "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "embedding_latency_ms": embedding_elapsed_ms,
+            "query_latency_ms": query_elapsed_ms,
+            "match_feature_keys": match_feature_keys,
+        }
+    if not any(grouped_ids.values()):
+        if diagnostics is not None:
+            diagnostics["vespa"]["hydrated_count"] = 0
+            diagnostics["vespa"]["returned_count"] = 0
+        return []
+
+    hydrate_started = time.perf_counter()
+    psycopg = _load_psycopg()
+    with psycopg.connect(database_url()) as conn:
+        with conn.cursor() as cur:
+            corpus_details = _hydrate_corpus_candidate_details(
+                cur,
+                candidate_ids=grouped_ids["asset_chunks"][: min(max(limit * 4, 20), 200)],
+                root_name=root_name,
+                filters=filters,
+                raw_scores=raw_scores,
+            )
+            for item_id, detail in corpus_details.items():
+                detail["raw_scores"] = dict(raw_scores.get(item_id, {}))
+            _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=corpus_details)
+            episode_details = _hydrate_episode_candidate_details(
+                cur,
+                candidate_ids=grouped_ids["episodes"][: min(max(limit * 4, 20), 200)],
+                root_name=root_name,
+                raw_scores=raw_scores,
+            )
+            _add_semantic_duplicate_metadata(cur, owner_table="episodes", details=episode_details)
+            claim_details = _hydrate_claim_candidate_details(
+                cur,
+                candidate_ids=grouped_ids["claims"][: min(max(limit * 4, 20), 200)],
+                root_name=root_name,
+                raw_scores=raw_scores,
+            )
+            _add_semantic_duplicate_metadata(cur, owner_table="claims", details=claim_details)
+    hydrate_elapsed_ms = max(0, int((time.perf_counter() - hydrate_started) * 1000))
+
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        owner_table = str(item.get("owner_table") or "")
+        owner_id = str(item.get("owner_id") or "")
+        key = (owner_table, owner_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        score = float(item.get("score") or 0.0)
+        if owner_table == "asset_chunks" and owner_id in corpus_details:
+            payloads = _corpus_results_from_fused(
+                [RankedItem(item_id=owner_id, score=score, streams=("vespa_hybrid",))],
+                corpus_details,
+            )
+            if payloads:
+                results.append({"kind": "corpus_chunk", **payloads[0]})
+        elif owner_table == "episodes" and owner_id in episode_details:
+            results.append(_evidence_detail_payload("episode", episode_details[owner_id], score=score))
+        elif owner_table == "claims" and owner_id in claim_details:
+            results.append(_evidence_detail_payload("claim", claim_details[owner_id], score=score))
+
+    if diagnostics is not None:
+        diagnostics["vespa"]["hydrated_count"] = len(results)
+        diagnostics["vespa"]["hydration_latency_ms"] = hydrate_elapsed_ms
+    reranker = QwenReranker(top_n=min(80, max(limit, len(results))))
+    rerank_started = time.perf_counter()
+    reranked = reranker.rerank(query, results)
+    rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
+    if diagnostics is not None:
+        diagnostics["reranker"] = {
+            "model": reranker.model,
+            "quantization": reranker.quantization,
+            "input_count": len(results),
+            "returned_count": min(limit, len(reranked)),
+            "latency_ms": rerank_elapsed_ms,
+            "top_n": reranker.top_n,
+            "max_passage_tokens": reranker.max_passage_tokens,
+        }
+        diagnostics["vespa"]["returned_count"] = min(limit, len(reranked))
+    return reranked[:limit]
+
+
+def _evidence_detail_payload(kind: str, detail: dict[str, Any], *, score: float) -> dict[str, Any]:
+    payload = {
+        "kind": kind,
+        "id": detail["id"],
+        "title": detail["title"],
+        "summary": detail["summary"],
+        "score": score,
+        "streams": ["vespa_hybrid"],
+        "raw_scores": detail.get("raw_scores") or {},
+    }
+    for key in ("root_name", "source_path", "metadata", "lifecycle", "graph", "semantic_duplicate_cluster"):
+        if key in detail:
+            payload[key] = detail[key]
+    return payload
+
+
+def _hydrate_episode_candidate_details(
+    cur: Any,
+    *,
+    candidate_ids: list[str],
+    root_name: str | None,
+    raw_scores: dict[str, dict[str, float]],
+) -> dict[str, dict[str, Any]]:
+    if not candidate_ids:
+        return {}
+    root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
+    params: tuple[Any, ...] = (candidate_ids, *((root_name,) if root_name else ()))
+    cur.execute(
+        f"""
+        SELECT e.id::text, e.title, e.summary, e.metadata,
+               e.confidence, e.usage_count, e.superseded_by IS NOT NULL AS superseded,
+               e.lifecycle_state, e.contradiction_count, e.retention_action,
+               e.created_at, e.updated_at
+        FROM episodes e
+        WHERE e.id = ANY(%s::uuid[])
+          AND e.superseded_by IS NULL
+          {root_sql}
+        """,
+        params,
+    )
+    details: dict[str, dict[str, Any]] = {}
+    for row in cur.fetchall():
+        item_id = str(row[0])
+        metadata = row[3] if isinstance(row[3], dict) else {}
+        details[item_id] = {
+            "id": item_id,
+            "title": str(row[1] or ""),
+            "summary": str(row[2] or ""),
+            "metadata": metadata,
+            "root_name": metadata.get("root_name"),
+            "source_path": metadata.get("source_path") or metadata.get("source"),
+            "raw_scores": dict(raw_scores.get(item_id, {})),
+            "lifecycle": {
+                "confidence": float(row[4] or 0.0),
+                "usage_count": int(row[5] or 0),
+                "superseded": bool(row[6]),
+                "state": row[7],
+                "contradiction_count": int(row[8] or 0),
+                "retention_action": row[9],
+                "created_at": row[10].isoformat() if row[10] else None,
+                "updated_at": row[11].isoformat() if row[11] else None,
+            },
+        }
+    return details
+
+
+def _hydrate_claim_candidate_details(
+    cur: Any,
+    *,
+    candidate_ids: list[str],
+    root_name: str | None,
+    raw_scores: dict[str, dict[str, float]],
+) -> dict[str, dict[str, Any]]:
+    if not candidate_ids:
+        return {}
+    root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
+    params: tuple[Any, ...] = (candidate_ids, *((root_name,) if root_name else ()))
+    cur.execute(
+        f"""
+        SELECT c.id::text, concat_ws(' ', e.name, c.predicate) AS title,
+               c.object_text, c.episode_id::text, c.lifecycle_state,
+               c.confidence, c.usage_count, c.reinforcement_count,
+               c.last_confirmed_at, c.retention_action, c.metadata
+        FROM claims c
+        LEFT JOIN entities e ON e.id = c.subject_entity_id
+        WHERE c.id = ANY(%s::uuid[])
+          AND c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
+          AND c.retention_action = 'keep'
+          {root_sql}
+        """,
+        params,
+    )
+    details: dict[str, dict[str, Any]] = {}
+    for row in cur.fetchall():
+        item_id = str(row[0])
+        metadata = row[10] if isinstance(row[10], dict) else {}
+        graph = {"episode_id": row[3]} if row[3] else {}
+        details[item_id] = {
+            "id": item_id,
+            "title": str(row[1] or "Claim"),
+            "summary": str(row[2] or ""),
+            "metadata": metadata,
+            "root_name": metadata.get("root_name"),
+            "source_path": metadata.get("source_path") or metadata.get("source"),
+            "raw_scores": dict(raw_scores.get(item_id, {})),
+            "graph": graph,
+            "lifecycle": {
+                "state": row[4],
+                "confidence": float(row[5] or 0.0),
+                "usage_count": int(row[6] or 0),
+                "reinforcement_count": int(row[7] or 0),
+                "last_confirmed_at": row[8].isoformat() if row[8] else None,
+                "retention_action": row[9],
+            },
+        }
+    return details
+
+
 def _corpus_results_from_fused(fused: list[Any], details: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for item in fused:
@@ -1331,11 +1457,6 @@ def refresh_semantic_duplicate_clusters(
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             for item_class in classes:
-                if item_class == "claim":
-                    payload["claim_embeddings_backfilled"] = payload.get("claim_embeddings_backfilled", 0) + _backfill_claim_embeddings(
-                        cur,
-                        limit=row_limit,
-                    )
                 payload["retired_clusters"] += _retire_semantic_duplicate_clusters(
                     cur,
                     memory_class=item_class,
@@ -1349,12 +1470,9 @@ def refresh_semantic_duplicate_clusters(
                 )
                 if len(candidates) < 2:
                     continue
-                pairs = _fetch_semantic_duplicate_pairs(
-                    cur,
-                    memory_class=item_class,
-                    root_name=root_name,
+                pairs = _semantic_duplicate_pairs_from_snowflake(
+                    candidates,
                     threshold=normalized_threshold,
-                    limit=row_limit,
                 )
                 clusters = _build_semantic_duplicate_clusters(
                     candidates,
@@ -1507,7 +1625,6 @@ def forget_episode(memory_id: str, *, reason: str = "user_request", url: str | N
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM embeddings WHERE owner_table = 'episodes' AND owner_id = %s", (parsed_id,))
             cur.execute("DELETE FROM episodes WHERE id = %s", (parsed_id,))
             deleted = cur.rowcount > 0
             cur.execute(
@@ -1635,23 +1752,6 @@ def upsert_claim(
                 ),
             )
             claim = _claim_row(cur.fetchone(), subject=_entity_row(entity))
-            cur.execute(
-                """
-                DELETE FROM embeddings
-                WHERE owner_table = 'claims'
-                  AND owner_id = %s
-                  AND model = %s
-                """,
-                (claim["id"], DEFAULT_EMBEDDING_MODEL),
-            )
-            _insert_embedding_result(
-                cur,
-                _embedding_result_for_text(
-                    owner_table="claims",
-                    owner_id=claim["id"],
-                    text=f"{subject_name}\n{predicate}\n{object_text}",
-                ),
-            )
             cur.execute(
                 """
                 INSERT INTO claim_lifecycle_events (
@@ -2664,19 +2764,6 @@ def delete_monitored_root(
                 WHERE canonical_asset_id IN (
                     SELECT id FROM source_assets WHERE root_id = %s
                 )
-                """,
-                (actual_root_id,),
-            )
-            cur.execute(
-                """
-                DELETE FROM embeddings
-                WHERE owner_table = 'asset_chunks'
-                  AND owner_id IN (
-                    SELECT c.id
-                    FROM asset_chunks c
-                    JOIN source_assets a ON a.id = c.asset_id
-                    WHERE a.root_id = %s
-                  )
                 """,
                 (actual_root_id,),
             )
@@ -4209,16 +4296,6 @@ def purge_unseen_corpus_assets(
                     WHERE source_asset_id IN (SELECT id FROM eligible)
                     RETURNING 1
                 ),
-                embeddings_deleted AS (
-                    DELETE FROM embeddings
-                    WHERE owner_table = 'asset_chunks'
-                      AND owner_id IN (
-                          SELECT c.id
-                          FROM asset_chunks c
-                          JOIN eligible e ON e.id = c.asset_id
-                      )
-                    RETURNING 1
-                ),
                 chunks_deleted AS (
                     DELETE FROM asset_chunks
                     WHERE asset_id IN (SELECT id FROM eligible)
@@ -4968,35 +5045,6 @@ def repair_extracted_corpus_asset_statuses(
                       {root_filter}
                 ),
                 deleted AS (
-                    DELETE FROM embeddings e
-                    USING stale_chunks s
-                    WHERE e.owner_table = 'asset_chunks'
-                      AND e.owner_id = s.id
-                    RETURNING 1
-                )
-                SELECT count(*) FROM deleted
-                """,
-                params,
-            )
-            embeddings_purged = int(cur.fetchone()[0] or 0)
-            cur.execute(
-                f"""
-                WITH stale_chunks AS (
-                    SELECT c.id
-                    FROM asset_chunks c
-                    JOIN source_assets a ON a.id = c.asset_id
-                    JOIN monitored_roots r ON r.id = a.root_id
-                    WHERE (
-                        a.deleted_at IS NOT NULL
-                        OR a.extraction_status NOT IN ('indexed', 'processing_staged')
-                        OR (
-                            array_length(string_to_array(a.path, '/'), 1) = 2
-                            AND lower(split_part(a.path, '/', 2)) IN ('message.eml', 'message.msg', 'body.html')
-                        )
-                    )
-                      {root_filter}
-                ),
-                deleted AS (
                     DELETE FROM asset_chunks c
                     USING stale_chunks s
                     WHERE c.id = s.id
@@ -5035,7 +5083,6 @@ def repair_extracted_corpus_asset_statuses(
                 """,
                 params,
             )
-            repaired_mail_chunk_ids: list[str] = []
             mail_plaintext_chunks_repaired = 0
             for chunk_id, chunk_index, title, body, _metadata, asset_path, row_root_name in cur.fetchall():
                 kind = mail_content_store.managed_mail_content_kind(str(asset_path or ""))
@@ -5066,24 +5113,12 @@ def repair_extracted_corpus_asset_statuses(
                         chunk_id,
                     ),
                 )
-                repaired_mail_chunk_ids.append(str(chunk_id))
                 mail_plaintext_chunks_repaired += 1
-            if repaired_mail_chunk_ids:
-                cur.execute(
-                    """
-                    DELETE FROM embeddings
-                    WHERE owner_table = 'asset_chunks'
-                      AND owner_id = ANY(%s::uuid[])
-                    """,
-                    (repaired_mail_chunk_ids,),
-                )
-                embeddings_purged += int(getattr(cur, "rowcount", 0) or 0)
             return {
                 "root_name": root_name,
                 "repaired": repaired,
                 "internal_mail_artifacts_deleted": internal_deleted,
                 "chunks_purged": chunks_purged,
-                "embeddings_purged": embeddings_purged,
                 "mail_plaintext_chunks_repaired": mail_plaintext_chunks_repaired,
             }
 
@@ -5662,7 +5697,7 @@ def create_benchmark_soak_jobs(
         with conn.cursor() as cur:
             for index in range(row_count):
                 job_family = families[index % len(families)]
-                job_type = "corpus_embed" if job_family == "embedding" else f"corpus_extract_{job_family}"
+                job_type = "search_index_sync" if job_family == "embedding" else f"corpus_extract_{job_family}"
                 payload = {
                     "benchmark": True,
                     "benchmark_tag": tag,
@@ -7245,7 +7280,7 @@ def retrieval_stats(*, url: str | None = None) -> dict[str, int]:
                 "sources": "sources",
                 "source_assets": "source_assets",
                 "asset_chunks": "asset_chunks",
-                "embeddings": "embeddings",
+                "search_index_records": "search_index_records",
             }.items():
                 cur.execute(f"SELECT count(*) FROM {table}")
                 counts[key] = cur.fetchone()[0]
@@ -10005,7 +10040,7 @@ def _is_code_corpus_detail(detail: dict[str, Any]) -> bool:
 def _non_code_text_quality(detail: dict[str, Any]) -> float:
     raw_scores = detail.get("raw_scores") if isinstance(detail.get("raw_scores"), dict) else {}
     quality = 0.0
-    for stream in ("corpus_lexical", "corpus_fuzzy", "mail_sidecar", "corpus_vector"):
+    for stream in ("corpus_lexical", "corpus_fuzzy", "mail_sidecar", "vespa_hybrid"):
         try:
             quality = max(quality, float(raw_scores.get(stream) or 0.0))
         except (TypeError, ValueError):
@@ -10450,13 +10485,11 @@ def _fetch_semantic_duplicate_candidates(
                    NULL::double precision AS confidence,
                    0 AS usage_count, 0 AS reinforcement_count,
                    NULL::timestamptz AS last_confirmed_at,
-                   c.updated_at
+                   c.updated_at,
+                   concat_ws(E'\n', c.title, a.path, c.body) AS semantic_text
             FROM asset_chunks c
             JOIN source_assets a ON a.id = c.asset_id
             JOIN monitored_roots r ON r.id = a.root_id
-            JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
-                               AND emb.owner_id = c.id
-                               AND emb.model = %s
             WHERE r.enabled
               AND a.deleted_at IS NULL
               AND a.canonical_asset_id IS NULL
@@ -10465,7 +10498,7 @@ def _fetch_semantic_duplicate_candidates(
             ORDER BY r.name, c.updated_at DESC, c.id
             LIMIT %s
             """,
-            (DEFAULT_EMBEDDING_MODEL, *params),
+            params,
         )
     elif memory_class == "episode":
         root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
@@ -10486,17 +10519,15 @@ def _fetch_semantic_duplicate_candidates(
                    NULL::integer AS trust_rank, length(e.summary) AS text_length,
                    e.confidence, e.usage_count, 0 AS reinforcement_count,
                    NULL::timestamptz AS last_confirmed_at,
-                   e.updated_at
+                   e.updated_at,
+                   concat_ws(E'\n', e.title, e.summary) AS semantic_text
             FROM episodes e
-            JOIN embeddings emb ON emb.owner_table = 'episodes'
-                               AND emb.owner_id = e.id
-                               AND emb.model = %s
             WHERE e.superseded_by IS NULL
               {root_sql}
             ORDER BY workspace_key, e.updated_at DESC, e.id
             LIMIT %s
             """,
-            (DEFAULT_EMBEDDING_MODEL, *params),
+            params,
         )
     else:
         root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
@@ -10519,19 +10550,17 @@ def _fetch_semantic_duplicate_candidates(
                    length(concat_ws(' ', e.name, c.predicate, c.object_text)) AS text_length,
                    c.confidence, c.usage_count, c.reinforcement_count,
                    c.last_confirmed_at,
-                   c.updated_at
+                   c.updated_at,
+                   concat_ws(' ', e.name, c.predicate, c.object_text) AS semantic_text
             FROM claims c
             LEFT JOIN entities e ON e.id = c.subject_entity_id
-            JOIN embeddings emb ON emb.owner_table = 'claims'
-                               AND emb.owner_id = c.id
-                               AND emb.model = %s
             WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
               AND c.retention_action = 'keep'
               {root_sql}
             ORDER BY workspace_key, c.updated_at DESC, c.id
             LIMIT %s
             """,
-            (DEFAULT_EMBEDDING_MODEL, *params),
+            params,
         )
     rows = cur.fetchall()
     return {
@@ -10550,118 +10579,70 @@ def _fetch_semantic_duplicate_candidates(
             "reinforcement_count": row[10],
             "last_confirmed_at": row[11],
             "updated_at": row[12],
+            "semantic_text": row[13],
         }
         for row in rows
     }
 
 
-def _fetch_semantic_duplicate_pairs(
-    cur: Any,
+def _semantic_duplicate_pairs_from_snowflake(
+    candidates: dict[str, dict[str, Any]],
     *,
-    memory_class: str,
-    root_name: str | None,
     threshold: float,
-    limit: int,
 ) -> list[tuple[str, str, float]]:
-    cte_sql, params = _semantic_duplicate_candidate_cte(memory_class=memory_class, root_name=root_name, limit=limit)
-    cur.execute(
-        f"""
-        WITH candidates AS (
-            {cte_sql}
+    if len(candidates) < 2:
+        return []
+    from .embeddings import SnowflakeEmbeddingProvider
+    from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL
+
+    ordered = sorted(candidates.values(), key=lambda item: (str(item.get("workspace_key") or ""), str(item["owner_id"])))
+    inputs = [
+        EmbeddingInput(
+            owner_table=str(item["owner_table"]),
+            owner_id=str(item["owner_id"]),
+            text=str(item.get("semantic_text") or item.get("label") or ""),
+            model=SNOWFLAKE_EMBEDDING_MODEL,
+            dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
         )
-        SELECT a.owner_id::text, b.owner_id::text,
-               1 - (a.embedding <=> b.embedding) AS similarity
-        FROM candidates a
-        JOIN candidates b
-          ON a.workspace_key = b.workspace_key
-         AND a.owner_id < b.owner_id
-        WHERE 1 - (a.embedding <=> b.embedding) >= %s
-        ORDER BY similarity DESC, a.owner_id::text, b.owner_id::text
-        """,
-        (*params, threshold),
-    )
-    return [(str(row[0]), str(row[1]), float(row[2] or 0.0)) for row in cur.fetchall()]
+        for item in ordered
+    ]
+    vectors = {
+        result.owner_id: result.vector
+        for result in SnowflakeEmbeddingProvider(
+            model=SNOWFLAKE_EMBEDDING_MODEL,
+            dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        ).embed_batch(inputs)
+    }
+    pairs: list[tuple[str, str, float]] = []
+    by_workspace: dict[str, list[dict[str, Any]]] = {}
+    for item in ordered:
+        by_workspace.setdefault(str(item.get("workspace_key") or ""), []).append(item)
+    for workspace_items in by_workspace.values():
+        for left_index, left in enumerate(workspace_items):
+            left_id = str(left["owner_id"])
+            left_vector = vectors.get(left_id)
+            if left_vector is None:
+                continue
+            for right in workspace_items[left_index + 1 :]:
+                right_id = str(right["owner_id"])
+                right_vector = vectors.get(right_id)
+                if right_vector is None:
+                    continue
+                similarity = _cosine_similarity(left_vector, right_vector)
+                if similarity >= threshold:
+                    pairs.append((left_id, right_id, similarity))
+    return sorted(pairs, key=lambda item: (-item[2], item[0], item[1]))
 
 
-def _semantic_duplicate_candidate_cte(
-    *,
-    memory_class: str,
-    root_name: str | None,
-    limit: int,
-) -> tuple[str, tuple[Any, ...]]:
-    if memory_class == "corpus":
-        root_sql = "AND r.name = %s" if root_name else ""
-        params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
-        return (
-            f"""
-            SELECT c.id AS owner_id, 'root:' || r.name AS workspace_key, emb.embedding
-            FROM asset_chunks c
-            JOIN source_assets a ON a.id = c.asset_id
-            JOIN monitored_roots r ON r.id = a.root_id
-            JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
-                               AND emb.owner_id = c.id
-                               AND emb.model = %s
-            WHERE r.enabled
-              AND a.deleted_at IS NULL
-              AND a.canonical_asset_id IS NULL
-              {root_sql}
-            ORDER BY r.name, c.updated_at DESC, c.id
-            LIMIT %s
-            """,
-            (DEFAULT_EMBEDDING_MODEL, *params),
-        )
-    if memory_class == "episode":
-        root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
-        params = ((root_name,) if root_name else ()) + (limit,)
-        return (
-            f"""
-            SELECT e.id AS owner_id,
-                   COALESCE(
-                     NULLIF(e.metadata->>'workspace_key', ''),
-                     CASE
-                       WHEN NULLIF(e.metadata->>'root_name', '') IS NOT NULL
-                       THEN 'root:' || (e.metadata->>'root_name')
-                       ELSE ''
-                     END
-                   ) AS workspace_key,
-                   emb.embedding
-            FROM episodes e
-            JOIN embeddings emb ON emb.owner_table = 'episodes'
-                               AND emb.owner_id = e.id
-                               AND emb.model = %s
-            WHERE e.superseded_by IS NULL
-              {root_sql}
-            ORDER BY workspace_key, e.updated_at DESC, e.id
-            LIMIT %s
-            """,
-            (DEFAULT_EMBEDDING_MODEL, *params),
-        )
-    root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
-    params = ((root_name,) if root_name else ()) + (limit,)
-    return (
-        f"""
-        SELECT c.id AS owner_id,
-               COALESCE(
-                 NULLIF(c.metadata->>'workspace_key', ''),
-                 CASE
-                   WHEN NULLIF(c.metadata->>'root_name', '') IS NOT NULL
-                   THEN 'root:' || (c.metadata->>'root_name')
-                   ELSE ''
-                 END
-               ) AS workspace_key,
-               emb.embedding
-        FROM claims c
-        JOIN embeddings emb ON emb.owner_table = 'claims'
-                           AND emb.owner_id = c.id
-                           AND emb.model = %s
-        WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
-          AND c.retention_action = 'keep'
-          {root_sql}
-        ORDER BY workspace_key, c.updated_at DESC, c.id
-        LIMIT %s
-        """,
-        (DEFAULT_EMBEDDING_MODEL, *params),
-    )
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    dot = sum(float(a) * float(b) for a, b in zip(left, right))
+    left_norm = sum(float(value) * float(value) for value in left) ** 0.5
+    right_norm = sum(float(value) * float(value) for value in right) ** 0.5
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return float(dot / (left_norm * right_norm))
 
 
 def _build_semantic_duplicate_clusters(
@@ -10861,45 +10842,6 @@ def _insert_semantic_duplicate_cluster(cur: Any, cluster: dict[str, Any]) -> dic
         "updated_at": updated_at.isoformat() if updated_at else None,
     }
     return {"cluster": inserted, "member_count": member_count}
-
-
-def _backfill_claim_embeddings(cur: Any, *, limit: int) -> int:
-    cur.execute(
-        """
-        SELECT c.id::text, e.name, c.predicate, c.object_text
-        FROM claims c
-        LEFT JOIN entities e ON e.id = c.subject_entity_id
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM embeddings emb
-            WHERE emb.owner_table = 'claims'
-              AND emb.owner_id = c.id
-              AND emb.model = %s
-        )
-        ORDER BY CASE
-                    WHEN rec.index_status = 'failed' THEN 0
-                    WHEN rec.index_status IS NULL THEN 1
-                    WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
-                    ELSE 3
-                 END,
-                 c.updated_at DESC,
-                 c.id
-        LIMIT %s
-        """,
-        (DEFAULT_EMBEDDING_MODEL, limit),
-    )
-    rows = cur.fetchall()
-    for claim_id, subject_name, predicate, object_text in rows:
-        text = f"{subject_name or ''}\n{predicate or ''}\n{object_text or ''}"
-        _insert_embedding_result(
-            cur,
-            _embedding_result_for_text(
-                owner_table="claims",
-                owner_id=claim_id,
-                text=text,
-            ),
-        )
-    return len(rows)
 
 
 def _semantic_duplicate_cluster_row(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -12087,18 +12029,6 @@ def _block_metadata_only_assets_for_strict_root(cur: Any, *, root_id: str) -> in
         return 0
     cur.execute("DELETE FROM code_references WHERE source_asset_id = ANY(%s::uuid[])", (asset_ids,))
     cur.execute("DELETE FROM code_symbols WHERE source_asset_id = ANY(%s::uuid[])", (asset_ids,))
-    cur.execute(
-        """
-        DELETE FROM embeddings
-        WHERE owner_table = 'asset_chunks'
-          AND owner_id IN (
-              SELECT id
-              FROM asset_chunks
-              WHERE asset_id = ANY(%s::uuid[])
-          )
-        """,
-        (asset_ids,),
-    )
     cur.execute("DELETE FROM asset_chunks WHERE asset_id = ANY(%s::uuid[])", (asset_ids,))
     cur.execute(
         """
@@ -12227,14 +12157,6 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
     mail_context = _managed_mail_asset_context(cur, asset_id)
     cur.execute("DELETE FROM code_references WHERE source_asset_id = %s", (asset_id,))
     cur.execute("DELETE FROM code_symbols WHERE source_asset_id = %s", (asset_id,))
-    cur.execute(
-        """
-        DELETE FROM embeddings
-        WHERE owner_table = 'asset_chunks'
-          AND owner_id IN (SELECT id FROM asset_chunks WHERE asset_id = %s)
-        """,
-        (asset_id,),
-    )
     cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s", (asset_id,))
     inserted = 0
     for chunk in chunks:
@@ -12276,14 +12198,6 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
         )
         chunk_id = cur.fetchone()[0]
         _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
-        _insert_embedding_result(
-            cur,
-            _embedding_result_for_text(
-                owner_table="asset_chunks",
-                owner_id=chunk_id,
-                text=f"{chunk_title}\n{chunk_body}",
-            ),
-        )
         inserted += 1
     return inserted
 
@@ -12305,14 +12219,6 @@ def _append_or_upsert_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, .
         )
         previous = cur.fetchone()
         if previous:
-            cur.execute(
-                """
-                DELETE FROM embeddings
-                WHERE owner_table = 'asset_chunks'
-                  AND owner_id = %s
-                """,
-                (previous[0],),
-            )
             cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s AND chunk_index = %s", (asset_id, chunk_index))
         chunk_title = strip_postgres_nul(str(chunk.title))
         chunk_body = strip_postgres_nul(str(chunk.body))
@@ -12352,14 +12258,6 @@ def _append_or_upsert_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, .
         )
         chunk_id = cur.fetchone()[0]
         _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
-        _insert_embedding_result(
-            cur,
-            _embedding_result_for_text(
-                owner_table="asset_chunks",
-                owner_id=chunk_id,
-                text=f"{chunk_title}\n{chunk_body}",
-            ),
-        )
         inserted += 1
     return inserted
 
@@ -12499,7 +12397,7 @@ def _job_schedule_metadata(job_type: str) -> dict[str, Any]:
     return schedule
 
 
-def _normalize_embedding_owner_class(owner_class: str | None) -> str:
+def _normalize_search_owner_class(owner_class: str | None) -> str:
     normalized = str(owner_class or "all").strip().lower()
     aliases = {
         "asset_chunks": "corpus",
@@ -12512,173 +12410,6 @@ def _normalize_embedding_owner_class(owner_class: str | None) -> str:
     if normalized not in {"all", "corpus", "episodes", "claims"}:
         raise ValueError("owner_class must be all, corpus, episodes, or claims")
     return normalized
-
-
-def enqueue_embedding_jobs(
-    *,
-    owner_class: str = "all",
-    root_name: str | None = None,
-    stale_only: bool = True,
-    limit: int = 100,
-    url: str | None = None,
-) -> dict[str, Any]:
-    normalized_class = _normalize_embedding_owner_class(owner_class)
-    row_limit = max(1, min(int(limit or 100), 5000))
-    payload = {
-        "owner_class": normalized_class,
-        "root_name": root_name,
-        "stale_only": bool(stale_only),
-        "limit": row_limit,
-    }
-    schedule = _job_schedule_metadata("corpus_embed")
-    psycopg = _load_psycopg()
-    with psycopg.connect(url or database_url()) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO capture_jobs (
-                    job_type, payload, job_family, resource_class, priority, time_budget_seconds
-                )
-                VALUES (%s, %s::jsonb, %s, %s, %s, %s)
-                RETURNING id::text
-                """,
-                (
-                    "corpus_embed",
-                    _json(payload),
-                    schedule["job_family"],
-                    schedule["resource_class"],
-                    schedule["priority"],
-                    schedule["time_budget_seconds"],
-                ),
-            )
-            job_id = cur.fetchone()[0]
-    return {
-        "queued": 1,
-        "job_id": job_id,
-        **payload,
-    }
-
-
-def refresh_embeddings(
-    *,
-    owner_class: str = "all",
-    root_name: str | None = None,
-    stale_only: bool = True,
-    limit: int = 100,
-    provider: HashEmbeddingProvider | None = None,
-    url: str | None = None,
-) -> dict[str, Any]:
-    normalized_class = _normalize_embedding_owner_class(owner_class)
-    row_limit = max(1, min(int(limit or 100), 5000))
-    embedding_provider = provider or HashEmbeddingProvider()
-    psycopg = _load_psycopg()
-    with psycopg.connect(url or database_url()) as conn:
-        with conn.cursor() as cur:
-            inputs = _fetch_embedding_inputs(
-                cur,
-                owner_class=normalized_class,
-                root_name=root_name,
-                stale_only=bool(stale_only),
-                limit=row_limit,
-            )
-            results = embedding_provider.embed_batch(inputs)
-            replaced = _replace_embeddings(cur, results)
-    cache_keys = [str(item.metadata.get("cache_key") or "") for item in results]
-    unique_cache_keys = {item for item in cache_keys if item}
-    cache_hits = max(0, len(cache_keys) - len(unique_cache_keys))
-    cache_misses = len(unique_cache_keys)
-    dimensions = results[0].dimensions if results else DEFAULT_EMBEDDING_DIMENSIONS
-    model = results[0].model if results else DEFAULT_EMBEDDING_MODEL
-    return {
-        "owner_class": normalized_class,
-        "root_name": root_name,
-        "stale_only": bool(stale_only),
-        "limit": row_limit,
-        "requested": len(inputs),
-        "vectors": replaced,
-        "skipped_unchanged": 0,
-        "batches": 1 if inputs else 0,
-        "cache_hits": cache_hits,
-        "cache_misses": cache_misses,
-        "provider": embedding_provider.name,
-        "model": model,
-        "dimensions": dimensions,
-    }
-
-
-def embedding_status(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
-    psycopg = _load_psycopg()
-    with psycopg.connect(url or database_url()) as conn:
-        with conn.cursor() as cur:
-            corpus_filter = "AND r.name = %s" if root_name else ""
-            corpus_params: tuple[Any, ...] = (root_name,) if root_name else ()
-            cur.execute(
-                f"""
-                SELECT count(*)::integer,
-                       count(*) FILTER (WHERE emb.id IS NULL)::integer,
-                       count(*) FILTER (WHERE emb.id IS NOT NULL AND NOT (emb.metadata ? 'source_hash'))::integer
-                FROM asset_chunks c
-                JOIN source_assets a ON a.id = c.asset_id
-                JOIN monitored_roots r ON r.id = a.root_id
-                LEFT JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
-                                        AND emb.owner_id = c.id
-                                        AND emb.model = %s
-                WHERE a.deleted_at IS NULL
-                  AND a.canonical_asset_id IS NULL
-                  AND a.extraction_status = 'indexed'
-                  {corpus_filter}
-                """,
-                (DEFAULT_EMBEDDING_MODEL, *corpus_params),
-            )
-            corpus = cur.fetchone()
-            memory_root_filter = "AND item.metadata->>'root_name' = %s" if root_name else ""
-            memory_params: tuple[Any, ...] = (root_name,) if root_name else ()
-            cur.execute(
-                f"""
-                SELECT count(*)::integer,
-                       count(*) FILTER (WHERE emb.id IS NULL)::integer,
-                       count(*) FILTER (WHERE emb.id IS NOT NULL AND NOT (emb.metadata ? 'source_hash'))::integer
-                FROM episodes item
-                LEFT JOIN embeddings emb ON emb.owner_table = 'episodes'
-                                        AND emb.owner_id = item.id
-                                        AND emb.model = %s
-                WHERE item.superseded_by IS NULL
-                  {memory_root_filter}
-                """,
-                (DEFAULT_EMBEDDING_MODEL, *memory_params),
-            )
-            episodes = cur.fetchone()
-            cur.execute(
-                f"""
-                SELECT count(*)::integer,
-                       count(*) FILTER (WHERE emb.id IS NULL)::integer,
-                       count(*) FILTER (WHERE emb.id IS NOT NULL AND NOT (emb.metadata ? 'source_hash'))::integer
-                FROM claims item
-                LEFT JOIN embeddings emb ON emb.owner_table = 'claims'
-                                        AND emb.owner_id = item.id
-                                        AND emb.model = %s
-                WHERE item.retention_action = 'keep'
-                  {memory_root_filter}
-                """,
-                (DEFAULT_EMBEDDING_MODEL, *memory_params),
-            )
-            claims = cur.fetchone()
-    rows = {
-        "corpus": {"total": int(corpus[0] or 0), "missing": int(corpus[1] or 0), "metadata_missing": int(corpus[2] or 0)},
-        "episodes": {"total": int(episodes[0] or 0), "missing": int(episodes[1] or 0), "metadata_missing": int(episodes[2] or 0)},
-        "claims": {"total": int(claims[0] or 0), "missing": int(claims[1] or 0), "metadata_missing": int(claims[2] or 0)},
-    }
-    return {
-        "root_name": root_name,
-        "model": DEFAULT_EMBEDDING_MODEL,
-        "dimensions": DEFAULT_EMBEDDING_DIMENSIONS,
-        "owners": rows,
-        "totals": {
-            "total": sum(item["total"] for item in rows.values()),
-            "missing": sum(item["missing"] for item in rows.values()),
-            "metadata_missing": sum(item["metadata_missing"] for item in rows.values()),
-        },
-    }
 
 
 def search_index_status(*, root_name: str | None = None, url: str | None = None) -> dict[str, Any]:
@@ -12827,7 +12558,7 @@ def sync_search_index(
         build_vespa_document,
     )
 
-    normalized_class = _normalize_embedding_owner_class(owner_class)
+    normalized_class = _normalize_search_owner_class(owner_class)
     row_limit = max(1, min(int(limit or 100), 5000))
     provider = embedding_provider or SnowflakeEmbeddingProvider(
         model=SNOWFLAKE_EMBEDDING_MODEL,
@@ -12966,21 +12697,30 @@ def _fetch_search_index_rows(
     limit: int,
     embedding_model: str,
 ) -> list[dict[str, Any]]:
-    remaining = max(1, min(int(limit or 100), 5000))
+    row_limit = max(1, min(int(limit or 100), 5000))
     classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
     rows: list[dict[str, Any]] = []
+    class_limits = _fair_class_limits(classes, row_limit) if owner_class == "all" else {classes[0]: row_limit}
     for item_class in classes:
-        if remaining <= 0:
-            break
+        class_limit = class_limits.get(item_class, row_limit)
+        if class_limit <= 0:
+            continue
         if item_class == "corpus":
-            batch = _fetch_corpus_search_index_rows(cur, root_name=root_name, limit=remaining, embedding_model=embedding_model)
+            batch = _fetch_corpus_search_index_rows(cur, root_name=root_name, limit=class_limit, embedding_model=embedding_model)
         elif item_class == "episodes":
-            batch = _fetch_episode_search_index_rows(cur, root_name=root_name, limit=remaining, embedding_model=embedding_model)
+            batch = _fetch_episode_search_index_rows(cur, root_name=root_name, limit=class_limit, embedding_model=embedding_model)
         else:
-            batch = _fetch_claim_search_index_rows(cur, root_name=root_name, limit=remaining, embedding_model=embedding_model)
+            batch = _fetch_claim_search_index_rows(cur, root_name=root_name, limit=class_limit, embedding_model=embedding_model)
         rows.extend(batch)
-        remaining -= len(batch)
-    return rows
+    return rows[:row_limit]
+
+
+def _fair_class_limits(classes: list[str], row_limit: int) -> dict[str, int]:
+    if not classes:
+        return {}
+    base = max(1, row_limit // len(classes))
+    remainder = max(0, row_limit - (base * len(classes)))
+    return {item_class: base + (1 if index < remainder else 0) for index, item_class in enumerate(classes)}
 
 
 def _fetch_corpus_search_index_rows(
@@ -13201,21 +12941,22 @@ def _fetch_stale_search_index_records(
     root_name: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    remaining = max(1, min(int(limit or 100), 5000))
+    row_limit = max(1, min(int(limit or 100), 5000))
     classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
     rows: list[dict[str, Any]] = []
+    class_limits = _fair_class_limits(classes, row_limit) if owner_class == "all" else {classes[0]: row_limit}
     for item_class in classes:
-        if remaining <= 0:
-            break
+        class_limit = class_limits.get(item_class, row_limit)
+        if class_limit <= 0:
+            continue
         if item_class == "corpus":
-            batch = _fetch_stale_corpus_search_index_records(cur, root_name=root_name, limit=remaining)
+            batch = _fetch_stale_corpus_search_index_records(cur, root_name=root_name, limit=class_limit)
         elif item_class == "episodes":
-            batch = _fetch_stale_episode_search_index_records(cur, root_name=root_name, limit=remaining)
+            batch = _fetch_stale_episode_search_index_records(cur, root_name=root_name, limit=class_limit)
         else:
-            batch = _fetch_stale_claim_search_index_records(cur, root_name=root_name, limit=remaining)
+            batch = _fetch_stale_claim_search_index_records(cur, root_name=root_name, limit=class_limit)
         rows.extend(batch)
-        remaining -= len(batch)
-    return rows
+    return rows[:row_limit]
 
 
 def _fetch_stale_corpus_search_index_records(cur: Any, *, root_name: str | None, limit: int) -> list[dict[str, Any]]:
@@ -13423,140 +13164,6 @@ def _mark_search_index_record_failed(cur: Any, *, record: dict[str, Any], error:
         """,
         (str(error or "")[:1000], record["vespa_document_id"]),
     )
-
-
-def _fetch_embedding_inputs(
-    cur: Any,
-    *,
-    owner_class: str,
-    root_name: str | None,
-    stale_only: bool,
-    limit: int,
-) -> list[EmbeddingInput]:
-    remaining = max(1, min(int(limit or 100), 5000))
-    classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
-    items: list[EmbeddingInput] = []
-    for item_class in classes:
-        if remaining <= 0:
-            break
-        if item_class == "corpus":
-            rows = _fetch_corpus_embedding_rows(cur, root_name=root_name, limit=remaining)
-            owner_table = "asset_chunks"
-        elif item_class == "episodes":
-            rows = _fetch_episode_embedding_rows(cur, root_name=root_name, limit=remaining)
-            owner_table = "episodes"
-        else:
-            rows = _fetch_claim_embedding_rows(cur, root_name=root_name, limit=remaining)
-            owner_table = "claims"
-        for owner_id, text, existing_source_hash in rows:
-            source_hash = embedding_source_hash(str(text or ""))
-            if stale_only and existing_source_hash == source_hash:
-                continue
-            items.append(
-                EmbeddingInput(
-                    owner_table=owner_table,
-                    owner_id=str(owner_id),
-                    text=str(text or ""),
-                    model=DEFAULT_EMBEDDING_MODEL,
-                    dimensions=DEFAULT_EMBEDDING_DIMENSIONS,
-                    existing_source_hash=existing_source_hash,
-                )
-            )
-            remaining -= 1
-            if remaining <= 0:
-                break
-    return items
-
-
-def _fetch_corpus_embedding_rows(cur: Any, *, root_name: str | None, limit: int) -> list[tuple[Any, Any, Any]]:
-    root_sql = "AND r.name = %s" if root_name else ""
-    params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
-    cur.execute(
-        f"""
-        SELECT c.id::text, c.title, c.body, c.metadata,
-               emb.metadata->>'source_hash' AS existing_source_hash
-        FROM asset_chunks c
-        JOIN source_assets a ON a.id = c.asset_id
-        JOIN monitored_roots r ON r.id = a.root_id
-        LEFT JOIN embeddings emb ON emb.owner_table = 'asset_chunks'
-                                AND emb.owner_id = c.id
-                                AND emb.model = %s
-        WHERE a.deleted_at IS NULL
-          AND a.canonical_asset_id IS NULL
-          AND a.extraction_status = 'indexed'
-          {root_sql}
-        ORDER BY c.updated_at DESC, c.id
-        LIMIT %s
-        """,
-        (DEFAULT_EMBEDDING_MODEL, *params),
-    )
-    rows: list[tuple[Any, Any, Any]] = []
-    for owner_id, title, body, metadata, existing_source_hash in cur.fetchall():
-        chunk = {"title": title, "body": body, "metadata": metadata or {}}
-        hydrated_body = mail_content_store.hydrate_chunk_body(chunk)
-        text = "\n".join(part for part in (str(title or ""), hydrated_body) if part).strip()
-        rows.append((owner_id, text, existing_source_hash))
-    return rows
-
-
-def _fetch_episode_embedding_rows(cur: Any, *, root_name: str | None, limit: int) -> list[tuple[Any, Any, Any]]:
-    root_sql = "AND e.metadata->>'root_name' = %s" if root_name else ""
-    params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
-    cur.execute(
-        f"""
-        SELECT e.id::text, concat_ws(E'\n', e.title, e.summary) AS text,
-               emb.metadata->>'source_hash' AS existing_source_hash
-        FROM episodes e
-        LEFT JOIN embeddings emb ON emb.owner_table = 'episodes'
-                                AND emb.owner_id = e.id
-                                AND emb.model = %s
-        WHERE e.superseded_by IS NULL
-          {root_sql}
-        ORDER BY e.updated_at DESC, e.id
-        LIMIT %s
-        """,
-        (DEFAULT_EMBEDDING_MODEL, *params),
-    )
-    return list(cur.fetchall())
-
-
-def _fetch_claim_embedding_rows(cur: Any, *, root_name: str | None, limit: int) -> list[tuple[Any, Any, Any]]:
-    root_sql = "AND c.metadata->>'root_name' = %s" if root_name else ""
-    params: tuple[Any, ...] = ((root_name,) if root_name else ()) + (limit,)
-    cur.execute(
-        f"""
-        SELECT c.id::text, concat_ws(' ', e.name, c.predicate, c.object_text) AS text,
-               emb.metadata->>'source_hash' AS existing_source_hash
-        FROM claims c
-        LEFT JOIN entities e ON e.id = c.subject_entity_id
-        LEFT JOIN embeddings emb ON emb.owner_table = 'claims'
-                                AND emb.owner_id = c.id
-                                AND emb.model = %s
-        WHERE c.retention_action = 'keep'
-          {root_sql}
-        ORDER BY c.updated_at DESC, c.id
-        LIMIT %s
-        """,
-        (DEFAULT_EMBEDDING_MODEL, *params),
-    )
-    return list(cur.fetchall())
-
-
-def _replace_embeddings(cur: Any, results: list[EmbeddingResult] | tuple[EmbeddingResult, ...]) -> int:
-    replaced = 0
-    for result in results:
-        cur.execute(
-            """
-            DELETE FROM embeddings
-            WHERE owner_table = %s
-              AND owner_id = %s
-              AND model = %s
-            """,
-            (result.owner_table, result.owner_id, result.model),
-        )
-        _insert_embedding_result(cur, result)
-        replaced += 1
-    return replaced
 
 
 def _cancel_duplicate_corpus_job_for_asset(cur: Any, *, root_name: str, relative_path: str) -> None:
@@ -14146,7 +13753,7 @@ def _normalize_operator_automation_action(value: str | None) -> str:
         "refresh_retrieval_evidence",
         "ingest_approved_capture",
         "safe_diagnostic_recovery",
-        "enqueue_embedding_refresh",
+        "sync_search_index",
         "run_governance_shadow",
     }
     if normalized not in allowed:

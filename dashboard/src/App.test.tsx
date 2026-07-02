@@ -20,7 +20,7 @@ const health = {
   },
   watcher: { active_roots: 1, disabled_roots: 2, stale_count: 0 },
   jobs: { pending: 4, failed: 1, blocked: 2 },
-  retrieval: { episodes: 9, asset_chunks: 12, embeddings: 40 },
+  retrieval: { episodes: 9, asset_chunks: 12, search_index_records: 40 },
   acceleration: {
     capabilities: {
       nvidia: { ok: false, state: "missing", message: "nvidia-smi not found" },
@@ -287,15 +287,15 @@ const settings = [
     description: "Default context brief token budget."
   },
   {
-    key: "embedding.dimensions",
-    value: 384,
+    key: "retrieval.embedding_model",
+    value: "Snowflake/snowflake-arctic-embed-l-v2.0",
     source: "default",
     sensitive: false,
     category: "retrieval",
     apply_mode: "reindex_required",
     read_only: false,
     affected_components: ["retrieval", "worker"],
-    description: "Embedding vector dimensions."
+    description: "Snowflake embedding model used for Vespa search-index sync."
   },
   {
     key: "dashboard.poll_interval_seconds",
@@ -425,8 +425,8 @@ describe("Flux dashboard", () => {
         },
         retrieval_explanation: {
           score: 0.91,
-          streams: ["corpus_lexical", "corpus_vector"],
-          raw_scores: { corpus_lexical: 0.7, corpus_vector: 0.3 },
+          streams: ["corpus_lexical", "vespa_hybrid"],
+          raw_scores: { corpus_lexical: 0.7, vespa_hybrid: 0.3 },
           scope: { label: "local", root_name: "docs" },
           corpus: { source_path: "docs/operations.md", root_name: "docs", trust_rank: 450, duplicate_count: 2, related_evidence_count: 0 },
           lifecycle: { state: "active", score: 0.88, explanation: { penalties: { state: 1, retention: 0.6 } } },
@@ -1398,7 +1398,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("auto")).toBeInTheDocument();
     expect(screen.getByText("D:/FluxLLMKB/private/cache")).toBeInTheDocument();
     expect(screen.getAllByText("media").length).toBeGreaterThan(0);
-    expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss; ASR 4 hit / 1 miss; 9 segments; Vision 5 hit / 2 miss; 3 descriptions; 1 blocked; 4 decorative skips; Frames 6 sampled; thumbnails 7 hit / 8 miss; Embeddings 10 vectors; 2 skipped; 1 batches; cache 3 hit / 4 miss")).toBeInTheDocument();
+    expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss; ASR 4 hit / 1 miss; 9 segments; Vision 5 hit / 2 miss; 3 descriptions; 1 blocked; 4 decorative skips; Frames 6 sampled; thumbnails 7 hit / 8 miss; Search index 10 vectors; 2 skipped; 1 batches; cache 3 hit / 4 miss")).toBeInTheDocument();
     expect(screen.getByText("Family Backpressure")).toBeInTheDocument();
     expect(screen.getByText("cap 1/1")).toBeInTheDocument();
     expect(screen.getByText("Cap Reached; oldest 120s; retry 2; blocked locks 1; parser 3 hit / 1 miss; 5 manifest skips")).toBeInTheDocument();
@@ -3040,19 +3040,19 @@ describe("Flux dashboard", () => {
       );
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit embedding.dimensions" }));
+    await user.click(screen.getByRole("button", { name: "Edit retrieval.embedding_model" }));
     await user.clear(screen.getByLabelText("Setting value"));
-    await user.type(screen.getByLabelText("Setting value"), "768");
+    await user.type(screen.getByLabelText("Setting value"), "Snowflake/custom-test-model");
     await user.click(screen.getByRole("button", { name: "Save setting" }));
     expect(screen.getByRole("dialog", { name: "Confirm setting change" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Confirm and save" }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
-        "/api/settings/embedding.dimensions",
+        "/api/settings/retrieval.embedding_model",
         expect.objectContaining({
           method: "PUT",
-          body: JSON.stringify({ value: 768, confirmed: true, reason: "dashboard update" })
+          body: JSON.stringify({ value: "Snowflake/custom-test-model", confirmed: true, reason: "dashboard update" })
         })
       );
     });
@@ -3073,7 +3073,7 @@ describe("Flux dashboard", () => {
     expect(await screen.findByText("Dashboard Operations")).toBeInTheDocument();
     expect(screen.getByText("Dashboard search result with highlighted operations.")).toBeInTheDocument();
     await user.click(screen.getByText("Why this result"));
-    expect(screen.getByText("Corpus Lexical, Corpus Vector")).toBeInTheDocument();
+    expect(screen.getByText("Corpus Lexical, Vespa Hybrid")).toBeInTheDocument();
     expect(screen.getByText("local")).toBeInTheDocument();
     expect(screen.getByText("Lifecycle penalties")).toBeInTheDocument();
     expect(screen.getByText("state 1.000, retention 0.600")).toBeInTheDocument();

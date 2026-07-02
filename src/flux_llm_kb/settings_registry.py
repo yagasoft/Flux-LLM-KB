@@ -6,7 +6,6 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from .database import DEFAULT_DATABASE_URL
-from .embeddings import DEFAULT_EMBEDDING_DIMENSIONS, DEFAULT_EMBEDDING_MODEL
 from .reranking import (
     DEFAULT_MAX_RERANK_PASSAGE_TOKENS,
     DEFAULT_RERANK_TOP_N,
@@ -511,27 +510,6 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         affected_components=("worker", "model-runner"),
     ),
     SettingDefinition(
-        key="embedding.model",
-        category="retrieval",
-        default=DEFAULT_EMBEDDING_MODEL,
-        value_type="str",
-        description="Embedding model/provider identifier used for new embeddings.",
-        env_var="FLUX_KB_EMBEDDING_MODEL",
-        apply_mode=APPLY_REINDEX_REQUIRED,
-        affected_components=("retrieval", "worker"),
-    ),
-    SettingDefinition(
-        key="embedding.dimensions",
-        category="retrieval",
-        default=DEFAULT_EMBEDDING_DIMENSIONS,
-        value_type="int",
-        description="Embedding dimensionality for new embeddings.",
-        env_var="FLUX_KB_EMBEDDING_DIMENSIONS",
-        apply_mode=APPLY_REINDEX_REQUIRED,
-        affected_components=("retrieval", "worker", "database"),
-        validator=_min_int(64),
-    ),
-    SettingDefinition(
         key="acceleration.cache_root",
         category="acceleration",
         default="",
@@ -954,12 +932,12 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         affected_components=("worker", "api", "cli", "mcp", "dashboard"),
     ),
     SettingDefinition(
-        key="operator.automation.auto_refresh_embeddings",
+        key="operator.automation.auto_sync_search_index",
         category="operator",
         default=True,
         value_type="bool",
-        description="Allow guarded automation to enqueue stale or missing embedding refresh work.",
-        env_var="FLUX_KB_OPERATOR_AUTOMATION_REFRESH_EMBEDDINGS",
+        description="Allow guarded automation to enqueue stale or missing Vespa search-index sync work.",
+        env_var="FLUX_KB_OPERATOR_AUTOMATION_SYNC_SEARCH_INDEX",
         apply_mode=APPLY_RELOAD,
         affected_components=("worker", "api", "cli", "mcp", "dashboard"),
     ),

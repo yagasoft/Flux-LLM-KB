@@ -8,7 +8,7 @@ import pytest
 from flux_llm_kb import database
 from flux_llm_kb.crawler import AssetChunk, CrawlPlan, DiscoveredAsset
 from flux_llm_kb.database import forget_episode
-from flux_llm_kb.embeddings import EmbeddingInput
+from flux_llm_kb.embeddings import EmbeddingResult
 
 
 def test_forget_episode_rejects_invalid_uuid_without_database():
@@ -1366,27 +1366,25 @@ def test_search_corpus_chunks_includes_freshness_stream():
 
     assert "corpus_lexical" in function
     assert "corpus_fuzzy" in function
-    assert "corpus_vector" in function
+    assert "corpus_vector" not in function
     assert "corpus_trust" in function
     assert "corpus_freshness" in function
     assert "EXTRACT(EPOCH FROM (now() - c.updated_at))" in source
 
 
-def test_search_corpus_chunks_uses_candidate_first_root_scoped_vector_and_trigram_search():
+def test_search_corpus_chunks_uses_bounded_lexical_title_path_fallback_without_pgvector():
     source = Path(database.__file__).read_text(encoding="utf-8")
     function = source.split("def search_corpus_chunks", 1)[1].split("\ndef ", 1)[0]
 
-    assert "WITH nearest_embeddings AS MATERIALIZED" in function
-    assert "nearest.root_id = %s::uuid" in function
-    assert "OR nearest.root_id IS NULL" in function
-    assert "ORDER BY emb.embedding <=> %s::vector" in function
-    assert "JOIN asset_chunks c ON c.id = nearest.owner_id" in function
+    assert "WITH nearest_embeddings AS MATERIALIZED" not in function
+    assert "emb.embedding <=>" not in function
+    assert "set_config('hnsw.ef_search'" not in function
     assert "c.title %% %s" in function
-    assert "c.body %% %s" in function
+    assert "a.path %% %s" in function
+    assert "c.body %% %s" not in function
     assert "cs.qualified_name %% %s" in function
     assert "cs.name %% %s" in function
     assert "set_config('pg_trgm.similarity_threshold'" in function
-    assert "set_config('hnsw.ef_search'" in function
 
 
 def test_search_corpus_chunks_hydrates_candidates_once_and_records_diagnostics(monkeypatch):
@@ -1414,8 +1412,6 @@ def test_search_corpus_chunks_hydrates_candidates_once_and_records_diagnostics(m
                 return [("chunk-1", 0.9)]
             if "greatest(similarity(c.title" in sql:
                 return [("chunk-1", 0.7)]
-            if "nearest_embeddings" in sql:
-                return [("chunk-1", 0.8)]
             if "FROM code_symbols" in sql:
                 return [("chunk-1", 2.0)]
             if "WHERE c.id = ANY" in sql:
@@ -1454,8 +1450,6 @@ def test_search_corpus_chunks_hydrates_candidates_once_and_records_diagnostics(m
 
     diagnostics: dict[str, object] = {}
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _vector: "[0,0,0]")
     monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(database, "_search_mail_sidecar_rows", lambda *_args, **_kwargs: [])
 
@@ -1464,8 +1458,8 @@ def test_search_corpus_chunks_hydrates_candidates_once_and_records_diagnostics(m
     hydrate_queries = [sql for sql, _params in executed if "WHERE c.id = ANY" in sql and "JOIN source_assets" in sql]
     assert len(hydrate_queries) == 1
     assert rows[0]["id"] == "chunk-1"
-    assert rows[0]["raw_scores"]["corpus_vector"] == 0.8
-    assert diagnostics["streams"]["corpus_vector"]["plan"] == "root_scoped_hnsw_candidates"
+    assert "corpus_vector" not in rows[0]["raw_scores"]
+    assert "corpus_vector" not in diagnostics["streams"]
     assert diagnostics["streams"]["corpus_hydration"]["rows"] == 1
 
 
@@ -1494,8 +1488,6 @@ def test_search_corpus_chunks_skips_fuzzy_when_cheaper_streams_satisfy_result_ta
                 return [(f"chunk-{index}", 1.0 - index / 100.0) for index in range(3)]
             if "greatest(similarity(c.title" in sql:
                 raise AssertionError("fuzzy corpus search should be skipped once cheap streams are sufficient")
-            if "nearest_embeddings" in sql:
-                return []
             if "WHERE c.id = ANY" in sql:
                 return [
                     (
@@ -1532,8 +1524,6 @@ def test_search_corpus_chunks_skips_fuzzy_when_cheaper_streams_satisfy_result_ta
 
     diagnostics: dict[str, object] = {}
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _vector: "[0,0,0]")
     monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(database, "_search_mail_sidecar_rows", lambda *_args, **_kwargs: [])
 
@@ -1665,13 +1655,13 @@ def test_direct_corpus_filters_accept_singular_file_kind_code():
     assert params[:2] == [["code"], "src/%.py"]
 
 
-def test_embedding_insert_populates_asset_chunk_root_id():
+def test_search_index_record_populates_asset_chunk_root_id():
     source = Path(database.__file__).read_text(encoding="utf-8")
-    function = source.split("def _insert_embedding_result", 1)[1].split("\ndef ", 1)[0]
+    function = source.split("def _upsert_search_index_record", 1)[1].split("\ndef ", 1)[0]
 
     assert "root_id" in function
-    assert "CASE WHEN %s = 'asset_chunks'" in function
-    assert "JOIN source_assets a ON a.id = c.asset_id" in function
+    assert "NULLIF(%s, '')::uuid" in function
+    assert "search_index_records" in function
 
 
 def test_semantic_duplicate_cluster_builder_selects_canonical_without_deleting_members():
@@ -1751,11 +1741,10 @@ def test_semantic_duplicate_workspace_key_sql_parenthesizes_json_extraction():
     for memory_class, alias in (("episode", "e"), ("claim", "c")):
         cursor = FakeCursor()
         database._fetch_semantic_duplicate_candidates(cursor, memory_class=memory_class, root_name=None, limit=10)
-        cte, _params = database._semantic_duplicate_candidate_cte(memory_class=memory_class, root_name=None, limit=10)
 
         expected = f"THEN 'root:' || ({alias}.metadata->>'root_name')"
         assert expected in cursor.sql
-        assert expected in cte
+        assert "JOIN embeddings" not in cursor.sql
 
 
 def test_list_semantic_duplicate_clusters_returns_sanitized_members(monkeypatch):
@@ -1778,7 +1767,7 @@ def test_list_semantic_duplicate_clusters_returns_sanitized_members(monkeypatch)
                     "cluster-1",
                     "corpus",
                     "active",
-                    "flux-hash-v1:cosine",
+                    "snowflake-vespa-cosine-v1",
                     0.9,
                     "root:docs",
                     "docs",
@@ -1836,16 +1825,16 @@ def test_list_semantic_duplicate_clusters_returns_sanitized_members(monkeypatch)
     assert params[-1] == 10
 
 
-def test_upsert_claim_records_claim_embedding_for_semantic_duplicate_refresh():
+def test_upsert_claim_does_not_record_legacy_embedding_rows():
     source = Path(database.__file__).read_text(encoding="utf-8")
     function = source.split("def upsert_claim", 1)[1].split("\ndef ", 1)[0]
 
-    assert "_embedding_result_for_text" in function
-    assert 'owner_table="claims"' in function
-    assert 'text=f"{subject_name}\\n{predicate}\\n{object_text}"' in function
+    assert "_embedding_result_for_text" not in function
+    assert "INSERT INTO embeddings" not in function
+    assert "DELETE FROM embeddings" not in function
 
 
-def test_enqueue_embedding_jobs_creates_corpus_embed_job(monkeypatch):
+def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
     executed: list[tuple[str, object]] = []
 
     class FakeCursor:
@@ -1859,7 +1848,7 @@ def test_enqueue_embedding_jobs_creates_corpus_embed_job(monkeypatch):
             executed.append((sql, params))
 
         def fetchone(self):
-            return ("job-embed",)
+            return ("job-search-index",)
 
     class FakeConnection:
         def __enter__(self):
@@ -1877,26 +1866,35 @@ def test_enqueue_embedding_jobs_creates_corpus_embed_job(monkeypatch):
 
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
 
-    result = database.enqueue_embedding_jobs(owner_class="corpus", root_name="docs", stale_only=True, limit=25)
+    result = database.enqueue_search_index_sync(owner_class="corpus", root_name="docs", limit=25)
 
     sql, params = executed[0]
     payload = json.loads(params[1])
     assert "INSERT INTO capture_jobs" in sql
-    assert "corpus_embed" in params
-    assert payload == {"owner_class": "corpus", "root_name": "docs", "stale_only": True, "limit": 25}
+    assert "search_index_sync" in params
+    assert payload == {
+        "owner_class": "corpus",
+        "root_name": "docs",
+        "limit": 25,
+        "search_engine": "vespa",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+    }
     assert params[2:6] == ("embedding", "gpu", 35, 300)
     assert result == {
         "queued": 1,
-        "job_id": "job-embed",
+        "job_id": "job-search-index",
         "owner_class": "corpus",
         "root_name": "docs",
-        "stale_only": True,
         "limit": 25,
+        "search_engine": "vespa",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
     }
 
 
-def test_refresh_embeddings_batches_candidates_and_replaces_vectors(monkeypatch):
-    replaced = []
+def test_sync_search_index_batches_candidates_and_feeds_vespa(monkeypatch):
+    fed = []
 
     class FakeCursor:
         def __enter__(self):
@@ -1919,35 +1917,77 @@ def test_refresh_embeddings_batches_candidates_and_replaces_vectors(monkeypatch)
         def connect(self, *_args, **_kwargs):
             return FakeConnection()
 
+    class FakeProvider:
+        name = "model_runner"
+
+        def embed_batch(self, inputs):
+            return [
+                EmbeddingResult(
+                    owner_table=item.owner_table,
+                    owner_id=item.owner_id,
+                    model="Snowflake/snowflake-arctic-embed-l-v2.0",
+                    dimensions=1024,
+                    vector=[1.0] + [0.0] * 1023,
+                    metadata={"source_hash": "source-hash"},
+                )
+                for item in inputs
+            ]
+
+    class FakeAdapter:
+        def feed(self, document):
+            fed.append(document)
+            return {"ok": True}
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         database,
-        "_fetch_embedding_inputs",
-        lambda _cur, *, owner_class, root_name, stale_only, limit: [
-            EmbeddingInput("asset_chunks", "chunk-1", "Chunk One\nbody", "flux-hash-v1", 1536),
-            EmbeddingInput("claims", "claim-1", "subject predicate object", "flux-hash-v1", 1536),
+        "_fetch_search_index_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-1",
+                "owner_table": "asset_chunks",
+                "owner_id": "chunk-1",
+                "asset_id": "asset-1",
+                "root_id": "33333333-3333-3333-3333-333333333333",
+                "root_name": "docs",
+                "title": "Chunk One",
+                "body": "body",
+                "source_path": "docs/chunk.md",
+                "symbols": [],
+                "language": "",
+                "file_kind": "text",
+                "lifecycle_state": "active",
+                "deleted": False,
+                "canonical": True,
+                "source_hash": "old-hash",
+                "index_text": "Chunk One\nbody",
+                "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+                "embedding_dimensions": 1024,
+                "existing_source_hash": None,
+                "existing_index_status": None,
+                "existing_embedding_model": None,
+            }
         ],
     )
-    monkeypatch.setattr(database, "_replace_embeddings", lambda _cur, results: replaced.extend(results) or len(results))
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **_kwargs: None)
 
-    result = database.refresh_embeddings(owner_class="all", root_name="docs", stale_only=True, limit=20)
+    result = database.sync_search_index(owner_class="all", root_name="docs", limit=20, embedding_provider=FakeProvider(), adapter=FakeAdapter())
 
     assert result["owner_class"] == "all"
     assert result["root_name"] == "docs"
-    assert result["stale_only"] is True
-    assert result["requested"] == 2
-    assert result["vectors"] == 2
+    assert result["requested"] == 1
+    assert result["indexed"] == 1
     assert result["skipped_unchanged"] == 0
-    assert result["batches"] == 1
-    assert result["cache_misses"] == 2
-    assert result["cache_hits"] == 0
-    assert result["provider"] == "hash"
-    assert result["model"] == "flux-hash-v1"
-    assert result["dimensions"] == 1536
-    assert [item.owner_id for item in replaced] == ["chunk-1", "claim-1"]
+    assert result["embedding_model"] == "Snowflake/snowflake-arctic-embed-l-v2.0"
+    assert result["embedding_dimensions"] == 1024
+    assert fed[0]["fields"]["owner_table"] == "asset_chunks"
 
 
-def test_corpus_embedding_rows_hydrate_managed_mail_sidecar(monkeypatch):
+def test_corpus_search_index_rows_hydrate_managed_mail_sidecar(monkeypatch):
     class FakeCursor:
         def execute(self, _sql, _params=()):
             return None
@@ -1956,8 +1996,13 @@ def test_corpus_embedding_rows_hydrate_managed_mail_sidecar(monkeypatch):
             return [
                 (
                     "chunk-mail",
+                    "asset-mail",
+                    "33333333-3333-3333-3333-333333333333",
+                    "docs",
                     "body.txt",
                     "",
+                    "mail/body.txt",
+                    "mail",
                     {
                         "sidecar_ref": {
                             "source": "managed_mail",
@@ -1968,18 +2013,38 @@ def test_corpus_embedding_rows_hydrate_managed_mail_sidecar(monkeypatch):
                         }
                     },
                     None,
+                    None,
+                    None,
                 ),
-                ("chunk-file", "plan.txt", "Plain file body", {}, "old-hash"),
+                (
+                    "chunk-file",
+                    "asset-file",
+                    "33333333-3333-3333-3333-333333333333",
+                    "docs",
+                    "plan.txt",
+                    "Plain file body",
+                    "docs/plan.txt",
+                    "text",
+                    {},
+                    "old-hash",
+                    "indexed",
+                    "Snowflake/snowflake-arctic-embed-l-v2.0",
+                ),
             ]
 
     monkeypatch.setattr(database.mail_content_store, "read_mail_content", lambda _ref: "Private mail body")
 
-    rows = database._fetch_corpus_embedding_rows(FakeCursor(), root_name=None, limit=10)
+    rows = database._fetch_corpus_search_index_rows(
+        FakeCursor(),
+        root_name=None,
+        limit=10,
+        embedding_model="Snowflake/snowflake-arctic-embed-l-v2.0",
+    )
 
-    assert rows == [
-        ("chunk-mail", "body.txt\nPrivate mail body", None),
-        ("chunk-file", "plan.txt\nPlain file body", "old-hash"),
-    ]
+    assert rows[0]["owner_id"] == "chunk-mail"
+    assert rows[0]["index_text"] == "body.txt\nmail/body.txt\nPrivate mail body"
+    assert rows[1]["owner_id"] == "chunk-file"
+    assert rows[1]["index_text"] == "plan.txt\ndocs/plan.txt\nPlain file body"
 
 
 def test_search_managed_mail_sidecar_rows_hydrates_private_text(monkeypatch):
@@ -2198,7 +2263,7 @@ def test_delete_monitored_root_purges_index_rows_and_jobs(monkeypatch):
     sql = "\n".join(item[0] for item in executed)
     assert result == {"id": "root-1", "name": "docs", "deleted": True, "purged_index": True}
     assert "UPDATE monitored_roots" in sql
-    assert "DELETE FROM embeddings" in sql
+    assert "DELETE FROM embeddings" not in sql
     assert "DELETE FROM asset_chunks" in sql
     assert "DELETE FROM source_assets" in sql
     assert "DELETE FROM capture_jobs" in sql
@@ -2393,7 +2458,7 @@ def test_purge_unseen_corpus_assets_removes_index_rows_after_grace(monkeypatch):
     assert "metadata ? 'unseen_reason'" in sql
     assert "make_interval(secs => %s)" in sql
     assert "LIMIT %s" in sql
-    assert "DELETE FROM embeddings" in sql
+    assert "DELETE FROM embeddings" not in sql
     assert "DELETE FROM code_symbols" in sql
     assert "DELETE FROM code_references" in sql
     assert "DELETE FROM asset_chunks" in sql
@@ -2448,8 +2513,7 @@ def test_repair_extracted_corpus_asset_statuses_marks_chunked_queued_assets_inde
         "root_name": "watch-test",
         "repaired": 7,
         "internal_mail_artifacts_deleted": 2,
-        "embeddings_purged": 3,
-        "chunks_purged": 4,
+        "chunks_purged": 3,
         "mail_plaintext_chunks_repaired": 0,
     }
     assert "EXISTS" in sql
@@ -3878,8 +3942,6 @@ def test_apply_extraction_result_persists_container_child_assets(monkeypatch):
     )
     result = SimpleNamespace(status="metadata_only", metadata={"extractor": "container"}, chunks=(), child_assets=(child,))
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
 
     database.apply_extraction_result(root_name="docs", relative_path="bundle.zip", result=result)
 
@@ -3994,8 +4056,6 @@ def test_apply_extraction_result_for_job_locks_running_job_before_writing(monkey
         child_assets=(),
     )
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
 
     applied = database.apply_extraction_result_for_job(
         job_id="job-1",
@@ -4120,8 +4180,6 @@ def test_apply_staged_extraction_piece_upserts_chunks_and_enqueues_next(monkeypa
         child_assets=(),
     )
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
 
     applied = database.apply_staged_extraction_piece_for_job(
         job_id="job-1",
@@ -4135,7 +4193,7 @@ def test_apply_staged_extraction_piece_upserts_chunks_and_enqueues_next(monkeypa
     assert applied is True
     assert "FOR UPDATE" in sql
     assert "extraction_status = %s" in sql
-    assert "DELETE FROM embeddings" in sql
+    assert "DELETE FROM embeddings" not in sql
     assert "DELETE FROM asset_chunks WHERE asset_id = %s AND chunk_index = %s" in sql
     assert "INSERT INTO asset_chunks" in sql
     assert "INSERT INTO capture_jobs" in sql
@@ -4201,8 +4259,6 @@ def test_apply_staged_extraction_plan_persists_parent_chunks_before_child_jobs(m
         child_assets=(),
     )
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
 
     applied = database.apply_staged_extraction_plan_for_job(
         job_id="job-1",
@@ -4418,8 +4474,6 @@ def test_apply_extraction_result_persists_nested_container_child_metadata(monkey
     )
     result = SimpleNamespace(status="metadata_only", metadata={"extractor": "container"}, chunks=(), child_assets=(child,))
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
 
     database.apply_extraction_result(root_name="docs", relative_path="bundle.zip", result=result)
 
@@ -4552,8 +4606,6 @@ def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypa
         ],
     )
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
 
     result = database.persist_crawl_plan(root_name="mail-root", plan=plan)
 
@@ -4712,8 +4764,6 @@ def test_managed_mail_chunks_store_private_text_off_db(monkeypatch):
         }
 
     monkeypatch.setattr(mail_content_store, "write_mail_content", fake_write_mail_content)
-    monkeypatch.setattr(database, "embed_text", lambda _text: [0.0, 0.0, 0.0])
-    monkeypatch.setattr(database, "to_pgvector_literal", lambda _embedding: "[0,0,0]")
 
     inserted = database._replace_asset_chunks(
         FakeCursor(),
@@ -4741,7 +4791,6 @@ def test_managed_mail_chunks_store_private_text_off_db(monkeypatch):
 
 def test_replace_asset_chunks_strips_postgres_nul_from_text_fields(monkeypatch):
     executed = []
-    embedded_texts = []
 
     class FakeCursor:
         def execute(self, sql, params=()):
@@ -4754,13 +4803,6 @@ def test_replace_asset_chunks_strips_postgres_nul_from_text_fields(monkeypatch):
             if "INSERT INTO asset_chunks" in sql:
                 return ("chunk-1",)
             return None
-
-    def fake_embedding_result(**kwargs):
-        embedded_texts.append(kwargs["text"])
-        return SimpleNamespace()
-
-    monkeypatch.setattr(database, "_embedding_result_for_text", fake_embedding_result)
-    monkeypatch.setattr(database, "_insert_embedding_result", lambda *_args, **_kwargs: None)
 
     inserted = database._replace_asset_chunks(
         FakeCursor(),
@@ -4786,18 +4828,15 @@ def test_replace_asset_chunks_strips_postgres_nul_from_text_fields(monkeypatch):
     assert insert_params[4] == "text"
     assert insert_params[5] == "char:0-9"
     assert metadata == {"badkey": "badvalue"}
-    assert embedded_texts == ["nultitle\nbodytext\nArabic نص"]
+    assert "INSERT INTO embeddings" not in "\n".join(sql for sql, _params in executed)
 
 
-def test_corpus_embedding_and_semantic_candidates_require_indexed_assets():
+def test_semantic_duplicate_candidates_require_indexed_assets_without_embedding_join():
     source = Path(database.__file__).read_text(encoding="utf-8")
-    embedding_function = source.split("def _fetch_corpus_embedding_rows", 1)[1].split("def _fetch_episode_embedding_rows", 1)[0]
-    status_function = source.split("def embedding_status", 1)[1].split("def _fetch_embedding_inputs", 1)[0]
     semantic_function = source.split("def _fetch_semantic_duplicate_candidates", 1)[1].split("elif memory_class == \"episode\"", 1)[0]
 
-    assert "a.extraction_status = 'indexed'" in embedding_function
-    assert "a.extraction_status = 'indexed'" in status_function
     assert "a.extraction_status = 'indexed'" in semantic_function
+    assert "JOIN embeddings" not in semantic_function
 
 
 def test_repair_extracted_corpus_asset_statuses_purges_stale_chunks_and_mail_internals():
@@ -4805,7 +4844,7 @@ def test_repair_extracted_corpus_asset_statuses_purges_stale_chunks_and_mail_int
     repair_function = source.split("def repair_extracted_corpus_asset_statuses", 1)[1].split("def worker_family_stats", 1)[0]
 
     assert "stale_chunks" in repair_function
-    assert "DELETE FROM embeddings" in repair_function
+    assert "DELETE FROM embeddings" not in repair_function
     assert "DELETE FROM asset_chunks" in repair_function
     assert "a.extraction_status NOT IN ('indexed', 'processing_staged')" in repair_function
     assert "a.extraction_status <> 'indexed'" not in repair_function

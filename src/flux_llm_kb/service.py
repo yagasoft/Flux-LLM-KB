@@ -53,7 +53,7 @@ from .watcher import WatchEvent, WatchRoot, create_corpus_watcher, probe_watcher
 
 
 LOCAL_SCOPE_SCORE_BOOST = 1.15
-STRONG_VECTOR_MIN_SCORE = 0.35
+STRONG_SEMANTIC_MIN_SCORE = 0.35
 ALLOWED_RETRIEVAL_LOGICAL_KINDS = {"episode", "file", "mail"}
 CODE_FILE_KIND = "code"
 INTERNAL_EXCLUDE_FILE_KINDS_KEY = "_exclude_file_kinds"
@@ -218,41 +218,40 @@ class KnowledgeService:
         include_episodes = not logical_kinds or "episode" in logical_kinds
         include_corpus = not logical_kinds or bool(logical_kinds.intersection({"file", "mail"}))
         episode_workspace_key = scope.workspace_key or (f"root:{scope.root_name}" if scope.root_name else None)
-        episode_items = (
-            database.search_episodes(
-                query,
-                limit=limit,
-                cwd=scope.cwd,
-                root_path=scope.root_path,
-                workspace_key=episode_workspace_key,
-            )
-            if include_episodes and (not is_local or scope.cwd or scope.root_path or episode_workspace_key)
-            else []
-        )
         corpus_kwargs: dict[str, Any] = {"limit": corpus_limit, "root_name": scope.root_name}
         if filters is not None:
             corpus_kwargs["filters"] = filters
         corpus_diagnostics: dict[str, Any] | None = {} if diagnostics is not None else None
         if corpus_diagnostics is not None:
             corpus_kwargs["diagnostics"] = corpus_diagnostics
-        corpus_items = (
-            _search_corpus_with_configured_engine(query, **corpus_kwargs)
-            if include_corpus and (not is_local or scope.root_name)
-            else []
+        evidence_items = (
+            _search_evidence_with_configured_engine(query, **corpus_kwargs)
+            if (include_corpus or include_episodes) and (not is_local or scope.root_name or episode_workspace_key)
+            else None
         )
+        if evidence_items is None:
+            episode_items = (
+                database.search_episodes(
+                    query,
+                    limit=limit,
+                    cwd=scope.cwd,
+                    root_path=scope.root_path,
+                    workspace_key=episode_workspace_key,
+                )
+                if include_episodes and (not is_local or scope.cwd or scope.root_path or episode_workspace_key)
+                else []
+            )
+            corpus_items = (
+                _search_corpus_with_configured_engine(query, **corpus_kwargs)
+                if include_corpus and (not is_local or scope.root_name)
+                else []
+            )
+        else:
+            episode_items = [item for item in evidence_items if item.get("kind") in {"episode", "claim"}] if include_episodes else []
+            corpus_items = [item for item in evidence_items if item.get("kind") == "corpus_chunk"] if include_corpus else []
         if diagnostics is not None and corpus_diagnostics is not None:
             diagnostics.setdefault("scopes", {}).setdefault(label, {})["corpus"] = corpus_diagnostics
-        episodes = [
-            {
-                "kind": "episode",
-                "logical_kind": "episode",
-                **item,
-                "excerpt": item.get("summary", ""),
-                "detail_ref": {"kind": "episode", "id": item.get("id")},
-                "related_evidence_count": 0,
-            }
-            for item in episode_items
-        ]
+        episodes = [_format_memory_evidence_search_item(item) for item in episode_items]
         corpus = collapse_mail_spool_search_results(
             [
                 decorate_corpus_search_item({"kind": "corpus_chunk", **_format_corpus_search_item(item)})
@@ -774,24 +773,30 @@ class KnowledgeService:
             diagnostic_action = self._first_safe_diagnostic_action(limit=limit)
             if diagnostic_action:
                 plan.append(diagnostic_action)
-        if bool(policy.get("auto_refresh_embeddings")):
+        if bool(policy.get("auto_sync_search_index")):
             try:
-                embedding_status = self.embedding_status()
+                search_index_status = self.search_index_status()
             except Exception:
-                embedding_status = {}
-            summary = embedding_status.get("summary") if isinstance(embedding_status.get("summary"), dict) else {}
-            stale = int(summary.get("stale_vectors") or summary.get("stale") or 0)
-            missing = int(summary.get("missing_vectors") or summary.get("missing") or 0)
-            if stale or missing:
+                search_index_status = {}
+            summary = search_index_status.get("summary") if isinstance(search_index_status.get("summary"), dict) else {}
+            by_status = summary.get("by_status") if isinstance(summary.get("by_status"), dict) else {}
+            pending = (
+                int(by_status.get("pending") or 0)
+                + int(by_status.get("failed") or 0)
+                + int(by_status.get("syncing") or 0)
+                + int(summary.get("pending") or 0)
+                + int(summary.get("failed") or 0)
+            )
+            if pending:
                 plan.append(
                     _automation_plan_action(
-                        action="enqueue_embedding_refresh",
-                        label=labels["enqueue_embedding_refresh"],
-                        source="embeddings",
-                        target_type="embedding_queue",
-                        target_id="stale_or_missing",
-                        reason=f"{stale + missing} embedding vector(s) need refresh.",
-                        evidence={"stale_vectors": stale, "missing_vectors": missing},
+                        action="sync_search_index",
+                        label=labels["sync_search_index"],
+                        source="search_index",
+                        target_type="search_index_queue",
+                        target_id="pending_or_failed",
+                        reason=f"{pending} search-index record(s) need sync.",
+                        evidence={"pending_or_failed": pending, "by_status": by_status},
                     )
                 )
         if bool(policy.get("auto_run_governance_shadow")):
@@ -863,8 +868,8 @@ class KnowledgeService:
                 reason=str(payload.get("reason") or "operator automation diagnostic remediation"),
                 actor=actor,
             )
-        if action == "enqueue_embedding_refresh":
-            return self.enqueue_embedding_jobs(owner_class="all", stale_only=True, limit=limit)
+        if action == "sync_search_index":
+            return self.search_index_sync(owner_class="all", limit=limit)
         if action == "run_governance_shadow":
             return self.run_governance(mode="shadow", actor=actor, limit=limit)
         raise ValueError(f"unsupported operator automation action: {action}")
@@ -1674,39 +1679,6 @@ class KnowledgeService:
         return database.list_semantic_duplicate_clusters(
             memory_class=memory_class,
             root_name=root_name,
-            limit=limit,
-        )
-
-    def embedding_status(self, *, root_name: str | None = None) -> dict[str, Any]:
-        return database.embedding_status(root_name=root_name)
-
-    def enqueue_embedding_jobs(
-        self,
-        *,
-        owner_class: str = "all",
-        root_name: str | None = None,
-        stale_only: bool = True,
-        limit: int = 100,
-    ) -> dict[str, Any]:
-        return database.enqueue_embedding_jobs(
-            owner_class=owner_class,
-            root_name=root_name,
-            stale_only=stale_only,
-            limit=limit,
-        )
-
-    def refresh_embeddings(
-        self,
-        *,
-        owner_class: str = "all",
-        root_name: str | None = None,
-        stale_only: bool = True,
-        limit: int = 100,
-    ) -> dict[str, Any]:
-        return database.refresh_embeddings(
-            owner_class=owner_class,
-            root_name=root_name,
-            stale_only=stale_only,
             limit=limit,
         )
 
@@ -3534,8 +3506,6 @@ class KnowledgeService:
             with processes.capture_job_tool_invocations(str(job.get("id") or "")):
                 if job.get("job_type") == "corpus_sync_root":
                     process_result = self._process_corpus_sync_job(job)
-                elif job.get("job_type") == "corpus_embed":
-                    process_result = worker.process_embedding_job(job)
                 elif job.get("job_type") == "search_index_sync":
                     process_result = worker.process_search_index_sync_job(job)
                 else:
@@ -4047,6 +4017,20 @@ def _format_corpus_search_item(item: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _format_memory_evidence_search_item(item: dict[str, Any]) -> dict[str, Any]:
+    kind = str(item.get("kind") or "episode")
+    detail_kind = "episode" if kind == "episode" else "claim"
+    result = {
+        "kind": kind,
+        "logical_kind": "episode",
+        **item,
+        "excerpt": item.get("summary", ""),
+        "detail_ref": {"kind": detail_kind, "id": item.get("id")},
+        "related_evidence_count": 0,
+    }
+    return result
+
+
 def normalize_retrieval_filters(filters: dict[str, Any] | None = None) -> dict[str, Any]:
     filters = filters or {}
     logical_kinds = _normalize_filter_values(filters.get("logical_kinds") or filters.get("kind"))
@@ -4269,9 +4253,9 @@ def _operator_automation_policy_from_settings() -> dict[str, Any]:
             "operator.automation.auto_remediate_diagnostics",
             operator_automation.DEFAULT_POLICY["auto_remediate_diagnostics"],
         ),
-        "auto_refresh_embeddings": resolve(
-            "operator.automation.auto_refresh_embeddings",
-            operator_automation.DEFAULT_POLICY["auto_refresh_embeddings"],
+        "auto_sync_search_index": resolve(
+            "operator.automation.auto_sync_search_index",
+            operator_automation.DEFAULT_POLICY["auto_sync_search_index"],
         ),
         "auto_run_governance_shadow": resolve(
             "operator.automation.auto_run_governance_shadow",
@@ -5128,8 +5112,8 @@ def _is_strong_cross_workspace_evidence(item: dict[str, Any]) -> bool:
     streams = {str(stream) for stream in item.get("streams", [])}
     if any("lexical" in stream or "fuzzy" in stream for stream in streams):
         return True
-    if any("vector" in stream for stream in streams):
-        return float(item.get("score") or 0.0) >= STRONG_VECTOR_MIN_SCORE
+    if "vespa_hybrid" in streams:
+        return float(item.get("score") or 0.0) >= STRONG_SEMANTIC_MIN_SCORE
     return False
 
 
@@ -5283,8 +5267,8 @@ def _job_matches_kind(job_type: str, kind: str) -> bool:
         return job_type in {"corpus_extract_audio", "corpus_extract_video"}
     if kind == "text":
         return job_type in {"corpus_extract_text", "corpus_extract_code", "corpus_extract_document"}
-    if kind == "embeddings":
-        return job_type == "corpus_embed"
+    if kind == "search-index":
+        return job_type == "search_index_sync"
     return True
 
 
@@ -5327,6 +5311,26 @@ def _search_corpus_with_configured_engine(query: str, **kwargs: Any) -> list[dic
             diagnostics["degraded_mode"]["search_engine"] = "vespa"
             diagnostics["degraded_mode"]["fallback"] = "postgres_lexical_diagnostic"
         return database.search_corpus_chunks_postgres_diagnostic(query, **kwargs)
+
+
+def _search_evidence_with_configured_engine(query: str, **kwargs: Any) -> list[dict[str, Any]] | None:
+    diagnostics = kwargs.get("diagnostics") if isinstance(kwargs.get("diagnostics"), dict) else None
+    if database.search_corpus_chunks is not _DEFAULT_SEARCH_CORPUS_CHUNKS:
+        return None
+    if _configured_retrieval_search_engine() != "vespa":
+        return None
+    try:
+        return database.search_evidence_vespa(
+            query,
+            vespa_base_url=_configured_vespa_base_url(),
+            **kwargs,
+        )
+    except Exception as exc:
+        if diagnostics is not None:
+            diagnostics.setdefault("degraded_mode", {})["reason"] = str(exc)[:300]
+            diagnostics["degraded_mode"]["search_engine"] = "vespa"
+            diagnostics["degraded_mode"]["fallback"] = "postgres_lexical_diagnostic"
+        return None
 
 
 def _configured_reconcile_on_start() -> bool:

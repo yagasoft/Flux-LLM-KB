@@ -195,12 +195,6 @@ def create_app():
         threshold: float | None = None
         limit: int = 1000
 
-    class EmbeddingRefreshRequest(BaseModel):
-        owner_class: str = "all"
-        root_name: str | None = None
-        stale_only: bool = True
-        limit: int = 100
-
     class ForgetRequest(BaseModel):
         memory_id: str
         reason: str = "user_request"
@@ -1169,28 +1163,6 @@ def create_app():
                 user_action="Use memory_class corpus, episode, or claim.",
                 target={"type": "semantic_duplicates", "id": memory_class or "all"},
             ) from exc
-
-    @app.get("/api/embeddings/status")
-    def embeddings_status(root_name: str | None = None):
-        return service.embedding_status(root_name=root_name)
-
-    @app.post("/api/embeddings/enqueue")
-    def embeddings_enqueue(request: EmbeddingRefreshRequest = Body(...)):
-        return service.enqueue_embedding_jobs(
-            owner_class=request.owner_class,
-            root_name=request.root_name,
-            stale_only=request.stale_only,
-            limit=request.limit,
-        )
-
-    @app.post("/api/embeddings/backfill")
-    def embeddings_backfill(request: EmbeddingRefreshRequest = Body(...)):
-        return service.refresh_embeddings(
-            owner_class=request.owner_class,
-            root_name=request.root_name,
-            stale_only=request.stale_only,
-            limit=request.limit,
-        )
 
     @app.get("/api/corpus/assets")
     def corpus_assets(root_name: str | None = None, path: str | None = None, limit: int = 50):

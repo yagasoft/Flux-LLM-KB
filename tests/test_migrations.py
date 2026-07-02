@@ -11,10 +11,12 @@ def test_load_migrations_returns_ordered_sql_files():
     assert migrations
     assert migrations == sorted(migrations, key=lambda item: item.version)
     assert migrations[0].name == "0001_initial"
-    assert "CREATE EXTENSION IF NOT EXISTS vector" in migrations[0].sql
+    assert "CREATE EXTENSION IF NOT EXISTS vector" not in migrations[0].sql
     assert "CREATE EXTENSION IF NOT EXISTS pgcrypto" in migrations[0].sql
     assert "CREATE TABLE IF NOT EXISTS episodes" in migrations[0].sql
-    assert "USING hnsw" in migrations[1].sql
+    assert "CREATE TABLE IF NOT EXISTS embeddings" not in migrations[0].sql
+    assert "USING hnsw" not in migrations[1].sql
+    assert not any("idx_asset_chunks_body_trgm" in item.sql for item in migrations if item.name != "0033_legacy_retrieval_purge")
     assert any("CREATE TABLE IF NOT EXISTS monitored_roots" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS source_assets" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS asset_chunks" in item.sql for item in migrations)
@@ -72,11 +74,9 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "corpus_extract_video" in acceleration_migration.sql
     assert "media" in acceleration_migration.sql
     embedding_migration = next(item for item in migrations if item.name == "0015_embedding_vectorization")
-    assert "ALTER TABLE embeddings" in embedding_migration.sql
-    assert "ADD COLUMN IF NOT EXISTS metadata" in embedding_migration.sql
-    assert "ADD COLUMN IF NOT EXISTS updated_at" in embedding_migration.sql
-    assert "idx_embeddings_owner_model" in embedding_migration.sql
-    assert "idx_embeddings_metadata" in embedding_migration.sql
+    assert "Legacy embedding storage was removed" in embedding_migration.sql
+    assert "ALTER TABLE embeddings" not in embedding_migration.sql
+    assert "idx_embeddings_owner_model" not in embedding_migration.sql
     benchmark_migration = next(item for item in migrations if item.name == "0017_benchmark_harness")
     assert "ALTER TABLE acceleration_benchmark_runs" in benchmark_migration.sql
     assert "ADD COLUMN IF NOT EXISTS mode" in benchmark_migration.sql
@@ -122,12 +122,9 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "idx_memory_governance_actions_status" in governance_migration.sql
     assert "idx_memory_governance_actions_target" in governance_migration.sql
     retrieval_performance_migration = next(item for item in migrations if item.name == "0026_retrieval_performance")
-    assert "ADD COLUMN IF NOT EXISTS root_id uuid" in retrieval_performance_migration.sql
-    assert "UPDATE embeddings emb" in retrieval_performance_migration.sql
-    assert "FROM asset_chunks c" in retrieval_performance_migration.sql
-    assert "c.id = emb.owner_id" in retrieval_performance_migration.sql
-    assert "JOIN source_assets a ON a.id = c.asset_id" in retrieval_performance_migration.sql
-    assert "idx_embeddings_asset_chunks_root_model" in retrieval_performance_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS root_id uuid" not in retrieval_performance_migration.sql
+    assert "UPDATE embeddings emb" not in retrieval_performance_migration.sql
+    assert "idx_embeddings_asset_chunks_root_model" not in retrieval_performance_migration.sql
     assert "idx_source_assets_active_root" in retrieval_performance_migration.sql
     assert "idx_asset_chunks_sidecar_ref" in retrieval_performance_migration.sql
     assert "idx_code_symbols_qualified_name_trgm" in retrieval_performance_migration.sql
@@ -177,6 +174,13 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "idx_search_index_records_source_hash" in search_index_migration.sql
     assert "idx_capture_jobs_search_index_sync_claim" in search_index_migration.sql
     assert "WHERE job_type = 'search_index_sync'" in search_index_migration.sql
+    purge_migration = next(item for item in migrations if item.name == "0033_legacy_retrieval_purge")
+    assert "algorithm = 'flux-hash-v1:cosine'" in purge_migration.sql
+    assert "action = 'sync_search_index'" in purge_migration.sql
+    assert "CREATE OR REPLACE PROCEDURE run_legacy_retrieval_purge()" in purge_migration.sql
+    assert "DROP TABLE IF EXISTS embeddings" in purge_migration.sql
+    assert "DROP INDEX IF EXISTS idx_asset_chunks_body_trgm" in purge_migration.sql
+    assert "DROP EXTENSION IF EXISTS vector" in purge_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
 
 

@@ -352,7 +352,8 @@ def test_job_family_mapping_keeps_existing_kind_compatibility():
     assert job_family_for_type("corpus_extract_archive") == "archive"
     assert job_family_for_type("corpus_extract_document") == "office"
     assert job_family_for_type("corpus_extract_code") == "text"
-    assert job_family_for_type("corpus_embed") == "embedding"
+    assert job_family_for_type("search_index_sync") == "embedding"
+    assert job_family_for_type("corpus_embed") == "general"
     assert job_family_for_type("unknown") == "general"
     assert kind_to_job_families("media") == ("media",)
     assert kind_to_job_families("diagrams") == ("diagram",)

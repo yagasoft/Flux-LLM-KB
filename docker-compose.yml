@@ -34,7 +34,7 @@ services:
              python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5"
 
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     container_name: flux-llm-kb-postgres
     shm_size: "4gb"
     command: >

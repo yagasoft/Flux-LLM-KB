@@ -1,35 +1,27 @@
-from math import isclose, sqrt
-
 from flux_llm_kb.embeddings import (
+    DEFAULT_EMBEDDING_DIMENSIONS,
     DEFAULT_EMBEDDING_MODEL,
     EmbeddingInput,
-    HashEmbeddingProvider,
-    embed_text,
+    SnowflakeEmbeddingProvider,
     embedding_cache_key,
     embedding_source_hash,
-    to_pgvector_literal,
 )
+from flux_llm_kb.search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL
 
 
-def test_embed_text_is_deterministic_and_normalized():
-    first = embed_text("PostgreSQL pgvector memory kernel", dimensions=64)
-    second = embed_text("PostgreSQL pgvector memory kernel", dimensions=64)
+class FakeModelRunner:
+    def __init__(self):
+        self.calls = []
 
-    assert first == second
-    assert len(first) == 64
-    norm = sqrt(sum(value * value for value in first))
-    assert isclose(norm, 1.0, rel_tol=1e-6)
-
-
-def test_pgvector_literal_uses_vector_array_syntax():
-    literal = to_pgvector_literal([0.1, -0.25, 0.0])
-
-    assert literal == "[0.100000,-0.250000,0.000000]"
+    def embed(self, texts, *, model, dimensions):
+        self.calls.append({"texts": list(texts), "model": model, "dimensions": dimensions})
+        return [[1.0] + [0.0] * (dimensions - 1) for _ in texts]
 
 
-def test_hash_embedding_provider_batches_vectors_with_redacted_metadata():
+def test_snowflake_embedding_provider_batches_vectors_with_redacted_metadata():
     source_hash = embedding_source_hash("Private project alpha notes")
-    provider = HashEmbeddingProvider(dimensions=64)
+    runner = FakeModelRunner()
+    provider = SnowflakeEmbeddingProvider(model_runner=runner)
 
     results = provider.embed_batch(
         [
@@ -38,21 +30,30 @@ def test_hash_embedding_provider_batches_vectors_with_redacted_metadata():
                 owner_id="chunk-1",
                 text="Private project alpha notes",
                 model=DEFAULT_EMBEDDING_MODEL,
-                dimensions=64,
+                dimensions=DEFAULT_EMBEDDING_DIMENSIONS,
             )
         ]
     )
 
     assert len(results) == 1
-    assert results[0].vector == embed_text("Private project alpha notes", dimensions=64)
+    assert DEFAULT_EMBEDDING_MODEL == SNOWFLAKE_EMBEDDING_MODEL
+    assert DEFAULT_EMBEDDING_DIMENSIONS == SNOWFLAKE_EMBEDDING_DIMENSIONS
+    assert results[0].vector == [1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1)
+    assert runner.calls == [
+        {
+            "texts": ["Private project alpha notes"],
+            "model": SNOWFLAKE_EMBEDDING_MODEL,
+            "dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        }
+    ]
     assert results[0].metadata == {
-        "provider": "hash",
+        "provider": "model_runner",
         "model": DEFAULT_EMBEDDING_MODEL,
-        "dimensions": 64,
+        "dimensions": DEFAULT_EMBEDDING_DIMENSIONS,
         "source_hash": source_hash,
         "cache_key": embedding_cache_key(
             model=DEFAULT_EMBEDDING_MODEL,
-            dimensions=64,
+            dimensions=DEFAULT_EMBEDDING_DIMENSIONS,
             source_hash=source_hash,
         ),
     }

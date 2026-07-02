@@ -196,23 +196,6 @@ def main(argv: list[str] | None = None) -> int:
     semantic_list.add_argument("--root-name")
     semantic_list.add_argument("--limit", type=int, default=50)
 
-    embeddings_parser = subparsers.add_parser("embeddings", help="Manage embedding vector refresh jobs")
-    embeddings_subparsers = embeddings_parser.add_subparsers(dest="embeddings_command", required=True)
-    embeddings_status = embeddings_subparsers.add_parser("status", help="Show embedding vector coverage")
-    embeddings_status.add_argument("--root", dest="root_name")
-    embeddings_enqueue = embeddings_subparsers.add_parser("enqueue", help="Queue an embedding refresh job")
-    embeddings_enqueue.add_argument("--owner-class", choices=["all", "corpus", "episodes", "claims"], default="all")
-    embeddings_enqueue.add_argument("--root", dest="root_name")
-    embeddings_enqueue.add_argument("--limit", type=int, default=100)
-    embeddings_enqueue.add_argument("--all", action="store_false", dest="stale_only", help="Refresh all vectors, not only missing or stale vectors")
-    embeddings_enqueue.set_defaults(stale_only=True)
-    embeddings_backfill = embeddings_subparsers.add_parser("backfill", help="Refresh embeddings immediately")
-    embeddings_backfill.add_argument("--owner-class", choices=["all", "corpus", "episodes", "claims"], default="all")
-    embeddings_backfill.add_argument("--root", dest="root_name")
-    embeddings_backfill.add_argument("--limit", type=int, default=100)
-    embeddings_backfill.add_argument("--all", action="store_false", dest="stale_only", help="Refresh all vectors, not only missing or stale vectors")
-    embeddings_backfill.set_defaults(stale_only=True)
-
     code_parser = subparsers.add_parser("code", help="Inspect code-aware retrieval diagnostics")
     code_subparsers = code_parser.add_subparsers(dest="code_command", required=True)
     code_status = code_subparsers.add_parser("status", help="Show code index coverage and parser status")
@@ -352,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     crawl_requeue_svg.add_argument("--limit", type=int, default=1000)
 
     crawl_backfill = crawl_subparsers.add_parser("backfill", help="Claim deferred corpus extraction jobs")
-    crawl_kind_choices = ["text", "images", "diagrams", "archives", "containers", "media", "embeddings", "data", "mail", "reports", "metadata", "all"]
+    crawl_kind_choices = ["text", "images", "diagrams", "archives", "containers", "media", "search-index", "data", "mail", "reports", "metadata", "all"]
     crawl_backfill.add_argument(
         "--kind",
         choices=crawl_kind_choices,
@@ -609,7 +592,6 @@ def main(argv: list[str] | None = None) -> int:
         "capture": _capture,
         "retention": _retention,
         "semantic-duplicates": _semantic_duplicates,
-        "embeddings": _embeddings,
         "forget": _forget,
         "audit": _audit,
         "backfill-codex": _backfill_codex,
@@ -648,7 +630,7 @@ def _doctor(args: argparse.Namespace) -> int:
 
 
 def _init(_: argparse.Namespace) -> int:
-    print("Copy .env.example to .env, start PostgreSQL/pgvector, then run `flux-kb migrate`.")
+    print("Copy .env.example to .env, start PostgreSQL, then run `flux-kb migrate`.")
     return 0
 
 
@@ -879,32 +861,6 @@ def _semantic_duplicates(args: argparse.Namespace) -> int:
         )
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.semantic_duplicates_command)
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0
-
-
-def _embeddings(args: argparse.Namespace) -> int:
-    from .service import KnowledgeService
-
-    service = KnowledgeService()
-    if args.embeddings_command == "status":
-        payload = service.embedding_status(root_name=args.root_name)
-    elif args.embeddings_command == "enqueue":
-        payload = service.enqueue_embedding_jobs(
-            owner_class=args.owner_class,
-            root_name=args.root_name,
-            stale_only=args.stale_only,
-            limit=args.limit,
-        )
-    elif args.embeddings_command == "backfill":
-        payload = service.refresh_embeddings(
-            owner_class=args.owner_class,
-            root_name=args.root_name,
-            stale_only=args.stale_only,
-            limit=args.limit,
-        )
-    else:  # pragma: no cover - argparse prevents this
-        raise ValueError(args.embeddings_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
@@ -1541,10 +1497,9 @@ def _lint(_: argparse.Namespace) -> int:
     migrations = load_migrations()
     sql = "\n".join(migration.sql for migration in migrations)
     required = [
-        "CREATE EXTENSION IF NOT EXISTS vector",
         "CREATE EXTENSION IF NOT EXISTS pg_trgm",
         "CREATE EXTENSION IF NOT EXISTS pgcrypto",
-        "USING hnsw",
+        "CREATE TABLE IF NOT EXISTS search_index_records",
     ]
     missing = [item for item in required if item not in sql]
     payload = {"migration_count": len(migrations), "ok": bool(migrations) and not missing, "missing": missing}

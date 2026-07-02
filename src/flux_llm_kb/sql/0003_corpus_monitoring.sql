@@ -97,7 +97,6 @@ CREATE INDEX IF NOT EXISTS idx_source_assets_path_trgm ON source_assets USING GI
 CREATE INDEX IF NOT EXISTS idx_source_assets_metadata ON source_assets USING GIN (metadata);
 CREATE INDEX IF NOT EXISTS idx_asset_chunks_search_vector ON asset_chunks USING GIN (search_vector);
 CREATE INDEX IF NOT EXISTS idx_asset_chunks_title_trgm ON asset_chunks USING GIN (title gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_asset_chunks_body_trgm ON asset_chunks USING GIN (body gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_crawl_runs_root_started ON crawl_runs (root_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_watcher_state_status ON watcher_state (status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_capture_jobs_corpus_claim ON capture_jobs (status, next_attempt_at, created_at)

@@ -33,7 +33,7 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     monkeypatch.setattr(
         database,
         "retrieval_stats",
-        lambda: {"episodes": 3, "asset_chunks": 5, "embeddings": 8},
+        lambda: {"episodes": 3, "asset_chunks": 5, "search_index_records": 8},
     )
     monkeypatch.setattr(
         database,
@@ -153,7 +153,7 @@ def test_collect_dashboard_payload_blocks_when_required_host_database_path_fails
             "watchers": [],
         },
     )
-    monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "embeddings": 0})
+    monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "search_index_records": 0})
     monkeypatch.setattr(database, "list_runtime_components", lambda: [], raising=False)
     monkeypatch.setattr(database, "list_capture_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(health, "remote_status", lambda: {"status": "running"})
@@ -232,7 +232,7 @@ def test_dashboard_health_includes_actionable_error_details(monkeypatch):
             ],
         },
     )
-    monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "embeddings": 0})
+    monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "search_index_records": 0})
     monkeypatch.setattr(database, "list_runtime_components", lambda: [], raising=False)
     monkeypatch.setattr(database, "list_capture_jobs", lambda **_kwargs: [])
     monkeypatch.setattr(

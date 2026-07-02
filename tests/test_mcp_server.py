@@ -96,9 +96,9 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.governance_recover")' in source
     assert '@mcp.tool(name="kb.governance_digest")' in source
     assert '@mcp.tool(name="kb.governance_policy")' in source
-    assert '@mcp.tool(name="kb.embeddings_status")' in source
-    assert '@mcp.tool(name="kb.embeddings_enqueue")' in source
-    assert '@mcp.tool(name="kb.embeddings_backfill")' in source
+    assert '@mcp.tool(name="kb.embeddings_status")' not in source
+    assert '@mcp.tool(name="kb.embeddings_enqueue")' not in source
+    assert '@mcp.tool(name="kb.embeddings_backfill")' not in source
     assert 'def capture_review(status: str = "pending_review", limit: int = 50)' in source
     assert "def capture_review_decide(job_id: str, decision: str, rationale: str)" in source
     assert "def capture_review_ingest(job_id: str | None = None, limit: int = 25, dry_run: bool = False)" in source

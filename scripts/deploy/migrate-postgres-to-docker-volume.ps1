@@ -34,7 +34,7 @@ function Test-FluxPostgresVolumeInitialised {
     if (-not (Test-FluxDockerVolumeExists -Name $Name)) {
         return $false
     }
-    docker run --rm --entrypoint sh -v "${Name}:/var/lib/postgresql/data" pgvector/pgvector:pg16 -c "test -f /var/lib/postgresql/data/PG_VERSION" *> $null
+    docker run --rm --entrypoint sh -v "${Name}:/var/lib/postgresql/data" postgres:16 -c "test -f /var/lib/postgresql/data/PG_VERSION" *> $null
     return $LASTEXITCODE -eq 0
 }
 
@@ -59,7 +59,7 @@ function Test-FluxDockerVolumeHasEntries {
     if (-not (Test-FluxDockerVolumeExists -Name $Name)) {
         return $false
     }
-    docker run --rm --entrypoint sh -v "${Name}:/to" pgvector/pgvector:pg16 -c "find /to -mindepth 1 -maxdepth 1 -print -quit | grep -q ." *> $null
+    docker run --rm --entrypoint sh -v "${Name}:/to" postgres:16 -c "find /to -mindepth 1 -maxdepth 1 -print -quit | grep -q ." *> $null
     return $LASTEXITCODE -eq 0
 }
 
@@ -87,7 +87,7 @@ function Copy-FluxDirectoryToDockerVolume {
         "--entrypoint", "sh",
         "-v", "${SourcePath}:/from:ro",
         "-v", "${VolumeName}:/to",
-        "pgvector/pgvector:pg16",
+        "postgres:16",
         "-c", $CopyCommand
     )
 }
@@ -163,7 +163,7 @@ try {
         "-e", "POSTGRES_PASSWORD=flux",
         "-e", "POSTGRES_DB=flux_llm_kb",
         "-v", "${PostgresVolumeName}:/var/lib/postgresql/data",
-        "pgvector/pgvector:pg16"
+        "postgres:16"
     )
     Wait-FluxTemporaryPostgres -ContainerName $tempContainerName
     Invoke-FluxDocker -Arguments @("cp", $backupPath, "${tempContainerName}:/tmp/$backupFileName")

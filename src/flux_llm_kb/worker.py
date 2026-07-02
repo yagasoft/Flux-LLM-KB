@@ -243,30 +243,6 @@ def _payload_relative_path_for_extraction(path: Path, policy: CorpusPolicy, payl
     return relative_path
 
 
-def process_embedding_job(job: dict) -> JobProcessResult:
-    payload = job.get("payload") or {}
-    try:
-        result = database.refresh_embeddings(
-            owner_class=str(payload.get("owner_class") or "all"),
-            root_name=payload.get("root_name"),
-            stale_only=bool(payload.get("stale_only", True)),
-            limit=int(payload.get("limit") or 100),
-        )
-    except ValueError as exc:
-        return JobProcessResult(status="failed", message=str(exc))
-    telemetry = {
-        "embedding_vectors": int(result.get("vectors") or 0),
-        "embedding_skipped_unchanged": int(result.get("skipped_unchanged") or 0),
-        "embedding_batches": int(result.get("batches") or 0),
-        "embedding_cache_hits": int(result.get("cache_hits") or 0),
-        "embedding_cache_misses": int(result.get("cache_misses") or 0),
-        "embedding_provider": result.get("provider"),
-        "embedding_model": result.get("model"),
-        "embedding_dimensions": int(result.get("dimensions") or 0),
-    }
-    return JobProcessResult(status="indexed", telemetry=telemetry)
-
-
 def process_search_index_sync_job(job: dict) -> JobProcessResult:
     payload = job.get("payload") or {}
     try:

@@ -104,7 +104,7 @@ def job_family_for_type(job_type: str | None) -> str:
         return "archive"
     if normalized in {"corpus_extract_audio", "corpus_extract_video", "corpus_extract_media_segment", "corpus_extract_video_frames"}:
         return "media"
-    if normalized in {"corpus_embed", "search_index_sync"}:
+    if normalized == "search_index_sync":
         return "embedding"
     if normalized == "corpus_preview":
         return "preview"
@@ -127,7 +127,7 @@ def kind_to_job_families(kind: str | None) -> tuple[str, ...] | None:
         return ("archive",)
     if normalized == "media":
         return ("media",)
-    if normalized == "embeddings":
+    if normalized in {"search-index", "search_index"}:
         return ("embedding",)
     if normalized == "data":
         return ("text", "office", "general")

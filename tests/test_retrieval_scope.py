@@ -102,7 +102,7 @@ def test_local_first_falls_back_to_global_when_scoped_results_have_no_lexical_or
 
     def fake_search_episodes(query, *, limit=5, cwd=None, root_path=None, workspace_key=None, url=None):
         if root_path:
-            return [_episode("local-vector", "Local semantic-only memory", ["vector"], score=0.8)]
+            return [_episode("local-semantic", "Local semantic-only memory", ["semantic"], score=0.8)]
         return [_episode("global-episode", "Global fallback memory", ["lexical"], score=0.5)]
 
     def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, url=None):
@@ -241,7 +241,7 @@ def test_workspace_boosted_blends_local_and_strong_cross_workspace_results(monke
     def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, url=None):
         if root_name == "flux":
             return [_chunk("local-chunk", "Local corpus note", ["corpus_lexical"], score=0.7)]
-        global_chunk = _chunk("global-chunk", "General indexed PC document", ["corpus_vector"], score=0.65)
+        global_chunk = _chunk("global-chunk", "General indexed PC document", ["vespa_hybrid"], score=0.65)
         global_chunk["root_name"] = "docs"
         return [
             _chunk("local-chunk", "Duplicate local from global search", ["corpus_lexical"], score=0.99),
@@ -453,22 +453,22 @@ def test_explain_includes_additive_corpus_retrieval_timings(monkeypatch):
 
     def fake_search_corpus_chunks(query, *, limit=5, root_name=None, filters=None, diagnostics=None, url=None):
         if diagnostics is not None:
-            diagnostics.setdefault("streams", {})["corpus_vector"] = {
+            diagnostics.setdefault("streams", {})["vespa_hybrid"] = {
                 "duration_ms": 2.5,
                 "rows": 1,
-                "plan": "root_scoped_hnsw_candidates",
+                "plan": "vespa_hybrid_candidates",
             }
-        return [_chunk("local-chunk", "Local corpus note", ["corpus_vector"], score=0.7)]
+        return [_chunk("local-chunk", "Local corpus note", ["vespa_hybrid"], score=0.7)]
 
     monkeypatch.setattr(database, "search_corpus_chunks", fake_search_corpus_chunks)
 
     payload = KnowledgeService().explain("local corpus", cwd="E:\\LLM KB", scope_mode="local_only")
 
     assert payload["results"][0]["id"] == "local-chunk"
-    assert payload["retrieval_timing"]["scopes"]["local"]["corpus"]["streams"]["corpus_vector"] == {
+    assert payload["retrieval_timing"]["scopes"]["local"]["corpus"]["streams"]["vespa_hybrid"] == {
         "duration_ms": 2.5,
         "rows": 1,
-        "plan": "root_scoped_hnsw_candidates",
+        "plan": "vespa_hybrid_candidates",
     }
 
 

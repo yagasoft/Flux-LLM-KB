@@ -143,6 +143,7 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "flux_llm_kb_vespa_logs:/opt/vespa/logs" in compose
         assert "  model-runner:" in compose
         assert "container_name: flux-llm-kb-model-runner" in compose
+        assert '"127.0.0.1:8790:8790"' in compose
         assert "python -m flux_llm_kb.model_runner serve --host 0.0.0.0 --port 8790" in compose
         assert 'test: ["CMD", "python", "-m", "flux_llm_kb.model_runner", "health"]' in compose
         assert "  paddle-runner:" in compose

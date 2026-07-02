@@ -25,7 +25,7 @@ def test_cli_doctor_reports_missing_docker_without_failing():
     assert payload["summary"]["ok"] in {True, False}
 
 
-def test_cli_lint_requires_vector_and_index_migrations():
+def test_cli_lint_requires_postgres_and_search_index_migrations():
     repo_root = Path(__file__).resolve().parents[1]
 
     result = subprocess.run(
@@ -39,6 +39,15 @@ def test_cli_lint_requires_vector_and_index_migrations():
 
     assert payload["ok"] is True
     assert payload["missing"] == []
+
+
+def test_cli_removes_legacy_embeddings_command():
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+
+    assert 'subparsers.add_parser("embeddings"' not in source
+    assert '"embeddings": _embeddings' not in source
+    assert "def _embeddings(" not in source
+    assert 'subparsers.add_parser("search-index"' in source
 
 
 def test_cli_search_uses_service_search(monkeypatch, capsys):
@@ -1058,46 +1067,43 @@ def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, cap
     assert report_worker_payload["worker"]["limit"] == 7
 
 
-def test_cli_embeddings_status_enqueue_and_backfill_use_service(monkeypatch, capsys):
+def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 
     calls = {}
 
     class FakeService:
-        def embedding_status(self, **kwargs):
+        def search_index_status(self, **kwargs):
             calls["status"] = kwargs
             return {"status": kwargs}
 
-        def enqueue_embedding_jobs(self, **kwargs):
-            calls["enqueue"] = kwargs
-            return {"enqueue": kwargs}
+        def search_index_sync(self, **kwargs):
+            calls["sync"] = kwargs
+            return {"sync": kwargs}
 
-        def refresh_embeddings(self, **kwargs):
-            calls["backfill"] = kwargs
-            return {"backfill": kwargs}
+        def search_index_rebuild(self, **kwargs):
+            calls["rebuild"] = kwargs
+            return {"rebuild": kwargs}
 
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
-    assert cli.main(["embeddings", "status", "--root", "docs"]) == 0
+    assert cli.main(["search-index", "status", "--root", "docs"]) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["status"] == {"root_name": "docs"}
 
-    assert cli.main(["embeddings", "enqueue", "--owner-class", "corpus", "--root", "docs", "--limit", "25"]) == 0
-    enqueue_payload = json.loads(capsys.readouterr().out)
-    assert enqueue_payload["enqueue"] == {
+    assert cli.main(["search-index", "sync", "--owner-class", "corpus", "--root", "docs", "--limit", "25"]) == 0
+    sync_payload = json.loads(capsys.readouterr().out)
+    assert sync_payload["sync"] == {
         "owner_class": "corpus",
         "root_name": "docs",
-        "stale_only": True,
         "limit": 25,
     }
 
-    assert cli.main(["embeddings", "backfill", "--owner-class", "all", "--root", "docs", "--limit", "20"]) == 0
-    backfill_payload = json.loads(capsys.readouterr().out)
-    assert backfill_payload["backfill"] == {
-        "owner_class": "all",
+    assert cli.main(["search-index", "rebuild", "--root", "docs", "--confirm"]) == 0
+    rebuild_payload = json.loads(capsys.readouterr().out)
+    assert rebuild_payload["rebuild"] == {
         "root_name": "docs",
-        "stale_only": True,
-        "limit": 20,
+        "confirmed": True,
     }
 
 

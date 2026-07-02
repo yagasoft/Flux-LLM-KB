@@ -17,7 +17,7 @@ def test_operator_automation_policy_defaults_to_disabled_guarded_mode():
         "refresh_retrieval_evidence",
         "ingest_approved_capture",
         "safe_diagnostic_recovery",
-        "enqueue_embedding_refresh",
+        "sync_search_index",
         "run_governance_shadow",
     ]
     assert "delete" in policy["manual_actions"]
@@ -45,13 +45,13 @@ def test_operator_automation_run_records_sanitized_guarded_actions(monkeypatch):
             "auto_refresh_evidence": True,
             "auto_ingest_approved_capture": True,
             "auto_remediate_diagnostics": True,
-            "auto_refresh_embeddings": True,
+            "auto_sync_search_index": True,
             "auto_run_governance_shadow": True,
         },
         raising=False,
     )
     monkeypatch.setattr(database, "list_capture_ingestion_jobs", lambda **_kwargs: [{"id": "capture-1", "payload": {"path": "E:/Private/session.json"}}])
-    monkeypatch.setattr(database, "embedding_status", lambda **_kwargs: {"summary": {"stale_vectors": 3, "missing_vectors": 2}})
+    monkeypatch.setattr(database, "search_index_status", lambda **_kwargs: {"summary": {"pending": 3, "failed": 2}})
     monkeypatch.setattr(
         database,
         "list_operator_automation_runs",
@@ -99,7 +99,7 @@ def test_operator_automation_run_records_sanitized_guarded_actions(monkeypatch):
     monkeypatch.setattr(service, "run_retrieval_benchmark", lambda **kwargs: calls.append(("retrieval", kwargs)) or {"settings_mutated": False})
     monkeypatch.setattr(service, "run_indexer_reliability", lambda **kwargs: calls.append(("reliability", kwargs)) or {"settings_mutated": False})
     monkeypatch.setattr(service, "ingest_capture_review_jobs", lambda **kwargs: calls.append(("capture", kwargs)) or {"settings_mutated": False, "processed": 1})
-    monkeypatch.setattr(service, "enqueue_embedding_jobs", lambda **kwargs: calls.append(("embeddings", kwargs)) or {"settings_mutated": False, "queued": 5})
+    monkeypatch.setattr(service, "search_index_sync", lambda **kwargs: calls.append(("search_index", kwargs)) or {"settings_mutated": False, "queued": 5})
     monkeypatch.setattr(service, "run_governance", lambda **kwargs: calls.append(("governance", kwargs)) or {"settings_mutated": False, "summary": {"total": 2}})
 
     result = service.run_operator_automation(actor="pytest", trigger="manual", mode="guarded", limit=10)

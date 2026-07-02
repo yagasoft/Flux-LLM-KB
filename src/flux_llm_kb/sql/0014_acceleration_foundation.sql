@@ -22,7 +22,7 @@ SET job_family = CASE job_type
         WHEN 'corpus_extract_container' THEN 'archive'
         WHEN 'corpus_extract_audio' THEN 'media'
         WHEN 'corpus_extract_video' THEN 'media'
-        WHEN 'corpus_embed' THEN 'embedding'
+        WHEN 'search_index_sync' THEN 'embedding'
         WHEN 'corpus_preview' THEN 'preview'
         ELSE 'general'
     END,
@@ -30,7 +30,7 @@ SET job_family = CASE job_type
         WHEN 'corpus_extract_image' THEN 'gpu'
         WHEN 'corpus_extract_audio' THEN 'gpu'
         WHEN 'corpus_extract_video' THEN 'gpu'
-        WHEN 'corpus_embed' THEN 'gpu'
+        WHEN 'search_index_sync' THEN 'gpu'
         WHEN 'corpus_extract_archive' THEN 'io'
         WHEN 'corpus_extract_container' THEN 'io'
         ELSE 'cpu'
@@ -48,7 +48,7 @@ SET job_family = CASE job_type
         WHEN 'corpus_extract_image' THEN 45
         WHEN 'corpus_extract_audio' THEN 40
         WHEN 'corpus_extract_video' THEN 40
-        WHEN 'corpus_embed' THEN 35
+        WHEN 'search_index_sync' THEN 35
         WHEN 'corpus_preview' THEN 25
         ELSE 10
     END,
@@ -65,7 +65,7 @@ SET job_family = CASE job_type
         WHEN 'corpus_extract_image' THEN 600
         WHEN 'corpus_extract_audio' THEN 900
         WHEN 'corpus_extract_video' THEN 900
-        WHEN 'corpus_embed' THEN 300
+        WHEN 'search_index_sync' THEN 300
         WHEN 'corpus_preview' THEN 180
         ELSE 180
     END

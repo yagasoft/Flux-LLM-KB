@@ -442,31 +442,6 @@ def create_server():
         """Read the effective local governance automation policy and guardrail defaults."""
         return service.governance_policy()
 
-    @mcp.tool(name="kb.embeddings_status")
-    def embeddings_status(root_name: str | None = None):
-        """Return embedding vector coverage and missing/stale metadata counts."""
-        return service.embedding_status(root_name=root_name)
-
-    @mcp.tool(name="kb.embeddings_enqueue")
-    def embeddings_enqueue(owner_class: str = "all", root_name: str | None = None, stale_only: bool = True, limit: int = 100):
-        """Queue a corpus_embed job to refresh missing or stale embeddings."""
-        return service.enqueue_embedding_jobs(
-            owner_class=owner_class,
-            root_name=root_name,
-            stale_only=stale_only,
-            limit=limit,
-        )
-
-    @mcp.tool(name="kb.embeddings_backfill")
-    def embeddings_backfill(owner_class: str = "all", root_name: str | None = None, stale_only: bool = True, limit: int = 100):
-        """Refresh missing or stale embeddings immediately using the local deterministic provider."""
-        return service.refresh_embeddings(
-            owner_class=owner_class,
-            root_name=root_name,
-            stale_only=stale_only,
-            limit=limit,
-        )
-
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
         """Finalize the current agent turn by storing a redacted durable summary. Finalize with kb.finalize_turn at turn end; avoid duplicating every prior kb.remember item."""

@@ -3,6 +3,8 @@ from io import BytesIO
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
+from pathlib import Path
+
 from flux_llm_kb import database, worker
 from flux_llm_kb.embeddings import (
     EmbeddingInput,
@@ -485,7 +487,7 @@ def test_sync_search_index_uses_configured_vespa_base_url(monkeypatch):
     assert captured["base_url"] == "http://vespa:8080"
 
 
-def test_search_index_fetch_prioritizes_unindexed_records():
+def test_search_index_fetch_all_owner_class_does_not_starve_episodes_or_claims():
     executed = []
 
     class FakeCursor:
@@ -493,16 +495,66 @@ def test_search_index_fetch_prioritizes_unindexed_records():
             executed.append((sql, params))
 
         def fetchall(self):
+            sql, params = executed[-1]
+            requested = int(params[-1])
+            if "FROM asset_chunks c" in sql:
+                return [
+                    (
+                        f"11111111-1111-1111-1111-{idx:012d}",
+                        "22222222-2222-2222-2222-222222222222",
+                        "33333333-3333-3333-3333-333333333333",
+                        "docs",
+                        f"chunk-{idx}.md",
+                        "Vespa owns hybrid search.",
+                        f"docs/chunk-{idx}.md",
+                        "text",
+                        {"code": {"language": "markdown"}},
+                        None,
+                        None,
+                        None,
+                    )
+                    for idx in range(requested)
+                ]
+            if "FROM episodes e" in sql:
+                return [
+                    (
+                        f"44444444-4444-4444-4444-{idx:012d}",
+                        f"Episode {idx}",
+                        "Durable memory episode.",
+                        {"root_name": "docs"},
+                        None,
+                        None,
+                        None,
+                    )
+                    for idx in range(requested)
+                ]
+            if "FROM claims c" in sql:
+                return [
+                    (
+                        f"55555555-5555-5555-5555-{idx:012d}",
+                        f"Claim {idx}",
+                        "Durable claim text.",
+                        "active",
+                        {"root_name": "docs"},
+                        None,
+                        None,
+                        None,
+                    )
+                    for idx in range(requested)
+                ]
             return []
 
-    database._fetch_search_index_rows(
+    rows = database._fetch_search_index_rows(
         FakeCursor(),
         owner_class="all",
         root_name=None,
-        limit=10,
+        limit=6,
         embedding_model=SNOWFLAKE_EMBEDDING_MODEL,
     )
 
+    assert [row["owner_table"] for row in rows].count("asset_chunks") == 2
+    assert [row["owner_table"] for row in rows].count("episodes") == 2
+    assert [row["owner_table"] for row in rows].count("claims") == 2
     assert len(executed) == 3
     assert all("WHEN rec.index_status = 'failed' THEN 0" in sql for sql, _params in executed)
     assert all("WHEN rec.index_status IS NULL THEN 1" in sql for sql, _params in executed)
@@ -604,6 +656,138 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
     assert diagnostics["reranker"]["model"] == "Qwen/Qwen3-Reranker-4B"
     assert diagnostics["reranker"]["quantization"] == "int4_awq"
     assert diagnostics["reranker"]["input_count"] == 1
+
+
+def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypatch):
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def embed_batch(self, _inputs):
+            return [
+                EmbeddingResult(
+                    owner_table="query",
+                    owner_id="query",
+                    model=SNOWFLAKE_EMBEDDING_MODEL,
+                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                    vector=[1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+                    metadata={"source_hash": "query-hash"},
+                )
+            ]
+
+    class FakeAdapter:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def query(self, *_args, **_kwargs):
+            return [
+                {"owner_table": "asset_chunks", "owner_id": "chunk-1", "score": 3.0, "match_features": {"bm25(body)": 1.0}},
+                {"owner_table": "episodes", "owner_id": "episode-1", "score": 2.0, "match_features": {"bm25(body)": 0.8}},
+                {"owner_table": "claims", "owner_id": "claim-1", "score": 1.5, "match_features": {"bm25(body)": 0.5}},
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return self
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeReranker:
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "int4_awq"
+        top_n = 80
+        max_passage_tokens = 1536
+
+        def __init__(self, **kwargs):
+            self.top_n = kwargs["top_n"]
+
+        def rerank(self, _query, candidates):
+            return [{**candidate, "reranker": {"score": float(10 - idx)}} for idx, candidate in enumerate(candidates)]
+
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", FakeReranker)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        database,
+        "_hydrate_corpus_candidate_details",
+        lambda *_args, **_kwargs: {
+            "chunk-1": {
+                "title": "Doc",
+                "summary": "Corpus chunk text",
+                "raw_scores": {"vespa_hybrid": 3.0},
+                "asset_id": "asset-1",
+                "source_path": "docs/doc.md",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        database,
+        "_hydrate_episode_candidate_details",
+        lambda *_args, **_kwargs: {
+            "episode-1": {
+                "id": "episode-1",
+                "kind": "episode",
+                "title": "Episode",
+                "summary": "Episode text",
+                "raw_scores": {"vespa_hybrid": 2.0},
+            }
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
+        "_hydrate_claim_candidate_details",
+        lambda *_args, **_kwargs: {
+            "claim-1": {
+                "id": "claim-1",
+                "kind": "claim",
+                "title": "Claim",
+                "summary": "Claim text",
+                "raw_scores": {"vespa_hybrid": 1.5},
+            }
+        },
+        raising=False,
+    )
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_evidence_vespa(
+        "quality",
+        limit=5,
+        root_name="docs",
+        filters={},
+        vespa_base_url="http://vespa:8080",
+        diagnostics=diagnostics,
+    )
+
+    assert [result["kind"] for result in results] == ["corpus_chunk", "episode", "claim"]
+    assert diagnostics["vespa"]["owner_counts"] == {"asset_chunks": 1, "episodes": 1, "claims": 1}
+    assert diagnostics["vespa"]["hydrated_count"] == 3
+    assert diagnostics["reranker"]["input_count"] == 3
+
+
+def test_legacy_pgvector_and_hash_embedding_code_paths_are_removed():
+    database_source = Path(database.__file__).read_text(encoding="utf-8")
+    legacy_search_body = database_source.split("def search_corpus_chunks", 1)[1].split("\ndef ", 1)[0]
+    semantic_duplicate_body = database_source.split("def refresh_semantic_duplicate_clusters", 1)[1].split("\ndef ", 1)[0]
+
+    assert '_SEMANTIC_DUPLICATE_ALGORITHM = "snowflake-vespa-cosine-v1"' in database_source
+    assert "emb.embedding <=>" not in legacy_search_body
+    assert "to_pgvector_literal" not in legacy_search_body
+    assert "DEFAULT_EMBEDDING_MODEL" not in semantic_duplicate_body
+    assert "JOIN embeddings emb" not in semantic_duplicate_body
 
 
 def test_claim_corpus_jobs_includes_search_index_sync_jobs(monkeypatch):

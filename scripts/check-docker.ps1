@@ -2,7 +2,7 @@ param()
 
 $docker = Get-Command docker -ErrorAction SilentlyContinue
 if (-not $docker) {
-    Write-Error "Docker is required for the default PostgreSQL/pgvector runtime profile but was not found on PATH."
+    Write-Error "Docker is required for the default PostgreSQL runtime profile but was not found on PATH."
     exit 1
 }
 
@@ -13,4 +13,3 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Output "Docker Compose is available."
-

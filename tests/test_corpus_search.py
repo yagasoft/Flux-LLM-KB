@@ -143,10 +143,10 @@ def test_service_search_adds_query_snippet_and_retrieval_explanation(monkeypatch
                 "id": "chunk-1",
                 "asset_id": "asset-1",
                 "title": "architecture.md",
-                "summary": "Dashboard retrieval uses pgvector, lifecycle scoring, and snippets.",
+                "summary": "Dashboard retrieval uses Vespa, lifecycle scoring, and snippets.",
                 "score": 0.9,
-                "streams": ["corpus_lexical", "corpus_vector"],
-                "raw_scores": {"corpus_lexical": 1.0, "corpus_vector": 0.5},
+                "streams": ["corpus_lexical", "vespa_hybrid"],
+                "raw_scores": {"corpus_lexical": 1.0, "vespa_hybrid": 0.5},
                 "source_path": "docs/architecture.md",
                 "root_name": "docs",
                 "duplicate_count": 1,
@@ -155,12 +155,12 @@ def test_service_search_adds_query_snippet_and_retrieval_explanation(monkeypatch
         ],
     )
 
-    result = KnowledgeService().search("pgvector dashboard", limit=5)[0]
+    result = KnowledgeService().search("vespa dashboard", limit=5)[0]
 
     assert result["excerpt"] == result["snippet"]["text"]
-    assert result["snippet"]["matched_terms"] == ["dashboard", "pgvector"]
+    assert result["snippet"]["matched_terms"] == ["dashboard", "vespa"]
     assert result["snippet"]["source_path"] == "docs/architecture.md"
-    assert result["retrieval_explanation"]["streams"] == ["corpus_lexical", "corpus_vector"]
+    assert result["retrieval_explanation"]["streams"] == ["corpus_lexical", "vespa_hybrid"]
     assert result["retrieval_explanation"]["scope"] == {"label": "global"}
     assert result["retrieval_explanation"]["corpus"]["source_path"] == "docs/architecture.md"
     assert result["retrieval_explanation"]["corpus"]["duplicate_count"] == 1
@@ -460,10 +460,10 @@ def test_service_explain_surfaces_semantic_duplicate_suppression_without_raw_dup
                 "id": "chunk-canonical",
                 "asset_id": "asset-canonical",
                 "title": "Architecture",
-                "summary": "Flux retrieval architecture uses pgvector and local ranking.",
+                "summary": "Flux retrieval architecture uses Vespa and local ranking.",
                 "score": 0.9,
-                "streams": ["corpus_lexical", "corpus_vector"],
-                "raw_scores": {"corpus_lexical": 1.0, "corpus_vector": 0.8},
+                "streams": ["corpus_lexical", "vespa_hybrid"],
+                "raw_scores": {"corpus_lexical": 1.0, "vespa_hybrid": 0.8},
                 "source_path": "docs/architecture.md",
                 "root_name": "docs",
                 "duplicate_count": 0,
@@ -490,7 +490,7 @@ def test_service_explain_surfaces_semantic_duplicate_suppression_without_raw_dup
     )
 
     payload = KnowledgeService().explain(
-        "pgvector architecture",
+        "vespa architecture",
         limit=5,
         token_budget=100,
         filters={"include_suppressed": True},
@@ -513,7 +513,7 @@ def test_service_explain_surfaces_semantic_duplicate_suppression_without_raw_dup
         ],
     }
     assert payload["suppression"]["semantic_duplicates"][0]["suppressed_count"] == 1
-    assert "Flux retrieval architecture uses pgvector" in payload["results"][0]["summary"]
+    assert "Flux retrieval architecture uses Vespa" in payload["results"][0]["summary"]
     assert "raw duplicate" not in json.dumps(payload).lower()
 
 
