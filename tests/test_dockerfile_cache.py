@@ -23,8 +23,28 @@ def test_dockerfile_uses_pip_buildkit_cache() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
     assert "# syntax=docker/dockerfile:" in dockerfile
-    assert "--mount=type=cache,target=/root/.cache/pip" in dockerfile
+    assert "--mount=type=cache,target=/root/.cache/pip,sharing=locked" in dockerfile
     assert "--no-cache-dir" not in dockerfile
+
+
+def test_dockerfile_materializes_persistent_wheelhouse_before_install() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    dependency_stage = dockerfile.index("AS runtime-deps")
+    pip_cache = dockerfile.index("--mount=type=cache,target=/root/.cache/pip")
+    wheelhouse = dockerfile.index(
+        "--mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse"
+    )
+    download = dockerfile.index("python -m pip download")
+    install = dockerfile.index("python -m pip install --no-index --find-links /opt/flux-wheelhouse")
+    runtime_stage = dockerfile.index("FROM runtime-deps AS runtime")
+
+    assert dependency_stage < pip_cache
+    assert pip_cache < download
+    assert wheelhouse < download
+    assert download < install
+    assert install < runtime_stage
+    assert "--dest /opt/flux-wheelhouse -r /tmp/requirements-docker.txt" in dockerfile
 
 
 def test_dockerfile_installs_mcp_extra_for_containerized_codex_retrieval() -> None:

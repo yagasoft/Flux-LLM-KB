@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG FLUX_KB_DOCKER_BASE_IMAGE=python:3.12-slim
-FROM ${FLUX_KB_DOCKER_BASE_IMAGE}
+FROM ${FLUX_KB_DOCKER_BASE_IMAGE} AS runtime-deps
 
 ARG FLUX_KB_SKIP_SYSTEM_PACKAGES=false
 ARG APT_DEBIAN_MIRROR_URL=""
@@ -71,13 +71,19 @@ Path("/tmp/requirements-docker.txt").write_text(
 )
 PY
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --upgrade pip \
-    && if [ -n "$PIP_INDEX_URL" ]; then \
-        python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --index-url "$PIP_INDEX_URL" -r /tmp/requirements-docker.txt; \
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse,sharing=locked \
+    set -eu; \
+    python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --upgrade pip; \
+    mkdir -p /opt/flux-wheelhouse; \
+    if [ -n "$PIP_INDEX_URL" ]; then \
+        python -m pip download --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --index-url "$PIP_INDEX_URL" --dest /opt/flux-wheelhouse -r /tmp/requirements-docker.txt; \
     else \
-        python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" -r /tmp/requirements-docker.txt; \
-    fi
+        python -m pip download --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --dest /opt/flux-wheelhouse -r /tmp/requirements-docker.txt; \
+    fi; \
+    python -m pip install --no-index --find-links /opt/flux-wheelhouse -r /tmp/requirements-docker.txt
+
+FROM runtime-deps AS runtime
 
 COPY src ./src
 COPY plugins ./plugins

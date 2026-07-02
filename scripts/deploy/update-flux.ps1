@@ -24,7 +24,8 @@ param(
     [int]$PipRetries = 2,
     [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL,
     [string]$AptDebianMirrorUrl = $env:FLUX_KB_APT_DEBIAN_MIRROR_URL,
-    [string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL
+    [string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL,
+    [switch]$SkipWorkerStart
 )
 
 $ErrorActionPreference = "Stop"
@@ -645,6 +646,14 @@ function Stop-FluxHostAgentLaunchers {
     }
 }
 
+function Stop-FluxWorkerContainer {
+    $workerId = docker ps --filter "name=^/flux-llm-kb-worker$" --format "{{.ID}}" 2>$null | Select-Object -First 1
+    if ($workerId) {
+        Write-Host "Stopping Flux worker container so queued jobs stay paused during model cutover."
+        docker stop -t 45 flux-llm-kb-worker | Out-Host
+    }
+}
+
 function Resolve-FluxPythonwExe {
     param([string]$AppRoot)
     $pythonw = Join-Path $AppRoot ".venv\Scripts\pythonw.exe"
@@ -1099,6 +1108,7 @@ function Invoke-FluxDockerComposeUp {
         [string]$AppEnvPath,
         [string]$ComposePath,
         [bool]$GpuEnabled,
+        [bool]$SkipWorkerStart,
         [int]$TimeoutSeconds
     )
     Invoke-FluxDockerComposeServicesUp `
@@ -1117,6 +1127,11 @@ function Invoke-FluxDockerComposeUp {
         $services = @("model-runner", "ollama", "asr", "api", "worker")
         $containers = @("flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
         $recoverableContainers = @("flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
+    }
+    if ($SkipWorkerStart) {
+        $services = @($services | Where-Object { $_ -ne "worker" })
+        $containers = @($containers | Where-Object { $_ -ne "flux-llm-kb-worker" })
+        $recoverableContainers = @($recoverableContainers | Where-Object { $_ -ne "flux-llm-kb-worker" })
     }
     Invoke-FluxDockerComposeServicesUp `
         -AppRoot $AppRoot `
@@ -1260,6 +1275,9 @@ Invoke-FluxCodexPluginInstall -VenvPython $venvPython -InstallRoot $InstallRoot
 Write-FluxHostScripts -AppRoot $appRoot -InstallRoot $InstallRoot -HostAgentPort $HostAgentPort -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled -OllamaHostPort $OllamaHostPort -AsrHostPort $AsrHostPort
 Remove-FluxLegacyConsoleLaunchers -AppRoot $appRoot
 Stop-FluxOutlookHostLaunchers -InstallRoot $InstallRoot
+if ($SkipWorkerStart) {
+    Stop-FluxWorkerContainer
+}
 if ($gpuEnabled) {
     Invoke-FluxAsrModelDownload -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -TimeoutSeconds $AsrModelDownloadTimeoutSeconds
     Invoke-FluxModelRunnerModelDownload -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -TimeoutSeconds $ModelRunnerModelDownloadTimeoutSeconds
@@ -1267,7 +1285,7 @@ if ($gpuEnabled) {
 
 Push-Location $appRoot
 try {
-    Invoke-FluxDockerComposeUp -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -GpuEnabled $gpuEnabled -TimeoutSeconds $DockerComposeTimeoutSeconds
+    Invoke-FluxDockerComposeUp -AppRoot $appRoot -AppEnvPath $appEnvPath -ComposePath $composePath -GpuEnabled $gpuEnabled -SkipWorkerStart ([bool]$SkipWorkerStart) -TimeoutSeconds $DockerComposeTimeoutSeconds
 } finally {
     Pop-Location
 }

@@ -8,6 +8,10 @@ def _script(name: str) -> str:
     return (ROOT / "scripts" / "deploy" / name).read_text(encoding="utf-8")
 
 
+def _dev_script(name: str) -> str:
+    return (ROOT / "scripts" / "dev" / name).read_text(encoding="utf-8")
+
+
 def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
@@ -470,6 +474,22 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     assert "`$(seq 1 120)" in update
     assert "19071/ApplicationStatus" in update
     assert 'Start-Process -FilePath "docker"' not in update
+
+
+def test_production_update_can_keep_worker_paused_during_model_cutover():
+    update = _script("update-flux.ps1")
+    complete_feature = _dev_script("complete-feature.ps1")
+
+    assert "[switch]$SkipWorkerStart" in update
+    assert "Stop-FluxWorkerContainer" in update
+    assert 'docker ps --filter "name=^/flux-llm-kb-worker$"' in update
+    assert 'docker stop -t 45 flux-llm-kb-worker' in update
+    assert 'Where-Object { $_ -ne "worker" }' in update
+    assert 'Where-Object { $_ -ne "flux-llm-kb-worker" }' in update
+    assert "Invoke-FluxDockerComposeUp" in update
+    assert "-SkipWorkerStart ([bool]$SkipWorkerStart)" in update
+    assert "[switch]$SkipWorkerStart" in complete_feature
+    assert "$deployCommand += ' -SkipWorkerStart'" in complete_feature
 
 
 def test_production_deploy_bounds_docker_build_and_pip_installs():
