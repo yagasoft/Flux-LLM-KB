@@ -528,6 +528,19 @@ def test_production_deploy_can_reuse_local_docker_base_for_fast_updates():
         assert '"--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages"' in script
 
 
+def test_production_docker_base_probe_handles_missing_local_image_without_stderr_failure():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        assert "function Test-FluxDockerImageExists" in script
+        assert "[System.Diagnostics.ProcessStartInfo]::new()" in script
+        assert '$processInfo.RedirectStandardError = $true' in script
+        assert "$process.StandardError.ReadToEnd() | Out-Null" in script
+        assert "return $process.ExitCode -eq 0" in script
+        assert "docker image inspect $Image *> $null" not in script
+
+
 def test_production_deploy_supports_custom_pip_index_for_gpu_wheels():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     install = _script("install-flux.ps1")

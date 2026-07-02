@@ -1016,8 +1016,20 @@ function Invoke-FluxVespaApplicationDeploy {
 function Test-FluxDockerImageExists {
     param([string]$Image)
     if (-not $Image) { return $false }
-    docker image inspect $Image *> $null
-    return $LASTEXITCODE -eq 0
+    $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = "docker"
+    $processInfo.Arguments = "image inspect " + (ConvertTo-FluxCommandArgument $Image)
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    [void]$process.Start()
+    $process.StandardOutput.ReadToEnd() | Out-Null
+    $process.StandardError.ReadToEnd() | Out-Null
+    $process.WaitForExit()
+    return $process.ExitCode -eq 0
 }
 
 function Resolve-FluxDockerBuildBase {
