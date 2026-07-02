@@ -1527,6 +1527,28 @@ kbd {
   white-space: nowrap;
 }
 
+.job-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: max-content;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+
+.job-sort-button.active {
+  color: var(--accent);
+}
+
+.job-sort-button svg {
+  flex: 0 0 auto;
+}
+
 .job-table .job-target,
 .job-table .job-error {
   max-width: 280px;

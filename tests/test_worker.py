@@ -2094,6 +2094,23 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
     assert calls[2][1]["details"]["target_id"] == "office"
 
 
+def test_service_remediate_diagnostic_preserves_obsolete_retry_conflict(monkeypatch):
+    def fake_requeue(**_kwargs):
+        raise LookupError("retryable corpus job not found: job-obsolete")
+
+    monkeypatch.setattr(database, "requeue_corpus_job", fake_requeue)
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: pytest.fail("retry conflict should not be audited as success"))
+
+    with pytest.raises(LookupError, match="retryable corpus job not found: job-obsolete"):
+        KnowledgeService().remediate_diagnostic(
+            action="retry_corpus_job",
+            target_type="job",
+            target_id="job-obsolete",
+            reason="operator retry",
+            actor="dashboard",
+        )
+
+
 def test_service_remediate_diagnostic_requires_scoped_backfill_and_cleanup():
     with pytest.raises(ValueError, match="root_name and exact worker family"):
         KnowledgeService().remediate_diagnostic(

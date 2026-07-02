@@ -178,6 +178,13 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "algorithm = 'flux-hash-v1:cosine'" in purge_migration.sql
     assert "action = 'sync_search_index'" in purge_migration.sql
     assert "CREATE OR REPLACE PROCEDURE run_legacy_retrieval_purge()" in purge_migration.sql
+    obsolete_migration = next(item for item in migrations if item.name == "0034_capture_job_obsolete_status")
+    assert "status = 'obsolete'" in obsolete_migration.sql
+    assert "delete_requested_at IS NOT NULL" in obsolete_migration.sql
+    assert "obsolete_previous_status" in obsolete_migration.sql
+    assert "obsolete_previous_result_status" in obsolete_migration.sql
+    assert "DROP INDEX IF EXISTS idx_capture_jobs_marked_retention" in obsolete_migration.sql
+    assert "idx_capture_jobs_marked_retention" in obsolete_migration.sql
     assert "DROP TABLE IF EXISTS embeddings" in purge_migration.sql
     assert "DROP INDEX IF EXISTS idx_asset_chunks_body_trgm" in purge_migration.sql
     assert "DROP EXTENSION IF EXISTS vector" in purge_migration.sql

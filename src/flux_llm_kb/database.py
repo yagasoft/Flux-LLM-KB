@@ -3678,6 +3678,24 @@ def _capture_job_delete_markable(status: str) -> bool:
     return status in {"completed", "failed"} or status.startswith("blocked_") or status.startswith("cancelled_")
 
 
+_CAPTURE_JOB_SORT_SQL = {
+    "status": "status",
+    "job_type": "job_type",
+    "target": "COALESCE(payload->>'path', payload->>'canonical_path', payload->>'file_path', payload->>'profile_name', '')",
+    "root": "COALESCE(payload->>'root_name', '')",
+    "attempts": "attempts",
+    "updated": "updated_at",
+    "progress": "COALESCE(telemetry->>'progress_label', telemetry->>'stage', telemetry->>'progress_percent', '')",
+    "last_error": "COALESCE(last_error, '')",
+}
+
+
+def _capture_job_order_sql(sort_by: str | None, sort_dir: str | None) -> str:
+    expression = _CAPTURE_JOB_SORT_SQL.get(str(sort_by or "").strip(), _CAPTURE_JOB_SORT_SQL["updated"])
+    direction = "ASC" if str(sort_dir or "").strip().lower() == "asc" else "DESC"
+    return f"ORDER BY {expression} {direction}, id {direction}"
+
+
 def list_capture_jobs(
     *,
     limit: int = 50,
@@ -3687,6 +3705,8 @@ def list_capture_jobs(
     job_type: str | list[str] | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
+    sort_by: str | None = "updated",
+    sort_dir: str | None = "desc",
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     where_sql, params = _capture_job_filter_sql(
@@ -3696,6 +3716,7 @@ def list_capture_jobs(
         updated_from=updated_from,
         updated_to=updated_to,
     )
+    order_sql = _capture_job_order_sql(sort_by, sort_dir)
     params.extend([_capture_job_limit(limit), _capture_job_offset(offset)])
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -3709,7 +3730,7 @@ def list_capture_jobs(
                        delete_requested_at, delete_requested_by, delete_reason
                 FROM capture_jobs
                 WHERE {where_sql}
-                ORDER BY updated_at DESC, id DESC
+                {order_sql}
                 LIMIT %s
                 OFFSET %s
                 """,
@@ -4012,14 +4033,7 @@ def mark_capture_job_for_deletion(
                     "error": f"corpus job not found: {job_id}",
                 }
             status = str(row[1] or "unknown")
-            if not _capture_job_delete_markable(status):
-                return {
-                    "job_id": row[0],
-                    "status": status,
-                    "delete_requested": False,
-                    "error": f"Corpus job status {status} cannot be marked for deletion.",
-                }
-            if row[2] is not None:
+            if status == "obsolete" and row[2] is not None:
                 requested_at = row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2])
                 return {
                     "job_id": row[0],
@@ -4029,12 +4043,30 @@ def mark_capture_job_for_deletion(
                     "delete_requested_by": row[3],
                     "delete_reason": row[4],
                 }
+            if not _capture_job_delete_markable(status):
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "delete_requested": False,
+                    "error": f"Corpus job status {status} cannot be marked for deletion.",
+                }
             cur.execute(
                 """
                 UPDATE capture_jobs
-                SET delete_requested_at = COALESCE(delete_requested_at, now()),
+                SET status = 'obsolete',
+                    delete_requested_at = COALESCE(delete_requested_at, now()),
                     delete_requested_by = COALESCE(delete_requested_by, %s),
-                    delete_reason = COALESCE(delete_reason, %s)
+                    delete_reason = COALESCE(delete_reason, %s),
+                    telemetry = jsonb_strip_nulls(
+                        COALESCE(telemetry, '{}'::jsonb) || jsonb_build_object(
+                            'obsolete_previous_status', status,
+                            'obsolete_previous_result_status', telemetry->>'result_status',
+                            'result_status', 'obsolete'
+                        )
+                    ),
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
                   AND (
@@ -4067,6 +4099,7 @@ def mark_capture_job_for_deletion(
                             "actor": clean_actor,
                             "reason": clean_reason,
                             "previous_status": status,
+                            "status": "obsolete",
                         }
                     ),
                 ),
@@ -4077,6 +4110,122 @@ def mark_capture_job_for_deletion(
                 "status": updated[1],
                 "delete_requested": True,
                 "delete_requested_at": requested_at,
+                "delete_requested_by": updated[3],
+                "delete_reason": updated[4],
+            }
+
+
+def restore_capture_job_deletion_request(
+    *,
+    job_id: str,
+    actor: str = "operator",
+    url: str | None = None,
+) -> dict[str, Any]:
+    clean_actor = str(actor or "operator").strip() or "operator"
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, status, delete_requested_at, delete_requested_by, delete_reason, telemetry
+                FROM capture_jobs
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {
+                    "job_id": job_id,
+                    "status": "not_found",
+                    "delete_requested": False,
+                    "error": f"corpus job not found: {job_id}",
+                }
+            status = str(row[1] or "unknown")
+            if status != "obsolete" or row[2] is None:
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "delete_requested": row[2] is not None,
+                    "error": f"Corpus job status {status} cannot be restored from deletion.",
+                }
+            telemetry = row[5] if isinstance(row[5], dict) else {}
+            restored_status = str(telemetry.get("obsolete_previous_status") or "").strip()
+            restored_result_status = telemetry.get("obsolete_previous_result_status")
+            if not restored_status or restored_status == "obsolete":
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "delete_requested": True,
+                    "delete_requested_at": row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2]),
+                    "delete_requested_by": row[3],
+                    "delete_reason": row[4],
+                    "error": "Corpus job cannot be restored because its previous status was not recorded.",
+                }
+            if restored_result_status is not None:
+                restored_result_status = str(restored_result_status)
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = %s,
+                    delete_requested_at = NULL,
+                    delete_requested_by = NULL,
+                    delete_reason = NULL,
+                    telemetry = CASE
+                        WHEN %s IS NULL THEN
+                            COALESCE(telemetry, '{}'::jsonb)
+                            - 'obsolete_previous_status'
+                            - 'obsolete_previous_result_status'
+                            - 'result_status'
+                        ELSE
+                            (
+                                COALESCE(telemetry, '{}'::jsonb)
+                                - 'obsolete_previous_status'
+                                - 'obsolete_previous_result_status'
+                                - 'result_status'
+                            ) || jsonb_build_object('result_status', %s::text)
+                        END,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id = %s
+                  AND job_type LIKE 'corpus_%%'
+                  AND status = 'obsolete'
+                  AND delete_requested_at IS NOT NULL
+                RETURNING id::text, status, delete_requested_at, delete_requested_by, delete_reason
+                """,
+                (restored_status, restored_result_status, restored_result_status, row[0]),
+            )
+            updated = cur.fetchone()
+            if updated is None:
+                return {
+                    "job_id": row[0],
+                    "status": status,
+                    "delete_requested": True,
+                    "error": "Corpus job could not be restored because its status changed.",
+                }
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, target_table, target_id, details)
+                VALUES ('capture_job.deletion_restored', 'capture_jobs', %s, %s::jsonb)
+                """,
+                (
+                    row[0],
+                    _json(
+                        {
+                            "actor": clean_actor,
+                            "previous_status": status,
+                            "restored_status": updated[1],
+                        }
+                    ),
+                ),
+            )
+            return {
+                "job_id": updated[0],
+                "status": updated[1],
+                "delete_requested": False,
+                "delete_requested_at": updated[2].isoformat() if hasattr(updated[2], "isoformat") else updated[2],
                 "delete_requested_by": updated[3],
                 "delete_reason": updated[4],
             }
@@ -4101,11 +4250,7 @@ def purge_expired_capture_jobs(
                           job.status = 'completed'
                           OR (
                               job.delete_requested_at IS NOT NULL
-                              AND (
-                                  job.status = 'failed'
-                                  OR job.status LIKE 'blocked_%%'
-                                  OR job.status LIKE 'cancelled_%%'
-                              )
+                              AND job.status = 'obsolete'
                           )
                       )
                     RETURNING 1
@@ -4601,6 +4746,7 @@ def claim_corpus_jobs(
                               FROM capture_jobs first_sync
                               WHERE first_sync.job_type = 'corpus_sync_root'
                                 AND first_sync.status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                                AND first_sync.delete_requested_at IS NULL
                                 AND first_sync.next_attempt_at <= now()
                                 AND first_sync.payload->>'root_name' = capture_jobs.payload->>'root_name'
                               ORDER BY first_sync.priority DESC, first_sync.created_at
@@ -4614,6 +4760,7 @@ def claim_corpus_jobs(
                               FROM capture_jobs other
                               WHERE other.job_type = 'corpus_sync_root'
                                 AND other.status = 'running'
+                                AND other.delete_requested_at IS NULL
                                 AND other.payload->>'root_name' = capture_jobs.payload->>'root_name'
                           )
                       )
@@ -4624,6 +4771,7 @@ def claim_corpus_jobs(
                     FROM capture_jobs
                     WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                       AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                      AND delete_requested_at IS NULL
                       AND next_attempt_at <= now()
                       {family_filter}
                       {root_filter}
@@ -4657,6 +4805,7 @@ def claim_corpus_jobs(
                          CROSS JOIN family_caps
                          WHERE (capture_jobs.job_type LIKE 'corpus_%%' OR capture_jobs.job_type = 'search_index_sync')
                            AND capture_jobs.status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                           AND capture_jobs.delete_requested_at IS NULL
                            AND capture_jobs.next_attempt_at <= now()
                            {family_filter}
                            {root_filter}
@@ -5034,6 +5183,7 @@ def retry_corpus_job(
                 WHERE id = %s
                   AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                   AND status = 'running'
+                  AND delete_requested_at IS NULL
                 """,
                 (status, error, max(1, cooldown_seconds), duration_ms, _json(telemetry or {}), job_id),
             )
@@ -5059,13 +5209,11 @@ def requeue_corpus_job(
                     next_attempt_at = now(),
                     locked_at = NULL,
                     locked_by = NULL,
-                    delete_requested_at = NULL,
-                    delete_requested_by = NULL,
-                    delete_reason = NULL,
                     telemetry = telemetry || jsonb_build_object('remediation_reason', %s::text),
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
+                  AND delete_requested_at IS NULL
                   AND (
                       status = 'failed'
                       OR status LIKE 'blocked_%%'

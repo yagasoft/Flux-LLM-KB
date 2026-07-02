@@ -199,6 +199,8 @@ def collect_jobs_payload(
     job_type: str | list[str] | None = None,
     updated_from: str | None = None,
     updated_to: str | None = None,
+    sort_by: str | None = "updated",
+    sort_dir: str | None = "desc",
 ) -> dict[str, Any]:
     safe_limit = _bounded_jobs_limit(limit)
     safe_offset = _bounded_jobs_offset(offset)
@@ -209,7 +211,7 @@ def collect_jobs_payload(
         "updated_from": updated_from,
         "updated_to": updated_to,
     }
-    jobs = _safe(lambda: database.list_capture_jobs(limit=safe_limit, offset=safe_offset, **filters), [])
+    jobs = _safe(lambda: database.list_capture_jobs(limit=safe_limit, offset=safe_offset, sort_by=sort_by, sort_dir=sort_dir, **filters), [])
     count = _safe(lambda: database.count_capture_jobs(**filters), len(jobs))
     filter_options = _safe(database.capture_job_filter_options, {"statuses": [], "roots": [], "job_types": []})
     return {

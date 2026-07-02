@@ -2,6 +2,9 @@ import {
   AlertCircle,
   AlertTriangle,
   Archive,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   BriefcaseBusiness,
   CheckCircle2,
   ChevronDown,
@@ -37,7 +40,7 @@ import {
   X
 } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type HealthCheck = { ok?: boolean; message?: string; required?: boolean; label?: string; target?: string | null; probe_target?: string | null };
 
@@ -1092,6 +1095,12 @@ type JobHistoryFilters = {
   updated_from: string;
   updated_to: string;
 };
+type JobSortKey = "status" | "job_type" | "target" | "root" | "attempts" | "updated" | "progress" | "last_error";
+type JobSortDir = "asc" | "desc";
+type JobSortState = {
+  sort_by: JobSortKey;
+  sort_dir: JobSortDir;
+};
 const emptyJobHistoryFilters: JobHistoryFilters = {
   status: [],
   root_name: [],
@@ -1099,11 +1108,17 @@ const emptyJobHistoryFilters: JobHistoryFilters = {
   updated_from: "",
   updated_to: ""
 };
+const defaultJobSort: JobSortState = {
+  sort_by: "updated",
+  sort_dir: "desc"
+};
+const jobSortKeys = new Set<JobSortKey>(["status", "job_type", "target", "root", "attempts", "updated", "progress", "last_error"]);
 type SavedDashboardState = {
   activeTab?: TabId;
   selectedName?: string;
   selectedRootName?: string;
   jobFilters?: JobHistoryFilters;
+  jobSort?: JobSortState;
 };
 
 export default function App() {
@@ -1113,6 +1128,7 @@ export default function App() {
   const [selectedName, setSelectedName] = useState<string>(initialDashboardState.selectedName ?? "");
   const [selectedRootName, setSelectedRootName] = useState<string>(initialDashboardState.selectedRootName ?? "");
   const [jobFilters, setJobFilters] = useState<JobHistoryFilters>(initialDashboardState.jobFilters ?? emptyJobHistoryFilters);
+  const [jobSort, setJobSort] = useState<JobSortState>(initialDashboardState.jobSort ?? defaultJobSort);
   const [jobOffset, setJobOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -1165,16 +1181,17 @@ export default function App() {
   const [reviewLoading, setReviewLoading] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
 
-  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number } = {}) {
+  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number; jobSort?: JobSortState } = {}) {
     if (options.showLoading ?? false) {
       setLoading(true);
     }
     const effectiveJobFilters = options.jobFilters ?? jobFilters;
     const effectiveJobOffset = options.jobOffset ?? jobOffset;
+    const effectiveJobSort = options.jobSort ?? jobSort;
     const [health, crawl, jobs, retrieval, mail, outlook, settings] = await Promise.all([
       getJson<HealthPayload>("/api/dashboard/health", {}),
       getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }),
-      getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }),
+      getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset, effectiveJobSort), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }),
       getJson<RetrievalPayload>("/api/dashboard/retrieval-stats", {}),
       getJson<MailStatus>("/api/mail/status", { profiles: [] }),
       getJson<OutlookStatus>("/api/outlook-host/status", { profiles: [], pending_requests: [] }),
@@ -1242,15 +1259,15 @@ export default function App() {
   const pollSeconds = dashboardPollSeconds(state.settings);
 
   useEffect(() => {
-    writeDashboardState({ activeTab, selectedName, selectedRootName, jobFilters });
-  }, [activeTab, selectedName, selectedRootName, jobFilters]);
+    writeDashboardState({ activeTab, selectedName, selectedRootName, jobFilters, jobSort });
+  }, [activeTab, selectedName, selectedRootName, jobFilters, jobSort]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
       void load({ showLoading: false });
     }, pollSeconds * 1000);
     return () => window.clearInterval(timer);
-  }, [pollSeconds, jobFilters, jobOffset]);
+  }, [pollSeconds, jobFilters, jobOffset, jobSort]);
 
   async function requestProfileSync(profile = selectedProfile) {
     if (!profile) {
@@ -1315,29 +1332,45 @@ export default function App() {
   async function markCorpusJobForDeletion(jobId: string) {
     try {
       await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/delete-request`, "POST", { reason: "operator_cleanup" });
-      setToast("Corpus job marked for deletion after retention.");
+      setToast("Corpus job marked obsolete for deletion.");
       await load();
     } catch (error) {
       setToast(`Corpus job deletion mark failed: ${errorMessage(error)}`);
     }
   }
 
+  async function restoreCorpusJobDeletionRequest(jobId: string) {
+    try {
+      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/delete-request`, "DELETE", {});
+      setToast("Corpus job deletion mark restored.");
+      await load();
+    } catch (error) {
+      setToast(`Corpus job deletion restore failed: ${errorMessage(error)}`);
+    }
+  }
+
   async function applyJobFilters(filters: JobHistoryFilters) {
     setJobFilters(filters);
     setJobOffset(0);
-    await load({ jobFilters: filters, jobOffset: 0 });
+    await load({ jobFilters: filters, jobOffset: 0, jobSort });
   }
 
   async function clearJobFilters() {
     setJobFilters(emptyJobHistoryFilters);
     setJobOffset(0);
-    await load({ jobFilters: emptyJobHistoryFilters, jobOffset: 0 });
+    await load({ jobFilters: emptyJobHistoryFilters, jobOffset: 0, jobSort });
+  }
+
+  async function applyJobSort(sort: JobSortState) {
+    setJobSort(sort);
+    setJobOffset(0);
+    await load({ jobSort: sort, jobOffset: 0 });
   }
 
   async function pageJobHistory(offset: number) {
     const nextOffset = Math.max(0, offset);
     setJobOffset(nextOffset);
-    await load({ jobOffset: nextOffset });
+    await load({ jobOffset: nextOffset, jobSort });
   }
 
   async function saveProfile(form: ProfileForm) {
@@ -2058,14 +2091,17 @@ export default function App() {
           <JobsTab
             state={state}
             jobFilters={jobFilters}
+            jobSort={jobSort}
             onRefresh={() => void load()}
             onApplyJobFilters={(filters) => void applyJobFilters(filters)}
             onClearJobFilters={() => void clearJobFilters()}
+            onApplyJobSort={(sort) => void applyJobSort(sort)}
             onPageJobHistory={(offset) => void pageJobHistory(offset)}
             onCancelOutlookRequest={(requestId) => void cancelOutlookRequest(requestId)}
             onCancelCorpusJob={(jobId) => void cancelCorpusJob(jobId)}
             onRetryCorpusJob={(jobId) => void retryCorpusJob(jobId)}
             onMarkCorpusJobForDeletion={(jobId) => void markCorpusJobForDeletion(jobId)}
+            onRestoreCorpusJobDeletionRequest={(jobId) => void restoreCorpusJobDeletionRequest(jobId)}
             onJobFileAction={(jobId, action) => void runJobFileAction(jobId, action)}
           />
         )}
@@ -5138,26 +5174,32 @@ function prettyStreamName(value: string): string {
 function JobsTab({
   state,
   jobFilters,
+  jobSort,
   onRefresh,
   onApplyJobFilters,
   onClearJobFilters,
+  onApplyJobSort,
   onPageJobHistory,
   onCancelOutlookRequest,
   onCancelCorpusJob,
   onRetryCorpusJob,
   onMarkCorpusJobForDeletion,
+  onRestoreCorpusJobDeletionRequest,
   onJobFileAction
 }: {
   state: LoadState;
   jobFilters: JobHistoryFilters;
+  jobSort: JobSortState;
   onRefresh: () => void;
   onApplyJobFilters: (filters: JobHistoryFilters) => void;
   onClearJobFilters: () => void;
+  onApplyJobSort: (sort: JobSortState) => void;
   onPageJobHistory: (offset: number) => void;
   onCancelOutlookRequest: (requestId: string) => void;
   onCancelCorpusJob: (jobId: string) => void;
   onRetryCorpusJob: (jobId: string) => void;
   onMarkCorpusJobForDeletion: (jobId: string) => void;
+  onRestoreCorpusJobDeletionRequest: (jobId: string) => void;
   onJobFileAction: (jobId: string, action: "open" | "reveal") => void;
 }) {
   const outlookJobs = activeOutlookRequests(state.outlook.pending_requests).map(outlookRequestJob);
@@ -5192,10 +5234,13 @@ function JobsTab({
           jobs={jobs}
           label={hasOutlookRequests ? "Operational jobs" : "Extraction jobs"}
           empty={hasOutlookRequests ? "No operational jobs queued." : "No queued extraction jobs."}
+          sort={jobSort}
+          onSortChange={onApplyJobSort}
           onCancelOutlookRequest={onCancelOutlookRequest}
           onCancelCorpusJob={onCancelCorpusJob}
           onRetryCorpusJob={onRetryCorpusJob}
           onMarkCorpusJobForDeletion={onMarkCorpusJobForDeletion}
+          onRestoreCorpusJobDeletionRequest={onRestoreCorpusJobDeletionRequest}
           onJobFileAction={onJobFileAction}
         />
       </Panel>
@@ -5231,6 +5276,7 @@ function JobHistoryControls({
   onPage: (offset: number) => void;
 }) {
   const [draft, setDraft] = useState<JobHistoryFilters>(filters);
+  const [openFilterMenu, setOpenFilterMenu] = useState<"status" | "root_name" | "job_type" | null>(null);
   useEffect(() => {
     setDraft(filters);
   }, [filters.status, filters.root_name, filters.job_type, filters.updated_from, filters.updated_to]);
@@ -5256,6 +5302,8 @@ function JobHistoryControls({
           allLabel="All statuses"
           pluralLabel="statuses"
           optionLabel={statusLabel}
+          open={openFilterMenu === "status"}
+          onOpenChange={(open) => setOpenFilterMenu(open ? "status" : null)}
           onToggle={(value) => toggleDraftValue("status", value)}
         />
         <JobFilterMultiSelect
@@ -5267,6 +5315,8 @@ function JobHistoryControls({
           allLabel="All roots"
           pluralLabel="roots"
           optionLabel={(root) => root}
+          open={openFilterMenu === "root_name"}
+          onOpenChange={(open) => setOpenFilterMenu(open ? "root_name" : null)}
           onToggle={(value) => toggleDraftValue("root_name", value)}
         />
         <JobFilterMultiSelect
@@ -5278,6 +5328,8 @@ function JobHistoryControls({
           allLabel="All types"
           pluralLabel="types"
           optionLabel={jobTypeLabel}
+          open={openFilterMenu === "job_type"}
+          onOpenChange={(open) => setOpenFilterMenu(open ? "job_type" : null)}
           onToggle={(value) => toggleDraftValue("job_type", value)}
         />
         <label>Updated from
@@ -5313,6 +5365,8 @@ function JobFilterMultiSelect({
   allLabel,
   pluralLabel,
   optionLabel,
+  open,
+  onOpenChange,
   onToggle
 }: {
   label: string;
@@ -5323,20 +5377,41 @@ function JobFilterMultiSelect({
   allLabel: string;
   pluralLabel: string;
   optionLabel: (value: string) => string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onToggle: (value: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        onOpenChange(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onOpenChange(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open, onOpenChange]);
   const selected = new Set(values);
   const summary = multiFilterSummary(values, allLabel, pluralLabel, optionLabel);
   return (
-    <div className="job-filter-menu">
+    <div className="job-filter-menu" ref={menuRef}>
       <span>{label}</span>
       <button
         className="job-filter-menu-button"
         type="button"
         aria-label={buttonLabel}
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => onOpenChange(!open)}
       >
         <strong>{summary}</strong>
         <ChevronDown size={15} />
@@ -5360,19 +5435,25 @@ function JobQueueTable({
   jobs,
   label,
   empty,
+  sort,
+  onSortChange,
   onCancelOutlookRequest,
   onCancelCorpusJob,
   onRetryCorpusJob,
   onMarkCorpusJobForDeletion,
+  onRestoreCorpusJobDeletionRequest,
   onJobFileAction
 }: {
   jobs: Array<Record<string, unknown>>;
   label: string;
   empty: string;
+  sort: JobSortState;
+  onSortChange: (sort: JobSortState) => void;
   onCancelOutlookRequest?: (requestId: string) => void;
   onCancelCorpusJob?: (jobId: string) => void;
   onRetryCorpusJob?: (jobId: string) => void;
   onMarkCorpusJobForDeletion?: (jobId: string) => void;
+  onRestoreCorpusJobDeletionRequest?: (jobId: string) => void;
   onJobFileAction?: (jobId: string, action: "open" | "reveal") => void;
 }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
@@ -5401,19 +5482,36 @@ function JobQueueTable({
     }
   }, [expandedJobId, jobs, loadToolInvocations]);
   if (jobs.length === 0) return <p className="muted">{empty}</p>;
+  const sortHeader = (key: JobSortKey, headerLabel: string) => {
+    const active = sort.sort_by === key;
+    const Icon = active ? (sort.sort_dir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+    return (
+      <th aria-sort={active ? (sort.sort_dir === "asc" ? "ascending" : "descending") : "none"}>
+        <button
+          className={`job-sort-button ${active ? "active" : ""}`}
+          type="button"
+          aria-label={`Sort jobs by ${headerLabel}`}
+          onClick={() => onSortChange(nextJobSort(sort, key))}
+        >
+          <span>{headerLabel}</span>
+          <Icon size={14} />
+        </button>
+      </th>
+    );
+  };
   return (
     <div className="job-table-wrap">
       <table className="profile-table job-table" aria-label={label}>
         <thead>
           <tr>
-            <th>Status</th>
-            <th>Job type</th>
-            <th>Target</th>
-            <th>Root</th>
-            <th>Attempts</th>
-            <th>Updated</th>
-            <th>Progress</th>
-            <th>Last error</th>
+            {sortHeader("status", "Status")}
+            {sortHeader("job_type", "Job type")}
+            {sortHeader("target", "Target")}
+            {sortHeader("root", "Root")}
+            {sortHeader("attempts", "Attempts")}
+            {sortHeader("updated", "Updated")}
+            {sortHeader("progress", "Progress")}
+            {sortHeader("last_error", "Last error")}
             <th>Details</th>
           </tr>
         </thead>
@@ -5429,7 +5527,10 @@ function JobQueueTable({
             const cancellableCorpusJob = isCancelableCorpusJob(job, status);
             const retryableCorpusJob = isRetryableCorpusJob(job, status);
             const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
-            const deletionMarkableCorpusJob = isDeletionMarkableCorpusJob(job, status) && !deletionRequested;
+            const obsoleteCorpusJob = status === "obsolete";
+            const deletionMarkableCorpusJob = isDeletionMarkableCorpusJob(job, status);
+            const deletionRestorableCorpusJob = isDeletionRestorableCorpusJob(job, status);
+            const showDeletionMarker = deletionRequested && !obsoleteCorpusJob;
             const targetActionable = isActionableJobTarget(job, payload, target);
             const progress = jobProgressSummary(job);
             return (
@@ -5510,7 +5611,17 @@ function JobQueueTable({
                         <Trash2 size={15} /> Mark for deletion
                       </button>
                     ) : null}
-                    {deletionRequested ? <span className="state-pill warning">Marked for deletion</span> : null}
+                    {deletionRestorableCorpusJob ? (
+                      <button
+                        className="row-button"
+                        type="button"
+                        aria-label={`Restore deletion mark for corpus job ${id}`}
+                        onClick={() => onRestoreCorpusJobDeletionRequest?.(id)}
+                      >
+                        <RotateCcw size={15} /> Restore
+                      </button>
+                    ) : null}
+                    {showDeletionMarker ? <span className="state-pill warning">Marked for deletion</span> : null}
                     <button
                       className="row-button"
                       type="button"
@@ -5751,6 +5862,8 @@ function isCancelableCorpusJob(job: Record<string, unknown>, status: string) {
 
 function isRetryableCorpusJob(job: Record<string, unknown>, status: string) {
   const type = stringFromUnknown(job.job_type) ?? "";
+  const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
+  if (deletionRequested || status === "obsolete") return false;
   return type.startsWith("corpus_") && (
     status === "failed"
     || status === "retrying_locked"
@@ -5761,11 +5874,26 @@ function isRetryableCorpusJob(job: Record<string, unknown>, status: string) {
 
 function isDeletionMarkableCorpusJob(job: Record<string, unknown>, status: string) {
   const type = stringFromUnknown(job.job_type) ?? "";
+  const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
+  if (deletionRequested || status === "obsolete") return false;
   return type.startsWith("corpus_") && (
     status === "failed"
     || status.startsWith("blocked_")
     || status.startsWith("cancelled_")
   );
+}
+
+function isDeletionRestorableCorpusJob(job: Record<string, unknown>, status: string) {
+  const type = stringFromUnknown(job.job_type) ?? "";
+  const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
+  return type.startsWith("corpus_") && status === "obsolete" && deletionRequested;
+}
+
+function nextJobSort(current: JobSortState, key: JobSortKey): JobSortState {
+  if (current.sort_by === key) {
+    return { sort_by: key, sort_dir: current.sort_dir === "asc" ? "desc" : "asc" };
+  }
+  return { sort_by: key, sort_dir: "asc" };
 }
 
 function activeOutlookRequests(requests?: OutlookSyncRequest[]) {
@@ -5796,7 +5924,8 @@ function outlookRequestJob(request: OutlookSyncRequest): Record<string, unknown>
 const STATUS_LABELS: Record<string, string> = {
   blocked_by_policy: "Blocked by policy",
   blocked_invalid_source: "Invalid source",
-  blocked_missing_dependency: "Missing dependency"
+  blocked_missing_dependency: "Missing dependency",
+  obsolete: "Obsolete"
 };
 
 function statusLabel(value: string) {
@@ -6409,7 +6538,8 @@ function normalizeDashboardState(value: unknown): SavedDashboardState {
     activeTab: normalizeTabId(value.activeTab) ?? "overview",
     selectedName: stringFromUnknown(value.selectedName) ?? "",
     selectedRootName: stringFromUnknown(value.selectedRootName) ?? "",
-    jobFilters: normalizeJobHistoryFilters(value.jobFilters)
+    jobFilters: normalizeJobHistoryFilters(value.jobFilters),
+    jobSort: normalizeJobSort(value.jobSort)
   };
 }
 
@@ -6426,12 +6556,17 @@ function writeDashboardState(value: SavedDashboardState) {
   }
 }
 
-function jobHistoryUrl(filters: JobHistoryFilters, offset: number) {
+function jobHistoryUrl(filters: JobHistoryFilters, offset: number, sort: JobSortState = defaultJobSort) {
   const safeOffset = Math.max(0, offset);
-  if (!hasJobHistoryFilters(filters) && safeOffset === 0) return "/api/dashboard/jobs";
+  const hasSort = hasJobSort(sort);
+  if (!hasJobHistoryFilters(filters) && safeOffset === 0 && !hasSort) return "/api/dashboard/jobs";
   const params = new URLSearchParams();
   params.set("limit", String(JOB_PAGE_LIMIT));
   params.set("offset", String(safeOffset));
+  if (hasSort) {
+    params.set("sort_by", sort.sort_by);
+    params.set("sort_dir", sort.sort_dir);
+  }
   filters.status.forEach((status) => params.append("status", status));
   filters.root_name.forEach((root) => params.append("root_name", root));
   filters.job_type.forEach((type) => params.append("job_type", type));
@@ -6446,6 +6581,10 @@ function hasJobHistoryFilters(filters: JobHistoryFilters) {
   return Boolean(filters.status.length || filters.root_name.length || filters.job_type.length || filters.updated_from || filters.updated_to);
 }
 
+function hasJobSort(sort: JobSortState) {
+  return sort.sort_by !== defaultJobSort.sort_by || sort.sort_dir !== defaultJobSort.sort_dir;
+}
+
 function normalizeJobHistoryFilters(value: unknown): JobHistoryFilters {
   if (!isRecord(value)) return emptyJobHistoryFilters;
   return {
@@ -6454,6 +6593,16 @@ function normalizeJobHistoryFilters(value: unknown): JobHistoryFilters {
     job_type: stringListFromUnknown(value.job_type),
     updated_from: stringFromUnknown(value.updated_from) ?? "",
     updated_to: stringFromUnknown(value.updated_to) ?? ""
+  };
+}
+
+function normalizeJobSort(value: unknown): JobSortState {
+  if (!isRecord(value)) return defaultJobSort;
+  const sortBy = stringFromUnknown(value.sort_by);
+  const sortDir = stringFromUnknown(value.sort_dir);
+  return {
+    sort_by: sortBy && jobSortKeys.has(sortBy as JobSortKey) ? sortBy as JobSortKey : defaultJobSort.sort_by,
+    sort_dir: sortDir === "asc" || sortDir === "desc" ? sortDir : defaultJobSort.sort_dir
   };
 }
 

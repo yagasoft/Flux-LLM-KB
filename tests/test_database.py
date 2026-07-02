@@ -219,6 +219,7 @@ def test_claim_corpus_jobs_uses_skip_locked(monkeypatch):
 
     assert jobs[0]["id"] == "job-1"
     assert any("FOR UPDATE SKIP LOCKED" in sql for sql in executed_sql)
+    assert any("delete_requested_at IS NULL" in sql for sql in executed_sql)
 
 
 def test_claim_corpus_jobs_skips_sync_root_when_same_root_is_running(monkeypatch):
@@ -785,6 +786,7 @@ def test_claim_corpus_jobs_applies_family_caps(monkeypatch):
     sql, params = executed[0]
     assert "running_family_counts" in sql
     assert "family_caps" in sql
+    assert "delete_requested_at IS NULL" in sql
     assert params[0] == json.dumps({"archive": 2, "media": 1}, sort_keys=True)
 
 
@@ -2989,7 +2991,48 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert "status = 'retrying_locked'" in sql
     assert "status = 'retrying_vss_failed'" in sql
     assert "status LIKE 'cancelled_%%'" in sql
+    assert "delete_requested_at IS NULL" in sql
+    assert "delete_requested_at = NULL" not in sql
+    assert "delete_requested_by = NULL" not in sql
+    assert "delete_reason = NULL" not in sql
     assert executed[0][1] == ("operator retry", "job-1")
+
+
+def test_retry_corpus_job_ignores_marked_jobs(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.retry_corpus_job(job_id="job-1", error="temporary failure", telemetry={"stage": "extract"})
+
+    sql, params = executed[0]
+    assert "AND status = 'running'" in sql
+    assert "AND delete_requested_at IS NULL" in sql
+    assert params[5] == "job-1"
 
 
 def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch):
@@ -3058,6 +3101,8 @@ def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch)
         job_type=["corpus_extract_pdf", "corpus_sync_root"],
         updated_from="2026-06-25T00:00:00+00:00",
         updated_to="2026-06-26T00:00:00+00:00",
+        sort_by="target",
+        sort_dir="asc",
     )
 
     sql, params = executed[0]
@@ -3070,7 +3115,7 @@ def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch)
     assert "job_type = ANY(%s::text[])" in sql
     assert "updated_at >= %s" in sql
     assert "updated_at <= %s" in sql
-    assert "ORDER BY updated_at DESC, id DESC" in sql
+    assert "ORDER BY COALESCE(payload->>'path', payload->>'canonical_path', payload->>'file_path', payload->>'profile_name', '') ASC, id ASC" in sql
     assert "LIMIT %s" in sql
     assert "OFFSET %s" in sql
     assert params == (
@@ -3082,6 +3127,46 @@ def test_list_capture_jobs_applies_filters_paging_and_updated_range(monkeypatch)
         25,
         50,
     )
+
+
+def test_list_capture_jobs_falls_back_to_default_sort_for_invalid_values(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.list_capture_jobs(sort_by="updated_at; DROP TABLE capture_jobs", sort_dir="sideways")
+
+    sql, params = executed[0]
+    assert "DROP TABLE" not in sql
+    assert "ORDER BY updated_at DESC, id DESC" in sql
+    assert params == (50, 0)
 
 
 def test_count_capture_jobs_reuses_job_history_filters(monkeypatch):
@@ -3360,7 +3445,7 @@ def test_purge_expired_capture_job_tool_invocations_deletes_only_completed_jobs_
     assert params == (24,)
 
 
-def test_purge_expired_capture_jobs_deletes_completed_and_marked_terminal_jobs(monkeypatch):
+def test_purge_expired_capture_jobs_deletes_completed_and_obsolete_marked_jobs(monkeypatch):
     executed = []
 
     class FakeCursor:
@@ -3400,9 +3485,7 @@ def test_purge_expired_capture_jobs_deletes_completed_and_marked_terminal_jobs(m
     assert "job.job_type LIKE 'corpus_%%'" in sql
     assert "job.status = 'completed'" in sql
     assert "job.delete_requested_at IS NOT NULL" in sql
-    assert "job.status LIKE 'blocked_%%'" in sql
-    assert "job.status LIKE 'cancelled_%%'" in sql
-    assert "job.status = 'failed'" in sql
+    assert "job.status = 'obsolete'" in sql
     assert "COALESCE(job.completed_at, job.updated_at) < now() - make_interval(days => %s)" in sql
     assert "job.status IN ('pending', 'running', 'retrying_locked', 'retrying_vss_failed')" not in sql
     assert params == (7, 7)
@@ -3412,7 +3495,7 @@ def test_mark_capture_job_for_deletion_marks_terminal_jobs_and_audits(monkeypatc
     executed = []
     rows = [
         ("job-1", "blocked_missing_dependency", None, None, None),
-        ("job-1", "blocked_missing_dependency", "2026-07-01T09:00:00+00:00", "dashboard", "operator_cleanup"),
+        ("job-1", "obsolete", "2026-07-01T09:00:00+00:00", "dashboard", "operator_cleanup"),
     ]
 
     class FakeCursor:
@@ -3449,7 +3532,7 @@ def test_mark_capture_job_for_deletion_marks_terminal_jobs_and_audits(monkeypatc
     sql = "\n".join(item[0] for item in executed)
     assert result == {
         "job_id": "job-1",
-        "status": "blocked_missing_dependency",
+        "status": "obsolete",
         "delete_requested": True,
         "delete_requested_at": "2026-07-01T09:00:00+00:00",
         "delete_requested_by": "dashboard",
@@ -3457,16 +3540,23 @@ def test_mark_capture_job_for_deletion_marks_terminal_jobs_and_audits(monkeypatc
     }
     assert "SELECT id::text, status, delete_requested_at" in sql
     assert "UPDATE capture_jobs" in sql
+    assert "status = 'obsolete'" in sql
     assert "delete_requested_at = COALESCE(delete_requested_at, now())" in sql
     assert "delete_requested_by = COALESCE(delete_requested_by, %s)" in sql
+    assert "obsolete_previous_status" in sql
+    assert "obsolete_previous_result_status" in sql
+    assert "result_status" in sql
     assert "VALUES ('capture_job.deletion_requested', 'capture_jobs', %s, %s::jsonb)" in sql
-    assert "updated_at = now()" not in executed[1][0]
+    assert "updated_at = now()" in executed[1][0]
     assert executed[1][1] == ("dashboard", "operator_cleanup", "job-1")
+    audit_details = json.loads(executed[2][1][1])
+    assert audit_details["previous_status"] == "blocked_missing_dependency"
+    assert audit_details["status"] == "obsolete"
 
 
 def test_mark_capture_job_for_deletion_is_idempotent_for_already_marked_jobs(monkeypatch):
     executed = []
-    rows = [("job-1", "failed", "2026-07-01T09:00:00+00:00", "dashboard", "operator_cleanup")]
+    rows = [("job-1", "obsolete", "2026-07-01T09:00:00+00:00", "dashboard", "operator_cleanup")]
 
     class FakeCursor:
         def __enter__(self):
@@ -3501,7 +3591,7 @@ def test_mark_capture_job_for_deletion_is_idempotent_for_already_marked_jobs(mon
 
     assert result == {
         "job_id": "job-1",
-        "status": "failed",
+        "status": "obsolete",
         "delete_requested": True,
         "delete_requested_at": "2026-07-01T09:00:00+00:00",
         "delete_requested_by": "dashboard",
@@ -3509,6 +3599,127 @@ def test_mark_capture_job_for_deletion_is_idempotent_for_already_marked_jobs(mon
     }
     assert len(executed) == 1
     assert "SELECT id::text, status, delete_requested_at" in executed[0][0]
+
+
+def test_restore_capture_job_deletion_request_restores_previous_status_and_audits(monkeypatch):
+    executed = []
+    rows = [
+        (
+            "job-1",
+            "obsolete",
+            "2026-07-01T09:00:00+00:00",
+            "dashboard",
+            "operator_cleanup",
+            {
+                "obsolete_previous_status": "blocked_invalid_source",
+                "obsolete_previous_result_status": "metadata_only",
+                "result_status": "obsolete",
+                "stage": "extract",
+            },
+        ),
+        ("job-1", "blocked_invalid_source", None, None, None),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.restore_capture_job_deletion_request(job_id="job-1", actor="dashboard")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {
+        "job_id": "job-1",
+        "status": "blocked_invalid_source",
+        "delete_requested": False,
+        "delete_requested_at": None,
+        "delete_requested_by": None,
+        "delete_reason": None,
+    }
+    assert "SELECT id::text, status, delete_requested_at, delete_requested_by, delete_reason, telemetry" in sql
+    assert "status = %s" in sql
+    assert "delete_requested_at = NULL" in sql
+    assert "obsolete_previous_status" in sql
+    assert "obsolete_previous_result_status" in sql
+    assert "capture_job.deletion_restored" in sql
+    assert executed[1][1] == ("blocked_invalid_source", "metadata_only", "metadata_only", "job-1")
+    audit_details = json.loads(executed[2][1][1])
+    assert audit_details["actor"] == "dashboard"
+    assert audit_details["previous_status"] == "obsolete"
+    assert audit_details["restored_status"] == "blocked_invalid_source"
+
+
+def test_restore_capture_job_deletion_request_rejects_unmarked_or_missing_jobs(monkeypatch):
+    executed = []
+    rows = [("job-1", "failed", None, None, None, {"result_status": "failed"}), None]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    conflict = database.restore_capture_job_deletion_request(job_id="job-1", actor="dashboard")
+    missing = database.restore_capture_job_deletion_request(job_id="missing", actor="dashboard")
+
+    assert conflict["job_id"] == "job-1"
+    assert conflict["status"] == "failed"
+    assert conflict["delete_requested"] is False
+    assert "cannot be restored" in conflict["error"]
+    assert missing == {
+        "job_id": "missing",
+        "status": "not_found",
+        "delete_requested": False,
+        "error": "corpus job not found: missing",
+    }
+    assert len(executed) == 2
 
 
 def test_mark_capture_job_for_deletion_rejects_active_jobs(monkeypatch):
@@ -3594,9 +3805,10 @@ def test_requeue_corpus_job_allows_cancelled_states_for_operator_retry(monkeypat
     assert "status = 'retrying_locked'" in sql
     assert "status = 'retrying_vss_failed'" in sql
     assert "status LIKE 'cancelled_%%'" in sql
-    assert "delete_requested_at = NULL" in sql
-    assert "delete_requested_by = NULL" in sql
-    assert "delete_reason = NULL" in sql
+    assert "delete_requested_at IS NULL" in sql
+    assert "delete_requested_at = NULL" not in sql
+    assert "delete_requested_by = NULL" not in sql
+    assert "delete_reason = NULL" not in sql
 
 
 def test_cancel_corpus_job_marks_pending_jobs_cancelled(monkeypatch):

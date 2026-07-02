@@ -446,6 +446,53 @@ def test_host_job_file_action_opens_containing_folder_for_missing_file(monkeypat
     assert audits[0]["target_id"] == "job-1"
 
 
+def test_host_open_containing_folder_opens_parent_for_existing_file(monkeypatch, tmp_path):
+    target = tmp_path / "docs" / "report.pdf"
+    target.parent.mkdir()
+    target.write_text("pdf", encoding="utf-8")
+    launched: list[Path] = []
+    revealed: list[Path] = []
+    monkeypatch.setattr(host_agent, "_launch_default_app", lambda path: launched.append(path), raising=False)
+    monkeypatch.setattr(host_agent, "_reveal_in_folder", lambda path: revealed.append(path), raising=False)
+
+    host_agent._open_containing_folder(target)
+
+    assert launched == [target.parent]
+    assert revealed == []
+
+
+def test_windows_reveal_tolerates_empty_explorer_nonzero_for_existing_target(monkeypatch, tmp_path):
+    target = tmp_path / "docs" / "report.pdf"
+    target.parent.mkdir()
+    target.write_text("pdf", encoding="utf-8")
+    calls: list[list[str]] = []
+    monkeypatch.setattr(host_agent.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        host_agent,
+        "run_no_window",
+        lambda command, **_kwargs: calls.append(command) or SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
+
+    host_agent._reveal_in_folder(target)
+
+    assert calls == [["explorer", f"/select,{target}"]]
+
+
+def test_windows_reveal_surfaces_explorer_output_errors(monkeypatch, tmp_path):
+    target = tmp_path / "docs" / "report.pdf"
+    target.parent.mkdir()
+    target.write_text("pdf", encoding="utf-8")
+    monkeypatch.setattr(host_agent.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        host_agent,
+        "run_no_window",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="Access is denied."),
+    )
+
+    with pytest.raises(OSError, match="Access is denied"):
+        host_agent._reveal_in_folder(target)
+
+
 def test_host_job_file_action_rejects_unknown_job_with_reason(monkeypatch):
     audits: list[dict] = []
     monkeypatch.setattr(host_agent.database, "get_capture_job_for_file_action", lambda job_id: None, raising=False)

@@ -984,6 +984,8 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
             ("job_type", "corpus_extract_pdf"),
             ("updated_from", "2026-06-25T00:00:00+00:00"),
             ("updated_to", "2026-06-26T00:00:00+00:00"),
+            ("sort_by", "target"),
+            ("sort_dir", "asc"),
             ("limit", "25"),
             ("offset", "50"),
         ],
@@ -1000,6 +1002,8 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
             "job_type": ["corpus_extract_pdf"],
             "updated_from": "2026-06-25T00:00:00+00:00",
             "updated_to": "2026-06-26T00:00:00+00:00",
+            "sort_by": "target",
+            "sort_dir": "asc",
         }
     ]
 
@@ -1090,7 +1094,7 @@ def test_dashboard_job_delete_request_endpoint_marks_terminal_job(monkeypatch):
         lambda **kwargs: calls.append(kwargs)
         or {
             "job_id": kwargs["job_id"],
-            "status": "failed",
+            "status": "obsolete",
             "delete_requested": True,
             "delete_requested_at": "2026-07-01T09:00:00+00:00",
             "delete_requested_by": "dashboard",
@@ -1104,6 +1108,7 @@ def test_dashboard_job_delete_request_endpoint_marks_terminal_job(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["delete_requested"] is True
+    assert response.json()["status"] == "obsolete"
     assert calls == [{"job_id": "job-failed", "actor": "dashboard", "reason": "operator_cleanup"}]
 
 
@@ -1149,6 +1154,65 @@ def test_dashboard_job_delete_request_endpoint_reports_active_job_conflict(monke
 
     assert response.status_code == 409
     assert "cannot be marked for deletion" in response.json()["detail"]
+
+
+def test_dashboard_job_delete_request_restore_endpoint_restores_marked_job(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "restore_capture_job_deletion_request",
+        lambda **kwargs: calls.append(kwargs)
+        or {
+            "job_id": kwargs["job_id"],
+            "status": "blocked_invalid_source",
+            "delete_requested": False,
+            "delete_requested_at": None,
+            "delete_requested_by": None,
+            "delete_reason": None,
+        },
+    )
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.delete("/api/dashboard/jobs/job-obsolete/delete-request")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "blocked_invalid_source"
+    assert response.json()["delete_requested"] is False
+    assert calls == [{"job_id": "job-obsolete", "actor": "dashboard"}]
+
+
+def test_dashboard_job_delete_request_restore_endpoint_reports_conflict_and_missing(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    def fake_restore(**kwargs):
+        if kwargs["job_id"] == "missing":
+            return {
+                "job_id": kwargs["job_id"],
+                "status": "not_found",
+                "delete_requested": False,
+                "error": f"corpus job not found: {kwargs['job_id']}",
+            }
+        return {
+            "job_id": kwargs["job_id"],
+            "status": "failed",
+            "delete_requested": False,
+            "error": "Corpus job status failed cannot be restored from deletion.",
+        }
+
+    monkeypatch.setattr(database, "restore_capture_job_deletion_request", fake_restore)
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    conflict = client.delete("/api/dashboard/jobs/job-failed/delete-request")
+    missing = client.delete("/api/dashboard/jobs/missing/delete-request")
+
+    assert conflict.status_code == 409
+    assert "cannot be restored" in conflict.json()["detail"]
+    assert missing.status_code == 404
+    assert "corpus job not found" in missing.json()["detail"]
 
 
 def test_dashboard_job_file_action_endpoint_routes_to_host_agent(monkeypatch):

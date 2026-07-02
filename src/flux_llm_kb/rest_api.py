@@ -633,6 +633,8 @@ def create_app():
         job_type: list[str] | None = Query(None),
         updated_from: str | None = None,
         updated_to: str | None = None,
+        sort_by: str | None = "updated",
+        sort_dir: str | None = "desc",
     ):
         return collect_jobs_payload(
             limit=limit,
@@ -642,6 +644,8 @@ def create_app():
             job_type=job_type,
             updated_from=updated_from,
             updated_to=updated_to,
+            sort_by=sort_by,
+            sort_dir=sort_dir,
         )
 
     @app.get("/api/dashboard/jobs/{job_id}/tool-invocations")
@@ -688,6 +692,14 @@ def create_app():
         if not payload.get("delete_requested"):
             status_code = 404 if payload.get("status") == "not_found" else 409
             raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job cannot be marked for deletion.")
+        return payload
+
+    @app.delete("/api/dashboard/jobs/{job_id}/delete-request")
+    def dashboard_job_delete_request_restore(job_id: str):
+        payload = database.restore_capture_job_deletion_request(job_id=job_id, actor="dashboard")
+        if payload.get("error"):
+            status_code = 404 if payload.get("status") == "not_found" else 409
+            raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job deletion mark cannot be restored.")
         return payload
 
     @app.post("/api/dashboard/jobs/{job_id}/file-actions")

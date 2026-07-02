@@ -998,6 +998,14 @@ def _reveal_in_folder(path: Path) -> None:
     system = platform.system()
     if system == "Windows":
         result = run_no_window(["explorer", f"/select,{path}"], capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            message = result.stderr.strip() or result.stdout.strip()
+            if message:
+                raise OSError(message)
+            if path.exists() and path.parent.exists():
+                return
+            raise OSError("reveal failed")
+        return
     elif system == "Darwin":
         result = run_no_window(["open", "-R", str(path)], capture_output=True, text=True, check=False)
     else:
@@ -1007,10 +1015,10 @@ def _reveal_in_folder(path: Path) -> None:
 
 
 def _open_containing_folder(path: Path) -> None:
-    if path.exists():
-        _reveal_in_folder(path)
-        return
-    _launch_default_app(path.parent)
+    parent = path if path.exists() and path.is_dir() else path.parent
+    if not parent.exists():
+        raise FileNotFoundError(str(parent))
+    _launch_default_app(parent)
 
 
 def _is_locked_error(exc: OSError) -> bool:

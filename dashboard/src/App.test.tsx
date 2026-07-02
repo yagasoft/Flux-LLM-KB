@@ -365,6 +365,7 @@ let outlookCancelRequests: string[];
 let corpusCancelRequests: string[];
 let corpusRetryRequests: string[];
 let corpusDeleteRequests: string[];
+let corpusRestoreRequests: string[];
 let corpusJobFileActionRequests: Array<{ url: string; body: unknown }>;
 let corpusJobFileActionPayload: Record<string, unknown>;
 let jobsRequestUrls: string[];
@@ -740,6 +741,7 @@ describe("Flux dashboard", () => {
     corpusCancelRequests = [];
     corpusRetryRequests = [];
     corpusDeleteRequests = [];
+    corpusRestoreRequests = [];
     corpusJobFileActionRequests = [];
     corpusJobFileActionPayload = { state: "opened", path: "E:/Flux Docs/docs/failed.pdf" };
     jobsRequestUrls = [];
@@ -1271,8 +1273,19 @@ describe("Flux dashboard", () => {
         return json({ settings_mutated: false, action: "retry_corpus_job", result: { job_id: jobId, status: "pending" } });
       }
       if (url.startsWith("/api/dashboard/jobs/") && url.endsWith("/delete-request")) {
-        corpusDeleteRequests.push(url);
         const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");
+        if (init?.method === "DELETE") {
+          corpusRestoreRequests.push(url);
+          return json({
+            job_id: jobId,
+            status: "blocked_missing_dependency",
+            delete_requested: false,
+            delete_requested_at: null,
+            delete_requested_by: null,
+            delete_reason: null
+          });
+        }
+        corpusDeleteRequests.push(url);
         if (jobId === "job-running") {
           return errorJson(
             { error: { message: "Corpus job status running cannot be marked for deletion." } },
@@ -1282,7 +1295,7 @@ describe("Flux dashboard", () => {
         }
         return json({
           job_id: jobId,
-          status: "failed",
+          status: "obsolete",
           delete_requested: true,
           delete_requested_at: "2026-07-01T09:00:00+00:00",
           delete_requested_by: "dashboard",
@@ -1878,6 +1891,29 @@ describe("Flux dashboard", () => {
       expect(params.get("limit")).toBe("50");
       expect(params.get("offset")).toBe("0");
     });
+
+    await user.click(screen.getByRole("button", { name: "Sort jobs by Status" }));
+
+    await waitFor(() => {
+      const latestUrl = jobsRequestUrls.at(-1) ?? "";
+      const params = new URLSearchParams(latestUrl.split("?")[1]);
+      expect(params.get("sort_by")).toBe("status");
+      expect(params.get("sort_dir")).toBe("asc");
+      expect(params.get("offset")).toBe("0");
+      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
+    });
+    await waitFor(() => {
+      const savedState = JSON.parse(localStorage.getItem("flux-dashboard-state") ?? "{}") as { jobSort?: Record<string, unknown> };
+      expect(savedState.jobSort).toEqual({ sort_by: "status", sort_dir: "asc" });
+    });
+    await user.click(screen.getByRole("button", { name: "Sort jobs by Status" }));
+    await waitFor(() => {
+      const latestUrl = jobsRequestUrls.at(-1) ?? "";
+      const params = new URLSearchParams(latestUrl.split("?")[1]);
+      expect(params.get("sort_by")).toBe("status");
+      expect(params.get("sort_dir")).toBe("desc");
+    });
+
     await waitFor(() => {
       const savedState = JSON.parse(localStorage.getItem("flux-dashboard-state") ?? "{}") as { jobFilters?: Record<string, unknown> };
       expect(savedState.jobFilters).toMatchObject({
@@ -1900,6 +1936,37 @@ describe("Flux dashboard", () => {
       expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
       expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
     });
+  });
+
+  test("job filter menus close on outside click and Escape", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [],
+      count: 0,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["failed", "retrying_locked"],
+        roots: ["docs", "mail"],
+        job_types: ["corpus_extract_pdf", "corpus_sync_root"]
+      }
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await user.click(screen.getByRole("button", { name: "Job status filter" }));
+    expect(screen.getByRole("group", { name: "Job status options" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("heading", { name: "Operations" }));
+    expect(screen.queryByRole("group", { name: "Job status options" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Job root filter" }));
+    expect(screen.getByRole("group", { name: "Job root options" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("group", { name: "Job root options" })).not.toBeInTheDocument();
   });
 
   test("job queue opens corpus job target files and containing folders", async () => {
@@ -1997,7 +2064,8 @@ describe("Flux dashboard", () => {
         job_type: ["corpus_extract_pdf", "corpus_sync_root"],
         updated_from: "2026-06-25T00:00",
         updated_to: "2026-06-26T23:59"
-      }
+      },
+      jobSort: { sort_by: "target", sort_dir: "asc" }
     }));
     jobsPayload = {
       jobs: [
@@ -2041,6 +2109,8 @@ describe("Flux dashboard", () => {
       expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
       expect(params.get("updated_from")).toBe(updatedFromIso);
       expect(params.get("updated_to")).toBe(updatedToIso);
+      expect(params.get("sort_by")).toBe("target");
+      expect(params.get("sort_dir")).toBe("asc");
       expect(params.get("limit")).toBe("50");
       expect(params.get("offset")).toBe("0");
     });
@@ -2112,14 +2182,36 @@ describe("Flux dashboard", () => {
           payload: { root_name: "docs", path: "docs/done.pdf" },
           attempts: 1,
           updated_at: "2026-06-26T09:10:00+00:00"
+        },
+        {
+          id: "job-obsolete",
+          job_type: "corpus_extract_pdf",
+          status: "obsolete",
+          payload: { root_name: "docs", path: "docs/obsolete.pdf" },
+          attempts: 1,
+          updated_at: "2026-06-26T09:05:00+00:00",
+          delete_requested_at: "2026-07-01T09:00:00+00:00",
+          delete_requested_by: "dashboard",
+          delete_reason: "operator_cleanup"
+        },
+        {
+          id: "job-marked-failed",
+          job_type: "corpus_extract_pdf",
+          status: "failed",
+          payload: { root_name: "docs", path: "docs/marked.pdf" },
+          attempts: 2,
+          updated_at: "2026-06-26T09:00:00+00:00",
+          delete_requested_at: "2026-07-01T09:01:00+00:00",
+          delete_requested_by: "dashboard",
+          delete_reason: "operator_cleanup"
         }
       ],
-      count: 3,
+      count: 5,
       limit: 50,
       offset: 0,
       has_next: false,
       filter_options: {
-        statuses: ["failed", "cancelled_operator", "completed"],
+        statuses: ["failed", "cancelled_operator", "completed", "obsolete"],
         roots: ["docs", "mail"],
         job_types: ["corpus_extract_pdf", "corpus_sync_root"]
       }
@@ -2132,6 +2224,8 @@ describe("Flux dashboard", () => {
     expect(await screen.findByRole("button", { name: "Force retry corpus job job-failed" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Force retry corpus job job-cancelled" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Force retry corpus job job-completed" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Force retry corpus job job-obsolete" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Force retry corpus job job-marked-failed" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Force retry corpus job job-cancelled" }));
 
@@ -2159,7 +2253,7 @@ describe("Flux dashboard", () => {
         {
           id: "job-marked",
           job_type: "corpus_extract_pdf",
-          status: "blocked_missing_dependency",
+          status: "obsolete",
           payload: { root_name: "docs", path: "docs/missing.pdf" },
           attempts: 2,
           last_error: "missing dependency",
@@ -2200,7 +2294,7 @@ describe("Flux dashboard", () => {
       offset: 0,
       has_next: false,
       filter_options: {
-        statuses: ["failed", "blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source", "running"],
+        statuses: ["failed", "obsolete", "blocked_by_policy", "blocked_invalid_source", "running"],
         roots: ["docs"],
         job_types: ["corpus_extract_pdf", "corpus_extract_code", "corpus_extract_document"]
       }
@@ -2213,17 +2307,27 @@ describe("Flux dashboard", () => {
     expect(await screen.findByRole("button", { name: "Mark corpus job job-failed for deletion" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mark corpus job job-policy for deletion" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mark corpus job job-invalid for deletion" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark corpus job job-marked for deletion" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Mark corpus job job-running for deletion" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Force retry corpus job job-marked" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore deletion mark for corpus job job-marked" })).toBeInTheDocument();
     expect(screen.getByText("Blocked by policy")).toBeInTheDocument();
     expect(screen.getByText("Invalid source")).toBeInTheDocument();
-    expect(screen.getByText("Marked for deletion")).toBeInTheDocument();
+    expect(screen.getByText("Obsolete")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Mark corpus job job-failed for deletion" }));
 
     await waitFor(() => {
       expect(corpusDeleteRequests).toContain("/api/dashboard/jobs/job-failed/delete-request");
     });
-    expect(await screen.findByText("Corpus job marked for deletion after retention.")).toBeInTheDocument();
+    expect(await screen.findByText("Corpus job marked obsolete for deletion.")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Restore deletion mark for corpus job job-marked" }));
+
+    await waitFor(() => {
+      expect(corpusRestoreRequests).toContain("/api/dashboard/jobs/job-marked/delete-request");
+    });
+    expect(await screen.findByText("Corpus job deletion mark restored.")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Show details for job job-marked" }));
 
