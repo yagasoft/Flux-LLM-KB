@@ -855,6 +855,49 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
     assert results[2]["streams"] == ["vespa_rrf", "vespa_dense"]
 
 
+def test_vespa_episode_hydration_marks_only_stale_claim_episode_non_current():
+    class FakeCursor:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args, **_kwargs):
+            self.calls += 1
+
+        def fetchall(self):
+            if self.calls == 1:
+                return [
+                    (
+                        "episode-stale",
+                        "Stale memory",
+                        "Stale claim-backed memory.",
+                        {},
+                        0.7,
+                        0,
+                        False,
+                        "active",
+                        0,
+                        "keep",
+                        None,
+                        None,
+                    )
+                ]
+            return [("episode-stale", False, True, ["stale"], ["deprioritize"])]
+
+    details = database._hydrate_episode_candidate_details(
+        FakeCursor(),
+        candidate_ids=["episode-stale"],
+        root_name=None,
+        raw_scores={"episode-stale": {"vespa_rrf": 0.0325, "vespa_dense": 0.8}},
+    )
+
+    lifecycle = details["episode-stale"]["lifecycle"]
+    assert lifecycle["current"] is False
+    assert lifecycle["audit_visible"] is True
+    assert lifecycle["claim_current"] is False
+    assert lifecycle["claim_states"] == ["stale"]
+    assert lifecycle["claim_retention_actions"] == ["deprioritize"]
+
+
 def test_vespa_evidence_search_merges_duplicate_rrf_stream_signals(monkeypatch):
     class FakeProvider:
         def __init__(self, **_kwargs):

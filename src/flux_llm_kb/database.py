@@ -578,6 +578,7 @@ def search_episodes(
                     (list(details.keys()),),
                 )
                 _add_episode_lifecycle_rows(cur.fetchall(), details)
+                _add_episode_claim_lifecycle_rows(cur, details)
                 _add_semantic_duplicate_metadata(cur, owner_table="episodes", details=details)
 
     fused = reciprocal_rank_fusion(streams)
@@ -1553,6 +1554,7 @@ def _hydrate_episode_candidate_details(
     for row in cur.fetchall():
         item_id = str(row[0])
         metadata = row[3] if isinstance(row[3], dict) else {}
+        lifecycle_state = str(row[7] or "active")
         details[item_id] = {
             "id": item_id,
             "title": str(row[1] or ""),
@@ -1565,13 +1567,16 @@ def _hydrate_episode_candidate_details(
                 "confidence": float(row[4] or 0.0),
                 "usage_count": int(row[5] or 0),
                 "superseded": bool(row[6]),
-                "state": row[7],
+                "state": lifecycle_state,
+                "current": lifecycle_state in {"active", "confirmed", "reinforced"},
                 "contradiction_count": int(row[8] or 0),
                 "retention_action": row[9],
+                "audit_visible": lifecycle_state in {"superseded", "contradicted", "stale", "retired"},
                 "created_at": row[10].isoformat() if row[10] else None,
                 "updated_at": row[11].isoformat() if row[11] else None,
             },
         }
+    _add_episode_claim_lifecycle_rows(cur, details)
     return details
 
 
@@ -10084,6 +10089,42 @@ def _add_episode_lifecycle_rows(
                     "explanation": score.explanation,
                 }
             )
+
+
+def _add_episode_claim_lifecycle_rows(cur: Any, details: dict[str, dict[str, Any]]) -> None:
+    if not details:
+        return
+    cur.execute(
+        """
+        SELECT episode_id::text,
+               bool_or(lifecycle_state IN ('active', 'confirmed', 'reinforced')
+                       AND COALESCE(retention_action, 'keep') = 'keep') AS has_current_claim,
+               bool_or(lifecycle_state IN ('stale', 'contradicted', 'superseded', 'retired')
+                       OR COALESCE(retention_action, 'keep') <> 'keep') AS has_non_current_claim,
+               array_remove(array_agg(DISTINCT lifecycle_state ORDER BY lifecycle_state), NULL) AS claim_states,
+               array_remove(array_agg(DISTINCT COALESCE(retention_action, 'keep')
+                                      ORDER BY COALESCE(retention_action, 'keep')), NULL) AS retention_actions
+        FROM claims
+        WHERE episode_id = ANY(%s::uuid[])
+        GROUP BY episode_id
+        """,
+        (list(details.keys()),),
+    )
+    for row in cur.fetchall():
+        detail = details.get(str(row[0]))
+        if detail is None:
+            continue
+        has_current_claim = bool(row[1])
+        has_non_current_claim = bool(row[2])
+        lifecycle = detail.setdefault("lifecycle", {})
+        if not isinstance(lifecycle, dict):
+            continue
+        lifecycle["claim_current"] = has_current_claim
+        lifecycle["claim_states"] = [str(value) for value in (row[3] or []) if value is not None]
+        lifecycle["claim_retention_actions"] = [str(value) for value in (row[4] or []) if value is not None]
+        if has_non_current_claim and not has_current_claim:
+            lifecycle["current"] = False
+            lifecycle["audit_visible"] = True
 
 
 def _merge_graph_metadata(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
