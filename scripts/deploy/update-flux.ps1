@@ -998,7 +998,7 @@ function Invoke-FluxVespaApplicationDeploy {
     }
     Invoke-FluxNativeCommand -FilePath "docker" -Arguments @(
         "exec", "flux-vespa", "sh", "-lc",
-        "for i in `$(seq 1 120); do curl -fsS http://127.0.0.1:8080/ApplicationStatus >/dev/null && exit 0; sleep 2; done; exit 1"
+        "for i in `$(seq 1 120); do curl -fsS http://127.0.0.1:19071/ApplicationStatus >/dev/null && exit 0; sleep 2; done; exit 1"
     ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "wait for Vespa application endpoint"
     Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("cp", $vespaApp, "flux-vespa:/tmp/flux-vespa-app") -WorkingDirectory $AppRoot -TimeoutSeconds 120 -StepName "copy Vespa application package"
     Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("exec", "flux-vespa", "sh", "-lc", "vespa deploy --wait 300 /tmp/flux-vespa-app") -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "deploy Vespa application package"
