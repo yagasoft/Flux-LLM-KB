@@ -12,7 +12,7 @@ param(
     [switch]$SkipDashboardBuild,
     [switch]$RecreateVenv,
     [switch]$RestartHostTasks,
-    [int]$DockerComposeTimeoutSeconds = 120,
+    [int]$DockerComposeTimeoutSeconds = 3600,
     [int]$DockerBuildTimeoutSeconds = 3600,
     [int]$AsrModelDownloadTimeoutSeconds = 3600,
     [int]$ModelRunnerModelDownloadTimeoutSeconds = 43200,

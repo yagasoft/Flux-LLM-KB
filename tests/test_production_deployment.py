@@ -448,6 +448,7 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     update = _script("update-flux.ps1")
 
     assert "[int]$DockerComposeTimeoutSeconds" in update
+    assert "[int]$DockerComposeTimeoutSeconds = 3600" in update
     assert "Invoke-FluxDockerComposeUp" in update
     assert "Invoke-FluxNativeCommand" in update
     assert "[System.Diagnostics.ProcessStartInfo]" in update
