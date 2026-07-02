@@ -3247,6 +3247,37 @@ def test_process_corpus_job_blocks_invalid_xlsx_package(monkeypatch, tmp_path):
     assert applied_result.metadata["reason"] == "invalid_package"
 
 
+def test_process_corpus_job_persists_invalid_svg_source(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "broken.svg").write_bytes(b"\x00not svg xml")
+    applied = []
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+        "metadata": {},
+    })
+    monkeypatch.setattr(database, "apply_extraction_result", lambda **kwargs: applied.append(kwargs))
+
+    result = worker.process_corpus_job({"job_type": "corpus_extract_image", "payload": {"root_name": "docs", "path": "broken.svg"}})
+
+    assert result.status == "blocked_invalid_source"
+    assert "SVG XML parse failed" in (result.message or "")
+    assert applied[0]["root_name"] == "docs"
+    assert applied[0]["relative_path"] == "broken.svg"
+    applied_result = applied[0]["result"]
+    assert applied_result.status == "blocked_invalid_source"
+    assert applied_result.metadata["extractor"] == "image"
+    assert applied_result.metadata["svg_parse"]["reason"] == "invalid_svg_xml"
+
+
 def test_process_corpus_job_persists_policy_block(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 

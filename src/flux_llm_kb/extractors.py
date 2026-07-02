@@ -120,6 +120,13 @@ DECORATIVE_ICON_MAX_DIMENSION = 32
 DECORATIVE_ICON_MAX_BYTES = 4096
 
 
+class SvgExtractionError(ValueError):
+    def __init__(self, message: str, *, status: str, reason: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class ContainerChildAsset:
     member_path: str
@@ -3693,6 +3700,14 @@ def _extract_svg_image(path: Path) -> ExtractionResult:
     except ImportError:
         metadata["svg_parse"] = {"status": "blocked_missing_dependency", "parser": "defusedxml"}
         return ExtractionResult(status="blocked_missing_dependency", metadata=metadata, message="defusedxml module not installed")
+    except SvgExtractionError as exc:
+        metadata["svg_parse"] = {
+            "status": exc.status,
+            "reason": exc.reason,
+            "error": str(exc),
+            "parser": "defusedxml",
+        }
+        return ExtractionResult(status=exc.status, metadata=metadata, message=str(exc))
     except ValueError as exc:
         metadata["svg_parse"] = {"status": "failed", "error": str(exc)}
         return ExtractionResult(status="failed", metadata=metadata, message=str(exc))
@@ -3789,13 +3804,25 @@ def _parse_svg(path: Path) -> dict[str, Any]:
 
     size = path.stat().st_size
     if size > SVG_MAX_BYTES:
-        raise ValueError("SVG file exceeds readable size limit")
+        raise SvgExtractionError(
+            "SVG file exceeds readable size limit",
+            status="blocked_by_policy",
+            reason="svg_size_limit",
+        )
     try:
         root = SafeElementTree.fromstring(path.read_bytes())
     except Exception as exc:
-        raise ValueError(f"SVG XML parse failed: {exc}") from exc
+        raise SvgExtractionError(
+            f"SVG XML parse failed: {exc}",
+            status="blocked_invalid_source",
+            reason="invalid_svg_xml",
+        ) from exc
     if _local_name(root.tag).lower() != "svg":
-        raise ValueError("SVG root element is not <svg>")
+        raise SvgExtractionError(
+            "SVG root element is not <svg>",
+            status="blocked_invalid_source",
+            reason="not_svg_root",
+        )
 
     titles: list[str] = []
     descriptions: list[str] = []
@@ -5116,6 +5143,7 @@ def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingRes
     chunks: list[AssetChunk] = []
     timestamps: list[float] = []
     scene_scores: list[float] = []
+    thumbnail_failures: list[dict[str, Any]] = []
     thumbnail_hits = 0
     thumbnail_misses = 0
     vision_summary = {
@@ -5132,11 +5160,8 @@ def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingRes
     for timestamp, score in selected:
         thumbnail = _thumbnail_for_frame(path, ffmpeg=ffmpeg, timestamp=timestamp)
         if thumbnail["status"] == "failed":
-            return FrameSamplingResult(
-                status="failed",
-                metadata={**metadata, "status": "failed", "frame_count": len(timestamps)},
-                message=str(thumbnail.get("message") or "thumbnail extraction failed"),
-            )
+            thumbnail_failures.append(_thumbnail_failure_metadata(timestamp, thumbnail))
+            continue
         if thumbnail["cache_hit"]:
             thumbnail_hits += 1
         else:
@@ -5153,6 +5178,10 @@ def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingRes
             vision_summary["blocked_dependency_count"] += int(vision.metadata.get("blocked_dependency_count") or 0)
         if vision.text:
             chunks.extend(_chunks_from_text(vision.text, f"{path.name} frame {timestamp:.3f}s", modality="vision"))
+    if thumbnail_failures and not timestamps:
+        status = "skipped_thumbnail_unavailable"
+    elif thumbnail_failures:
+        status = "partial"
     final_metadata = {
         **metadata,
         "status": status,
@@ -5162,9 +5191,17 @@ def _sample_video_frames(path: Path, probed: dict[str, Any]) -> FrameSamplingRes
         "thumbnail_cache_hits": thumbnail_hits,
         "thumbnail_cache_misses": thumbnail_misses,
     }
+    if thumbnail_failures:
+        final_metadata["thumbnail_failure_count"] = len(thumbnail_failures)
+        final_metadata["thumbnail_failures"] = thumbnail_failures[:5]
     if vision_summary["status"] != "disabled":
         final_metadata["vision"] = vision_summary
-    return FrameSamplingResult(status="completed", chunks=_reindexed_chunks(chunks), metadata=final_metadata)
+    return FrameSamplingResult(
+        status="completed",
+        chunks=_reindexed_chunks(chunks),
+        metadata=final_metadata,
+        message=_first_thumbnail_failure_message(thumbnail_failures),
+    )
 
 
 def _sample_video_frames_at_timestamps(path: Path, probed: dict[str, Any], *, timestamps: list[float]) -> FrameSamplingResult:
@@ -5193,6 +5230,7 @@ def _sample_video_frames_at_timestamps(path: Path, probed: dict[str, Any], *, ti
     thumbnail_hits = 0
     thumbnail_misses = 0
     sampled: list[float] = []
+    thumbnail_failures: list[dict[str, Any]] = []
     vision_summary = {
         "engine": "local_vision",
         "provider": _vision_settings()["provider"],
@@ -5207,11 +5245,8 @@ def _sample_video_frames_at_timestamps(path: Path, probed: dict[str, Any], *, ti
     for timestamp in timestamps:
         thumbnail = _thumbnail_for_frame(path, ffmpeg=ffmpeg, timestamp=timestamp)
         if thumbnail["status"] == "failed":
-            return FrameSamplingResult(
-                status="failed",
-                metadata={**metadata, "status": "failed", "frame_count": len(sampled)},
-                message=str(thumbnail.get("message") or "thumbnail extraction failed"),
-            )
+            thumbnail_failures.append(_thumbnail_failure_metadata(timestamp, thumbnail))
+            continue
         if thumbnail["cache_hit"]:
             thumbnail_hits += 1
         else:
@@ -5226,18 +5261,31 @@ def _sample_video_frames_at_timestamps(path: Path, probed: dict[str, Any], *, ti
             vision_summary["blocked_dependency_count"] += int(vision.metadata.get("blocked_dependency_count") or 0)
         if vision.text:
             chunks.extend(_chunks_from_text(vision.text, f"{path.name} frame {timestamp:.3f}s", modality="vision"))
+    status = "completed"
+    if thumbnail_failures and not sampled:
+        status = "skipped_thumbnail_unavailable"
+    elif thumbnail_failures:
+        status = "partial"
     final_metadata = {
         **metadata,
-        "status": "completed",
+        "status": status,
         "timestamps": sampled,
         "scene_scores": [],
         "frame_count": len(sampled),
         "thumbnail_cache_hits": thumbnail_hits,
         "thumbnail_cache_misses": thumbnail_misses,
     }
+    if thumbnail_failures:
+        final_metadata["thumbnail_failure_count"] = len(thumbnail_failures)
+        final_metadata["thumbnail_failures"] = thumbnail_failures[:5]
     if vision_summary["status"] != "disabled":
         final_metadata["vision"] = vision_summary
-    return FrameSamplingResult(status="completed", chunks=_reindexed_chunks(chunks), metadata=final_metadata)
+    return FrameSamplingResult(
+        status="completed",
+        chunks=_reindexed_chunks(chunks),
+        metadata=final_metadata,
+        message=_first_thumbnail_failure_message(thumbnail_failures),
+    )
 
 
 def _frame_sampling_settings() -> dict[str, Any]:
@@ -5337,43 +5385,102 @@ def _selected_transition_frames(transitions: list[tuple[float, float]], limit: i
     return sorted(strongest, key=lambda item: item[0])
 
 
+def _thumbnail_failure_metadata(timestamp: float, thumbnail: dict[str, Any]) -> dict[str, Any]:
+    failure = {
+        "timestamp": round(float(timestamp), 3),
+        "message": str(thumbnail.get("message") or "thumbnail extraction failed")[:240],
+    }
+    attempts = _optional_int(thumbnail.get("attempts"))
+    if attempts is not None:
+        failure["attempts"] = attempts
+    return failure
+
+
+def _first_thumbnail_failure_message(failures: list[dict[str, Any]]) -> str | None:
+    if not failures:
+        return None
+    return str(failures[0].get("message") or "thumbnail extraction failed")
+
+
 def _thumbnail_for_frame(path: Path, *, ffmpeg: str, timestamp: float) -> dict[str, Any]:
     cache_file = _thumbnail_cache_file(path, timestamp=timestamp)
-    if cache_file.exists():
-        return {"status": "completed", "path": str(cache_file), "cache_hit": True}
+    if _valid_thumbnail_file(cache_file):
+        return {"status": "completed", "path": str(cache_file), "cache_hit": True, "attempts": 0}
+    _discard_invalid_thumbnail(cache_file)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    timestamp_text = f"{timestamp:.3f}"
+    commands = [
+        [
+            ffmpeg,
+            "-y",
+            "-ss",
+            timestamp_text,
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-f",
+            "image2",
+            str(cache_file),
+        ],
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(path),
+            "-ss",
+            timestamp_text,
+            "-frames:v",
+            "1",
+            "-f",
+            "image2",
+            str(cache_file),
+        ],
+    ]
+    failures: list[str] = []
+    for attempt, command in enumerate(commands, start=1):
+        _discard_invalid_thumbnail(cache_file)
+        try:
+            result = run_no_window(
+                command,
+                text=True,
+                capture_output=True,
+                timeout=FRAME_SAMPLING_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except Exception as exc:
+            failures.append(str(exc))
+            continue
+        if result.returncode != 0:
+            failures.append(result.stderr.strip() or "ffmpeg thumbnail extraction failed")
+            continue
+        if _valid_thumbnail_file(cache_file):
+            return {"status": "completed", "path": str(cache_file), "cache_hit": False, "attempts": attempt}
+        failures.append("thumbnail file was not created")
+    _discard_invalid_thumbnail(cache_file)
+    return {
+        "status": "failed",
+        "path": str(cache_file),
+        "cache_hit": False,
+        "attempts": len(commands),
+        "message": failures[-1] if failures else "thumbnail file was not created",
+        "failures": failures[:5],
+    }
+
+
+def _valid_thumbnail_file(path: Path) -> bool:
     try:
-        cache_file.parent.mkdir(parents=True, exist_ok=True)
-        result = run_no_window(
-            [
-                ffmpeg,
-                "-y",
-                "-ss",
-                f"{timestamp:.3f}",
-                "-i",
-                str(path),
-                "-frames:v",
-                "1",
-                "-f",
-                "image2",
-                str(cache_file),
-            ],
-            text=True,
-            capture_output=True,
-            timeout=FRAME_SAMPLING_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except Exception as exc:
-        return {"status": "failed", "path": str(cache_file), "cache_hit": False, "message": str(exc)}
-    if result.returncode != 0:
-        return {
-            "status": "failed",
-            "path": str(cache_file),
-            "cache_hit": False,
-            "message": result.stderr.strip() or "ffmpeg thumbnail extraction failed",
-        }
-    if not cache_file.exists():
-        return {"status": "failed", "path": str(cache_file), "cache_hit": False, "message": "thumbnail file was not created"}
-    return {"status": "completed", "path": str(cache_file), "cache_hit": False}
+        return path.exists() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _discard_invalid_thumbnail(path: Path) -> None:
+    try:
+        if path.exists() and path.stat().st_size <= 0:
+            path.unlink()
+    except OSError:
+        return
 
 
 def _thumbnail_cache_file(path: Path, *, timestamp: float) -> Path:
@@ -6052,7 +6159,10 @@ def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None
         temp_root = Path(temp_dir_obj.name)
         ocr_input, preprocess = _scaled_ocr_input(path, temp_root=temp_root, base_metadata=preprocess)
     try:
-        raw_text = _run_paddleocr_image(ocr_input, model=model)
+        if _is_paddleocr_document_model(model):
+            raw_text = _run_paddleocr_document(ocr_input, model=model)
+        else:
+            raw_text = _run_paddleocr_image(ocr_input, model=model)
     except subprocess.TimeoutExpired as exc:
         return OcrResult(
             status="blocked_missing_dependency",
@@ -6191,7 +6301,24 @@ def _ocr_cache_file(path: Path) -> Path:
     return Path(resolve_cache_layout()["directories"]["ocr"]) / f"{key}.json"
 
 
+def _is_paddleocr_document_model(model: str) -> bool:
+    return str(model or "").startswith("PaddleOCR-VL")
+
+
+def _run_paddleocr_document(path: Path, *, model: str) -> str:
+    if os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL"):
+        from .model_runner import ModelRunnerClient
+
+        payload = ModelRunnerClient().ocr_file(path, model=model, document=True)
+        return str(payload.get("text") or "")
+    from .model_runner import _ocr_document_with_paddle
+
+    return _ocr_document_with_paddle(str(path), model=model)
+
+
 def _run_paddleocr_image(path: Path, *, model: str) -> str:
+    if _is_paddleocr_document_model(model):
+        raise ValueError("PaddleOCR-VL document OCR must use the document OCR pipeline")
     if os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL"):
         from .model_runner import ModelRunnerClient
 

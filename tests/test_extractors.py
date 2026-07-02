@@ -1118,6 +1118,53 @@ def test_run_paddleocr_image_configures_onnxruntime_before_importing_paddleocr(m
     assert events[:2] == ["configure-ort", "import-paddleocr"]
 
 
+def test_pdf_ocr_pages_routes_paddleocr_vl_through_document_pipeline(monkeypatch, tmp_path):
+    path = tmp_path / "scan.pdf"
+    path.write_bytes(b"%PDF scanned")
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors.shutil.which",
+        lambda command: {"pdftoppm": "C:/tools/pdftoppm.exe"}.get(command),
+    )
+
+    def fake_run(command, **_kwargs):
+        assert command[0] == "C:/tools/pdftoppm.exe"
+        output_prefix = Path(command[-1])
+        output_prefix.with_name(f"{output_prefix.name}-1.png").write_bytes(PNG_BYTES)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    simple_ocr_kwargs: list[dict[str, object]] = []
+    document_pipeline_kwargs: list[dict[str, object]] = []
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            simple_ocr_kwargs.append(kwargs)
+            if kwargs.get("ocr_version") == "PaddleOCR-VL":
+                raise AssertionError("PaddleOCR-VL must not be passed as a PaddleOCR ocr_version")
+
+    class FakeDocumentPipeline:
+        def predict(self, image_path):
+            assert Path(image_path).name == "page-1.png"
+            return [{"content": "PaddleOCR VL page text"}]
+
+    def fake_create_pipeline(**kwargs):
+        document_pipeline_kwargs.append(kwargs)
+        return FakeDocumentPipeline()
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=FakePaddleOCR))
+    monkeypatch.setitem(sys.modules, "paddlex", SimpleNamespace(create_pipeline=fake_create_pipeline))
+
+    result = extractors._ocr_pdf_pages(path, page_start=1, page_end=1, page_count=1, page_numbers=[1])
+
+    assert result.status == "completed"
+    assert result.text == "PaddleOCR VL page text"
+    assert simple_ocr_kwargs == []
+    assert document_pipeline_kwargs[0]["pipeline"] == "PaddleOCR-VL"
+
+
 def test_extract_svg_embedded_text_without_ocr_or_vision(monkeypatch, tmp_path):
     path = tmp_path / "workflow.svg"
     path.write_text(
@@ -1263,6 +1310,33 @@ def test_extract_visual_svg_blocks_when_renderer_is_missing(monkeypatch, tmp_pat
     assert result.metadata["svg"]["kind"] == "visual"
     assert result.metadata["svg_parse"]["status"] == "completed"
     assert result.metadata["svg_raster"]["status"] == "blocked_missing_dependency"
+    assert "ocr" not in result.metadata
+
+
+def test_extract_svg_size_limit_blocks_by_policy(monkeypatch, tmp_path):
+    path = tmp_path / "oversized.svg"
+    path.write_text('<svg xmlns="http://www.w3.org/2000/svg"><text>Too large</text></svg>', encoding="utf-8")
+    monkeypatch.setattr(extractors, "SVG_MAX_BYTES", 12)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_by_policy"
+    assert result.message == "SVG file exceeds readable size limit"
+    assert result.metadata["svg_parse"]["status"] == "blocked_by_policy"
+    assert result.metadata["svg_parse"]["reason"] == "svg_size_limit"
+    assert "ocr" not in result.metadata
+
+
+def test_extract_malformed_svg_blocks_invalid_source(monkeypatch, tmp_path):
+    path = tmp_path / "broken.svg"
+    path.write_bytes(b"\x00not svg xml")
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_invalid_source"
+    assert result.metadata["svg_parse"]["status"] == "blocked_invalid_source"
+    assert result.metadata["svg_parse"]["reason"] == "invalid_svg_xml"
+    assert "SVG XML parse failed" in (result.message or "")
     assert "ocr" not in result.metadata
 
 
@@ -1733,6 +1807,68 @@ def test_extract_video_samples_transition_frames_and_reuses_thumbnail_cache(monk
     assert calls == ["ffprobe", "scene"]
 
 
+def test_thumbnail_for_frame_retries_with_accurate_seek_after_empty_output(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    calls: list[list[object]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        output_path = Path(command[-1])
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        output_path.write_bytes(PNG_BYTES)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+    result = extractors._thumbnail_for_frame(path, ffmpeg="C:/tools/ffmpeg.exe", timestamp=12.345)
+
+    assert result["status"] == "completed"
+    assert result["cache_hit"] is False
+    assert result["attempts"] == 2
+    assert len(calls) == 2
+    assert calls[0].index("-ss") < calls[0].index("-i")
+    assert calls[1].index("-ss") > calls[1].index("-i")
+
+
+def test_extract_video_frames_completes_metadata_when_thumbnails_are_unavailable(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"fake media")
+    _configure_frame_sampling(monkeypatch, tmp_path, count=2, threshold=0.35)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=60), stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._thumbnail_for_frame",
+        lambda *_args, **_kwargs: {
+            "status": "failed",
+            "path": str(tmp_path / "missing.png"),
+            "cache_hit": False,
+            "message": "thumbnail file was not created",
+            "attempts": 2,
+        },
+    )
+
+    result = extractors.extract_video_frames(
+        path,
+        {"timestamps": [10.0, 20.0], "duration_seconds": 60.0, "chunks_seen": 0},
+    )
+
+    assert result.status == "metadata_only"
+    assert result.message == "thumbnail file was not created"
+    frame_sampling = result.metadata["frame_sampling"]
+    assert frame_sampling["status"] == "skipped_thumbnail_unavailable"
+    assert frame_sampling["frame_count"] == 0
+    assert frame_sampling["thumbnail_failure_count"] == 2
+
+
 def test_extract_video_reindexes_transcript_and_frame_vision_chunks(monkeypatch, tmp_path):
     path = tmp_path / "clip.mp4"
     path.write_bytes(b"fake media")
@@ -1998,7 +2134,7 @@ def test_extract_image_only_pdf_uses_pdftoppm_and_paddleocr_vl(monkeypatch, tmp_
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
-    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_document", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -2106,7 +2242,7 @@ def test_extract_large_scanned_pdf_ocr_all_pages_without_page_cap(monkeypatch, t
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
-    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_document", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_file(path, CorpusPolicy(root_path=tmp_path))
 
@@ -2141,7 +2277,7 @@ def test_extract_pdf_ocr_pages_queues_next_batch(monkeypatch, tmp_path):
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
-    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_document", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_pdf_ocr_pages(
         path,
@@ -2189,7 +2325,7 @@ def test_extract_pdf_ocr_pages_accepts_explicit_mixed_page_batches(monkeypatch, 
         raise AssertionError(command)
 
     monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
-    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_document", lambda image_path, **_kwargs: f"OCR text from {Path(image_path).stem}")
 
     result = extract_pdf_ocr_pages(
         path,
