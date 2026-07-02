@@ -619,6 +619,8 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     assert by_category["code_test"]["filters"]["relationships"] == ["test"]
     assert by_category["code_generated_suppression"]["filters"]["include_generated"] is True
     assert by_category["code_cross_root"]["filters"]["path_globs"] == ["app/*"]
+    assert by_category["code_symbol_miss"]["filters"]["file_kinds"] == ["code"]
+    assert by_category["code_symbol_miss"]["filters"]["path_globs"] == ["code_fallback.py"]
     add_root_calls = [call for call in calls if call[0] == "add_root"]
     assert add_root_calls[0][1]["include_globs"] == ["*", "**/*"]
     refresh_calls = [call for call in calls if call[0] == "refresh_semantic"]

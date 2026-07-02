@@ -276,6 +276,15 @@ def test_service_search_excludes_code_without_explicit_code_filter(monkeypatch):
     assert all(result.get("file_kind") != "code" for result in results)
 
 
+def test_mail_only_filter_does_not_exclude_code_backed_mail_manifests():
+    filters = service.normalize_retrieval_filters({"logical_kinds": ["mail"], "current_only": True})
+
+    effective = service._effective_retrieval_filters(filters)
+
+    assert effective["logical_kinds"] == ["mail"]
+    assert "_exclude_file_kinds" not in effective
+
+
 def test_service_explain_and_brief_exclude_code_without_explicit_code_filter(monkeypatch):
     captured = []
     monkeypatch.setattr(database, "search_episodes", lambda query, limit=5, **_kwargs: [])

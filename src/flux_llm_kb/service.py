@@ -1353,7 +1353,12 @@ class KnowledgeService:
                     query=f"{fallback_token} missing symbol fallback note",
                     root_name=root_name,
                     source_path="code_fallback.py",
-                    filters={"logical_kinds": ["file"], "current_only": True},
+                    filters={
+                        "logical_kinds": ["file"],
+                        "current_only": True,
+                        "file_kinds": ["code"],
+                        "path_globs": ["code_fallback.py"],
+                    },
                 ),
                 {
                     "id": "episode-brief",
@@ -4135,7 +4140,9 @@ def _validate_code_file_kind_filter(file_kinds: list[str]) -> None:
 
 def _effective_retrieval_filters(filters: dict[str, Any] | None) -> dict[str, Any]:
     effective = dict(filters) if isinstance(filters, dict) else normalize_retrieval_filters(None)
-    if not _retrieval_filters_request_code_results(effective):
+    logical_kinds = {str(value).strip().lower().replace("-", "_") for value in effective.get("logical_kinds") or []}
+    mail_only = logical_kinds == {"mail"}
+    if not mail_only and not _retrieval_filters_request_code_results(effective):
         effective[INTERNAL_EXCLUDE_FILE_KINDS_KEY] = [CODE_FILE_KIND]
     return effective
 

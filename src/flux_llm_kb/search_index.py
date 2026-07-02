@@ -34,6 +34,37 @@ def _vespa_text(value: Any) -> str:
     )
 
 
+def _vespa_filter_values(values: Iterable[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        text = _vespa_text(value).strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
+def _add_string_attribute_filter(
+    yql_filters: list[str],
+    query_params: dict[str, str],
+    *,
+    field: str,
+    param_prefix: str,
+    values: Iterable[str] | None,
+) -> None:
+    filtered_values = _vespa_filter_values(values)
+    if not filtered_values:
+        return
+    predicates: list[str] = []
+    for index, value in enumerate(filtered_values):
+        param_name = f"{param_prefix}_{index}"
+        query_params[param_name] = value
+        predicates.append(f"{field} contains @{param_name}")
+    yql_filters.append(predicates[0] if len(predicates) == 1 else f"({' or '.join(predicates)})")
+
+
 class SearchIndexError(RuntimeError):
     pass
 
@@ -167,12 +198,11 @@ class VespaSearchAdapter:
             "deleted = false",
             "canonical = true",
         ]
+        query_params: dict[str, str] = {}
         if root_name:
             yql_filters.append("root_name contains @root_name")
-        if file_kinds:
-            yql_filters.append("file_kind in @file_kinds")
-        if languages:
-            yql_filters.append("language in @languages")
+        _add_string_attribute_filter(yql_filters, query_params, field="file_kind", param_prefix="file_kind", values=file_kinds)
+        _add_string_attribute_filter(yql_filters, query_params, field="language", param_prefix="language", values=languages)
         where = " and ".join(yql_filters)
         payload: dict[str, Any] = {
             "yql": (
@@ -188,10 +218,7 @@ class VespaSearchAdapter:
         }
         if root_name:
             payload["root_name"] = root_name
-        if file_kinds:
-            payload["file_kinds"] = list(file_kinds)
-        if languages:
-            payload["languages"] = list(languages)
+        payload.update(query_params)
         response = self.http.post_json("/search/", payload)
         children = response.get("root", {}).get("children", [])
         results: list[dict[str, Any]] = []

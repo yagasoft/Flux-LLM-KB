@@ -256,8 +256,12 @@ def test_vespa_adapter_builds_hybrid_query_with_filters_and_features():
     assert payload["hits"] == 10
     assert payload["input.query(query_embedding)"] == [0.0] * 1024
     assert payload["root_name"] == "docs"
-    assert payload["file_kinds"] == ["text"]
-    assert payload["languages"] == ["markdown"]
+    assert "file_kind in @file_kinds" not in payload["yql"]
+    assert "language in @languages" not in payload["yql"]
+    assert "file_kind contains @file_kind_0" in payload["yql"]
+    assert "language contains @language_0" in payload["yql"]
+    assert payload["file_kind_0"] == "text"
+    assert payload["language_0"] == "markdown"
     assert results[0]["match_features"]["bm25(body)"] == 3.5
 
 
@@ -776,6 +780,110 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
     assert diagnostics["vespa"]["owner_counts"] == {"asset_chunks": 1, "episodes": 1, "claims": 1}
     assert diagnostics["vespa"]["hydrated_count"] == 3
     assert diagnostics["reranker"]["input_count"] == 3
+
+
+def test_vespa_evidence_search_promotes_exact_code_symbol_matches(monkeypatch):
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def embed_batch(self, _inputs):
+            return [
+                EmbeddingResult(
+                    owner_table="query",
+                    owner_id="query",
+                    model=SNOWFLAKE_EMBEDDING_MODEL,
+                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                    vector=[1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+                    metadata={"source_hash": "query-hash"},
+                )
+            ]
+
+    class FakeAdapter:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def query(self, *_args, **_kwargs):
+            return [
+                {"owner_table": "asset_chunks", "owner_id": "chunk-module", "score": 9.0},
+                {"owner_table": "asset_chunks", "owner_id": "chunk-helper", "score": 0.2},
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return self
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeReranker:
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "int4_awq"
+        top_n = 80
+        max_passage_tokens = 1536
+
+        def __init__(self, **kwargs):
+            self.top_n = kwargs["top_n"]
+
+        def rerank(self, _query, candidates):
+            return [{**candidate, "reranker": {"score": float(10 - idx)}} for idx, candidate in enumerate(candidates)]
+
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", FakeReranker)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        database,
+        "_hydrate_corpus_candidate_details",
+        lambda *_args, **_kwargs: {
+            "chunk-module": {
+                "title": "service_impl.py::module",
+                "summary": "module marker and helper definition",
+                "raw_scores": {"vespa_hybrid": 9.0},
+                "asset_id": "asset-1",
+                "source_path": "service_impl.py",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {"primary_symbol": "module", "relationship": "definition"},
+            },
+            "chunk-helper": {
+                "title": "service_impl.py::_benchmark_private_helper",
+                "summary": "def _benchmark_private_helper(request): return request",
+                "raw_scores": {"vespa_hybrid": 0.2},
+                "asset_id": "asset-1",
+                "source_path": "service_impl.py",
+                "root_name": "repo",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+                "file_kind": "code",
+                "code": {"primary_symbol": "_benchmark_private_helper", "relationship": "definition"},
+            },
+        },
+    )
+    monkeypatch.setattr(database, "_hydrate_episode_candidate_details", lambda *_args, **_kwargs: {}, raising=False)
+    monkeypatch.setattr(database, "_hydrate_claim_candidate_details", lambda *_args, **_kwargs: {}, raising=False)
+
+    results = database.search_evidence_vespa(
+        "code marker _benchmark_private_helper",
+        limit=5,
+        root_name="repo",
+        filters={"logical_kinds": ["file"], "file_kinds": ["code"]},
+        vespa_base_url="http://vespa:8080",
+    )
+
+    assert results[0]["id"] == "chunk-helper"
+    assert "code_rank_adjustment" in results[0]["streams"]
+    assert results[0]["raw_scores"]["code_rank_adjustment"] > 0
 
 
 def test_legacy_pgvector_and_hash_embedding_code_paths_are_removed():

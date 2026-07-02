@@ -1245,6 +1245,20 @@ def search_evidence_vespa(
 
     results: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    if _filters_request_code_focus(filters):
+        corpus_stream_ids = [item_id for item_id in grouped_ids["asset_chunks"] if item_id in corpus_details]
+        corpus_ranked = _rank_corpus_candidates(
+            query,
+            streams={"vespa_hybrid": corpus_stream_ids},
+            details=corpus_details,
+            filters=filters,
+        )
+        for ranked_item in corpus_ranked:
+            payloads = _corpus_results_from_fused([ranked_item], corpus_details)
+            if not payloads:
+                continue
+            results.append({"kind": "corpus_chunk", **payloads[0]})
+            seen.add(("asset_chunks", ranked_item.item_id))
     for item in candidates:
         owner_table = str(item.get("owner_table") or "")
         owner_id = str(item.get("owner_id") or "")
@@ -1270,7 +1284,7 @@ def search_evidence_vespa(
         diagnostics["vespa"]["hydration_latency_ms"] = hydrate_elapsed_ms
     reranker = QwenReranker(top_n=min(80, max(limit, len(results))))
     rerank_started = time.perf_counter()
-    reranked = reranker.rerank(query, results)
+    reranked = _sort_code_adjusted_reranked_results(reranker.rerank(query, results))
     rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
     if diagnostics is not None:
         diagnostics["reranker"] = {
@@ -1284,6 +1298,38 @@ def search_evidence_vespa(
         }
         diagnostics["vespa"]["returned_count"] = min(limit, len(reranked))
     return reranked[:limit]
+
+
+def _sort_code_adjusted_reranked_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not any(_code_rank_adjustment_score(item) > 0 for item in results):
+        return results
+    return [
+        item
+        for _index, item in sorted(
+            enumerate(results),
+            key=lambda row: (
+                -_code_rank_adjustment_score(row[1]),
+                -_reranker_score(row[1]),
+                row[0],
+            ),
+        )
+    ]
+
+
+def _code_rank_adjustment_score(item: dict[str, Any]) -> float:
+    raw_scores = item.get("raw_scores") if isinstance(item.get("raw_scores"), dict) else {}
+    try:
+        return float(raw_scores.get("code_rank_adjustment") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _reranker_score(item: dict[str, Any]) -> float:
+    reranker = item.get("reranker") if isinstance(item.get("reranker"), dict) else {}
+    try:
+        return float(reranker.get("score") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _evidence_detail_payload(kind: str, detail: dict[str, Any], *, score: float) -> dict[str, Any]:
