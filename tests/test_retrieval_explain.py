@@ -43,10 +43,10 @@ def test_explain_search_result_uses_existing_retrieval_signals():
         "logical_kind": "file",
         "id": "chunk-1",
         "title": "architecture.md",
-        "summary": "Dashboard retrieval uses Vespa hybrid ranking and full text.",
+        "summary": "Dashboard retrieval uses Vespa RRF ranking and full text.",
         "score": 0.42,
-        "streams": ["corpus_lexical", "vespa_hybrid"],
-        "raw_scores": {"corpus_lexical": 0.9, "vespa_hybrid": 0.4},
+        "streams": ["corpus_lexical", "vespa_rrf", "vespa_lexical", "vespa_dense"],
+        "raw_scores": {"corpus_lexical": 0.9, "vespa_rrf": 0.016, "vespa_lexical": 1.2, "vespa_dense": 0.8},
         "retrieval_scope": "local",
         "retrieval_root_name": "docs",
         "source_path": "docs/architecture.md",
@@ -68,8 +68,8 @@ def test_explain_search_result_uses_existing_retrieval_signals():
     explanation = explain_search_result("vespa dashboard", item)
 
     assert explanation["score"] == 0.42
-    assert explanation["streams"] == ["corpus_lexical", "vespa_hybrid"]
-    assert explanation["raw_scores"] == {"corpus_lexical": 0.9, "vespa_hybrid": 0.4}
+    assert explanation["streams"] == ["corpus_lexical", "vespa_rrf", "vespa_lexical", "vespa_dense"]
+    assert explanation["raw_scores"] == {"corpus_lexical": 0.9, "vespa_rrf": 0.016, "vespa_lexical": 1.2, "vespa_dense": 0.8}
     assert explanation["scope"] == {"label": "local", "root_name": "docs"}
     assert explanation["corpus"] == {
         "source_path": "docs/architecture.md",
@@ -84,7 +84,7 @@ def test_explain_search_result_uses_existing_retrieval_signals():
         "factors": {
             "rank": 1,
             "rank_margin": 0.19,
-            "stream_count": 2,
+            "stream_count": 4,
             "local_scope": True,
             "exact_signal": False,
             "lifecycle_score": 0.91,

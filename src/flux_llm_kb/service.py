@@ -5133,7 +5133,7 @@ def _is_strong_cross_workspace_evidence(item: dict[str, Any]) -> bool:
     streams = {str(stream) for stream in item.get("streams", [])}
     if any("lexical" in stream or "fuzzy" in stream for stream in streams):
         return True
-    if "vespa_hybrid" in streams:
+    if {"vespa_hybrid", "vespa_rrf", "vespa_dense"}.intersection(streams):
         return float(item.get("score") or 0.0) >= STRONG_SEMANTIC_MIN_SCORE
     return False
 

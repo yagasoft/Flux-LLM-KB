@@ -526,6 +526,53 @@ def test_service_explain_surfaces_semantic_duplicate_suppression_without_raw_dup
     assert "raw duplicate" not in json.dumps(payload).lower()
 
 
+def test_service_explain_degrades_to_postgres_when_vespa_fails(monkeypatch):
+    monkeypatch.setattr(service, "_configured_retrieval_search_engine", lambda: "vespa")
+    monkeypatch.setattr(service, "_configured_vespa_base_url", lambda: "http://vespa:8080")
+    monkeypatch.setattr(database, "search_episodes", lambda *_args, **_kwargs: [])
+
+    def fail_vespa(*_args, **_kwargs):
+        raise RuntimeError("vespa unavailable")
+
+    def fake_postgres_fallback(query, *, diagnostics=None, **_kwargs):
+        if diagnostics is not None:
+            diagnostics.setdefault("streams", {})["postgres_lexical_diagnostic"] = {
+                "duration_ms": 1,
+                "rows": 1,
+                "plan": "degraded_tsquery_only",
+            }
+        return [
+            {
+                "id": "chunk-fallback",
+                "asset_id": "asset-fallback",
+                "title": "Fallback note",
+                "summary": "Postgres diagnostic fallback still returns corpus evidence.",
+                "score": 0.4,
+                "streams": ["postgres_lexical_diagnostic"],
+                "raw_scores": {"postgres_lexical_diagnostic": 0.4},
+                "source_path": "docs/fallback.md",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+            }
+        ]
+
+    monkeypatch.setattr(database, "search_evidence_vespa", fail_vespa)
+    monkeypatch.setattr(database, "search_corpus_chunks_vespa", fail_vespa)
+    monkeypatch.setattr(database, "search_corpus_chunks_postgres_diagnostic", fake_postgres_fallback)
+
+    payload = KnowledgeService().explain("fallback evidence", limit=5, token_budget=100, scope_mode="global")
+
+    assert payload["results"][0]["id"] == "chunk-fallback"
+    corpus_diagnostics = payload["retrieval_timing"]["scopes"]["global"]["corpus"]
+    assert corpus_diagnostics["degraded_mode"] == {
+        "reason": "vespa unavailable",
+        "search_engine": "vespa",
+        "fallback": "postgres_lexical_diagnostic",
+    }
+    assert corpus_diagnostics["streams"]["postgres_lexical_diagnostic"]["plan"] == "degraded_tsquery_only"
+
+
 def test_service_semantic_duplicate_methods_forward_to_database(monkeypatch):
     calls = {}
 

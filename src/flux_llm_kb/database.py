@@ -49,6 +49,15 @@ DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS = 86400
 DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE = 500
 _CODE_EXACT_SYMBOL_BOOST = 0.10
 _CODE_IMPLEMENTATION_INTENT_BOOST = 0.025
+_VESPA_RRF_K = 60
+_VESPA_RRF_RANK_PROFILE = "hybrid_rrf"
+_VESPA_RRF_QUERY_MODE = "vespa_hybrid_rrf"
+_VESPA_RRF_STREAM = "vespa_rrf"
+_VESPA_LEXICAL_STREAM = "vespa_lexical"
+_VESPA_DENSE_STREAM = "vespa_dense"
+_VESPA_VALID_OWNER_TABLES = {"asset_chunks", "episodes", "claims"}
+_VESPA_BM25_FEATURES = ("bm25(title)", "bm25(body)", "bm25(source_path)", "bm25(symbols)")
+_VESPA_DENSE_FEATURES = ("dense_score", "closeness(field, embedding)", "closeness(field,embedding)")
 _CODE_IMPLEMENTATION_RELATIONSHIPS = {"definition", "route", "config", "migration"}
 _CODE_NON_IMPLEMENTATION_INTENT_TERMS = {
     "call",
@@ -999,6 +1008,162 @@ def search_corpus_chunks_postgres_diagnostic(
     return _corpus_results_from_fused(fused[:limit], details)
 
 
+def _vespa_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _vespa_match_feature(match_features: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = _vespa_float(match_features.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def _vespa_lexical_score(match_features: dict[str, Any]) -> float:
+    direct = _vespa_match_feature(match_features, "lexical_score")
+    if direct is not None:
+        return max(0.0, direct)
+    total = 0.0
+    found = False
+    for feature in _VESPA_BM25_FEATURES:
+        value = _vespa_match_feature(match_features, feature)
+        if value is None:
+            continue
+        found = True
+        total += value
+    return max(0.0, total) if found else 0.0
+
+
+def _vespa_dense_score(match_features: dict[str, Any]) -> float:
+    value = _vespa_match_feature(match_features, *_VESPA_DENSE_FEATURES)
+    return max(0.0, value or 0.0)
+
+
+def _vespa_streams_from_raw_scores(raw_scores: dict[str, Any], extra_streams: Iterable[str] | None = None) -> list[str]:
+    streams: list[str] = []
+    for stream in (_VESPA_RRF_STREAM, _VESPA_LEXICAL_STREAM, _VESPA_DENSE_STREAM, "vespa_hybrid"):
+        if stream in raw_scores and stream not in streams:
+            streams.append(stream)
+    for stream in extra_streams or ():
+        normalized = str(stream)
+        if normalized and normalized not in streams:
+            streams.append(normalized)
+    for stream in sorted(str(stream) for stream in raw_scores):
+        if stream not in streams:
+            streams.append(stream)
+    return streams
+
+
+def _vespa_candidate_signals(candidate: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+    match_features = candidate.get("match_features") if isinstance(candidate.get("match_features"), dict) else {}
+    raw_scores = {_VESPA_RRF_STREAM: float(candidate.get("score") or 0.0)}
+    lexical_score = _vespa_lexical_score(match_features)
+    dense_score = _vespa_dense_score(match_features)
+    if lexical_score > 0:
+        raw_scores[_VESPA_LEXICAL_STREAM] = lexical_score
+    if dense_score > 0:
+        raw_scores[_VESPA_DENSE_STREAM] = dense_score
+    return raw_scores, _vespa_streams_from_raw_scores(raw_scores)
+
+
+def _merge_vespa_rrf_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for candidate in candidates:
+        owner_table = str(candidate.get("owner_table") or "")
+        owner_id = str(candidate.get("owner_id") or "")
+        if owner_table not in _VESPA_VALID_OWNER_TABLES or not owner_id:
+            continue
+        raw_scores, streams = _vespa_candidate_signals(candidate)
+        score = raw_scores[_VESPA_RRF_STREAM]
+        key = (owner_table, owner_id)
+        if key not in merged:
+            row = dict(candidate)
+            row["score"] = score
+            row["raw_scores"] = raw_scores
+            row["streams"] = streams
+            row["match_features"] = dict(candidate.get("match_features") or {})
+            merged[key] = row
+            order.append(key)
+            continue
+        row = merged[key]
+        if score > float(row.get("score") or 0.0):
+            for field in ("title", "root_name", "source_path"):
+                if candidate.get(field):
+                    row[field] = candidate[field]
+            row["score"] = score
+        row_features = row.setdefault("match_features", {})
+        if isinstance(row_features, dict):
+            row_features.update(candidate.get("match_features") or {})
+        row_raw_scores = row.setdefault("raw_scores", {})
+        for stream, value in raw_scores.items():
+            row_raw_scores[stream] = max(float(row_raw_scores.get(stream) or 0.0), value)
+        row["streams"] = _vespa_streams_from_raw_scores(row_raw_scores, [*row.get("streams", []), *streams])
+    order_index = {key: index for index, key in enumerate(order)}
+    return sorted(
+        (merged[key] for key in order),
+        key=lambda row: (
+            -float(row.get("score") or 0.0),
+            order_index.get((str(row.get("owner_table") or ""), str(row.get("owner_id") or "")), 0),
+        ),
+    )
+
+
+def _vespa_stream_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    lexical = 0
+    dense = 0
+    overlap = 0
+    for candidate in candidates:
+        raw_scores = candidate.get("raw_scores") if isinstance(candidate.get("raw_scores"), dict) else {}
+        has_lexical = _VESPA_LEXICAL_STREAM in raw_scores
+        has_dense = _VESPA_DENSE_STREAM in raw_scores
+        lexical += int(has_lexical)
+        dense += int(has_dense)
+        overlap += int(has_lexical and has_dense)
+    return {"lexical": lexical, "dense": dense, "overlap": overlap}
+
+
+def _vespa_owner_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    owner_counts: dict[str, int] = {}
+    for candidate in candidates:
+        owner_table = str(candidate.get("owner_table") or "")
+        if owner_table not in _VESPA_VALID_OWNER_TABLES:
+            continue
+        owner_counts[owner_table] = owner_counts.get(owner_table, 0) + 1
+    return owner_counts
+
+
+def _vespa_grouped_ids(candidates: list[dict[str, Any]]) -> dict[str, list[str]]:
+    grouped_ids: dict[str, list[str]] = {"asset_chunks": [], "episodes": [], "claims": []}
+    for candidate in candidates:
+        owner_table = str(candidate.get("owner_table") or "")
+        owner_id = str(candidate.get("owner_id") or "")
+        if owner_table in grouped_ids and owner_id:
+            grouped_ids[owner_table].append(owner_id)
+    return grouped_ids
+
+
+def _vespa_raw_scores_by_owner(candidates: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    return {
+        str(candidate.get("owner_id")): dict(candidate.get("raw_scores") or {})
+        for candidate in candidates
+        if candidate.get("owner_id")
+    }
+
+
+def _with_vespa_signal_streams(item: dict[str, Any]) -> dict[str, Any]:
+    raw_scores = item.get("raw_scores") if isinstance(item.get("raw_scores"), dict) else {}
+    if not any(stream in raw_scores for stream in (_VESPA_RRF_STREAM, _VESPA_LEXICAL_STREAM, _VESPA_DENSE_STREAM)):
+        return item
+    result = dict(item)
+    result["streams"] = _vespa_streams_from_raw_scores(raw_scores, result.get("streams", []))
+    return result
+
+
 def search_corpus_chunks_vespa(
     query: str,
     *,
@@ -1032,8 +1197,8 @@ def search_corpus_chunks_vespa(
         ]
     )[0]
     embedding_elapsed_ms = max(0, int((time.perf_counter() - embedding_started) * 1000))
-    rank_profile = "hybrid"
-    candidate_limit = max(limit * 8, 80)
+    rank_profile = _VESPA_RRF_RANK_PROFILE
+    candidate_limit = min(max(limit * 8, 80), 200)
     query_started = time.perf_counter()
     resolved_vespa_base_url = vespa_base_url or "http://127.0.0.1:8080"
     candidates = VespaSearchAdapter(base_url=resolved_vespa_base_url).query(
@@ -1046,12 +1211,14 @@ def search_corpus_chunks_vespa(
         rank_profile=rank_profile,
     )
     query_elapsed_ms = max(0, int((time.perf_counter() - query_started) * 1000))
+    fused_candidates = _merge_vespa_rrf_candidates(candidates)
     _record_corpus_stream_diagnostics(
         diagnostics,
-        "vespa_hybrid",
+        _VESPA_RRF_STREAM,
         started,
-        rows=len(candidates),
-        plan="vespa_hybrid_bm25_dense",
+        rows=len(fused_candidates),
+        plan="vespa_hybrid_rrf_candidates",
+        candidate_limit=candidate_limit,
     )
     match_feature_keys = sorted(
         {
@@ -1066,17 +1233,25 @@ def search_corpus_chunks_vespa(
             "search_engine": "vespa",
             "base_url": resolved_vespa_base_url,
             "rank_profile": rank_profile,
+            "query_mode": _VESPA_RRF_QUERY_MODE,
+            "rrf_k": _VESPA_RRF_K,
             "candidate_limit": candidate_limit,
             "candidate_count": len(candidates),
+            "fused_candidate_count": len(fused_candidates),
+            "stream_counts": _vespa_stream_counts(fused_candidates),
             "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
             "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
             "embedding_latency_ms": embedding_elapsed_ms,
             "query_latency_ms": query_elapsed_ms,
             "match_feature_keys": match_feature_keys,
         }
-    candidate_ids = [str(item.get("owner_id") or "") for item in candidates if str(item.get("owner_table") or "") == "asset_chunks"]
-    raw_scores = {str(item.get("owner_id")): {"vespa_hybrid": float(item.get("score") or 0.0)} for item in candidates}
-    streams = {"vespa_hybrid": candidate_ids}
+    candidate_ids = [
+        str(item.get("owner_id") or "")
+        for item in fused_candidates
+        if str(item.get("owner_table") or "") == "asset_chunks"
+    ]
+    raw_scores = _vespa_raw_scores_by_owner(fused_candidates)
+    streams = {_VESPA_RRF_STREAM: candidate_ids}
     if not candidate_ids:
         if diagnostics is not None:
             diagnostics["vespa"]["hydrated_count"] = 0
@@ -1101,7 +1276,10 @@ def search_corpus_chunks_vespa(
         diagnostics["vespa"]["hydrated_count"] = len(details)
         diagnostics["vespa"]["hydration_latency_ms"] = hydrate_elapsed_ms
     fused = _rank_corpus_candidates(query, streams=streams, details=details, filters=filters)
-    hydrated = _corpus_results_from_fused(fused[: max(limit, min(len(fused), 80))], details)
+    hydrated = [
+        _with_vespa_signal_streams(item)
+        for item in _corpus_results_from_fused(fused[: max(limit, min(len(fused), 80))], details)
+    ]
     reranker = QwenReranker(top_n=min(80, max(limit, len(hydrated))))
     rerank_started = time.perf_counter()
     reranked = reranker.rerank(query, hydrated)
@@ -1153,8 +1331,8 @@ def search_evidence_vespa(
         ]
     )[0]
     embedding_elapsed_ms = max(0, int((time.perf_counter() - embedding_started) * 1000))
-    rank_profile = "hybrid"
-    candidate_limit = max(limit * 8, 80)
+    rank_profile = _VESPA_RRF_RANK_PROFILE
+    candidate_limit = min(max(limit * 8, 80), 200)
     query_started = time.perf_counter()
     resolved_vespa_base_url = vespa_base_url or "http://127.0.0.1:8080"
     candidates = VespaSearchAdapter(base_url=resolved_vespa_base_url).query(
@@ -1167,14 +1345,15 @@ def search_evidence_vespa(
         rank_profile=rank_profile,
     )
     query_elapsed_ms = max(0, int((time.perf_counter() - query_started) * 1000))
+    fused_candidates = _merge_vespa_rrf_candidates(candidates)
     _record_corpus_stream_diagnostics(
         diagnostics,
-        "vespa_hybrid",
+        _VESPA_RRF_STREAM,
         started,
-        rows=len(candidates),
-        plan="vespa_hybrid_bm25_dense_all_evidence",
+        rows=len(fused_candidates),
+        plan="vespa_hybrid_rrf_all_evidence",
+        candidate_limit=candidate_limit,
     )
-    owner_counts: dict[str, int] = {}
     match_feature_keys = sorted(
         {
             str(key)
@@ -1183,23 +1362,20 @@ def search_evidence_vespa(
             for key in item["match_features"].keys()
         }
     )
-    grouped_ids: dict[str, list[str]] = {"asset_chunks": [], "episodes": [], "claims": []}
-    raw_scores: dict[str, dict[str, float]] = {}
-    for item in candidates:
-        owner_table = str(item.get("owner_table") or "")
-        owner_id = str(item.get("owner_id") or "")
-        if owner_table not in grouped_ids or not owner_id:
-            continue
-        owner_counts[owner_table] = owner_counts.get(owner_table, 0) + 1
-        grouped_ids[owner_table].append(owner_id)
-        raw_scores[owner_id] = {"vespa_hybrid": float(item.get("score") or 0.0)}
+    owner_counts = _vespa_owner_counts(fused_candidates)
+    grouped_ids = _vespa_grouped_ids(fused_candidates)
+    raw_scores = _vespa_raw_scores_by_owner(fused_candidates)
     if diagnostics is not None:
         diagnostics["vespa"] = {
             "search_engine": "vespa",
             "base_url": resolved_vespa_base_url,
             "rank_profile": rank_profile,
+            "query_mode": _VESPA_RRF_QUERY_MODE,
+            "rrf_k": _VESPA_RRF_K,
             "candidate_limit": candidate_limit,
             "candidate_count": len(candidates),
+            "fused_candidate_count": len(fused_candidates),
+            "stream_counts": _vespa_stream_counts(fused_candidates),
             "owner_counts": owner_counts,
             "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
             "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
@@ -1249,7 +1425,7 @@ def search_evidence_vespa(
         corpus_stream_ids = [item_id for item_id in grouped_ids["asset_chunks"] if item_id in corpus_details]
         corpus_ranked = _rank_corpus_candidates(
             query,
-            streams={"vespa_hybrid": corpus_stream_ids},
+            streams={_VESPA_RRF_STREAM: corpus_stream_ids},
             details=corpus_details,
             filters=filters,
         )
@@ -1257,9 +1433,9 @@ def search_evidence_vespa(
             payloads = _corpus_results_from_fused([ranked_item], corpus_details)
             if not payloads:
                 continue
-            results.append({"kind": "corpus_chunk", **payloads[0]})
+            results.append({"kind": "corpus_chunk", **_with_vespa_signal_streams(payloads[0])})
             seen.add(("asset_chunks", ranked_item.item_id))
-    for item in candidates:
+    for item in fused_candidates:
         owner_table = str(item.get("owner_table") or "")
         owner_id = str(item.get("owner_id") or "")
         key = (owner_table, owner_id)
@@ -1269,15 +1445,15 @@ def search_evidence_vespa(
         score = float(item.get("score") or 0.0)
         if owner_table == "asset_chunks" and owner_id in corpus_details:
             payloads = _corpus_results_from_fused(
-                [RankedItem(item_id=owner_id, score=score, streams=("vespa_hybrid",))],
+                [RankedItem(item_id=owner_id, score=score, streams=tuple(item.get("streams") or (_VESPA_RRF_STREAM,)))],
                 corpus_details,
             )
             if payloads:
-                results.append({"kind": "corpus_chunk", **payloads[0]})
+                results.append({"kind": "corpus_chunk", **_with_vespa_signal_streams(payloads[0])})
         elif owner_table == "episodes" and owner_id in episode_details:
-            results.append(_evidence_detail_payload("episode", episode_details[owner_id], score=score))
+            results.append(_evidence_detail_payload("episode", episode_details[owner_id], score=score, streams=item.get("streams")))
         elif owner_table == "claims" and owner_id in claim_details:
-            results.append(_evidence_detail_payload("claim", claim_details[owner_id], score=score))
+            results.append(_evidence_detail_payload("claim", claim_details[owner_id], score=score, streams=item.get("streams")))
 
     if diagnostics is not None:
         diagnostics["vespa"]["hydrated_count"] = len(results)
@@ -1332,15 +1508,16 @@ def _reranker_score(item: dict[str, Any]) -> float:
         return 0.0
 
 
-def _evidence_detail_payload(kind: str, detail: dict[str, Any], *, score: float) -> dict[str, Any]:
+def _evidence_detail_payload(kind: str, detail: dict[str, Any], *, score: float, streams: Iterable[str] | None = None) -> dict[str, Any]:
+    raw_scores = detail.get("raw_scores") if isinstance(detail.get("raw_scores"), dict) else {}
     payload = {
         "kind": kind,
         "id": detail["id"],
         "title": detail["title"],
         "summary": detail["summary"],
         "score": score,
-        "streams": ["vespa_hybrid"],
-        "raw_scores": detail.get("raw_scores") or {},
+        "streams": _vespa_streams_from_raw_scores(raw_scores, streams),
+        "raw_scores": raw_scores,
     }
     for key in ("root_name", "source_path", "metadata", "lifecycle", "graph", "semantic_duplicate_cluster"):
         if key in detail:
@@ -10086,7 +10263,7 @@ def _is_code_corpus_detail(detail: dict[str, Any]) -> bool:
 def _non_code_text_quality(detail: dict[str, Any]) -> float:
     raw_scores = detail.get("raw_scores") if isinstance(detail.get("raw_scores"), dict) else {}
     quality = 0.0
-    for stream in ("corpus_lexical", "corpus_fuzzy", "mail_sidecar", "vespa_hybrid"):
+    for stream in ("corpus_lexical", "corpus_fuzzy", "mail_sidecar", _VESPA_RRF_STREAM, _VESPA_LEXICAL_STREAM, "vespa_hybrid"):
         try:
             quality = max(quality, float(raw_scores.get(stream) or 0.0))
         except (TypeError, ValueError):

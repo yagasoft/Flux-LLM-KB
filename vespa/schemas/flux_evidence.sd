@@ -96,7 +96,7 @@ schema flux_evidence {
         match-features: closeness(field, embedding)
     }
 
-    rank-profile hybrid inherits default {
+    rank-profile hybrid_weighted inherits default {
         inputs {
             query(query_embedding) tensor<float>(x[1024])
         }
@@ -108,5 +108,28 @@ schema flux_evidence {
             rerank-count: 200
         }
         match-features: bm25(title) bm25(body) bm25(source_path) bm25(symbols) closeness(field, embedding) firstPhase
+    }
+
+    rank-profile hybrid_rrf inherits default {
+        inputs {
+            query(query_embedding) tensor<float>(x[1024])
+        }
+        function lexical_score() {
+            expression: bm25(title) + bm25(body) + bm25(source_path) + bm25(symbols)
+        }
+        function dense_score() {
+            expression: closeness(field, embedding)
+        }
+        first-phase {
+            expression: 0.55 * dense_score + 0.45 * lexical_score
+        }
+        global-phase {
+            expression: reciprocal_rank(lexical_score, 60) + reciprocal_rank(dense_score, 60)
+            rerank-count: 200
+        }
+        match-features: bm25(title) bm25(body) bm25(source_path) bm25(symbols) lexical_score dense_score closeness(field, embedding) firstPhase
+    }
+
+    rank-profile hybrid inherits hybrid_rrf {
     }
 }

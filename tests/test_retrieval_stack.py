@@ -132,6 +132,58 @@ def test_vespa_document_builder_removes_control_characters_from_text_fields():
     assert fields["symbols"] == ["bad symbol", "good.symbol"]
 
 
+def test_vespa_adapter_allows_rrf_rank_profile():
+    requests = []
+
+    class FakeHttp:
+        def post_json(self, path, payload):
+            requests.append((path, payload))
+            return {"root": {"children": []}}
+
+    adapter = VespaSearchAdapter(base_url="http://vespa:8080", http=FakeHttp())
+
+    adapter.query(
+        "hybrid retrieval",
+        embedding=[1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+        rank_profile="hybrid_rrf",
+        limit=20,
+    )
+
+    assert requests[0][0] == "/search/"
+    assert requests[0][1]["ranking.profile"] == "hybrid_rrf"
+    assert "nearestNeighbor(embedding, query_embedding) or userQuery()" in requests[0][1]["yql"]
+
+
+def test_vespa_schema_defines_native_rrf_profile_and_weighted_comparison():
+    schema = Path("vespa/schemas/flux_evidence.sd").read_text(encoding="utf-8")
+
+    assert "rank-profile hybrid_rrf" in schema
+    assert "function lexical_score()" in schema
+    assert "bm25(title) + bm25(body) + bm25(source_path) + bm25(symbols)" in schema
+    assert "function dense_score()" in schema
+    assert "closeness(field, embedding)" in schema
+    assert "global-phase" in schema
+    assert "reciprocal_rank(lexical_score, 60) + reciprocal_rank(dense_score, 60)" in schema
+    assert "rerank-count: 200" in schema
+    assert "rank-profile hybrid_weighted" in schema
+
+
+def test_vespa_rrf_candidate_merge_orders_by_fused_score():
+    candidates = [
+        {"owner_table": "asset_chunks", "owner_id": "chunk-low", "score": 0.010, "match_features": {"lexical_score": 5.0}},
+        {"owner_table": "episodes", "owner_id": "episode-high", "score": 0.030, "match_features": {"dense_score": 0.9}},
+        {"owner_table": "claims", "owner_id": "claim-mid", "score": 0.020, "match_features": {"lexical_score": 2.0, "dense_score": 0.5}},
+    ]
+
+    merged = database._merge_vespa_rrf_candidates(candidates)
+
+    assert [(item["owner_table"], item["owner_id"]) for item in merged] == [
+        ("episodes", "episode-high"),
+        ("claims", "claim-mid"),
+        ("asset_chunks", "chunk-low"),
+    ]
+
+
 def test_vespa_adapter_feeds_full_document_with_post_put_payload():
     class FakeFeedHttp:
         def __init__(self):
@@ -567,6 +619,8 @@ def test_search_index_fetch_all_owner_class_does_not_starve_episodes_or_claims()
 
 
 def test_vespa_search_records_explain_diagnostics(monkeypatch):
+    vespa_queries = []
+
     class FakeProvider:
         def __init__(self, **_kwargs):
             pass
@@ -587,15 +641,16 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
         def __init__(self, base_url):
             self.base_url = base_url
 
-        def query(self, *_args, **_kwargs):
+        def query(self, *_args, **kwargs):
+            vespa_queries.append(kwargs)
             return [
                 {
                     "owner_table": "asset_chunks",
                     "owner_id": "chunk-1",
-                    "score": 2.5,
+                    "score": 0.016,
                     "match_features": {
-                        "bm25(body)": 1.2,
-                        "closeness(field,embedding)": 0.8,
+                        "lexical_score": 1.2,
+                        "dense_score": 0.8,
                     },
                 }
             ]
@@ -637,29 +692,43 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
             "chunk-1": {
                 "title": "Doc",
                 "summary": "Private text is not copied into diagnostics.",
-                "raw_scores": {"vespa_hybrid": 2.5},
+                "raw_scores": {"vespa_rrf": 0.016, "vespa_lexical": 1.2, "vespa_dense": 0.8},
             }
         },
     )
     monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(database, "_rank_corpus_candidates", lambda *_args, **_kwargs: [SimpleNamespace(item_id="chunk-1", score=2.5)])
+    monkeypatch.setattr(database, "_rank_corpus_candidates", lambda *_args, **_kwargs: [SimpleNamespace(item_id="chunk-1", score=0.016)])
     monkeypatch.setattr(
         database,
         "_corpus_results_from_fused",
-        lambda _fused, _details: [{"id": "chunk-1", "title": "Doc", "summary": "Private text", "score": 2.5, "raw_scores": {"vespa_hybrid": 2.5}}],
+        lambda _fused, _details: [
+            {
+                "id": "chunk-1",
+                "title": "Doc",
+                "summary": "Private text",
+                "score": 0.016,
+                "raw_scores": {"vespa_rrf": 0.016, "vespa_lexical": 1.2, "vespa_dense": 0.8},
+            }
+        ],
     )
     diagnostics: dict[str, object] = {}
 
     results = database.search_corpus_chunks_vespa("quality", limit=3, root_name="docs", vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
 
     assert len(results) == 1
-    assert diagnostics["vespa"]["rank_profile"] == "hybrid"
+    assert vespa_queries[0]["rank_profile"] == "hybrid_rrf"
+    assert diagnostics["vespa"]["rank_profile"] == "hybrid_rrf"
+    assert diagnostics["vespa"]["query_mode"] == "vespa_hybrid_rrf"
+    assert diagnostics["vespa"]["rrf_k"] == 60
     assert diagnostics["vespa"]["candidate_count"] == 1
+    assert diagnostics["vespa"]["fused_candidate_count"] == 1
+    assert diagnostics["vespa"]["stream_counts"] == {"lexical": 1, "dense": 1, "overlap": 1}
     assert diagnostics["vespa"]["hydrated_count"] == 1
-    assert diagnostics["vespa"]["match_feature_keys"] == ["bm25(body)", "closeness(field,embedding)"]
+    assert diagnostics["vespa"]["match_feature_keys"] == ["dense_score", "lexical_score"]
     assert diagnostics["reranker"]["model"] == "Qwen/Qwen3-Reranker-4B"
     assert diagnostics["reranker"]["quantization"] == "int4_awq"
     assert diagnostics["reranker"]["input_count"] == 1
+    assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
 
 
 def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypatch):
@@ -685,9 +754,9 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
 
         def query(self, *_args, **_kwargs):
             return [
-                {"owner_table": "asset_chunks", "owner_id": "chunk-1", "score": 3.0, "match_features": {"bm25(body)": 1.0}},
-                {"owner_table": "episodes", "owner_id": "episode-1", "score": 2.0, "match_features": {"bm25(body)": 0.8}},
-                {"owner_table": "claims", "owner_id": "claim-1", "score": 1.5, "match_features": {"bm25(body)": 0.5}},
+                {"owner_table": "asset_chunks", "owner_id": "chunk-1", "score": 0.018, "match_features": {"lexical_score": 1.0, "dense_score": 0.7}},
+                {"owner_table": "episodes", "owner_id": "episode-1", "score": 0.015, "match_features": {"lexical_score": 0.8}},
+                {"owner_table": "claims", "owner_id": "claim-1", "score": 0.014, "match_features": {"dense_score": 0.6}},
             ]
 
     class FakeConnection:
@@ -728,7 +797,7 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
             "chunk-1": {
                 "title": "Doc",
                 "summary": "Corpus chunk text",
-                "raw_scores": {"vespa_hybrid": 3.0},
+                "raw_scores": {"vespa_rrf": 0.018, "vespa_lexical": 1.0, "vespa_dense": 0.7},
                 "asset_id": "asset-1",
                 "source_path": "docs/doc.md",
                 "root_name": "docs",
@@ -746,7 +815,7 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
                 "kind": "episode",
                 "title": "Episode",
                 "summary": "Episode text",
-                "raw_scores": {"vespa_hybrid": 2.0},
+                "raw_scores": {"vespa_rrf": 0.015, "vespa_lexical": 0.8},
             }
         },
         raising=False,
@@ -760,7 +829,7 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
                 "kind": "claim",
                 "title": "Claim",
                 "summary": "Claim text",
-                "raw_scores": {"vespa_hybrid": 1.5},
+                "raw_scores": {"vespa_rrf": 0.014, "vespa_dense": 0.6},
             }
         },
         raising=False,
@@ -778,8 +847,109 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
 
     assert [result["kind"] for result in results] == ["corpus_chunk", "episode", "claim"]
     assert diagnostics["vespa"]["owner_counts"] == {"asset_chunks": 1, "episodes": 1, "claims": 1}
+    assert diagnostics["vespa"]["stream_counts"] == {"lexical": 2, "dense": 2, "overlap": 1}
     assert diagnostics["vespa"]["hydrated_count"] == 3
     assert diagnostics["reranker"]["input_count"] == 3
+    assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
+    assert results[1]["streams"] == ["vespa_rrf", "vespa_lexical"]
+    assert results[2]["streams"] == ["vespa_rrf", "vespa_dense"]
+
+
+def test_vespa_evidence_search_merges_duplicate_rrf_stream_signals(monkeypatch):
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def embed_batch(self, _inputs):
+            return [
+                EmbeddingResult(
+                    owner_table="query",
+                    owner_id="query",
+                    model=SNOWFLAKE_EMBEDDING_MODEL,
+                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                    vector=[1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+                    metadata={"source_hash": "query-hash"},
+                )
+            ]
+
+    class FakeAdapter:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def query(self, *_args, **_kwargs):
+            return [
+                {"owner_table": "asset_chunks", "owner_id": "chunk-1", "score": 0.012, "match_features": {"lexical_score": 4.0}},
+                {"owner_table": "asset_chunks", "owner_id": "chunk-1", "score": 0.016, "match_features": {"dense_score": 0.82}},
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return self
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeReranker:
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "int4_awq"
+        top_n = 80
+        max_passage_tokens = 1536
+
+        def __init__(self, **kwargs):
+            self.top_n = kwargs["top_n"]
+
+        def rerank(self, _query, candidates):
+            return [{**candidate, "reranker": {"score": 9.0}} for candidate in candidates]
+
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", FakeReranker)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        database,
+        "_hydrate_corpus_candidate_details",
+        lambda *_args, **_kwargs: {
+            "chunk-1": {
+                "title": "Doc",
+                "summary": "Corpus chunk text",
+                "raw_scores": {"vespa_rrf": 0.016, "vespa_lexical": 4.0, "vespa_dense": 0.82},
+                "asset_id": "asset-1",
+                "source_path": "docs/doc.md",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+            }
+        },
+    )
+    monkeypatch.setattr(database, "_hydrate_episode_candidate_details", lambda *_args, **_kwargs: {}, raising=False)
+    monkeypatch.setattr(database, "_hydrate_claim_candidate_details", lambda *_args, **_kwargs: {}, raising=False)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_evidence_vespa(
+        "quality",
+        limit=5,
+        root_name="docs",
+        filters={},
+        vespa_base_url="http://vespa:8080",
+        diagnostics=diagnostics,
+    )
+
+    assert len(results) == 1
+    assert results[0]["id"] == "chunk-1"
+    assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
+    assert results[0]["raw_scores"] == {"vespa_rrf": 0.016, "vespa_lexical": 4.0, "vespa_dense": 0.82}
+    assert diagnostics["vespa"]["candidate_count"] == 2
+    assert diagnostics["vespa"]["fused_candidate_count"] == 1
+    assert diagnostics["vespa"]["stream_counts"] == {"lexical": 1, "dense": 1, "overlap": 1}
+    assert diagnostics["reranker"]["input_count"] == 1
 
 
 def test_vespa_evidence_search_promotes_exact_code_symbol_matches(monkeypatch):
