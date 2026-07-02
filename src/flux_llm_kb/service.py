@@ -1020,8 +1020,9 @@ class KnowledgeService:
                         errors = "; ".join(str(item) for item in (cleanup_index_result.get("errors") or [])[:3])
                         raise RuntimeError(
                             f"retrieval benchmark search-index cleanup failed: {errors or cleanup_index_result['failed']}"
-                        )
+                    )
                     database._delete_search_index_records_for_root(root_name=root_name, statuses=["deleted"])
+                    database._delete_semantic_duplicate_clusters_for_root(root_name=root_name)
             finally:
                 temp_dir.cleanup()
 

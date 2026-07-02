@@ -10512,6 +10512,17 @@ def _retire_semantic_duplicate_clusters(cur: Any, *, memory_class: str, root_nam
     return int(getattr(cur, "rowcount", 0) or 0)
 
 
+def _delete_semantic_duplicate_clusters_for_root(*, root_name: str, url: str | None = None) -> int:
+    normalized_root = str(root_name or "").strip()
+    if not normalized_root:
+        raise ValueError("root_name is required")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM semantic_duplicate_clusters WHERE root_name = %s", (normalized_root,))
+            return int(cur.rowcount or 0)
+
+
 def _fetch_semantic_duplicate_candidates(
     cur: Any,
     *,

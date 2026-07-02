@@ -564,6 +564,12 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     )
     monkeypatch.setattr(
         database,
+        "_delete_semantic_duplicate_clusters_for_root",
+        lambda **kwargs: calls.append(("delete_semantic_duplicate_clusters", kwargs)) or 3,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
         "list_source_assets",
         lambda **kwargs: [{"id": f"asset-{kwargs['path']}", "path": kwargs["path"], "canonical_asset_id": None}],
     )
@@ -645,4 +651,7 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     assert delete_index_calls
     assert delete_index_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
     assert delete_index_calls[0][1]["statuses"] == ["deleted"]
+    delete_semantic_calls = [call for call in calls if call[0] == "delete_semantic_duplicate_clusters"]
+    assert delete_semantic_calls
+    assert delete_semantic_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
     assert any(call[0] == "delete_root" for call in calls)
