@@ -436,7 +436,7 @@ def test_dockerfile_installs_practical_extractor_pack():
     ):
         assert package in dockerfile
     assert "tesseract-ocr" not in dockerfile
-    for dependency in ("defusedxml", "duckdb", "pyarrow", "faster-whisper", "paddleocr", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
+    for dependency in ("defusedxml", "duckdb", "pyarrow", "faster-whisper", "paddleocr", "paddlepaddle", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
         assert dependency in pyproject
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update

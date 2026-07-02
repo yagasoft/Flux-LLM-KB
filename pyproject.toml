@@ -51,6 +51,7 @@ processors = [
   "accelerate>=0.33,<2.0",
   "bitsandbytes>=0.43,<0.50; platform_system != 'Windows'",
   "paddleocr>=3.0,<4.0",
+  "paddlepaddle>=3.0,<4.0; platform_system == 'Linux'",
 ]
 asr_gpu = [
   "nvidia-cuda-runtime-cu12>=12,<13",
