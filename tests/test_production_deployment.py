@@ -488,8 +488,20 @@ def test_production_update_can_keep_worker_paused_during_model_cutover():
     assert 'Where-Object { $_ -ne "flux-llm-kb-worker" }' in update
     assert "Invoke-FluxDockerComposeUp" in update
     assert "-SkipWorkerStart ([bool]$SkipWorkerStart)" in update
+    assert "if ($SkipWorkerStart) {" in update
+    assert "Disable-ScheduledTask -TaskName $taskSpec.Name" in update
+    assert "continue" in update
     assert "[switch]$SkipWorkerStart" in complete_feature
     assert "$deployCommand += ' -SkipWorkerStart'" in complete_feature
+
+
+def test_production_deploy_defaults_match_prefilled_wheel_cache_args():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        assert "[int]$PipTimeoutSeconds = 180" in script
+        assert "[int]$PipRetries = 20" in script
 
 
 def test_production_deploy_bounds_docker_build_and_pip_installs():

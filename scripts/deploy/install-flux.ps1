@@ -18,8 +18,8 @@ param(
     [string]$DockerBaseMode = "auto",
     [string]$DockerBaseImage = $env:FLUX_KB_DOCKER_BASE_IMAGE,
     [int]$PipInstallTimeoutSeconds = 900,
-    [int]$PipTimeoutSeconds = 30,
-    [int]$PipRetries = 2,
+    [int]$PipTimeoutSeconds = 180,
+    [int]$PipRetries = 20,
     [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL,
     [string]$AptDebianMirrorUrl = $env:FLUX_KB_APT_DEBIAN_MIRROR_URL,
     [string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL
