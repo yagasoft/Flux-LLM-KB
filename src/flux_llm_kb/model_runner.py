@@ -16,6 +16,7 @@ DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-4B"
 DEFAULT_RERANKER_QUANTIZATION = "int4_awq"
 DEFAULT_OCR_SIMPLE_MODEL = "PP-OCRv5"
 DEFAULT_OCR_DOCUMENT_MODEL = "PaddleOCR-VL"
+DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS = 600
 _EMBEDDING_MODELS: dict[str, Any] = {}
 _RERANKER_MODELS: dict[tuple[str, str], tuple[Any, Any]] = {}
 _PADDLE_OCR_MODELS: dict[str, Any] = {}
@@ -26,9 +27,12 @@ class ModelRunnerError(RuntimeError):
 
 
 class ModelRunnerClient:
-    def __init__(self, base_url: str | None = None, *, timeout_seconds: int = 120) -> None:
+    def __init__(self, base_url: str | None = None, *, timeout_seconds: int | None = None) -> None:
         self.base_url = (base_url or os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL") or DEFAULT_MODEL_RUNNER_BASE_URL).rstrip("/")
-        self.timeout_seconds = max(1, int(timeout_seconds or 120))
+        resolved_timeout = timeout_seconds
+        if resolved_timeout is None:
+            resolved_timeout = int(os.environ.get("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS") or DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS)
+        self.timeout_seconds = max(1, int(resolved_timeout))
 
     def embed(self, texts: Iterable[str], *, model: str, dimensions: int) -> list[list[float]]:
         payload = self._post_json(

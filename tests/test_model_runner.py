@@ -6,6 +6,14 @@ from types import SimpleNamespace
 from flux_llm_kb import model_runner
 
 
+def test_model_runner_client_timeout_allows_cold_model_start(monkeypatch):
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS", raising=False)
+    assert model_runner.ModelRunnerClient().timeout_seconds == 600
+
+    monkeypatch.setenv("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS", "900")
+    assert model_runner.ModelRunnerClient().timeout_seconds == 900
+
+
 def test_download_models_retries_hf_snapshots_and_skips_embedding_onnx(tmp_path, monkeypatch):
     calls: list[dict[str, object]] = []
     qwen_attempts = 0
