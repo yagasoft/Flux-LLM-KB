@@ -366,6 +366,7 @@ let corpusCancelRequests: string[];
 let corpusRetryRequests: string[];
 let corpusDeleteRequests: string[];
 let corpusJobFileActionRequests: Array<{ url: string; body: unknown }>;
+let corpusJobFileActionPayload: Record<string, unknown>;
 let jobsRequestUrls: string[];
 let jobToolInvocationPayload: unknown;
 let jobToolInvocationRequestUrls: string[];
@@ -740,6 +741,7 @@ describe("Flux dashboard", () => {
     corpusRetryRequests = [];
     corpusDeleteRequests = [];
     corpusJobFileActionRequests = [];
+    corpusJobFileActionPayload = { state: "opened", path: "E:/Flux Docs/docs/failed.pdf" };
     jobsRequestUrls = [];
     jobToolInvocationRequestUrls = [];
     jobToolInvocationPayload = { job_id: "job-pdf", invocations: [] };
@@ -1290,7 +1292,7 @@ describe("Flux dashboard", () => {
       if (url.startsWith("/api/dashboard/jobs/") && url.endsWith("/file-actions")) {
         corpusJobFileActionRequests.push({ url, body: JSON.parse(String(init?.body ?? "{}")) });
         const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");
-        return json({ job_id: jobId, action: JSON.parse(String(init?.body ?? "{}")).action, state: "opened", path: "E:/Flux Docs/docs/failed.pdf" });
+        return json({ job_id: jobId, action: JSON.parse(String(init?.body ?? "{}")).action, ...corpusJobFileActionPayload });
       }
       if (url === "/api/crawl/roots") return json({ root: JSON.parse(String(init?.body)), sync: { files_seen: 0 } });
       if (url.startsWith("/api/crawl/roots/") && init?.method === "PATCH") {
@@ -1935,7 +1937,8 @@ describe("Flux dashboard", () => {
     expect(openFolder).toHaveAttribute("title", "Open containing folder");
 
     await user.click(openFile);
-    expect(await screen.findByText("Open request opened.")).toBeInTheDocument();
+    const openedToast = await screen.findByText("Open request opened.");
+    expect(openedToast.closest(".toast")).toHaveClass("success");
     await user.click(openFolder);
 
     await waitFor(() => {
@@ -1945,6 +1948,44 @@ describe("Flux dashboard", () => {
       ]);
     });
     expect(await screen.findByText("Open containing folder request opened.")).toBeInTheDocument();
+  });
+
+  test("job queue shows rejected file action details as a warning toast", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-failed",
+          job_type: "corpus_extract_pdf",
+          status: "failed",
+          payload: { root_name: "docs", path: "docs/failed.pdf" },
+          attempts: 3,
+          last_error: "extract failed",
+          updated_at: "2026-06-26T09:30:00+00:00"
+        }
+      ],
+      count: 1,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["failed"],
+        roots: ["docs"],
+        job_types: ["corpus_extract_pdf"]
+      }
+    };
+    corpusJobFileActionPayload = { state: "not_allowed", message: "reveal failed", reason: "host_action_failed" };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    const openFolder = await screen.findByRole("button", { name: "Open containing folder for job target docs/failed.pdf" });
+    await user.click(openFolder);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("warning");
+    expect(alert).toHaveTextContent("Open containing folder request was rejected: reveal failed.");
   });
 
   test("job queue restores persisted history filters on load", async () => {
@@ -3392,6 +3433,7 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Sync docs" }));
 
     const alert = await screen.findByRole("alert");
+    expect(alert).toHaveClass("error");
     expect(alert).toHaveTextContent("Watched path is missing");
     expect(alert).not.toHaveTextContent("code=crawl.root_invalid");
   });

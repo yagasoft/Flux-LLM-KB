@@ -1266,7 +1266,13 @@ def create_app():
     @app.post("/api/corpus/assets/{asset_id}/actions")
     def corpus_asset_action(asset_id: str, request: FileActionRequest = Body(...)):
         if request.action not in {"open", "reveal"}:
-            return {"state": "not_allowed", "asset_id": asset_id, "action": request.action}
+            return {
+                "state": "not_allowed",
+                "asset_id": asset_id,
+                "action": request.action,
+                "reason": "unsupported_action",
+                "message": "file action must be open or reveal",
+            }
         return host_agent_file_action(asset_id=asset_id, action=request.action)
 
     @app.post("/api/remember")

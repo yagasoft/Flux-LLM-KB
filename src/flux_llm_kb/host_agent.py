@@ -181,17 +181,17 @@ def browse_folder() -> dict[str, Any]:
 
 def perform_file_action(*, asset_id: str, action: str) -> dict[str, Any]:
     if action not in {"open", "reveal"}:
-        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed")
+        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed", reason="unsupported_action")
 
     asset = database.get_source_asset_for_file_action(asset_id)
     if asset is None:
-        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed")
+        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed", reason="unknown_asset")
     if asset.get("deleted_at") or asset.get("status") == "deleted":
         return _file_action_result(asset_id=asset_id, action=action, state="deleted", asset=asset)
 
     target = _resolve_known_asset_path(asset)
     if target is None:
-        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed", asset=asset)
+        return _file_action_result(asset_id=asset_id, action=action, state="not_allowed", asset=asset, reason="unsafe_or_unresolvable_path")
     if not target.exists():
         return _file_action_result(asset_id=asset_id, action=action, state="missing", asset=asset, target=target)
 
@@ -204,21 +204,22 @@ def perform_file_action(*, asset_id: str, action: str) -> dict[str, Any]:
         return _file_action_result(asset_id=asset_id, action=action, state="missing", asset=asset, target=target)
     except (PermissionError, OSError) as exc:
         state = "locked" if _is_locked_error(exc) else "not_allowed"
-        return _file_action_result(asset_id=asset_id, action=action, state=state, asset=asset, target=target, error=str(exc))
+        reason = "host_action_failed" if state == "not_allowed" else None
+        return _file_action_result(asset_id=asset_id, action=action, state=state, asset=asset, target=target, error=str(exc), reason=reason)
     return _file_action_result(asset_id=asset_id, action=action, state="opened", asset=asset, target=target)
 
 
 def perform_job_file_action(*, job_id: str, action: str) -> dict[str, Any]:
     if action not in {"open", "reveal"}:
-        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed")
+        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed", reason="unsupported_action")
 
     job = database.get_capture_job_for_file_action(job_id)
     if job is None:
-        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed")
+        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed", reason="unknown_job")
 
     target = _resolve_known_asset_path(job)
     if target is None:
-        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed", job=job)
+        return _job_file_action_result(job_id=job_id, action=action, state="not_allowed", job=job, reason="unsafe_or_unresolvable_path")
     if action == "open" and not target.exists():
         return _job_file_action_result(job_id=job_id, action=action, state="missing", job=job, target=target)
     if action == "reveal" and not target.exists() and not target.parent.exists():
@@ -233,7 +234,8 @@ def perform_job_file_action(*, job_id: str, action: str) -> dict[str, Any]:
         return _job_file_action_result(job_id=job_id, action=action, state="missing", job=job, target=target)
     except (PermissionError, OSError) as exc:
         state = "locked" if _is_locked_error(exc) else "not_allowed"
-        return _job_file_action_result(job_id=job_id, action=action, state=state, job=job, target=target, error=str(exc))
+        reason = "host_action_failed" if state == "not_allowed" else None
+        return _job_file_action_result(job_id=job_id, action=action, state=state, job=job, target=target, error=str(exc), reason=reason)
     return _job_file_action_result(job_id=job_id, action=action, state="opened", job=job, target=target)
 
 
@@ -912,6 +914,7 @@ def _file_action_result(
     asset: dict[str, Any] | None = None,
     target: Path | None = None,
     error: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     details = {
         "asset_id": asset_id,
@@ -920,6 +923,7 @@ def _file_action_result(
         "path": str(asset.get("path")) if asset else None,
         "target_path": str(target) if target else None,
         "error": error,
+        "reason": reason,
     }
     database.record_audit_event(
         event_type="host.file_action",
@@ -927,13 +931,16 @@ def _file_action_result(
         target_id=asset_id,
         details={key: value for key, value in details.items() if value is not None},
     )
-    return {
+    result = {
         "state": state,
         "asset_id": asset_id,
         "action": action,
         "path": str(target) if target else None,
         "message": error,
     }
+    if reason:
+        result["reason"] = reason
+    return result
 
 
 def _job_file_action_result(
@@ -944,6 +951,7 @@ def _job_file_action_result(
     job: dict[str, Any] | None = None,
     target: Path | None = None,
     error: str | None = None,
+    reason: str | None = None,
 ) -> dict[str, Any]:
     details = {
         "job_id": job_id,
@@ -953,6 +961,7 @@ def _job_file_action_result(
         "path": str(job.get("path")) if job else None,
         "target_path": str(target) if target else None,
         "error": error,
+        "reason": reason,
     }
     database.record_audit_event(
         event_type="host.job_file_action",
@@ -960,13 +969,16 @@ def _job_file_action_result(
         target_id=job_id,
         details={key: value for key, value in details.items() if value is not None},
     )
-    return {
+    result = {
         "state": state,
         "job_id": job_id,
         "action": action,
         "path": str(target) if target else None,
         "message": error,
     }
+    if reason:
+        result["reason"] = reason
+    return result
 
 
 def _launch_default_app(path: Path) -> None:

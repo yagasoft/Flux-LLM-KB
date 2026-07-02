@@ -320,8 +320,10 @@ def test_host_file_action_rejects_unknown_asset(monkeypatch):
     result = host_agent.perform_file_action(asset_id="missing-asset", action="open")
 
     assert result["state"] == "not_allowed"
+    assert result["reason"] == "unknown_asset"
     assert audits[0]["event_type"] == "host.file_action"
     assert audits[0]["details"]["state"] == "not_allowed"
+    assert audits[0]["details"]["reason"] == "unknown_asset"
 
 
 def test_host_file_action_reports_deleted_asset(monkeypatch, tmp_path):
@@ -365,6 +367,7 @@ def test_host_file_action_reports_missing_file(monkeypatch, tmp_path):
 
 
 def test_host_file_action_rejects_asset_path_outside_root(monkeypatch, tmp_path):
+    audits: list[dict] = []
     monkeypatch.setattr(
         host_agent.database,
         "get_source_asset_for_file_action",
@@ -377,11 +380,13 @@ def test_host_file_action_rejects_asset_path_outside_root(monkeypatch, tmp_path)
         },
         raising=False,
     )
-    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **_kwargs: None)
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
 
     result = host_agent.perform_file_action(asset_id="asset-1", action="open")
 
     assert result["state"] == "not_allowed"
+    assert result["reason"] == "unsafe_or_unresolvable_path"
+    assert audits[0]["details"]["reason"] == "unsafe_or_unresolvable_path"
 
 
 def test_host_file_action_opens_known_asset_and_audits(monkeypatch, tmp_path):
@@ -439,6 +444,48 @@ def test_host_job_file_action_opens_containing_folder_for_missing_file(monkeypat
     assert audits[0]["event_type"] == "host.job_file_action"
     assert audits[0]["target_table"] == "capture_jobs"
     assert audits[0]["target_id"] == "job-1"
+
+
+def test_host_job_file_action_rejects_unknown_job_with_reason(monkeypatch):
+    audits: list[dict] = []
+    monkeypatch.setattr(host_agent.database, "get_capture_job_for_file_action", lambda job_id: None, raising=False)
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    result = host_agent.perform_job_file_action(job_id="missing-job", action="reveal")
+
+    assert result["state"] == "not_allowed"
+    assert result["reason"] == "unknown_job"
+    assert audits[0]["event_type"] == "host.job_file_action"
+    assert audits[0]["details"]["state"] == "not_allowed"
+    assert audits[0]["details"]["reason"] == "unknown_job"
+
+
+def test_host_job_file_action_reports_native_reveal_failure_reason(monkeypatch, tmp_path):
+    target = tmp_path / "docs" / "failed.pdf"
+    target.parent.mkdir()
+    target.write_text("pdf", encoding="utf-8")
+    audits: list[dict] = []
+    monkeypatch.setattr(
+        host_agent.database,
+        "get_capture_job_for_file_action",
+        lambda job_id: {
+            "id": job_id,
+            "root_path": str(tmp_path),
+            "path": "docs/failed.pdf",
+            "status": "failed",
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent, "_open_containing_folder", lambda path: (_ for _ in ()).throw(OSError("reveal failed")), raising=False)
+    monkeypatch.setattr(host_agent.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
+
+    result = host_agent.perform_job_file_action(job_id="job-1", action="reveal")
+
+    assert result["state"] == "not_allowed"
+    assert result["reason"] == "host_action_failed"
+    assert result["message"] == "reveal failed"
+    assert audits[0]["details"]["reason"] == "host_action_failed"
+    assert audits[0]["details"]["error"] == "reveal failed"
 
 
 def test_host_file_action_reports_locked_when_os_denies_open(monkeypatch, tmp_path):

@@ -748,6 +748,15 @@ type FileActionResponse = {
   state?: "opened" | "missing" | "deleted" | "locked" | "host_agent_offline" | "not_allowed";
   action?: string;
   asset_id?: string;
+  path?: string | null;
+  message?: string | null;
+  reason?: string | null;
+};
+
+type ToastTone = "success" | "warning" | "error";
+type ToastState = {
+  message: string;
+  tone: ToastTone;
 };
 
 type MailSyncError = {
@@ -1107,7 +1116,18 @@ export default function App() {
   const [jobOffset, setJobOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  const [toast, setToast] = useState<string>("");
+  const [toast, setToastState] = useState<ToastState | null>(null);
+  function setToast(next: string | ToastState, tone?: ToastTone) {
+    if (typeof next !== "string") {
+      setToastState(next);
+      return;
+    }
+    if (!next) {
+      setToastState(null);
+      return;
+    }
+    setToastState({ message: next, tone: tone ?? toastTone(next) });
+  }
   const [debugOpen, setDebugOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [profileDialog, setProfileDialog] = useState<MailProfile | "new" | null>(null);
@@ -1788,18 +1808,18 @@ export default function App() {
     }
     try {
       const payload = await sendJson<FileActionResponse>(`/api/corpus/assets/${encodeURIComponent(detail.asset_id)}/actions`, "POST", { action });
-      setToast(fileActionToast(action, payload.state));
+      setToast(fileActionToast(action, payload));
     } catch (error) {
-      setToast(`File action failed: ${errorMessage(error)}`);
+      setToast(`File action failed: ${errorMessage(error)}`, "error");
     }
   }
 
   async function runJobFileAction(jobId: string, action: "open" | "reveal") {
     try {
       const payload = await sendJson<FileActionResponse>(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/file-actions`, "POST", { action });
-      setToast(fileActionToast(action, payload.state, action === "reveal" ? "Open containing folder" : undefined));
+      setToast(fileActionToast(action, payload, action === "reveal" ? "Open containing folder" : undefined));
     } catch (error) {
-      setToast(`Job file action failed: ${errorMessage(error)}`);
+      setToast(`Job file action failed: ${errorMessage(error)}`, "error");
     }
   }
 
@@ -1814,7 +1834,7 @@ export default function App() {
   const blockedJobs = health.jobs?.blocked ?? 0;
   const oauthProfiles = state.mail.oauth?.profiles ?? [];
   const restartRows = restartSettings(state.settings);
-  const currentToastTone = toast ? toastTone(toast) : "success";
+  const currentToastTone = toast?.tone ?? "success";
 
   return (
     <div className="app-shell">
@@ -1899,9 +1919,9 @@ export default function App() {
 
         {toast && (
           <div className={`toast ${currentToastTone}`} role={currentToastTone === "success" ? "status" : "alert"}>
-            {currentToastTone === "error" ? <AlertCircle size={18} /> : <CheckCircle2 size={18} />}
-            <span>{toast}</span>
-            <button type="button" aria-label="Dismiss notification" onClick={() => setToast("")}><X size={15} /></button>
+            {currentToastTone === "error" ? <AlertCircle size={18} /> : currentToastTone === "warning" ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+            <span>{toast.message}</span>
+            <button type="button" aria-label="Dismiss notification" onClick={() => setToastState(null)}><X size={15} /></button>
           </div>
         )}
 
@@ -6622,26 +6642,28 @@ function objectSummary(value: unknown) {
     .join(", ");
 }
 
-function toastTone(message: string): "success" | "warning" | "error" {
+function toastTone(message: string): ToastTone {
   const text = message.toLowerCase();
-  if (/(failed|failure|could not|error|invalid|denied|timed out|unavailable|auth_failed|auth_expired|blocked)/.test(text)) {
+  if (/(failed|failure|could not|error|invalid|denied|timed out|auth_failed|auth_expired)/.test(text)) {
     return "error";
   }
-  if (/(queued|pending|started|opened)/.test(text)) {
+  if (/(queued|pending|started|blocked|rejected|unavailable|cannot run|locked|deleted|missing)/.test(text)) {
     return "warning";
   }
   return "success";
 }
 
-function fileActionToast(action: "open" | "reveal", state?: FileActionResponse["state"], labelOverride?: string) {
+function fileActionToast(action: "open" | "reveal", payload: FileActionResponse, labelOverride?: string): ToastState {
+  const state = payload.state;
   const label = labelOverride ?? (action === "open" ? "Open" : "Reveal");
-  if (state === "opened") return `${label} request opened.`;
-  if (state === "missing") return `${label} request could not find the file.`;
-  if (state === "deleted") return `${label} request is unavailable because the asset is deleted from the index.`;
-  if (state === "locked") return `${label} request could not access the file because it is locked.`;
-  if (state === "host_agent_offline") return `${label} request cannot run because the host agent is offline.`;
-  if (state === "not_allowed") return `${label} request was rejected for this indexed asset.`;
-  return `${label} request finished with state ${state ?? "unknown"}.`;
+  const detail = payload.message ? `: ${payload.message}` : "";
+  if (state === "opened") return { message: `${label} request opened.`, tone: "success" };
+  if (state === "missing") return { message: `${label} request could not find the file${detail}.`, tone: "warning" };
+  if (state === "deleted") return { message: `${label} request is unavailable because the asset is deleted from the index${detail}.`, tone: "warning" };
+  if (state === "locked") return { message: `${label} request could not access the file because it is locked${detail}.`, tone: "warning" };
+  if (state === "host_agent_offline") return { message: `${label} request cannot run because the host agent is offline${detail}.`, tone: "warning" };
+  if (state === "not_allowed") return { message: `${label} request was rejected${detail}.`, tone: "warning" };
+  return { message: `${label} request finished with state ${state ?? "unknown"}${detail}.`, tone: "warning" };
 }
 
 function actionAvailable(detail: ResultDetail, action: string) {
