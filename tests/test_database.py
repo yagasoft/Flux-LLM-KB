@@ -445,9 +445,158 @@ def test_complete_corpus_job_records_duration_and_telemetry(monkeypatch):
     sql, params = executed[0]
     assert "completed_at = now()" in sql
     assert "last_duration_ms = %s" in sql
-    assert "telemetry = telemetry || %s::jsonb" in sql
+    assert "WHEN job_type = 'search_index_sync'" in sql
+    assert "- 'search_index_errors'" in sql
     assert "AND status = 'running'" in sql
     assert params == (42, json.dumps({"family": "media"}, sort_keys=True), "job-1")
+
+
+def test_complete_search_index_sync_job_clears_stale_failure_telemetry_on_success(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.complete_corpus_job(
+        job_id="job-search",
+        duration_ms=25,
+        telemetry={"result_status": "indexed", "search_index_failed": 0},
+    )
+
+    sql, params = executed[0]
+    assert "WHEN job_type = 'search_index_sync'" in sql
+    assert "- 'search_index_errors'" in sql
+    assert "- 'error_type'" in sql
+    assert "- 'error'" in sql
+    assert "- 'last_error'" in sql
+    assert "- 'failed_stage'" in sql
+    assert "- 'failure_stage'" in sql
+    assert "- 'failed_error'" in sql
+    assert "- 'failure_error'" in sql
+    assert "- 'failed_reason'" in sql
+    assert "- 'failure_reason'" in sql
+    assert "ELSE telemetry" in sql
+    assert "END || %s::jsonb" in sql
+    assert params == (
+        25,
+        json.dumps({"result_status": "indexed", "search_index_failed": 0}, sort_keys=True),
+        "job-search",
+    )
+
+
+def _search_index_row() -> dict[str, object]:
+    return {
+        "vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-1",
+        "owner_table": "asset_chunks",
+        "owner_id": "11111111-1111-1111-1111-111111111111",
+        "root_id": "22222222-2222-2222-2222-222222222222",
+        "root_name": "docs",
+        "source_hash": "hash-1",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+        "model_generation": "snowflake-qwen-paddleocr-v1",
+    }
+
+
+def test_upsert_search_index_record_clears_failed_stage_after_success():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    database._upsert_search_index_record(
+        FakeCursor(),
+        row=_search_index_row(),
+        status="indexed",
+        last_error=None,
+        metadata={"rank_profile": "hybrid"},
+    )
+
+    sql, params = executed[0]
+    normalized_sql = " ".join(sql.split())
+    assert "EXCLUDED.index_status IN ('indexed', 'deleted', 'skipped')" in sql
+    assert "search_index_records.metadata - 'failed_stage'" in normalized_sql
+    assert "- 'failed_stage_last_error'" in sql
+    assert "- 'failed_stage_error'" in sql
+    assert "- 'failed_last_error'" in sql
+    assert "- 'failed_error'" in sql
+    assert "- 'failure_error'" in sql
+    assert "- 'error_type'" in sql
+    assert "- 'last_error'" in sql
+    assert "ELSE search_index_records.metadata" in sql
+    assert json.loads(params[-1]) == {"rank_profile": "hybrid"}
+
+
+def test_upsert_search_index_record_keeps_failed_stage_for_failed_status():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    database._upsert_search_index_record(
+        FakeCursor(),
+        row=_search_index_row(),
+        status="failed",
+        last_error="embedding failed",
+        metadata={"failed_stage": "embedding"},
+    )
+
+    sql, params = executed[0]
+    assert "EXCLUDED.index_status IN ('indexed', 'deleted', 'skipped')" in sql
+    assert params[9] == "failed"
+    assert params[10] == "embedding failed"
+    assert json.loads(params[-1]) == {"failed_stage": "embedding"}
+
+
+def test_mark_search_index_record_deleted_clears_failed_stage_metadata():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    database._mark_search_index_record_deleted(
+        FakeCursor(),
+        record={"vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-1"},
+    )
+
+    sql, params = executed[0]
+    normalized_sql = " ".join(sql.split())
+    assert "metadata - 'failed_stage'" in normalized_sql
+    assert "- 'failed_stage_last_error'" in sql
+    assert "- 'failed_stage_error'" in sql
+    assert "- 'failed_last_error'" in sql
+    assert "- 'failed_error'" in sql
+    assert "- 'failure_error'" in sql
+    assert "- 'error_type'" in sql
+    assert "- 'last_error'" in sql
+    assert "jsonb_build_object('deleted_from_vespa', true)" in sql
+    assert params == ("id:flux:flux_evidence::asset_chunks--chunk-1",)
 
 
 def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):

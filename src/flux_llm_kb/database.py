@@ -4818,7 +4818,20 @@ def complete_corpus_job(
                     last_error = NULL,
                     completed_at = now(),
                     last_duration_ms = %s,
-                    telemetry = telemetry || %s::jsonb,
+                    telemetry = CASE
+                        WHEN job_type = 'search_index_sync' THEN telemetry
+                            - 'search_index_errors'
+                            - 'error_type'
+                            - 'error'
+                            - 'last_error'
+                            - 'failed_stage'
+                            - 'failure_stage'
+                            - 'failed_error'
+                            - 'failure_error'
+                            - 'failed_reason'
+                            - 'failure_reason'
+                        ELSE telemetry
+                    END || %s::jsonb,
                     locked_at = NULL,
                     locked_by = NULL,
                     updated_at = now()
@@ -13390,7 +13403,18 @@ def _upsert_search_index_record(
             last_error = EXCLUDED.last_error,
             sync_started_at = EXCLUDED.sync_started_at,
             sync_completed_at = EXCLUDED.sync_completed_at,
-            metadata = search_index_records.metadata || EXCLUDED.metadata,
+            metadata = CASE
+                WHEN EXCLUDED.index_status IN ('indexed', 'deleted', 'skipped') THEN search_index_records.metadata
+                    - 'failed_stage'
+                    - 'failed_stage_last_error'
+                    - 'failed_stage_error'
+                    - 'failed_last_error'
+                    - 'failed_error'
+                    - 'failure_error'
+                    - 'error_type'
+                    - 'last_error'
+                ELSE search_index_records.metadata
+            END || EXCLUDED.metadata,
             updated_at = now()
         """,
         (
@@ -13419,7 +13443,17 @@ def _mark_search_index_record_deleted(cur: Any, *, record: dict[str, Any]) -> No
             last_error = NULL,
             sync_completed_at = now(),
             updated_at = now(),
-            metadata = metadata || jsonb_build_object('deleted_from_vespa', true)
+            metadata = (
+                metadata
+                    - 'failed_stage'
+                    - 'failed_stage_last_error'
+                    - 'failed_stage_error'
+                    - 'failed_last_error'
+                    - 'failed_error'
+                    - 'failure_error'
+                    - 'error_type'
+                    - 'last_error'
+            ) || jsonb_build_object('deleted_from_vespa', true)
         WHERE vespa_document_id = %s
         """,
         (record["vespa_document_id"],),
