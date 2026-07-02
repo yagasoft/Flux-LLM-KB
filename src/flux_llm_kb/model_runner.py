@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from typing import Any, Iterable
 from urllib.error import URLError
 from urllib.parse import urljoin
@@ -263,6 +264,52 @@ def _ocr_image_with_paddle(path: str, *, model: str) -> str:
     return _paddleocr_text(result)
 
 
+def _env_positive_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_non_negative_float(name: str, default: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _download_snapshot_with_retries(
+    snapshot_download: Any,
+    *,
+    repo_id: str,
+    cache_dir: str,
+    ignore_patterns: list[str] | None = None,
+) -> str:
+    attempts = _env_positive_int("FLUX_KB_MODEL_RUNNER_DOWNLOAD_RETRIES", 5)
+    retry_seconds = _env_non_negative_float("FLUX_KB_MODEL_RUNNER_DOWNLOAD_RETRY_SECONDS", 10.0)
+    max_workers = _env_positive_int("FLUX_KB_MODEL_RUNNER_DOWNLOAD_MAX_WORKERS", 2)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            kwargs: dict[str, Any] = {
+                "repo_id": repo_id,
+                "cache_dir": cache_dir,
+                "local_files_only": False,
+                "max_workers": max_workers,
+            }
+            if ignore_patterns:
+                kwargs["ignore_patterns"] = ignore_patterns
+            return str(snapshot_download(**kwargs))
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            print(f"Retrying Hugging Face snapshot download for {repo_id} after {exc.__class__.__name__}: {exc}", flush=True)
+            if retry_seconds > 0:
+                time.sleep(retry_seconds)
+    raise ModelRunnerError(f"failed to download Hugging Face snapshot for {repo_id} after {attempts} attempts: {last_error}") from last_error
+
+
 def download_models(models_dir: str) -> dict[str, Any]:
     models_root = os.path.abspath(models_dir)
     hf_home = os.environ.get("HF_HOME") or os.path.join(models_root, "huggingface")
@@ -272,12 +319,18 @@ def download_models(models_dir: str) -> dict[str, Any]:
         from huggingface_hub import snapshot_download
     except ImportError as exc:
         raise ModelRunnerError("huggingface-hub is required to pre-download model-runner models") from exc
-    for repo_id in (
-        os.environ.get("FLUX_KB_RETRIEVAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-        os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
-        os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL_REPO", "PaddlePaddle/PaddleOCR-VL"),
+    embedding_model = os.environ.get("FLUX_KB_RETRIEVAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+    for repo_id, ignore_patterns in (
+        (embedding_model, ["onnx/*", "*.onnx"]),
+        (os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL), None),
+        (os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL_REPO", "PaddlePaddle/PaddleOCR-VL"), None),
     ):
-        path = snapshot_download(repo_id=repo_id, cache_dir=hf_home, local_files_only=False)
+        path = _download_snapshot_with_retries(
+            snapshot_download,
+            repo_id=repo_id,
+            cache_dir=hf_home,
+            ignore_patterns=ignore_patterns,
+        )
         results.append({"repo_id": repo_id, "path": path})
     try:
         _load_paddleocr(os.environ.get("FLUX_KB_OCR_SIMPLE_MODEL", DEFAULT_OCR_SIMPLE_MODEL))
