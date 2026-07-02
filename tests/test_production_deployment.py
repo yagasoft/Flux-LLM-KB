@@ -467,6 +467,7 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     assert "flux-llm-kb-api" in update
     assert "flux-llm-kb-worker" in update
     assert "flux-llm-kb-asr" in update
+    assert "`$(seq 1 120)" in update
     assert 'Start-Process -FilePath "docker"' not in update
 
 
