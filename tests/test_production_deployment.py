@@ -541,6 +541,71 @@ def test_production_deploy_bounds_docker_build_and_pip_installs():
         assert '"--retries", ([string]$PipRetries)' in script
 
 
+def test_dockerfile_declares_oci_image_traceability_labels():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    for arg_name in (
+        "FLUX_KB_IMAGE_REVISION",
+        "FLUX_KB_IMAGE_SOURCE",
+        "FLUX_KB_IMAGE_CREATED",
+        "FLUX_KB_IMAGE_VERSION",
+    ):
+        assert f'ARG {arg_name}=""' in dockerfile
+
+    for label, arg_name in (
+        ("org.opencontainers.image.revision", "FLUX_KB_IMAGE_REVISION"),
+        ("org.opencontainers.image.source", "FLUX_KB_IMAGE_SOURCE"),
+        ("org.opencontainers.image.created", "FLUX_KB_IMAGE_CREATED"),
+        ("org.opencontainers.image.version", "FLUX_KB_IMAGE_VERSION"),
+    ):
+        assert f"{label}=${arg_name}" in dockerfile
+
+
+def test_production_deploy_scripts_pass_authoritative_image_metadata_to_docker_build():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        compose = _embedded_compose_template(script)
+        assert "function Get-FluxBuildMetadata" in script
+        assert "git -C $Root rev-parse HEAD" in script
+        assert "git -C $Root rev-parse --short HEAD" in script
+        assert "git -C $Root status --porcelain" in script
+        assert 'throw "Flux source checkout is dirty' in script
+        assert 'git -C $Root remote get-url origin' in script
+        assert "[uri]$sourceUri" in script
+        assert 'ToString("yyyy-MM-ddTHH:mm:ssZ")' in script
+        assert "$imageTag = $buildMetadata.ShortRevision" in script
+        assert '"--build-arg", "FLUX_KB_IMAGE_REVISION=$($buildMetadata.Revision)"' in script
+        assert '"--build-arg", "FLUX_KB_IMAGE_SOURCE=$($buildMetadata.Source)"' in script
+        assert '"--build-arg", "FLUX_KB_IMAGE_CREATED=$($buildMetadata.Created)"' in script
+        assert '"--build-arg", "FLUX_KB_IMAGE_VERSION=$($buildMetadata.Version)"' in script
+        assert "FLUX_KB_IMAGE_REVISION=$($buildMetadata.Revision)" in script
+        assert "FLUX_KB_IMAGE_SOURCE=$($buildMetadata.Source)" in script
+        assert "FLUX_KB_IMAGE_CREATED=$($buildMetadata.Created)" in script
+        assert "FLUX_KB_IMAGE_VERSION=$($buildMetadata.Version)" in script
+        for label, env_name in (
+            ("org.opencontainers.image.revision", "FLUX_KB_IMAGE_REVISION"),
+            ("org.opencontainers.image.source", "FLUX_KB_IMAGE_SOURCE"),
+            ("org.opencontainers.image.created", "FLUX_KB_IMAGE_CREATED"),
+            ("org.opencontainers.image.version", "FLUX_KB_IMAGE_VERSION"),
+        ):
+            assert compose.count(f"{label}: `${{{env_name}}}") == 5
+
+
+def test_verify_image_traceability_script_checks_image_and_container_labels():
+    verify = _script("verify-image-traceability.ps1")
+
+    assert "docker image inspect" in verify
+    assert "docker inspect" in verify
+    assert "org.opencontainers.image.revision" in verify
+    assert "org.opencontainers.image.source" in verify
+    assert "org.opencontainers.image.created" in verify
+    assert "org.opencontainers.image.version" in verify
+    assert "$ExpectedRevision" in verify
+    assert "exit 1" in verify
+
+
 def test_production_deploy_can_reuse_local_docker_base_for_fast_updates():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
@@ -616,6 +681,8 @@ def test_docs_describe_production_runtime_boundary():
     assert "startup reconciliation" in architecture.lower()
     assert "periodic reconciliation" in architecture.lower()
     assert "repository remains source code only" in setup.lower()
+    assert ".\\scripts\\deploy\\verify-image-traceability.ps1" in setup
+    assert "docker image inspect" in setup.lower()
 
 
 def _embedded_compose_template(script: str) -> str:

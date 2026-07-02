@@ -113,6 +113,16 @@ RUN --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse
 
 FROM runtime-deps AS runtime
 
+ARG FLUX_KB_IMAGE_REVISION=""
+ARG FLUX_KB_IMAGE_SOURCE=""
+ARG FLUX_KB_IMAGE_CREATED=""
+ARG FLUX_KB_IMAGE_VERSION=""
+
+LABEL org.opencontainers.image.revision=$FLUX_KB_IMAGE_REVISION \
+      org.opencontainers.image.source=$FLUX_KB_IMAGE_SOURCE \
+      org.opencontainers.image.created=$FLUX_KB_IMAGE_CREATED \
+      org.opencontainers.image.version=$FLUX_KB_IMAGE_VERSION
+
 COPY src ./src
 COPY plugins ./plugins
 COPY README.md ./

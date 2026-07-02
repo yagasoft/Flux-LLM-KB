@@ -50,13 +50,53 @@ function Set-FluxEnvValue {
     }
 }
 
-function Get-FluxGitSha {
-    param([string]$Root)
+function ConvertTo-FluxImageSourceLabel {
+    param([string]$Source)
+    if (-not $Source) { return "local" }
     try {
-        $sha = (& git -C $Root rev-parse --short HEAD 2>$null).Trim()
-        if ($sha) { return $sha }
+        [uri]$sourceUri = $Source
+        if ($sourceUri.UserInfo) {
+            $builder = [System.UriBuilder]::new($sourceUri)
+            $builder.UserName = ""
+            $builder.Password = ""
+            return $builder.Uri.AbsoluteUri
+        }
     } catch {}
-    return "local"
+    return $Source
+}
+
+function Get-FluxBuildMetadata {
+    param([string]$Root)
+    $dirty = @(git -C $Root status --porcelain)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Flux source root is not a Git checkout: $Root"
+    }
+    if ($dirty.Count -gt 0) {
+        throw "Flux source checkout is dirty; commit or remove changes before building a traceable production image.`n$($dirty -join "`n")"
+    }
+
+    $revision = (git -C $Root rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $revision) {
+        throw "Could not resolve Flux Git revision for source root: $Root"
+    }
+    $shortRevision = (git -C $Root rev-parse --short HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $shortRevision) {
+        throw "Could not resolve Flux short Git revision for source root: $Root"
+    }
+
+    $source = ""
+    $sourceResult = @(git -C $Root remote get-url origin 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $sourceResult.Count -gt 0) {
+        $source = ($sourceResult | Select-Object -First 1).Trim()
+    }
+
+    return [pscustomobject]@{
+        Revision = $revision
+        ShortRevision = $shortRevision
+        Source = ConvertTo-FluxImageSourceLabel -Source $source
+        Created = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        Version = $shortRevision
+    }
 }
 
 function Resolve-FluxPythonExe {
@@ -169,6 +209,11 @@ function Write-FluxCompose {
 services:
   api:
     image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    labels:
+      org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
+      org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
+      org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-api
     restart: unless-stopped
     gpus: all
@@ -234,6 +279,11 @@ services:
 
   worker:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    labels:
+      org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
+      org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
+      org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-worker
     restart: unless-stopped
     gpus: all
@@ -295,6 +345,11 @@ services:
 
   asr:
     image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    labels:
+      org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
+      org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
+      org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-asr
     restart: unless-stopped
     gpus: all
@@ -321,6 +376,11 @@ services:
 
   model-runner:
     image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    labels:
+      org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
+      org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
+      org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-model-runner
     restart: unless-stopped
     gpus: all
@@ -362,6 +422,11 @@ services:
 
   paddle-runner:
     image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    labels:
+      org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
+      org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
+      org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-paddle-runner
     restart: unless-stopped
     gpus: all
@@ -1069,7 +1134,8 @@ foreach ($dir in @($InstallRoot, $appRoot, $privateRoot, $dataRoot, (Join-Path $
     New-FluxDirectory $dir
 }
 
-$imageTag = Get-FluxGitSha -Root $SourceRoot
+$buildMetadata = Get-FluxBuildMetadata -Root $SourceRoot
+$imageTag = $buildMetadata.ShortRevision
 $resolvedPython = Resolve-FluxPythonExe -InstallRoot $InstallRoot -RequestedPython $PythonExe
 if (-not $SkipDashboardBuild) {
     Invoke-FluxDashboardBuild -DashboardRoot (Join-Path $SourceRoot "dashboard")
@@ -1080,6 +1146,10 @@ $skipSystemPackages = if ($dockerBase.SkipSystemPackages) { "true" } else { "fal
 $dockerBuildArgs = @(
     "build",
     "--progress=plain",
+    "--build-arg", "FLUX_KB_IMAGE_REVISION=$($buildMetadata.Revision)",
+    "--build-arg", "FLUX_KB_IMAGE_SOURCE=$($buildMetadata.Source)",
+    "--build-arg", "FLUX_KB_IMAGE_CREATED=$($buildMetadata.Created)",
+    "--build-arg", "FLUX_KB_IMAGE_VERSION=$($buildMetadata.Version)",
     "--build-arg", "FLUX_KB_DOCKER_BASE_IMAGE=$($dockerBase.Image)",
     "--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages",
     "--build-arg", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
@@ -1118,7 +1188,14 @@ $appEnvPath = Join-Path $appRoot ".env"
 & (Join-Path $PSScriptRoot "migrate-postgres-to-docker-volume.ps1") -InstallRoot $InstallRoot -PostgresPort $PostgresPort -BackupRoot $backupRoot
 Write-FluxCompose -TargetPath $composePath -ImageTag $imageTag -ApiPort $ApiPort -PostgresPort $PostgresPort -OllamaHostPort $OllamaHostPort -AsrHostPort $AsrHostPort -GpuEnabled $gpuEnabled
 Write-FluxEnv -TargetPath $envPath -InstallRoot $InstallRoot -ImageTag $imageTag -PostgresPort $PostgresPort -GpuEnabled $gpuEnabled
-Set-Content -Path $appEnvPath -Value "FLUX_KB_IMAGE_TAG=$imageTag`n" -Encoding UTF8
+$imageMetadataEnv = @"
+FLUX_KB_IMAGE_TAG=$imageTag
+FLUX_KB_IMAGE_REVISION=$($buildMetadata.Revision)
+FLUX_KB_IMAGE_SOURCE=$($buildMetadata.Source)
+FLUX_KB_IMAGE_CREATED=$($buildMetadata.Created)
+FLUX_KB_IMAGE_VERSION=$($buildMetadata.Version)
+"@
+Set-Content -Path $appEnvPath -Value "$imageMetadataEnv`n" -Encoding UTF8
 Set-Content -Path (Join-Path $appRoot "VERSION") -Value $imageTag -Encoding UTF8
 
 $venvPython = Join-Path $appRoot ".venv\Scripts\python.exe"

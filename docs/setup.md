@@ -90,6 +90,23 @@ Update an existing deployment from the current checkout with:
 .\scripts\deploy\update-flux.ps1 -RestartHostTasks
 ```
 
+Each production build records source provenance as OCI labels on the Flux image
+and generated Flux containers. The short image tag is kept for local operations,
+but `org.opencontainers.image.revision` is the authoritative full Git commit.
+Before or after deployment, verify a built image with:
+
+```powershell
+$revision = (git rev-parse HEAD).Trim()
+.\scripts\deploy\verify-image-traceability.ps1 -Image "flux-llm-kb-api:$(git rev-parse --short HEAD)" -ExpectedRevision $revision
+docker image inspect "flux-llm-kb-api:$(git rev-parse --short HEAD)" --format '{{json .Config.Labels}}'
+```
+
+After an approved deployment, include the container check:
+
+```powershell
+.\scripts\deploy\verify-image-traceability.ps1 -Image "flux-llm-kb-api:$(git rev-parse --short HEAD)" -Container flux-llm-kb-api -ExpectedRevision $revision
+```
+
 Start and stop the deployed runtime with:
 
 ```powershell
