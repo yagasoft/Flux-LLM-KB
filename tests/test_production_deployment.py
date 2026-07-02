@@ -42,6 +42,7 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "Resolve-FluxPythonExe" in install
     assert "python\\python.exe" in install
     assert "Invoke-FluxMigration" in install
+    assert 'Invoke-FluxDockerImageAvailable -Image "postgres:16"' in install
     assert "-m flux_llm_kb.cli migrate" in install
     assert "Invoke-FluxCodexPluginInstall" in install
     assert "-m flux_llm_kb.cli codex install-plugin" in install
@@ -90,6 +91,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "Resolve-FluxPythonExe" in update
     assert "RecreateVenv" in update
     assert "Invoke-FluxMigration" in update
+    assert 'Invoke-FluxDockerImageAvailable -Image "postgres:16"' in update
     assert "-m flux_llm_kb.cli migrate" in update
     assert "Invoke-FluxCodexPluginInstall" in update
     assert "-m flux_llm_kb.cli codex install-plugin" in update

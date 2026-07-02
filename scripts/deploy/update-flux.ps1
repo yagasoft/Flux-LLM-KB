@@ -992,6 +992,16 @@ function Invoke-FluxNativeCommand {
     }
 }
 
+function Invoke-FluxDockerImageAvailable {
+    param(
+        [string]$Image,
+        [string]$WorkingDirectory,
+        [int]$TimeoutSeconds = 300
+    )
+    if (Test-FluxDockerImageExists -Image $Image) { return }
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("pull", $Image) -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds -StepName "docker pull $Image"
+}
+
 function Invoke-FluxAsrModelDownload {
     param(
         [string]$AppRoot,
@@ -1304,6 +1314,7 @@ $dockerBuildArgs += @("-t", "flux-llm-kb-api:$imageTag", "-t", "flux-llm-kb-api:
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments $dockerBuildArgs -WorkingDirectory $SourceRoot -TimeoutSeconds $DockerBuildTimeoutSeconds -StepName "docker build"
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:$imageTag") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker version"
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:local") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker local"
+Invoke-FluxDockerImageAvailable -Image "postgres:16" -WorkingDirectory $SourceRoot -TimeoutSeconds 300
 
 $gpuEnabled = Assert-FluxGpuAvailable -ImageTag $imageTag -GpuMode $GpuMode
 
