@@ -6191,9 +6191,21 @@ def _ocr_cache_file(path: Path) -> Path:
 
 
 def _run_paddleocr_image(path: Path, *, model: str) -> str:
+    if os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL"):
+        from .model_runner import ModelRunnerClient
+
+        payload = ModelRunnerClient().ocr_file(path, model=model, document=str(model).startswith("PaddleOCR-VL"))
+        return str(payload.get("text") or "")
+
     from paddleocr import PaddleOCR
 
-    kwargs: dict[str, Any] = {"lang": "en"}
+    kwargs: dict[str, Any] = {
+        "lang": "en",
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
+        "enable_mkldnn": False,
+    }
     if model:
         kwargs["ocr_version"] = model
     ocr = PaddleOCR(**kwargs)

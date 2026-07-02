@@ -10,12 +10,14 @@ ARG APT_SECURITY_MIRROR_URL=""
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PIP_ROOT_USER_ACTION=ignore
-ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib:/usr/local/lib/python3.12/site-packages/nvidia/nccl/lib:/usr/local/lib/python3.12/site-packages/nvidia/cufft/lib:/usr/local/lib/python3.12/site-packages/nvidia/curand/lib:/usr/local/lib/python3.12/site-packages/nvidia/cusolver/lib:/usr/local/lib/python3.12/site-packages/nvidia/cusparse/lib
+ENV FLUX_KB_PADDLE_PYTHON=/opt/flux-paddle/bin/python
+ENV FLUX_KB_PADDLE_LD_LIBRARY_PATH=/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/nccl/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cufft/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/curand/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cusolver/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cusparse/lib
 
 WORKDIR /app
 
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+RUN --mount=type=cache,id=flux-llm-kb-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=flux-llm-kb-apt-lists,target=/var/lib/apt/lists,sharing=locked \
     if [ "$FLUX_KB_SKIP_SYSTEM_PACKAGES" = "true" ]; then \
         echo "Skipping system package installation; reusing packages from Docker base image."; \
     else \
@@ -33,6 +35,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
             catdoc \
             cpio \
             ffmpeg \
+            g++ \
+            gcc \
             libarchive-tools \
             libemail-address-perl \
             libemail-outlook-message-perl \
@@ -51,37 +55,61 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi
 
 ARG PIP_INDEX_URL=""
+ARG PADDLE_GPU_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+ARG PYTORCH_GPU_INDEX_URL="https://download.pytorch.org/whl/cu126"
+ARG PIP_OFFLINE=false
 ARG PIP_DEFAULT_TIMEOUT=30
 ARG PIP_RETRIES=2
 
 COPY pyproject.toml ./
 
-RUN python - <<'PY' > /tmp/requirements-docker.txt
+RUN python - <<'PY'
 import tomllib
 from pathlib import Path
 
 config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-requirements = list(config["project"]["dependencies"])
 optional = config["project"].get("optional-dependencies", {})
-for extra in ("api", "corpus", "mcp", "processors", "asr_gpu"):
-    requirements.extend(optional.get(extra, []))
-Path("/tmp/requirements-docker.txt").write_text(
-    "\n".join(requirements) + "\n",
-    encoding="utf-8",
-)
+
+def write_requirements(path: str, extras: tuple[str, ...]) -> None:
+    requirements = list(config["project"]["dependencies"])
+    for extra in extras:
+        requirements.extend(optional.get(extra, []))
+    Path(path).write_text("\n".join(requirements) + "\n", encoding="utf-8")
+
+write_requirements("/tmp/requirements-docker.txt", ("api", "corpus", "mcp", "processors", "asr_gpu"))
+write_requirements("/tmp/requirements-paddle.txt", ("api", "ocr_paddle"))
 PY
 
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse,sharing=locked \
+RUN --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse,sharing=locked \
     set -eu; \
-    python -m pip install --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --upgrade pip; \
-    mkdir -p /opt/flux-wheelhouse; \
+    export PIP_CACHE_DIR=/opt/flux-wheelhouse/.pip-cache; \
+    python -m pip --version; \
+    python -m venv /opt/flux-paddle; \
+    /opt/flux-paddle/bin/python -m pip --version; \
+    mkdir -p /opt/flux-wheelhouse "$PIP_CACHE_DIR"; \
+    pip_extra_index_args=""; \
+    if [ -n "$PADDLE_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PADDLE_GPU_INDEX_URL"; fi; \
+    if [ -n "$PYTORCH_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PYTORCH_GPU_INDEX_URL"; fi; \
     if [ -n "$PIP_INDEX_URL" ]; then \
-        python -m pip download --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --index-url "$PIP_INDEX_URL" --dest /opt/flux-wheelhouse -r /tmp/requirements-docker.txt; \
+        pip_index_args="--index-url $PIP_INDEX_URL"; \
     else \
-        python -m pip download --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --dest /opt/flux-wheelhouse -r /tmp/requirements-docker.txt; \
+        pip_index_args=""; \
     fi; \
-    python -m pip install --no-index --find-links /opt/flux-wheelhouse -r /tmp/requirements-docker.txt
+    download_requirements() { \
+        python_bin="$1"; \
+        requirements="$2"; \
+        if "$python_bin" -m pip download --only-binary=:all: --no-index --find-links /opt/flux-wheelhouse --dest /opt/flux-wheelhouse -r "$requirements"; then \
+            return 0; \
+        fi; \
+        if [ "$PIP_OFFLINE" = "true" ]; then \
+            return 1; \
+        fi; \
+        "$python_bin" -m pip download --only-binary=:all: --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --find-links /opt/flux-wheelhouse $pip_index_args $pip_extra_index_args --dest /opt/flux-wheelhouse -r "$requirements"; \
+    }; \
+    download_requirements python /tmp/requirements-docker.txt; \
+    python -m pip install --no-index --find-links /opt/flux-wheelhouse -r /tmp/requirements-docker.txt; \
+    download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt; \
+    /opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse -r /tmp/requirements-paddle.txt
 
 FROM runtime-deps AS runtime
 
@@ -89,7 +117,8 @@ COPY src ./src
 COPY plugins ./plugins
 COPY README.md ./
 
-RUN python -m pip install --no-deps .
+RUN python -m pip install --no-deps . \
+    && /opt/flux-paddle/bin/python -m pip install --no-deps .
 
 EXPOSE 8765
 

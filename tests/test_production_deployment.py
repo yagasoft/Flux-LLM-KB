@@ -83,7 +83,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "flux-llm-kb-api:" in update
     assert '"up", "-d", "--no-build"' in update
     assert '"postgres", "vespa"' in update
-    assert '"model-runner", "api", "worker"' in update
+    assert '"paddle-runner", "model-runner", "api", "worker"' in update
     assert "FLUX_KB_IMAGE_TAG" in update
     assert "private\\flux.env" in update
     assert 'Join-Path $appRoot "plugins"' in update
@@ -133,9 +133,9 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
     update_compose = _embedded_compose_template(_script("update-flux.ps1"))
 
     for compose in (install_compose, update_compose):
-        assert compose.count("gpus: all") == 5
-        assert compose.count("NVIDIA_VISIBLE_DEVICES: all") == 5
-        assert compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 5
+        assert compose.count("gpus: all") == 6
+        assert compose.count("NVIDIA_VISIBLE_DEVICES: all") == 6
+        assert compose.count("NVIDIA_DRIVER_CAPABILITIES: compute,utility") == 6
         assert "  vespa:" in compose
         assert "image: vespaengine/vespa:8" in compose
         assert "container_name: flux-vespa" in compose
@@ -145,6 +145,11 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "container_name: flux-llm-kb-model-runner" in compose
         assert "python -m flux_llm_kb.model_runner serve --host 0.0.0.0 --port 8790" in compose
         assert 'test: ["CMD", "python", "-m", "flux_llm_kb.model_runner", "health"]' in compose
+        assert "  paddle-runner:" in compose
+        assert "container_name: flux-llm-kb-paddle-runner" in compose
+        assert "/opt/flux-paddle/bin/python -m flux_llm_kb.model_runner serve-paddle --host 0.0.0.0 --port 8791" in compose
+        assert 'test: ["CMD", "/opt/flux-paddle/bin/python", "-m", "flux_llm_kb.model_runner", "health", "--role", "paddle-runner"]' in compose
+        assert "FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791" in compose
         assert "FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790" in compose
         assert "FLUX_KB_RETRIEVAL_SEARCH_ENGINE: vespa" in compose
         assert "FLUX_KB_RETRIEVAL_VESPA_BASE_URL: http://vespa:8080" in compose
@@ -155,6 +160,7 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_OCR_ENGINE: paddleocr" in compose
         assert "FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5" in compose
         assert "FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL" in compose
+        assert compose.count("PADDLE_PDX_MODEL_SOURCE: bos") == 2
         assert "  ollama:" in compose
         assert "image: ollama/ollama:latest" in compose
         assert "container_name: flux-ollama" in compose
@@ -249,6 +255,7 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
         assert "python -m flux_llm_kb.asr_server download-model --model large-v3-turbo --output-dir /models/faster-whisper-large-v3-turbo" in script
         assert "Invoke-FluxModelRunnerModelDownload" in script
         assert '"flux_llm_kb.model_runner", "download-models", "--models-dir", "/models"' in script
+        assert '"flux_llm_kb.model_runner", "download-paddle-models", "--models-dir", "/models"' in script
         assert "Snowflake, Qwen reranker, PP-OCRv5, and PaddleOCR-VL" in script
         assert "Invoke-FluxVespaApplicationDeploy" in script
         assert "vespa deploy --wait 300 /tmp/flux-vespa-app" in script
@@ -295,8 +302,8 @@ def test_production_compose_uses_docker_volumes_for_container_owned_state():
             assert f"    name: {volume_name}" in compose
         assert "flux_llm_kb_vespa_var:/opt/vespa/var" in compose
         assert "flux_llm_kb_vespa_logs:/opt/vespa/logs" in compose
-        assert "flux_llm_kb_model_runner_models:/models" in compose
-        assert "flux_llm_kb_paddle_cache:/root/.paddleocr" in compose
+        assert compose.count("flux_llm_kb_model_runner_models:/models") == 2
+        assert compose.count("flux_llm_kb_paddle_cache:/root/.paddleocr") == 2
         assert "  flux_llm_kb_vespa_var:" in compose
         assert "  flux_llm_kb_vespa_logs:" in compose
         assert "  flux_llm_kb_model_runner_models:" in compose
@@ -412,7 +419,8 @@ def test_dockerfile_installs_practical_extractor_pack():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
 
-    assert 'for extra in ("api", "corpus", "mcp", "processors", "asr_gpu")' in dockerfile
+    assert 'write_requirements("/tmp/requirements-docker.txt", ("api", "corpus", "mcp", "processors", "asr_gpu"))' in dockerfile
+    assert 'write_requirements("/tmp/requirements-paddle.txt", ("api", "ocr_paddle"))' in dockerfile
     assert 'for extra in ("api", "corpus", "processors", "gpu")' not in dockerfile
     assert "nvidia/cublas/lib" in dockerfile
     assert "nvidia/cudnn/lib" in dockerfile
@@ -440,8 +448,16 @@ def test_dockerfile_installs_practical_extractor_pack():
     ):
         assert package in dockerfile
     assert "tesseract-ocr" not in dockerfile
-    for dependency in ("defusedxml", "duckdb", "pyarrow", "faster-whisper", "paddleocr", "paddlepaddle", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
+    for dependency in ("defusedxml", "duckdb", "pyarrow", "faster-whisper", "torch==2.12.1+cu126", "sentence-transformers==5.6.0", "transformers==4.57.6", "accelerate==1.14.0", "paddleocr==3.7.0", "paddlex[ocr]==3.7.2", "paddlepaddle-gpu", "onnxruntime-gpu", "nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
         assert dependency in pyproject
+    assert '"paddlepaddle-gpu==3.3.1; platform_system == \'Linux\'"' in pyproject
+    assert "paddlepaddle>=3.0" not in pyproject
+    assert "PADDLE_GPU_INDEX_URL" in dockerfile
+    assert "PYTORCH_GPU_INDEX_URL" in dockerfile
+    assert "PaddleGpuIndexUrl" in install
+    assert "PytorchGpuIndexUrl" in install
+    assert "PaddleGpuIndexUrl" in update
+    assert "PytorchGpuIndexUrl" in update
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
     assert '"$SourceRoot[api,corpus,mail,mcp,processors,gpu]"' not in install
@@ -559,7 +575,8 @@ def test_production_deploy_supports_custom_pip_index_for_gpu_wheels():
     update = _script("update-flux.ps1")
 
     assert "ARG PIP_INDEX_URL=\"\"" in dockerfile
-    assert "--index-url \"$PIP_INDEX_URL\"" in dockerfile
+    assert 'pip_index_args="--index-url $PIP_INDEX_URL"' in dockerfile
+    assert "$pip_index_args $pip_extra_index_args" in dockerfile
     for script in (install, update):
         assert "[string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL" in script
         assert '"--build-arg", "PIP_INDEX_URL=$PipIndexUrl"' in script

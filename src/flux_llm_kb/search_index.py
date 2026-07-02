@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from typing import Any, Iterable
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
@@ -26,8 +26,36 @@ def vespa_document_id(owner_table: str, owner_id: str) -> str:
     return f"id:{VESPA_NAMESPACE}:{VESPA_SCHEMA}::{safe_table}--{safe_id}"
 
 
+def _vespa_text(value: Any) -> str:
+    text = str(value or "")
+    return "".join(
+        char if char in {"\t", "\n", "\r"} or ord(char) >= 0x20 and ord(char) != 0x7F else " "
+        for char in text
+    )
+
+
 class SearchIndexError(RuntimeError):
     pass
+
+
+def _vespa_http_error_message(exc: HTTPError) -> str:
+    detail = str(exc)
+    try:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:  # pragma: no cover - defensive fallback
+        body = ""
+    if body:
+        try:
+            decoded = json.loads(body)
+        except json.JSONDecodeError:
+            rendered = body
+        else:
+            if isinstance(decoded, dict):
+                rendered = str(decoded.get("message") or decoded.get("error") or decoded)
+            else:
+                rendered = str(decoded)
+        detail = f"{detail}: {rendered[:2000]}"
+    return detail
 
 
 @dataclass(frozen=True)
@@ -67,6 +95,8 @@ class VespaHttpClient:
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
+        except HTTPError as exc:  # pragma: no cover - network-specific
+            raise SearchIndexError(_vespa_http_error_message(exc)) from exc
         except URLError as exc:  # pragma: no cover - network-specific
             raise SearchIndexError(str(exc)) from exc
         except Exception as exc:  # pragma: no cover - network-specific
@@ -89,6 +119,8 @@ class VespaHttpClient:
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
+        except HTTPError as exc:  # pragma: no cover - network-specific
+            raise SearchIndexError(_vespa_http_error_message(exc)) from exc
         except Exception as exc:  # pragma: no cover - network-specific
             raise SearchIndexError(str(exc)) from exc
         return json.loads(raw or "{}")
@@ -98,6 +130,8 @@ class VespaHttpClient:
         try:
             with urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
+        except HTTPError as exc:  # pragma: no cover - network-specific
+            raise SearchIndexError(_vespa_http_error_message(exc)) from exc
         except Exception as exc:  # pragma: no cover - network-specific
             raise SearchIndexError(str(exc)) from exc
         return json.loads(raw or "{}")
@@ -111,7 +145,7 @@ class VespaSearchAdapter:
     def feed(self, document: dict[str, Any]) -> dict[str, Any]:
         document_id = str(document["id"])
         path = f"/document/v1/{VESPA_NAMESPACE}/{VESPA_SCHEMA}/docid/{document_id.rsplit('::', 1)[-1]}"
-        return self.http.put_json(path, {"fields": document["fields"]})
+        return self.http.post_json(path, {"put": document_id, "fields": document["fields"]})
 
     def delete(self, document_id: str) -> dict[str, Any]:
         path = f"/document/v1/{VESPA_NAMESPACE}/{VESPA_SCHEMA}/docid/{document_id.rsplit('::', 1)[-1]}"
@@ -165,6 +199,7 @@ class VespaSearchAdapter:
             if not isinstance(child, dict):
                 continue
             fields = child.get("fields") if isinstance(child.get("fields"), dict) else {}
+            match_features = child.get("matchfeatures") if isinstance(child.get("matchfeatures"), dict) else fields.get("matchfeatures")
             result = VespaSearchResult(
                 owner_table=str(fields.get("owner_table") or ""),
                 owner_id=str(fields.get("owner_id") or ""),
@@ -172,7 +207,7 @@ class VespaSearchAdapter:
                 root_name=fields.get("root_name"),
                 source_path=fields.get("source_path"),
                 score=float(child.get("relevance") or 0.0),
-                match_features=child.get("matchfeatures") if isinstance(child.get("matchfeatures"), dict) else {},
+                match_features=match_features if isinstance(match_features, dict) else {},
             )
             results.append(result.as_candidate())
         return results
@@ -184,22 +219,22 @@ def build_vespa_document(row: dict[str, Any]) -> dict[str, Any]:
     if len(vector) != int(row.get("embedding_dimensions") or SNOWFLAKE_EMBEDDING_DIMENSIONS):
         raise ValueError("Vespa document embedding does not match embedding_dimensions")
     fields = {
-        "owner_table": str(row.get("owner_table") or ""),
-        "owner_id": str(row.get("owner_id") or ""),
-        "root_id": str(row.get("root_id") or ""),
-        "root_name": str(row.get("root_name") or ""),
-        "title": str(row.get("title") or ""),
-        "body": str(row.get("body") or ""),
-        "source_path": str(row.get("source_path") or ""),
-        "symbols": list(row.get("symbols") or []),
-        "language": str(row.get("language") or ""),
-        "file_kind": str(row.get("file_kind") or ""),
-        "lifecycle_state": str(row.get("lifecycle_state") or "active"),
+        "owner_table": _vespa_text(row.get("owner_table")),
+        "owner_id": _vespa_text(row.get("owner_id")),
+        "root_id": _vespa_text(row.get("root_id")),
+        "root_name": _vespa_text(row.get("root_name")),
+        "title": _vespa_text(row.get("title")),
+        "body": _vespa_text(row.get("body")),
+        "source_path": _vespa_text(row.get("source_path")),
+        "symbols": [_vespa_text(symbol) for symbol in list(row.get("symbols") or [])],
+        "language": _vespa_text(row.get("language")),
+        "file_kind": _vespa_text(row.get("file_kind")),
+        "lifecycle_state": _vespa_text(row.get("lifecycle_state") or "active"),
         "deleted": bool(row.get("deleted", False)),
         "canonical": bool(row.get("canonical", True)),
-        "source_hash": str(row.get("source_hash") or ""),
-        "model_generation": str(row.get("model_generation") or "snowflake-qwen-paddleocr-v1"),
-        "embedding_model": str(row.get("embedding_model") or SNOWFLAKE_EMBEDDING_MODEL),
+        "source_hash": _vespa_text(row.get("source_hash")),
+        "model_generation": _vespa_text(row.get("model_generation") or "snowflake-qwen-paddleocr-v1"),
+        "embedding_model": _vespa_text(row.get("embedding_model") or SNOWFLAKE_EMBEDDING_MODEL),
         "embedding_dimensions": int(row.get("embedding_dimensions") or SNOWFLAKE_EMBEDDING_DIMENSIONS),
         "embedding": {"values": vector},
     }

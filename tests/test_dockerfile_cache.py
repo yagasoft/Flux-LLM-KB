@@ -23,36 +23,89 @@ def test_dockerfile_uses_pip_buildkit_cache() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
     assert "# syntax=docker/dockerfile:" in dockerfile
-    assert "--mount=type=cache,target=/root/.cache/pip,sharing=locked" in dockerfile
+    assert dockerfile.count("id=flux-llm-kb-pip-wheelhouse") == 1
+    assert "--mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse,sharing=locked" in dockerfile
+    assert "export PIP_CACHE_DIR=/opt/flux-wheelhouse/.pip-cache" in dockerfile
+    assert "id=flux-llm-kb-pip-cache" not in dockerfile
+    assert "target=/root/.cache/pip" not in dockerfile
     assert "--no-cache-dir" not in dockerfile
+    assert "--upgrade pip" not in dockerfile
 
 
 def test_dockerfile_materializes_persistent_wheelhouse_before_install() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
     dependency_stage = dockerfile.index("AS runtime-deps")
-    pip_cache = dockerfile.index("--mount=type=cache,target=/root/.cache/pip")
     wheelhouse = dockerfile.index(
         "--mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse"
     )
-    download = dockerfile.index("python -m pip download")
+    download = dockerfile.index("download_requirements python /tmp/requirements-docker.txt")
     install = dockerfile.index("python -m pip install --no-index --find-links /opt/flux-wheelhouse")
     runtime_stage = dockerfile.index("FROM runtime-deps AS runtime")
 
-    assert dependency_stage < pip_cache
-    assert pip_cache < download
+    assert dependency_stage < wheelhouse
     assert wheelhouse < download
     assert download < install
     assert install < runtime_stage
-    assert "--dest /opt/flux-wheelhouse -r /tmp/requirements-docker.txt" in dockerfile
+    assert "--find-links /opt/flux-wheelhouse" in dockerfile
+    assert "pip install --dry-run" not in dockerfile
+    assert "--no-index --find-links /opt/flux-wheelhouse --dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
+    assert "--dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
+    assert 'ARG PIP_OFFLINE=false' in dockerfile
+    assert 'if [ "$PIP_OFFLINE" = "true" ]' in dockerfile
+
+
+def test_dockerfile_builds_isolated_paddle_runtime_from_same_wheelhouse() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "/tmp/requirements-docker.txt" in dockerfile
+    assert "/tmp/requirements-paddle.txt" in dockerfile
+    assert 'write_requirements("/tmp/requirements-docker.txt", ("api", "corpus", "mcp", "processors", "asr_gpu"))' in dockerfile
+    assert 'write_requirements("/tmp/requirements-paddle.txt", ("api", "ocr_paddle"))' in dockerfile
+    assert "python -m venv /opt/flux-paddle" in dockerfile
+    assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt" in dockerfile
+    assert "/opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse" in dockerfile
+    assert "FLUX_KB_PADDLE_PYTHON=/opt/flux-paddle/bin/python" in dockerfile
+
+
+def test_pyproject_splits_torch_and_paddle_dependency_groups() -> None:
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    processors_start = pyproject.index("processors = [")
+    ocr_paddle_start = pyproject.index("ocr_paddle = [")
+    processors = pyproject[processors_start:ocr_paddle_start]
+    ocr_paddle = pyproject[ocr_paddle_start:]
+
+    assert "torch==2.12.1+cu126" in processors
+    assert "sentence-transformers==5.6.0" in processors
+    assert "transformers==4.57.6" in processors
+    assert "accelerate==1.14.0" in processors
+    assert "paddleocr" not in processors
+    assert "paddlex" not in processors
+    assert "paddlepaddle-gpu" not in processors
+    assert "paddleocr==3.7.0" in ocr_paddle
+    assert "paddlex[ocr]==3.7.2" in ocr_paddle
+    assert '"paddlepaddle-gpu==3.3.1; platform_system == \'Linux\'"' in ocr_paddle
 
 
 def test_dockerfile_installs_mcp_extra_for_containerized_codex_retrieval() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
-    assert 'for extra in ("api", "corpus", "mcp", "processors", "asr_gpu")' in dockerfile
+    assert 'write_requirements("/tmp/requirements-docker.txt", ("api", "corpus", "mcp", "processors", "asr_gpu"))' in dockerfile
     assert "nvidia/cublas/lib" in dockerfile
     assert "nvidia/cudnn/lib" in dockerfile
+    assert "nvidia/nccl/lib" in dockerfile
+    assert 'ARG PADDLE_GPU_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu126/"' in dockerfile
+    assert 'ARG PYTORCH_GPU_INDEX_URL="https://download.pytorch.org/whl/cu126"' in dockerfile
+    assert 'pip_extra_index_args="$pip_extra_index_args --extra-index-url $PADDLE_GPU_INDEX_URL"' in dockerfile
+    assert 'pip_extra_index_args="$pip_extra_index_args --extra-index-url $PYTORCH_GPU_INDEX_URL"' in dockerfile
+
+
+def test_dockerfile_keeps_compiler_for_quantized_qwen_runtime() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "gcc \\" in dockerfile
+    assert "g++ \\" in dockerfile
 
 
 def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> None:
@@ -75,8 +128,8 @@ def test_dockerfile_can_reuse_existing_runtime_base_for_updates() -> None:
     assert "ARG FLUX_KB_SKIP_SYSTEM_PACKAGES=false" in dockerfile
     assert 'if [ "$FLUX_KB_SKIP_SYSTEM_PACKAGES" = "true" ]' in dockerfile
     assert "Skipping system package installation" in dockerfile
-    assert "--mount=type=cache,target=/var/cache/apt,sharing=locked" in dockerfile
-    assert "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked" in dockerfile
+    assert "--mount=type=cache,id=flux-llm-kb-apt-cache,target=/var/cache/apt,sharing=locked" in dockerfile
+    assert "--mount=type=cache,id=flux-llm-kb-apt-lists,target=/var/lib/apt/lists,sharing=locked" in dockerfile
 
 
 def test_docker_compose_defines_corpus_worker_service() -> None:

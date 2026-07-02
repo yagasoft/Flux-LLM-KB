@@ -1,4 +1,7 @@
 import json
+from io import BytesIO
+from types import SimpleNamespace
+from urllib.error import HTTPError
 
 from flux_llm_kb import database, worker
 from flux_llm_kb.embeddings import (
@@ -10,6 +13,8 @@ from flux_llm_kb.reranking import QwenReranker
 from flux_llm_kb.search_index import (
     SNOWFLAKE_EMBEDDING_DIMENSIONS,
     SNOWFLAKE_EMBEDDING_MODEL,
+    SearchIndexError,
+    VespaHttpClient,
     VespaSearchAdapter,
     build_vespa_document,
 )
@@ -92,6 +97,111 @@ def test_vespa_document_builder_preserves_search_metadata_and_vector_shape():
     assert fields["symbols"] == ["KnowledgeService.search"]
 
 
+def test_vespa_document_builder_removes_control_characters_from_text_fields():
+    document = build_vespa_document(
+        {
+            "vespa_document_id": "id:flux:evidence::chunk-1",
+            "owner_table": "asset_chunks",
+            "owner_id": "chunk-1",
+            "root_id": "root-1",
+            "root_name": "docs",
+            "title": "bad\u000btitle",
+            "body": "line one\u000bline two\nline three\tkept",
+            "source_path": "docs/bad\u000cpath.md",
+            "file_kind": "text",
+            "language": "markdown",
+            "lifecycle_state": "active",
+            "deleted": False,
+            "canonical": True,
+            "source_hash": "hash-1",
+            "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+            "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "embedding": [1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+            "symbols": ["bad\u000bsymbol", "good.symbol"],
+        }
+    )
+
+    fields = document["fields"]
+    assert "\u000b" not in json.dumps(fields)
+    assert "\u000c" not in json.dumps(fields)
+    assert fields["title"] == "bad title"
+    assert fields["body"] == "line one line two\nline three\tkept"
+    assert fields["source_path"] == "docs/bad path.md"
+    assert fields["symbols"] == ["bad symbol", "good.symbol"]
+
+
+def test_vespa_adapter_feeds_full_document_with_post_put_payload():
+    class FakeFeedHttp:
+        def __init__(self):
+            self.posts = []
+
+        def post_json(self, path, payload):
+            self.posts.append({"path": path, "payload": payload})
+            return {"id": payload["put"]}
+
+    http = FakeFeedHttp()
+    adapter = VespaSearchAdapter(base_url="http://vespa:8080", http=http)
+    document = build_vespa_document(
+        {
+            "vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-1",
+            "owner_table": "asset_chunks",
+            "owner_id": "chunk-1",
+            "root_id": "root-1",
+            "root_name": "docs",
+            "title": "architecture.md",
+            "body": "Vespa owns BM25 and dense candidate retrieval.",
+            "source_path": "docs/architecture.md",
+            "file_kind": "text",
+            "language": "markdown",
+            "lifecycle_state": "active",
+            "deleted": False,
+            "canonical": True,
+            "source_hash": "hash-1",
+            "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+            "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "embedding": [1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+            "symbols": ["KnowledgeService.search"],
+        }
+    )
+
+    response = adapter.feed(document)
+
+    assert response == {"id": "id:flux:flux_evidence::asset_chunks--chunk-1"}
+    assert http.posts == [
+        {
+            "path": "/document/v1/flux/flux_evidence/docid/asset_chunks--chunk-1",
+            "payload": {
+                "put": "id:flux:flux_evidence::asset_chunks--chunk-1",
+                "fields": document["fields"],
+            },
+        }
+    ]
+
+
+def test_vespa_http_client_includes_error_response_body(monkeypatch):
+    def fake_urlopen(_request, timeout):
+        raise HTTPError(
+            url="http://vespa:8080/document/v1/flux/flux_evidence/docid/chunk-1",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=BytesIO(b'{"message":"Field body contains unsupported code point"}'),
+        )
+
+    monkeypatch.setattr("flux_llm_kb.search_index.urlopen", fake_urlopen)
+    client = VespaHttpClient("http://vespa:8080")
+
+    try:
+        client.post_json("/document/v1/flux/flux_evidence/docid/chunk-1", {"fields": {}})
+    except SearchIndexError as exc:
+        error = str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("expected SearchIndexError")
+
+    assert "HTTP Error 400: Bad Request" in error
+    assert "Field body contains unsupported code point" in error
+
+
 class FakeVespaHttp:
     def __init__(self):
         self.posts = []
@@ -147,6 +257,39 @@ def test_vespa_adapter_builds_hybrid_query_with_filters_and_features():
     assert payload["file_kinds"] == ["text"]
     assert payload["languages"] == ["markdown"]
     assert results[0]["match_features"]["bm25(body)"] == 3.5
+
+
+def test_vespa_adapter_reads_matchfeatures_from_fields():
+    class FakeFieldsMatchFeaturesHttp:
+        def post_json(self, _path, _payload):
+            return {
+                "root": {
+                    "children": [
+                        {
+                            "relevance": 2.5,
+                            "fields": {
+                                "owner_table": "asset_chunks",
+                                "owner_id": "chunk-1",
+                                "matchfeatures": {
+                                    "bm25(body)": 1.2,
+                                    "closeness(field,embedding)": 0.8,
+                                },
+                            },
+                        }
+                    ]
+                }
+            }
+
+    results = VespaSearchAdapter(base_url="http://vespa:8080", http=FakeFieldsMatchFeaturesHttp()).query(
+        "hybrid retrieval",
+        embedding=[0.0] * 1024,
+        limit=1,
+    )
+
+    assert results[0]["match_features"] == {
+        "bm25(body)": 1.2,
+        "closeness(field,embedding)": 0.8,
+    }
 
 
 class FakeQwenScorer:
@@ -296,6 +439,171 @@ def test_sync_search_index_feeds_vespa_and_records_status(monkeypatch):
     assert fields["embedding"]["values"] == [1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1)
     assert any(params and "syncing" in params for _sql, params in executed)
     assert any(params and "indexed" in params for _sql, params in executed)
+
+
+def test_sync_search_index_uses_configured_vespa_base_url(monkeypatch):
+    captured: dict[str, str] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeAdapter:
+        def __init__(self, base_url):
+            captured["base_url"] = base_url
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_VESPA_BASE_URL", "http://vespa:8080")
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+
+    result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=1)
+
+    assert result["failed"] == 0
+    assert captured["base_url"] == "http://vespa:8080"
+
+
+def test_search_index_fetch_prioritizes_unindexed_records():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    database._fetch_search_index_rows(
+        FakeCursor(),
+        owner_class="all",
+        root_name=None,
+        limit=10,
+        embedding_model=SNOWFLAKE_EMBEDDING_MODEL,
+    )
+
+    assert len(executed) == 3
+    assert all("WHEN rec.index_status = 'failed' THEN 0" in sql for sql, _params in executed)
+    assert all("WHEN rec.index_status IS NULL THEN 1" in sql for sql, _params in executed)
+    assert all("WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2" in sql for sql, _params in executed)
+    assert all("ORDER BY" in sql for sql, _params in executed)
+
+
+def test_vespa_search_records_explain_diagnostics(monkeypatch):
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def embed_batch(self, _inputs):
+            return [
+                EmbeddingResult(
+                    owner_table="query",
+                    owner_id="query",
+                    model=SNOWFLAKE_EMBEDDING_MODEL,
+                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                    vector=[1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+                    metadata={"source_hash": "query-hash"},
+                )
+            ]
+
+    class FakeAdapter:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def query(self, *_args, **_kwargs):
+            return [
+                {
+                    "owner_table": "asset_chunks",
+                    "owner_id": "chunk-1",
+                    "score": 2.5,
+                    "match_features": {
+                        "bm25(body)": 1.2,
+                        "closeness(field,embedding)": 0.8,
+                    },
+                }
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return self
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeReranker:
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "int4_awq"
+        top_n = 80
+        max_passage_tokens = 1536
+
+        def __init__(self, **kwargs):
+            self.top_n = kwargs["top_n"]
+
+        def rerank(self, _query, candidates):
+            return [{**candidate, "reranker": {"model": self.model, "quantization": self.quantization, "score": 9.0}} for candidate in candidates]
+
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", FakeReranker)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(
+        database,
+        "_hydrate_corpus_candidate_details",
+        lambda *_args, **_kwargs: {
+            "chunk-1": {
+                "title": "Doc",
+                "summary": "Private text is not copied into diagnostics.",
+                "raw_scores": {"vespa_hybrid": 2.5},
+            }
+        },
+    )
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(database, "_rank_corpus_candidates", lambda *_args, **_kwargs: [SimpleNamespace(item_id="chunk-1", score=2.5)])
+    monkeypatch.setattr(
+        database,
+        "_corpus_results_from_fused",
+        lambda _fused, _details: [{"id": "chunk-1", "title": "Doc", "summary": "Private text", "score": 2.5, "raw_scores": {"vespa_hybrid": 2.5}}],
+    )
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_corpus_chunks_vespa("quality", limit=3, root_name="docs", vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert len(results) == 1
+    assert diagnostics["vespa"]["rank_profile"] == "hybrid"
+    assert diagnostics["vespa"]["candidate_count"] == 1
+    assert diagnostics["vespa"]["hydrated_count"] == 1
+    assert diagnostics["vespa"]["match_feature_keys"] == ["bm25(body)", "closeness(field,embedding)"]
+    assert diagnostics["reranker"]["model"] == "Qwen/Qwen3-Reranker-4B"
+    assert diagnostics["reranker"]["quantization"] == "int4_awq"
+    assert diagnostics["reranker"]["input_count"] == 1
 
 
 def test_claim_corpus_jobs_includes_search_index_sync_jobs(monkeypatch):

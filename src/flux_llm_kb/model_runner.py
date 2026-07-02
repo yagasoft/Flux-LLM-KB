@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
+import tempfile
 import time
 from typing import Any, Iterable
 from urllib.error import URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
+from pathlib import Path
 
 
 DEFAULT_MODEL_RUNNER_BASE_URL = "http://127.0.0.1:8790"
@@ -17,9 +20,14 @@ DEFAULT_RERANKER_QUANTIZATION = "int4_awq"
 DEFAULT_OCR_SIMPLE_MODEL = "PP-OCRv5"
 DEFAULT_OCR_DOCUMENT_MODEL = "PaddleOCR-VL"
 DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS = 600
+DEFAULT_PADDLEX_CACHE_HOME = "/root/.paddleocr/paddlex"
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", DEFAULT_PADDLEX_CACHE_HOME)
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "bos")
 _EMBEDDING_MODELS: dict[str, Any] = {}
-_RERANKER_MODELS: dict[tuple[str, str], tuple[Any, Any]] = {}
+_RERANKER_MODELS: dict[tuple[str, str], Any] = {}
 _PADDLE_OCR_MODELS: dict[str, Any] = {}
+_PADDLE_OCR_VL_MODELS: dict[str, Any] = {}
 
 
 class ModelRunnerError(RuntimeError):
@@ -65,6 +73,16 @@ class ModelRunnerClient:
     def ocr_document(self, path: str, *, pages: list[int] | None, model: str) -> dict[str, Any]:
         return self._post_json("/v1/ocr/document", {"path": path, "pages": pages or [], "model": model})
 
+    def ocr_file(self, path: str | Path, *, model: str, document: bool = False) -> dict[str, Any]:
+        file_path = Path(path)
+        payload = {
+            "filename": file_path.name,
+            "content_b64": base64.b64encode(file_path.read_bytes()).decode("ascii"),
+            "model": model,
+        }
+        endpoint = "/v1/ocr/document" if document else "/v1/ocr/image"
+        return self._post_json(endpoint, payload)
+
     def health(self) -> dict[str, Any]:
         try:
             with urlopen(f"{self.base_url}/health", timeout=min(self.timeout_seconds, 10)) as response:
@@ -73,29 +91,7 @@ class ModelRunnerClient:
             raise ModelRunnerError(str(exc)) from exc
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        body = json.dumps(payload).encode("utf-8")
-        request = Request(
-            urljoin(f"{self.base_url}/", path.lstrip("/")),
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-        except URLError as exc:  # pragma: no cover - network-specific
-            raise ModelRunnerError(str(exc)) from exc
-        except Exception as exc:  # pragma: no cover - network-specific
-            raise ModelRunnerError(str(exc)) from exc
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ModelRunnerError("model-runner returned invalid JSON") from exc
-        if not isinstance(payload, dict):
-            raise ModelRunnerError("model-runner returned a non-object payload")
-        if payload.get("ok") is False:
-            raise ModelRunnerError(str(payload.get("message") or "model-runner request failed"))
-        return payload
+        return _post_json_to_base_url(self.base_url, path, payload, self.timeout_seconds)
 
 
 class ModelRunnerRerankScorer:
@@ -106,19 +102,85 @@ class ModelRunnerRerankScorer:
         return self.client.rerank(query, passages, model=model, quantization=quantization)
 
 
-def health_payload() -> dict[str, Any]:
-    cuda_available = False
+def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/")),
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        import torch
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+    except URLError as exc:  # pragma: no cover - network-specific
+        raise ModelRunnerError(str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - network-specific
+        raise ModelRunnerError(str(exc)) from exc
+    try:
+        response_payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ModelRunnerError("model-runner returned invalid JSON") from exc
+    if not isinstance(response_payload, dict):
+        raise ModelRunnerError("model-runner returned a non-object payload")
+    if response_payload.get("ok") is False:
+        raise ModelRunnerError(str(response_payload.get("message") or "model-runner request failed"))
+    return response_payload
 
-        cuda_available = bool(torch.cuda.is_available())
-    except Exception:
-        cuda_available = False
-    return {
+
+def _paddle_runner_base_url() -> str:
+    return (os.environ.get("FLUX_KB_PADDLE_RUNNER_BASE_URL") or "").rstrip("/")
+
+
+def _paddle_runner_timeout_seconds() -> int:
+    return _env_positive_int("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS", DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS)
+
+
+def _proxy_paddle_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    base_url = _paddle_runner_base_url()
+    if not base_url:
+        raise ModelRunnerError("Paddle runner base URL is not configured")
+    return _post_json_to_base_url(base_url, path, payload, _paddle_runner_timeout_seconds())
+
+
+def _paddle_runner_health() -> dict[str, Any] | None:
+    base_url = _paddle_runner_base_url()
+    if not base_url:
+        return None
+    try:
+        with urlopen(f"{base_url}/health", timeout=min(_paddle_runner_timeout_seconds(), 10)) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:  # pragma: no cover - deployment-specific
+        return {"ok": False, "message": str(exc)}
+    return payload if isinstance(payload, dict) else {"ok": False, "message": "Paddle runner returned invalid health payload"}
+
+
+def health_payload(role: str | None = None) -> dict[str, Any]:
+    resolved_role = role or os.environ.get("FLUX_KB_MODEL_RUNNER_ROLE", "model-runner")
+    cuda_available = False
+    if resolved_role != "paddle-runner":
+        try:
+            import torch
+
+            cuda_available = bool(torch.cuda.is_available())
+        except Exception:
+            cuda_available = False
+    paddle_runner = None if resolved_role == "paddle-runner" else _paddle_runner_health()
+    if paddle_runner is not None and paddle_runner.get("ok") is True:
+        paddle_cuda_available = bool(paddle_runner.get("paddle_cuda_available"))
+        paddle_cuda_device_count = int(paddle_runner.get("paddle_cuda_device_count") or 0)
+        paddle_device = str(paddle_runner.get("paddle_device") or "cpu")
+    else:
+        paddle_cuda_available, paddle_cuda_device_count = _paddle_cuda_status()
+        paddle_device = _paddle_device()
+    payload = {
         "ok": True,
-        "service": "model-runner",
+        "service": resolved_role,
         "cuda_required": True,
         "cuda_available": cuda_available,
+        "paddle_cuda_available": paddle_cuda_available,
+        "paddle_cuda_device_count": paddle_cuda_device_count,
+        "paddle_device": paddle_device,
         "embedding_model": os.environ.get("FLUX_KB_RETRIEVAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
         "reranker_model": os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
         "reranker_quantization": os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", DEFAULT_RERANKER_QUANTIZATION),
@@ -127,6 +189,10 @@ def health_payload() -> dict[str, Any]:
         "ocr_document_model": os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL", DEFAULT_OCR_DOCUMENT_MODEL),
         "models_dir": os.environ.get("FLUX_KB_MODEL_RUNNER_MODELS_DIR", "/models"),
     }
+    if resolved_role != "paddle-runner" and _paddle_runner_base_url():
+        payload["paddle_runner_base_url"] = _paddle_runner_base_url()
+        payload["paddle_runner"] = paddle_runner
+    return payload
 
 
 def _load_embedding_model(model: str) -> Any:
@@ -158,64 +224,43 @@ def _embed_with_sentence_transformers(texts: list[str], *, model: str, dimension
     return result
 
 
-def _load_reranker_model(model: str, quantization: str) -> tuple[Any, Any]:
+def _load_reranker_model(model: str, quantization: str) -> Any:
     cache_key = (model, quantization)
     if cache_key not in _RERANKER_MODELS:
         try:
             import torch
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            from sentence_transformers import CrossEncoder
         except ImportError as exc:
-            raise ModelRunnerError("transformers and torch are required for Qwen reranking") from exc
-        tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+            raise ModelRunnerError("sentence-transformers and torch are required for Qwen reranking") from exc
         model_kwargs: dict[str, Any] = {
             "trust_remote_code": True,
-            "device_map": "auto",
         }
+        cross_encoder_model_kwargs: dict[str, Any] = {"device_map": "auto"}
         if quantization in {"int4_awq", "int4", "4bit"}:
             try:
                 from transformers import BitsAndBytesConfig
             except ImportError as exc:
                 raise ModelRunnerError("bitsandbytes-compatible transformers is required for 4-bit Qwen reranking") from exc
-            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            cross_encoder_model_kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )
-        elif torch.cuda.is_available():
-            model_kwargs["torch_dtype"] = torch.float16
-        reranker = AutoModelForSequenceClassification.from_pretrained(model, **model_kwargs)
-        reranker.eval()
-        _RERANKER_MODELS[cache_key] = (tokenizer, reranker)
+        elif getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+            cross_encoder_model_kwargs["torch_dtype"] = torch.float16
+        model_kwargs["model_kwargs"] = cross_encoder_model_kwargs
+        model_kwargs["max_length"] = int(os.environ.get("FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS", "1536"))
+        _RERANKER_MODELS[cache_key] = CrossEncoder(model, **model_kwargs)
     return _RERANKER_MODELS[cache_key]
 
 
 def _rerank_with_transformers(query: str, passages: list[str], *, model: str, quantization: str) -> list[float]:
     if not passages:
         return []
-    try:
-        import torch
-    except ImportError as exc:
-        raise ModelRunnerError("torch is required for Qwen reranking") from exc
-    tokenizer, reranker = _load_reranker_model(model, quantization)
-    encoded = tokenizer(
-        [query] * len(passages),
-        passages,
-        padding=True,
-        truncation=True,
-        max_length=int(os.environ.get("FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS", "1536")),
-        return_tensors="pt",
-    )
-    device = next(reranker.parameters()).device
-    encoded = {key: value.to(device) for key, value in encoded.items()}
-    with torch.no_grad():
-        output = reranker(**encoded)
-    logits = output.logits
-    if logits.ndim == 2 and logits.shape[-1] > 1:
-        scores = logits[:, -1]
-    else:
-        scores = logits.reshape(-1)
-    return [float(score) for score in scores.detach().cpu().tolist()]
+    reranker = _load_reranker_model(model, quantization)
+    scores = reranker.predict([(query, passage) for passage in passages])
+    return [float(score) for score in scores]
 
 
 def _load_paddleocr(model: str) -> Any:
@@ -224,11 +269,50 @@ def _load_paddleocr(model: str) -> Any:
             from paddleocr import PaddleOCR
         except ImportError as exc:
             raise ModelRunnerError("paddleocr is required for OCR") from exc
-        kwargs: dict[str, Any] = {"lang": "en"}
+        kwargs: dict[str, Any] = {
+            "lang": "en",
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+            "enable_mkldnn": False,
+            "device": _paddle_device(),
+        }
         if model:
             kwargs["ocr_version"] = model
         _PADDLE_OCR_MODELS[model] = PaddleOCR(**kwargs)
     return _PADDLE_OCR_MODELS[model]
+
+
+def _paddle_cuda_status() -> tuple[bool, int]:
+    try:
+        import paddle
+
+        if not paddle.device.is_compiled_with_cuda():
+            return False, 0
+        device_count = int(paddle.device.cuda.device_count())
+        return device_count > 0, device_count
+    except Exception:
+        return False, 0
+
+
+def _paddle_device() -> str:
+    cuda_available, _device_count = _paddle_cuda_status()
+    return "gpu:0" if cuda_available else "cpu"
+
+
+def _load_paddleocr_vl(model: str) -> Any:
+    if model not in _PADDLE_OCR_VL_MODELS:
+        try:
+            from paddlex import create_pipeline
+        except ImportError as exc:
+            raise ModelRunnerError("paddlex[ocr] is required for PaddleOCR-VL document OCR") from exc
+        _PADDLE_OCR_VL_MODELS[model] = create_pipeline(
+            pipeline=model,
+            device=_paddle_device(),
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+        )
+    return _PADDLE_OCR_VL_MODELS[model]
 
 
 def _paddleocr_text(value: Any) -> str:
@@ -241,12 +325,25 @@ def _paddleocr_text(value: Any) -> str:
                 parts.append(text)
             return
         if isinstance(item, dict):
-            for key in ("text", "rec_text", "content"):
+            for key in ("text", "rec_text", "rec_texts", "content"):
                 if key in item:
                     visit(item[key])
-            for key in ("res", "data", "results"):
+            for key in ("res", "data", "results", "parsing_res_list"):
                 if key in item:
                     visit(item[key])
+            return
+        if hasattr(item, "to_dict"):
+            visit(item.to_dict())
+            return
+        if hasattr(item, "items"):
+            try:
+                visit(dict(item.items()))
+                return
+            except Exception:
+                pass
+        content = getattr(item, "content", None)
+        if content is not None:
+            visit(content)
             return
         if isinstance(item, (list, tuple)):
             if len(item) >= 2 and isinstance(item[1], (list, tuple)) and item[1] and isinstance(item[1][0], str):
@@ -260,12 +357,45 @@ def _paddleocr_text(value: Any) -> str:
 
 
 def _ocr_image_with_paddle(path: str, *, model: str) -> str:
+    if _paddle_runner_base_url():
+        payload = _proxy_paddle_request("/v1/ocr/image", {"path": str(path), "model": model})
+        return str(payload.get("text") or "")
     ocr = _load_paddleocr(model)
     if hasattr(ocr, "predict"):
-        result = ocr.predict(path)
+        result = ocr.predict(str(path))
     else:
-        result = ocr.ocr(path, cls=True)
+        result = ocr.ocr(str(path), cls=True)
     return _paddleocr_text(result)
+
+
+def _ocr_document_with_paddle(path: str, *, model: str) -> str:
+    if _paddle_runner_base_url():
+        payload = _proxy_paddle_request("/v1/ocr/document", {"path": str(path), "model": model})
+        return str(payload.get("text") or "")
+    if model.startswith("PaddleOCR-VL"):
+        pipeline = _load_paddleocr_vl(model)
+        return _paddleocr_text(list(pipeline.predict(str(path))))
+    return _ocr_image_with_paddle(path, model=model)
+
+
+def _with_ocr_input_path(payload: dict[str, Any], consumer: Any) -> str:
+    content_b64 = payload.get("content_b64")
+    if isinstance(content_b64, str) and content_b64.strip():
+        filename = str(payload.get("filename") or "ocr-input.bin")
+        suffix = Path(filename).suffix or ".bin"
+        fd, temp_name = tempfile.mkstemp(prefix="flux-kb-ocr-", suffix=suffix)
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            temp_path.write_bytes(base64.b64decode(content_b64))
+            return str(consumer(temp_path))
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+    path = str(payload.get("path") or "")
+    return str(consumer(Path(path)))
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -292,6 +422,18 @@ def _download_snapshot_with_retries(
     attempts = _env_positive_int("FLUX_KB_MODEL_RUNNER_DOWNLOAD_RETRIES", 5)
     retry_seconds = _env_non_negative_float("FLUX_KB_MODEL_RUNNER_DOWNLOAD_RETRY_SECONDS", 10.0)
     max_workers = _env_positive_int("FLUX_KB_MODEL_RUNNER_DOWNLOAD_MAX_WORKERS", 2)
+    try:
+        kwargs: dict[str, Any] = {
+            "repo_id": repo_id,
+            "cache_dir": cache_dir,
+            "local_files_only": True,
+            "max_workers": max_workers,
+        }
+        if ignore_patterns:
+            kwargs["ignore_patterns"] = ignore_patterns
+        return str(snapshot_download(**kwargs))
+    except Exception:
+        pass
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -317,7 +459,9 @@ def _download_snapshot_with_retries(
 def download_models(models_dir: str) -> dict[str, Any]:
     models_root = os.path.abspath(models_dir)
     hf_home = os.environ.get("HF_HOME") or os.path.join(models_root, "huggingface")
+    hf_hub_cache = os.environ.get("HF_HUB_CACHE") or os.path.join(hf_home, "hub")
     os.makedirs(hf_home, exist_ok=True)
+    os.makedirs(hf_hub_cache, exist_ok=True)
     results: list[dict[str, Any]] = []
     try:
         from huggingface_hub import snapshot_download
@@ -327,18 +471,37 @@ def download_models(models_dir: str) -> dict[str, Any]:
     for repo_id, ignore_patterns in (
         (embedding_model, ["onnx/*", "*.onnx"]),
         (os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL), None),
-        (os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL_REPO", "PaddlePaddle/PaddleOCR-VL"), None),
     ):
         path = _download_snapshot_with_retries(
             snapshot_download,
             repo_id=repo_id,
-            cache_dir=hf_home,
+            cache_dir=hf_hub_cache,
             ignore_patterns=ignore_patterns,
         )
         results.append({"repo_id": repo_id, "path": path})
+    return {"ok": True, "models_dir": models_root, "downloads": results}
+
+
+def download_paddle_models(models_dir: str) -> dict[str, Any]:
+    models_root = os.path.abspath(models_dir)
+    hf_home = os.environ.get("HF_HOME") or os.path.join(models_root, "huggingface")
+    hf_hub_cache = os.environ.get("HF_HUB_CACHE") or os.path.join(hf_home, "hub")
+    os.makedirs(models_root, exist_ok=True)
+    os.makedirs(hf_home, exist_ok=True)
+    os.makedirs(hf_hub_cache, exist_ok=True)
+    results: list[dict[str, Any]] = []
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise ModelRunnerError("huggingface-hub is required to pre-download PaddleOCR-VL models") from exc
+    repo_id = os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL_REPO", "PaddlePaddle/PaddleOCR-VL")
+    path = _download_snapshot_with_retries(snapshot_download, repo_id=repo_id, cache_dir=hf_hub_cache)
+    results.append({"repo_id": repo_id, "path": path})
     try:
         _load_paddleocr(os.environ.get("FLUX_KB_OCR_SIMPLE_MODEL", DEFAULT_OCR_SIMPLE_MODEL))
         results.append({"repo_id": "paddleocr-runtime", "path": os.environ.get("PADDLEOCR_HOME", "")})
+        _load_paddleocr_vl(os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL", DEFAULT_OCR_DOCUMENT_MODEL))
+        results.append({"repo_id": "paddleocr-vl-runtime", "path": os.environ.get("PADDLE_PDX_CACHE_HOME", "")})
     except Exception as exc:
         results.append({"repo_id": "paddleocr-runtime", "error": str(exc)})
         raise
@@ -380,13 +543,17 @@ def create_app():
     def ocr_image(payload: dict[str, Any]) -> dict[str, Any]:
         path = str(payload.get("path") or "")
         model = str(payload.get("model") or DEFAULT_OCR_SIMPLE_MODEL)
-        return {"ok": True, "model": model, "text": _ocr_image_with_paddle(path, model=model)}
+        if _paddle_runner_base_url():
+            return _proxy_paddle_request("/v1/ocr/image", {**payload, "model": model})
+        return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_image_with_paddle(str(input_path or path), model=model))}
 
     @app.post("/v1/ocr/document")
     def ocr_document(payload: dict[str, Any]) -> dict[str, Any]:
         path = str(payload.get("path") or "")
         model = str(payload.get("model") or DEFAULT_OCR_DOCUMENT_MODEL)
-        return {"ok": True, "model": model, "text": _ocr_image_with_paddle(path, model=model)}
+        if _paddle_runner_base_url():
+            return _proxy_paddle_request("/v1/ocr/document", {**payload, "model": model})
+        return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model))}
 
     return app
 
@@ -394,23 +561,41 @@ def create_app():
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m flux_llm_kb.model_runner")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("health")
+    health = subparsers.add_parser("health")
+    health.add_argument("--role", choices=["model-runner", "paddle-runner"], default=None)
     serve = subparsers.add_parser("serve")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8790)
+    serve_paddle = subparsers.add_parser("serve-paddle")
+    serve_paddle.add_argument("--host", default="127.0.0.1")
+    serve_paddle.add_argument("--port", type=int, default=8791)
     download = subparsers.add_parser("download-models")
     download.add_argument("--models-dir", default="/models")
+    download_paddle = subparsers.add_parser("download-paddle-models")
+    download_paddle.add_argument("--models-dir", default="/models")
     args = parser.parse_args(argv)
 
     if args.command == "health":
-        print(json.dumps(health_payload(), indent=2, sort_keys=True))
+        print(json.dumps(health_payload(args.role), indent=2, sort_keys=True))
         return 0
     if args.command == "download-models":
         print(json.dumps(download_models(args.models_dir), indent=2))
         return 0
+    if args.command == "download-paddle-models":
+        os.environ["FLUX_KB_MODEL_RUNNER_ROLE"] = "paddle-runner"
+        os.environ.pop("FLUX_KB_PADDLE_RUNNER_BASE_URL", None)
+        print(json.dumps(download_paddle_models(args.models_dir), indent=2))
+        return 0
     if args.command == "serve":
         import uvicorn
 
+        uvicorn.run(create_app(), host=args.host, port=args.port)
+        return 0
+    if args.command == "serve-paddle":
+        import uvicorn
+
+        os.environ["FLUX_KB_MODEL_RUNNER_ROLE"] = "paddle-runner"
+        os.environ.pop("FLUX_KB_PADDLE_RUNNER_BASE_URL", None)
         uvicorn.run(create_app(), host=args.host, port=args.port)
         return 0
     raise ValueError(args.command)

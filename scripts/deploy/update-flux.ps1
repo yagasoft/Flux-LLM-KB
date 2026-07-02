@@ -23,6 +23,8 @@ param(
     [int]$PipTimeoutSeconds = 180,
     [int]$PipRetries = 20,
     [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL,
+    [string]$PaddleGpuIndexUrl = $(if ($env:FLUX_KB_PADDLE_GPU_INDEX_URL) { $env:FLUX_KB_PADDLE_GPU_INDEX_URL } else { "https://www.paddlepaddle.org.cn/packages/stable/cu126/" }),
+    [string]$PytorchGpuIndexUrl = $(if ($env:FLUX_KB_PYTORCH_GPU_INDEX_URL) { $env:FLUX_KB_PYTORCH_GPU_INDEX_URL } else { "https://download.pytorch.org/whl/cu126" }),
     [string]$AptDebianMirrorUrl = $env:FLUX_KB_APT_DEBIAN_MIRROR_URL,
     [string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL,
     [switch]$SkipWorkerStart
@@ -320,10 +322,15 @@ services:
     container_name: flux-llm-kb-model-runner
     restart: unless-stopped
     gpus: all
+    depends_on:
+      paddle-runner:
+        condition: service_healthy
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_MODEL_RUNNER_ROLE: model-runner
       FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
       FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
       FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
@@ -334,6 +341,9 @@ services:
       HF_HOME: /models/huggingface
       HF_HUB_DISABLE_XET: "1"
       PADDLEOCR_HOME: /root/.paddleocr
+      PADDLE_PDX_CACHE_HOME: /root/.paddleocr/paddlex
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+      PADDLE_PDX_MODEL_SOURCE: bos
     volumes:
       - flux_llm_kb_model_runner_models:/models
       - flux_llm_kb_paddle_cache:/root/.paddleocr
@@ -341,6 +351,37 @@ services:
       python -m flux_llm_kb.model_runner serve --host 0.0.0.0 --port 8790
     healthcheck:
       test: ["CMD", "python", "-m", "flux_llm_kb.model_runner", "health"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  paddle-runner:
+    image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-paddle-runner
+    restart: unless-stopped
+    gpus: all
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      LD_LIBRARY_PATH: /opt/flux-paddle/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/nccl/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cufft/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/curand/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cusolver/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cusparse/lib
+      FLUX_KB_MODEL_RUNNER_ROLE: paddle-runner
+      FLUX_KB_OCR_ENGINE: paddleocr
+      FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
+      FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
+      HF_HOME: /models/huggingface
+      HF_HUB_DISABLE_XET: "1"
+      PADDLEOCR_HOME: /root/.paddleocr
+      PADDLE_PDX_CACHE_HOME: /root/.paddleocr/paddlex
+      PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "True"
+      PADDLE_PDX_MODEL_SOURCE: bos
+    volumes:
+      - flux_llm_kb_model_runner_models:/models
+      - flux_llm_kb_paddle_cache:/root/.paddleocr
+    command: >
+      /opt/flux-paddle/bin/python -m flux_llm_kb.model_runner serve-paddle --host 0.0.0.0 --port 8791
+    healthcheck:
+      test: ["CMD", "/opt/flux-paddle/bin/python", "-m", "flux_llm_kb.model_runner", "health", "--role", "paddle-runner"]
       interval: 10s
       timeout: 10s
       retries: 30
@@ -986,6 +1027,14 @@ function Invoke-FluxModelRunnerModelDownload {
         "model-runner",
         "python", "-m", "flux_llm_kb.model_runner", "download-models", "--models-dir", "/models"
     ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download model-runner models"
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @(
+        "compose",
+        "--env-file", $AppEnvPath,
+        "-f", $ComposePath,
+        "run", "--rm", "--no-deps",
+        "paddle-runner",
+        "/opt/flux-paddle/bin/python", "-m", "flux_llm_kb.model_runner", "download-paddle-models", "--models-dir", "/models"
+    ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download PaddleOCR models"
 }
 
 function Copy-FluxVespaApplication {
@@ -1132,13 +1181,13 @@ function Invoke-FluxDockerComposeUp {
         -RecoverableContainers @("flux-vespa") `
         -TimeoutSeconds $TimeoutSeconds
     Invoke-FluxVespaApplicationDeploy -AppRoot $AppRoot -TimeoutSeconds 300
-    $services = @("model-runner", "api", "worker")
-    $containers = @("flux-llm-kb-model-runner", "flux-llm-kb-api", "flux-llm-kb-worker")
-    $recoverableContainers = @("flux-llm-kb-model-runner", "flux-llm-kb-api", "flux-llm-kb-worker")
+    $services = @("paddle-runner", "model-runner", "api", "worker")
+    $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api", "flux-llm-kb-worker")
+    $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api", "flux-llm-kb-worker")
     if ($GpuEnabled) {
-        $services = @("model-runner", "ollama", "asr", "api", "worker")
-        $containers = @("flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
-        $recoverableContainers = @("flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
+        $services = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker")
+        $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
+        $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker")
     }
     if ($SkipWorkerStart) {
         $services = @($services | Where-Object { $_ -ne "worker" })
@@ -1236,7 +1285,9 @@ $dockerBuildArgs = @(
     "--build-arg", "FLUX_KB_DOCKER_BASE_IMAGE=$($dockerBase.Image)",
     "--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages",
     "--build-arg", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
-    "--build-arg", "PIP_RETRIES=$PipRetries"
+    "--build-arg", "PIP_RETRIES=$PipRetries",
+    "--build-arg", "PADDLE_GPU_INDEX_URL=$PaddleGpuIndexUrl",
+    "--build-arg", "PYTORCH_GPU_INDEX_URL=$PytorchGpuIndexUrl"
 )
 if ($AptDebianMirrorUrl) {
     $dockerBuildArgs += @("--build-arg", "APT_DEBIAN_MIRROR_URL=$AptDebianMirrorUrl")

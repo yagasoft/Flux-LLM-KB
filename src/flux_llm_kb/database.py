@@ -1174,6 +1174,7 @@ def search_corpus_chunks_vespa(
     file_kinds = list(filters.get("file_kinds") or []) if isinstance(filters, dict) else []
     languages = list(filters.get("languages") or []) if isinstance(filters, dict) else []
     started = time.perf_counter()
+    embedding_started = time.perf_counter()
     embedding_result = SnowflakeEmbeddingProvider(
         model=SNOWFLAKE_EMBEDDING_MODEL,
         dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
@@ -1188,14 +1189,21 @@ def search_corpus_chunks_vespa(
             )
         ]
     )[0]
-    candidates = VespaSearchAdapter(base_url=vespa_base_url or "http://127.0.0.1:8080").query(
+    embedding_elapsed_ms = max(0, int((time.perf_counter() - embedding_started) * 1000))
+    rank_profile = "hybrid"
+    candidate_limit = max(limit * 8, 80)
+    query_started = time.perf_counter()
+    resolved_vespa_base_url = vespa_base_url or "http://127.0.0.1:8080"
+    candidates = VespaSearchAdapter(base_url=resolved_vespa_base_url).query(
         query,
         embedding=embedding_result.vector,
         root_name=root_name,
         file_kinds=file_kinds,
         languages=languages,
-        limit=max(limit * 8, 80),
+        limit=candidate_limit,
+        rank_profile=rank_profile,
     )
+    query_elapsed_ms = max(0, int((time.perf_counter() - query_started) * 1000))
     _record_corpus_stream_diagnostics(
         diagnostics,
         "vespa_hybrid",
@@ -1203,12 +1211,37 @@ def search_corpus_chunks_vespa(
         rows=len(candidates),
         plan="vespa_hybrid_bm25_dense",
     )
+    match_feature_keys = sorted(
+        {
+            str(key)
+            for item in candidates
+            if isinstance(item.get("match_features"), dict)
+            for key in item["match_features"].keys()
+        }
+    )
+    if diagnostics is not None:
+        diagnostics["vespa"] = {
+            "search_engine": "vespa",
+            "base_url": resolved_vespa_base_url,
+            "rank_profile": rank_profile,
+            "candidate_limit": candidate_limit,
+            "candidate_count": len(candidates),
+            "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+            "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "embedding_latency_ms": embedding_elapsed_ms,
+            "query_latency_ms": query_elapsed_ms,
+            "match_feature_keys": match_feature_keys,
+        }
     candidate_ids = [str(item.get("owner_id") or "") for item in candidates if str(item.get("owner_table") or "") == "asset_chunks"]
     raw_scores = {str(item.get("owner_id")): {"vespa_hybrid": float(item.get("score") or 0.0)} for item in candidates}
     streams = {"vespa_hybrid": candidate_ids}
     if not candidate_ids:
+        if diagnostics is not None:
+            diagnostics["vespa"]["hydrated_count"] = 0
+            diagnostics["vespa"]["returned_count"] = 0
         return []
     psycopg = _load_psycopg()
+    hydrate_started = time.perf_counter()
     with psycopg.connect(database_url()) as conn:
         with conn.cursor() as cur:
             details = _hydrate_corpus_candidate_details(
@@ -1221,9 +1254,27 @@ def search_corpus_chunks_vespa(
             for item_id, detail in details.items():
                 detail["raw_scores"] = dict(raw_scores.get(item_id, {}))
             _add_semantic_duplicate_metadata(cur, owner_table="asset_chunks", details=details)
+    hydrate_elapsed_ms = max(0, int((time.perf_counter() - hydrate_started) * 1000))
+    if diagnostics is not None:
+        diagnostics["vespa"]["hydrated_count"] = len(details)
+        diagnostics["vespa"]["hydration_latency_ms"] = hydrate_elapsed_ms
     fused = _rank_corpus_candidates(query, streams=streams, details=details, filters=filters)
     hydrated = _corpus_results_from_fused(fused[: max(limit, min(len(fused), 80))], details)
-    reranked = QwenReranker(top_n=min(80, max(limit, len(hydrated)))).rerank(query, hydrated)
+    reranker = QwenReranker(top_n=min(80, max(limit, len(hydrated))))
+    rerank_started = time.perf_counter()
+    reranked = reranker.rerank(query, hydrated)
+    rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
+    if diagnostics is not None:
+        diagnostics["reranker"] = {
+            "model": reranker.model,
+            "quantization": reranker.quantization,
+            "input_count": len(hydrated),
+            "returned_count": min(limit, len(reranked)),
+            "latency_ms": rerank_elapsed_ms,
+            "top_n": reranker.top_n,
+            "max_passage_tokens": reranker.max_passage_tokens,
+        }
+        diagnostics["vespa"]["returned_count"] = min(limit, len(reranked))
     return reranked[:limit]
 
 
@@ -10825,7 +10876,14 @@ def _backfill_claim_embeddings(cur: Any, *, limit: int) -> int:
               AND emb.owner_id = c.id
               AND emb.model = %s
         )
-        ORDER BY c.updated_at DESC, c.id
+        ORDER BY CASE
+                    WHEN rec.index_status = 'failed' THEN 0
+                    WHEN rec.index_status IS NULL THEN 1
+                    WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
+                    ELSE 3
+                 END,
+                 c.updated_at DESC,
+                 c.id
         LIMIT %s
         """,
         (DEFAULT_EMBEDDING_MODEL, limit),
@@ -12775,7 +12833,8 @@ def sync_search_index(
         model=SNOWFLAKE_EMBEDDING_MODEL,
         dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
     )
-    vespa = adapter or VespaSearchAdapter(base_url=vespa_base_url or "http://127.0.0.1:8080")
+    resolved_vespa_base_url = vespa_base_url or os.environ.get("FLUX_KB_RETRIEVAL_VESPA_BASE_URL") or "http://127.0.0.1:8080"
+    vespa = adapter or VespaSearchAdapter(base_url=resolved_vespa_base_url)
     result: dict[str, Any] = {
         "owner_class": normalized_class,
         "root_name": root_name,
@@ -12951,7 +13010,14 @@ def _fetch_corpus_search_index_rows(
           AND a.canonical_asset_id IS NULL
           AND a.extraction_status = 'indexed'
           {root_sql}
-        ORDER BY c.updated_at DESC, c.id
+        ORDER BY CASE
+                    WHEN rec.index_status = 'failed' THEN 0
+                    WHEN rec.index_status IS NULL THEN 1
+                    WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
+                    ELSE 3
+                 END,
+                 c.updated_at DESC,
+                 c.id
         LIMIT %s
         """,
         (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
@@ -13012,7 +13078,14 @@ def _fetch_episode_search_index_rows(
                                           AND rec.embedding_model = %s
         WHERE e.superseded_by IS NULL
           {root_sql}
-        ORDER BY e.updated_at DESC, e.id
+        ORDER BY CASE
+                    WHEN rec.index_status = 'failed' THEN 0
+                    WHEN rec.index_status IS NULL THEN 1
+                    WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
+                    ELSE 3
+                 END,
+                 e.updated_at DESC,
+                 e.id
         LIMIT %s
         """,
         (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
@@ -13075,7 +13148,14 @@ def _fetch_claim_search_index_rows(
         WHERE c.lifecycle_state IN ('active', 'confirmed', 'reinforced')
           AND c.retention_action = 'keep'
           {root_sql}
-        ORDER BY c.updated_at DESC, c.id
+        ORDER BY CASE
+                    WHEN rec.index_status = 'failed' THEN 0
+                    WHEN rec.index_status IS NULL THEN 1
+                    WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
+                    ELSE 3
+                 END,
+                 c.updated_at DESC,
+                 c.id
         LIMIT %s
         """,
         (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),

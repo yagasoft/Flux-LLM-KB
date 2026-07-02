@@ -45,13 +45,17 @@ processors = [
   "pyarrow>=16.0",
   "faster-whisper==1.2.1",
   "huggingface-hub>=0.24",
-  "torch==2.6.0; platform_system == 'Linux'",
-  "sentence-transformers>=3.0,<6.0",
-  "transformers>=4.51,<5.0",
-  "accelerate>=0.33,<2.0",
-  "bitsandbytes>=0.43,<0.50; platform_system != 'Windows'",
-  "paddleocr>=3.0,<4.0",
-  "paddlepaddle>=3.0,<4.0; platform_system == 'Linux'",
+  "torch==2.12.1+cu126; platform_system == 'Linux'",
+  "sentence-transformers==5.6.0",
+  "transformers==4.57.6",
+  "accelerate==1.14.0",
+  "bitsandbytes==0.49.2; platform_system != 'Windows'",
+]
+ocr_paddle = [
+  "huggingface-hub>=0.24",
+  "paddleocr==3.7.0",
+  "paddlex[ocr]==3.7.2",
+  "paddlepaddle-gpu==3.3.1; platform_system == 'Linux'",
 ]
 asr_gpu = [
   "nvidia-cuda-runtime-cu12>=12,<13",
