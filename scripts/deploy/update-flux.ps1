@@ -15,7 +15,7 @@ param(
     [int]$DockerComposeTimeoutSeconds = 120,
     [int]$DockerBuildTimeoutSeconds = 3600,
     [int]$AsrModelDownloadTimeoutSeconds = 3600,
-    [int]$ModelRunnerModelDownloadTimeoutSeconds = 7200,
+    [int]$ModelRunnerModelDownloadTimeoutSeconds = 43200,
     [ValidateSet("auto", "local", "python")]
     [string]$DockerBaseMode = "auto",
     [string]$DockerBaseImage = $env:FLUX_KB_DOCKER_BASE_IMAGE,
@@ -331,6 +331,7 @@ services:
       FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
       FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
       HF_HOME: /models/huggingface
+      HF_HUB_DISABLE_XET: "1"
       PADDLEOCR_HOME: /root/.paddleocr
     volumes:
       - flux_llm_kb_model_runner_models:/models

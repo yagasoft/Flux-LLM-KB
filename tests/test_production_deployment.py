@@ -252,6 +252,16 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
         assert "qwen3-vl:32b" not in script
 
 
+def test_model_runner_download_avoids_hf_xet_and_allows_large_model_cache_warmup():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+        compose = _embedded_compose_template(script)
+
+        assert "[int]$ModelRunnerModelDownloadTimeoutSeconds = 43200" in script
+        assert "HF_HUB_DISABLE_XET: \"1\"" in compose
+        assert "HF_HOME: /models/huggingface" in compose
+
+
 def test_production_compose_overrides_host_paths_inside_api_and_worker():
     for script_name in ("install-flux.ps1", "update-flux.ps1"):
         compose = _embedded_compose_template(_script(script_name))
