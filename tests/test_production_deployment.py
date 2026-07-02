@@ -261,6 +261,8 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
         assert '"flux_llm_kb.model_runner", "download-paddle-models", "--models-dir", "/models"' in script
         assert "Snowflake, Qwen reranker, PP-OCRv5, and PaddleOCR-VL" in script
         assert "Invoke-FluxVespaApplicationDeploy" in script
+        assert '("exec", "-u", "root", "flux-vespa", "sh", "-lc", "rm -rf /tmp/flux-vespa-app")' in script
+        assert script.index("rm -rf /tmp/flux-vespa-app") < script.index('"cp", $vespaApp, "flux-vespa:/tmp/flux-vespa-app"')
         assert "vespa deploy --wait 300 /tmp/flux-vespa-app" in script
         assert "Copy-FluxVespaApplication -SourceRoot $SourceRoot -AppRoot $appRoot" in script
         assert "qwen3-vl:32b" not in script
