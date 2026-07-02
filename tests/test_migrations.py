@@ -185,6 +185,25 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "obsolete_previous_result_status" in obsolete_migration.sql
     assert "DROP INDEX IF EXISTS idx_capture_jobs_marked_retention" in obsolete_migration.sql
     assert "idx_capture_jobs_marked_retention" in obsolete_migration.sql
+    unique_jobs_migration = next(item for item in migrations if item.name == "0035_capture_job_identity")
+    assert "CREATE OR REPLACE FUNCTION capture_job_identity" in unique_jobs_migration.sql
+    assert "IMMUTABLE" in unique_jobs_migration.sql
+    for ignored_field in (
+        "reason",
+        "status",
+        "requested_by",
+        "requested_at",
+        "paths_total",
+        "path_batch_index",
+        "path_batch_total",
+    ):
+        assert f"- '{ignored_field}'" in unique_jobs_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS identity_key" in unique_jobs_migration.sql
+    assert "GENERATED ALWAYS AS" in unique_jobs_migration.sql
+    assert "ROW_NUMBER() OVER" in unique_jobs_migration.sql
+    assert "WHEN status = 'running' THEN 0" in unique_jobs_migration.sql
+    assert "DELETE FROM capture_jobs" in unique_jobs_migration.sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_jobs_identity_key" in unique_jobs_migration.sql
     assert "DROP TABLE IF EXISTS embeddings" in purge_migration.sql
     assert "DROP INDEX IF EXISTS idx_asset_chunks_body_trgm" in purge_migration.sql
     assert "DROP EXTENSION IF EXISTS vector" in purge_migration.sql

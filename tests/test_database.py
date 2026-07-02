@@ -1999,7 +1999,12 @@ def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
             executed.append((sql, params))
 
         def fetchone(self):
-            return ("job-search-index",)
+            sql = executed[-1][0]
+            if "SELECT id::text, status" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-search-index", "pending")
+            return None
 
     class FakeConnection:
         def __enter__(self):
@@ -2019,7 +2024,7 @@ def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
 
     result = database.enqueue_search_index_sync(owner_class="corpus", root_name="docs", limit=25)
 
-    sql, params = executed[0]
+    sql, params = next((statement, params) for statement, params in executed if "INSERT INTO capture_jobs" in statement)
     payload = json.loads(params[1])
     assert "INSERT INTO capture_jobs" in sql
     assert "search_index_sync" in params
@@ -2031,10 +2036,12 @@ def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
     }
-    assert params[2:6] == ("embedding", "gpu", 35, 300)
+    assert params[5:9] == ("embedding", "gpu", 35, 300)
     assert result == {
         "queued": 1,
         "job_id": "job-search-index",
+        "deduped": False,
+        "reused": False,
         "owner_class": "corpus",
         "root_name": "docs",
         "limit": 25,
@@ -2042,6 +2049,113 @@ def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
     }
+
+
+def test_enqueue_capture_job_reuses_active_duplicate(monkeypatch):
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "identity_key = capture_job_identity" in sql:
+                return ("job-active", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    job_id = database.enqueue_capture_job(
+        job_type="codex_backfill",
+        payload={"path": "history/thread.json", "status": "pending_review", "reason": "manual"},
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert job_id == "job-active"
+    assert "pg_advisory_xact_lock" in sql
+    assert "identity_key = capture_job_identity(%s, %s::jsonb)" in sql
+    assert "FOR UPDATE" in sql
+    assert "INSERT INTO capture_jobs" not in sql
+    assert "capture_job.queued" not in sql
+
+
+def test_enqueue_capture_job_reuses_inactive_duplicate_and_audits(monkeypatch):
+    executed: list[tuple[str, object]] = []
+    rows = [("job-old", "failed"), ("job-old", "pending")]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "identity_key = capture_job_identity" in sql:
+                return rows.pop(0)
+            if "UPDATE capture_jobs" in sql:
+                return rows.pop(0)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    job_id = database.enqueue_capture_job(
+        job_type="codex_backfill",
+        payload={"path": "history/thread.json", "status": "pending_review", "requested_by": "dashboard"},
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert job_id == "job-old"
+    assert "pg_advisory_xact_lock" in sql
+    assert "DELETE FROM capture_job_tool_invocations" in sql
+    assert "UPDATE capture_jobs" in sql
+    assert "attempts = 0" in sql
+    assert "last_error = %s" in sql
+    assert "delete_requested_at = NULL" in sql
+    assert "delete_requested_by = NULL" in sql
+    assert "delete_reason = NULL" in sql
+    assert "created_at = now()" in sql
+    assert "VALUES ('capture_job.identity_reused'" in sql
+    assert "INSERT INTO capture_jobs" not in sql
 
 
 def test_sync_search_index_batches_candidates_and_feeds_vespa(monkeypatch):
@@ -3950,9 +4064,10 @@ def test_enqueue_corpus_sync_job_uses_operator_schedule(monkeypatch):
         "status": "pending",
         "root_name": "mail-outlook-mohesr",
         "deduped": False,
+        "reused": False,
     }
-    assert insert_params[4] == schedule["priority"]
-    assert insert_params[5] == schedule["time_budget_seconds"]
+    assert insert_params[7] == schedule["priority"]
+    assert insert_params[8] == schedule["time_budget_seconds"]
 
 
 def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
@@ -4004,6 +4119,7 @@ def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
         "status": "pending",
         "root_name": "mail-outlook-mohesr",
         "deduped": True,
+        "reused": False,
     }
     assert "priority = GREATEST(priority, %s)" in sql
     assert "time_budget_seconds = GREATEST(time_budget_seconds, %s)" in sql
@@ -4104,7 +4220,14 @@ def test_enqueue_corpus_sync_job_creates_pending_followup_for_running_path_job(m
 
     sql = "\n".join(statement for statement, _params in executed)
     insert_params = next(params for statement, params in executed if "INSERT INTO capture_jobs" in statement)
-    assert result == {"job_id": "job-followup", "status": "pending", "root_name": "docs", "deduped": False, "followup": True}
+    assert result == {
+        "job_id": "job-followup",
+        "status": "pending",
+        "root_name": "docs",
+        "deduped": False,
+        "reused": False,
+        "followup": True,
+    }
     assert "UPDATE capture_jobs" not in sql
     assert json.loads(insert_params[1]) == {"root_name": "docs", "reason": "watch_event", "path": "b.md"}
 
@@ -4586,7 +4709,7 @@ def test_apply_staged_extraction_piece_upserts_chunks_and_enqueues_next(monkeypa
 
         def fetchone(self):
             sql = executed[-1][0]
-            if "FROM capture_jobs" in sql and "FOR UPDATE" in sql:
+            if "FROM capture_jobs" in sql and "WHERE id = %s" in sql and "FOR UPDATE" in sql:
                 return ("job-1", "running")
             if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
                 return ("asset-1", None)
@@ -4667,7 +4790,7 @@ def test_apply_staged_extraction_plan_persists_parent_chunks_before_child_jobs(m
 
         def fetchone(self):
             sql = executed[-1][0]
-            if "FROM capture_jobs" in sql and "FOR UPDATE" in sql:
+            if "FROM capture_jobs" in sql and "WHERE id = %s" in sql and "FOR UPDATE" in sql:
                 return ("job-1", "running")
             if "SELECT a.id::text, a.canonical_asset_id::text" in sql:
                 return ("asset-1", None)
@@ -4753,8 +4876,10 @@ def test_requeue_metadata_only_source_assets_creates_extract_jobs(monkeypatch):
 
         def fetchone(self):
             sql = executed[-1][0]
+            if "SELECT id::text, status" in sql:
+                return None
             if "INSERT INTO capture_jobs" in sql:
-                return (f"job-{len([item for item in executed if 'INSERT INTO capture_jobs' in item[0]])}",)
+                return (f"job-{len([item for item in executed if 'INSERT INTO capture_jobs' in item[0]])}", "pending")
             return None
 
     class FakeConnection:
@@ -4810,8 +4935,10 @@ def test_requeue_svg_source_assets_resets_svg_assets_and_creates_image_jobs(monk
 
         def fetchone(self):
             sql = executed[-1][0]
+            if "SELECT id::text, status" in sql:
+                return None
             if "INSERT INTO capture_jobs" in sql:
-                return (f"job-{len([item for item in executed if 'INSERT INTO capture_jobs' in item[0]])}",)
+                return (f"job-{len([item for item in executed if 'INSERT INTO capture_jobs' in item[0]])}", "pending")
             return None
 
     class FakeConnection:
@@ -5097,6 +5224,10 @@ def test_persist_crawl_plan_requeues_unchanged_blocked_deferred_asset(monkeypatc
                 return None
             if "INSERT INTO source_assets" in sql:
                 return ("asset-1",)
+            if "SELECT id::text, status" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-mail", "pending")
             return None
 
     class FakeConnection:

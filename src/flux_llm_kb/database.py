@@ -3355,45 +3355,36 @@ def persist_crawl_plan(
                     if asset.extraction_tier == "deferred" and not canonical_id:
                         job_type = f"corpus_extract_{asset.file_kind}"
                         schedule = _job_schedule_metadata(job_type)
-                        cur.execute(
-                            """
-                            INSERT INTO capture_jobs (
-                                job_type, payload, job_family, resource_class, priority, time_budget_seconds
-                            )
-                            VALUES (%s, %s::jsonb, %s, %s, %s, %s)
-                            """,
-                            (
-                                job_type,
-                                _json({"root_name": root_name, "path": asset.relative_path}),
-                                schedule["job_family"],
-                                schedule["resource_class"],
-                                schedule["priority"],
-                                schedule["time_budget_seconds"],
-                            ),
+                        queued = _enqueue_unique_capture_job_with_cursor(
+                            cur,
+                            job_type=job_type,
+                            payload={"root_name": root_name, "path": asset.relative_path},
+                            job_family=schedule["job_family"],
+                            resource_class=schedule["resource_class"],
+                            priority=schedule["priority"],
+                            time_budget_seconds=schedule["time_budget_seconds"],
+                            telemetry={"stage": "queued", "root_name": root_name, "path": asset.relative_path},
+                            audit_details={"job_type": job_type, "root_name": root_name, "path": asset.relative_path},
                         )
-                        jobs_queued += 1
+                        jobs_queued += 0 if queued["deduped"] else 1
                     elif asset.extraction_status == "retrying_locked" and not canonical_id:
                         job_type = f"corpus_extract_{asset.file_kind}"
                         schedule = _job_schedule_metadata(job_type)
-                        cur.execute(
-                            """
-                            INSERT INTO capture_jobs (
-                                job_type, payload, status, last_error, next_attempt_at,
-                                job_family, resource_class, priority, time_budget_seconds
-                            )
-                            VALUES (%s, %s::jsonb, 'retrying_locked', %s, now() + make_interval(secs => 300), %s, %s, %s, %s)
-                            """,
-                            (
-                                job_type,
-                                _json({"root_name": root_name, "path": asset.relative_path}),
-                                str(asset.metadata.get("error") or "file locked"),
-                                schedule["job_family"],
-                                schedule["resource_class"],
-                                schedule["priority"],
-                                schedule["time_budget_seconds"],
-                            ),
+                        queued = _enqueue_unique_capture_job_with_cursor(
+                            cur,
+                            job_type=job_type,
+                            payload={"root_name": root_name, "path": asset.relative_path},
+                            status="retrying_locked",
+                            last_error=str(asset.metadata.get("error") or "file locked"),
+                            next_attempt_delay_seconds=300,
+                            job_family=schedule["job_family"],
+                            resource_class=schedule["resource_class"],
+                            priority=schedule["priority"],
+                            time_budget_seconds=schedule["time_budget_seconds"],
+                            telemetry={"stage": "queued", "root_name": root_name, "path": asset.relative_path},
+                            audit_details={"job_type": job_type, "root_name": root_name, "path": asset.relative_path},
                         )
-                        jobs_queued += 1
+                        jobs_queued += 0 if queued["deduped"] else 1
                     elif asset.extraction_tier == "deferred" and canonical_id:
                         _cancel_duplicate_corpus_job_for_asset(cur, root_name=root_name, relative_path=asset.relative_path)
                 if index == files_total or index % 100 == 0:
@@ -6104,24 +6095,18 @@ def create_benchmark_soak_jobs(
                     "path": f"synthetic/{fixture}/{job_family}-{index:04d}",
                     "root_name": "__benchmark__",
                 }
-                cur.execute(
-                    """
-                    INSERT INTO capture_jobs (
-                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
-                    )
-                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
-                    """,
-                    (
-                        job_type,
-                        _json(payload),
-                        job_family,
-                        resource_class_for_family(job_family),
-                        default_priority_for_family(job_family),
-                        time_budget_for_family(job_family),
-                        _json({"benchmark_tag": tag, "benchmark_fixture": fixture, "benchmark_file_count": row_count}),
-                    ),
+                result = _enqueue_unique_capture_job_with_cursor(
+                    cur,
+                    job_type=job_type,
+                    payload=payload,
+                    job_family=job_family,
+                    resource_class=resource_class_for_family(job_family),
+                    priority=default_priority_for_family(job_family),
+                    time_budget_seconds=time_budget_for_family(job_family),
+                    telemetry={"benchmark_tag": tag, "benchmark_fixture": fixture, "benchmark_file_count": row_count},
+                    audit_details={"job_type": job_type, "benchmark_tag": tag, "benchmark_fixture": fixture},
                 )
-                inserted += 1
+                inserted += 0 if result["deduped"] else 1
     return {"tag": tag, "created": inserted, "family": normalized_family}
 
 
@@ -7575,35 +7560,19 @@ def _enqueue_staged_jobs_with_cursor(
             "path": relative_path,
         }
         schedule = _job_schedule_metadata(job_type)
-        cur.execute(
-            """
-            INSERT INTO capture_jobs (
-                job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
-            )
-            VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
-            RETURNING id::text, status
-            """,
-            (
-                job_type,
-                _json(job_payload),
-                schedule["job_family"],
-                schedule["resource_class"],
-                schedule["priority"],
-                schedule["time_budget_seconds"],
-                _json({"stage": "queued", "root_name": root_name, "path": relative_path, "staged": True}),
-            ),
+        queued = _enqueue_unique_capture_job_with_cursor(
+            cur,
+            job_type=job_type,
+            payload=job_payload,
+            job_family=schedule["job_family"],
+            resource_class=schedule["resource_class"],
+            priority=schedule["priority"],
+            time_budget_seconds=schedule["time_budget_seconds"],
+            telemetry={"stage": "queued", "root_name": root_name, "path": relative_path, "staged": True},
+            audit_details={"job_type": job_type, "root_name": root_name, "path": relative_path, "staged": True},
         )
-        row = cur.fetchone()
-        if row:
-            job_id = row[0]
-            job_ids.append(job_id)
-            cur.execute(
-                """
-                INSERT INTO audit_events (event_type, target_table, target_id, details)
-                VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
-                """,
-                (job_id, _json({"job_type": job_type, "root_name": root_name, "path": relative_path, "staged": True})),
-            )
+        if queued:
+            job_ids.append(queued["job_id"])
     return job_ids
 
 
@@ -9741,36 +9710,26 @@ def enqueue_corpus_sync_job(
                     ),
                 )
                 row = cur.fetchone() or pending
-                return {"job_id": row[0], "status": row[1], "root_name": root, "deduped": True}
-            cur.execute(
-                """
-                INSERT INTO capture_jobs (
-                    job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
-                )
-                VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
-                RETURNING id::text, status
-                """,
-                (
-                    "corpus_sync_root",
-                    _json(job_payload),
-                    schedule["job_family"],
-                    schedule["resource_class"],
-                    schedule["priority"],
-                    schedule["time_budget_seconds"],
-                    _json({"stage": "queued", "root_name": root}),
-                ),
+                return {"job_id": row[0], "status": row[1], "root_name": root, "deduped": True, "reused": False}
+            queued = _enqueue_unique_capture_job_with_cursor(
+                cur,
+                job_type="corpus_sync_root",
+                payload=job_payload,
+                job_family=schedule["job_family"],
+                resource_class=schedule["resource_class"],
+                priority=schedule["priority"],
+                time_budget_seconds=schedule["time_budget_seconds"],
+                telemetry={"stage": "queued", "root_name": root},
+                audit_details={"job_type": "corpus_sync_root", "root_name": root, "reason": job_payload["reason"]},
             )
-            row = cur.fetchone()
-            job_id = row[0]
-            cur.execute(
-                """
-                INSERT INTO audit_events (event_type, target_table, target_id, details)
-                VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
-                """,
-                (job_id, _json({"job_type": "corpus_sync_root", "root_name": root, "reason": job_payload["reason"]})),
-            )
-            result = {"job_id": job_id, "status": row[1], "root_name": root, "deduped": False}
-            if running:
+            result = {
+                "job_id": queued["job_id"],
+                "status": queued["status"],
+                "root_name": root,
+                "deduped": queued["deduped"],
+                "reused": queued["reused"],
+            }
+            if running and not queued["deduped"]:
                 result["followup"] = True
             return result
 
@@ -9806,60 +9765,38 @@ def enqueue_corpus_sync_path_batch_jobs(
                     "path_batch_index": batch_index,
                     "path_batch_total": len(batches),
                 }
-                cur.execute(
-                    """
-                    INSERT INTO capture_jobs (
-                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
-                    )
-                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
-                    RETURNING id::text, status
-                    """,
-                    (
-                        "corpus_sync_root",
-                        _json(job_payload),
-                        schedule["job_family"],
-                        schedule["resource_class"],
-                        schedule["priority"],
-                        schedule["time_budget_seconds"],
-                        _json(
-                            {
-                                "stage": "queued",
-                                "root_name": root,
-                                "paths_total": len(clean_paths),
-                                "paths_queued": len(batch_paths),
-                                "path_batch_index": batch_index,
-                                "path_batch_total": len(batches),
-                            }
-                        ),
-                    ),
-                )
-                row = cur.fetchone()
-                job_id = row[0]
-                cur.execute(
-                    """
-                    INSERT INTO audit_events (event_type, target_table, target_id, details)
-                    VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
-                    """,
-                    (
-                        job_id,
-                        _json(
-                            {
-                                "job_type": "corpus_sync_root",
-                                "root_name": root,
-                                "reason": job_payload["reason"],
-                                "paths_queued": len(batch_paths),
-                                "path_batch_index": batch_index,
-                                "path_batch_total": len(batches),
-                            }
-                        ),
-                    ),
+                queued = _enqueue_unique_capture_job_with_cursor(
+                    cur,
+                    job_type="corpus_sync_root",
+                    payload=job_payload,
+                    job_family=schedule["job_family"],
+                    resource_class=schedule["resource_class"],
+                    priority=schedule["priority"],
+                    time_budget_seconds=schedule["time_budget_seconds"],
+                    telemetry={
+                        "stage": "queued",
+                        "root_name": root,
+                        "paths_total": len(clean_paths),
+                        "paths_queued": len(batch_paths),
+                        "path_batch_index": batch_index,
+                        "path_batch_total": len(batches),
+                    },
+                    audit_details={
+                        "job_type": "corpus_sync_root",
+                        "root_name": root,
+                        "reason": job_payload["reason"],
+                        "paths_queued": len(batch_paths),
+                        "path_batch_index": batch_index,
+                        "path_batch_total": len(batches),
+                    },
                 )
                 jobs.append(
                     {
-                        "job_id": job_id,
-                        "status": row[1],
+                        "job_id": queued["job_id"],
+                        "status": queued["status"],
                         "root_name": root,
-                        "deduped": False,
+                        "deduped": queued["deduped"],
+                        "reused": queued["reused"],
                         "path_count": len(batch_paths),
                         "path_batch_index": batch_index,
                         "path_batch_total": len(batches),
@@ -9915,29 +9852,178 @@ def heartbeat_corpus_job(
             )
 
 
+_ACTIVE_CAPTURE_JOB_STATUSES = ("pending", "running", "retrying_locked", "retrying_vss_failed")
+
+
+def _enqueue_unique_capture_job_with_cursor(
+    cur: Any,
+    *,
+    job_type: str,
+    payload: dict[str, Any],
+    status: str = "pending",
+    last_error: str | None = None,
+    next_attempt_delay_seconds: int = 0,
+    job_family: str | None = None,
+    resource_class: str | None = None,
+    priority: int | None = None,
+    time_budget_seconds: int | None = None,
+    telemetry: dict[str, Any] | None = None,
+    audit_details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    clean_job_type = str(job_type or "").strip()
+    if not clean_job_type:
+        raise ValueError("job_type is required")
+    clean_payload = dict(payload or {})
+    schedule = _job_schedule_metadata(clean_job_type)
+    resolved_job_family = str(job_family or schedule["job_family"])
+    resolved_resource_class = str(resource_class or schedule["resource_class"])
+    resolved_priority = int(priority if priority is not None else schedule["priority"])
+    resolved_time_budget = time_budget_seconds if time_budget_seconds is not None else schedule["time_budget_seconds"]
+    clean_status = str(status or "pending").strip() or "pending"
+    delay_seconds = max(0, int(next_attempt_delay_seconds or 0))
+    payload_json = _json(clean_payload)
+    telemetry_json = _json(telemetry or {})
+    details = {"job_type": clean_job_type, **(audit_details or {})}
+    cur.execute(
+        """
+        SELECT pg_advisory_xact_lock(hashtextextended(capture_job_identity(%s, %s::jsonb), 0))
+        """,
+        (clean_job_type, payload_json),
+    )
+    cur.execute(
+        """
+        SELECT id::text, status
+        FROM capture_jobs
+        WHERE identity_key = capture_job_identity(%s, %s::jsonb)
+        FOR UPDATE
+        """,
+        (clean_job_type, payload_json),
+    )
+    existing = cur.fetchone()
+    if existing is not None:
+        existing_status = str(existing[1] or "unknown")
+        if existing_status in _ACTIVE_CAPTURE_JOB_STATUSES:
+            return {
+                "job_id": existing[0],
+                "status": existing_status,
+                "created": False,
+                "deduped": True,
+                "reused": False,
+            }
+        cur.execute("DELETE FROM capture_job_tool_invocations WHERE job_id = %s", (existing[0],))
+        cur.execute(
+            """
+            UPDATE capture_jobs
+            SET job_type = %s,
+                payload = %s::jsonb,
+                status = %s,
+                attempts = 0,
+                last_error = %s,
+                next_attempt_at = now() + make_interval(secs => %s),
+                locked_at = NULL,
+                locked_by = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                last_duration_ms = NULL,
+                progress_heartbeat_at = NULL,
+                delete_requested_at = NULL,
+                delete_requested_by = NULL,
+                delete_reason = NULL,
+                job_family = %s,
+                resource_class = %s,
+                priority = %s,
+                time_budget_seconds = %s,
+                telemetry = %s::jsonb,
+                created_at = now(),
+                updated_at = now()
+            WHERE id = %s
+            RETURNING id::text, status
+            """,
+            (
+                clean_job_type,
+                payload_json,
+                clean_status,
+                _postgres_text_or_none(last_error),
+                delay_seconds,
+                resolved_job_family,
+                resolved_resource_class,
+                resolved_priority,
+                resolved_time_budget,
+                telemetry_json,
+                existing[0],
+            ),
+        )
+        updated = cur.fetchone()
+        cur.execute(
+            """
+            INSERT INTO audit_events (event_type, target_table, target_id, details)
+            VALUES ('capture_job.identity_reused', 'capture_jobs', %s, %s::jsonb)
+            """,
+            (
+                updated[0],
+                _json({**details, "previous_status": existing_status, "status": updated[1]}),
+            ),
+        )
+        return {
+            "job_id": updated[0],
+            "status": updated[1],
+            "created": False,
+            "deduped": False,
+            "reused": True,
+        }
+    cur.execute(
+        """
+        INSERT INTO capture_jobs (
+            job_type, payload, status, last_error, next_attempt_at,
+            job_family, resource_class, priority, time_budget_seconds, telemetry
+        )
+        VALUES (%s, %s::jsonb, %s, %s, now() + make_interval(secs => %s), %s, %s, %s, %s, %s::jsonb)
+        RETURNING id::text, status
+        """,
+        (
+            clean_job_type,
+            payload_json,
+            clean_status,
+            _postgres_text_or_none(last_error),
+            delay_seconds,
+            resolved_job_family,
+            resolved_resource_class,
+            resolved_priority,
+            resolved_time_budget,
+            telemetry_json,
+        ),
+    )
+    inserted = cur.fetchone()
+    cur.execute(
+        """
+        INSERT INTO audit_events (event_type, target_table, target_id, details)
+        VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
+        """,
+        (inserted[0], _json(details)),
+    )
+    return {
+        "job_id": inserted[0],
+        "status": inserted[1],
+        "created": True,
+        "deduped": False,
+        "reused": False,
+    }
+
+
 def enqueue_capture_job(
     *, job_type: str, payload: dict[str, Any], url: str | None = None
 ) -> str:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO capture_jobs (job_type, payload)
-                VALUES (%s, %s::jsonb)
-                RETURNING id::text
-                """,
-                (job_type, _json(payload)),
+            result = _enqueue_unique_capture_job_with_cursor(
+                cur,
+                job_type=job_type,
+                payload=payload,
+                telemetry={"stage": "queued"},
+                audit_details={"job_type": job_type},
             )
-            job_id = cur.fetchone()[0]
-            cur.execute(
-                """
-                INSERT INTO audit_events (event_type, target_table, target_id, details)
-                VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
-                """,
-                (job_id, _json({"job_type": job_type})),
-            )
-            return job_id
+            return result["job_id"]
 
 
 def requeue_metadata_only_source_assets(
@@ -9977,25 +10063,18 @@ def requeue_metadata_only_source_assets(
                     "path": path,
                     "reason": "metadata_only_requeue",
                 }
-                cur.execute(
-                    """
-                    INSERT INTO capture_jobs (
-                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
-                    )
-                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
-                    RETURNING id::text
-                    """,
-                    (
-                        job_type,
-                        _json(payload),
-                        schedule["job_family"],
-                        schedule["resource_class"],
-                        schedule["priority"],
-                        schedule["time_budget_seconds"],
-                        _json({"stage": "queued", "root_name": row_root_name, "path": path, "reason": "metadata_only_requeue"}),
-                    ),
+                queued = _enqueue_unique_capture_job_with_cursor(
+                    cur,
+                    job_type=job_type,
+                    payload=payload,
+                    job_family=schedule["job_family"],
+                    resource_class=schedule["resource_class"],
+                    priority=schedule["priority"],
+                    time_budget_seconds=schedule["time_budget_seconds"],
+                    telemetry={"stage": "queued", "root_name": row_root_name, "path": path, "reason": "metadata_only_requeue"},
+                    audit_details={"job_type": job_type, "root_name": row_root_name, "path": path, "reason": "metadata_only_requeue"},
                 )
-                job_id = cur.fetchone()[0]
+                job_id = queued["job_id"]
                 cur.execute(
                     """
                     UPDATE source_assets
@@ -10010,17 +10089,7 @@ def requeue_metadata_only_source_assets(
                         asset_id,
                     ),
                 )
-                cur.execute(
-                    """
-                    INSERT INTO audit_events (event_type, target_table, target_id, details)
-                    VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
-                    """,
-                    (
-                        job_id,
-                        _json({"job_type": job_type, "root_name": row_root_name, "path": path, "reason": "metadata_only_requeue"}),
-                    ),
-                )
-                jobs.append({"job_id": job_id, "root_name": row_root_name, "path": path, "job_type": job_type})
+                jobs.append({"job_id": job_id, "root_name": row_root_name, "path": path, "job_type": job_type, "deduped": queued["deduped"], "reused": queued["reused"]})
     return {"queued": len(jobs), "jobs": jobs, "limit": row_limit, "root_name": root_name}
 
 
@@ -10064,25 +10133,18 @@ def requeue_svg_source_assets(
                     "path": path,
                     "reason": "svg_renderer_reparse",
                 }
-                cur.execute(
-                    """
-                    INSERT INTO capture_jobs (
-                        job_type, payload, job_family, resource_class, priority, time_budget_seconds, telemetry
-                    )
-                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s::jsonb)
-                    RETURNING id::text
-                    """,
-                    (
-                        "corpus_extract_image",
-                        _json(payload),
-                        schedule["job_family"],
-                        schedule["resource_class"],
-                        schedule["priority"],
-                        schedule["time_budget_seconds"],
-                        _json({"stage": "queued", "root_name": row_root_name, "path": path, "reason": "svg_renderer_reparse"}),
-                    ),
+                queued = _enqueue_unique_capture_job_with_cursor(
+                    cur,
+                    job_type="corpus_extract_image",
+                    payload=payload,
+                    job_family=schedule["job_family"],
+                    resource_class=schedule["resource_class"],
+                    priority=schedule["priority"],
+                    time_budget_seconds=schedule["time_budget_seconds"],
+                    telemetry={"stage": "queued", "root_name": row_root_name, "path": path, "reason": "svg_renderer_reparse"},
+                    audit_details={"job_type": "corpus_extract_image", "root_name": row_root_name, "path": path, "reason": "svg_renderer_reparse"},
                 )
-                job_id = cur.fetchone()[0]
+                job_id = queued["job_id"]
                 cur.execute("DELETE FROM asset_chunks WHERE asset_id = %s", (asset_id,))
                 cur.execute(
                     """
@@ -10102,17 +10164,7 @@ def requeue_svg_source_assets(
                         asset_id,
                     ),
                 )
-                cur.execute(
-                    """
-                    INSERT INTO audit_events (event_type, target_table, target_id, details)
-                    VALUES ('capture_job.queued', 'capture_jobs', %s, %s::jsonb)
-                    """,
-                    (
-                        job_id,
-                        _json({"job_type": "corpus_extract_image", "root_name": row_root_name, "path": path, "reason": "svg_renderer_reparse"}),
-                    ),
-                )
-                jobs.append({"job_id": job_id, "root_name": row_root_name, "path": path, "job_type": "corpus_extract_image"})
+                jobs.append({"job_id": job_id, "root_name": row_root_name, "path": path, "job_type": "corpus_extract_image", "deduped": queued["deduped"], "reused": queued["reused"]})
     return {"queued": len(jobs), "jobs": jobs, "limit": row_limit, "root_name": root_name}
 
 
@@ -12934,25 +12986,18 @@ def enqueue_search_index_sync(
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO capture_jobs (
-                    job_type, payload, job_family, resource_class, priority, time_budget_seconds
-                )
-                VALUES (%s, %s::jsonb, %s, %s, %s, %s)
-                RETURNING id::text
-                """,
-                (
-                    "search_index_sync",
-                    _json(payload),
-                    schedule["job_family"],
-                    schedule["resource_class"],
-                    schedule["priority"],
-                    schedule["time_budget_seconds"],
-                ),
+            queued = _enqueue_unique_capture_job_with_cursor(
+                cur,
+                job_type="search_index_sync",
+                payload=payload,
+                job_family=schedule["job_family"],
+                resource_class=schedule["resource_class"],
+                priority=schedule["priority"],
+                time_budget_seconds=schedule["time_budget_seconds"],
+                telemetry={"stage": "queued", "owner_class": payload["owner_class"], "root_name": root_name},
+                audit_details={"job_type": "search_index_sync", "owner_class": payload["owner_class"], "root_name": root_name},
             )
-            job_id = cur.fetchone()[0]
-    return {"queued": 1, "job_id": job_id, **payload}
+    return {"queued": 0 if queued["deduped"] else 1, "job_id": queued["job_id"], "deduped": queued["deduped"], "reused": queued["reused"], **payload}
 
 
 def mark_search_index_rebuild(
