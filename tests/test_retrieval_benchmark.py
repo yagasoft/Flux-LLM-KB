@@ -553,6 +553,11 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     )
     monkeypatch.setattr(
         database,
+        "sync_search_index",
+        lambda **kwargs: calls.append(("sync_search_index", kwargs)) or {"indexed": 12, "failed": 0},
+    )
+    monkeypatch.setattr(
+        database,
         "list_source_assets",
         lambda **kwargs: [{"id": f"asset-{kwargs['path']}", "path": kwargs["path"], "canonical_asset_id": None}],
     )
@@ -620,4 +625,9 @@ def test_service_retrieval_benchmark_standard_suite_includes_expanded_code_cases
     assert refresh_calls
     assert refresh_calls[0][1]["memory_class"] == "corpus"
     assert refresh_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
+    search_index_calls = [call for call in calls if call[0] == "sync_search_index"]
+    assert search_index_calls
+    assert search_index_calls[0][1]["owner_class"] == "all"
+    assert search_index_calls[0][1]["root_name"].startswith("__retrieval_benchmark_")
+    assert search_index_calls[0][1]["limit"] == 1000
     assert any(call[0] == "delete_root" for call in calls)

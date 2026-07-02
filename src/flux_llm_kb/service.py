@@ -1160,6 +1160,10 @@ class KnowledgeService:
                 transition="deprioritize",
                 reason="synthetic retrieval benchmark stale evidence",
             )
+            search_index_result = database.sync_search_index(owner_class="all", root_name=root_name, limit=1000)
+            if int(search_index_result.get("failed") or 0):
+                errors = "; ".join(str(item) for item in (search_index_result.get("errors") or [])[:3])
+                raise RuntimeError(f"retrieval benchmark search-index sync failed: {errors or search_index_result['failed']}")
             cases = [
                 _retrieval_benchmark_case(
                     self,
