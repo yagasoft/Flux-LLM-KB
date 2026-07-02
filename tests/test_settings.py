@@ -28,6 +28,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.embedding_model" in keys
     assert "retrieval.embedding_dimensions" in keys
     assert "retrieval.reranker_model" in keys
+    assert "retrieval.reranker_awq_model" in keys
     assert "retrieval.reranker_quantization" in keys
     assert "retrieval.rerank_top_n" in keys
     assert "retrieval.max_rerank_passage_tokens" in keys
@@ -118,6 +119,32 @@ def test_worker_default_workers_uses_environment_override(monkeypatch):
     assert resolved.value == 12
     assert resolved.raw_value == 12
     assert resolved.source == "env"
+
+
+def test_reranker_quantization_settings_canonicalize_legacy_aliases(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    definitions = {definition.key: definition for definition in SETTING_REGISTRY}
+    quantization = definitions["retrieval.reranker_quantization"]
+    awq_model = definitions["retrieval.reranker_awq_model"]
+
+    assert quantization.default == "awq_int4"
+    assert quantization.validate("awq_int4") == "awq_int4"
+    assert quantization.validate("int4_awq") == "awq_int4"
+    assert quantization.validate("awq") == "awq_int4"
+    assert quantization.validate("nf4_4bit") == "nf4_4bit"
+    assert quantization.validate("int4") == "nf4_4bit"
+    assert quantization.validate("4bit") == "nf4_4bit"
+    assert quantization.validate("fp16") == "fp16"
+    with pytest.raises(ValueError, match="awq_int4"):
+        quantization.validate("nf4_awq")
+
+    service = SettingsService()
+    assert service.resolve("retrieval.reranker_quantization").raw_value == "awq_int4"
+    assert service.resolve("retrieval.reranker_awq_model").raw_value == "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+    assert awq_model.env_var == "FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL"
+
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", "int4_awq")
+    assert service.resolve("retrieval.reranker_quantization").raw_value == "awq_int4"
 
 
 def test_crawler_global_excludes_skip_dedicated_worktrees(monkeypatch):

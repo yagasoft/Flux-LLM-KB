@@ -80,6 +80,7 @@ def test_pyproject_splits_torch_and_paddle_dependency_groups() -> None:
     assert "sentence-transformers==5.6.0" in processors
     assert "transformers==4.57.6" in processors
     assert "accelerate==1.14.0" in processors
+    assert "compressed-tensors" in processors
     assert "paddleocr" not in processors
     assert "paddlex" not in processors
     assert "paddlepaddle-gpu" not in processors

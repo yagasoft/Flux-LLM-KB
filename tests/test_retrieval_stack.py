@@ -354,19 +354,24 @@ class FakeQwenScorer:
     def __init__(self):
         self.calls = []
 
-    def score(self, query, passages, *, model, quantization):
+    def score(self, query, passages, *, model, quantization, awq_model=None):
         self.calls.append(
             {
                 "query": query,
                 "passages": list(passages),
                 "model": model,
                 "quantization": quantization,
+                "awq_model": awq_model,
             }
         )
         return [float(len(passage.split())) for passage in passages]
 
 
-def test_qwen_reranker_uses_quantized_microbatches_and_token_bounds():
+def test_qwen_reranker_uses_quantized_microbatches_and_token_bounds(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.delenv("FLUX_KB_RETRIEVAL_RERANKER_MODEL", raising=False)
+    monkeypatch.delenv("FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL", raising=False)
+    monkeypatch.delenv("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", raising=False)
     scorer = FakeQwenScorer()
     reranker = QwenReranker(scorer=scorer, top_n=3, microbatch_size=2, max_passage_tokens=4)
     candidates = [
@@ -380,11 +385,33 @@ def test_qwen_reranker_uses_quantized_microbatches_and_token_bounds():
 
     assert [len(call["passages"]) for call in scorer.calls] == [2, 1]
     assert all(call["model"] == "Qwen/Qwen3-Reranker-4B" for call in scorer.calls)
-    assert all(call["quantization"] == "int4_awq" for call in scorer.calls)
+    assert all(call["quantization"] == "awq_int4" for call in scorer.calls)
+    assert all(call["awq_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4" for call in scorer.calls)
     assert scorer.calls[0]["passages"][0] == "A\none two three four"
     assert [item["id"] for item in reranked] == ["a", "c", "b"]
     assert [item["reranker"]["model"] for item in reranked] == ["Qwen/Qwen3-Reranker-4B"] * 3
-    assert all(item["reranker"]["quantization"] == "int4_awq" for item in reranked)
+    assert all(item["reranker"]["quantization"] == "awq_int4" for item in reranked)
+    assert all(item["reranker"]["requested_quantization"] == "awq_int4" for item in reranked)
+    assert all(item["reranker"]["quantization_backend"] == "compressed_tensors_awq" for item in reranked)
+    assert all(item["reranker"]["load_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4" for item in reranked)
+    assert all(item["reranker"]["awq_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4" for item in reranked)
+
+
+def test_qwen_reranker_resolves_runtime_quantization_aliases(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", "int4_awq")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL", "example/Qwen3-Reranker-4B-AWQ")
+
+    scorer = FakeQwenScorer()
+    reranker = QwenReranker(scorer=scorer, top_n=1)
+
+    assert reranker.requested_quantization == "int4_awq"
+    assert reranker.quantization == "awq_int4"
+    assert reranker.quantization_backend == "compressed_tensors_awq"
+    assert reranker.load_model == "example/Qwen3-Reranker-4B-AWQ"
+    assert reranker.awq_model == "example/Qwen3-Reranker-4B-AWQ"
+    reranker.rerank("rank", [{"id": "a", "summary": "candidate"}])
+    assert scorer.calls[0]["awq_model"] == "example/Qwen3-Reranker-4B-AWQ"
 
 
 class FakeSearchIndexProvider:
@@ -671,7 +698,11 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
 
     class FakeReranker:
         model = "Qwen/Qwen3-Reranker-4B"
-        quantization = "int4_awq"
+        quantization = "awq_int4"
+        requested_quantization = "awq_int4"
+        quantization_backend = "compressed_tensors_awq"
+        load_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        awq_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
         top_n = 80
         max_passage_tokens = 1536
 
@@ -679,7 +710,21 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
             self.top_n = kwargs["top_n"]
 
         def rerank(self, _query, candidates):
-            return [{**candidate, "reranker": {"model": self.model, "quantization": self.quantization, "score": 9.0}} for candidate in candidates]
+            return [
+                {
+                    **candidate,
+                    "reranker": {
+                        "model": self.model,
+                        "quantization": self.quantization,
+                        "requested_quantization": self.requested_quantization,
+                        "quantization_backend": self.quantization_backend,
+                        "load_model": self.load_model,
+                        "awq_model": self.awq_model,
+                        "score": 9.0,
+                    },
+                }
+                for candidate in candidates
+            ]
 
     monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
     monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
@@ -726,7 +771,11 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
     assert diagnostics["vespa"]["hydrated_count"] == 1
     assert diagnostics["vespa"]["match_feature_keys"] == ["dense_score", "lexical_score"]
     assert diagnostics["reranker"]["model"] == "Qwen/Qwen3-Reranker-4B"
-    assert diagnostics["reranker"]["quantization"] == "int4_awq"
+    assert diagnostics["reranker"]["quantization"] == "awq_int4"
+    assert diagnostics["reranker"]["requested_quantization"] == "awq_int4"
+    assert diagnostics["reranker"]["quantization_backend"] == "compressed_tensors_awq"
+    assert diagnostics["reranker"]["load_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+    assert diagnostics["reranker"]["awq_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4"
     assert diagnostics["reranker"]["input_count"] == 1
     assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
 
@@ -775,7 +824,11 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
 
     class FakeReranker:
         model = "Qwen/Qwen3-Reranker-4B"
-        quantization = "int4_awq"
+        quantization = "awq_int4"
+        requested_quantization = "awq_int4"
+        quantization_backend = "compressed_tensors_awq"
+        load_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        awq_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
         top_n = 80
         max_passage_tokens = 1536
 
@@ -1038,7 +1091,11 @@ def test_vespa_evidence_search_promotes_exact_code_symbol_matches(monkeypatch):
 
     class FakeReranker:
         model = "Qwen/Qwen3-Reranker-4B"
-        quantization = "int4_awq"
+        quantization = "awq_int4"
+        requested_quantization = "awq_int4"
+        quantization_backend = "compressed_tensors_awq"
+        load_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        awq_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
         top_n = 80
         max_passage_tokens = 1536
 

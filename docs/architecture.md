@@ -85,8 +85,9 @@ Queries combine local-first signals:
   Snowflake `snowflake-arctic-embed-l-v2.0` 1024-dimensional dense vectors
 - PostgreSQL hydration, root/file-kind/language/lifecycle filtering,
   permissions, graph traversal, and duplicate/version suppression
-- Qwen `Qwen3-Reranker-4B` INT4-scored reranking over the top hydrated
-  candidates when the local model runner is healthy
+- Qwen `Qwen3-Reranker-4B` reranking over the top hydrated candidates when the
+  local model runner is healthy, with `awq_int4`, `nf4_4bit`, and `fp16`
+  reported as distinct quantisation modes
 - bounded PostgreSQL lexical diagnostics when Vespa or the model runner is not
   available; this fallback is not the active semantic path
 - lifecycle scoring from confidence, recency, reinforcement, and supersession
@@ -121,6 +122,13 @@ Search-index records carry redacted provider metadata such as model,
 dimensions, source hash, and cache key, but not raw source text. Active
 search-index sync writes Snowflake vectors to Vespa and stores only sync state
 and metadata in PostgreSQL.
+The default Qwen reranker quantisation is `awq_int4`, which loads the compatible
+AWQ checkpoint configured by `retrieval.reranker_awq_model` and relies on the
+checkpoint's `compressed-tensors` quantisation metadata. `nf4_4bit` is the
+separate bitsandbytes NF4 path, and `fp16` is the unquantised half-precision
+path. Health, rerank responses, and retrieval diagnostics expose the requested
+quantisation, canonical quantisation, backend, base model, AWQ model, and actual
+loaded model so AWQ, NF4, and FP16 cannot silently masquerade as each other.
 Semantic near-duplicate clusters are stored as advisory metadata in
 `semantic_duplicate_clusters` and `semantic_duplicate_members` for corpus
 chunks, episodes, and claims. Refreshes retire prior active clusters and create

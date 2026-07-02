@@ -429,6 +429,20 @@ text. Use `flux-kb search-index status` to inspect coverage,
 `flux-kb search-index rebuild` when Vespa documents need rebuilding. The same
 counters appear in the dashboard Performance tab as indexed, skipped, deleted,
 failed, and stale records.
+Qwen reranking uses explicit quantisation settings. The default
+`retrieval.reranker_quantization=awq_int4` loads
+`retrieval.reranker_awq_model`, defaulting to
+`drawais/Qwen3-Reranker-4B-AWQ-INT4`, through the AWQ checkpoint's
+`compressed-tensors` metadata. `nf4_4bit` is the separate bitsandbytes NF4
+path, and `fp16` is the half-precision path. Legacy aliases are accepted only
+for compatibility: `int4_awq` and `awq` canonicalise to `awq_int4`, while
+`int4` and `4bit` canonicalise to `nf4_4bit`. The matching environment
+overrides are `FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION`,
+`FLUX_KB_RETRIEVAL_RERANKER_MODEL`, and
+`FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL`. Flux does not silently fall back between
+AWQ, NF4, and FP16; model-runner health and rerank metadata report the requested
+quantisation, canonical quantisation, backend, base model, AWQ model, and actual
+loaded model.
 
 The destructive legacy retrieval purge is deliberately not run by ordinary
 database migration. Migration `0033_legacy_retrieval_purge` installs

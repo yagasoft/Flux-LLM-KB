@@ -254,7 +254,8 @@ services:
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
       FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
       FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
-      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq
+      FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL: drawais/Qwen3-Reranker-4B-AWQ-INT4
+      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: awq_int4
       FLUX_KB_RETRIEVAL_RERANK_TOP_N: "80"
       FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS: "1536"
       FLUX_KB_RETRIEVAL_GPU_VRAM_BUDGET_MB: "10240"
@@ -322,7 +323,8 @@ services:
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
       FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
       FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
-      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq
+      FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL: drawais/Qwen3-Reranker-4B-AWQ-INT4
+      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: awq_int4
       FLUX_KB_RETRIEVAL_RERANK_TOP_N: "80"
       FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS: "1536"
       FLUX_KB_RETRIEVAL_GPU_VRAM_BUDGET_MB: "10240"
@@ -403,7 +405,8 @@ services:
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
       FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
       FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
-      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq
+      FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL: drawais/Qwen3-Reranker-4B-AWQ-INT4
+      FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: awq_int4
       FLUX_KB_OCR_ENGINE: paddleocr
       FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
       FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
@@ -905,7 +908,8 @@ function Set-FluxProductionRuntimeSettings {
         Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.embedding_model", "Snowflake/snowflake-arctic-embed-l-v2.0", "--confirm")
         Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.embedding_dimensions", "1024", "--confirm")
         Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.reranker_model", "Qwen/Qwen3-Reranker-4B", "--confirm")
-        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.reranker_quantization", "int4_awq", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.reranker_awq_model", "drawais/Qwen3-Reranker-4B-AWQ-INT4", "--confirm")
+        Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.reranker_quantization", "awq_int4", "--confirm")
         Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.rerank_top_n", "80", "--confirm")
         Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.max_rerank_passage_tokens", "1536", "--confirm")
         Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "retrieval.gpu_vram_budget_mb", "10240", "--confirm")

@@ -9,8 +9,10 @@ from .database import DEFAULT_DATABASE_URL
 from .reranking import (
     DEFAULT_MAX_RERANK_PASSAGE_TOKENS,
     DEFAULT_RERANK_TOP_N,
+    DEFAULT_RERANKER_AWQ_MODEL,
     DEFAULT_RERANKER_MODEL,
     DEFAULT_RERANKER_QUANTIZATION,
+    normalize_reranker_quantization,
 )
 from .search_index import DEFAULT_VESPA_BASE_URL, SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL
 
@@ -130,6 +132,10 @@ def _choice(*choices: str) -> Callable[[Any], Any]:
         return parsed
 
     return validate
+
+
+def _reranker_quantization(value: Any) -> str:
+    return normalize_reranker_quantization(value)
 
 
 def _loopback_http_url(value: Any) -> str:
@@ -425,15 +431,25 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         affected_components=("retrieval", "model-runner"),
     ),
     SettingDefinition(
+        key="retrieval.reranker_awq_model",
+        category="retrieval",
+        default=DEFAULT_RERANKER_AWQ_MODEL,
+        value_type="str",
+        description="AWQ checkpoint loaded when retrieval.reranker_quantization is awq_int4.",
+        env_var="FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("retrieval", "model-runner"),
+    ),
+    SettingDefinition(
         key="retrieval.reranker_quantization",
         category="retrieval",
         default=DEFAULT_RERANKER_QUANTIZATION,
         value_type="str",
-        description="Quantization used for the final reranker under the local VRAM budget.",
+        description="Quantization used for the final reranker: awq_int4, nf4_4bit, or fp16; legacy aliases are canonicalized.",
         env_var="FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION",
         apply_mode=APPLY_RELOAD,
         affected_components=("retrieval", "model-runner"),
-        validator=_choice("int4_awq", "int4", "awq"),
+        validator=_reranker_quantization,
     ),
     SettingDefinition(
         key="retrieval.rerank_top_n",

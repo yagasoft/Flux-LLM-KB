@@ -159,7 +159,9 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0" in compose
         assert "FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: \"1024\"" in compose
         assert "FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B" in compose
-        assert "FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq" in compose
+        assert "FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL: drawais/Qwen3-Reranker-4B-AWQ-INT4" in compose
+        assert "FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: awq_int4" in compose
+        assert "FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq" not in compose
         assert "FLUX_KB_OCR_ENGINE: paddleocr" in compose
         assert "FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5" in compose
         assert "FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL" in compose
@@ -239,7 +241,9 @@ def test_production_deploy_persists_host_side_qwen_runtime_settings():
         assert '"settings", "set", "retrieval.embedding_model", "Snowflake/snowflake-arctic-embed-l-v2.0", "--confirm"' in script
         assert '"settings", "set", "retrieval.embedding_dimensions", "1024", "--confirm"' in script
         assert '"settings", "set", "retrieval.reranker_model", "Qwen/Qwen3-Reranker-4B", "--confirm"' in script
-        assert '"settings", "set", "retrieval.reranker_quantization", "int4_awq", "--confirm"' in script
+        assert '"settings", "set", "retrieval.reranker_awq_model", "drawais/Qwen3-Reranker-4B-AWQ-INT4", "--confirm"' in script
+        assert '"settings", "set", "retrieval.reranker_quantization", "awq_int4", "--confirm"' in script
+        assert '"settings", "set", "retrieval.reranker_quantization", "int4_awq", "--confirm"' not in script
         assert '"settings", "set", "retrieval.rerank_top_n", "80", "--confirm"' in script
         assert '"settings", "set", "retrieval.max_rerank_passage_tokens", "1536", "--confirm"' in script
         assert '"settings", "set", "retrieval.gpu_vram_budget_mb", "10240", "--confirm"' in script

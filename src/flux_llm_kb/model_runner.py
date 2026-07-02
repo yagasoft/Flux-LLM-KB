@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from dataclasses import dataclass
 import json
 import os
 import tempfile
@@ -18,7 +19,8 @@ from .onnxruntime_logging import configure_onnxruntime_logging
 DEFAULT_MODEL_RUNNER_BASE_URL = "http://127.0.0.1:8790"
 DEFAULT_EMBEDDING_MODEL = "Snowflake/snowflake-arctic-embed-l-v2.0"
 DEFAULT_RERANKER_MODEL = "Qwen/Qwen3-Reranker-4B"
-DEFAULT_RERANKER_QUANTIZATION = "int4_awq"
+DEFAULT_RERANKER_AWQ_MODEL = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+DEFAULT_RERANKER_QUANTIZATION = "awq_int4"
 DEFAULT_OCR_SIMPLE_MODEL = "PP-OCRv5"
 DEFAULT_OCR_DOCUMENT_MODEL = "PaddleOCR-VL"
 DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS = 600
@@ -27,13 +29,83 @@ os.environ.setdefault("PADDLE_PDX_CACHE_HOME", DEFAULT_PADDLEX_CACHE_HOME)
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "bos")
 _EMBEDDING_MODELS: dict[str, Any] = {}
-_RERANKER_MODELS: dict[tuple[str, str], Any] = {}
+_RERANKER_MODELS: dict[tuple[str, str, str], Any] = {}
 _PADDLE_OCR_MODELS: dict[str, Any] = {}
 _PADDLE_OCR_VL_MODELS: dict[str, Any] = {}
 
 
 class ModelRunnerError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class RerankerQuantizationProfile:
+    requested_quantization: str
+    quantization: str
+    backend: str
+    model: str
+    load_model: str
+    awq_model: str
+
+
+_RERANKER_QUANTIZATION_ALIASES = {
+    "int4_awq": "awq_int4",
+    "awq": "awq_int4",
+    "int4": "nf4_4bit",
+    "4bit": "nf4_4bit",
+}
+_RERANKER_QUANTIZATION_CHOICES = ("awq_int4", "nf4_4bit", "fp16")
+
+
+def normalize_reranker_quantization(value: Any) -> str:
+    requested = str(value or DEFAULT_RERANKER_QUANTIZATION).strip().lower()
+    canonical = _RERANKER_QUANTIZATION_ALIASES.get(requested, requested)
+    if canonical not in _RERANKER_QUANTIZATION_CHOICES:
+        choices = ", ".join((*_RERANKER_QUANTIZATION_CHOICES, *_RERANKER_QUANTIZATION_ALIASES))
+        raise ValueError(f"value must be one of: {choices}")
+    return canonical
+
+
+def resolve_reranker_quantization(
+    quantization: Any,
+    *,
+    model: str | None = None,
+    awq_model: str | None = None,
+) -> RerankerQuantizationProfile:
+    requested = str(quantization or DEFAULT_RERANKER_QUANTIZATION).strip() or DEFAULT_RERANKER_QUANTIZATION
+    canonical = normalize_reranker_quantization(requested)
+    base_model = str(model or DEFAULT_RERANKER_MODEL)
+    resolved_awq_model = str(
+        awq_model
+        or os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL")
+        or DEFAULT_RERANKER_AWQ_MODEL
+    )
+    if canonical == "awq_int4":
+        return RerankerQuantizationProfile(
+            requested_quantization=requested,
+            quantization=canonical,
+            backend="compressed_tensors_awq",
+            model=base_model,
+            load_model=resolved_awq_model,
+            awq_model=resolved_awq_model,
+        )
+    if canonical == "nf4_4bit":
+        return RerankerQuantizationProfile(
+            requested_quantization=requested,
+            quantization=canonical,
+            backend="bitsandbytes_nf4",
+            model=base_model,
+            load_model=base_model,
+            awq_model=resolved_awq_model,
+        )
+    return RerankerQuantizationProfile(
+        requested_quantization=requested,
+        quantization=canonical,
+        backend="torch_fp16",
+        model=base_model,
+        load_model=base_model,
+        awq_model=resolved_awq_model,
+    )
 
 
 class ModelRunnerClient:
@@ -54,16 +126,24 @@ class ModelRunnerClient:
             raise ModelRunnerError("model-runner embedding response did not include vectors")
         return [[float(value) for value in vector] for vector in vectors]
 
-    def rerank(self, query: str, passages: Iterable[str], *, model: str, quantization: str) -> list[float]:
-        payload = self._post_json(
-            "/v1/rerank",
-            {
-                "model": model,
-                "quantization": quantization,
-                "query": query,
-                "passages": list(passages),
-            },
-        )
+    def rerank(
+        self,
+        query: str,
+        passages: Iterable[str],
+        *,
+        model: str,
+        quantization: str,
+        awq_model: str | None = None,
+    ) -> list[float]:
+        request_payload = {
+            "model": model,
+            "quantization": quantization,
+            "query": query,
+            "passages": list(passages),
+        }
+        if awq_model:
+            request_payload["awq_model"] = awq_model
+        payload = self._post_json("/v1/rerank", request_payload)
         scores = payload.get("scores")
         if not isinstance(scores, list):
             raise ModelRunnerError("model-runner rerank response did not include scores")
@@ -117,8 +197,16 @@ class ModelRunnerRerankScorer:
     def __init__(self, client: ModelRunnerClient | None = None) -> None:
         self.client = client or ModelRunnerClient()
 
-    def score(self, query: str, passages: list[str], *, model: str, quantization: str) -> list[float]:
-        return self.client.rerank(query, passages, model=model, quantization=quantization)
+    def score(
+        self,
+        query: str,
+        passages: list[str],
+        *,
+        model: str,
+        quantization: str,
+        awq_model: str | None = None,
+    ) -> list[float]:
+        return self.client.rerank(query, passages, model=model, quantization=quantization, awq_model=awq_model)
 
 
 def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
@@ -176,6 +264,11 @@ def _paddle_runner_health() -> dict[str, Any] | None:
 
 def health_payload(role: str | None = None) -> dict[str, Any]:
     resolved_role = role or os.environ.get("FLUX_KB_MODEL_RUNNER_ROLE", "model-runner")
+    reranker_model = os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL)
+    reranker_profile = resolve_reranker_quantization(
+        os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", DEFAULT_RERANKER_QUANTIZATION),
+        model=reranker_model,
+    )
     cuda_available = False
     if resolved_role != "paddle-runner":
         try:
@@ -201,8 +294,12 @@ def health_payload(role: str | None = None) -> dict[str, Any]:
         "paddle_cuda_device_count": paddle_cuda_device_count,
         "paddle_device": paddle_device,
         "embedding_model": os.environ.get("FLUX_KB_RETRIEVAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
-        "reranker_model": os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL),
-        "reranker_quantization": os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", DEFAULT_RERANKER_QUANTIZATION),
+        "reranker_model": reranker_profile.model,
+        "reranker_awq_model": reranker_profile.awq_model,
+        "reranker_load_model": reranker_profile.load_model,
+        "reranker_quantization": reranker_profile.quantization,
+        "reranker_requested_quantization": reranker_profile.requested_quantization,
+        "reranker_quantization_backend": reranker_profile.backend,
         "ocr_engine": os.environ.get("FLUX_KB_OCR_ENGINE", "paddleocr"),
         "ocr_simple_model": os.environ.get("FLUX_KB_OCR_SIMPLE_MODEL", DEFAULT_OCR_SIMPLE_MODEL),
         "ocr_document_model": os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL", DEFAULT_OCR_DOCUMENT_MODEL),
@@ -243,9 +340,31 @@ def _embed_with_sentence_transformers(texts: list[str], *, model: str, dimension
     return result
 
 
-def _load_reranker_model(model: str, quantization: str) -> Any:
-    cache_key = (model, quantization)
+def _load_reranker_model(model: str, quantization: str, *, awq_model: str | None = None) -> Any:
+    profile = resolve_reranker_quantization(quantization, model=model, awq_model=awq_model)
+    cache_key = (profile.model, profile.quantization, profile.load_model)
     if cache_key not in _RERANKER_MODELS:
+        if profile.quantization == "awq_int4":
+            try:
+                import compressed_tensors  # noqa: F401
+                import torch
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+            except ImportError as exc:
+                raise ModelRunnerError("compressed-tensors, transformers, and torch are required for AWQ Qwen reranking") from exc
+            tokenizer = AutoTokenizer.from_pretrained(profile.load_model, trust_remote_code=True, padding_side="left")
+            causal_model = AutoModelForCausalLM.from_pretrained(
+                profile.load_model,
+                device_map="auto",
+                trust_remote_code=True,
+            ).eval()
+            _RERANKER_MODELS[cache_key] = _QwenCausalLMReranker(
+                causal_model,
+                tokenizer,
+                torch_module=torch,
+                profile=profile,
+                max_length=int(os.environ.get("FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS", "1536")),
+            )
+            return _RERANKER_MODELS[cache_key]
         try:
             import torch
             from sentence_transformers import CrossEncoder
@@ -255,29 +374,124 @@ def _load_reranker_model(model: str, quantization: str) -> Any:
             "trust_remote_code": True,
         }
         cross_encoder_model_kwargs: dict[str, Any] = {"device_map": "auto"}
-        if quantization in {"int4_awq", "int4", "4bit"}:
+        if profile.quantization == "nf4_4bit":
             try:
                 from transformers import BitsAndBytesConfig
             except ImportError as exc:
-                raise ModelRunnerError("bitsandbytes-compatible transformers is required for 4-bit Qwen reranking") from exc
+                raise ModelRunnerError("bitsandbytes-compatible transformers is required for NF4 Qwen reranking") from exc
             cross_encoder_model_kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.float16,
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
             )
-        elif getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
+        elif profile.quantization == "fp16":
             cross_encoder_model_kwargs["torch_dtype"] = torch.float16
         model_kwargs["model_kwargs"] = cross_encoder_model_kwargs
         model_kwargs["max_length"] = int(os.environ.get("FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS", "1536"))
-        _RERANKER_MODELS[cache_key] = CrossEncoder(model, **model_kwargs)
+        reranker = CrossEncoder(profile.load_model, **model_kwargs)
+        _attach_reranker_profile(reranker, profile)
+        _RERANKER_MODELS[cache_key] = reranker
     return _RERANKER_MODELS[cache_key]
 
 
-def _rerank_with_transformers(query: str, passages: list[str], *, model: str, quantization: str) -> list[float]:
+def _attach_reranker_profile(reranker: Any, profile: RerankerQuantizationProfile) -> None:
+    try:
+        reranker.profile = profile
+        reranker.quantization = profile.quantization
+        reranker.requested_quantization = profile.requested_quantization
+        reranker.quantization_backend = profile.backend
+        reranker.load_model = profile.load_model
+    except Exception:
+        pass
+
+
+class _QwenCausalLMReranker:
+    def __init__(
+        self,
+        model: Any,
+        tokenizer: Any,
+        *,
+        torch_module: Any,
+        profile: RerankerQuantizationProfile,
+        max_length: int,
+    ) -> None:
+        self.model = model
+        self.tokenizer = tokenizer
+        self.torch = torch_module
+        self.profile = profile
+        self.quantization = profile.quantization
+        self.requested_quantization = profile.requested_quantization
+        self.quantization_backend = profile.backend
+        self.load_model = profile.load_model
+        self.max_length = max(1, int(max_length))
+        self.token_false_id = int(tokenizer.convert_tokens_to_ids("no"))
+        self.token_true_id = int(tokenizer.convert_tokens_to_ids("yes"))
+        prefix = (
+            "<|im_start|>system\n"
+            'Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".'
+            "<|im_end|>\n<|im_start|>user\n"
+        )
+        suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        self.prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
+        self.suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
+        try:
+            tokenizer.deprecation_warnings["Asking-to-pad-a-fast-tokenizer"] = True
+        except Exception:
+            pass
+
+    def predict(self, pairs: Iterable[tuple[str, str]]) -> list[float]:
+        pair_list = [(str(query or ""), str(document or "")) for query, document in pairs]
+        if not pair_list:
+            return []
+        inputs = self._process_inputs(pair_list)
+        with self.torch.no_grad():
+            logits = self.model(**inputs).logits[:, -1, :]
+            true_vector = logits[:, self.token_true_id]
+            false_vector = logits[:, self.token_false_id]
+            scores = self.torch.stack([false_vector, true_vector], dim=1)
+            scores = self.torch.nn.functional.log_softmax(scores, dim=1)
+            return [float(score) for score in scores[:, 1].exp().tolist()]
+
+    def _process_inputs(self, pairs: list[tuple[str, str]]) -> Any:
+        task = "Given a web search query, retrieve relevant passages that answer the query"
+        texts = [
+            "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {document}".format(
+                instruction=task,
+                query=query,
+                document=document,
+            )
+            for query, document in pairs
+        ]
+        max_pair_length = max(1, self.max_length - len(self.prefix_tokens) - len(self.suffix_tokens))
+        inputs = self.tokenizer(
+            texts,
+            padding=False,
+            truncation="longest_first",
+            return_attention_mask=False,
+            max_length=max_pair_length,
+        )
+        inputs["input_ids"] = [self.prefix_tokens + input_ids + self.suffix_tokens for input_ids in inputs["input_ids"]]
+        inputs = self.tokenizer.pad(inputs, padding=True, return_tensors="pt")
+        device = getattr(self.model, "device", None)
+        if device is not None and hasattr(inputs, "to"):
+            return inputs.to(device)
+        if device is not None and isinstance(inputs, dict):
+            return {key: value.to(device) if hasattr(value, "to") else value for key, value in inputs.items()}
+        return inputs
+
+
+def _rerank_with_transformers(
+    query: str,
+    passages: list[str],
+    *,
+    model: str,
+    quantization: str,
+    awq_model: str | None = None,
+) -> list[float]:
     if not passages:
         return []
-    reranker = _load_reranker_model(model, quantization)
+    reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
     scores = reranker.predict([(query, passage) for passage in passages])
     return [float(score) for score in scores]
 
@@ -496,9 +710,14 @@ def download_models(models_dir: str) -> dict[str, Any]:
     except ImportError as exc:
         raise ModelRunnerError("huggingface-hub is required to pre-download model-runner models") from exc
     embedding_model = os.environ.get("FLUX_KB_RETRIEVAL_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+    reranker_model = os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL)
+    reranker_profile = resolve_reranker_quantization(
+        os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", DEFAULT_RERANKER_QUANTIZATION),
+        model=reranker_model,
+    )
     for repo_id, ignore_patterns in (
         (embedding_model, ["onnx/*", "*.onnx"]),
-        (os.environ.get("FLUX_KB_RETRIEVAL_RERANKER_MODEL", DEFAULT_RERANKER_MODEL), None),
+        (reranker_profile.load_model, None),
     ):
         path = _download_snapshot_with_retries(
             snapshot_download,
@@ -565,7 +784,30 @@ def create_app():
         passages = payload.get("passages") if isinstance(payload.get("passages"), list) else []
         model = str(payload.get("model") or DEFAULT_RERANKER_MODEL)
         quantization = str(payload.get("quantization") or DEFAULT_RERANKER_QUANTIZATION)
-        return {"ok": True, "model": model, "quantization": quantization, "scores": _rerank_with_transformers(str(payload.get("query") or ""), [str(passage or "") for passage in passages], model=model, quantization=quantization)}
+        awq_model = payload.get("awq_model") or payload.get("reranker_awq_model")
+        profile = resolve_reranker_quantization(quantization, model=model, awq_model=str(awq_model) if awq_model else None)
+        scores = _rerank_with_transformers(
+            str(payload.get("query") or ""),
+            [str(passage or "") for passage in passages],
+            model=model,
+            quantization=quantization,
+            awq_model=profile.awq_model,
+        )
+        return {
+            "ok": True,
+            "model": profile.model,
+            "load_model": profile.load_model,
+            "quantization": profile.quantization,
+            "requested_quantization": profile.requested_quantization,
+            "quantization_backend": profile.backend,
+            "reranker_model": profile.model,
+            "reranker_awq_model": profile.awq_model,
+            "reranker_load_model": profile.load_model,
+            "reranker_quantization": profile.quantization,
+            "reranker_requested_quantization": profile.requested_quantization,
+            "reranker_quantization_backend": profile.backend,
+            "scores": scores,
+        }
 
     @app.post("/v1/ocr/image")
     def ocr_image(payload: dict[str, Any]) -> dict[str, Any]:

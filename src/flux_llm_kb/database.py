@@ -1289,6 +1289,10 @@ def search_corpus_chunks_vespa(
         diagnostics["reranker"] = {
             "model": reranker.model,
             "quantization": reranker.quantization,
+            "requested_quantization": getattr(reranker, "requested_quantization", reranker.quantization),
+            "quantization_backend": getattr(reranker, "quantization_backend", ""),
+            "load_model": getattr(reranker, "load_model", reranker.model),
+            "awq_model": getattr(reranker, "awq_model", ""),
             "input_count": len(hydrated),
             "returned_count": min(limit, len(reranked)),
             "latency_ms": rerank_elapsed_ms,
@@ -1467,6 +1471,10 @@ def search_evidence_vespa(
         diagnostics["reranker"] = {
             "model": reranker.model,
             "quantization": reranker.quantization,
+            "requested_quantization": getattr(reranker, "requested_quantization", reranker.quantization),
+            "quantization_backend": getattr(reranker, "quantization_backend", ""),
+            "load_model": getattr(reranker, "load_model", reranker.model),
+            "awq_model": getattr(reranker, "awq_model", ""),
             "input_count": len(results),
             "returned_count": min(limit, len(reranked)),
             "latency_ms": rerank_elapsed_ms,

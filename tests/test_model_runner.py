@@ -39,7 +39,7 @@ def test_download_models_retries_hf_snapshots_and_skips_embedding_onnx(tmp_path,
     def fake_snapshot_download(**kwargs):
         nonlocal qwen_attempts
         calls.append(kwargs)
-        if kwargs["repo_id"] == model_runner.DEFAULT_RERANKER_MODEL:
+        if kwargs["repo_id"] == model_runner.DEFAULT_RERANKER_AWQ_MODEL:
             qwen_attempts += 1
             if qwen_attempts == 1:
                 raise OSError("connection broken: incomplete read")
@@ -55,9 +55,10 @@ def test_download_models_retries_hf_snapshots_and_skips_embedding_onnx(tmp_path,
     assert result["ok"] is True
     assert [item["repo_id"] for item in result["downloads"]] == [
         model_runner.DEFAULT_EMBEDDING_MODEL,
-        model_runner.DEFAULT_RERANKER_MODEL,
+        model_runner.DEFAULT_RERANKER_AWQ_MODEL,
     ]
-    assert [call["repo_id"] for call in calls].count(model_runner.DEFAULT_RERANKER_MODEL) == 2
+    assert [call["repo_id"] for call in calls].count(model_runner.DEFAULT_RERANKER_AWQ_MODEL) == 2
+    assert model_runner.DEFAULT_RERANKER_MODEL not in [call["repo_id"] for call in calls]
     snowflake_call = calls[0]
     assert snowflake_call["repo_id"] == model_runner.DEFAULT_EMBEDDING_MODEL
     assert snowflake_call["cache_dir"] == str(tmp_path / "models" / "huggingface" / "hub")
@@ -100,7 +101,66 @@ def test_download_paddle_models_uses_persistent_hf_and_paddle_caches(tmp_path, m
     ]
 
 
-def test_qwen_reranker_uses_cross_encoder_with_4bit_quantization(monkeypatch):
+def test_legacy_int4_awq_uses_awq_loader_not_bitsandbytes(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    class ExplodingBitsAndBytesConfig:
+        def __init__(self, **_kwargs):
+            raise AssertionError("AWQ must not use BitsAndBytesConfig")
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            calls.append({"loader": "tokenizer", "model": model, "kwargs": kwargs})
+            return cls()
+
+        def encode(self, _text, add_special_tokens=False):
+            return [1, 2]
+
+        def convert_tokens_to_ids(self, token):
+            return {"no": 10, "yes": 11}[token]
+
+    class FakeModel:
+        device = "cuda:0"
+
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            calls.append({"loader": "model", "model": model, "kwargs": kwargs})
+            return cls()
+
+        def eval(self):
+            calls.append({"loader": "eval"})
+            return self
+
+    monkeypatch.setitem(sys.modules, "compressed_tensors", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(float16="float16"))
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoTokenizer=FakeTokenizer,
+            AutoModelForCausalLM=FakeModel,
+            BitsAndBytesConfig=ExplodingBitsAndBytesConfig,
+        ),
+    )
+    model_runner._RERANKER_MODELS.clear()
+
+    reranker = model_runner._load_reranker_model(
+        model_runner.DEFAULT_RERANKER_MODEL,
+        "int4_awq",
+    )
+
+    assert reranker.profile.requested_quantization == "int4_awq"
+    assert reranker.profile.quantization == "awq_int4"
+    assert reranker.profile.backend == "compressed_tensors_awq"
+    assert reranker.profile.load_model == model_runner.DEFAULT_RERANKER_AWQ_MODEL
+    assert [call["model"] for call in calls if call.get("loader") in {"tokenizer", "model"}] == [
+        model_runner.DEFAULT_RERANKER_AWQ_MODEL,
+        model_runner.DEFAULT_RERANKER_AWQ_MODEL,
+    ]
+
+
+def test_qwen_reranker_uses_cross_encoder_with_nf4_quantization(monkeypatch):
     created: list[dict[str, object]] = []
 
     class FakeBitsAndBytesConfig:
@@ -125,7 +185,7 @@ def test_qwen_reranker_uses_cross_encoder_with_4bit_quantization(monkeypatch):
         "hybrid retrieval",
         ["Vespa combines BM25 and dense search.", "OCR extracts page text."],
         model=model_runner.DEFAULT_RERANKER_MODEL,
-        quantization="int4_awq",
+        quantization="nf4_4bit",
     )
 
     assert scores == [8.0, -4.0]
@@ -138,6 +198,39 @@ def test_qwen_reranker_uses_cross_encoder_with_4bit_quantization(monkeypatch):
     quantization_config = model_kwargs["quantization_config"]
     assert quantization_config.kwargs["load_in_4bit"] is True
     assert quantization_config.kwargs["bnb_4bit_compute_dtype"] == "float16"
+    assert quantization_config.kwargs["bnb_4bit_quant_type"] == "nf4"
+
+
+def test_qwen_reranker_fp16_uses_distinct_cross_encoder_backend(monkeypatch):
+    created: list[dict[str, object]] = []
+
+    class FakeCrossEncoder:
+        def __init__(self, model, **kwargs):
+            created.append({"model": model, "kwargs": kwargs})
+
+        def predict(self, _pairs):
+            return [3.0]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(float16="float16", cuda=SimpleNamespace(is_available=lambda: True)),
+    )
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(CrossEncoder=FakeCrossEncoder))
+    model_runner._RERANKER_MODELS.clear()
+
+    scores = model_runner._rerank_with_transformers(
+        "hybrid retrieval",
+        ["Vespa combines BM25 and dense search."],
+        model=model_runner.DEFAULT_RERANKER_MODEL,
+        quantization="fp16",
+    )
+
+    assert scores == [3.0]
+    model_kwargs = created[0]["kwargs"]["model_kwargs"]
+    assert model_kwargs["device_map"] == "auto"
+    assert model_kwargs["torch_dtype"] == "float16"
+    assert "quantization_config" not in model_kwargs
 
 
 def test_paddleocr_loader_disables_optional_preprocessors(monkeypatch):
@@ -364,6 +457,52 @@ def test_model_runner_health_reports_paddle_cuda_status(monkeypatch):
     assert payload["cuda_available"] is True
     assert payload["paddle_cuda_available"] is True
     assert payload["paddle_device"] == "gpu:0"
+    assert payload["reranker_quantization"] == "awq_int4"
+    assert payload["reranker_requested_quantization"] == "awq_int4"
+    assert payload["reranker_quantization_backend"] == "compressed_tensors_awq"
+    assert payload["reranker_model"] == model_runner.DEFAULT_RERANKER_MODEL
+    assert payload["reranker_load_model"] == model_runner.DEFAULT_RERANKER_AWQ_MODEL
+    assert payload["reranker_awq_model"] == model_runner.DEFAULT_RERANKER_AWQ_MODEL
+
+
+def test_rerank_endpoint_reports_canonical_quantization_metadata(monkeypatch):
+    app = model_runner.create_app()
+    from fastapi.testclient import TestClient
+
+    calls: list[dict[str, object]] = []
+
+    def fake_rerank(*_args, **kwargs):
+        calls.append(kwargs)
+        return [0.25]
+
+    monkeypatch.setattr(model_runner, "_rerank_with_transformers", fake_rerank)
+
+    response = TestClient(app).post(
+        "/v1/rerank",
+        json={
+            "model": model_runner.DEFAULT_RERANKER_MODEL,
+            "quantization": "awq",
+            "awq_model": "example/Qwen3-Reranker-4B-AWQ",
+            "query": "hybrid retrieval",
+            "passages": ["Vespa combines BM25 and dense search."],
+        },
+    )
+
+    payload = response.json()
+
+    assert payload["ok"] is True
+    assert payload["scores"] == [0.25]
+    assert payload["model"] == model_runner.DEFAULT_RERANKER_MODEL
+    assert payload["quantization"] == "awq_int4"
+    assert payload["requested_quantization"] == "awq"
+    assert payload["quantization_backend"] == "compressed_tensors_awq"
+    assert payload["load_model"] == "example/Qwen3-Reranker-4B-AWQ"
+    assert payload["reranker_awq_model"] == "example/Qwen3-Reranker-4B-AWQ"
+    assert payload["reranker_load_model"] == "example/Qwen3-Reranker-4B-AWQ"
+    assert payload["reranker_quantization"] == "awq_int4"
+    assert payload["reranker_requested_quantization"] == "awq"
+    assert payload["reranker_quantization_backend"] == "compressed_tensors_awq"
+    assert calls[0]["awq_model"] == "example/Qwen3-Reranker-4B-AWQ"
 
 
 def test_model_runner_proxies_ocr_to_paddle_runner(monkeypatch):
@@ -435,3 +574,29 @@ def test_model_runner_client_can_send_ocr_file_bytes(tmp_path, monkeypatch):
     assert payload["model"] == "PaddleOCR-VL"
     assert payload["filename"] == "page.png"
     assert base64.b64decode(payload["content_b64"]) == b"image-bytes"
+
+
+def test_model_runner_client_forwards_awq_model_for_reranking():
+    calls: list[dict[str, object]] = []
+
+    class FakeClient(model_runner.ModelRunnerClient):
+        def _post_json(self, path, payload):
+            calls.append({"path": path, "payload": payload})
+            return {"ok": True, "scores": [0.9]}
+
+    client = FakeClient(base_url="http://model-runner:8790")
+
+    scores = client.rerank(
+        "hybrid retrieval",
+        ["Vespa combines BM25 and dense search."],
+        model=model_runner.DEFAULT_RERANKER_MODEL,
+        quantization="awq_int4",
+        awq_model="example/Qwen3-Reranker-4B-AWQ",
+    )
+
+    assert scores == [0.9]
+    assert calls[0]["path"] == "/v1/rerank"
+    payload = calls[0]["payload"]
+    assert payload["model"] == model_runner.DEFAULT_RERANKER_MODEL
+    assert payload["quantization"] == "awq_int4"
+    assert payload["awq_model"] == "example/Qwen3-Reranker-4B-AWQ"
