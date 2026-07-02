@@ -35,6 +35,7 @@ RUN --mount=type=cache,id=flux-llm-kb-apt-cache,target=/var/cache/apt,sharing=lo
             catdoc \
             cpio \
             ffmpeg \
+            ccache \
             g++ \
             gcc \
             libarchive-tools \

@@ -10,7 +10,7 @@ import sys
 import tarfile
 from io import BytesIO
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from urllib.parse import quote
 from zipfile import ZipFile
 import zlib
@@ -1087,6 +1087,35 @@ def test_extract_image_blocks_when_paddleocr_is_missing(monkeypatch, tmp_path):
     assert result.metadata["ocr"]["engine"] == "paddleocr"
     assert result.metadata["ocr"]["cache_hits"] == 0
     assert result.metadata["ocr"]["cache_misses"] == 1
+
+
+def test_run_paddleocr_image_configures_onnxruntime_before_importing_paddleocr(monkeypatch, tmp_path):
+    path = tmp_path / "scan.png"
+    path.write_bytes(PNG_BYTES)
+    events: list[str] = []
+
+    class FakePaddleOCR:
+        def __init__(self, **_kwargs):
+            events.append("paddleocr-init")
+
+        def predict(self, _path):
+            return [{"text": "legacy OCR text"}]
+
+    class FakePaddleOCRModule(ModuleType):
+        def __getattr__(self, name):
+            if name == "PaddleOCR":
+                events.append("import-paddleocr")
+                return FakePaddleOCR
+            raise AttributeError(name)
+
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(extractors, "configure_onnxruntime_logging", lambda: events.append("configure-ort"), raising=False)
+    monkeypatch.setitem(sys.modules, "paddleocr", FakePaddleOCRModule("paddleocr"))
+
+    text = extractors._run_paddleocr_image(path, model="PP-OCRv5")
+
+    assert text == "legacy OCR text"
+    assert events[:2] == ["configure-ort", "import-paddleocr"]
 
 
 def test_extract_svg_embedded_text_without_ocr_or_vision(monkeypatch, tmp_path):

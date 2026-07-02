@@ -441,6 +441,7 @@ def test_dockerfile_installs_practical_extractor_pack():
         "zstd",
         "lz4",
         "binutils",
+        "ccache",
         "rpm2cpio",
         "ffmpeg",
         "calibre",

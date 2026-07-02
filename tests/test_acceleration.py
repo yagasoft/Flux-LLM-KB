@@ -6,6 +6,7 @@ import pytest
 
 from flux_llm_kb.acceleration import (
     FAMILY_DEFAULT_CAPS,
+    _onnxruntime_status,
     collect_acceleration_status,
     job_family_for_type,
     kind_to_job_families,
@@ -199,6 +200,55 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
         "cache_hits": 4,
         "cache_misses": 2,
     }
+
+
+def test_onnxruntime_status_sets_warning_severity_before_provider_discovery():
+    calls: list[tuple[str, object]] = []
+
+    class FakeOnnxRuntime:
+        def set_default_logger_severity(self, severity):
+            calls.append(("severity", severity))
+
+        def get_available_providers(self):
+            calls.append(("providers", None))
+            return ["CPUExecutionProvider"]
+
+    def fake_import(name):
+        calls.append(("import", name))
+        if name == "onnxruntime":
+            return FakeOnnxRuntime()
+        raise ModuleNotFoundError(name)
+
+    status = _onnxruntime_status(fake_import)
+
+    assert status["ok"] is True
+    assert status["providers"] == ["CPUExecutionProvider"]
+    assert calls == [("import", "onnxruntime"), ("severity", 3), ("providers", None)]
+
+
+def test_onnxruntime_status_reports_provider_discovery_failure():
+    calls: list[str] = []
+
+    class FakeOnnxRuntime:
+        def set_default_logger_severity(self, severity):
+            calls.append(f"severity:{severity}")
+
+        def get_available_providers(self):
+            calls.append("providers")
+            raise RuntimeError("GPU device discovery failed")
+
+    def fake_import(name):
+        if name == "onnxruntime":
+            return FakeOnnxRuntime()
+        raise ModuleNotFoundError(name)
+
+    status = _onnxruntime_status(fake_import)
+
+    assert status["ok"] is False
+    assert status["state"] == "unavailable"
+    assert status["providers"] == []
+    assert "GPU device discovery failed" in status["message"]
+    assert calls == ["severity:3", "providers"]
 
 
 def test_collect_status_reports_onnx_import_failure_without_crashing():

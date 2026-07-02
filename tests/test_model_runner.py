@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 from flux_llm_kb import model_runner
 
@@ -175,6 +175,39 @@ def test_paddleocr_loader_disables_optional_preprocessors(monkeypatch):
     ]
 
 
+def test_paddleocr_loader_configures_onnxruntime_before_importing_paddleocr(monkeypatch):
+    events: list[str] = []
+
+    class FakePaddleOCR:
+        def __init__(self, **_kwargs):
+            events.append("paddleocr-init")
+
+    class FakePaddleOCRModule(ModuleType):
+        def __getattr__(self, name):
+            if name == "PaddleOCR":
+                events.append("import-paddleocr")
+                return FakePaddleOCR
+            raise AttributeError(name)
+
+    monkeypatch.setattr(model_runner, "configure_onnxruntime_logging", lambda: events.append("configure-ort"), raising=False)
+    monkeypatch.setitem(sys.modules, "paddleocr", FakePaddleOCRModule("paddleocr"))
+    monkeypatch.setitem(
+        sys.modules,
+        "paddle",
+        SimpleNamespace(
+            device=SimpleNamespace(
+                is_compiled_with_cuda=lambda: False,
+                cuda=SimpleNamespace(device_count=lambda: 0),
+            )
+        ),
+    )
+    model_runner._PADDLE_OCR_MODELS.clear()
+
+    model_runner._load_paddleocr("PP-OCRv5")
+
+    assert events[:2] == ["configure-ort", "import-paddleocr"]
+
+
 def test_paddlex_model_source_defaults_to_bos():
     assert model_runner.os.environ["PADDLE_PDX_MODEL_SOURCE"] == "bos"
 
@@ -241,6 +274,42 @@ def test_paddleocr_vl_document_uses_paddlex_pipeline(monkeypatch):
             "use_doc_unwarping": False,
         }
     ]
+
+
+def test_paddleocr_vl_loader_configures_onnxruntime_before_importing_paddlex(monkeypatch):
+    events: list[str] = []
+
+    class FakePipeline:
+        pass
+
+    def fake_create_pipeline(**_kwargs):
+        events.append("create-pipeline")
+        return FakePipeline()
+
+    class FakePaddlexModule(ModuleType):
+        def __getattr__(self, name):
+            if name == "create_pipeline":
+                events.append("import-paddlex")
+                return fake_create_pipeline
+            raise AttributeError(name)
+
+    monkeypatch.setattr(model_runner, "configure_onnxruntime_logging", lambda: events.append("configure-ort"), raising=False)
+    monkeypatch.setitem(sys.modules, "paddlex", FakePaddlexModule("paddlex"))
+    monkeypatch.setitem(
+        sys.modules,
+        "paddle",
+        SimpleNamespace(
+            device=SimpleNamespace(
+                is_compiled_with_cuda=lambda: False,
+                cuda=SimpleNamespace(device_count=lambda: 0),
+            )
+        ),
+    )
+    model_runner._PADDLE_OCR_VL_MODELS.clear()
+
+    model_runner._load_paddleocr_vl("PaddleOCR-VL")
+
+    assert events[:2] == ["configure-ort", "import-paddlex"]
 
 
 def test_paddleocr_vl_document_uses_gpu_when_paddle_cuda_is_available(monkeypatch):

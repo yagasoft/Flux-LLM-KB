@@ -12,6 +12,8 @@ from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from pathlib import Path
 
+from .onnxruntime_logging import configure_onnxruntime_logging
+
 
 DEFAULT_MODEL_RUNNER_BASE_URL = "http://127.0.0.1:8790"
 DEFAULT_EMBEDDING_MODEL = "Snowflake/snowflake-arctic-embed-l-v2.0"
@@ -282,6 +284,7 @@ def _rerank_with_transformers(query: str, passages: list[str], *, model: str, qu
 
 def _load_paddleocr(model: str) -> Any:
     if model not in _PADDLE_OCR_MODELS:
+        _configure_optional_onnxruntime_logging()
         try:
             from paddleocr import PaddleOCR
         except ImportError as exc:
@@ -317,8 +320,16 @@ def _paddle_device() -> str:
     return "gpu:0" if cuda_available else "cpu"
 
 
+def _configure_optional_onnxruntime_logging() -> None:
+    try:
+        configure_onnxruntime_logging()
+    except ModuleNotFoundError:
+        pass
+
+
 def _load_paddleocr_vl(model: str) -> Any:
     if model not in _PADDLE_OCR_VL_MODELS:
+        _configure_optional_onnxruntime_logging()
         try:
             from paddlex import create_pipeline
         except ImportError as exc:

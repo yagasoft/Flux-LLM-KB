@@ -106,6 +106,7 @@ def test_dockerfile_keeps_compiler_for_quantized_qwen_runtime() -> None:
 
     assert "gcc \\" in dockerfile
     assert "g++ \\" in dockerfile
+    assert "ccache \\" in dockerfile
 
 
 def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> None:

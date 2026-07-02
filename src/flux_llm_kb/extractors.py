@@ -64,6 +64,7 @@ from .crawler import (
     CorpusPolicy,
     classify_file,
 )
+from .onnxruntime_logging import configure_onnxruntime_logging
 from .processes import run_no_window
 from .redaction import redact_text
 from .text_safety import decode_text_bytes, read_text_with_bom
@@ -6197,6 +6198,7 @@ def _run_paddleocr_image(path: Path, *, model: str) -> str:
         payload = ModelRunnerClient().ocr_file(path, model=model, document=str(model).startswith("PaddleOCR-VL"))
         return str(payload.get("text") or "")
 
+    _configure_optional_onnxruntime_logging()
     from paddleocr import PaddleOCR
 
     kwargs: dict[str, Any] = {
@@ -6214,6 +6216,13 @@ def _run_paddleocr_image(path: Path, *, model: str) -> str:
     else:
         result = ocr.ocr(str(path), cls=True)
     return _paddleocr_text(result)
+
+
+def _configure_optional_onnxruntime_logging() -> None:
+    try:
+        configure_onnxruntime_logging()
+    except ModuleNotFoundError:
+        pass
 
 
 def _paddleocr_text(value: Any) -> str:

@@ -11,6 +11,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 from urllib.request import urlopen as _urlopen
 
+from .onnxruntime_logging import configure_onnxruntime_logging
 from .watcher import resolve_watcher_backend
 
 
@@ -352,7 +353,7 @@ def _nvidia_status(command_runner: Callable[..., Any]) -> dict[str, Any]:
 
 def _onnxruntime_status(module_importer: Callable[[str], Any]) -> dict[str, Any]:
     try:
-        module = module_importer("onnxruntime")
+        module = configure_onnxruntime_logging(module_importer)
     except ModuleNotFoundError:
         return {"ok": False, "state": "missing", "providers": [], "message": "onnxruntime not installed"}
     except (ImportError, OSError) as exc:
