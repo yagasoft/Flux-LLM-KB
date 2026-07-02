@@ -6,6 +6,8 @@
 - In WSL, use `pwsh`, not `pwsh.exe`, if PowerShell is needed.
 - Do not run `dotnet format`.
 - Do not leave behind build warnings.
+- Never run Docker builder-cache prune commands. This includes `docker builder prune`, `docker builder prune -a`, `docker builder prune -af`, `docker buildx prune`, or any script/wrapper path whose purpose is to prune Docker builder cache. If Docker builder cache looks large, report it and ask the user instead.
+- Never deploy, redeploy, run production update scripts, or run any command whose purpose is to replace/restart the live production stack without asking the user first and receiving explicit approval in the current conversation.
 - Feature closeout for `codex/...` branches must use `scripts/dev/complete-feature.ps1`.
   Do not manually run the commit/squash-merge/push/deploy/purge sequence unless
   explicitly overridden. If the script fails, stop and report its JSON
