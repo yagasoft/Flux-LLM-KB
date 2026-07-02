@@ -528,6 +528,11 @@ def test_production_deploy_defaults_match_prefilled_wheel_cache_args():
     for script in (install, update):
         assert "[int]$PipTimeoutSeconds = 180" in script
         assert "[int]$PipRetries = 20" in script
+        assert '[bool]$PipOffline = $true' in script
+        assert '"--build-arg", "PIP_OFFLINE=$pipOfflineValue"' in script
+        assert '$dockerBuildNetwork = if ($PipOffline -and $dockerBase.SkipSystemPackages) { "none" } else { "default" }' in script
+        assert '"--pull=false"' in script
+        assert '"--network", $dockerBuildNetwork' in script
 
 
 def test_production_deploy_bounds_docker_build_and_pip_installs():
@@ -629,6 +634,18 @@ def test_production_deploy_can_reuse_local_docker_base_for_fast_updates():
         assert "flux-llm-kb-api:local" in script
         assert '"--build-arg", "FLUX_KB_DOCKER_BASE_IMAGE=$($dockerBase.Image)"' in script
         assert '"--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages"' in script
+
+
+def test_production_deploy_tags_local_base_with_localhost_alias_to_avoid_registry_lookup():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        assert "function New-FluxLocalDockerBaseAlias" in script
+        assert '"localhost/flux-llm-kb-build-base:$shortId"' in script
+        assert 'Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", $Image, $alias)' in script
+        assert "$baseAlias = New-FluxLocalDockerBaseAlias -Image $candidateImage" in script
+        assert 'return [pscustomobject]@{ Image = $baseAlias; SkipSystemPackages = $true }' in script
 
 
 def test_production_docker_base_probe_handles_missing_local_image_without_stderr_failure():

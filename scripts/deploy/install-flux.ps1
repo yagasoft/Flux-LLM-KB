@@ -20,6 +20,7 @@ param(
     [int]$PipInstallTimeoutSeconds = 900,
     [int]$PipTimeoutSeconds = 180,
     [int]$PipRetries = 20,
+    [bool]$PipOffline = $true,
     [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL,
     [string]$PaddleGpuIndexUrl = $(if ($env:FLUX_KB_PADDLE_GPU_INDEX_URL) { $env:FLUX_KB_PADDLE_GPU_INDEX_URL } else { "https://www.paddlepaddle.org.cn/packages/stable/cu126/" }),
     [string]$PytorchGpuIndexUrl = $(if ($env:FLUX_KB_PYTORCH_GPU_INDEX_URL) { $env:FLUX_KB_PYTORCH_GPU_INDEX_URL } else { "https://download.pytorch.org/whl/cu126" }),
@@ -1082,6 +1083,41 @@ function Test-FluxDockerImageExists {
     return $process.ExitCode -eq 0
 }
 
+function Get-FluxDockerImageId {
+    param([string]$Image)
+    if (-not $Image) { return $null }
+    $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = "docker"
+    $processInfo.Arguments = "image inspect --format " + (ConvertTo-FluxCommandArgument "{{.Id}}") + " " + (ConvertTo-FluxCommandArgument $Image)
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $process.StandardError.ReadToEnd() | Out-Null
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { return $null }
+    return $stdout.Trim()
+}
+
+function New-FluxLocalDockerBaseAlias {
+    param([string]$Image)
+    $imageId = Get-FluxDockerImageId -Image $Image
+    if (-not $imageId) {
+        throw "Unable to inspect Docker base image: $Image"
+    }
+    $shortId = $imageId -replace "^sha256:", ""
+    if ($shortId.Length -gt 12) {
+        $shortId = $shortId.Substring(0, 12)
+    }
+    $alias = "localhost/flux-llm-kb-build-base:$shortId"
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", $Image, $alias) -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "tag local Docker build base"
+    return $alias
+}
+
 function Resolve-FluxDockerBuildBase {
     param(
         [ValidateSet("auto", "local", "python")]
@@ -1099,8 +1135,9 @@ function Resolve-FluxDockerBuildBase {
         throw "Docker base mode 'local' requires an existing image: $candidateImage"
     }
     if ($candidateExists) {
-        Write-Host "Reusing Docker base image $candidateImage; Debian system packages will not be reinstalled."
-        return [pscustomobject]@{ Image = $candidateImage; SkipSystemPackages = $true }
+        $baseAlias = New-FluxLocalDockerBaseAlias -Image $candidateImage
+        Write-Host "Reusing Docker base image $candidateImage as $baseAlias; Debian system packages will not be reinstalled."
+        return [pscustomobject]@{ Image = $baseAlias; SkipSystemPackages = $true }
     }
     if ($DockerBaseImage) {
         Write-Warning "Requested Docker base image $DockerBaseImage was not found; falling back to $pythonBase."
@@ -1148,15 +1185,20 @@ if (-not $SkipDashboardBuild) {
 
 $dockerBase = Resolve-FluxDockerBuildBase -DockerBaseMode $DockerBaseMode -DockerBaseImage $DockerBaseImage
 $skipSystemPackages = if ($dockerBase.SkipSystemPackages) { "true" } else { "false" }
+$pipOfflineValue = if ($PipOffline) { "true" } else { "false" }
+$dockerBuildNetwork = if ($PipOffline -and $dockerBase.SkipSystemPackages) { "none" } else { "default" }
 $dockerBuildArgs = @(
     "build",
     "--progress=plain",
+    "--pull=false",
+    "--network", $dockerBuildNetwork,
     "--build-arg", "FLUX_KB_IMAGE_REVISION=$($buildMetadata.Revision)",
     "--build-arg", "FLUX_KB_IMAGE_SOURCE=$($buildMetadata.Source)",
     "--build-arg", "FLUX_KB_IMAGE_CREATED=$($buildMetadata.Created)",
     "--build-arg", "FLUX_KB_IMAGE_VERSION=$($buildMetadata.Version)",
     "--build-arg", "FLUX_KB_DOCKER_BASE_IMAGE=$($dockerBase.Image)",
     "--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages",
+    "--build-arg", "PIP_OFFLINE=$pipOfflineValue",
     "--build-arg", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
     "--build-arg", "PIP_RETRIES=$PipRetries",
     "--build-arg", "PADDLE_GPU_INDEX_URL=$PaddleGpuIndexUrl",

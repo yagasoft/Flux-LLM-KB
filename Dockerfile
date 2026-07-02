@@ -58,11 +58,13 @@ RUN --mount=type=cache,id=flux-llm-kb-apt-cache,target=/var/cache/apt,sharing=lo
 ARG PIP_INDEX_URL=""
 ARG PADDLE_GPU_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu126/"
 ARG PYTORCH_GPU_INDEX_URL="https://download.pytorch.org/whl/cu126"
-ARG PIP_OFFLINE=false
+ARG PIP_OFFLINE=true
 ARG PIP_DEFAULT_TIMEOUT=30
 ARG PIP_RETRIES=2
 
 COPY pyproject.toml ./
+COPY docker/requirements-docker.lock /tmp/requirements-docker.lock
+COPY docker/requirements-paddle.lock /tmp/requirements-paddle.lock
 
 RUN python - <<'PY'
 import tomllib
@@ -99,18 +101,20 @@ RUN --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse
     download_requirements() { \
         python_bin="$1"; \
         requirements="$2"; \
-        if "$python_bin" -m pip download --only-binary=:all: --no-index --find-links /opt/flux-wheelhouse --dest /opt/flux-wheelhouse -r "$requirements"; then \
+        constraint="$3"; \
+        if "$python_bin" -m pip download --only-binary=:all: --no-index --find-links /opt/flux-wheelhouse --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; then \
             return 0; \
         fi; \
         if [ "$PIP_OFFLINE" = "true" ]; then \
+            echo "Required Docker wheels are missing from /opt/flux-wheelhouse and PIP_OFFLINE=true; seed the BuildKit wheelhouse before rebuilding." >&2; \
             return 1; \
         fi; \
-        "$python_bin" -m pip download --only-binary=:all: --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --find-links /opt/flux-wheelhouse $pip_index_args $pip_extra_index_args --dest /opt/flux-wheelhouse -r "$requirements"; \
+        "$python_bin" -m pip download --only-binary=:all: --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --find-links /opt/flux-wheelhouse $pip_index_args $pip_extra_index_args --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; \
     }; \
-    download_requirements python /tmp/requirements-docker.txt; \
-    python -m pip install --no-index --find-links /opt/flux-wheelhouse -r /tmp/requirements-docker.txt; \
-    download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt; \
-    /opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse -r /tmp/requirements-paddle.txt
+    download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock; \
+    python -m pip install --no-index --find-links /opt/flux-wheelhouse --constraint /tmp/requirements-docker.lock -r /tmp/requirements-docker.txt; \
+    download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock; \
+    /opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse --constraint /tmp/requirements-paddle.lock -r /tmp/requirements-paddle.txt
 
 FROM runtime-deps AS runtime
 

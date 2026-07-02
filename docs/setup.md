@@ -90,6 +90,13 @@ Update an existing deployment from the current checkout with:
 .\scripts\deploy\update-flux.ps1 -RestartHostTasks
 ```
 
+Production Docker builds use the persistent BuildKit wheelhouse and run with
+`PIP_OFFLINE=true` by default. Runtime and Paddle dependency locks under
+`docker/` pin large GPU and AWQ-support packages to versions already expected in
+that wheelhouse. If a required wheel is missing, the build stops instead of
+downloading a replacement; seed the wheelhouse first, or pass `-PipOffline
+$false` deliberately when a networked dependency refresh is intended.
+
 Each production build records source provenance as OCI labels on the Flux image
 and generated Flux containers. The short image tag is kept for local operations,
 but `org.opencontainers.image.revision` is the authoritative full Git commit.

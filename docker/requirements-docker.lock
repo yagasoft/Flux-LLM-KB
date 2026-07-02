@@ -1,0 +1,8 @@
+# Docker image dependency pins chosen from the existing BuildKit wheelhouse.
+# Keep this file exact-version only. Broad ranges in image builds can make pip
+# select newer remote GPU wheels and burn deployment bandwidth.
+compressed-tensors==0.17.1
+loguru==0.7.3
+nvidia-cuda-runtime-cu12==12.6.77
+nvidia-cublas-cu12==12.6.4.1
+nvidia-cudnn-cu12==9.10.2.21

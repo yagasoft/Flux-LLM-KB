@@ -499,8 +499,11 @@ cache/data/runtime/logs, and the Docker Ollama model cache.
 Docker runs PostgreSQL/API/dashboard/worker from prebuilt local images and bind
 mounts only Windows-host-owned paths such as private config, mail spool, and
 host-accessed watched roots. Host-agent and Outlook-host run as Windows
-Scheduled Tasks in the logged-in user session. Production Compose uses a
-high-memory local PostgreSQL profile only when Docker Desktop exposes enough
+Scheduled Tasks in the logged-in user session. Image builds use a BuildKit
+wheelhouse cache with exact runtime/Paddle constraints and offline dependency
+resolution by default, so package updates are explicit instead of accidental
+side effects of broad dependency ranges. Production Compose uses a high-memory
+local PostgreSQL profile only when Docker Desktop exposes enough
 Linux VM memory: larger shared buffers, bounded `work_mem`, larger maintenance
 memory, WAL/checkpoint headroom, and an enlarged `/dev/shm`. Runtime status
 prints Docker-visible memory and Postgres shared-memory sizing so future changes

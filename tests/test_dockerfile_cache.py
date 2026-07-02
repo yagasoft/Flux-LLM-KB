@@ -32,6 +32,31 @@ def test_dockerfile_uses_pip_buildkit_cache() -> None:
     assert "--upgrade pip" not in dockerfile
 
 
+def test_dockerfile_uses_locked_wheelhouse_constraints() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+    runtime_lock = Path("docker/requirements-docker.lock").read_text(encoding="utf-8")
+    paddle_lock = Path("docker/requirements-paddle.lock").read_text(encoding="utf-8")
+
+    assert "COPY docker/requirements-docker.lock /tmp/requirements-docker.lock" in dockerfile
+    assert "COPY docker/requirements-paddle.lock /tmp/requirements-paddle.lock" in dockerfile
+    assert "--constraint /tmp/requirements-docker.lock" in dockerfile
+    assert "--constraint /tmp/requirements-paddle.lock" in dockerfile
+    assert "--no-index --find-links /opt/flux-wheelhouse --constraint \"$constraint\"" in dockerfile
+    assert "--find-links /opt/flux-wheelhouse $pip_index_args $pip_extra_index_args --constraint \"$constraint\"" in dockerfile
+    assert "download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock" in dockerfile
+    assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock" in dockerfile
+    assert "compressed-tensors==0.17.1" in runtime_lock
+    assert "loguru==0.7.3" in runtime_lock
+    assert "nvidia-cuda-runtime-cu12==12.6.77" in runtime_lock
+    assert "nvidia-cublas-cu12==12.6.4.1" in runtime_lock
+    assert "nvidia-cudnn-cu12==9.10.2.21" in runtime_lock
+    assert "nvidia-cuda-runtime-cu12==12.6.77" in paddle_lock
+    assert "nvidia-cuda-nvrtc-cu12==12.6.77" in paddle_lock
+    assert "nvidia-cuda-cupti-cu12==12.6.80" in paddle_lock
+    assert "nvidia-cublas-cu12==12.6.4.1" in paddle_lock
+    assert "nvidia-cudnn-cu12==9.5.1.17" in paddle_lock
+
+
 def test_dockerfile_materializes_persistent_wheelhouse_before_install() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 
@@ -49,9 +74,9 @@ def test_dockerfile_materializes_persistent_wheelhouse_before_install() -> None:
     assert install < runtime_stage
     assert "--find-links /opt/flux-wheelhouse" in dockerfile
     assert "pip install --dry-run" not in dockerfile
-    assert "--no-index --find-links /opt/flux-wheelhouse --dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
+    assert "--no-index --find-links /opt/flux-wheelhouse --constraint \"$constraint\" --dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
     assert "--dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
-    assert 'ARG PIP_OFFLINE=false' in dockerfile
+    assert 'ARG PIP_OFFLINE=true' in dockerfile
     assert 'if [ "$PIP_OFFLINE" = "true" ]' in dockerfile
 
 
@@ -63,8 +88,9 @@ def test_dockerfile_builds_isolated_paddle_runtime_from_same_wheelhouse() -> Non
     assert 'write_requirements("/tmp/requirements-docker.txt", ("api", "corpus", "mcp", "processors", "asr_gpu"))' in dockerfile
     assert 'write_requirements("/tmp/requirements-paddle.txt", ("api", "ocr_paddle"))' in dockerfile
     assert "python -m venv /opt/flux-paddle" in dockerfile
-    assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt" in dockerfile
+    assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock" in dockerfile
     assert "/opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse" in dockerfile
+    assert "/opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse --constraint /tmp/requirements-paddle.lock" in dockerfile
     assert "FLUX_KB_PADDLE_PYTHON=/opt/flux-paddle/bin/python" in dockerfile
 
 
@@ -80,13 +106,24 @@ def test_pyproject_splits_torch_and_paddle_dependency_groups() -> None:
     assert "sentence-transformers==5.6.0" in processors
     assert "transformers==4.57.6" in processors
     assert "accelerate==1.14.0" in processors
-    assert "compressed-tensors" in processors
+    assert "compressed-tensors==0.17.1" in processors
     assert "paddleocr" not in processors
     assert "paddlex" not in processors
     assert "paddlepaddle-gpu" not in processors
     assert "paddleocr==3.7.0" in ocr_paddle
     assert "paddlex[ocr]==3.7.2" in ocr_paddle
     assert '"paddlepaddle-gpu==3.3.1; platform_system == \'Linux\'"' in ocr_paddle
+
+
+def test_pyproject_pins_gpu_wheels_to_cached_versions() -> None:
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert "nvidia-cuda-runtime-cu12==12.6.77" in pyproject
+    assert "nvidia-cublas-cu12==12.6.4.1" in pyproject
+    assert "nvidia-cudnn-cu12==9.10.2.21" in pyproject
+    assert "nvidia-cuda-runtime-cu12>=12" not in pyproject
+    assert "nvidia-cublas-cu12>=12" not in pyproject
+    assert "nvidia-cudnn-cu12>=9" not in pyproject
 
 
 def test_dockerfile_installs_mcp_extra_for_containerized_codex_retrieval() -> None:
