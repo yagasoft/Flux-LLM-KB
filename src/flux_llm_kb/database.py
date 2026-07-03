@@ -10372,7 +10372,7 @@ def invalidate_reprocess_derived_state(
                             'obsolete_previous_result_status', telemetry->>'result_status',
                             'result_status', 'obsolete',
                             'obsolete_reason', 'maintenance_reprocess_derived_state',
-                            'actor', %s
+                            'actor', %s::text
                         )
                     ),
                     locked_at = NULL,

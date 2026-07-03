@@ -5117,6 +5117,7 @@ def test_invalidate_reprocess_derived_state_requeues_physical_assets_and_marks_i
     assert "message.eml" in sql
     assert "body.html" in sql
     assert "status = 'obsolete'" in sql
+    assert "'actor', %s::text" in sql
     assert "DELETE FROM code_references" in sql
     assert "DELETE FROM code_symbols" in sql
     assert "DELETE FROM asset_chunks" in sql
