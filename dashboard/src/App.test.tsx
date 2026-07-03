@@ -342,6 +342,7 @@ let auditPayload: unknown;
 let graphPayload: unknown;
 let claimTransitionPayload: unknown;
 let postProcessDryRunPayload: unknown;
+let mailProfileDeleteResponse: unknown;
 let retentionPoliciesPayload: unknown;
 let retentionQualityPayload: unknown;
 let retentionPolicyUpdatePayload: unknown;
@@ -681,6 +682,16 @@ describe("Flux dashboard", () => {
     codeSearchRequestUrl = undefined;
     codeSymbolRequestUrl = undefined;
     retrievalBenchmarkRunPayload = undefined;
+    mailProfileDeleteResponse = {
+      profile_name: "gmail-capture",
+      root_name: "mail-gmail-capture",
+      deleted: true,
+      profile: { deleted: true },
+      corpus_root: { deleted: true },
+      search_index: { deleted: 2, records_deleted: 2 },
+      sidecars: { deleted: 1, missing: 0, blocked: 0, failed: 0, errors: [] },
+      spool: { status: "deleted", deleted: true, blocked_reason: null }
+    };
     diagnosticsActionPayload = undefined;
     automationRunPayload = undefined;
     automationStatusPayload = {
@@ -1150,6 +1161,12 @@ describe("Flux dashboard", () => {
         });
       }
       if (url === "/api/mail/profiles" && init?.method === "POST") return json({ ...JSON.parse(String(init.body)), enabled: true });
+      if (url.startsWith("/api/mail/profiles/") && init?.method === "DELETE") {
+        return json({
+          ...(mailProfileDeleteResponse as Record<string, unknown>),
+          profile_name: decodeURIComponent(url.split("/").pop() ?? "")
+        });
+      }
       if (url.startsWith("/api/mail/profiles/") && url.endsWith("/oauth-client-config") && init?.method === "PUT") {
         return json({
           name: decodeURIComponent(url.split("/").at(-2) ?? ""),
@@ -3176,6 +3193,59 @@ describe("Flux dashboard", () => {
         })
       );
     });
+  });
+
+  test("mail profile row more menu deletes profile after confirmation", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "More gmail-capture" }));
+
+    const menu = screen.getByRole("menu", { name: "gmail-capture profile actions" });
+    expect(within(menu).getByRole("menuitem", { name: "View details" })).toBeInTheDocument();
+    await user.click(within(menu).getByRole("menuitem", { name: "Delete profile" }));
+
+    const dialog = screen.getByRole("dialog", { name: "Delete mail profile" });
+    expect(dialog).toHaveTextContent("mail-gmail-capture");
+    expect(dialog).toHaveTextContent("private spool");
+    await user.click(within(dialog).getByRole("button", { name: "Delete profile and private spool" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/api/mail/profiles/gmail-capture", expect.objectContaining({ method: "DELETE" }));
+    });
+    expect(await screen.findByText(/Mail profile gmail-capture deleted/)).toBeInTheDocument();
+  });
+
+  test("mail profile delete shows spool cleanup warning from API", async () => {
+    mailProfileDeleteResponse = {
+      profile_name: "gmail-capture",
+      root_name: "mail-gmail-capture",
+      deleted: true,
+      profile: { deleted: true },
+      corpus_root: { deleted: true },
+      search_index: { deleted: 2, records_deleted: 2 },
+      sidecars: { deleted: 1, missing: 0, blocked: 0, failed: 0, errors: [] },
+      spool: {
+        status: "blocked",
+        deleted: false,
+        blocked_reason: "resolved path is not under a private mail-spool profile directory"
+      }
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    await user.click(screen.getByRole("button", { name: "More gmail-capture" }));
+    await user.click(within(screen.getByRole("menu", { name: "gmail-capture profile actions" })).getByRole("menuitem", { name: "Delete profile" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Delete mail profile" })).getByRole("button", { name: "Delete profile and private spool" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Mail profile gmail-capture deleted");
+    expect(alert).toHaveTextContent("Spool cleanup blocked");
+    expect(alert).toHaveTextContent("private mail-spool profile directory");
   });
 
   test("corpus tab can add a watched path with policy fields", async () => {

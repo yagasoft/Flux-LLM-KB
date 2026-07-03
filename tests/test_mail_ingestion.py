@@ -173,6 +173,129 @@ def test_mail_profile_registers_ready_spool_root(monkeypatch, tmp_path):
     assert calls[0]["metadata"]["strict_indexing"] is True
 
 
+def test_delete_mail_profile_removes_corpus_profile_and_safe_private_spool(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    spool = tmp_path / "private" / "mail-spool" / "gmail-capture"
+    ready = spool / "ready"
+    ready.mkdir(parents=True)
+    (ready / "body.txt").write_text("private mail body", encoding="utf-8")
+    profile = {"id": "profile-1", "name": "gmail-capture", "spool_path": str(spool)}
+    calls = []
+
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile] if name == "gmail-capture" else [])
+    monkeypatch.setattr(
+        database,
+        "delete_managed_mail_sidecars_for_root",
+        lambda root_name: calls.append(("sidecars", root_name)) or {"deleted": 1, "missing": 0, "blocked": 0, "failed": 0, "errors": []},
+    )
+    monkeypatch.setattr(
+        database,
+        "delete_monitored_root",
+        lambda root_id, purge_index, actor: calls.append(("root", root_id, purge_index, actor))
+        or {"id": root_id, "name": root_id, "deleted": True, "purged_index": purge_index},
+    )
+    monkeypatch.setattr(
+        database,
+        "sync_search_index",
+        lambda owner_class, root_name, limit: calls.append(("search_index", owner_class, root_name, limit))
+        or {"owner_class": owner_class, "root_name": root_name, "deleted": 2, "failed": 0, "errors": []},
+    )
+    monkeypatch.setattr(
+        database,
+        "_delete_search_index_records_for_root",
+        lambda root_name, statuses: calls.append(("search_records", root_name, statuses)) or 2,
+    )
+    monkeypatch.setattr(
+        database,
+        "_delete_semantic_duplicate_clusters_for_root",
+        lambda root_name: calls.append(("semantic_clusters", root_name)) or 1,
+    )
+    monkeypatch.setattr(
+        database,
+        "delete_mail_profile",
+        lambda name, actor: calls.append(("profile", name, actor)) or {"id": "profile-1", "name": name, "deleted": True},
+    )
+
+    result = mail_ingestion.delete_mail_profile("gmail-capture", actor="tester")
+
+    assert result["profile_name"] == "gmail-capture"
+    assert result["root_name"] == "mail-gmail-capture"
+    assert result["profile"]["deleted"] is True
+    assert result["corpus_root"]["deleted"] is True
+    assert result["search_index"]["records_deleted"] == 2
+    assert result["semantic_duplicate_clusters"]["deleted"] == 1
+    assert result["sidecars"]["deleted"] == 1
+    assert result["spool"]["status"] == "deleted"
+    assert not spool.exists()
+    assert [call[0] for call in calls] == [
+        "sidecars",
+        "root",
+        "search_index",
+        "search_records",
+        "semantic_clusters",
+        "profile",
+    ]
+
+
+def test_delete_mail_profile_blocks_unsafe_spool_path_but_deletes_profile_and_corpus(monkeypatch, tmp_path):
+    from flux_llm_kb import mail_ingestion
+
+    spool = tmp_path / "mail-spool-backup" / "gmail-capture"
+    spool.mkdir(parents=True)
+    (spool / "body.txt").write_text("must not delete", encoding="utf-8")
+    profile = {"id": "profile-1", "name": "gmail-capture", "spool_path": str(spool)}
+    calls = []
+
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [profile] if name == "gmail-capture" else [])
+    monkeypatch.setattr(
+        database,
+        "delete_managed_mail_sidecars_for_root",
+        lambda root_name: calls.append(("sidecars", root_name)) or {"deleted": 0, "missing": 0, "blocked": 0, "failed": 0, "errors": []},
+    )
+    monkeypatch.setattr(
+        database,
+        "delete_monitored_root",
+        lambda root_id, purge_index, actor: calls.append(("root", root_id)) or {"id": root_id, "name": root_id, "deleted": True, "purged_index": purge_index},
+    )
+    monkeypatch.setattr(
+        database,
+        "sync_search_index",
+        lambda owner_class, root_name, limit: calls.append(("search_index", root_name)) or {"deleted": 0, "failed": 0, "errors": []},
+    )
+    monkeypatch.setattr(database, "_delete_search_index_records_for_root", lambda root_name, statuses: 0)
+    monkeypatch.setattr(database, "_delete_semantic_duplicate_clusters_for_root", lambda root_name: 0)
+    monkeypatch.setattr(
+        database,
+        "delete_mail_profile",
+        lambda name, actor: calls.append(("profile", name)) or {"id": "profile-1", "name": name, "deleted": True},
+    )
+
+    result = mail_ingestion.delete_mail_profile("gmail-capture", actor="tester")
+
+    assert spool.exists()
+    assert (spool / "body.txt").exists()
+    assert result["profile"]["deleted"] is True
+    assert result["corpus_root"]["deleted"] is True
+    assert result["spool"]["status"] == "blocked"
+    assert result["spool"]["deleted"] is False
+    assert "mail-spool" in result["spool"]["blocked_reason"]
+    assert [call[0] for call in calls] == ["sidecars", "root", "search_index", "profile"]
+
+
+def test_delete_mail_profile_raises_for_unknown_profile(monkeypatch):
+    from flux_llm_kb import mail_ingestion
+
+    monkeypatch.setattr(database, "list_mail_profiles", lambda name=None: [])
+
+    try:
+        mail_ingestion.delete_mail_profile("missing", actor="tester")
+    except ValueError as exc:
+        assert str(exc) == "mail profile not found: missing"
+    else:
+        raise AssertionError("expected missing mail profile to raise ValueError")
+
+
 def test_outlook_mail_profile_normalizes_imap_account_and_server(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(database, "insert_mail_profile", lambda **kwargs: calls.append(kwargs) or {"id": "profile-1", **kwargs})

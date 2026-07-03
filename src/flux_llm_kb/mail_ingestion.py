@@ -379,6 +379,105 @@ def add_mail_profile(
     return profile
 
 
+def delete_mail_profile(profile_name: str, *, actor: str = "dashboard") -> dict[str, Any]:
+    normalized_name = str(profile_name or "").strip()
+    if not normalized_name:
+        raise ValueError("mail profile name is required")
+    profiles = database.list_mail_profiles(name=normalized_name)
+    if not profiles:
+        raise ValueError(f"mail profile not found: {normalized_name}")
+    profile = profiles[0]
+    actual_name = str(profile["name"])
+    root_name = f"mail-{actual_name}"
+
+    sidecars = database.delete_managed_mail_sidecars_for_root(root_name=root_name)
+    corpus_root = database.delete_monitored_root(root_id=root_name, purge_index=True, actor=actor)
+    search_index = dict(database.sync_search_index(owner_class="all", root_name=root_name, limit=1000))
+    records_deleted = database._delete_search_index_records_for_root(root_name=root_name, statuses=["deleted"])
+    semantic_clusters_deleted = database._delete_semantic_duplicate_clusters_for_root(root_name=root_name)
+    profile_delete = database.delete_mail_profile(name=actual_name, actor=actor)
+    spool_cleanup = _delete_private_mail_spool(profile_name=actual_name, spool_path=str(profile.get("spool_path") or ""))
+
+    search_index["records_deleted"] = records_deleted
+    return {
+        "profile_name": actual_name,
+        "root_name": root_name,
+        "deleted": bool(profile_delete.get("deleted")),
+        "profile": profile_delete,
+        "corpus_root": corpus_root,
+        "search_index": search_index,
+        "semantic_duplicate_clusters": {"deleted": semantic_clusters_deleted},
+        "sidecars": sidecars,
+        "spool": spool_cleanup,
+    }
+
+
+def _delete_private_mail_spool(*, profile_name: str, spool_path: str) -> dict[str, Any]:
+    if not str(spool_path or "").strip():
+        return {"status": "missing", "deleted": False, "path": None, "blocked_reason": "mail profile has no spool path"}
+    try:
+        resolved = _resolve_host_spool_path(spool_path)
+    except OSError as exc:
+        return {"status": "blocked", "deleted": False, "path": str(spool_path), "blocked_reason": str(exc)}
+    guard_reason = _private_mail_spool_blocked_reason(resolved, profile_name=profile_name)
+    if guard_reason:
+        return {
+            "status": "blocked",
+            "deleted": False,
+            "path": str(resolved),
+            "blocked_reason": guard_reason,
+        }
+    if not resolved.exists():
+        return {"status": "missing", "deleted": False, "path": str(resolved), "blocked_reason": None}
+    if not resolved.is_dir():
+        return {
+            "status": "blocked",
+            "deleted": False,
+            "path": str(resolved),
+            "blocked_reason": "private mail-spool profile path is not a directory",
+        }
+
+    bytes_deleted = _directory_size(resolved)
+    files_deleted = sum(1 for child in resolved.rglob("*") if child.is_file())
+    try:
+        shutil.rmtree(resolved)
+    except OSError as exc:
+        return {
+            "status": "failed",
+            "deleted": False,
+            "path": str(resolved),
+            "blocked_reason": None,
+            "error": str(exc),
+            "bytes_deleted": 0,
+            "files_deleted": 0,
+        }
+    return {
+        "status": "deleted",
+        "deleted": True,
+        "path": str(resolved),
+        "blocked_reason": None,
+        "bytes_deleted": bytes_deleted,
+        "files_deleted": files_deleted,
+    }
+
+
+def _private_mail_spool_blocked_reason(path: Path, *, profile_name: str) -> str | None:
+    if path.name != profile_name:
+        return "resolved spool path is not the named mail-spool profile directory"
+    if path.parent.name != "mail-spool":
+        return "resolved path is not under a private mail-spool profile directory"
+    parts = [part.lower() for part in path.parts]
+    try:
+        mail_spool_index = parts.index("mail-spool")
+    except ValueError:
+        return "resolved path is not under a private mail-spool profile directory"
+    if "private" not in parts[:mail_spool_index]:
+        return "resolved path is not under a private mail-spool profile directory"
+    if path.parent == path or path.parent.parent == path.parent:
+        return "resolved spool path is not a profile directory"
+    return None
+
+
 def update_mail_profile_oauth_client_config_path(*, profile_name: str, client_config_path: str) -> dict[str, Any]:
     profiles = database.list_mail_profiles(name=profile_name)
     if not profiles:

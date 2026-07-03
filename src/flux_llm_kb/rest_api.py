@@ -1580,6 +1580,24 @@ def create_app():
             outlook_incremental_basis=request.outlook_incremental_basis,
         )
 
+    @app.delete("/api/mail/profiles/{profile_name}")
+    def mail_profile_delete(profile_name: str):
+        from .mail_ingestion import delete_mail_profile
+
+        try:
+            return delete_mail_profile(profile_name=profile_name, actor="dashboard")
+        except ValueError as exc:
+            raise FluxApiError(
+                code="mail.profile_not_found",
+                message=str(exc),
+                status_code=404,
+                component="mail",
+                retryable=False,
+                user_action="Refresh the Mail tab and choose an existing profile.",
+                target={"type": "mail_profile", "id": profile_name},
+                links=[{"label": "Mail", "tab": "mail", "profile": profile_name}],
+            ) from exc
+
     @app.post("/api/mail/profiles/{profile_name}/post-process/dry-run")
     def mail_post_process_dry_run(profile_name: str, request: MailPostProcessDryRunRequest = Body(default=MailPostProcessDryRunRequest())):
         from .mail_ingestion import dry_run_mail_post_process

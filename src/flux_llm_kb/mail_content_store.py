@@ -86,6 +86,52 @@ def read_mail_content(ref: dict[str, Any] | None) -> str:
     return text
 
 
+def delete_mail_content(ref: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(ref, dict):
+        return {"status": "skipped", "deleted": False, "blocked_reason": "missing sidecar reference"}
+    if ref.get("source") != "managed_mail" or ref.get("storage") != "disk_sidecar":
+        return {
+            "status": "blocked",
+            "deleted": False,
+            "blocked_reason": "sidecar reference is not a managed mail disk sidecar",
+        }
+    relative_path = str(ref.get("relative_path") or "").replace("\\", "/").strip("/")
+    if not relative_path:
+        return {"status": "skipped", "deleted": False, "blocked_reason": "missing sidecar relative path"}
+    if not relative_path.startswith("mail_content/"):
+        return {
+            "status": "blocked",
+            "deleted": False,
+            "relative_path": relative_path,
+            "blocked_reason": "mail sidecar path is outside the managed mail_content cache",
+        }
+
+    root = _cache_root().resolve()
+    path = (root / relative_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return {
+            "status": "blocked",
+            "deleted": False,
+            "relative_path": relative_path,
+            "path": str(path),
+            "blocked_reason": "mail sidecar path escapes the cache root",
+        }
+    if not path.exists():
+        return {"status": "missing", "deleted": False, "relative_path": relative_path, "path": str(path)}
+    if not path.is_file():
+        return {
+            "status": "blocked",
+            "deleted": False,
+            "relative_path": relative_path,
+            "path": str(path),
+            "blocked_reason": "mail sidecar path is not a file",
+        }
+    path.unlink()
+    return {"status": "deleted", "deleted": True, "relative_path": relative_path, "path": str(path)}
+
+
 def hydrate_chunk_body(chunk: dict[str, Any]) -> str:
     body = str(chunk.get("body") or "")
     if body:

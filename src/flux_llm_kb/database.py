@@ -8379,6 +8379,45 @@ def list_mail_profiles(*, name: str | None = None, url: str | None = None) -> li
             return [_mail_profile_row(row) for row in cur.fetchall()]
 
 
+def delete_mail_profile(*, name: str, actor: str = "system", url: str | None = None) -> dict[str, Any]:
+    normalized_name = str(name or "").strip()
+    if not normalized_name:
+        raise ValueError("mail profile name is required")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id::text, name FROM mail_profiles WHERE name = %s", (normalized_name,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"mail profile not found: {normalized_name}")
+            profile_id, profile_name = row
+            cur.execute(
+                """
+                DELETE FROM mail_profiles
+                WHERE id = %s
+                RETURNING id::text, name
+                """,
+                (profile_id,),
+            )
+            deleted = cur.fetchone()
+            cur.execute(
+                """
+                INSERT INTO audit_events (event_type, actor, target_table, target_id, details)
+                VALUES ('mail_profile.deleted', %s, 'mail_profiles', %s, %s::jsonb)
+                """,
+                (
+                    actor,
+                    profile_id,
+                    _json({"name": profile_name}),
+                ),
+            )
+            return {
+                "id": deleted[0] if deleted else profile_id,
+                "name": deleted[1] if deleted else profile_name,
+                "deleted": deleted is not None,
+            }
+
+
 def list_due_imap_mail_profiles(*, limit: int = 10, url: str | None = None) -> list[dict[str, Any]]:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -11479,6 +11518,85 @@ def _delete_semantic_duplicate_clusters_for_root(*, root_name: str, url: str | N
         with conn.cursor() as cur:
             cur.execute("DELETE FROM semantic_duplicate_clusters WHERE root_name = %s", (normalized_root,))
             return int(cur.rowcount or 0)
+
+
+def delete_managed_mail_sidecars_for_root(*, root_name: str, url: str | None = None) -> dict[str, Any]:
+    normalized_root = str(root_name or "").strip()
+    if not normalized_root:
+        raise ValueError("root_name is required")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ref
+                FROM (
+                    SELECT c.metadata->'sidecar_ref' AS ref, r.name AS root_name
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE c.metadata ? 'sidecar_ref'
+                    UNION
+                    SELECT c.metadata->'mail_content' AS ref, r.name AS root_name
+                    FROM asset_chunks c
+                    JOIN source_assets a ON a.id = c.asset_id
+                    JOIN monitored_roots r ON r.id = a.root_id
+                    WHERE c.metadata ? 'mail_content'
+                ) refs
+                WHERE root_name = %s
+                  AND ref IS NOT NULL
+                  AND ref->>'source' = 'managed_mail'
+                  AND ref->>'storage' = 'disk_sidecar'
+                """,
+                (normalized_root,),
+            )
+            rows = cur.fetchall()
+
+    summary: dict[str, Any] = {
+        "root_name": normalized_root,
+        "deleted": 0,
+        "missing": 0,
+        "blocked": 0,
+        "failed": 0,
+        "errors": [],
+        "count": 0,
+    }
+    seen: set[str] = set()
+    for (ref,) in rows:
+        if not isinstance(ref, dict):
+            summary["blocked"] += 1
+            summary["errors"].append({"status": "blocked", "blocked_reason": "invalid mail sidecar reference"})
+            continue
+        key = str(ref.get("relative_path") or "").replace("\\", "/").strip("/")
+        if not key:
+            key = str(sorted(ref.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        summary["count"] += 1
+        try:
+            result = mail_content_store.delete_mail_content(ref)
+        except OSError as exc:
+            summary["failed"] += 1
+            summary["errors"].append({"status": "failed", "relative_path": key, "error": str(exc)})
+            continue
+        status = str(result.get("status") or "unknown")
+        if status in {"deleted", "missing", "blocked"}:
+            summary[status] += 1
+        elif status == "skipped":
+            summary["missing"] += 1
+        else:
+            summary["failed"] += 1
+        if status in {"blocked", "failed"}:
+            summary["errors"].append(
+                {
+                    "status": status,
+                    "relative_path": result.get("relative_path") or key,
+                    "blocked_reason": result.get("blocked_reason"),
+                    "error": result.get("error"),
+                }
+            )
+    return summary
 
 
 def _fetch_semantic_duplicate_candidates(

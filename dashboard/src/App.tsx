@@ -558,6 +558,24 @@ type MailStatus = {
   };
 };
 
+type MailProfileDeleteResponse = {
+  profile_name?: string;
+  root_name?: string;
+  deleted?: boolean;
+  profile?: { deleted?: boolean };
+  corpus_root?: { deleted?: boolean };
+  search_index?: { deleted?: number; records_deleted?: number; failed?: number; errors?: unknown[] };
+  semantic_duplicate_clusters?: { deleted?: number };
+  sidecars?: { deleted?: number; missing?: number; blocked?: number; failed?: number; errors?: unknown[] };
+  spool?: {
+    status?: string;
+    deleted?: boolean;
+    path?: string | null;
+    blocked_reason?: string | null;
+    error?: string | null;
+  };
+};
+
 type OutlookSyncRequest = {
   id?: string;
   profile_name?: string;
@@ -1201,6 +1219,7 @@ export default function App() {
   const [moreOpen, setMoreOpen] = useState(false);
   const [profileDialog, setProfileDialog] = useState<MailProfile | "new" | null>(null);
   const [rootDialog, setRootDialog] = useState<RootSummary | "new" | null>(null);
+  const [deleteProfile, setDeleteProfile] = useState<MailProfile | null>(null);
   const [deleteRoot, setDeleteRoot] = useState<RootSummary | null>(null);
   const [settingEditor, setSettingEditor] = useState<SettingRow | null>(null);
   const [settingValue, setSettingValue] = useState("");
@@ -1517,6 +1536,20 @@ export default function App() {
       await load();
     } catch (error) {
       setToast(`Could not save OAuth client JSON path for ${profile.name}: ${errorMessage(error)}`);
+    }
+  }
+
+  async function deleteSelectedProfile(profile: MailProfile) {
+    try {
+      const payload = await sendJson<MailProfileDeleteResponse>(`/api/mail/profiles/${encodeURIComponent(profile.name)}`, "DELETE", {});
+      setDeleteProfile(null);
+      if (selectedName === profile.name) setSelectedName("");
+      const spoolMessage = mailProfileSpoolCleanupMessage(payload);
+      const tone: ToastTone = ["blocked", "failed", "missing"].includes(String(payload.spool?.status ?? "")) ? "warning" : "success";
+      setToast(`Mail profile ${profile.name} deleted. Corpus ${payload.root_name ?? `mail-${profile.name}`} removed.${spoolMessage ? ` ${spoolMessage}` : ""}`, tone);
+      await load();
+    } catch (error) {
+      setToast(`Could not delete mail profile ${profile.name}: ${errorMessage(error)}`);
     }
   }
 
@@ -2032,6 +2065,7 @@ export default function App() {
             onEditProfile={setProfileDialog}
             onSelectProfile={(profile) => setSelectedName(profile.name)}
             onSyncProfile={(profile) => void requestProfileSync(profile)}
+            onDeleteProfile={setDeleteProfile}
             onPostProcessDryRun={(profile) => void runPostProcessDryRun(profile)}
             onOAuthStart={(profile, clientPath) => void startGmailOAuth(profile, clientPath)}
             onOAuthPathSave={(profile, clientPath) => void saveGmailOAuthClientPath(profile, clientPath)}
@@ -2191,6 +2225,16 @@ export default function App() {
         />
       )}
 
+      {deleteProfile && (
+        <ConfirmDialog
+          title="Delete mail profile"
+          body={`Delete mail profile ${deleteProfile.name}, mailbox corpus root mail-${deleteProfile.name}, search-index records, semantic duplicate metadata, managed mail sidecar files, and private spool files on disk when the configured path passes strict private mail-spool guards.`}
+          confirmLabel="Delete profile and private spool"
+          onCancel={() => setDeleteProfile(null)}
+          onConfirm={() => void deleteSelectedProfile(deleteProfile)}
+        />
+      )}
+
       {settingEditor && (
         <SettingDialog
           setting={settingEditor}
@@ -2263,6 +2307,7 @@ function MailTab({
   onEditProfile,
   onSelectProfile,
   onSyncProfile,
+  onDeleteProfile,
   onPostProcessDryRun,
   onOAuthStart,
   onOAuthPathSave,
@@ -2280,6 +2325,7 @@ function MailTab({
   onEditProfile: (profile: MailProfile) => void;
   onSelectProfile: (profile: MailProfile) => void;
   onSyncProfile: (profile: MailProfile) => void;
+  onDeleteProfile: (profile: MailProfile) => void;
   onPostProcessDryRun: (profile: MailProfile) => void;
   onOAuthStart: (profile: MailProfile, clientPath: string) => void;
   onOAuthPathSave: (profile: MailProfile, clientPath: string) => void;
@@ -2307,6 +2353,7 @@ function MailTab({
             onSelect={onSelectProfile}
             onSync={onSyncProfile}
             onEdit={onEditProfile}
+            onDelete={onDeleteProfile}
           />
         </Panel>
 
@@ -6307,7 +6354,8 @@ function ProfileTable({
   mailErrors,
   onSelect,
   onSync,
-  onEdit
+  onEdit,
+  onDelete
 }: {
   profiles: MailProfile[];
   selectedProfile?: MailProfile;
@@ -6317,7 +6365,30 @@ function ProfileTable({
   onSelect: (profile: MailProfile) => void;
   onSync: (profile: MailProfile) => void;
   onEdit: (profile: MailProfile) => void;
+  onDelete: (profile: MailProfile) => void;
 }) {
+  const [openMenuName, setOpenMenuName] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!openMenuName) return undefined;
+    function closeOnPointer(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setOpenMenuName(null);
+      }
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpenMenuName(null);
+      }
+    }
+    document.addEventListener("mousedown", closeOnPointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnPointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openMenuName]);
+
   return (
     <table className="profile-table" aria-label="Mail profiles">
       <thead>
@@ -6359,7 +6430,31 @@ function ProfileTable({
               <div className="row-actions">
                 <button type="button" aria-label={`Sync ${profile.name}`} title={`Sync ${profile.name} now`} onClick={(event) => { event.stopPropagation(); onSync(profile); }}><RefreshCcw size={15} /></button>
                 <button type="button" aria-label={`Edit ${profile.name}`} title={`Edit ${profile.name}`} onClick={(event) => { event.stopPropagation(); onEdit(profile); }}><Wrench size={15} /></button>
-                <button type="button" aria-label={`More ${profile.name}`} title={`Select ${profile.name} for details`} onClick={(event) => { event.stopPropagation(); onSelect(profile); }}><MoreVertical size={15} /></button>
+                <div className="menu-wrap row-menu-wrap" ref={openMenuName === profile.name ? menuRef : undefined}>
+                  <button
+                    type="button"
+                    aria-label={`More ${profile.name}`}
+                    aria-haspopup="menu"
+                    aria-expanded={openMenuName === profile.name}
+                    title={`Open ${profile.name} actions`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setOpenMenuName((current) => current === profile.name ? null : profile.name);
+                    }}
+                  >
+                    <MoreVertical size={15} />
+                  </button>
+                  {openMenuName === profile.name && (
+                    <div className="action-menu row-action-menu" role="menu" aria-label={`${profile.name} profile actions`} onClick={(event) => event.stopPropagation()}>
+                      <button role="menuitem" type="button" onClick={() => { setOpenMenuName(null); onSelect(profile); }}>
+                        <FileText size={15} /> View details
+                      </button>
+                      <button className="danger-menu-item" role="menuitem" type="button" onClick={() => { setOpenMenuName(null); onDelete(profile); }}>
+                        <Trash2 size={15} /> Delete profile
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </td>
           </tr>
@@ -6995,6 +7090,23 @@ function parseApiErrorDetail(body: string) {
   } catch {
     return body;
   }
+}
+
+function mailProfileSpoolCleanupMessage(payload: MailProfileDeleteResponse) {
+  const status = String(payload.spool?.status ?? "");
+  if (status === "blocked") {
+    return `Spool cleanup blocked: ${payload.spool?.blocked_reason ?? "strict private mail-spool guard refused the configured path"}.`;
+  }
+  if (status === "failed") {
+    return `Spool cleanup failed: ${payload.spool?.error ?? "check the private spool path"}.`;
+  }
+  if (status === "missing") {
+    return "Private spool was already missing.";
+  }
+  if (status === "deleted") {
+    return "Private spool deleted.";
+  }
+  return "";
 }
 
 function mailSyncStatusFailed(status: string) {

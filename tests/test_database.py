@@ -2381,6 +2381,123 @@ def test_delete_semantic_duplicate_clusters_for_root_requires_root(monkeypatch):
     assert params == ("__retrieval_benchmark_deadbeef",)
 
 
+def test_delete_managed_mail_sidecars_for_root_deletes_distinct_refs(monkeypatch):
+    executed = []
+    refs = [
+        {
+            "source": "managed_mail",
+            "storage": "disk_sidecar",
+            "relative_path": "mail_content/aa/one.json",
+        },
+        {
+            "source": "managed_mail",
+            "storage": "disk_sidecar",
+            "relative_path": "mail_content/aa/one.json",
+        },
+        {
+            "source": "managed_mail",
+            "storage": "disk_sidecar",
+            "relative_path": "mail_content/bb/missing.json",
+        },
+    ]
+    deleted_refs = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [(ref,) for ref in refs]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    def fake_delete_mail_content(ref):
+        deleted_refs.append(ref["relative_path"])
+        if ref["relative_path"].endswith("missing.json"):
+            return {"status": "missing", "relative_path": ref["relative_path"]}
+        return {"status": "deleted", "relative_path": ref["relative_path"]}
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database.mail_content_store, "delete_mail_content", fake_delete_mail_content)
+
+    result = database.delete_managed_mail_sidecars_for_root(root_name="mail-gmail-capture")
+
+    sql, params = executed[0]
+    assert result["deleted"] == 1
+    assert result["missing"] == 1
+    assert result["blocked"] == 0
+    assert deleted_refs == ["mail_content/aa/one.json", "mail_content/bb/missing.json"]
+    assert "JOIN source_assets" in sql
+    assert "JOIN monitored_roots" in sql
+    assert "root_name = %s" in sql
+    assert "sidecar_ref" in sql
+    assert params == ("mail-gmail-capture",)
+
+
+def test_delete_mail_profile_removes_profile_and_audits(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, name" in sql and "FROM mail_profiles" in sql:
+                return ("profile-1", "gmail-capture")
+            if "DELETE FROM mail_profiles" in sql:
+                return ("profile-1", "gmail-capture")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.delete_mail_profile(name="gmail-capture", actor="tester")
+
+    sql = "\n".join(item[0] for item in executed)
+    assert result == {"id": "profile-1", "name": "gmail-capture", "deleted": True}
+    assert "DELETE FROM mail_profiles" in sql
+    assert "mail_profile.deleted" in sql
+    assert executed[0][1] == ("gmail-capture",)
+
+
 def test_corpus_search_index_rows_hydrate_managed_mail_sidecar(monkeypatch):
     class FakeCursor:
         def execute(self, _sql, _params=()):

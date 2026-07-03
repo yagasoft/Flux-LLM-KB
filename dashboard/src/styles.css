@@ -679,6 +679,36 @@ kbd {
   gap: 6px;
 }
 
+.row-actions .menu-wrap {
+  position: relative;
+}
+
+.row-actions .action-menu {
+  width: 180px;
+}
+
+.row-actions .action-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+}
+
+.row-actions .action-menu button:hover {
+  background: var(--surface-soft);
+}
+
+.row-actions .action-menu button.danger-menu-item {
+  color: var(--red);
+}
+
 .empty-row {
   text-align: center;
   color: var(--muted);

@@ -146,12 +146,19 @@ def test_rest_exposes_settings_and_mail_routes(monkeypatch):
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     app = create_app()
     routes = {route.path for route in app.routes}
+    mail_profile_methods = {
+        method
+        for route in app.routes
+        if route.path == "/api/mail/profiles/{profile_name}"
+        for method in getattr(route, "methods", set())
+    }
 
     assert "/" in routes
     assert "/api/settings" in routes
     assert "/api/settings/{key}" in routes
     assert "/api/mail/status" in routes
     assert "/api/mail/profiles" in routes
+    assert "DELETE" in mail_profile_methods
     assert "/api/mail/profiles/{profile_name}/oauth-client-config" in routes
     assert "/api/mail/profiles/{profile_name}/post-process/dry-run" in routes
     assert "/api/mail/post-process/events" in routes
@@ -213,6 +220,54 @@ def test_rest_mail_profile_add_passes_outlook_incremental_basis(monkeypatch, tmp
 
     assert response.status_code == 200
     assert captured["outlook_incremental_basis"] == "last_modification_time"
+
+
+def test_rest_mail_profile_delete_calls_mail_ingestion(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_ingestion
+
+    calls = []
+    monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
+    monkeypatch.setattr(
+        mail_ingestion,
+        "delete_mail_profile",
+        lambda **kwargs: calls.append(kwargs)
+        or {
+            "profile_name": kwargs["profile_name"],
+            "deleted": True,
+            "spool": {"status": "deleted"},
+            "corpus_root": {"deleted": True},
+            "search_index": {"deleted": 2},
+            "sidecars": {"deleted": 1},
+        },
+    )
+    client = TestClient(create_app())
+
+    response = client.delete("/api/mail/profiles/gmail-capture")
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] is True
+    assert calls == [{"profile_name": "gmail-capture", "actor": "dashboard"}]
+
+
+def test_rest_mail_profile_delete_returns_structured_not_found(monkeypatch):
+    from fastapi.testclient import TestClient
+    from flux_llm_kb import mail_ingestion
+
+    monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
+    monkeypatch.setattr(
+        mail_ingestion,
+        "delete_mail_profile",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("mail profile not found: missing")),
+    )
+    client = TestClient(create_app())
+
+    response = client.delete("/api/mail/profiles/missing")
+
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["error"]["code"] == "mail.profile_not_found"
+    assert payload["error"]["target"] == {"type": "mail_profile", "id": "missing"}
 
 
 def test_rest_outlook_cancel_returns_conflict_for_mid_execution(monkeypatch):
