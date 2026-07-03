@@ -599,6 +599,10 @@ kbd {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.profile-table tr.pending-row {
+  opacity: 0.58;
+}
+
 [data-theme="dark"] .profile-table tr.selected {
   background: #102b37;
 }
@@ -618,6 +622,14 @@ kbd {
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.row-pending-label {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent) !important;
+  font-weight: 750;
 }
 
 .row-select,
@@ -657,6 +669,17 @@ kbd {
   background: #fff8ef;
 }
 
+.row-select:disabled,
+.row-actions button:disabled,
+.row-button:disabled,
+.ghost-action:disabled,
+.primary-action:disabled,
+.small-primary:disabled,
+.sync-selected:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .source-badge {
   display: inline-flex;
   align-items: center;
@@ -685,6 +708,21 @@ kbd {
 
 .row-actions .action-menu {
   width: 180px;
+}
+
+.portal-action-menu {
+  z-index: 80;
+}
+
+.portal-action-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.portal-action-menu button.danger-menu-item {
+  color: var(--red);
 }
 
 .row-actions .action-menu button {

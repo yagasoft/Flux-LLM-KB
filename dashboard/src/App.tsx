@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 type HealthCheck = { ok?: boolean; message?: string; required?: boolean; label?: string; target?: string | null; probe_target?: string | null };
 
@@ -830,6 +831,48 @@ type ToastState = {
   tone: ToastTone;
 };
 
+type PendingActionState = Record<string, { label: string }>;
+
+const MAIL_ROW_MENU_WIDTH = 180;
+const MAIL_ROW_MENU_ESTIMATED_HEIGHT = 96;
+const MENU_VIEWPORT_MARGIN = 8;
+
+function mailProfileActionKey(action: string, profileName: string) {
+  return `mail-profile:${action}:${profileName}`;
+}
+
+function corpusRootActionKey(action: string, rootName: string) {
+  return `corpus-root:${action}:${rootName}`;
+}
+
+function corpusJobActionKey(action: string, jobId: string) {
+  return `corpus-job:${action}:${jobId}`;
+}
+
+function settingActionKey(action: string, key: string) {
+  return `setting:${action}:${key}`;
+}
+
+function globalActionKey(action: string) {
+  return `dashboard:${action}`;
+}
+
+function pendingLabel(pendingActions: PendingActionState, key: string) {
+  return pendingActions[key]?.label;
+}
+
+function rowMenuPosition(rect: DOMRect, width = MAIL_ROW_MENU_WIDTH, height = MAIL_ROW_MENU_ESTIMATED_HEIGHT) {
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || width + MENU_VIEWPORT_MARGIN * 2;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || height + MENU_VIEWPORT_MARGIN * 2;
+  const maxLeft = Math.max(MENU_VIEWPORT_MARGIN, viewportWidth - width - MENU_VIEWPORT_MARGIN);
+  const left = Math.min(Math.max(MENU_VIEWPORT_MARGIN, rect.right - width), maxLeft);
+  const below = rect.bottom + MENU_VIEWPORT_MARGIN;
+  const top = below + height > viewportHeight - MENU_VIEWPORT_MARGIN
+    ? Math.max(MENU_VIEWPORT_MARGIN, rect.top - height - MENU_VIEWPORT_MARGIN)
+    : below;
+  return { top, left };
+}
+
 type MailSyncError = {
   folder?: string;
   stage?: string;
@@ -1204,6 +1247,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [toast, setToastState] = useState<ToastState | null>(null);
+  const [pendingActions, setPendingActions] = useState<PendingActionState>({});
+  const pendingActionKeysRef = useRef<Set<string>>(new Set());
   function setToast(next: string | ToastState, tone?: ToastTone) {
     if (typeof next !== "string") {
       setToastState(next);
@@ -1214,6 +1259,23 @@ export default function App() {
       return;
     }
     setToastState({ message: next, tone: tone ?? toastTone(next) });
+  }
+  async function runPendingAction<T>(key: string, label: string, operation: () => Promise<T>): Promise<T | undefined> {
+    if (pendingActionKeysRef.current.has(key)) {
+      return undefined;
+    }
+    pendingActionKeysRef.current.add(key);
+    setPendingActions((current) => ({ ...current, [key]: { label } }));
+    try {
+      return await operation();
+    } finally {
+      pendingActionKeysRef.current.delete(key);
+      setPendingActions((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    }
   }
   const [debugOpen, setDebugOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -1347,79 +1409,91 @@ export default function App() {
       setToast("Select a mail profile first.");
       return;
     }
-    try {
-      setToast(`Sync request queued for ${profile.name}...`);
-      if (profile.source_type === "outlook_com") {
-        const payload = await sendJson<{ status?: string }>("/api/outlook-host/request-sync", "POST", { profile_name: profile.name });
-        setToast(payload?.status ? `Outlook sync request ${payload.status}.` : "Outlook sync request queued.");
-      } else {
-        const payload = await sendJson<{ count?: number; profiles?: MailSyncProfileResult[] }>("/api/mail/sync", "POST", { profile_name: profile.name });
-        const result = payload.profiles?.[0];
-        const status = result?.status ?? "completed";
-        const exported = result?.exported ?? 0;
-        const details = mailSyncErrorDetail(result);
-        if (mailSyncStatusFailed(status)) {
-          setToast(`Sync failed for ${profile.name}: ${status}${details ? ` - ${details}` : ""}`);
+    await runPendingAction(mailProfileActionKey("sync", profile.name), "Syncing...", async () => {
+      try {
+        setToast(`Sync request queued for ${profile.name}...`);
+        if (profile.source_type === "outlook_com") {
+          const payload = await sendJson<{ status?: string }>("/api/outlook-host/request-sync", "POST", { profile_name: profile.name });
+          setToast(payload?.status ? `Outlook sync request ${payload.status}.` : "Outlook sync request queued.");
         } else {
-          const runText = result?.run_id ? ` (run ${result.run_id})` : "";
-          const exportedText = status === "queued" || status === "claimed" || status === "running" ? "" : `; exported ${exported} message${exported === 1 ? "" : "s"}`;
-          setToast(`IMAP sync ${status} for ${profile.name}${runText}${exportedText}.`);
+          const payload = await sendJson<{ count?: number; profiles?: MailSyncProfileResult[] }>("/api/mail/sync", "POST", { profile_name: profile.name });
+          const result = payload.profiles?.[0];
+          const status = result?.status ?? "completed";
+          const exported = result?.exported ?? 0;
+          const details = mailSyncErrorDetail(result);
+          if (mailSyncStatusFailed(status)) {
+            setToast(`Sync failed for ${profile.name}: ${status}${details ? ` - ${details}` : ""}`);
+          } else {
+            const runText = result?.run_id ? ` (run ${result.run_id})` : "";
+            const exportedText = status === "queued" || status === "claimed" || status === "running" ? "" : `; exported ${exported} message${exported === 1 ? "" : "s"}`;
+            setToast(`IMAP sync ${status} for ${profile.name}${runText}${exportedText}.`);
+          }
         }
+        await load();
+      } catch (error) {
+        setToast(`Sync failed for ${profile.name}: ${errorMessage(error)}`);
       }
-      await load();
-    } catch (error) {
-      setToast(`Sync failed for ${profile.name}: ${errorMessage(error)}`);
-    }
+    });
   }
 
   async function cancelOutlookRequest(requestId: string) {
-    try {
-      await sendJson(`/api/outlook-host/requests/${encodeURIComponent(requestId)}/cancel`, "POST", {});
-      setToast("Outlook sync request cancelled.");
-      await load();
-    } catch (error) {
-      setToast(`Outlook sync request cancellation failed: ${errorMessage(error)}`);
-    }
+    await runPendingAction(`outlook-request:cancel:${requestId}`, "Cancelling...", async () => {
+      try {
+        await sendJson(`/api/outlook-host/requests/${encodeURIComponent(requestId)}/cancel`, "POST", {});
+        setToast("Outlook sync request cancelled.");
+        await load();
+      } catch (error) {
+        setToast(`Outlook sync request cancellation failed: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function cancelCorpusJob(jobId: string) {
-    try {
-      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/cancel`, "POST", {});
-      setToast("Corpus job cancelled.");
-      await load();
-    } catch (error) {
-      setToast(`Corpus job cancellation failed: ${errorMessage(error)}`);
-    }
+    await runPendingAction(corpusJobActionKey("cancel", jobId), "Cancelling...", async () => {
+      try {
+        await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/cancel`, "POST", {});
+        setToast("Corpus job cancelled.");
+        await load();
+      } catch (error) {
+        setToast(`Corpus job cancellation failed: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function retryCorpusJob(jobId: string) {
-    try {
-      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/retry`, "POST", {});
-      setToast("Corpus job queued for retry.");
-      await load();
-    } catch (error) {
-      setToast(`Corpus job retry failed: ${errorMessage(error)}`);
-    }
+    await runPendingAction(corpusJobActionKey("retry", jobId), "Retrying...", async () => {
+      try {
+        await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/retry`, "POST", {});
+        setToast("Corpus job queued for retry.");
+        await load();
+      } catch (error) {
+        setToast(`Corpus job retry failed: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function markCorpusJobForDeletion(jobId: string) {
-    try {
-      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/delete-request`, "POST", { reason: "operator_cleanup" });
-      setToast("Corpus job marked obsolete for deletion.");
-      await load();
-    } catch (error) {
-      setToast(`Corpus job deletion mark failed: ${errorMessage(error)}`);
-    }
+    await runPendingAction(corpusJobActionKey("delete-request", jobId), "Marking...", async () => {
+      try {
+        await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/delete-request`, "POST", { reason: "operator_cleanup" });
+        setToast("Corpus job marked obsolete for deletion.");
+        await load();
+      } catch (error) {
+        setToast(`Corpus job deletion mark failed: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function restoreCorpusJobDeletionRequest(jobId: string) {
-    try {
-      await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/delete-request`, "DELETE", {});
-      setToast("Corpus job deletion mark restored.");
-      await load();
-    } catch (error) {
-      setToast(`Corpus job deletion restore failed: ${errorMessage(error)}`);
-    }
+    await runPendingAction(corpusJobActionKey("restore-delete-request", jobId), "Restoring...", async () => {
+      try {
+        await sendJson(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/delete-request`, "DELETE", {});
+        setToast("Corpus job deletion mark restored.");
+        await load();
+      } catch (error) {
+        setToast(`Corpus job deletion restore failed: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function applyJobFilters(filters: JobHistoryFilters) {
@@ -1482,18 +1556,20 @@ export default function App() {
       setToast("Select a mail profile first.");
       return;
     }
-    try {
-      const payload = await sendJson<{ events?: MailPostProcessEvent[] }>(
-        `/api/mail/profiles/${encodeURIComponent(profile.name)}/post-process/dry-run`,
-        "POST",
-        { limit: 5 }
-      );
-      const planned = payload.events?.length ?? 0;
-      setToast(`Post-process dry-run planned ${planned} action${planned === 1 ? "" : "s"}.`);
-      await load();
-    } catch (error) {
-      setToast(`Post-process dry-run failed for ${profile.name}: ${errorMessage(error)}`);
-    }
+    await runPendingAction(mailProfileActionKey("post-process-dry-run", profile.name), "Checking...", async () => {
+      try {
+        const payload = await sendJson<{ events?: MailPostProcessEvent[] }>(
+          `/api/mail/profiles/${encodeURIComponent(profile.name)}/post-process/dry-run`,
+          "POST",
+          { limit: 5 }
+        );
+        const planned = payload.events?.length ?? 0;
+        setToast(`Post-process dry-run planned ${planned} action${planned === 1 ? "" : "s"}.`);
+        await load();
+      } catch (error) {
+        setToast(`Post-process dry-run failed for ${profile.name}: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function startGmailOAuth(profile: MailProfile, clientConfigPath: string) {
@@ -1528,29 +1604,33 @@ export default function App() {
   }
 
   async function saveGmailOAuthClientPath(profile: MailProfile, clientConfigPath: string) {
-    try {
-      await sendJson(`/api/mail/profiles/${encodeURIComponent(profile.name)}/oauth-client-config`, "PUT", {
-        client_config_path: clientConfigPath.trim()
-      });
-      setToast(`OAuth client JSON path saved for ${profile.name}.`);
-      await load();
-    } catch (error) {
-      setToast(`Could not save OAuth client JSON path for ${profile.name}: ${errorMessage(error)}`);
-    }
+    await runPendingAction(mailProfileActionKey("oauth-client-save", profile.name), "Saving...", async () => {
+      try {
+        await sendJson(`/api/mail/profiles/${encodeURIComponent(profile.name)}/oauth-client-config`, "PUT", {
+          client_config_path: clientConfigPath.trim()
+        });
+        setToast(`OAuth client JSON path saved for ${profile.name}.`);
+        await load();
+      } catch (error) {
+        setToast(`Could not save OAuth client JSON path for ${profile.name}: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function deleteSelectedProfile(profile: MailProfile) {
-    try {
-      const payload = await sendJson<MailProfileDeleteResponse>(`/api/mail/profiles/${encodeURIComponent(profile.name)}`, "DELETE", {});
+    await runPendingAction(mailProfileActionKey("delete", profile.name), "Deleting...", async () => {
       setDeleteProfile(null);
-      if (selectedName === profile.name) setSelectedName("");
-      const spoolMessage = mailProfileSpoolCleanupMessage(payload);
-      const tone: ToastTone = ["blocked", "failed", "missing"].includes(String(payload.spool?.status ?? "")) ? "warning" : "success";
-      setToast(`Mail profile ${profile.name} deleted. Corpus ${payload.root_name ?? `mail-${profile.name}`} removed.${spoolMessage ? ` ${spoolMessage}` : ""}`, tone);
-      await load();
-    } catch (error) {
-      setToast(`Could not delete mail profile ${profile.name}: ${errorMessage(error)}`);
-    }
+      try {
+        const payload = await sendJson<MailProfileDeleteResponse>(`/api/mail/profiles/${encodeURIComponent(profile.name)}`, "DELETE", {});
+        if (selectedName === profile.name) setSelectedName("");
+        const spoolMessage = mailProfileSpoolCleanupMessage(payload);
+        const tone: ToastTone = ["blocked", "failed", "missing"].includes(String(payload.spool?.status ?? "")) ? "warning" : "success";
+        setToast(`Mail profile ${profile.name} deleted. Corpus ${payload.root_name ?? `mail-${profile.name}`} removed.${spoolMessage ? ` ${spoolMessage}` : ""}`, tone);
+        await load();
+      } catch (error) {
+        setToast(`Could not delete mail profile ${profile.name}: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function saveCrawlRoot(form: CrawlRootForm) {
@@ -1588,65 +1668,77 @@ export default function App() {
   }
 
   async function runCorpusSync() {
-    try {
-      await sendJson("/api/crawl/sync", "POST", { dry_run: false });
-      setToast("Corpus sync completed.");
-      await load();
-    } catch (error) {
-      setToast(`Corpus sync failed: ${errorMessage(error)}`);
-    }
+    await runPendingAction(globalActionKey("corpus-sync"), "Syncing...", async () => {
+      try {
+        await sendJson("/api/crawl/sync", "POST", { dry_run: false });
+        setToast("Corpus sync completed.");
+        await load();
+      } catch (error) {
+        setToast(`Corpus sync failed: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function setCorpusWatch(enabled: boolean) {
-    try {
-      await sendJson("/api/crawl/watch", "POST", { enabled });
-      setToast(enabled ? "Watch enabled." : "Watch disabled.");
-      await load();
-    } catch (error) {
-      setToast(`Watch update failed: ${errorMessage(error)}`);
-    }
+    await runPendingAction(globalActionKey(enabled ? "corpus-watch-enable" : "corpus-watch-disable"), enabled ? "Enabling..." : "Disabling...", async () => {
+      try {
+        await sendJson("/api/crawl/watch", "POST", { enabled });
+        setToast(enabled ? "Watch enabled." : "Watch disabled.");
+        await load();
+      } catch (error) {
+        setToast(`Watch update failed: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function runRootSync(rootName: string, dryRun = false) {
-    try {
-      await sendJson("/api/crawl/sync", "POST", { root_name: rootName, dry_run: dryRun });
-      setToast(dryRun ? `Dry run completed for ${rootName}.` : `Sync completed for ${rootName}.`);
-      await load();
-    } catch (error) {
-      setToast(`Root sync failed for ${rootName}: ${errorMessage(error)}`);
-    }
+    await runPendingAction(corpusRootActionKey(dryRun ? "dry-run" : "sync", rootName), dryRun ? "Checking..." : "Syncing...", async () => {
+      try {
+        await sendJson("/api/crawl/sync", "POST", { root_name: rootName, dry_run: dryRun });
+        setToast(dryRun ? `Dry run completed for ${rootName}.` : `Sync completed for ${rootName}.`);
+        await load();
+      } catch (error) {
+        setToast(`Root sync failed for ${rootName}: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function setRootWatch(rootName: string, enabled: boolean) {
-    try {
-      await sendJson("/api/crawl/watch", "POST", { root_name: rootName, enabled });
-      setToast(enabled ? `Watch enabled for ${rootName}.` : `Watch disabled for ${rootName}.`);
-      await load();
-    } catch (error) {
-      setToast(`Watch update failed for ${rootName}: ${errorMessage(error)}`);
-    }
+    await runPendingAction(corpusRootActionKey(enabled ? "watch-enable" : "watch-disable", rootName), enabled ? "Enabling..." : "Disabling...", async () => {
+      try {
+        await sendJson("/api/crawl/watch", "POST", { root_name: rootName, enabled });
+        setToast(enabled ? `Watch enabled for ${rootName}.` : `Watch disabled for ${rootName}.`);
+        await load();
+      } catch (error) {
+        setToast(`Watch update failed for ${rootName}: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function runRootBackfill(rootName: string) {
-    try {
-      await sendJson("/api/crawl/backfill", "POST", { kind: "all", limit: 10, workers: 1, root_name: rootName });
-      setToast(`Backfill run completed for ${rootName}.`);
-      await load();
-    } catch (error) {
-      setToast(`Backfill failed for ${rootName}: ${errorMessage(error)}`);
-    }
+    await runPendingAction(corpusRootActionKey("backfill", rootName), "Running...", async () => {
+      try {
+        await sendJson("/api/crawl/backfill", "POST", { kind: "all", limit: 10, workers: 1, root_name: rootName });
+        setToast(`Backfill run completed for ${rootName}.`);
+        await load();
+      } catch (error) {
+        setToast(`Backfill failed for ${rootName}: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function deleteSelectedRoot(root: RootSummary) {
-    try {
-      await sendJson(`/api/crawl/roots/${encodeURIComponent(root.id ?? root.name)}?purge_index=true`, "DELETE", {});
+    await runPendingAction(corpusRootActionKey("delete", root.name), "Deleting...", async () => {
       setDeleteRoot(null);
-      setSelectedRootName("");
-      setToast(`Watched path ${root.name} deleted and index rows purged. Files on disk were not deleted.`);
-      await load();
-    } catch (error) {
-      setToast(`Could not delete watched path ${root.name}: ${errorMessage(error)}`);
-    }
+      try {
+        await sendJson(`/api/crawl/roots/${encodeURIComponent(root.id ?? root.name)}?purge_index=true`, "DELETE", {});
+        setSelectedRootName("");
+        setToast(`Watched path ${root.name} deleted and index rows purged. Files on disk were not deleted.`);
+        await load();
+      } catch (error) {
+        setToast(`Could not delete watched path ${root.name}: ${errorMessage(error)}`);
+      }
+    });
   }
 
   async function saveSetting(confirmed = false) {
@@ -1655,28 +1747,35 @@ export default function App() {
       setConfirmSetting(settingEditor);
       return;
     }
-    const value = parseSettingValue(settingValue, settingEditor.value);
-    await sendJson(`/api/settings/${encodeURIComponent(settingEditor.key)}`, "PUT", {
-      value,
-      confirmed,
-      reason: "dashboard update"
+    const setting = settingEditor;
+    await runPendingAction(settingActionKey("save", setting.key), "Saving...", async () => {
+      const value = parseSettingValue(settingValue, setting.value);
+      await sendJson(`/api/settings/${encodeURIComponent(setting.key)}`, "PUT", {
+        value,
+        confirmed,
+        reason: "dashboard update"
+      });
+      setConfirmSetting(null);
+      setSettingEditor(null);
+      setToast(`Setting ${setting.key} saved.`);
+      await load();
     });
-    setConfirmSetting(null);
-    setSettingEditor(null);
-    setToast(`Setting ${settingEditor.key} saved.`);
-    await load();
   }
 
   async function resetSetting(setting: SettingRow) {
-    await sendJson(`/api/settings/${encodeURIComponent(setting.key)}/reset`, "POST", {});
-    setToast(`Setting ${setting.key} reset.`);
-    await load();
+    await runPendingAction(settingActionKey("reset", setting.key), "Resetting...", async () => {
+      await sendJson(`/api/settings/${encodeURIComponent(setting.key)}/reset`, "POST", {});
+      setToast(`Setting ${setting.key} reset.`);
+      await load();
+    });
   }
 
   async function applySettings(component?: string) {
-    await sendJson("/api/settings/apply", "POST", { component: component ?? null });
-    setToast(component ? `Apply request acknowledged for ${component}.` : "Apply requests acknowledged.");
-    await load();
+    await runPendingAction(globalActionKey(component ? `settings-apply:${component}` : "settings-apply"), "Applying...", async () => {
+      await sendJson("/api/settings/apply", "POST", { component: component ?? null });
+      setToast(component ? `Apply request acknowledged for ${component}.` : "Apply requests acknowledged.");
+      await load();
+    });
   }
 
   async function loadReview() {
@@ -1959,6 +2058,7 @@ export default function App() {
   const oauthProfiles = state.mail.oauth?.profiles ?? [];
   const restartRows = restartSettings(state.settings);
   const currentToastTone = toast?.tone ?? "success";
+  const selectedProfileSyncPending = selectedProfile ? pendingLabel(pendingActions, mailProfileActionKey("sync", selectedProfile.name)) : undefined;
 
   return (
     <div className="app-shell">
@@ -2021,9 +2121,9 @@ export default function App() {
               />
               <kbd>Ctrl K</kbd>
             </form>
-            <button className="primary-action" type="button" title="Run the selected mail profile sync now" onClick={() => void requestProfileSync()}>
-              <RefreshCcw size={17} />
-              Sync Now
+            <button className="primary-action" type="button" title="Run the selected mail profile sync now" disabled={Boolean(selectedProfileSyncPending)} onClick={() => void requestProfileSync()}>
+              {selectedProfileSyncPending ? <Clock3 size={17} /> : <RefreshCcw size={17} />}
+              {selectedProfileSyncPending ?? "Sync Now"}
             </button>
             <div className="menu-wrap">
               <button className="ghost-action" aria-label="More actions" title="Open dashboard actions and diagnostics" type="button" onClick={() => setMoreOpen((open) => !open)}>
@@ -2061,6 +2161,7 @@ export default function App() {
             host={host}
             oauthProfiles={oauthProfiles}
             mailErrors={mailErrors}
+            pendingActions={pendingActions}
             onAddProfile={() => setProfileDialog("new")}
             onEditProfile={setProfileDialog}
             onSelectProfile={(profile) => setSelectedName(profile.name)}
@@ -2102,6 +2203,7 @@ export default function App() {
           <CorpusTab
             state={state}
             selectedRoot={selectedRoot}
+            pendingActions={pendingActions}
             onAddRoot={() => setRootDialog("new")}
             onEditRoot={(root) => setRootDialog(root)}
             onDeleteRoot={(root) => setDeleteRoot(root)}
@@ -2121,6 +2223,7 @@ export default function App() {
             health={state.health}
             hostStatus={hostStatus}
             restartRows={restartRows}
+            pendingActions={pendingActions}
             onEdit={setSettingEditor}
             onReset={(setting) => void resetSetting(setting)}
             onApply={(component) => void applySettings(component)}
@@ -2195,6 +2298,7 @@ export default function App() {
             onMarkCorpusJobForDeletion={(jobId) => void markCorpusJobForDeletion(jobId)}
             onRestoreCorpusJobDeletionRequest={(jobId) => void restoreCorpusJobDeletionRequest(jobId)}
             onJobFileAction={(jobId, action) => void runJobFileAction(jobId, action)}
+            pendingActions={pendingActions}
           />
         )}
       </main>
@@ -2220,6 +2324,8 @@ export default function App() {
           title="Delete watched path"
           body={`Delete watched path ${deleteRoot.name} and purge its indexed files, chunks, search-index records, jobs, crawl runs, and watcher state. This does not delete files from disk.`}
           confirmLabel="Delete watched path and purge index"
+          pending={Boolean(pendingLabel(pendingActions, corpusRootActionKey("delete", deleteRoot.name)))}
+          pendingLabel={pendingLabel(pendingActions, corpusRootActionKey("delete", deleteRoot.name))}
           onCancel={() => setDeleteRoot(null)}
           onConfirm={() => void deleteSelectedRoot(deleteRoot)}
         />
@@ -2230,6 +2336,8 @@ export default function App() {
           title="Delete mail profile"
           body={`Delete mail profile ${deleteProfile.name}, mailbox corpus root mail-${deleteProfile.name}, search-index records, semantic duplicate metadata, managed mail sidecar files, and private spool files on disk when the configured path passes strict private mail-spool guards.`}
           confirmLabel="Delete profile and private spool"
+          pending={Boolean(pendingLabel(pendingActions, mailProfileActionKey("delete", deleteProfile.name)))}
+          pendingLabel={pendingLabel(pendingActions, mailProfileActionKey("delete", deleteProfile.name))}
           onCancel={() => setDeleteProfile(null)}
           onConfirm={() => void deleteSelectedProfile(deleteProfile)}
         />
@@ -2251,6 +2359,8 @@ export default function App() {
           title="Confirm setting change"
           body={`Changing ${confirmSetting.key} uses apply mode ${confirmSetting.apply_mode}. Flux will queue the required runtime action instead of silently changing behavior.`}
           confirmLabel="Confirm and save"
+          pending={Boolean(pendingLabel(pendingActions, settingActionKey("save", confirmSetting.key)))}
+          pendingLabel={pendingLabel(pendingActions, settingActionKey("save", confirmSetting.key))}
           onCancel={() => setConfirmSetting(null)}
           onConfirm={() => void saveSetting(true)}
         />
@@ -2303,6 +2413,7 @@ function MailTab({
   host,
   oauthProfiles,
   mailErrors,
+  pendingActions,
   onAddProfile,
   onEditProfile,
   onSelectProfile,
@@ -2321,6 +2432,7 @@ function MailTab({
   host: OutlookStatus["host"];
   oauthProfiles: Array<{ profile_name?: string; status?: string }>;
   mailErrors: number;
+  pendingActions: PendingActionState;
   onAddProfile: () => void;
   onEditProfile: (profile: MailProfile) => void;
   onSelectProfile: (profile: MailProfile) => void;
@@ -2350,6 +2462,7 @@ function MailTab({
             oauthProfiles={oauthProfiles}
             hostStatus={hostStatus}
             mailErrors={mailErrors}
+            pendingActions={pendingActions}
             onSelect={onSelectProfile}
             onSync={onSyncProfile}
             onEdit={onEditProfile}
@@ -2368,13 +2481,14 @@ function MailTab({
             onEdit={() => selectedProfile && onEditProfile(selectedProfile)}
             onOAuthStart={(clientPath) => selectedProfile && onOAuthStart(selectedProfile, clientPath)}
             onOAuthPathSave={(clientPath) => selectedProfile && onOAuthPathSave(selectedProfile, clientPath)}
+            pendingActions={pendingActions}
           />
         </Panel>
       </section>
 
       <section className="lower-grid">
         <MailSchedulerPanel scheduler={state.mail.scheduler} />
-        <MailPostProcessPanel mail={state.mail} selectedProfile={selectedProfile} onDryRun={onPostProcessDryRun} />
+        <MailPostProcessPanel mail={state.mail} selectedProfile={selectedProfile} pendingActions={pendingActions} onDryRun={onPostProcessDryRun} />
         <MailStatusPanel mail={state.mail} hostStatus={hostStatus} showOutlook={hasOutlookProfiles} />
         <MailErrorsPanel mail={state.mail} errors={state.health.recent_errors ?? []} onErrorDetail={onErrorDetail} />
         {hasOutlookProfiles && <OutlookHostPanel host={host} hostStatus={hostStatus} pending={activeOutlookCount} />}
@@ -2431,8 +2545,9 @@ function MailStatusPanel({ mail, hostStatus, showOutlook }: { mail: MailStatus; 
   );
 }
 
-function MailPostProcessPanel({ mail, selectedProfile, onDryRun }: { mail: MailStatus; selectedProfile?: MailProfile; onDryRun: (profile: MailProfile) => void }) {
+function MailPostProcessPanel({ mail, selectedProfile, pendingActions, onDryRun }: { mail: MailStatus; selectedProfile?: MailProfile; pendingActions: PendingActionState; onDryRun: (profile: MailProfile) => void }) {
   const events = mail.post_process?.recent_events ?? [];
+  const dryRunPending = selectedProfile ? pendingLabel(pendingActions, mailProfileActionKey("post-process-dry-run", selectedProfile.name)) : undefined;
   return (
     <Panel
       title="Post Process"
@@ -2442,9 +2557,10 @@ function MailPostProcessPanel({ mail, selectedProfile, onDryRun }: { mail: MailS
           type="button"
           aria-label={`Dry run post process for ${selectedProfile.name}`}
           title={`Preview post-process commands for ${selectedProfile.name}`}
+          disabled={Boolean(dryRunPending)}
           onClick={() => onDryRun(selectedProfile)}
         >
-          <Play size={15} /> Dry run
+          {dryRunPending ? <Clock3 size={15} /> : <Play size={15} />} {dryRunPending ?? "Dry run"}
         </button>
       ) : undefined}
     >
@@ -3520,6 +3636,7 @@ function CodexHooksPanel({ codex }: { codex?: HealthPayload["codex"] }) {
 function CorpusTab({
   state,
   selectedRoot,
+  pendingActions,
   onAddRoot,
   onEditRoot,
   onDeleteRoot,
@@ -3533,6 +3650,7 @@ function CorpusTab({
 }: {
   state: LoadState;
   selectedRoot?: RootSummary;
+  pendingActions: PendingActionState;
   onAddRoot: () => void;
   onEditRoot: (root: RootSummary) => void;
   onDeleteRoot: (root: RootSummary) => void;
@@ -3546,14 +3664,17 @@ function CorpusTab({
 }) {
   const roots = state.crawl.root_summaries ?? (state.crawl.roots ?? []);
   const status = state.crawl.status ?? {};
+  const syncAllPending = pendingLabel(pendingActions, globalActionKey("corpus-sync"));
+  const enableAllPending = pendingLabel(pendingActions, globalActionKey("corpus-watch-enable"));
+  const disableAllPending = pendingLabel(pendingActions, globalActionKey("corpus-watch-disable"));
   return (
     <section className="tab-grid corpus-tab">
       <Panel title="Corpus Monitor" action={<button className="small-primary" type="button" title="Add a monitored root path for recursive crawl and watch" onClick={onAddRoot}><Plus size={15} /> Add Watched Path</button>}>
         <div className="corpus-actions">
-          <button className="small-primary" type="button" title="Run a crawl sync for all configured roots" onClick={onSync}><RefreshCcw size={15} /> Sync all</button>
+          <button className="small-primary" type="button" title="Run a crawl sync for all configured roots" disabled={Boolean(syncAllPending)} onClick={onSync}>{syncAllPending ? <Clock3 size={15} /> : <RefreshCcw size={15} />} {syncAllPending ?? "Sync all"}</button>
           <button className="ghost-action compact" type="button" title="Reload dashboard crawl state" onClick={onRefresh}>Refresh</button>
-          <button className="ghost-action compact" type="button" title="Enable watch mode for every monitored root" onClick={() => onWatch(true)}>Enable all watch</button>
-          <button className="ghost-action compact" type="button" title="Disable watch mode without deleting roots" onClick={() => onWatch(false)}>Disable all watch</button>
+          <button className="ghost-action compact" type="button" title="Enable watch mode for every monitored root" disabled={Boolean(enableAllPending)} onClick={() => onWatch(true)}>{enableAllPending ?? "Enable all watch"}</button>
+          <button className="ghost-action compact" type="button" title="Disable watch mode without deleting roots" disabled={Boolean(disableAllPending)} onClick={() => onWatch(false)}>{disableAllPending ?? "Disable all watch"}</button>
         </div>
         <div className="summary-cards">
           <Stat label="Roots" value={String(roots.length)} />
@@ -3568,6 +3689,7 @@ function CorpusTab({
           <RootTable
             roots={roots}
             selectedRoot={selectedRoot}
+            pendingActions={pendingActions}
             onSelect={onSelectRoot}
             onSync={onRootSync}
             onWatch={onRootWatch}
@@ -3577,7 +3699,7 @@ function CorpusTab({
           />
         </Panel>
         <Panel title="Root Details" action={selectedRoot ? <RootStateBadge state={selectedRoot.state} /> : undefined}>
-          <RootInspector root={selectedRoot} onEdit={onEditRoot} onDelete={onDeleteRoot} onBackfill={onRootBackfill} />
+          <RootInspector root={selectedRoot} pendingActions={pendingActions} onEdit={onEditRoot} onDelete={onDeleteRoot} onBackfill={onRootBackfill} />
         </Panel>
       </section>
       <Panel title="Extractor Availability">
@@ -3594,6 +3716,7 @@ function CorpusTab({
 function RootTable({
   roots,
   selectedRoot,
+  pendingActions,
   onSelect,
   onSync,
   onWatch,
@@ -3603,6 +3726,7 @@ function RootTable({
 }: {
   roots: RootSummary[];
   selectedRoot?: RootSummary;
+  pendingActions: PendingActionState;
   onSelect: (root: RootSummary) => void;
   onSync: (root: RootSummary, dryRun: boolean) => void;
   onWatch: (root: RootSummary, enabled: boolean) => void;
@@ -3629,19 +3753,27 @@ function RootTable({
           const lockedAssets = (root.asset_counts?.retrying_locked ?? 0) + (root.asset_counts?.blocked_locked ?? 0);
           const retryingLockedJobs = root.job_counts?.retrying_locked ?? 0;
           const blockedLockedJobs = root.job_counts?.blocked_locked ?? 0;
+          const deleting = pendingLabel(pendingActions, corpusRootActionKey("delete", root.name));
+          const syncing = pendingLabel(pendingActions, corpusRootActionKey("sync", root.name));
+          const dryRun = pendingLabel(pendingActions, corpusRootActionKey("dry-run", root.name));
+          const backfill = pendingLabel(pendingActions, corpusRootActionKey("backfill", root.name));
+          const watch = pendingLabel(pendingActions, corpusRootActionKey(root.watch_enabled ? "watch-disable" : "watch-enable", root.name));
+          const rowPending = Boolean(deleting);
           return (
           <tr
             key={root.name}
-            className={selectedRoot?.name === root.name ? "selected" : ""}
-            onClick={() => onSelect(root)}
+            className={`${selectedRoot?.name === root.name ? "selected" : ""}${rowPending ? " pending-row" : ""}`}
+            aria-busy={rowPending ? "true" : undefined}
+            onClick={() => { if (!rowPending) onSelect(root); }}
           >
             <td>
-              <button className="row-select" type="button" aria-label={`Select ${root.name}`}>
+              <button className="row-select" type="button" aria-label={`Select ${root.name}`} disabled={rowPending}>
                 {selectedRoot?.name === root.name ? <CheckCircle2 size={15} /> : <Square size={12} />}
               </button>
               <div>
                 <strong>{root.name}</strong>
                 <span>{root.recursive ? "Recursive" : "Single level"} - trust {root.trust_rank ?? 500}</span>
+                {deleting ? <span className="row-pending-label"><Clock3 size={13} /> {deleting}</span> : null}
               </div>
             </td>
             <td className="path-cell" title={root.root_path}>{root.root_path}</td>
@@ -3662,14 +3794,14 @@ function RootTable({
             </td>
             <td>
               <div className="row-actions root-actions">
-                <button type="button" aria-label={`Sync ${root.name}`} title={`Sync ${root.name} now`} onClick={(event) => { event.stopPropagation(); onSync(root, false); }}><RefreshCcw size={15} /></button>
-                <button type="button" aria-label={`Dry run ${root.name}`} title={`Preview crawl changes for ${root.name}`} onClick={(event) => { event.stopPropagation(); onSync(root, true); }}><ListFilter size={15} /></button>
-                <button type="button" aria-label={`Run backfill for ${root.name}`} title={`Process deferred jobs for ${root.name}`} onClick={(event) => { event.stopPropagation(); onBackfill(root); }}><Play size={15} /></button>
-                <button type="button" aria-label={`${root.watch_enabled ? "Disable" : "Enable"} watch ${root.name}`} title={`${root.watch_enabled ? "Disable" : "Enable"} recursive watch for ${root.name}`} onClick={(event) => { event.stopPropagation(); onWatch(root, !root.watch_enabled); }}>
-                  {root.watch_enabled ? <Square size={15} /> : <Play size={15} />}
+                <button type="button" aria-label={`Sync ${root.name}`} title={syncing ?? `Sync ${root.name} now`} disabled={rowPending || Boolean(syncing)} onClick={(event) => { event.stopPropagation(); onSync(root, false); }}>{syncing ? <Clock3 size={15} /> : <RefreshCcw size={15} />}</button>
+                <button type="button" aria-label={`Dry run ${root.name}`} title={dryRun ?? `Preview crawl changes for ${root.name}`} disabled={rowPending || Boolean(dryRun)} onClick={(event) => { event.stopPropagation(); onSync(root, true); }}>{dryRun ? <Clock3 size={15} /> : <ListFilter size={15} />}</button>
+                <button type="button" aria-label={`Run backfill for ${root.name}`} title={backfill ?? `Process deferred jobs for ${root.name}`} disabled={rowPending || Boolean(backfill)} onClick={(event) => { event.stopPropagation(); onBackfill(root); }}>{backfill ? <Clock3 size={15} /> : <Play size={15} />}</button>
+                <button type="button" aria-label={`${root.watch_enabled ? "Disable" : "Enable"} watch ${root.name}`} title={watch ?? `${root.watch_enabled ? "Disable" : "Enable"} recursive watch for ${root.name}`} disabled={rowPending || Boolean(watch)} onClick={(event) => { event.stopPropagation(); onWatch(root, !root.watch_enabled); }}>
+                  {watch ? <Clock3 size={15} /> : root.watch_enabled ? <Square size={15} /> : <Play size={15} />}
                 </button>
-                <button type="button" aria-label={`Edit ${root.name}`} title={`Edit watched path ${root.name}`} onClick={(event) => { event.stopPropagation(); onEdit(root); }}><Wrench size={15} /></button>
-                <button type="button" aria-label={`Delete ${root.name}`} title={`Delete watched path ${root.name} from the Flux index`} onClick={(event) => { event.stopPropagation(); onDelete(root); }}><Trash2 size={15} /></button>
+                <button type="button" aria-label={`Edit ${root.name}`} title={`Edit watched path ${root.name}`} disabled={rowPending} onClick={(event) => { event.stopPropagation(); onEdit(root); }}><Wrench size={15} /></button>
+                <button type="button" aria-label={`Delete ${root.name}`} title={deleting ?? `Delete watched path ${root.name} from the Flux index`} disabled={rowPending} onClick={(event) => { event.stopPropagation(); onDelete(root); }}>{deleting ? <Clock3 size={15} /> : <Trash2 size={15} />}</button>
               </div>
             </td>
           </tr>
@@ -3687,11 +3819,13 @@ function RootTable({
 
 function RootInspector({
   root,
+  pendingActions,
   onEdit,
   onDelete,
   onBackfill
 }: {
   root?: RootSummary;
+  pendingActions: PendingActionState;
   onEdit: (root: RootSummary) => void;
   onDelete: (root: RootSummary) => void;
   onBackfill: (root: RootSummary) => void;
@@ -3700,6 +3834,8 @@ function RootInspector({
     return <div className="empty-inspector"><p className="muted">Add or select a watched path to see crawl, watch, and job status.</p></div>;
   }
   const latest = root.latest_crawl ?? {};
+  const deleting = pendingLabel(pendingActions, corpusRootActionKey("delete", root.name));
+  const backfill = pendingLabel(pendingActions, corpusRootActionKey("backfill", root.name));
   return (
     <div className="inspector root-inspector">
       <div className="profile-head">
@@ -3710,14 +3846,14 @@ function RootInspector({
         </div>
       </div>
       <div className="button-row">
-        <button className="ghost-action compact" type="button" aria-label={`Edit selected watched path ${root.name}`} title="Edit this watched path" onClick={() => onEdit(root)}>
+        <button className="ghost-action compact" type="button" aria-label={`Edit selected watched path ${root.name}`} title="Edit this watched path" disabled={Boolean(deleting)} onClick={() => onEdit(root)}>
           <Wrench size={15} /> Edit
         </button>
-        <button className="ghost-action compact" type="button" aria-label={`Run selected root backfill for ${root.name}`} title="Process deferred jobs for this watched path" onClick={() => onBackfill(root)}>
-          <Play size={15} /> Run backfill
+        <button className="ghost-action compact" type="button" aria-label={`Run selected root backfill for ${root.name}`} title={backfill ?? "Process deferred jobs for this watched path"} disabled={Boolean(deleting || backfill)} onClick={() => onBackfill(root)}>
+          {backfill ? <Clock3 size={15} /> : <Play size={15} />} {backfill ?? "Run backfill"}
         </button>
-        <button className="ghost-action compact danger-action" type="button" aria-label={`Delete selected watched path ${root.name}`} title="Delete this watched path from the Flux index" onClick={() => onDelete(root)}>
-          <Trash2 size={15} /> Delete
+        <button className="ghost-action compact danger-action" type="button" aria-label={`Delete selected watched path ${root.name}`} title={deleting ?? "Delete this watched path from the Flux index"} disabled={Boolean(deleting)} onClick={() => onDelete(root)}>
+          {deleting ? <Clock3 size={15} /> : <Trash2 size={15} />} {deleting ?? "Delete"}
         </button>
       </div>
       {root.job_counts?.pending ? (
@@ -3940,6 +4076,7 @@ function SettingsTab({
   health,
   hostStatus,
   restartRows,
+  pendingActions,
   onEdit,
   onReset,
   onApply
@@ -3948,19 +4085,21 @@ function SettingsTab({
   health: HealthPayload;
   hostStatus: string;
   restartRows: SettingRow[];
+  pendingActions: PendingActionState;
   onEdit: (setting: SettingRow) => void;
   onReset: (setting: SettingRow) => void;
   onApply: (component?: string) => void;
 }) {
   const categories = [...new Set(settings.map((setting) => setting.category))].sort();
+  const applyPending = pendingLabel(pendingActions, globalActionKey("settings-apply"));
   return (
     <section className="tab-grid">
       <CodexHooksPanel codex={health.codex} />
       <DeploymentPanel deployment={health.deployment} />
-      <Panel title={`Runtime Actions (${restartRows.length})`} action={<button className="small-primary" type="button" onClick={() => onApply()}>Apply acknowledged</button>}>
+      <Panel title={`Runtime Actions (${restartRows.length})`} action={<button className="small-primary" type="button" disabled={Boolean(applyPending)} onClick={() => onApply()}>{applyPending ?? "Apply acknowledged"}</button>}>
         <SettingsPreview rows={restartRows} />
       </Panel>
-      <Panel title="Runtime Settings" action={<button className="small-primary" type="button" onClick={() => onApply()}>Apply pending</button>}>
+      <Panel title="Runtime Settings" action={<button className="small-primary" type="button" disabled={Boolean(applyPending)} onClick={() => onApply()}>{applyPending ?? "Apply pending"}</button>}>
         <p className="panel-note">Settings are catalog-backed and cross-platform. Environment values override database values, and sensitive values stay masked.</p>
         <div className="settings-table-wrap">
           <table className="settings-table" aria-label="Runtime settings">
@@ -3975,7 +4114,9 @@ function SettingsTab({
               </tr>
             </thead>
             <tbody>
-              {settings.map((setting) => (
+              {settings.map((setting) => {
+                const resetPending = pendingLabel(pendingActions, settingActionKey("reset", setting.key));
+                return (
                 <tr key={setting.key}>
                   <td>
                     <strong>{setting.key}</strong>
@@ -3986,15 +4127,16 @@ function SettingsTab({
                   <td><em>{setting.apply_mode}</em></td>
                   <td>{(setting.affected_components ?? []).join(", ") || "-"}</td>
                   <td>
-                    <button className="row-button" type="button" aria-label={`Edit ${setting.key}`} disabled={setting.read_only} onClick={() => onEdit(setting)}>
+                    <button className="row-button" type="button" aria-label={`Edit ${setting.key}`} disabled={setting.read_only || Boolean(resetPending)} onClick={() => onEdit(setting)}>
                       <Wrench size={15} /> Edit
                     </button>
-                    <button className="row-button" type="button" aria-label={`Reset ${setting.key}`} disabled={setting.read_only || setting.source === "default"} onClick={() => onReset(setting)}>
-                      <RotateCcw size={15} /> Reset
+                    <button className="row-button" type="button" aria-label={`Reset ${setting.key}`} disabled={setting.read_only || setting.source === "default" || Boolean(resetPending)} onClick={() => onReset(setting)}>
+                      {resetPending ? <Clock3 size={15} /> : <RotateCcw size={15} />} {resetPending ?? "Reset"}
                     </button>
                   </td>
                 </tr>
-              ))}
+              );
+              })}
             </tbody>
           </table>
         </div>
@@ -5344,6 +5486,7 @@ function JobsTab({
   state,
   jobFilters,
   jobSort,
+  pendingActions,
   onRefresh,
   onApplyJobFilters,
   onClearJobFilters,
@@ -5359,6 +5502,7 @@ function JobsTab({
   state: LoadState;
   jobFilters: JobHistoryFilters;
   jobSort: JobSortState;
+  pendingActions: PendingActionState;
   onRefresh: () => void;
   onApplyJobFilters: (filters: JobHistoryFilters) => void;
   onClearJobFilters: () => void;
@@ -5412,6 +5556,7 @@ function JobsTab({
           onMarkCorpusJobForDeletion={onMarkCorpusJobForDeletion}
           onRestoreCorpusJobDeletionRequest={onRestoreCorpusJobDeletionRequest}
           onJobFileAction={onJobFileAction}
+          pendingActions={pendingActions}
         />
         {jobsEmptyHint ? <p className="panel-note">{jobsEmptyHint}</p> : null}
       </Panel>
@@ -5661,7 +5806,8 @@ function JobQueueTable({
   onRetryCorpusJob,
   onMarkCorpusJobForDeletion,
   onRestoreCorpusJobDeletionRequest,
-  onJobFileAction
+  onJobFileAction,
+  pendingActions
 }: {
   jobs: Array<Record<string, unknown>>;
   label: string;
@@ -5674,6 +5820,7 @@ function JobQueueTable({
   onMarkCorpusJobForDeletion?: (jobId: string) => void;
   onRestoreCorpusJobDeletionRequest?: (jobId: string) => void;
   onJobFileAction?: (jobId: string, action: "open" | "reveal") => void;
+  pendingActions: PendingActionState;
 }) {
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   const [toolInvocationsByJob, setToolInvocationsByJob] = useState<Record<string, JobToolInvocationState>>({});
@@ -5753,6 +5900,11 @@ function JobQueueTable({
             const showDeletionMarker = deletionRequested && !obsoleteCorpusJob;
             const targetActionable = isActionableJobTarget(job, payload, target);
             const progress = jobProgressSummary(job);
+            const retryPending = pendingLabel(pendingActions, corpusJobActionKey("retry", id));
+            const cancelPending = pendingLabel(pendingActions, corpusJobActionKey("cancel", id));
+            const deleteRequestPending = pendingLabel(pendingActions, corpusJobActionKey("delete-request", id));
+            const restoreDeletePending = pendingLabel(pendingActions, corpusJobActionKey("restore-delete-request", id));
+            const outlookCancelPending = pendingLabel(pendingActions, `outlook-request:cancel:${id}`);
             return (
               <Fragment key={id}>
                 <tr>
@@ -5796,9 +5948,10 @@ function JobQueueTable({
                         className="row-button"
                         type="button"
                         aria-label={`Force retry corpus job ${id}`}
+                        disabled={Boolean(retryPending)}
                         onClick={() => onRetryCorpusJob?.(id)}
                       >
-                        <RotateCcw size={15} /> Retry
+                        {retryPending ? <Clock3 size={15} /> : <RotateCcw size={15} />} {retryPending ?? "Retry"}
                       </button>
                     ) : null}
                     {outlookRequest ? (
@@ -5806,9 +5959,10 @@ function JobQueueTable({
                         className="row-button warning"
                         type="button"
                         aria-label={`Cancel Outlook request ${id}`}
+                        disabled={Boolean(outlookCancelPending)}
                         onClick={() => onCancelOutlookRequest?.(id)}
                       >
-                        <Trash2 size={15} /> Cancel
+                        {outlookCancelPending ? <Clock3 size={15} /> : <Trash2 size={15} />} {outlookCancelPending ?? "Cancel"}
                       </button>
                     ) : null}
                     {cancellableCorpusJob ? (
@@ -5816,9 +5970,10 @@ function JobQueueTable({
                         className="row-button warning"
                         type="button"
                         aria-label={`Cancel corpus job ${id}`}
+                        disabled={Boolean(cancelPending)}
                         onClick={() => onCancelCorpusJob?.(id)}
                       >
-                        <Trash2 size={15} /> Cancel
+                        {cancelPending ? <Clock3 size={15} /> : <Trash2 size={15} />} {cancelPending ?? "Cancel"}
                       </button>
                     ) : null}
                     {deletionMarkableCorpusJob ? (
@@ -5826,9 +5981,10 @@ function JobQueueTable({
                         className="row-button warning"
                         type="button"
                         aria-label={`Mark corpus job ${id} for deletion`}
+                        disabled={Boolean(deleteRequestPending)}
                         onClick={() => onMarkCorpusJobForDeletion?.(id)}
                       >
-                        <Trash2 size={15} /> Mark for deletion
+                        {deleteRequestPending ? <Clock3 size={15} /> : <Trash2 size={15} />} {deleteRequestPending ?? "Mark for deletion"}
                       </button>
                     ) : null}
                     {deletionRestorableCorpusJob ? (
@@ -5836,9 +5992,10 @@ function JobQueueTable({
                         className="row-button"
                         type="button"
                         aria-label={`Restore deletion mark for corpus job ${id}`}
+                        disabled={Boolean(restoreDeletePending)}
                         onClick={() => onRestoreCorpusJobDeletionRequest?.(id)}
                       >
-                        <RotateCcw size={15} /> Restore
+                        {restoreDeletePending ? <Clock3 size={15} /> : <RotateCcw size={15} />} {restoreDeletePending ?? "Restore"}
                       </button>
                     ) : null}
                     {nonRestorableObsoleteReason ? <span className="state-pill warning">{nonRestorableObsoleteReason}</span> : null}
@@ -6352,6 +6509,7 @@ function ProfileTable({
   oauthProfiles,
   hostStatus,
   mailErrors,
+  pendingActions,
   onSelect,
   onSync,
   onEdit,
@@ -6362,32 +6520,43 @@ function ProfileTable({
   oauthProfiles: Array<{ profile_name?: string; status?: string }>;
   hostStatus: string;
   mailErrors: number;
+  pendingActions: PendingActionState;
   onSelect: (profile: MailProfile) => void;
   onSync: (profile: MailProfile) => void;
   onEdit: (profile: MailProfile) => void;
   onDelete: (profile: MailProfile) => void;
 }) {
-  const [openMenuName, setOpenMenuName] = useState<string | null>(null);
+  const [openMenu, setOpenMenu] = useState<{ profileName: string; top: number; left: number } | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
-    if (!openMenuName) return undefined;
+    if (!openMenu) return undefined;
     function closeOnPointer(event: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setOpenMenuName(null);
+      const target = event.target as Node;
+      if (menuRef.current?.contains(target) || menuButtonRef.current?.contains(target)) {
+        return;
       }
+      setOpenMenu(null);
     }
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setOpenMenuName(null);
+        setOpenMenu(null);
       }
+    }
+    function closeOnViewportChange() {
+      setOpenMenu(null);
     }
     document.addEventListener("mousedown", closeOnPointer);
     document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeOnViewportChange);
+    window.addEventListener("scroll", closeOnViewportChange, true);
     return () => {
       document.removeEventListener("mousedown", closeOnPointer);
       document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeOnViewportChange);
+      window.removeEventListener("scroll", closeOnViewportChange, true);
     };
-  }, [openMenuName]);
+  }, [openMenu]);
 
   return (
     <table className="profile-table" aria-label="Mail profiles">
@@ -6405,15 +6574,25 @@ function ProfileTable({
         </tr>
       </thead>
       <tbody>
-        {profiles.map((profile) => (
-          <tr key={profile.name} className={profile.name === selectedProfile?.name ? "selected" : ""} onClick={() => onSelect(profile)}>
+        {profiles.map((profile) => {
+          const deleting = pendingLabel(pendingActions, mailProfileActionKey("delete", profile.name));
+          const syncing = pendingLabel(pendingActions, mailProfileActionKey("sync", profile.name));
+          const rowPending = Boolean(deleting);
+          return (
+          <tr
+            key={profile.name}
+            className={`${profile.name === selectedProfile?.name ? "selected" : ""}${rowPending ? " pending-row" : ""}`}
+            aria-busy={rowPending ? "true" : undefined}
+            onClick={() => { if (!rowPending) onSelect(profile); }}
+          >
             <td>
-              <button className="row-select" type="button" aria-label={`Select ${profile.name}`} onClick={(event) => { event.stopPropagation(); onSelect(profile); }}>
+              <button className="row-select" type="button" aria-label={`Select ${profile.name}`} disabled={rowPending} onClick={(event) => { event.stopPropagation(); onSelect(profile); }}>
                 {profile.name === selectedProfile?.name ? <Play size={14} fill="currentColor" /> : <Square size={12} />}
               </button>
               <div>
                 <strong>{profile.name}</strong>
                 <span>{profile.source_type === "outlook_com" ? "Catch-up" : "Primary Capture"}</span>
+                {deleting ? <span className="row-pending-label"><Clock3 size={13} /> {deleting}</span> : null}
               </div>
             </td>
             <td><SourceBadge source={profile.source_type} /></td>
@@ -6428,37 +6607,53 @@ function ProfileTable({
             <td className={mailErrors ? "error-text" : ""}>{mailErrors ? `${mailErrors} total` : "0"}</td>
             <td>
               <div className="row-actions">
-                <button type="button" aria-label={`Sync ${profile.name}`} title={`Sync ${profile.name} now`} onClick={(event) => { event.stopPropagation(); onSync(profile); }}><RefreshCcw size={15} /></button>
-                <button type="button" aria-label={`Edit ${profile.name}`} title={`Edit ${profile.name}`} onClick={(event) => { event.stopPropagation(); onEdit(profile); }}><Wrench size={15} /></button>
-                <div className="menu-wrap row-menu-wrap" ref={openMenuName === profile.name ? menuRef : undefined}>
+                <button type="button" aria-label={`Sync ${profile.name}`} title={syncing ?? `Sync ${profile.name} now`} disabled={rowPending || Boolean(syncing)} onClick={(event) => { event.stopPropagation(); onSync(profile); }}>{syncing ? <Clock3 size={15} /> : <RefreshCcw size={15} />}</button>
+                <button type="button" aria-label={`Edit ${profile.name}`} title={`Edit ${profile.name}`} disabled={rowPending} onClick={(event) => { event.stopPropagation(); onEdit(profile); }}><Wrench size={15} /></button>
+                <div className="menu-wrap row-menu-wrap">
                   <button
                     type="button"
                     aria-label={`More ${profile.name}`}
                     aria-haspopup="menu"
-                    aria-expanded={openMenuName === profile.name}
+                    aria-expanded={openMenu?.profileName === profile.name}
                     title={`Open ${profile.name} actions`}
+                    disabled={rowPending}
                     onClick={(event) => {
                       event.stopPropagation();
-                      setOpenMenuName((current) => current === profile.name ? null : profile.name);
+                      if (openMenu?.profileName === profile.name) {
+                        setOpenMenu(null);
+                        return;
+                      }
+                      menuButtonRef.current = event.currentTarget;
+                      const nextPosition = rowMenuPosition(event.currentTarget.getBoundingClientRect());
+                      setOpenMenu({ profileName: profile.name, ...nextPosition });
                     }}
                   >
                     <MoreVertical size={15} />
                   </button>
-                  {openMenuName === profile.name && (
-                    <div className="action-menu row-action-menu" role="menu" aria-label={`${profile.name} profile actions`} onClick={(event) => event.stopPropagation()}>
-                      <button role="menuitem" type="button" onClick={() => { setOpenMenuName(null); onSelect(profile); }}>
+                  {openMenu?.profileName === profile.name && createPortal(
+                    <div
+                      ref={menuRef}
+                      className="action-menu row-action-menu portal-action-menu"
+                      role="menu"
+                      aria-label={`${profile.name} profile actions`}
+                      style={{ position: "fixed", top: `${openMenu.top}px`, left: `${openMenu.left}px`, width: MAIL_ROW_MENU_WIDTH }}
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      <button role="menuitem" type="button" onClick={() => { setOpenMenu(null); onSelect(profile); }}>
                         <FileText size={15} /> View details
                       </button>
-                      <button className="danger-menu-item" role="menuitem" type="button" onClick={() => { setOpenMenuName(null); onDelete(profile); }}>
+                      <button className="danger-menu-item" role="menuitem" type="button" onClick={() => { setOpenMenu(null); onDelete(profile); }}>
                         <Trash2 size={15} /> Delete profile
                       </button>
-                    </div>
+                    </div>,
+                    document.body
                   )}
                 </div>
               </div>
             </td>
           </tr>
-        ))}
+        );
+        })}
         {profiles.length === 0 && (
           <tr>
             <td colSpan={9} className="empty-row">No mail profiles configured yet.</td>
@@ -6478,7 +6673,8 @@ function Inspector({
   onSync,
   onEdit,
   onOAuthStart,
-  onOAuthPathSave
+  onOAuthPathSave,
+  pendingActions
 }: {
   profile?: MailProfile;
   hostStatus: string;
@@ -6489,6 +6685,7 @@ function Inspector({
   onEdit: () => void;
   onOAuthStart: (clientPath: string) => void;
   onOAuthPathSave: (clientPath: string) => void;
+  pendingActions: PendingActionState;
 }) {
   const profileClientPath = oauthClientConfigPath(profile);
   const [clientPath, setClientPath] = useState(profileClientPath);
@@ -6497,6 +6694,8 @@ function Inspector({
   }, [profile?.name, profileClientPath]);
   if (!profile) return <div className="empty-inspector"><p className="muted">Select or create a mail profile.</p></div>;
   const oauthStatus = oauthProfile?.status ?? (profile.source_type === "imap" ? "blocked_auth_required" : "");
+  const syncing = pendingLabel(pendingActions, mailProfileActionKey("sync", profile.name));
+  const savingOAuthPath = pendingLabel(pendingActions, mailProfileActionKey("oauth-client-save", profile.name));
   return (
     <div className="inspector">
       <div className="profile-head">
@@ -6526,9 +6725,10 @@ function Inspector({
             className="ghost-action compact"
             type="button"
             title={`Save the private Google OAuth client JSON path for ${profile.name}`}
+            disabled={Boolean(savingOAuthPath)}
             onClick={() => onOAuthPathSave(clientPath)}
           >
-            <CheckCircle2 size={15} /> Save OAuth client JSON path
+            {savingOAuthPath ? <Clock3 size={15} /> : <CheckCircle2 size={15} />} {savingOAuthPath ?? "Save OAuth client JSON path"}
           </button>
           <button
             className="ghost-action compact"
@@ -6551,9 +6751,9 @@ function Inspector({
       </div>
       <RunHistory runs={runs ?? []} />
       <div className="button-row">
-        <button className="sync-selected" type="button" title={`Sync ${profile.name} now`} onClick={onSync}>
-          <RefreshCcw size={17} />
-          Sync selected profile
+        <button className="sync-selected" type="button" title={`Sync ${profile.name} now`} disabled={Boolean(syncing)} onClick={onSync}>
+          {syncing ? <Clock3 size={17} /> : <RefreshCcw size={17} />}
+          {syncing ?? "Sync selected profile"}
         </button>
         <button className="ghost-action compact" type="button" title={`Edit ${profile.name}`} onClick={onEdit}>
           <Wrench size={15} />
@@ -6747,18 +6947,37 @@ function SettingDialog({ setting, value, onValue, onClose, onSave, onReset }: { 
   );
 }
 
-function ConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }: { title: string; body: string; confirmLabel: string; onCancel: () => void; onConfirm: () => void }) {
+function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  pending = false,
+  pendingLabel: pendingText,
+  onCancel,
+  onConfirm
+}: {
+  title: string;
+  body: string;
+  confirmLabel: string;
+  pending?: boolean;
+  pendingLabel?: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
   return (
     <div className="modal-backdrop top-layer">
       <div className="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
         <header>
           <h2 id="confirm-dialog-title">{title}</h2>
-          <button type="button" aria-label="Close confirmation" onClick={onCancel}><X size={18} /></button>
+          <button type="button" aria-label="Close confirmation" disabled={pending} onClick={onCancel}><X size={18} /></button>
         </header>
         <p>{body}</p>
         <footer>
-          <button className="ghost-action compact" type="button" onClick={onCancel}>Cancel</button>
-          <button className="small-primary" type="button" onClick={onConfirm}>{confirmLabel}</button>
+          <button className="ghost-action compact" type="button" disabled={pending} onClick={onCancel}>Cancel</button>
+          <button className="small-primary" type="button" disabled={pending} onClick={onConfirm}>
+            {pending ? <Clock3 size={15} /> : null}
+            {pendingText ?? confirmLabel}
+          </button>
         </footer>
       </div>
     </div>

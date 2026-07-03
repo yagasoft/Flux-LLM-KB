@@ -373,6 +373,7 @@ let corpusJobFileActionPayload: Record<string, unknown>;
 let jobsRequestUrls: string[];
 let jobToolInvocationPayload: unknown;
 let jobToolInvocationRequestUrls: string[];
+let pendingFetchResponses: Record<string, DeferredResponse>;
 
 describe("Flux dashboard", () => {
   beforeEach(() => {
@@ -826,6 +827,7 @@ describe("Flux dashboard", () => {
     jobsRequestUrls = [];
     jobToolInvocationRequestUrls = [];
     jobToolInvocationPayload = { job_id: "job-pdf", invocations: [] };
+    pendingFetchResponses = {};
     resultDetailPayload = {
       logical_kind: "file",
       title: "Dashboard Operations",
@@ -1162,6 +1164,8 @@ describe("Flux dashboard", () => {
       }
       if (url === "/api/mail/profiles" && init?.method === "POST") return json({ ...JSON.parse(String(init.body)), enabled: true });
       if (url.startsWith("/api/mail/profiles/") && init?.method === "DELETE") {
+        const pending = pendingFetchResponses[url];
+        if (pending) return pending.promise;
         return json({
           ...(mailProfileDeleteResponse as Record<string, unknown>),
           profile_name: decodeURIComponent(url.split("/").pop() ?? "")
@@ -1336,6 +1340,8 @@ describe("Flux dashboard", () => {
       }
       if (url.startsWith("/api/dashboard/jobs/") && url.endsWith("/cancel")) {
         corpusCancelRequests.push(url);
+        const pending = pendingFetchResponses[url];
+        if (pending) return pending.promise;
         const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");
         if (jobId === "job-sync-running") {
           return errorJson(
@@ -1348,6 +1354,8 @@ describe("Flux dashboard", () => {
       }
       if (url.startsWith("/api/dashboard/jobs/") && url.endsWith("/retry")) {
         corpusRetryRequests.push(url);
+        const pending = pendingFetchResponses[url];
+        if (pending) return pending.promise;
         const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");
         if (jobId === "job-completed") {
           return errorJson(
@@ -1362,6 +1370,8 @@ describe("Flux dashboard", () => {
         const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");
         if (init?.method === "DELETE") {
           corpusRestoreRequests.push(url);
+          const pending = pendingFetchResponses[url];
+          if (pending) return pending.promise;
           return json({
             job_id: jobId,
             status: "blocked_missing_dependency",
@@ -1372,6 +1382,8 @@ describe("Flux dashboard", () => {
           });
         }
         corpusDeleteRequests.push(url);
+        const pending = pendingFetchResponses[url];
+        if (pending) return pending.promise;
         if (jobId === "job-running") {
           return errorJson(
             { error: { message: "Corpus job status running cannot be marked for deletion." } },
@@ -1398,6 +1410,8 @@ describe("Flux dashboard", () => {
         return json({ id: url.split("/").pop(), ...JSON.parse(String(init.body)) });
       }
       if (url.startsWith("/api/crawl/roots/") && init?.method === "DELETE") {
+        const pending = pendingFetchResponses[url];
+        if (pending) return pending.promise;
         return json({ id: url.split("/").pop()?.split("?")[0], deleted: true, purged_index: true });
       }
       if (url === "/api/crawl/backfill") return json({ completed: 1, blocked: 0, retried: 0 });
@@ -2685,6 +2699,100 @@ describe("Flux dashboard", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("cannot be cancelled mid-execution");
   });
 
+  test("corpus job action buttons show pending feedback while backend requests run", async () => {
+    const cancelDeferred = deferredResponse();
+    const retryDeferred = deferredResponse();
+    const markDeferred = deferredResponse();
+    const restoreDeferred = deferredResponse();
+    pendingFetchResponses["/api/dashboard/jobs/job-pending/cancel"] = cancelDeferred;
+    pendingFetchResponses["/api/dashboard/jobs/job-retry/retry"] = retryDeferred;
+    pendingFetchResponses["/api/dashboard/jobs/job-mark/delete-request"] = markDeferred;
+    pendingFetchResponses["/api/dashboard/jobs/job-restore/delete-request"] = restoreDeferred;
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-pending",
+          job_type: "corpus_sync_root",
+          status: "pending",
+          payload: { root_name: "docs", path: "Root sync" },
+          attempts: 0,
+          updated_at: "2026-06-27T16:29:01+00:00"
+        },
+        {
+          id: "job-retry",
+          job_type: "corpus_extract_pdf",
+          status: "failed",
+          payload: { root_name: "docs", path: "failed.pdf" },
+          attempts: 1,
+          updated_at: "2026-06-27T16:30:01+00:00"
+        },
+        {
+          id: "job-mark",
+          job_type: "corpus_extract_document",
+          status: "blocked_missing_dependency",
+          payload: { root_name: "docs", path: "blocked.docx" },
+          attempts: 1,
+          updated_at: "2026-06-27T16:31:01+00:00"
+        },
+        {
+          id: "job-restore",
+          job_type: "corpus_extract_code",
+          status: "obsolete",
+          delete_requested_at: "2026-07-01T09:00:00+00:00",
+          delete_requested_by: "dashboard",
+          delete_reason: "operator_cleanup",
+          payload: { root_name: "docs", path: "obsolete.py" },
+          attempts: 1,
+          updated_at: "2026-06-27T16:32:01+00:00"
+        }
+      ],
+      count: 4,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["pending", "failed", "blocked_missing_dependency", "obsolete"],
+        roots: ["docs"],
+        job_types: ["corpus_sync_root", "corpus_extract_pdf", "corpus_extract_document", "corpus_extract_code"]
+      }
+    };
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await screen.findByRole("table", { name: "Extraction jobs" });
+
+    const cancelButton = screen.getByRole("button", { name: "Cancel corpus job job-pending" });
+    const retryButton = screen.getByRole("button", { name: "Force retry corpus job job-retry" });
+    const markButton = screen.getByRole("button", { name: "Mark corpus job job-mark for deletion" });
+    const restoreButton = screen.getByRole("button", { name: "Restore deletion mark for corpus job job-restore" });
+    await user.click(cancelButton);
+    await user.click(retryButton);
+    await user.click(markButton);
+    await user.click(restoreButton);
+
+    expect(cancelButton).toBeDisabled();
+    expect(cancelButton).toHaveTextContent("Cancelling...");
+    expect(retryButton).toBeDisabled();
+    expect(retryButton).toHaveTextContent("Retrying...");
+    expect(markButton).toBeDisabled();
+    expect(markButton).toHaveTextContent("Marking...");
+    expect(restoreButton).toBeDisabled();
+    expect(restoreButton).toHaveTextContent("Restoring...");
+
+    cancelDeferred.resolve(json({ job_id: "job-pending", status: "cancelled_operator", cancelled: true }));
+    retryDeferred.resolve(json({ settings_mutated: false, action: "retry_corpus_job", result: { job_id: "job-retry", status: "pending" } }));
+    markDeferred.resolve(json({ job_id: "job-mark", status: "obsolete", delete_requested: true }));
+    restoreDeferred.resolve(json({ job_id: "job-restore", status: "blocked_missing_dependency", delete_requested: false }));
+    await waitFor(() => {
+      expect(corpusCancelRequests).toContain("/api/dashboard/jobs/job-pending/cancel");
+      expect(corpusRetryRequests).toContain("/api/dashboard/jobs/job-retry/retry");
+      expect(corpusDeleteRequests).toContain("/api/dashboard/jobs/job-mark/delete-request");
+      expect(corpusRestoreRequests).toContain("/api/dashboard/jobs/job-restore/delete-request");
+    });
+  });
+
   test("expanded job details show live console output refreshed by polling", async () => {
     const user = userEvent.setup();
     jobsPayload = {
@@ -3196,14 +3304,35 @@ describe("Flux dashboard", () => {
   });
 
   test("mail profile row more menu deletes profile after confirmation", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 760 });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1900 });
+    const deleteDeferred = deferredResponse();
+    pendingFetchResponses["/api/mail/profiles/gmail-capture"] = deleteDeferred;
     const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Mail" }));
-    await user.click(screen.getByRole("button", { name: "More gmail-capture" }));
+    const table = screen.getByRole("table", { name: "Mail profiles" });
+    const moreButton = screen.getByRole("button", { name: "More gmail-capture" });
+    vi.spyOn(moreButton, "getBoundingClientRect").mockReturnValue({
+      x: 1840,
+      y: 720,
+      top: 720,
+      bottom: 748,
+      left: 1840,
+      right: 1868,
+      width: 28,
+      height: 28,
+      toJSON: () => ({})
+    } as DOMRect);
+    await user.click(moreButton);
 
     const menu = screen.getByRole("menu", { name: "gmail-capture profile actions" });
+    expect(table).not.toContainElement(menu);
+    expect(menu).toHaveStyle({ position: "fixed" });
+    expect(Number.parseFloat(menu.style.top)).toBeLessThan(720);
+    expect(Number.parseFloat(menu.style.left)).toBeLessThanOrEqual(1712);
     expect(within(menu).getByRole("menuitem", { name: "View details" })).toBeInTheDocument();
     await user.click(within(menu).getByRole("menuitem", { name: "Delete profile" }));
 
@@ -3215,7 +3344,44 @@ describe("Flux dashboard", () => {
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith("/api/mail/profiles/gmail-capture", expect.objectContaining({ method: "DELETE" }));
     });
+    expect(screen.queryByRole("dialog", { name: "Delete mail profile" })).not.toBeInTheDocument();
+    const pendingRow = within(table).getByText("gmail-capture").closest("tr");
+    expect(pendingRow).toHaveAttribute("aria-busy", "true");
+    expect(pendingRow).toHaveTextContent("Deleting...");
+    mailPayload = {
+      ...(mailPayload as typeof mail),
+      profiles: (mailPayload as typeof mail).profiles.filter((profile) => profile.name !== "gmail-capture")
+    };
+    deleteDeferred.resolve(json(mailProfileDeleteResponse));
     expect(await screen.findByText(/Mail profile gmail-capture deleted/)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(within(table).queryByText("gmail-capture")).not.toBeInTheDocument();
+    });
+  });
+
+  test("failed mail profile delete clears busy state and keeps the row", async () => {
+    const deleteDeferred = deferredResponse();
+    pendingFetchResponses["/api/mail/profiles/gmail-capture"] = deleteDeferred;
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Mail" }));
+    const table = screen.getByRole("table", { name: "Mail profiles" });
+    await user.click(screen.getByRole("button", { name: "More gmail-capture" }));
+    await user.click(within(screen.getByRole("menu", { name: "gmail-capture profile actions" })).getByRole("menuitem", { name: "Delete profile" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Delete mail profile" })).getByRole("button", { name: "Delete profile and private spool" }));
+
+    const pendingRow = within(table).getByText("gmail-capture").closest("tr");
+    expect(pendingRow).toHaveAttribute("aria-busy", "true");
+    expect(pendingRow).toHaveTextContent("Deleting...");
+
+    deleteDeferred.resolve(errorJson({ error: { message: "delete failed" } }, 500, "Server Error"));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Could not delete mail profile gmail-capture: .*delete failed/);
+    const row = within(table).getByText("gmail-capture").closest("tr");
+    expect(row).not.toHaveAttribute("aria-busy", "true");
+    expect(row).not.toHaveTextContent("Deleting...");
   });
 
   test("mail profile delete shows spool cleanup warning from API", async () => {
@@ -3368,6 +3534,40 @@ describe("Flux dashboard", () => {
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith("/api/crawl/roots/docs?purge_index=true", expect.objectContaining({ method: "DELETE" }));
+    });
+  });
+
+  test("corpus root delete dims the row and keeps it until purge completes", async () => {
+    const deleteDeferred = deferredResponse();
+    pendingFetchResponses["/api/crawl/roots/docs?purge_index=true"] = deleteDeferred;
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Corpus" }));
+    const table = await screen.findByRole("table", { name: "Monitored roots" });
+    await user.click(screen.getByRole("button", { name: "Delete docs" }));
+    expect(screen.getByRole("dialog", { name: "Delete watched path" })).toHaveTextContent("does not delete files from disk");
+    await user.click(screen.getByRole("button", { name: "Delete watched path and purge index" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/api/crawl/roots/docs?purge_index=true", expect.objectContaining({ method: "DELETE" }));
+    });
+    expect(screen.queryByRole("dialog", { name: "Delete watched path" })).not.toBeInTheDocument();
+    const pendingRow = within(table).getByText("docs").closest("tr");
+    expect(pendingRow).toHaveAttribute("aria-busy", "true");
+    expect(pendingRow).toHaveTextContent("Deleting...");
+
+    crawlPayload = {
+      ...(crawlPayload as typeof crawl),
+      root_summaries: [],
+      roots: []
+    };
+    deleteDeferred.resolve(json({ id: "docs", deleted: true, purged_index: true }));
+
+    expect(await screen.findByText("Watched path docs deleted and index rows purged. Files on disk were not deleted.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(within(table).queryByText("docs")).not.toBeInTheDocument();
     });
   });
 
@@ -3964,4 +4164,20 @@ function errorJson(payload: unknown, status: number, statusText: string): Respon
     text: async () => JSON.stringify(payload),
     json: async () => payload
   } as Response;
+}
+
+type DeferredResponse = {
+  promise: Promise<Response>;
+  resolve: (response: Response) => void;
+  reject: (error: unknown) => void;
+};
+
+function deferredResponse(): DeferredResponse {
+  let resolve!: (response: Response) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<Response>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
