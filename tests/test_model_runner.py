@@ -806,6 +806,118 @@ def test_paddle_proxy_records_safe_ocr_activity(monkeypatch):
     assert "private-bytes" not in str(records)
 
 
+def test_direct_local_paddleocr_image_records_safe_activity(monkeypatch):
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeScheduler:
+        def acquire(self, profile):
+            assert profile.task_type == "ocr_image"
+            assert profile.model_id == "PP-OCRv5"
+            return FakeLease()
+
+        def record_model_residency(self, _residency):
+            return None
+
+    class FakePaddleOCR:
+        def predict(self, path):
+            assert path == "/tmp/private-image.png"
+            return [{"rec_text": "direct OCR"}]
+
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_ROLE", raising=False)
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(model_runner, "_load_paddleocr", lambda _model: FakePaddleOCR())
+
+    text = model_runner._ocr_image_with_paddle("/tmp/private-image.png", model="PP-OCRv5")
+
+    assert text == "direct OCR"
+    assert records == [
+        {
+            "service": "model-runner",
+            "endpoint": "/v1/ocr/image",
+            "action": "ocr_image",
+            "activity_class": "vision_ocr",
+            "model": "PP-OCRv5",
+            "metadata": {"document": False},
+        }
+    ]
+    assert "private-image" not in str(records)
+
+
+def test_direct_local_paddleocr_vl_document_records_safe_activity(monkeypatch):
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeScheduler:
+        def acquire(self, profile):
+            assert profile.task_type == "ocr_document"
+            assert profile.model_id == "PaddleOCR-VL"
+            return FakeLease()
+
+        def record_model_residency(self, _residency):
+            return None
+
+    class FakePipeline:
+        def predict(self, path):
+            assert path == "/tmp/private-document.png"
+            return [{"res": {"content": "document OCR"}}]
+
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_ROLE", raising=False)
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(model_runner, "_load_paddleocr_vl", lambda _model: FakePipeline())
+
+    text = model_runner._ocr_document_with_paddle("/tmp/private-document.png", model="PaddleOCR-VL")
+
+    assert text == "document OCR"
+    assert records == [
+        {
+            "service": "model-runner",
+            "endpoint": "/v1/ocr/document",
+            "action": "ocr_document",
+            "activity_class": "vision_ocr",
+            "model": "PaddleOCR-VL",
+            "metadata": {"document": True},
+        }
+    ]
+    assert "private-document" not in str(records)
+
+
 def test_paddle_runner_health_records_safe_activity(monkeypatch):
     records: list[dict[str, object]] = []
 

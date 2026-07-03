@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from flux_llm_kb import database, model_activity
-from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+from flux_llm_kb.gpu_scheduler import GpuLeaseRejected, GpuModelResidency, GpuSchedulerConfig, InProcessGpuScheduler
 
 
 def test_record_model_activity_sanitizes_metadata_and_completes(monkeypatch):
@@ -61,6 +61,67 @@ def test_record_model_activity_sanitizes_metadata_and_completes(monkeypatch):
             "error_message": None,
         }
     ]
+
+
+def test_resident_gpu_model_records_model_loading_activity(monkeypatch):
+    started: list[dict[str, object]] = []
+    finished: list[dict[str, object]] = []
+
+    monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **kwargs: started.append(kwargs) or "resident-event", raising=False)
+    monkeypatch.setattr(model_activity.database, "finish_model_activity_event", lambda **kwargs: finished.append(kwargs), raising=False)
+
+    scheduler = InProcessGpuScheduler(GpuSchedulerConfig(enabled=True, mode="in_process"))
+
+    scheduler.record_model_residency(
+        GpuModelResidency(
+            model_id="PP-OCRv5",
+            task_type="ocr_image",
+            estimated_vram_mb=1200,
+            resident=True,
+            metadata={"component": "worker"},
+        )
+    )
+
+    assert started == [
+        {
+            "service": "worker",
+            "endpoint": "/gpu/residency",
+            "action": "model_loading",
+            "activity_class": "model_loading",
+            "caller_surface": "gpu_scheduler",
+            "model": "PP-OCRv5",
+            "metadata": {"component": "worker", "resident": True, "task_type": "ocr_image"},
+        }
+    ]
+    assert finished == [
+        {
+            "event_id": "resident-event",
+            "status": "completed",
+            "duration_ms": 0,
+            "error_class": None,
+            "error_message": None,
+        }
+    ]
+
+
+def test_non_resident_gpu_model_does_not_record_model_loading_activity(monkeypatch):
+    started: list[dict[str, object]] = []
+
+    monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **kwargs: started.append(kwargs) or "resident-event", raising=False)
+
+    scheduler = InProcessGpuScheduler(GpuSchedulerConfig(enabled=True, mode="in_process"))
+
+    scheduler.record_model_residency(
+        GpuModelResidency(
+            model_id="PP-OCRv5",
+            task_type="ocr_image",
+            estimated_vram_mb=1200,
+            resident=False,
+            metadata={"component": "worker"},
+        )
+    )
+
+    assert started == []
 
 
 def test_record_model_activity_marks_busy_and_redacts_errors(monkeypatch):
@@ -238,12 +299,16 @@ def test_collect_model_activity_payload_summarizes_events_and_scheduler(monkeypa
     monkeypatch.setattr(model_activity, "_utc_now", lambda: now)
     monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: None, raising=False)
     monkeypatch.setattr(model_activity.database, "list_model_activity_events", lambda **_kwargs: events, raising=False)
+    monkeypatch.setattr(model_activity.database, "count_model_activity_events", lambda **_kwargs: 2, raising=False)
     monkeypatch.setattr(model_activity, "get_gpu_scheduler", lambda: FakeScheduler())
 
     payload = model_activity.collect_model_activity_payload(window_minutes=60, limit=50)
 
     assert payload["active_count"] == 1
     assert payload["recent_count"] == 2
+    assert payload["total_count"] == 2
+    assert payload["page_count"] == 1
+    assert payload["has_next"] is False
     assert payload["service_breakdown"] == [
         {"service": "model-runner", "count": 1, "active": 1, "failures": 0},
         {"service": "ollama", "count": 1, "active": 0, "failures": 1},
@@ -252,7 +317,8 @@ def test_collect_model_activity_payload_summarizes_events_and_scheduler(monkeypa
         {"activity_class": "retrieval", "count": 1},
         {"activity_class": "vision_ocr", "count": 1},
     ]
-    assert payload["events"][0]["metadata"] == {"batch_size": 2}
+    event_metadata = {event["id"]: event["metadata"] for event in payload["events"]}
+    assert event_metadata["event-running"] == {"batch_size": 2}
     assert payload["scheduler"]["mode"] == "postgres"
     assert payload["scheduler"]["running_count"] == 1
     assert payload["scheduler"]["waiting_count"] == 1
@@ -315,6 +381,7 @@ def test_collect_model_activity_payload_hides_control_plane_by_default(monkeypat
     monkeypatch.setattr(model_activity, "_utc_now", lambda: now)
     monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: None, raising=False)
     monkeypatch.setattr(model_activity.database, "list_model_activity_events", fake_list_model_activity_events, raising=False)
+    monkeypatch.setattr(model_activity.database, "count_model_activity_events", lambda **_kwargs: 1, raising=False)
     monkeypatch.setattr(model_activity, "get_gpu_scheduler", lambda: SimpleNamespace(status=lambda: {"enabled": True, "mode": "postgres"}))
 
     payload = model_activity.collect_model_activity_payload(window_minutes=60, limit=50)
@@ -323,8 +390,51 @@ def test_collect_model_activity_payload_hides_control_plane_by_default(monkeypat
     assert payload["service_breakdown"] == [{"service": "model-runner", "count": 1, "active": 0, "failures": 0}]
     assert payload["class_breakdown"] == [{"activity_class": "retrieval", "count": 1}]
     assert [event["id"] for event in payload["events"]] == ["event-rerank"]
-    assert calls == [{"window_minutes": 60, "limit": 50, "include_control_plane": False}]
+    assert calls == [{"window_minutes": 60, "limit": 50, "offset": 0, "include_control_plane": False}]
     assert "/health" not in str(payload)
+
+
+def test_collect_model_activity_payload_returns_pagination_metadata(monkeypatch):
+    now = datetime(2026, 7, 3, 1, 30, tzinfo=UTC)
+    events = [
+        {
+            "id": "event-newer",
+            "service": "paddle-runner",
+            "endpoint": "/v1/ocr/image",
+            "action": "ocr_image",
+            "activity_class": "vision_ocr",
+            "caller_surface": "worker",
+            "model": "PP-OCRv5",
+            "status": "completed",
+            "started_at": now - timedelta(minutes=2),
+            "completed_at": now - timedelta(minutes=1),
+            "duration_ms": 250,
+            "error_class": None,
+            "error_message": None,
+            "metadata": {"document": False},
+        }
+    ]
+    calls: list[dict[str, object]] = []
+
+    def fake_list_model_activity_events(**kwargs):
+        calls.append(kwargs)
+        return events
+
+    monkeypatch.setattr(model_activity, "_utc_now", lambda: now)
+    monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(model_activity.database, "list_model_activity_events", fake_list_model_activity_events, raising=False)
+    monkeypatch.setattr(model_activity.database, "count_model_activity_events", lambda **kwargs: 101, raising=False)
+    monkeypatch.setattr(model_activity, "get_gpu_scheduler", lambda: SimpleNamespace(status=lambda: {"enabled": True, "mode": "postgres"}))
+
+    payload = model_activity.collect_model_activity_payload(window_minutes=60, limit=50, offset=50)
+
+    assert payload["limit"] == 50
+    assert payload["offset"] == 50
+    assert payload["total_count"] == 101
+    assert payload["page_count"] == 3
+    assert payload["has_next"] is True
+    assert [event["id"] for event in payload["events"]] == ["event-newer"]
+    assert calls == [{"window_minutes": 60, "limit": 50, "offset": 50, "include_control_plane": False}]
 
 
 def test_collect_model_activity_payload_tolerates_scheduler_failures(monkeypatch):

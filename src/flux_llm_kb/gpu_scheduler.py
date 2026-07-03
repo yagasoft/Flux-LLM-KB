@@ -469,6 +469,7 @@ class InProcessGpuScheduler(BaseGpuScheduler):
             else:
                 self._resident_models.pop(key, None)
             self._condition.notify_all()
+        _record_model_residency_activity(residency)
 
     def reset_component_residency(self, component: str) -> None:
         target = str(component or "").strip()
@@ -647,6 +648,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 Jsonb(dict(residency.metadata or {})),
             ),
         )
+        _record_model_residency_activity(residency)
 
     def reset_component_residency(self, component: str) -> None:
         target = str(component or "").strip()
@@ -1400,6 +1402,33 @@ def _resident_component(residency: GpuModelResidency) -> str:
     metadata = dict(residency.metadata or {})
     component = str(metadata.get("component") or metadata.get("owner") or "").strip()
     return component or _component_for_task_type(residency.task_type)
+
+
+def _record_model_residency_activity(residency: GpuModelResidency) -> None:
+    if not residency.resident:
+        return
+    try:
+        from .model_activity import record_model_activity
+
+        component = _resident_component(residency)
+        metadata = {
+            "resident": True,
+            "task_type": residency.task_type,
+        }
+        if component:
+            metadata["component"] = component
+        with record_model_activity(
+            service=component or "unknown",
+            endpoint="/gpu/residency",
+            action="model_loading",
+            activity_class="model_loading",
+            caller_surface="gpu_scheduler",
+            model=residency.model_id,
+            metadata=metadata,
+        ):
+            pass
+    except Exception:
+        pass
 
 
 def _component_for_task_type(task_type: str) -> str:

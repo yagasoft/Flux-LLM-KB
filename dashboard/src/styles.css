@@ -1003,7 +1003,7 @@ kbd {
   padding: 18px;
 }
 
-.mini-table,
+.mini-table-wrap,
 .settings-list,
 .error-list {
   display: grid;
@@ -1164,7 +1164,6 @@ kbd {
   white-space: pre-wrap;
 }
 
-.mini-table div,
 .settings-row,
 .error-item {
   display: grid;
@@ -1173,24 +1172,57 @@ kbd {
   border-bottom: 1px solid var(--border);
 }
 
-.mini-table div {
-  grid-template-columns: 1fr 1fr auto;
-  gap: 10px;
+.mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
   font-size: 13px;
 }
 
-.mini-table.wide div {
-  grid-template-columns: minmax(90px, 0.8fr) minmax(120px, 1fr) minmax(130px, 1fr) minmax(150px, 1.2fr);
+.mini-table tr {
+  min-height: 42px;
+  border-bottom: 1px solid var(--border);
 }
 
-.mini-table span,
-.mini-table strong {
+.mini-table td {
   min-width: 0;
+  padding: 10px 12px;
+  vertical-align: middle;
   overflow-wrap: anywhere;
 }
 
-.mini-table strong {
+.mini-table[data-columns="3"] td:nth-child(1) {
+  width: 34%;
+}
+
+.mini-table[data-columns="3"] td:nth-child(2) {
+  width: 36%;
+}
+
+.mini-table[data-columns="3"] td:nth-child(3) {
+  width: 30%;
+}
+
+.mini-table[data-columns="4"] td:nth-child(1) {
+  width: 20%;
+}
+
+.mini-table[data-columns="4"] td:nth-child(2) {
+  width: 25%;
+}
+
+.mini-table[data-columns="4"] td:nth-child(3) {
+  width: 31%;
+}
+
+.mini-table[data-columns="4"] td:nth-child(4) {
+  width: 24%;
+}
+
+.mini-table-emphasis {
   color: var(--accent);
+  font-weight: 700;
+  text-align: right;
 }
 
 .error-item {
@@ -1231,18 +1263,29 @@ kbd {
 }
 
 .settings-row {
-  grid-template-columns: minmax(0, 1fr) 120px auto;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1fr) minmax(120px, max-content);
   gap: 12px;
+  padding: 8px 0;
   font-size: 13px;
 }
 
+.settings-row strong,
+.settings-row span,
 .settings-row em {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-row em {
+  justify-self: end;
+  max-width: 100%;
   padding: 4px 7px;
   border-radius: 6px;
   color: #a34600;
   background: #fff0df;
   font-style: normal;
   font-size: 12px;
+  text-align: right;
 }
 
 .host-layout {

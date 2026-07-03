@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import nullcontext
 import gc
 from dataclasses import dataclass
 import json
@@ -373,6 +374,27 @@ def _paddle_activity_kwargs(path: str, payload: dict[str, Any]) -> dict[str, Any
         "model": str(payload.get("model") or (DEFAULT_OCR_DOCUMENT_MODEL if document else DEFAULT_OCR_SIMPLE_MODEL)),
         "metadata": {"document": document},
     }
+
+
+def _direct_ocr_activity_kwargs(
+    *,
+    service: str,
+    endpoint: str,
+    model: str,
+    document: bool,
+    caller_surface: str | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "service": service or "model-runner",
+        "endpoint": endpoint,
+        "action": "ocr_document" if document else "ocr_image",
+        "activity_class": "vision_ocr",
+        "model": model,
+        "metadata": {"document": document},
+    }
+    if caller_surface:
+        payload["caller_surface"] = caller_surface
+    return payload
 
 
 def _payload_item_count(payload: dict[str, Any], *keys: str) -> int:
@@ -788,10 +810,30 @@ def _paddleocr_text(value: Any) -> str:
     return "\n".join(parts)
 
 
-def _ocr_image_with_paddle(path: str, *, model: str) -> str:
+def _ocr_image_with_paddle(
+    path: str,
+    *,
+    model: str,
+    record_activity: bool = True,
+    activity_service: str | None = None,
+    activity_caller_surface: str | None = None,
+) -> str:
     if _paddle_runner_base_url():
         payload = _proxy_paddle_request("/v1/ocr/image", {"path": str(path), "model": model})
         return str(payload.get("text") or "")
+    activity_kwargs = _direct_ocr_activity_kwargs(
+        service=activity_service or _scheduler_component(),
+        endpoint="/v1/ocr/image",
+        model=model,
+        document=False,
+        caller_surface=activity_caller_surface,
+    )
+    recorder = record_model_activity(**activity_kwargs) if record_activity else nullcontext()
+    with recorder:
+        return _ocr_image_with_paddle_direct(path, model=model)
+
+
+def _ocr_image_with_paddle_direct(path: str, *, model: str) -> str:
     if model in _PADDLE_OCR_MODELS:
         _record_model_residency_state("ocr_image", model, resident=True)
     profile = task_profile("ocr_image", model_id=model, component=_scheduler_component())
@@ -804,18 +846,44 @@ def _ocr_image_with_paddle(path: str, *, model: str) -> str:
     return _paddleocr_text(result)
 
 
-def _ocr_document_with_paddle(path: str, *, model: str) -> str:
+def _ocr_document_with_paddle(
+    path: str,
+    *,
+    model: str,
+    record_activity: bool = True,
+    activity_service: str | None = None,
+    activity_caller_surface: str | None = None,
+) -> str:
     if _paddle_runner_base_url():
         payload = _proxy_paddle_request("/v1/ocr/document", {"path": str(path), "model": model})
         return str(payload.get("text") or "")
     if model.startswith("PaddleOCR-VL"):
-        if model in _PADDLE_OCR_VL_MODELS:
-            _record_model_residency_state("ocr_document", model, resident=True)
-        profile = task_profile("ocr_document", model_id=model, component=_scheduler_component())
-        with get_gpu_scheduler().acquire(profile):
-            pipeline = _load_paddleocr_vl(model)
-            return _paddleocr_text(list(pipeline.predict(str(path))))
-    return _ocr_image_with_paddle(path, model=model)
+        activity_kwargs = _direct_ocr_activity_kwargs(
+            service=activity_service or _scheduler_component(),
+            endpoint="/v1/ocr/document",
+            model=model,
+            document=True,
+            caller_surface=activity_caller_surface,
+        )
+        recorder = record_model_activity(**activity_kwargs) if record_activity else nullcontext()
+        with recorder:
+            return _ocr_document_with_paddle_direct(path, model=model)
+    return _ocr_image_with_paddle(
+        path,
+        model=model,
+        record_activity=record_activity,
+        activity_service=activity_service,
+        activity_caller_surface=activity_caller_surface,
+    )
+
+
+def _ocr_document_with_paddle_direct(path: str, *, model: str) -> str:
+    if model in _PADDLE_OCR_VL_MODELS:
+        _record_model_residency_state("ocr_document", model, resident=True)
+    profile = task_profile("ocr_document", model_id=model, component=_scheduler_component())
+    with get_gpu_scheduler().acquire(profile):
+        pipeline = _load_paddleocr_vl(model)
+        return _paddleocr_text(list(pipeline.predict(str(path))))
 
 
 def _with_ocr_input_path(payload: dict[str, Any], consumer: Any) -> str:

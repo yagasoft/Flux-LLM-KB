@@ -6444,7 +6444,16 @@ def _run_paddleocr_document(path: Path, *, model: str) -> str:
         return str(payload.get("text") or "")
     from .model_runner import _ocr_document_with_paddle
 
-    return _ocr_document_with_paddle(str(path), model=model)
+    with record_model_activity(
+        service="worker",
+        endpoint="/v1/ocr/document",
+        action="ocr_document",
+        activity_class="vision_ocr",
+        caller_surface="worker",
+        model=model,
+        metadata={"document": True},
+    ):
+        return _ocr_document_with_paddle(str(path), model=model, record_activity=False)
 
 
 def _run_paddleocr_image(path: Path, *, model: str) -> str:
@@ -6471,12 +6480,21 @@ def _run_paddleocr_image(path: Path, *, model: str) -> str:
     from .gpu_scheduler import get_gpu_scheduler, task_profile
 
     profile = task_profile("ocr_image", model_id=model, component="worker")
-    with get_gpu_scheduler().acquire(profile):
-        ocr = PaddleOCR(**kwargs)
-        if hasattr(ocr, "predict"):
-            result = ocr.predict(str(path))
-        else:
-            result = ocr.ocr(str(path), cls=True)
+    with record_model_activity(
+        service="worker",
+        endpoint="/v1/ocr/image",
+        action="ocr_image",
+        activity_class="vision_ocr",
+        caller_surface="worker",
+        model=model,
+        metadata={"document": False},
+    ):
+        with get_gpu_scheduler().acquire(profile):
+            ocr = PaddleOCR(**kwargs)
+            if hasattr(ocr, "predict"):
+                result = ocr.predict(str(path))
+            else:
+                result = ocr.ocr(str(path), cls=True)
     return _paddleocr_text(result)
 
 

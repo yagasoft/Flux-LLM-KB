@@ -659,6 +659,7 @@ type ModelActivityEvent = {
   duration_ms?: number | null;
   error_class?: string | null;
   error_message?: string | null;
+  metadata?: Record<string, unknown>;
 };
 
 type ModelActivityBreakdown = {
@@ -686,6 +687,11 @@ type ModelActivityScheduler = {
 
 type ModelActivityPayload = {
   window_minutes?: number;
+  limit?: number;
+  offset?: number;
+  total_count?: number;
+  has_next?: boolean;
+  page_count?: number;
   active_count?: number;
   recent_count?: number;
   last_event_at?: string | null;
@@ -1201,6 +1207,7 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
 const DASHBOARD_STATE_KEY = "flux-dashboard-state";
 const DEFAULT_POLL_SECONDS = 10;
 const JOB_PAGE_LIMIT = 50;
+const MODEL_ACTIVITY_PAGE_LIMIT = 50;
 type JobHistoryFilters = {
   status: string[];
   root_name: string[];
@@ -1244,6 +1251,7 @@ export default function App() {
   const [jobFilters, setJobFilters] = useState<JobHistoryFilters>(initialDashboardState.jobFilters ?? emptyJobHistoryFilters);
   const [jobSort, setJobSort] = useState<JobSortState>(initialDashboardState.jobSort ?? defaultJobSort);
   const [jobOffset, setJobOffset] = useState(0);
+  const [modelActivityOffset, setModelActivityOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [toast, setToastState] = useState<ToastState | null>(null);
@@ -1316,17 +1324,16 @@ export default function App() {
   const [showControlPlaneActivity, setShowControlPlaneActivity] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
 
-  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number; jobSort?: JobSortState; showControlPlaneActivity?: boolean } = {}) {
+  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number; jobSort?: JobSortState; modelActivityOffset?: number; showControlPlaneActivity?: boolean } = {}) {
     if (options.showLoading ?? false) {
       setLoading(true);
     }
     const effectiveJobFilters = options.jobFilters ?? jobFilters;
     const effectiveJobOffset = options.jobOffset ?? jobOffset;
     const effectiveJobSort = options.jobSort ?? jobSort;
+    const effectiveModelActivityOffset = options.modelActivityOffset ?? modelActivityOffset;
     const effectiveShowControlPlaneActivity = options.showControlPlaneActivity ?? showControlPlaneActivity;
-    const modelActivityUrl = effectiveShowControlPlaneActivity
-      ? "/api/dashboard/model-activity?include_control_plane=true"
-      : "/api/dashboard/model-activity";
+    const modelActivityUrl = modelActivityHistoryUrl(effectiveShowControlPlaneActivity, effectiveModelActivityOffset);
     const [health, crawl, jobs, retrieval, modelActivity, mail, outlook, settings] = await Promise.all([
       getJson<HealthPayload>("/api/dashboard/health", {}),
       getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }),
@@ -1348,7 +1355,14 @@ export default function App() {
 
   function updateControlPlaneActivity(next: boolean) {
     setShowControlPlaneActivity(next);
-    void load({ showControlPlaneActivity: next });
+    setModelActivityOffset(0);
+    void load({ showControlPlaneActivity: next, modelActivityOffset: 0 });
+  }
+
+  async function updateModelActivityPage(offset: number) {
+    const nextOffset = Math.max(0, offset);
+    setModelActivityOffset(nextOffset);
+    await load({ modelActivityOffset: nextOffset });
   }
 
   useEffect(() => {
@@ -1412,7 +1426,7 @@ export default function App() {
       void load({ showLoading: false });
     }, pollSeconds * 1000);
     return () => window.clearInterval(timer);
-  }, [pollSeconds, jobFilters, jobOffset, jobSort, showControlPlaneActivity]);
+  }, [pollSeconds, jobFilters, jobOffset, jobSort, modelActivityOffset, showControlPlaneActivity]);
 
   async function requestProfileSync(profile = selectedProfile) {
     if (!profile) {
@@ -2209,8 +2223,10 @@ export default function App() {
           <PerformanceTab
             state={state}
             selectedRoot={selectedRoot}
+            modelActivityOffset={modelActivityOffset}
             includeControlPlaneActivity={showControlPlaneActivity}
             onIncludeControlPlaneActivityChange={updateControlPlaneActivity}
+            onModelActivityPage={(offset) => void updateModelActivityPage(offset)}
           />
         )}
 
@@ -2815,21 +2831,27 @@ function DiagnosticsTab({
 function PerformanceTab({
   state,
   selectedRoot,
+  modelActivityOffset,
   includeControlPlaneActivity,
-  onIncludeControlPlaneActivityChange
+  onIncludeControlPlaneActivityChange,
+  onModelActivityPage
 }: {
   state: LoadState;
   selectedRoot?: RootSummary | MonitoredRoot;
+  modelActivityOffset: number;
   includeControlPlaneActivity: boolean;
   onIncludeControlPlaneActivityChange: (include: boolean) => void;
+  onModelActivityPage: (offset: number) => void;
 }) {
   return (
     <section className="tab-grid">
       <OperatorEvidencePanel />
       <ModelActivityPanel
         activity={state.modelActivity}
+        offset={modelActivityOffset}
         includeControlPlane={includeControlPlaneActivity}
         onIncludeControlPlaneChange={onIncludeControlPlaneActivityChange}
+        onPage={onModelActivityPage}
       />
       <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
     </section>
@@ -3070,15 +3092,30 @@ function OperatorEvidencePanel() {
 
 function ModelActivityPanel({
   activity,
+  offset,
   includeControlPlane,
-  onIncludeControlPlaneChange
+  onIncludeControlPlaneChange,
+  onPage
 }: {
   activity: ModelActivityPayload;
+  offset: number;
   includeControlPlane: boolean;
   onIncludeControlPlaneChange: (include: boolean) => void;
+  onPage: (offset: number) => void;
 }) {
   const scheduler = activity.scheduler ?? {};
-  const visibleEvents = includeControlPlane ? (activity.events ?? []) : (activity.events ?? []).filter((event) => !isControlPlaneActivity(event.activity_class));
+  const events = [...(activity.events ?? [])].sort(modelActivityNewestFirst);
+  const visibleEvents = includeControlPlane ? events : events.filter((event) => !isControlPlaneActivity(event.activity_class));
+  const clientFiltered = visibleEvents.length !== events.length;
+  const safeLimit = Math.max(1, numberFromUnknown(activity.limit) ?? MODEL_ACTIVITY_PAGE_LIMIT);
+  const safeOffset = Math.max(0, offset);
+  const totalCount = clientFiltered ? visibleEvents.length : Math.max(numberFromUnknown(activity.total_count) ?? visibleEvents.length, visibleEvents.length);
+  const pageCount = numberFromUnknown(activity.page_count) ?? (totalCount > 0 ? Math.max(1, Math.ceil(totalCount / safeLimit)) : 0);
+  const currentPage = pageCount > 0 ? Math.min(pageCount, Math.floor(safeOffset / safeLimit) + 1) : 0;
+  const pageItems = jobPageItems(currentPage, pageCount);
+  const pageStart = totalCount > 0 ? safeOffset + 1 : 0;
+  const pageEnd = totalCount > 0 ? Math.min(safeOffset + visibleEvents.length, totalCount) : 0;
+  const hasNext = Boolean(activity.has_next ?? (safeOffset + visibleEvents.length < totalCount));
   const visibleActivity = {
     ...activity,
     events: visibleEvents,
@@ -3136,10 +3173,42 @@ function ModelActivityPanel({
           <em>{formatSchedulerEvictions(scheduler)}</em>
         </div>
       </div>
-      {serviceRows.length > 0 ? <MiniTable rows={serviceRows} /> : <p className="muted">No recent model service activity.</p>}
-      {classRows.length > 0 ? <MiniTable rows={classRows} /> : null}
-      {residentRows.length > 0 ? <MiniTable rows={residentRows} /> : null}
-      {eventRows.length > 0 ? <MiniTable rows={eventRows} /> : null}
+      {serviceRows.length > 0 ? <MiniTable label="Model service activity" rows={serviceRows} /> : <p className="muted">No recent model service activity.</p>}
+      {classRows.length > 0 ? <MiniTable label="Model activity classes" rows={classRows} /> : null}
+      {residentRows.length > 0 ? <MiniTable label="Resident models" rows={residentRows} /> : null}
+      {eventRows.length > 0 ? <MiniTable label="Model activity events" rows={eventRows} /> : null}
+      <div className="job-pager model-activity-pager" aria-label="Model activity paging">
+        <span>{pageStart}-{pageEnd} of {totalCount} model activity event{totalCount === 1 ? "" : "s"}</span>
+        <button className="ghost-action compact" type="button" aria-label="Previous model activity page" disabled={safeOffset <= 0} onClick={() => onPage(Math.max(0, safeOffset - safeLimit))}>
+          <ChevronLeft size={15} /> Previous
+        </button>
+        {pageItems.length > 0 && (
+          <div className="job-page-numbers" aria-label="Model activity pages">
+            {pageItems.map((item) => {
+              if (typeof item !== "number") {
+                return <span className="job-page-ellipsis" aria-hidden="true" key={item}>...</span>;
+              }
+              const isCurrent = item === currentPage;
+              return (
+                <button
+                  className="job-page-button"
+                  type="button"
+                  key={item}
+                  aria-current={isCurrent ? "page" : undefined}
+                  aria-label={isCurrent ? `Current model activity page ${item}` : `Go to model activity page ${item}`}
+                  disabled={isCurrent}
+                  onClick={() => onPage((item - 1) * safeLimit)}
+                >
+                  {item}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <button className="ghost-action compact" type="button" aria-label="Next model activity page" disabled={!hasNext} onClick={() => onPage(safeOffset + safeLimit)}>
+          Next <ChevronRight size={15} />
+        </button>
+      </div>
       {failures.length > 0 ? (
         <div className="settings-list">
           {failures.map((event) => (
@@ -6446,6 +6515,20 @@ function isControlPlaneActivity(value?: string) {
   return normalized === "health" || normalized === "control_plane";
 }
 
+function modelActivityNewestFirst(left: ModelActivityEvent, right: ModelActivityEvent) {
+  const rightTime = modelActivitySortTime(right);
+  const leftTime = modelActivitySortTime(left);
+  if (rightTime !== leftTime) return rightTime - leftTime;
+  const rightStarted = Date.parse(right.started_at ?? "") || 0;
+  const leftStarted = Date.parse(left.started_at ?? "") || 0;
+  if (rightStarted !== leftStarted) return rightStarted - leftStarted;
+  return String(right.id ?? "").localeCompare(String(left.id ?? ""));
+}
+
+function modelActivitySortTime(event: ModelActivityEvent) {
+  return Date.parse(event.completed_at ?? event.started_at ?? "") || 0;
+}
+
 function modelActivityEventDetail(event: ModelActivityEvent) {
   const parts = [
     event.model,
@@ -7261,6 +7344,14 @@ function jobHistoryUrl(filters: JobHistoryFilters, offset: number, sort: JobSort
   return `/api/dashboard/jobs?${params.toString()}`;
 }
 
+function modelActivityHistoryUrl(includeControlPlane: boolean, offset: number) {
+  const params = new URLSearchParams();
+  params.set("limit", String(MODEL_ACTIVITY_PAGE_LIMIT));
+  params.set("offset", String(Math.max(0, offset)));
+  if (includeControlPlane) params.set("include_control_plane", "true");
+  return `/api/dashboard/model-activity?${params.toString()}`;
+}
+
 function hasJobHistoryFilters(filters: JobHistoryFilters) {
   return Boolean(filters.status.length || filters.root_name.length || filters.job_type.length || filters.updated_from || filters.updated_to);
 }
@@ -7624,15 +7715,23 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 type MiniTableRow = [string, string, string] | [string, string, string, string];
 
-function MiniTable({ rows }: { rows: MiniTableRow[] }) {
+function MiniTable({ rows, label = "Dashboard summary table" }: { rows: MiniTableRow[]; label?: string }) {
   const wide = rows.some((row) => row.length > 3);
   return (
-    <div className={`mini-table${wide ? " wide" : ""}`}>
-      {rows.map((row) => (
-        <div key={row.join("-")}>
-          {row.map((cell, index) => index === row.length - 1 ? <strong key={`${cell}-${index}`}>{cell}</strong> : <span key={`${cell}-${index}`}>{cell}</span>)}
-        </div>
-      ))}
+    <div className="mini-table-wrap">
+      <table className="mini-table" data-columns={wide ? 4 : 3} aria-label={label}>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.join("-")}>
+              {row.map((cell, index) => (
+                <td key={`${cell}-${index}`} className={index === row.length - 1 ? "mini-table-emphasis" : undefined}>
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

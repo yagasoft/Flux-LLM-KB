@@ -371,6 +371,7 @@ let corpusRestoreRequests: string[];
 let corpusJobFileActionRequests: Array<{ url: string; body: unknown }>;
 let corpusJobFileActionPayload: Record<string, unknown>;
 let jobsRequestUrls: string[];
+let modelActivityRequestUrls: string[];
 let jobToolInvocationPayload: unknown;
 let jobToolInvocationRequestUrls: string[];
 let pendingFetchResponses: Record<string, DeferredResponse>;
@@ -411,6 +412,11 @@ describe("Flux dashboard", () => {
     };
     modelActivityPayload = {
       window_minutes: 60,
+      limit: 50,
+      offset: 0,
+      total_count: 3,
+      has_next: false,
+      page_count: 1,
       active_count: 1,
       recent_count: 3,
       last_event_at: "2026-07-03T01:26:06+00:00",
@@ -825,6 +831,7 @@ describe("Flux dashboard", () => {
     corpusJobFileActionRequests = [];
     corpusJobFileActionPayload = { state: "opened", path: "E:/Flux Docs/docs/failed.pdf" };
     jobsRequestUrls = [];
+    modelActivityRequestUrls = [];
     jobToolInvocationRequestUrls = [];
     jobToolInvocationPayload = { job_id: "job-pdf", invocations: [] };
     pendingFetchResponses = {};
@@ -847,7 +854,10 @@ describe("Flux dashboard", () => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(healthPayload);
       if (url === "/api/dashboard/crawl") return json(crawlPayload);
-      if (url.startsWith("/api/dashboard/model-activity")) return json(modelActivityPayload);
+      if (url.startsWith("/api/dashboard/model-activity")) {
+        modelActivityRequestUrls.push(url);
+        return json(modelActivityPayload);
+      }
       if (url.startsWith("/api/dashboard/jobs/") && url.includes("/tool-invocations")) {
         jobToolInvocationRequestUrls.push(url);
         return json(jobToolInvocationPayload);
@@ -1641,6 +1651,109 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).queryByText("Control Plane")).not.toBeInTheDocument();
   });
 
+  test("performance shows Paddle OCR model activity by default", async () => {
+    const user = userEvent.setup();
+    modelActivityPayload = {
+      ...modelActivityPayload,
+      active_count: 0,
+      recent_count: 2,
+      total_count: 2,
+      events: [
+        {
+          id: "event-health",
+          service: "model-runner",
+          endpoint: "/health",
+          action: "health",
+          activity_class: "control_plane",
+          caller_surface: "",
+          model: "",
+          status: "completed",
+          started_at: "2026-07-03T01:25:50+00:00",
+          completed_at: "2026-07-03T01:25:50+00:00",
+          duration_ms: 10,
+          error_class: null,
+          error_message: null
+        },
+        {
+          id: "event-ocr",
+          service: "paddle-runner",
+          endpoint: "/v1/ocr/image",
+          action: "ocr_image",
+          activity_class: "vision_ocr",
+          caller_surface: "worker",
+          model: "PP-OCRv5",
+          status: "completed",
+          started_at: "2026-07-03T01:26:01+00:00",
+          completed_at: "2026-07-03T01:26:04+00:00",
+          duration_ms: 340,
+          error_class: null,
+          error_message: null
+        }
+      ]
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Performance" }));
+
+    const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("/v1/ocr/image")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("PP-OCRv5; Worker; Vision OCR")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).queryByText("/health")).not.toBeInTheDocument();
+  });
+
+  test("performance paginates model activity with clickable page numbers", async () => {
+    const user = userEvent.setup();
+    modelActivityPayload = {
+      ...modelActivityPayload,
+      limit: 50,
+      offset: 0,
+      total_count: 125,
+      has_next: true,
+      page_count: 3,
+      recent_count: 50
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Performance" }));
+
+    const pager = screen.getByLabelText("Model activity paging");
+    expect(within(pager).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual([
+      "Previous model activity page",
+      "Current model activity page 1",
+      "Go to model activity page 2",
+      "Go to model activity page 3",
+      "Next model activity page"
+    ]);
+    expect(within(pager).getByText("1-2 of 125 model activity events")).toBeInTheDocument();
+
+    await user.click(within(pager).getByRole("button", { name: "Go to model activity page 3" }));
+
+    await waitFor(() => {
+      const latestUrl = modelActivityRequestUrls.at(-1) ?? "";
+      const params = new URLSearchParams(latestUrl.split("?")[1]);
+      expect(params.get("limit")).toBe("50");
+      expect(params.get("offset")).toBe("100");
+    });
+  });
+
+  test("performance model activity uses semantic tables outside the jobs tab", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Performance" }));
+
+    const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByRole("table", { name: "Model service activity" })).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByRole("table", { name: "Model activity events" })).toBeInTheDocument();
+  });
+
   test("performance can opt into control-plane model activity diagnostics", async () => {
     const user = userEvent.setup();
     modelActivityPayload = {
@@ -1700,7 +1813,12 @@ describe("Flux dashboard", () => {
     await user.click(within(panel as HTMLElement).getByRole("checkbox", { name: "Show control-plane diagnostics" }));
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/api/dashboard/model-activity?include_control_plane=true");
+      const latestUrl = modelActivityRequestUrls.at(-1) ?? "";
+      expect(latestUrl.startsWith("/api/dashboard/model-activity?")).toBe(true);
+      const params = new URLSearchParams(latestUrl.split("?")[1]);
+      expect(params.get("include_control_plane")).toBe("true");
+      expect(params.get("offset")).toBe("0");
+      expect(params.get("limit")).toBe("50");
     });
     panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(within(panel as HTMLElement).getByText("/health")).toBeInTheDocument();

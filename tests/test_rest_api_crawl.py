@@ -459,6 +459,11 @@ def test_dashboard_model_activity_route_is_bounded_and_safe(monkeypatch):
         calls.append(kwargs)
         return {
             "window_minutes": kwargs["window_minutes"],
+            "limit": kwargs["limit"],
+            "offset": kwargs["offset"],
+            "total_count": 75,
+            "has_next": True,
+            "page_count": 2,
             "active_count": 1,
             "recent_count": 2,
             "last_event_at": "2026-07-03T01:26:06+00:00",
@@ -493,9 +498,19 @@ def test_dashboard_model_activity_route_is_bounded_and_safe(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["window_minutes"] == 360
+    assert payload["limit"] == 200
+    assert payload["offset"] == 0
     assert payload["events"][0]["endpoint"] == "/v1/rerank"
     assert payload["scheduler"]["running_count"] == 1
-    assert calls == [{"window_minutes": 360, "limit": 200, "include_control_plane": False}]
+    assert calls == [{"window_minutes": 360, "limit": 200, "offset": 0, "include_control_plane": False}]
+
+    response = client.get(
+        "/api/dashboard/model-activity",
+        params={"window_minutes": 60, "limit": 25, "offset": 50, "include_control_plane": True},
+    )
+
+    assert response.status_code == 200
+    assert calls[-1] == {"window_minutes": 60, "limit": 25, "offset": 50, "include_control_plane": True}
 
 
 def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):

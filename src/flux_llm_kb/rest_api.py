@@ -30,7 +30,7 @@ from .health import (
     collect_retrieval_payload,
     doctor_payload,
 )
-from .model_activity import bounded_limit, bounded_window_minutes, caller_surface, collect_model_activity_payload
+from .model_activity import bounded_limit, bounded_offset, bounded_window_minutes, caller_surface, collect_model_activity_payload
 from .service import KnowledgeService, normalize_retrieval_filters
 
 
@@ -632,10 +632,11 @@ def create_app():
         return collect_crawl_payload()
 
     @app.get("/api/dashboard/model-activity")
-    def dashboard_model_activity(window_minutes: int = 60, limit: int = 50, include_control_plane: bool = False):
+    def dashboard_model_activity(window_minutes: int = 60, limit: int = 50, offset: int = 0, include_control_plane: bool = False):
         return collect_model_activity_payload(
             window_minutes=bounded_window_minutes(window_minutes),
             limit=bounded_limit(limit),
+            offset=bounded_offset(offset),
             include_control_plane=include_control_plane,
         )
 

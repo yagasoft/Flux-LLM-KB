@@ -17,6 +17,7 @@ ALLOWED_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "con
 CONTROL_PLANE_ACTIVITY_CLASSES = {"health", "control_plane"}
 ALLOWED_METADATA_KEYS = {
     "batch_size",
+    "component",
     "dimensions",
     "document",
     "duration_hint_ms",
@@ -24,6 +25,9 @@ ALLOWED_METADATA_KEYS = {
     "keep_alive",
     "passage_count",
     "quantization",
+    "resident",
+    "route",
+    "task_type",
 }
 DEFAULT_WINDOW_MINUTES = 60
 MIN_WINDOW_MINUTES = 5
@@ -91,11 +95,13 @@ def record_model_activity(
 def collect_model_activity_payload(
     window_minutes: int | str | None = DEFAULT_WINDOW_MINUTES,
     limit: int | str | None = DEFAULT_LIMIT,
+    offset: int | str | None = 0,
     *,
     include_control_plane: bool = False,
 ) -> dict[str, Any]:
     safe_window = bounded_window_minutes(window_minutes)
     safe_limit = bounded_limit(limit)
+    safe_offset = bounded_offset(offset)
     try:
         database.prune_model_activity_events(retention_hours=RETENTION_HOURS)
     except Exception:
@@ -104,18 +110,29 @@ def collect_model_activity_payload(
         rows = database.list_model_activity_events(
             window_minutes=safe_window,
             limit=safe_limit,
+            offset=safe_offset,
             include_control_plane=include_control_plane,
         )
     except Exception:
         rows = []
+    try:
+        total_count = int(
+            database.count_model_activity_events(
+                window_minutes=safe_window,
+                include_control_plane=include_control_plane,
+            )
+        )
+    except Exception:
+        total_count = safe_offset + len(rows)
     now = _utc_now()
-    events = [_event_payload(row, now=now) for row in rows]
+    events = sorted([_event_payload(row, now=now) for row in rows], key=_event_sort_key, reverse=True)
     if not include_control_plane:
         events = [
             item
             for item in events
             if str(item.get("activity_class") or "").lower() not in CONTROL_PLANE_ACTIVITY_CLASSES
         ]
+        total_count = max(total_count, len(events))
     active_count = sum(1 for item in events if item["status"] == "running")
     last_event_at = _latest_iso(
         [
@@ -124,8 +141,14 @@ def collect_model_activity_payload(
             if item.get("completed_at") or item.get("started_at")
         ]
     )
+    page_count = (total_count + safe_limit - 1) // safe_limit if total_count > 0 else 0
     return {
         "window_minutes": safe_window,
+        "limit": safe_limit,
+        "offset": safe_offset,
+        "total_count": total_count,
+        "has_next": safe_offset + len(events) < total_count,
+        "page_count": page_count,
         "active_count": active_count,
         "recent_count": len(events),
         "last_event_at": last_event_at,
@@ -150,6 +173,14 @@ def bounded_limit(value: int | str | None) -> int:
     except (TypeError, ValueError):
         numeric = DEFAULT_LIMIT
     return max(1, min(numeric, MAX_LIMIT))
+
+
+def bounded_offset(value: int | str | None) -> int:
+    try:
+        numeric = int(value if value is not None else 0)
+    except (TypeError, ValueError):
+        numeric = 0
+    return max(0, numeric)
 
 
 def sanitize_metadata(value: dict[str, Any]) -> dict[str, Any]:
@@ -223,6 +254,13 @@ def _event_payload(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         "error_message": _sanitize_error_message(row.get("error_message")) if row.get("error_message") else None,
         "metadata": sanitize_metadata(row.get("metadata") if isinstance(row.get("metadata"), dict) else {}),
     }
+
+
+def _event_sort_key(event: dict[str, Any]) -> tuple[str, str, str]:
+    completed_or_started = str(event.get("completed_at") or event.get("started_at") or "")
+    started = str(event.get("started_at") or "")
+    event_id = str(event.get("id") or "")
+    return (completed_or_started, started, event_id)
 
 
 def _service_breakdown(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

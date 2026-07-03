@@ -1124,6 +1124,99 @@ def test_run_paddleocr_image_configures_onnxruntime_before_importing_paddleocr(m
     assert events[:2] == ["configure-ort", "import-paddleocr"]
 
 
+def test_direct_worker_paddleocr_image_records_safe_activity(monkeypatch, tmp_path):
+    path = tmp_path / "private-screenshot.png"
+    path.write_bytes(PNG_BYTES)
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeScheduler:
+        def acquire(self, profile):
+            assert profile.task_type == "ocr_image"
+            assert profile.component == "worker"
+            return FakeLease()
+
+    class FakePaddleOCR:
+        def __init__(self, **_kwargs):
+            pass
+
+        def predict(self, _path):
+            return [{"text": "worker OCR text"}]
+
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(extractors, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr("flux_llm_kb.gpu_scheduler.get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=FakePaddleOCR))
+
+    text = extractors._run_paddleocr_image(path, model="PP-OCRv5")
+
+    assert text == "worker OCR text"
+    assert records == [
+        {
+            "service": "worker",
+            "endpoint": "/v1/ocr/image",
+            "action": "ocr_image",
+            "activity_class": "vision_ocr",
+            "caller_surface": "worker",
+            "model": "PP-OCRv5",
+            "metadata": {"document": False},
+        }
+    ]
+    assert str(path) not in str(records)
+
+
+def test_direct_worker_paddleocr_vl_document_records_safe_activity(monkeypatch, tmp_path):
+    path = tmp_path / "private-document.png"
+    path.write_bytes(PNG_BYTES)
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr("flux_llm_kb.model_runner._ocr_document_with_paddle", lambda _path, **_kwargs: "document OCR text")
+    monkeypatch.setattr(extractors, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+
+    text = extractors._run_paddleocr_document(path, model="PaddleOCR-VL")
+
+    assert text == "document OCR text"
+    assert records == [
+        {
+            "service": "worker",
+            "endpoint": "/v1/ocr/document",
+            "action": "ocr_document",
+            "activity_class": "vision_ocr",
+            "caller_surface": "worker",
+            "model": "PaddleOCR-VL",
+            "metadata": {"document": True},
+        }
+    ]
+    assert str(path) not in str(records)
+
+
 def test_pdf_ocr_pages_routes_paddleocr_vl_through_document_pipeline(monkeypatch, tmp_path):
     path = tmp_path / "scan.pdf"
     path.write_bytes(b"%PDF scanned")
@@ -1898,6 +1991,32 @@ def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_pat
     assert second.chunks[0].body == "Scanned image text"
     assert second.metadata["ocr"]["cache_hits"] == 1
     assert second.metadata["ocr"]["cache_misses"] == 0
+
+
+def test_extract_image_ocr_cache_hit_does_not_record_model_activity(monkeypatch, tmp_path):
+    path = tmp_path / "scan.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+
+    extractors._write_ocr_cache(path, "Cached OCR text", model="PP-OCRv5")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cache hit must not run OCR")),
+    )
+    monkeypatch.setattr(
+        extractors,
+        "record_model_activity",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("cache hit must not record model activity")),
+        raising=False,
+    )
+
+    result = extractors._ocr_image_with_paddleocr(path, model="PP-OCRv5")
+
+    assert result.status == "completed"
+    assert result.text == "Cached OCR text"
+    assert result.metadata["status"] == "cache_hit"
+    assert result.metadata["cache_hits"] == 1
+    assert result.metadata["cache_misses"] == 0
 
 
 def test_extract_large_image_downscales_paddleocr_input_and_reuses_original_cache(monkeypatch, tmp_path):

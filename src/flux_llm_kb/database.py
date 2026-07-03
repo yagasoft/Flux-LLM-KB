@@ -15658,6 +15658,7 @@ _MODEL_ACTIVITY_STATUSES = {"running", "completed", "failed", "busy", "stale_run
 _MODEL_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "control_plane", "model_loading"}
 _MODEL_ACTIVITY_METADATA_KEYS = {
     "batch_size",
+    "component",
     "dimensions",
     "document",
     "duration_hint_ms",
@@ -15665,6 +15666,9 @@ _MODEL_ACTIVITY_METADATA_KEYS = {
     "keep_alive",
     "passage_count",
     "quantization",
+    "resident",
+    "route",
+    "task_type",
 }
 MODEL_ACTIVITY_TEST_DATABASE_URL_ENV = "FLUX_KB_TEST_DATABASE_URL"
 MODEL_ACTIVITY_TEST_WRITE_OPT_IN_ENV = "FLUX_KB_ALLOW_MODEL_ACTIVITY_TEST_WRITES"
@@ -15789,11 +15793,13 @@ def list_model_activity_events(
     *,
     window_minutes: int = 60,
     limit: int = 50,
+    offset: int = 0,
     include_control_plane: bool = True,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     safe_window = max(5, min(int(window_minutes or 60), 360))
     safe_limit = max(1, min(int(limit or 50), 200))
+    safe_offset = max(0, int(offset or 0))
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -15806,10 +15812,13 @@ def list_model_activity_events(
                  WHERE (started_at >= now() - (%s * interval '1 minute')
                     OR status = 'running')
                    AND (%s OR activity_class NOT IN ('health', 'control_plane'))
-                 ORDER BY started_at DESC
+                 ORDER BY COALESCE(completed_at, started_at) DESC NULLS LAST,
+                          started_at DESC NULLS LAST,
+                          id DESC
                  LIMIT %s
+                OFFSET %s
                 """,
-                (safe_window, bool(include_control_plane), safe_limit),
+                (safe_window, bool(include_control_plane), safe_limit, safe_offset),
             )
             return [
                 {
@@ -15830,6 +15839,30 @@ def list_model_activity_events(
                 }
                 for row in cur.fetchall()
             ]
+
+
+def count_model_activity_events(
+    *,
+    window_minutes: int = 60,
+    include_control_plane: bool = True,
+    url: str | None = None,
+) -> int:
+    safe_window = max(5, min(int(window_minutes or 60), 360))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*)
+                  FROM model_activity_events
+                 WHERE (started_at >= now() - (%s * interval '1 minute')
+                    OR status = 'running')
+                   AND (%s OR activity_class NOT IN ('health', 'control_plane'))
+                """,
+                (safe_window, bool(include_control_plane)),
+            )
+            row = cur.fetchone()
+            return int(row[0] or 0) if row else 0
 
 
 def prune_model_activity_events(*, retention_hours: int = 24, url: str | None = None) -> None:
