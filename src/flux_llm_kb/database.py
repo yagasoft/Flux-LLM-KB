@@ -2609,7 +2609,7 @@ def traverse_entity_graph(
                            ARRAY[%s::uuid, re.to_entity_id] AS path
                     FROM relation_edges re
                     WHERE re.from_entity_id = %s
-                      AND (%s::text[] IS NULL OR relation_type = ANY(%s::text[]))
+                      AND (%s::text[] IS NULL OR re.relation_type = ANY(%s::text[]))
                     UNION ALL
                     SELECT re.id AS relation_id, re.from_entity_id, re.to_entity_id,
                            edge.next_entity_id, re.relation_type, re.confidence,
@@ -2619,7 +2619,7 @@ def traverse_entity_graph(
                     JOIN relation_edges re ON re.from_entity_id = graph.next_entity_id
                     JOIN LATERAL (SELECT re.to_entity_id AS next_entity_id) edge ON true
                     WHERE graph.depth < %s
-                      AND (%s::text[] IS NULL OR relation_type = ANY(%s::text[]))
+                      AND (%s::text[] IS NULL OR re.relation_type = ANY(%s::text[]))
                       AND NOT next_entity_id = ANY(path)
                 )
                 SELECT graph.relation_id::text, graph.from_entity_id::text,

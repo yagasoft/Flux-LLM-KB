@@ -377,6 +377,8 @@ def test_postgres_claim_review_list_counts_and_graph_work_together():
         graph = database.traverse_entity_graph(
             entity_id=active["subject_entity_id"],
             relation_types=["depends_on"],
+            direction="both",
+            max_depth=2,
             url=TEST_DATABASE_URL,
         )
 

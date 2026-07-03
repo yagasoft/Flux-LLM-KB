@@ -1925,6 +1925,33 @@ describe("Flux dashboard", () => {
       });
     });
 
+    const pager = screen.getByLabelText("Job history paging");
+    expect(within(pager).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual([
+      "Previous jobs page",
+      "Current jobs page 1",
+      "Go to jobs page 2",
+      "Next jobs page"
+    ]);
+    const currentPage = within(pager).getByRole("button", { name: "Current jobs page 1" });
+    expect(currentPage).toHaveAttribute("aria-current", "page");
+    const requestCountBeforeCurrentClick = jobsRequestUrls.length;
+    await user.click(currentPage);
+    expect(jobsRequestUrls).toHaveLength(requestCountBeforeCurrentClick);
+
+    await user.click(within(pager).getByRole("button", { name: "Go to jobs page 2" }));
+
+    await waitFor(() => {
+      const latestUrl = jobsRequestUrls.at(-1) ?? "";
+      const params = new URLSearchParams(latestUrl.split("?")[1]);
+      expect(params.get("offset")).toBe("50");
+      expect(params.get("limit")).toBe("50");
+      expect(params.get("sort_by")).toBe("status");
+      expect(params.get("sort_dir")).toBe("desc");
+      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
+      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
+      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
+    });
+
     await user.click(screen.getByRole("button", { name: "Next jobs page" }));
 
     await waitFor(() => {
@@ -1932,6 +1959,8 @@ describe("Flux dashboard", () => {
       const params = new URLSearchParams(latestUrl.split("?")[1]);
       expect(params.get("offset")).toBe("50");
       expect(params.get("limit")).toBe("50");
+      expect(params.get("sort_by")).toBe("status");
+      expect(params.get("sort_dir")).toBe("desc");
       expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
       expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
       expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);

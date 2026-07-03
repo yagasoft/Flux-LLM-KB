@@ -5991,7 +5991,7 @@ def test_graph_traversal_query_is_bounded_typed_stable_and_cycle_safe():
     assert "WITH RECURSIVE relation_edges" in traversal
     assert "graph AS" in traversal
     assert "depth < %s" in traversal
-    assert "relation_type = ANY" in traversal
+    assert "re.relation_type = ANY" in traversal
     assert "NOT next_entity_id = ANY(path)" in traversal
     assert "ORDER BY depth ASC, relation_type ASC" in traversal
 

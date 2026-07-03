@@ -1101,6 +1101,7 @@ type JobSortState = {
   sort_by: JobSortKey;
   sort_dir: JobSortDir;
 };
+type JobPageItem = number | `ellipsis-${number}`;
 const emptyJobHistoryFilters: JobHistoryFilters = {
   status: [],
   root_name: [],
@@ -5293,6 +5294,9 @@ function JobHistoryControls({
   const pageStart = count > 0 ? offset + 1 : 0;
   const pageEnd = count > 0 ? Math.min(offset + visibleCount, count) : 0;
   const safeLimit = Math.max(1, limit || JOB_PAGE_LIMIT);
+  const pageCount = count > 0 ? Math.max(1, Math.ceil(count / safeLimit)) : 0;
+  const currentPage = pageCount > 0 ? Math.min(pageCount, Math.floor(offset / safeLimit) + 1) : 0;
+  const pageItems = jobPageItems(currentPage, pageCount);
   const jobWord = count === 1 ? "job" : "jobs";
   return (
     <div className="job-history-controls">
@@ -5352,12 +5356,57 @@ function JobHistoryControls({
         <button className="ghost-action compact" type="button" aria-label="Previous jobs page" disabled={offset <= 0} onClick={() => onPage(Math.max(0, offset - safeLimit))}>
           <ChevronLeft size={15} /> Previous
         </button>
+        {pageItems.length > 0 && (
+          <div className="job-page-numbers" aria-label="Job pages">
+            {pageItems.map((item) => {
+              if (typeof item !== "number") {
+                return <span className="job-page-ellipsis" aria-hidden="true" key={item}>...</span>;
+              }
+              const isCurrent = item === currentPage;
+              return (
+                <button
+                  className="job-page-button"
+                  type="button"
+                  key={item}
+                  aria-current={isCurrent ? "page" : undefined}
+                  aria-label={isCurrent ? `Current jobs page ${item}` : `Go to jobs page ${item}`}
+                  disabled={isCurrent}
+                  onClick={() => onPage((item - 1) * safeLimit)}
+                >
+                  {item}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <button className="ghost-action compact" type="button" aria-label="Next jobs page" disabled={!hasNext} onClick={() => onPage(offset + safeLimit)}>
           Next <ChevronRight size={15} />
         </button>
       </div>
     </div>
   );
+}
+
+function jobPageItems(currentPage: number, pageCount: number): JobPageItem[] {
+  if (pageCount <= 0 || currentPage <= 0) return [];
+  if (pageCount <= 7) return Array.from({ length: pageCount }, (_, index) => index + 1);
+
+  const pages = new Set([1, pageCount, currentPage - 1, currentPage, currentPage + 1].filter((page) => page >= 1 && page <= pageCount));
+  const sorted = [...pages].sort((left, right) => left - right);
+  const items: JobPageItem[] = [];
+  for (const page of sorted) {
+    const previous = typeof items.at(-1) === "number" ? items.at(-1) as number : undefined;
+    if (previous !== undefined) {
+      const gap = page - previous;
+      if (gap === 2) {
+        items.push(previous + 1);
+      } else if (gap > 2) {
+        items.push(`ellipsis-${previous}` as const);
+      }
+    }
+    items.push(page);
+  }
+  return items;
 }
 
 function JobFilterMultiSelect({

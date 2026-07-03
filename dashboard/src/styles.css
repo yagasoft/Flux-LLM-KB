@@ -1507,9 +1507,44 @@ kbd {
   font-size: 13px;
 }
 
-.job-pager span {
+.job-pager > span {
   margin-right: auto;
   color: var(--ink);
+  font-weight: 700;
+}
+
+.job-page-numbers {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.job-page-button {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--surface);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.job-page-button[aria-current="page"] {
+  color: #ffffff;
+  background: #057994;
+  border-color: #057994;
+  cursor: default;
+  opacity: 1;
+}
+
+.job-page-ellipsis {
+  min-width: 18px;
+  margin: 0;
+  color: var(--muted);
+  text-align: center;
   font-weight: 700;
 }
 
