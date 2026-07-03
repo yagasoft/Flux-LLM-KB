@@ -1752,7 +1752,7 @@ class KnowledgeService:
         *,
         owner_class: str = "all",
         root_name: str | None = None,
-        limit: int = 100,
+        limit: int = database.DEFAULT_SEARCH_INDEX_JOB_LIMIT,
     ) -> dict[str, Any]:
         return database.enqueue_search_index_sync(owner_class=owner_class, root_name=root_name, limit=limit)
 

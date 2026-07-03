@@ -132,6 +132,35 @@ def test_vespa_document_builder_removes_control_characters_from_text_fields():
     assert fields["symbols"] == ["bad symbol", "good.symbol"]
 
 
+def test_vespa_document_builder_truncates_large_body_payload(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_SEARCH_INDEX_TEXT_MAX_CHARS", "12")
+
+    document = build_vespa_document(
+        {
+            "vespa_document_id": "id:flux:evidence::chunk-1",
+            "owner_table": "asset_chunks",
+            "owner_id": "chunk-1",
+            "root_id": "root-1",
+            "root_name": "docs",
+            "title": "architecture.md",
+            "body": "abcdefghijklmnopqrstuvwxyz",
+            "source_path": "docs/architecture.md",
+            "file_kind": "text",
+            "language": "markdown",
+            "lifecycle_state": "active",
+            "deleted": False,
+            "canonical": True,
+            "source_hash": "hash",
+            "model_generation": "snowflake-qwen-paddleocr-v1",
+            "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
+            "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "embedding": [0.001] * SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        }
+    )
+
+    assert document["fields"]["body"] == "abcdefghijkl"
+
+
 def test_vespa_adapter_allows_rrf_rank_profile():
     requests = []
 
@@ -166,6 +195,13 @@ def test_vespa_schema_defines_native_rrf_profile_and_weighted_comparison():
     assert "reciprocal_rank(lexical_score, 60) + reciprocal_rank(dense_score, 60)" in schema
     assert "rerank-count: 200" in schema
     assert "rank-profile hybrid_weighted" in schema
+
+
+def test_vespa_hnsw_insert_exploration_is_memory_bounded():
+    schema = Path("vespa/schemas/flux_evidence.sd").read_text(encoding="utf-8")
+
+    assert "max-links-per-node: 16" in schema
+    assert "neighbors-to-explore-at-insert: 64" in schema
 
 
 def test_vespa_rrf_candidate_merge_orders_by_fused_score():

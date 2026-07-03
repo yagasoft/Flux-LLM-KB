@@ -247,7 +247,7 @@ flux-kb host-agent run
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb search-index status --root projects
-flux-kb search-index sync --owner-class all --root projects --limit 100
+flux-kb search-index sync --owner-class all --root projects --limit 250
 flux-kb search-index rebuild --owner-class all --root projects --limit 100
 flux-kb maintenance reprocess --all-roots
 flux-kb maintenance reprocess --root projects --force --confirm --clear-caches ocr,asr,vision --process --limit 1000 --max-passes 2
@@ -275,7 +275,7 @@ flux-kb automation status
 flux-kb automation run --mode guarded --limit 25
 flux-kb automation actions --status all --limit 25
 flux-kb search-index status --root projects
-flux-kb search-index sync --owner-class all --root projects --limit 100
+flux-kb search-index sync --owner-class all --root projects --limit 250
 flux-kb search-index rebuild --owner-class all --root projects --limit 100
 flux-kb governance run --mode shadow --limit 25
 flux-kb governance actions list --status proposed --limit 25

@@ -350,7 +350,7 @@ flux-kb settings set retrieval.token_budget 1600
 flux-kb settings reset retrieval.token_budget
 flux-kb settings apply --component watcher
 flux-kb search-index status --root projects
-flux-kb search-index sync --owner-class all --root projects --limit 100
+flux-kb search-index sync --owner-class all --root projects --limit 250
 flux-kb search-index rebuild --owner-class all --root projects --limit 100
 ```
 

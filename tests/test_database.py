@@ -2226,6 +2226,8 @@ def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
         "owner_class": "corpus",
         "root_name": "docs",
         "limit": 25,
+        "page_size": 25,
+        "page_sequence": 0,
         "search_engine": "vespa",
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
@@ -2239,10 +2241,88 @@ def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
         "owner_class": "corpus",
         "root_name": "docs",
         "limit": 25,
+        "page_size": 25,
+        "page_sequence": 0,
         "search_engine": "vespa",
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
     }
+
+
+def test_enqueue_search_index_sync_clamps_large_requests_to_safe_job_limit(monkeypatch):
+    monkeypatch.delenv("FLUX_KB_SEARCH_INDEX_JOB_LIMIT", raising=False)
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-search-index", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_search_index_sync(owner_class="corpus", root_name="docs", limit=5000)
+
+    _sql, params = next((statement, params) for statement, params in executed if "INSERT INTO capture_jobs" in statement)
+    payload = json.loads(params[1])
+    assert payload["limit"] == 250
+    assert payload["page_size"] == 100
+    assert payload["page_sequence"] == 0
+    assert result["limit"] == 250
+    assert result["page_size"] == 100
+
+
+def test_asset_triggered_search_index_sync_uses_safe_job_limit(monkeypatch):
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT r.name" in sql:
+                return ("docs",)
+            if "SELECT id::text, status" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-search-index", "pending")
+            return None
+
+    result = database._enqueue_corpus_search_index_sync_for_asset(FakeCursor(), asset_id="asset-1")
+
+    _sql, params = next((statement, params) for statement, params in executed if "INSERT INTO capture_jobs" in statement)
+    payload = json.loads(params[1])
+    assert payload["limit"] == 250
+    assert payload["page_size"] == 100
+    assert payload["page_sequence"] == 0
+    assert result["deduped"] is False
 
 
 def test_search_index_status_reports_missing_corpus_records_without_changing_status_counts(monkeypatch):
@@ -2603,6 +2683,157 @@ def test_sync_search_index_embeds_pending_rows_in_bounded_batches(monkeypatch):
     assert result["requested"] == 5
     assert result["indexed"] == 5
     assert len(fed) == 5
+
+
+def test_search_index_embedding_batch_size_defaults_to_memory_safe_value(monkeypatch):
+    monkeypatch.delenv("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE", raising=False)
+
+    assert database._search_index_embedding_batch_size() == 16
+
+
+def test_sync_search_index_processes_one_page_and_reports_continuation(monkeypatch):
+    fetch_limits: list[int] = []
+    batch_calls: list[list[str]] = []
+    fed: list[dict] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeProvider:
+        name = "model_runner"
+
+        def embed_batch(self, inputs):
+            batch_calls.append([item.owner_id for item in inputs])
+            return [
+                EmbeddingResult(
+                    owner_table=item.owner_table,
+                    owner_id=item.owner_id,
+                    model="Snowflake/snowflake-arctic-embed-l-v2.0",
+                    dimensions=1024,
+                    vector=[1.0] + [0.0] * 1023,
+                    metadata={"source_hash": f"hash-{item.owner_id}"},
+                )
+                for item in inputs
+            ]
+
+    class FakeAdapter:
+        def feed(self, document):
+            fed.append(document)
+            return {"ok": True}
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
+    def candidate(index):
+        return {
+            "vespa_document_id": f"id:flux:flux_evidence::asset_chunks--chunk-{index}",
+            "owner_table": "asset_chunks",
+            "owner_id": f"chunk-{index}",
+            "asset_id": f"asset-{index}",
+            "root_id": "33333333-3333-3333-3333-333333333333",
+            "root_name": "docs",
+            "title": f"Chunk {index}",
+            "body": f"body {index}",
+            "source_path": f"docs/chunk-{index}.md",
+            "symbols": [],
+            "language": "",
+            "file_kind": "text",
+            "lifecycle_state": "active",
+            "deleted": False,
+            "canonical": True,
+            "source_hash": f"old-hash-{index}",
+            "index_text": f"Chunk {index}\nbody {index}",
+            "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+            "embedding_dimensions": 1024,
+            "existing_source_hash": None,
+            "existing_index_status": None,
+            "existing_embedding_model": None,
+            "search_index_hydrated_body_chars": len(f"body {index}"),
+            "search_index_truncated_chars": 0,
+        }
+
+    def fetch_rows(*_args, **kwargs):
+        fetch_limits.append(kwargs["limit"])
+        return [candidate(index) for index in range(kwargs["limit"])]
+
+    monkeypatch.delenv("FLUX_KB_SEARCH_INDEX_PAGE_SIZE", raising=False)
+    monkeypatch.setenv("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE", "200")
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", fetch_rows)
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **_kwargs: None)
+
+    result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=250, embedding_provider=FakeProvider(), adapter=FakeAdapter())
+
+    assert fetch_limits == [100]
+    assert result["requested"] == 100
+    assert result["indexed"] == 100
+    assert result["rows_loaded"] == 100
+    assert result["hydrated_body_chars"] == sum(len(f"body {index}") for index in range(100))
+    assert result["truncated_body_chars"] == 0
+    assert result["more_pending"] is True
+    assert result["continuation_remaining"] == 150
+    assert result["page_size"] == 100
+    assert len(fed) == 100
+
+
+def test_fetch_corpus_search_index_rows_truncates_indexed_body_text(monkeypatch):
+    long_body = "abcdefghijklmnopqrstuvwxyz"
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "chunk-1",
+                    "asset-1",
+                    "root-1",
+                    "docs",
+                    "Chunk One",
+                    long_body,
+                    "docs/chunk.md",
+                    "text",
+                    {},
+                    None,
+                    None,
+                    None,
+                )
+            ]
+
+    monkeypatch.setenv("FLUX_KB_SEARCH_INDEX_TEXT_MAX_CHARS", "12")
+
+    rows = database._fetch_corpus_search_index_rows(
+        FakeCursor(),
+        root_name="docs",
+        limit=1,
+        embedding_model="Snowflake/snowflake-arctic-embed-l-v2.0",
+    )
+
+    assert rows[0]["body"] == "abcdefghijkl"
+    assert "mnopqrstuvwxyz" not in rows[0]["index_text"]
+    assert rows[0]["search_index_hydrated_body_chars"] == len(long_body)
+    assert rows[0]["search_index_truncated_chars"] == len(long_body) - 12
 
 
 def test_delete_search_index_records_for_root_requires_root_and_filters_statuses(monkeypatch):

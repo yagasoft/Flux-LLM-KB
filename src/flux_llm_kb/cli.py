@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     search_index_sync = search_index_subparsers.add_parser("sync", help="Queue Vespa search-index sync work")
     search_index_sync.add_argument("--owner-class", choices=["all", "corpus", "episodes", "claims"], default="all")
     search_index_sync.add_argument("--root", dest="root_name")
-    search_index_sync.add_argument("--limit", type=int, default=100)
+    search_index_sync.add_argument("--limit", type=int, default=250)
     search_index_status = search_index_subparsers.add_parser("status", help="Show Vespa search-index sync state")
     search_index_status.add_argument("--root", dest="root_name")
     search_index_rebuild = search_index_subparsers.add_parser("rebuild", help="Mark Vespa search-index records pending for rebuild")

@@ -251,7 +251,9 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
         result = database.sync_search_index(
             owner_class=str(payload.get("owner_class") or "all"),
             root_name=payload.get("root_name"),
-            limit=int(payload.get("limit") or 100),
+            limit=int(payload.get("limit") or database.DEFAULT_SEARCH_INDEX_JOB_LIMIT),
+            page_size=int(payload.get("page_size") or 0) or None,
+            page_sequence=int(payload.get("page_sequence") or 0),
         )
     except ValueError as exc:
         return JobProcessResult(status="failed", message=str(exc))
@@ -275,6 +277,17 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
         "search_index_embedding_batch_size": int(result.get("embedding_batch_size") or 0),
         "search_index_embedding_batches": int(result.get("embedding_batches") or 0),
         "search_index_model_generation": result.get("model_generation"),
+        "search_index_page_size": int(result.get("page_size") or 0),
+        "search_index_page_sequence": int(result.get("page_sequence") or 0),
+        "search_index_rows_loaded": int(result.get("rows_loaded") or 0),
+        "search_index_hydrated_body_chars": int(result.get("hydrated_body_chars") or 0),
+        "search_index_truncated_body_chars": int(result.get("truncated_body_chars") or 0),
+        "search_index_feed_count": int(result.get("vespa_feed_count") or 0),
+        "search_index_feed_latency_ms_total": float(result.get("vespa_feed_latency_ms_total") or 0.0),
+        "search_index_feed_latency_ms_max": float(result.get("vespa_feed_latency_ms_max") or 0.0),
+        "search_index_rss_bytes_before": result.get("rss_bytes_before"),
+        "search_index_rss_bytes_after": result.get("rss_bytes_after"),
+        "search_index_continuation_remaining": int(result.get("continuation_remaining") or 0),
     }
     if result.get("errors"):
         telemetry["search_index_errors"] = list(result.get("errors") or [])[:5]
@@ -282,6 +295,18 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
     if failed:
         message = "; ".join(str(item) for item in (result.get("errors") or [])[:3]) or f"{failed} search-index documents failed"
         return JobProcessResult(status="failed", message=message, telemetry=telemetry)
+    if result.get("more_pending") and int(result.get("continuation_remaining") or 0) > 0:
+        continuation = database.enqueue_search_index_sync_continuation(
+            owner_class=str(payload.get("owner_class") or "all"),
+            root_name=payload.get("root_name"),
+            limit=int(result.get("continuation_remaining") or 0),
+            page_size=int(result.get("page_size") or 0),
+            continuation_of=str(payload.get("continuation_of") or job.get("id") or "search_index_sync"),
+            page_sequence=int(result.get("page_sequence") or 0) + 1,
+        )
+        telemetry["search_index_continuation_queued"] = int(continuation.get("queued") or 0)
+        telemetry["search_index_continuation_job_id"] = continuation.get("job_id")
+        telemetry["search_index_continuation_deduped"] = bool(continuation.get("deduped"))
     return JobProcessResult(status="indexed", telemetry=telemetry)
 
 

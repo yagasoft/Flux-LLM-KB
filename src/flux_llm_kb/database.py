@@ -48,7 +48,13 @@ _SEMANTIC_DUPLICATE_ALGORITHM = "snowflake-vespa-cosine-v1"
 UNSEEN_ASSET_CANCELLED_STATUS = "cancelled_unseen_asset"
 DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS = 86400
 DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE = 500
-DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE = 64
+DEFAULT_SEARCH_INDEX_JOB_LIMIT = 250
+DEFAULT_SEARCH_INDEX_PAGE_SIZE = 100
+DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE = 16
+DEFAULT_SEARCH_INDEX_TEXT_MAX_CHARS = 12000
+MAX_SEARCH_INDEX_JOB_LIMIT = 1000
+MAX_SEARCH_INDEX_PAGE_SIZE = 500
+MAX_SEARCH_INDEX_TEXT_MAX_CHARS = 200000
 _CODE_EXACT_SYMBOL_BOOST = 0.10
 _CODE_IMPLEMENTATION_INTENT_BOOST = 0.025
 _VESPA_RRF_K = 60
@@ -13947,13 +13953,17 @@ def enqueue_search_index_sync(
     *,
     owner_class: str = "all",
     root_name: str | None = None,
-    limit: int = 100,
+    limit: int = DEFAULT_SEARCH_INDEX_JOB_LIMIT,
     url: str | None = None,
 ) -> dict[str, Any]:
+    row_limit = _search_index_job_limit(limit)
+    page_size = min(_search_index_page_size(), row_limit)
     payload = {
         "owner_class": str(owner_class or "all"),
         "root_name": root_name,
-        "limit": max(1, min(int(limit or 100), 5000)),
+        "limit": row_limit,
+        "page_size": page_size,
+        "page_sequence": 0,
         "search_engine": "vespa",
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
@@ -13972,6 +13982,59 @@ def enqueue_search_index_sync(
                 time_budget_seconds=schedule["time_budget_seconds"],
                 telemetry={"stage": "queued", "owner_class": payload["owner_class"], "root_name": root_name},
                 audit_details={"job_type": "search_index_sync", "owner_class": payload["owner_class"], "root_name": root_name},
+            )
+    return {"queued": 0 if queued["deduped"] else 1, "job_id": queued["job_id"], "deduped": queued["deduped"], "reused": queued["reused"], **payload}
+
+
+def enqueue_search_index_sync_continuation(
+    *,
+    owner_class: str,
+    root_name: str | None,
+    limit: int,
+    page_size: int,
+    continuation_of: str,
+    page_sequence: int,
+    url: str | None = None,
+) -> dict[str, Any]:
+    row_limit = _search_index_job_limit(limit)
+    resolved_page_size = min(_search_index_page_size(page_size), row_limit)
+    payload = {
+        "owner_class": str(owner_class or "all"),
+        "root_name": root_name,
+        "limit": row_limit,
+        "page_size": resolved_page_size,
+        "page_sequence": max(1, int(page_sequence or 1)),
+        "continuation_of": str(continuation_of or ""),
+        "search_engine": "vespa",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+    }
+    schedule = _job_schedule_metadata("search_index_sync")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            queued = _enqueue_unique_capture_job_with_cursor(
+                cur,
+                job_type="search_index_sync",
+                payload=payload,
+                job_family=schedule["job_family"],
+                resource_class=schedule["resource_class"],
+                priority=schedule["priority"],
+                time_budget_seconds=schedule["time_budget_seconds"],
+                telemetry={
+                    "stage": "queued",
+                    "owner_class": payload["owner_class"],
+                    "root_name": root_name,
+                    "continuation_of": payload["continuation_of"],
+                    "page_sequence": payload["page_sequence"],
+                },
+                audit_details={
+                    "job_type": "search_index_sync",
+                    "owner_class": payload["owner_class"],
+                    "root_name": root_name,
+                    "continuation_of": payload["continuation_of"],
+                    "page_sequence": payload["page_sequence"],
+                },
             )
     return {"queued": 0 if queued["deduped"] else 1, "job_id": queued["job_id"], "deduped": queued["deduped"], "reused": queued["reused"], **payload}
 
@@ -13996,10 +14059,14 @@ def _enqueue_corpus_search_index_sync_for_asset(cur: Any, *, asset_id: str) -> d
     root_name = str(row[0] or "").strip()
     if not root_name:
         return None
+    row_limit = _search_index_job_limit()
+    page_size = min(_search_index_page_size(), row_limit)
     payload = {
         "owner_class": "corpus",
         "root_name": root_name,
-        "limit": 5000,
+        "limit": row_limit,
+        "page_size": page_size,
+        "page_sequence": 0,
         "search_engine": "vespa",
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
@@ -14295,20 +14362,96 @@ def _vespa_search_adapter() -> Any:
     return VespaSearchAdapter(base_url=os.environ.get("FLUX_KB_RETRIEVAL_VESPA_BASE_URL") or "http://127.0.0.1:8080")
 
 
-def _search_index_embedding_batch_size() -> int:
-    raw_value = os.environ.get("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE")
+def _bounded_int_env(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    raw_value = os.environ.get(name)
     try:
-        value = int(raw_value) if raw_value is not None else DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE
+        value = int(raw_value) if raw_value is not None else default
     except (TypeError, ValueError):
-        value = DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE
-    return max(1, min(value, 512))
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _search_index_job_limit(limit: int | None = None) -> int:
+    configured = _bounded_int_env(
+        "FLUX_KB_SEARCH_INDEX_JOB_LIMIT",
+        default=DEFAULT_SEARCH_INDEX_JOB_LIMIT,
+        minimum=1,
+        maximum=MAX_SEARCH_INDEX_JOB_LIMIT,
+    )
+    try:
+        requested = int(limit) if limit is not None else configured
+    except (TypeError, ValueError):
+        requested = configured
+    return max(1, min(requested, configured))
+
+
+def _search_index_page_size(page_size: int | None = None) -> int:
+    configured = _bounded_int_env(
+        "FLUX_KB_SEARCH_INDEX_PAGE_SIZE",
+        default=DEFAULT_SEARCH_INDEX_PAGE_SIZE,
+        minimum=1,
+        maximum=MAX_SEARCH_INDEX_PAGE_SIZE,
+    )
+    try:
+        requested = int(page_size) if page_size is not None else configured
+    except (TypeError, ValueError):
+        requested = configured
+    return max(1, min(requested, configured))
+
+
+def _search_index_fetch_limit(limit: int | None = None) -> int:
+    try:
+        requested = int(limit) if limit is not None else DEFAULT_SEARCH_INDEX_PAGE_SIZE
+    except (TypeError, ValueError):
+        requested = DEFAULT_SEARCH_INDEX_PAGE_SIZE
+    return max(1, min(requested, MAX_SEARCH_INDEX_PAGE_SIZE))
+
+
+def _search_index_embedding_batch_size() -> int:
+    return _bounded_int_env(
+        "FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE",
+        default=DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE,
+        minimum=1,
+        maximum=512,
+    )
+
+
+def _search_index_text_max_chars() -> int:
+    return _bounded_int_env(
+        "FLUX_KB_SEARCH_INDEX_TEXT_MAX_CHARS",
+        default=DEFAULT_SEARCH_INDEX_TEXT_MAX_CHARS,
+        minimum=1,
+        maximum=MAX_SEARCH_INDEX_TEXT_MAX_CHARS,
+    )
+
+
+def _bounded_search_index_body(value: Any) -> tuple[str, int, int]:
+    text = str(value or "")
+    hydrated_chars = len(text)
+    max_chars = _search_index_text_max_chars()
+    if hydrated_chars <= max_chars:
+        return text, hydrated_chars, 0
+    return text[:max_chars], hydrated_chars, hydrated_chars - max_chars
+
+
+def _current_process_rss_bytes() -> int | None:
+    try:
+        with open("/proc/self/statm", "r", encoding="utf-8") as handle:
+            parts = handle.read().split()
+        if len(parts) < 2:
+            return None
+        return int(parts[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+    except Exception:
+        return None
 
 
 def sync_search_index(
     *,
     owner_class: str = "all",
     root_name: str | None = None,
-    limit: int = 100,
+    limit: int = DEFAULT_SEARCH_INDEX_JOB_LIMIT,
+    page_size: int | None = None,
+    page_sequence: int = 0,
     embedding_provider: Any | None = None,
     adapter: Any | None = None,
     vespa_base_url: str | None = None,
@@ -14323,7 +14466,8 @@ def sync_search_index(
     )
 
     normalized_class = _normalize_search_owner_class(owner_class)
-    row_limit = max(1, min(int(limit or 100), 5000))
+    row_limit = _search_index_job_limit(limit)
+    resolved_page_size = min(_search_index_page_size(page_size), row_limit)
     provider = embedding_provider or SnowflakeEmbeddingProvider(
         model=SNOWFLAKE_EMBEDDING_MODEL,
         dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
@@ -14334,11 +14478,14 @@ def sync_search_index(
         "owner_class": normalized_class,
         "root_name": root_name,
         "limit": row_limit,
+        "page_size": resolved_page_size,
+        "page_sequence": max(0, int(page_sequence or 0)),
         "search_engine": "vespa",
         "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
         "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
         "model_generation": "snowflake-qwen-paddleocr-v1",
         "requested": 0,
+        "rows_loaded": 0,
         "indexed": 0,
         "deleted": 0,
         "skipped_unchanged": 0,
@@ -14346,7 +14493,26 @@ def sync_search_index(
         "errors": [],
         "embedding_batch_size": _search_index_embedding_batch_size(),
         "embedding_batches": 0,
+        "hydrated_body_chars": 0,
+        "truncated_body_chars": 0,
+        "vespa_feed_count": 0,
+        "vespa_feed_latency_ms_total": 0.0,
+        "vespa_feed_latency_ms_max": 0.0,
+        "rss_bytes_before": _current_process_rss_bytes(),
+        "rss_bytes_after": None,
+        "more_pending": False,
+        "continuation_remaining": 0,
     }
+
+    def finish_result() -> dict[str, Any]:
+        loaded = int(result.get("rows_loaded") or 0)
+        remaining = max(0, row_limit - loaded)
+        result["continuation_remaining"] = remaining if loaded >= resolved_page_size else 0
+        result["more_pending"] = bool(result["continuation_remaining"] and int(result.get("failed") or 0) == 0)
+        result["rss_bytes_after"] = _current_process_rss_bytes()
+        result["errors"] = list(dict.fromkeys(result["errors"]))[:20]
+        return result
+
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -14354,8 +14520,9 @@ def sync_search_index(
                 cur,
                 owner_class=normalized_class,
                 root_name=root_name,
-                limit=row_limit,
+                limit=resolved_page_size,
             )
+            result["rows_loaded"] += len(stale_records)
             for record in stale_records:
                 try:
                     vespa.delete(str(record["vespa_document_id"]))
@@ -14367,9 +14534,9 @@ def sync_search_index(
                 _mark_search_index_record_deleted(cur, record=record)
                 result["deleted"] += 1
 
-            remaining = max(0, row_limit - len(stale_records))
+            remaining = max(0, resolved_page_size - len(stale_records))
             if remaining == 0:
-                return result
+                return finish_result()
             rows = _fetch_search_index_rows(
                 cur,
                 owner_class=normalized_class,
@@ -14378,6 +14545,9 @@ def sync_search_index(
                 embedding_model=SNOWFLAKE_EMBEDDING_MODEL,
             )
             result["requested"] = len(rows)
+            result["rows_loaded"] += len(rows)
+            result["hydrated_body_chars"] += sum(int(row.get("search_index_hydrated_body_chars") or 0) for row in rows)
+            result["truncated_body_chars"] += sum(int(row.get("search_index_truncated_chars") or 0) for row in rows)
             pending = [
                 row
                 for row in rows
@@ -14392,10 +14562,14 @@ def sync_search_index(
                     row=row,
                     status="syncing",
                     last_error=None,
-                    metadata={"sync_reason": "search_index_sync"},
+                    metadata={
+                        "sync_reason": "search_index_sync",
+                        "search_index_text_max_chars": _search_index_text_max_chars(),
+                        "body_truncated_chars": int(row.get("search_index_truncated_chars") or 0),
+                    },
                 )
             if not pending:
-                return result
+                return finish_result()
 
             batch_size = int(result["embedding_batch_size"])
             for offset in range(0, len(pending), batch_size):
@@ -14427,7 +14601,7 @@ def sync_search_index(
                         )
                     result["failed"] += len(remaining_rows)
                     result["errors"].append(str(exc)[:300])
-                    return result
+                    return finish_result()
 
                 for row, embedding in zip(batch_rows, embeddings):
                     row = {
@@ -14438,6 +14612,7 @@ def sync_search_index(
                         "source_hash": str(embedding.metadata.get("source_hash") or row["source_hash"]),
                     }
                     try:
+                        feed_started = time.perf_counter()
                         vespa.feed(build_vespa_document(row))
                     except Exception as exc:
                         result["failed"] += 1
@@ -14450,16 +14625,24 @@ def sync_search_index(
                             metadata={"failed_stage": "feed"},
                         )
                         continue
+                    latency_ms = (time.perf_counter() - feed_started) * 1000
+                    result["vespa_feed_count"] += 1
+                    result["vespa_feed_latency_ms_total"] = round(float(result["vespa_feed_latency_ms_total"]) + latency_ms, 3)
+                    result["vespa_feed_latency_ms_max"] = round(max(float(result["vespa_feed_latency_ms_max"]), latency_ms), 3)
                     _upsert_search_index_record(
                         cur,
                         row=row,
                         status="indexed",
                         last_error=None,
-                        metadata={"rank_profile": "hybrid", "source": "search_index_sync"},
+                        metadata={
+                            "rank_profile": "hybrid",
+                            "source": "search_index_sync",
+                            "search_index_text_max_chars": _search_index_text_max_chars(),
+                            "body_truncated_chars": int(row.get("search_index_truncated_chars") or 0),
+                        },
                     )
                     result["indexed"] += 1
-    result["errors"] = list(dict.fromkeys(result["errors"]))[:20]
-    return result
+    return finish_result()
 
 
 def _fetch_search_index_rows(
@@ -14470,7 +14653,7 @@ def _fetch_search_index_rows(
     limit: int,
     embedding_model: str,
 ) -> list[dict[str, Any]]:
-    row_limit = max(1, min(int(limit or 100), 5000))
+    row_limit = _search_index_fetch_limit(limit)
     classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
     rows: list[dict[str, Any]] = []
     class_limits = _fair_class_limits(classes, row_limit) if owner_class == "all" else {classes[0]: row_limit}
@@ -14533,14 +14716,15 @@ def _fetch_corpus_search_index_rows(
                  c.id
         LIMIT %s
         """,
-        (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
+        (embedding_model, *root_params, _search_index_fetch_limit(limit)),
     )
     items: list[dict[str, Any]] = []
     for owner_id, asset_id, row_root_id, row_root_name, title, body, source_path, file_kind, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
         item_metadata = metadata if isinstance(metadata, dict) else {}
         hydrated_body = mail_content_store.hydrate_chunk_body({"body": body, "metadata": item_metadata})
+        bounded_body, hydrated_body_chars, truncated_body_chars = _bounded_search_index_body(hydrated_body)
         symbols = _search_index_symbols(item_metadata)
-        text = _search_index_text(title=title, body=hydrated_body, source_path=source_path, symbols=symbols)
+        text = _search_index_text(title=title, body=bounded_body, source_path=source_path, symbols=symbols)
         items.append(
             {
                 "vespa_document_id": vespa_document_id("asset_chunks", str(owner_id)),
@@ -14550,7 +14734,7 @@ def _fetch_corpus_search_index_rows(
                 "root_id": str(row_root_id or ""),
                 "root_name": str(row_root_name or ""),
                 "title": str(title or ""),
-                "body": hydrated_body,
+                "body": bounded_body,
                 "source_path": str(source_path or ""),
                 "symbols": symbols,
                 "language": _search_index_language(item_metadata),
@@ -14565,6 +14749,8 @@ def _fetch_corpus_search_index_rows(
                 "existing_source_hash": existing_hash,
                 "existing_index_status": existing_status,
                 "existing_embedding_model": existing_model,
+                "search_index_hydrated_body_chars": hydrated_body_chars,
+                "search_index_truncated_chars": truncated_body_chars,
             }
         )
     return items
@@ -14601,14 +14787,15 @@ def _fetch_episode_search_index_rows(
                  e.id
         LIMIT %s
         """,
-        (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
+        (embedding_model, *root_params, _search_index_fetch_limit(limit)),
     )
     items: list[dict[str, Any]] = []
     for owner_id, title, summary, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
         item_metadata = metadata if isinstance(metadata, dict) else {}
         symbols = _search_index_symbols(item_metadata)
         source_path = str(item_metadata.get("source_path") or item_metadata.get("source") or "")
-        text = _search_index_text(title=title, body=summary, source_path=source_path, symbols=symbols)
+        bounded_body, hydrated_body_chars, truncated_body_chars = _bounded_search_index_body(summary)
+        text = _search_index_text(title=title, body=bounded_body, source_path=source_path, symbols=symbols)
         items.append(
             {
                 "vespa_document_id": vespa_document_id("episodes", str(owner_id)),
@@ -14617,7 +14804,7 @@ def _fetch_episode_search_index_rows(
                 "root_id": str(item_metadata.get("root_id") or ""),
                 "root_name": str(item_metadata.get("root_name") or ""),
                 "title": str(title or ""),
-                "body": str(summary or ""),
+                "body": bounded_body,
                 "source_path": source_path,
                 "symbols": symbols,
                 "language": _search_index_language(item_metadata),
@@ -14632,6 +14819,8 @@ def _fetch_episode_search_index_rows(
                 "existing_source_hash": existing_hash,
                 "existing_index_status": existing_status,
                 "existing_embedding_model": existing_model,
+                "search_index_hydrated_body_chars": hydrated_body_chars,
+                "search_index_truncated_chars": truncated_body_chars,
             }
         )
     return items
@@ -14671,14 +14860,15 @@ def _fetch_claim_search_index_rows(
                  c.id
         LIMIT %s
         """,
-        (embedding_model, *root_params, max(1, min(int(limit or 100), 5000))),
+        (embedding_model, *root_params, _search_index_fetch_limit(limit)),
     )
     items: list[dict[str, Any]] = []
     for owner_id, title, object_text, lifecycle_state, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
         item_metadata = metadata if isinstance(metadata, dict) else {}
         symbols = _search_index_symbols(item_metadata)
         source_path = str(item_metadata.get("source_path") or item_metadata.get("source") or "")
-        text = _search_index_text(title=title, body=object_text, source_path=source_path, symbols=symbols)
+        bounded_body, hydrated_body_chars, truncated_body_chars = _bounded_search_index_body(object_text)
+        text = _search_index_text(title=title, body=bounded_body, source_path=source_path, symbols=symbols)
         items.append(
             {
                 "vespa_document_id": vespa_document_id("claims", str(owner_id)),
@@ -14687,7 +14877,7 @@ def _fetch_claim_search_index_rows(
                 "root_id": str(item_metadata.get("root_id") or ""),
                 "root_name": str(item_metadata.get("root_name") or ""),
                 "title": str(title or ""),
-                "body": str(object_text or ""),
+                "body": bounded_body,
                 "source_path": source_path,
                 "symbols": symbols,
                 "language": _search_index_language(item_metadata),
@@ -14702,6 +14892,8 @@ def _fetch_claim_search_index_rows(
                 "existing_source_hash": existing_hash,
                 "existing_index_status": existing_status,
                 "existing_embedding_model": existing_model,
+                "search_index_hydrated_body_chars": hydrated_body_chars,
+                "search_index_truncated_chars": truncated_body_chars,
             }
         )
     return items
@@ -14714,7 +14906,7 @@ def _fetch_stale_search_index_records(
     root_name: str | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    row_limit = max(1, min(int(limit or 100), 5000))
+    row_limit = _search_index_fetch_limit(limit)
     classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
     rows: list[dict[str, Any]] = []
     class_limits = _fair_class_limits(classes, row_limit) if owner_class == "all" else {classes[0]: row_limit}
@@ -14754,7 +14946,7 @@ def _fetch_stale_corpus_search_index_records(cur: Any, *, root_name: str | None,
         ORDER BY rec.updated_at
         LIMIT %s
         """,
-        (*root_params, max(1, min(int(limit or 100), 5000))),
+        (*root_params, _search_index_fetch_limit(limit)),
     )
     return [_search_index_record_row(row) for row in cur.fetchall()]
 
@@ -14774,7 +14966,7 @@ def _fetch_stale_episode_search_index_records(cur: Any, *, root_name: str | None
         ORDER BY rec.updated_at
         LIMIT %s
         """,
-        (*root_params, max(1, min(int(limit or 100), 5000))),
+        (*root_params, _search_index_fetch_limit(limit)),
     )
     return [_search_index_record_row(row) for row in cur.fetchall()]
 
@@ -14798,7 +14990,7 @@ def _fetch_stale_claim_search_index_records(cur: Any, *, root_name: str | None, 
         ORDER BY rec.updated_at
         LIMIT %s
         """,
-        (*root_params, max(1, min(int(limit or 100), 5000))),
+        (*root_params, _search_index_fetch_limit(limit)),
     )
     return [_search_index_record_row(row) for row in cur.fetchall()]
 

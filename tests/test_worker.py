@@ -781,6 +781,72 @@ def test_search_index_sync_gpu_lease_timeout_is_retryable(monkeypatch):
     }
 
 
+def test_search_index_sync_worker_enqueues_continuation_after_success(monkeypatch):
+    continuation_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        database,
+        "sync_search_index",
+        lambda **kwargs: {
+            "search_engine": "vespa",
+            "requested": 100,
+            "indexed": 100,
+            "deleted": 0,
+            "skipped_unchanged": 0,
+            "failed": 0,
+            "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+            "embedding_dimensions": 1024,
+            "embedding_batch_size": 16,
+            "embedding_batches": 7,
+            "model_generation": "snowflake-qwen-paddleocr-v1",
+            "more_pending": True,
+            "continuation_remaining": 150,
+            "page_size": 100,
+            "page_sequence": 0,
+            "rows_loaded": 100,
+            "hydrated_body_chars": 2048,
+            "truncated_body_chars": 128,
+            **kwargs,
+        },
+    )
+    monkeypatch.setattr(
+        database,
+        "enqueue_search_index_sync_continuation",
+        lambda **kwargs: continuation_calls.append(kwargs)
+        or {"queued": 1, "job_id": "job-search-next", "deduped": False, "reused": False, **kwargs},
+        raising=False,
+    )
+
+    result = worker.process_search_index_sync_job(
+        {
+            "id": "job-search-current",
+            "payload": {
+                "owner_class": "corpus",
+                "root_name": "docs",
+                "limit": 250,
+                "page_size": 100,
+                "page_sequence": 0,
+            },
+        }
+    )
+
+    assert result.status == "indexed"
+    assert continuation_calls == [
+        {
+            "owner_class": "corpus",
+            "root_name": "docs",
+            "limit": 150,
+            "page_size": 100,
+            "continuation_of": "job-search-current",
+            "page_sequence": 1,
+        }
+    ]
+    assert result.telemetry["search_index_continuation_queued"] == 1
+    assert result.telemetry["search_index_continuation_remaining"] == 150
+    assert result.telemetry["search_index_rows_loaded"] == 100
+    assert result.telemetry["search_index_truncated_body_chars"] == 128
+
+
 def test_backfill_retries_gpu_busy_result_without_terminal_failure(monkeypatch):
     calls = {"retried": [], "blocked": [], "completed": [], "repaired": [], "cleared_errors": []}
 

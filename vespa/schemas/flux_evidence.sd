@@ -69,7 +69,7 @@ schema flux_evidence {
             index {
                 hnsw {
                     max-links-per-node: 16
-                    neighbors-to-explore-at-insert: 200
+                    neighbors-to-explore-at-insert: 64
                 }
             }
         }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
@@ -13,6 +14,8 @@ SNOWFLAKE_EMBEDDING_DIMENSIONS = 1024
 DEFAULT_VESPA_BASE_URL = "http://127.0.0.1:8080"
 VESPA_SCHEMA = "flux_evidence"
 VESPA_NAMESPACE = "flux"
+DEFAULT_SEARCH_INDEX_TEXT_MAX_CHARS = 12000
+MAX_SEARCH_INDEX_TEXT_MAX_CHARS = 200000
 
 
 def vespa_document_id(owner_table: str, owner_id: str) -> str:
@@ -32,6 +35,20 @@ def _vespa_text(value: Any) -> str:
         char if char in {"\t", "\n", "\r"} or ord(char) >= 0x20 and ord(char) != 0x7F else " "
         for char in text
     )
+
+
+def _search_index_text_max_chars() -> int:
+    raw_value = os.environ.get("FLUX_KB_SEARCH_INDEX_TEXT_MAX_CHARS")
+    try:
+        value = int(raw_value) if raw_value is not None else DEFAULT_SEARCH_INDEX_TEXT_MAX_CHARS
+    except (TypeError, ValueError):
+        value = DEFAULT_SEARCH_INDEX_TEXT_MAX_CHARS
+    return max(1, min(value, MAX_SEARCH_INDEX_TEXT_MAX_CHARS))
+
+
+def _bounded_vespa_text(value: Any) -> str:
+    text = _vespa_text(value)
+    return text[: _search_index_text_max_chars()]
 
 
 def _vespa_filter_values(values: Iterable[str] | None) -> list[str]:
@@ -270,7 +287,7 @@ def build_vespa_document(row: dict[str, Any]) -> dict[str, Any]:
         "root_id": _vespa_text(row.get("root_id")),
         "root_name": _vespa_text(row.get("root_name")),
         "title": _vespa_text(row.get("title")),
-        "body": _vespa_text(row.get("body")),
+        "body": _bounded_vespa_text(row.get("body")),
         "source_path": _vespa_text(row.get("source_path")),
         "symbols": [_vespa_text(symbol) for symbol in list(row.get("symbols") or [])],
         "language": _vespa_text(row.get("language")),
