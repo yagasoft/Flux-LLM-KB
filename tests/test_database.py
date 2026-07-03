@@ -449,7 +449,46 @@ def test_complete_corpus_job_records_duration_and_telemetry(monkeypatch):
     assert "WHEN job_type = 'search_index_sync'" in sql
     assert "- 'search_index_errors'" in sql
     assert "AND status = 'running'" in sql
-    assert params == (42, json.dumps({"family": "media"}, sort_keys=True), "job-1")
+    assert params == (42, json.dumps({"family": "media", "progress_label": "Completed"}, sort_keys=True), "job-1")
+
+
+def test_complete_corpus_job_adds_terminal_progress_label(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.complete_corpus_job(job_id="job-1", duration_ms=42, telemetry={"result_status": "indexed"})
+
+    _, params = executed[0]
+    assert params == (
+        42,
+        json.dumps({"progress_label": "Indexed", "result_status": "indexed"}, sort_keys=True),
+        "job-1",
+    )
 
 
 def test_complete_search_index_sync_job_clears_stale_failure_telemetry_on_success(monkeypatch):
@@ -503,7 +542,7 @@ def test_complete_search_index_sync_job_clears_stale_failure_telemetry_on_succes
     assert "END || %s::jsonb" in sql
     assert params == (
         25,
-        json.dumps({"result_status": "indexed", "search_index_failed": 0}, sort_keys=True),
+        json.dumps({"progress_label": "Indexed", "result_status": "indexed", "search_index_failed": 0}, sort_keys=True),
         "job-search",
     )
 
@@ -3280,6 +3319,49 @@ def test_list_capture_jobs_falls_back_to_default_sort_for_invalid_values(monkeyp
     sql, params = executed[0]
     assert "DROP TABLE" not in sql
     assert "ORDER BY updated_at DESC, id DESC" in sql
+    assert params == (50, 0)
+
+
+def test_list_capture_jobs_progress_sort_prefers_terminal_result_over_stale_stage(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    database.list_capture_jobs(sort_by="progress", sort_dir="asc")
+
+    sql, params = executed[0]
+    assert "WHEN status = 'completed'" in sql
+    assert "WHEN status = 'obsolete'" in sql
+    assert "telemetry->>'result_status'" in sql
+    assert "telemetry->>'stage'" in sql
+    assert "ORDER BY CASE" in sql
     assert params == (50, 0)
 
 

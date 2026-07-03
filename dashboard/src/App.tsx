@@ -5702,6 +5702,7 @@ function JobQueueTable({
             const obsoleteCorpusJob = status === "obsolete";
             const deletionMarkableCorpusJob = isDeletionMarkableCorpusJob(job, status);
             const deletionRestorableCorpusJob = isDeletionRestorableCorpusJob(job, status);
+            const nonRestorableObsoleteReason = obsoleteCorpusJob && !deletionRestorableCorpusJob ? obsoleteJobReasonLabel(job) : undefined;
             const showDeletionMarker = deletionRequested && !obsoleteCorpusJob;
             const targetActionable = isActionableJobTarget(job, payload, target);
             const progress = jobProgressSummary(job);
@@ -5793,6 +5794,7 @@ function JobQueueTable({
                         <RotateCcw size={15} /> Restore
                       </button>
                     ) : null}
+                    {nonRestorableObsoleteReason ? <span className="state-pill warning">{nonRestorableObsoleteReason}</span> : null}
                     {showDeletionMarker ? <span className="state-pill warning">Marked for deletion</span> : null}
                     <button
                       className="row-button"
@@ -5853,6 +5855,8 @@ function JobDetailRow({
     ["Files seen", stringFromUnknown(telemetry.files_seen) ?? numberFromUnknown(telemetry.files_seen)?.toString()],
     ["Files changed", stringFromUnknown(telemetry.files_changed) ?? numberFromUnknown(telemetry.files_changed)?.toString()],
     ["Jobs queued", stringFromUnknown(telemetry.jobs_queued) ?? numberFromUnknown(telemetry.jobs_queued)?.toString()],
+    ["Previous status", statusLabel(stringFromUnknown(telemetry.obsolete_previous_status) ?? "")],
+    ["Obsolete reason", obsoleteReasonDetailLabel(telemetry)],
     ["Delete requested", formatDate(stringFromUnknown(job.delete_requested_at))],
     ["Delete requested by", stringFromUnknown(job.delete_requested_by)],
     ["Delete reason", stringFromUnknown(job.delete_reason)],
@@ -5976,6 +5980,8 @@ function jobProgressSummary(job: Record<string, unknown>) {
   const telemetry = jobTelemetry(job);
   const explicit = stringFromUnknown(telemetry.progress_label);
   if (explicit) return explicit;
+  const terminal = terminalJobProgressLabel(job, telemetry);
+  if (terminal) return terminal;
   const parts = [
     countProgressSummary(telemetry.paths_done, telemetry.paths_total, "Paths"),
     stageProgressSummary(telemetry),
@@ -5986,6 +5992,37 @@ function jobProgressSummary(job: Record<string, unknown>) {
   if (percent !== undefined) return `${percent}%`;
   const stage = stringFromUnknown(telemetry.stage);
   return stage ? humanizeIdentifier(stage) : "-";
+}
+
+function terminalJobProgressLabel(job: Record<string, unknown>, telemetry: Record<string, unknown>) {
+  const status = stringFromUnknown(job.status) ?? "";
+  const resultStatus = stringFromUnknown(telemetry.result_status);
+  if (status === "completed") {
+    return resultStatus ? statusLabel(resultStatus) : "Completed";
+  }
+  if (status === "obsolete") {
+    return obsoleteJobReasonLabel(job) ?? "Obsolete";
+  }
+  return undefined;
+}
+
+function obsoleteJobReasonLabel(job: Record<string, unknown>) {
+  const telemetry = jobTelemetry(job);
+  const reason = stringFromUnknown(telemetry.obsolete_reason);
+  if (reason === "maintenance_reprocess_derived_state") return "Maintenance obsolete";
+  return undefined;
+}
+
+function obsoleteReasonDetailLabel(telemetry: Record<string, unknown>) {
+  const reason = stringFromUnknown(telemetry.obsolete_reason);
+  if (!reason) return undefined;
+  if (reason === "maintenance_reprocess_derived_state") return "Maintenance reprocess derived state";
+  return sentenceLabel(reason);
+}
+
+function sentenceLabel(value: string) {
+  const label = humanizeIdentifier(value);
+  return label ? `${label.charAt(0).toUpperCase()}${label.slice(1).toLowerCase()}` : "";
 }
 
 function stageProgressSummary(telemetry: Record<string, unknown>) {

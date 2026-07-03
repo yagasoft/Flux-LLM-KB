@@ -3743,6 +3743,28 @@ def _capture_job_delete_markable(status: str) -> bool:
     return status in {"completed", "failed"} or status.startswith("blocked_") or status.startswith("cancelled_")
 
 
+def _capture_job_terminal_progress_label(telemetry: dict[str, Any]) -> str:
+    result_status = str(telemetry.get("result_status") or "").strip().lower()
+    if result_status == "indexed":
+        return "Indexed"
+    if result_status == "metadata_only":
+        return "Metadata only"
+    if result_status == "staged":
+        return "Staged"
+    if result_status == "obsolete":
+        return "Obsolete"
+    if result_status:
+        return result_status.replace("_", " ").capitalize()
+    return "Completed"
+
+
+def _terminal_capture_job_telemetry(telemetry: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(telemetry or {})
+    if not str(normalized.get("progress_label") or "").strip():
+        normalized["progress_label"] = _capture_job_terminal_progress_label(normalized)
+    return normalized
+
+
 _CAPTURE_JOB_SORT_SQL = {
     "status": "status",
     "job_type": "job_type",
@@ -3750,7 +3772,11 @@ _CAPTURE_JOB_SORT_SQL = {
     "root": "COALESCE(payload->>'root_name', '')",
     "attempts": "attempts",
     "updated": "updated_at",
-    "progress": "COALESCE(telemetry->>'progress_label', telemetry->>'stage', telemetry->>'progress_percent', '')",
+    "progress": """CASE
+        WHEN status = 'completed' THEN COALESCE(telemetry->>'progress_label', telemetry->>'result_status', status)
+        WHEN status = 'obsolete' THEN COALESCE(telemetry->>'progress_label', telemetry->>'obsolete_reason', telemetry->>'result_status', status)
+        ELSE COALESCE(telemetry->>'progress_label', telemetry->>'stage', telemetry->>'progress_percent', '')
+    END""",
     "last_error": "COALESCE(last_error, '')",
 }
 
@@ -5023,6 +5049,7 @@ def complete_corpus_job(
     telemetry: dict[str, Any] | None = None,
     url: str | None = None,
 ) -> None:
+    terminal_telemetry = _terminal_capture_job_telemetry(telemetry)
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
@@ -5054,7 +5081,7 @@ def complete_corpus_job(
                   AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                   AND status = 'running'
                 """,
-                (duration_ms, _json(telemetry or {}), job_id),
+                (duration_ms, _json(terminal_telemetry), job_id),
             )
 
 

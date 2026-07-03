@@ -2440,7 +2440,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByRole("button", { name: "Restore deletion mark for corpus job job-marked" })).toBeInTheDocument();
     expect(screen.getByText("Blocked by policy")).toBeInTheDocument();
     expect(screen.getByText("Invalid source")).toBeInTheDocument();
-    expect(screen.getByText("Obsolete")).toBeInTheDocument();
+    expect(screen.getAllByText("Obsolete").length).toBeGreaterThanOrEqual(1);
 
     await user.click(screen.getByRole("button", { name: "Mark corpus job job-failed for deletion" }));
 
@@ -2466,6 +2466,52 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("operator_cleanup")).toBeInTheDocument();
   });
 
+  test("job queue explains maintenance-obsolete jobs without offering restore", async () => {
+    const user = userEvent.setup();
+    jobsPayload = {
+      jobs: [
+        {
+          id: "job-maintenance",
+          job_type: "corpus_extract_pdf_ocr_pages",
+          status: "obsolete",
+          payload: { root_name: "docs", path: "docs/scanned.pdf" },
+          attempts: 3,
+          last_error: "Invalid OCR version",
+          updated_at: "2026-07-03T13:11:08+00:00",
+          telemetry: {
+            stage: "queued",
+            result_status: "obsolete",
+            obsolete_previous_status: "failed",
+            obsolete_reason: "maintenance_reprocess_derived_state"
+          }
+        }
+      ],
+      count: 1,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["obsolete"],
+        roots: ["docs"],
+        job_types: ["corpus_extract_pdf_ocr_pages"]
+      }
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    expect((await screen.findAllByText("Maintenance obsolete")).length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole("button", { name: "Restore deletion mark for corpus job job-maintenance" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show details for job job-maintenance" }));
+
+    expect(screen.getByText("Previous status")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Obsolete reason")).toBeInTheDocument();
+    expect(screen.getByText("Maintenance reprocess derived state")).toBeInTheDocument();
+  });
+
   test("job queue distinguishes completed metadata-only corpus jobs", async () => {
     const user = userEvent.setup();
     jobsPayload = {
@@ -2478,6 +2524,7 @@ describe("Flux dashboard", () => {
           attempts: 1,
           updated_at: "2026-07-01T10:04:00+00:00",
           telemetry: {
+            stage: "queued",
             result_status: "metadata_only",
             asr_duration_seconds: 5856,
             asr_segments: 0
@@ -2500,11 +2547,14 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
     expect(await screen.findByText("Completed Metadata Only")).toBeInTheDocument();
+    const table = await screen.findByRole("table", { name: "Extraction jobs" });
+    expect(within(table).getByText("Metadata Only")).toBeInTheDocument();
+    expect(within(table).queryByText("Queued")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Show details for job job-metadata" }));
 
     expect(screen.getByText("Result")).toBeInTheDocument();
-    expect(screen.getByText("Metadata Only")).toBeInTheDocument();
+    expect(screen.getAllByText("Metadata Only").length).toBeGreaterThanOrEqual(2);
   });
 
   test("job queue shows Outlook COM requests and cancel feedback", async () => {
