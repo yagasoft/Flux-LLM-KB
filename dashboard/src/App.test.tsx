@@ -331,6 +331,7 @@ let healthPayload: unknown;
 let crawlPayload: unknown;
 let mailPayload: unknown;
 let jobsPayload: unknown;
+let modelActivityPayload: unknown;
 let crawlSyncErrorPayload: unknown;
 let reviewPayload: unknown;
 let captureReviewPayload: unknown;
@@ -404,6 +405,73 @@ describe("Flux dashboard", () => {
         statuses: ["retrying_locked", "failed", "blocked_missing_dependency", "cancelled_operator"],
         roots: ["docs"],
         job_types: ["corpus_extract_pdf"]
+      }
+    };
+    modelActivityPayload = {
+      window_minutes: 60,
+      active_count: 1,
+      recent_count: 3,
+      last_event_at: "2026-07-03T01:26:06+00:00",
+      service_breakdown: [
+        { service: "model-runner", count: 2, active: 1, failures: 0 },
+        { service: "ollama", count: 1, active: 0, failures: 1 }
+      ],
+      class_breakdown: [
+        { activity_class: "retrieval", count: 2 },
+        { activity_class: "vision_ocr", count: 1 }
+      ],
+      events: [
+        {
+          id: "event-rerank",
+          service: "model-runner",
+          endpoint: "/v1/rerank",
+          action: "rerank",
+          activity_class: "retrieval",
+          caller_surface: "mcp",
+          model: "Qwen/Qwen3-Reranker-4B",
+          status: "completed",
+          started_at: "2026-07-03T01:25:58+00:00",
+          completed_at: "2026-07-03T01:26:00+00:00",
+          duration_ms: 1842,
+          error_class: null,
+          error_message: null
+        },
+        {
+          id: "event-ollama",
+          service: "ollama",
+          endpoint: "/api/generate",
+          action: "vision_generate",
+          activity_class: "vision_ocr",
+          caller_surface: "worker",
+          model: "qwen3-vl:8b",
+          status: "failed",
+          started_at: "2026-07-03T01:24:58+00:00",
+          completed_at: "2026-07-03T01:25:00+00:00",
+          duration_ms: 2042,
+          error_class: "RuntimeError",
+          error_message: "redacted failure"
+        }
+      ],
+      scheduler: {
+        mode: "postgres",
+        running_count: 1,
+        waiting_count: 1,
+        recent_count: 6,
+        rejections: 2,
+        timeouts: 1,
+        evictions_recent_count: 1,
+        last_eviction_at: "2026-07-03T01:20:00+00:00",
+        oldest_wait_age_ms: 20000,
+        last_activity_at: "2026-07-03T01:26:00+00:00",
+        resident_models: [
+          {
+            service: "model-runner",
+            model: "Snowflake/snowflake-arctic-embed-l-v2.0",
+            task_type: "embedding",
+            last_used_at: "2026-07-03T01:26:00+00:00"
+          }
+        ],
+        live_gpu_memory: { available: true, used_mb: 8120, total_mb: 16380 }
       }
     };
     crawlSyncErrorPayload = undefined;
@@ -766,6 +834,7 @@ describe("Flux dashboard", () => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(healthPayload);
       if (url === "/api/dashboard/crawl") return json(crawlPayload);
+      if (url === "/api/dashboard/model-activity") return json(modelActivityPayload);
       if (url.startsWith("/api/dashboard/jobs/") && url.includes("/tool-invocations")) {
         jobToolInvocationRequestUrls.push(url);
         return json(jobToolInvocationPayload);
@@ -1456,6 +1525,30 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("current 1 -> candidate 4")).toBeInTheDocument();
     expect(screen.getAllByText("office").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("3 pending")).toBeInTheDocument();
+  });
+
+  test("performance shows privacy-safe model activity and scheduler metrics", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Performance" }));
+
+    const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("3 recent / 1 active")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("model-runner")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("ollama")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Retrieval")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Vision OCR")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Scheduler")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("1 running / 1 waiting")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("2 rejected / 1 timed out")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("1 recent eviction")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("8120/16380 MB")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Snowflake/snowflake-arctic-embed-l-v2.0")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("/v1/rerank")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("redacted failure")).toBeInTheDocument();
   });
 
   test("retrieval tab owns code diagnostics and code-search quality controls", async () => {
@@ -2605,6 +2698,7 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
     expect(await screen.findByText("No queued extraction jobs.")).toBeInTheDocument();
+    expect(screen.getByText("No active crawl jobs. Recent model activity and GPU scheduler activity were detected. 1 running lease, 1 waiting request.")).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Extraction jobs" })).not.toBeInTheDocument();
   });
 

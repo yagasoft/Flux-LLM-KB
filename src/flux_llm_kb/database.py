@@ -14902,6 +14902,192 @@ def _find_canonical_asset_id(cur: Any, content_hash: str | None, current_id: str
     return row[0] if row else None
 
 
+_MODEL_ACTIVITY_STATUSES = {"running", "completed", "failed", "busy", "stale_running"}
+_MODEL_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "model_loading"}
+_MODEL_ACTIVITY_METADATA_KEYS = {
+    "batch_size",
+    "dimensions",
+    "document",
+    "duration_hint_ms",
+    "input_count",
+    "keep_alive",
+    "passage_count",
+    "quantization",
+}
+
+
+def start_model_activity_event(
+    *,
+    service: str,
+    endpoint: str = "",
+    action: str = "",
+    activity_class: str = "sidecar",
+    caller_surface: str = "",
+    model: str = "",
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> str:
+    psycopg = _load_psycopg()
+    try:
+        from psycopg.types.json import Jsonb
+    except ImportError:  # pragma: no cover - depends on optional psycopg extras
+        Jsonb = lambda value: _json(value)  # type: ignore[assignment]
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO model_activity_events (
+                    service, endpoint, action, activity_class, caller_surface,
+                    model, status, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, 'running', %s)
+                RETURNING id::text
+                """,
+                (
+                    _model_activity_text(service, fallback="unknown", max_length=80),
+                    _model_activity_text(endpoint, max_length=120),
+                    _model_activity_text(action, max_length=80),
+                    _model_activity_class(activity_class),
+                    _model_activity_text(caller_surface, max_length=40),
+                    _model_activity_text(model, max_length=200),
+                    Jsonb(_sanitize_model_activity_metadata(metadata or {})),
+                ),
+            )
+            row = cur.fetchone()
+            return str(row[0])
+
+
+def finish_model_activity_event(
+    *,
+    event_id: str,
+    status: str,
+    duration_ms: int | None = None,
+    error_class: str | None = None,
+    error_message: str | None = None,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE model_activity_events
+                   SET status = %s,
+                       completed_at = CASE WHEN %s = 'running' THEN completed_at ELSE now() END,
+                       duration_ms = %s,
+                       error_class = %s,
+                       error_message = %s
+                 WHERE id = %s
+                """,
+                (
+                    _model_activity_status(status),
+                    _model_activity_status(status),
+                    max(0, int(duration_ms)) if duration_ms is not None else None,
+                    _model_activity_text(error_class, max_length=120) or None,
+                    _model_activity_text(error_message, max_length=300) or None,
+                    event_id,
+                ),
+            )
+
+
+def list_model_activity_events(
+    *,
+    window_minutes: int = 60,
+    limit: int = 50,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_window = max(5, min(int(window_minutes or 60), 360))
+    safe_limit = max(1, min(int(limit or 50), 200))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, service, endpoint, action, activity_class, caller_surface,
+                       model, status, started_at, completed_at, duration_ms,
+                       error_class, error_message, metadata
+                  FROM model_activity_events
+                 WHERE started_at >= now() - (%s * interval '1 minute')
+                    OR status = 'running'
+                 ORDER BY started_at DESC
+                 LIMIT %s
+                """,
+                (safe_window, safe_limit),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "service": row[1],
+                    "endpoint": row[2],
+                    "action": row[3],
+                    "activity_class": row[4],
+                    "caller_surface": row[5],
+                    "model": row[6],
+                    "status": row[7],
+                    "started_at": row[8],
+                    "completed_at": row[9],
+                    "duration_ms": row[10],
+                    "error_class": row[11],
+                    "error_message": row[12],
+                    "metadata": _sanitize_model_activity_metadata(row[13] or {}),
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def prune_model_activity_events(*, retention_hours: int = 24, url: str | None = None) -> None:
+    safe_retention = max(1, min(int(retention_hours or 24), 168))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM model_activity_events
+                 WHERE started_at < now() - (%s * interval '1 hour')
+                """,
+                (safe_retention,),
+            )
+
+
+def _model_activity_status(value: str | None) -> str:
+    normalized = str(value or "running").strip().lower()
+    return normalized if normalized in _MODEL_ACTIVITY_STATUSES else "failed"
+
+
+def _model_activity_class(value: str | None) -> str:
+    normalized = str(value or "sidecar").strip().lower()
+    return normalized if normalized in _MODEL_ACTIVITY_CLASSES else "sidecar"
+
+
+def _model_activity_text(value: Any, *, fallback: str = "", max_length: int) -> str:
+    text = str(value or fallback).strip()
+    return text[:max_length]
+
+
+def _sanitize_model_activity_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    sanitized: dict[str, Any] = {}
+    for key, item in dict(value or {}).items():
+        key_text = str(key)
+        if key_text not in _MODEL_ACTIVITY_METADATA_KEYS:
+            continue
+        safe = _sanitize_model_activity_value(item)
+        if safe is not None:
+            sanitized[key_text] = safe
+    return sanitized
+
+
+def _sanitize_model_activity_value(value: Any) -> Any:
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, str):
+        return value[:120]
+    return None
+
+
 def _load_psycopg():
     try:
         import psycopg

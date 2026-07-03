@@ -65,6 +65,7 @@ from .crawler import (
     classify_file,
 )
 from .onnxruntime_logging import configure_onnxruntime_logging
+from .model_activity import record_model_activity
 from .processes import run_no_window
 from .redaction import redact_text
 from .text_safety import decode_text_bytes, read_text_with_bom
@@ -5794,9 +5795,18 @@ def _vision_with_ollama_compatible(
 
         profile = task_profile("ollama_vision", model_id=model, component="worker")
         scheduler = get_gpu_scheduler()
-        with scheduler.acquire(profile):
-            response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
-            raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+        with record_model_activity(
+            service="ollama",
+            endpoint="/api/generate",
+            action="vision_generate",
+            activity_class="vision_ocr",
+            caller_surface="worker",
+            model=model,
+            metadata={"keep_alive": bool(keep_alive)},
+        ):
+            with scheduler.acquire(profile):
+                response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
+                raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
         decoded = json.loads(raw or "{}")
         try:
             scheduler.record_model_residency(

@@ -30,6 +30,7 @@ from .health import (
     collect_retrieval_payload,
     doctor_payload,
 )
+from .model_activity import bounded_limit, bounded_window_minutes, caller_surface, collect_model_activity_payload
 from .service import KnowledgeService, normalize_retrieval_filters
 
 
@@ -630,6 +631,13 @@ def create_app():
     def dashboard_crawl():
         return collect_crawl_payload()
 
+    @app.get("/api/dashboard/model-activity")
+    def dashboard_model_activity(window_minutes: int = 60, limit: int = 50):
+        return collect_model_activity_payload(
+            window_minutes=bounded_window_minutes(window_minutes),
+            limit=bounded_limit(limit),
+        )
+
     @app.get("/api/dashboard/jobs")
     def dashboard_jobs(
         limit: int = 50,
@@ -727,7 +735,8 @@ def create_app():
             scope_mode=request.scope_mode,
             filters=_filters_from_body(request.filters),
         )
-        return service.search(request.query, **kwargs)
+        with caller_surface("api"):
+            return service.search(request.query, **kwargs)
 
     @app.get("/api/search")
     def search_get(
@@ -760,7 +769,8 @@ def create_app():
             include_generated=include_generated,
         )
         kwargs = _service_retrieval_kwargs(limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
-        return service.search(query, **kwargs)
+        with caller_surface("api"):
+            return service.search(query, **kwargs)
 
     @app.post("/api/brief")
     def brief(request: BriefRequest = Body(...)):
@@ -771,7 +781,8 @@ def create_app():
             scope_mode=request.scope_mode,
             filters=_filters_from_body(request.filters),
         )
-        return {"brief": service.brief(request.query, **kwargs)}
+        with caller_surface("api"):
+            return {"brief": service.brief(request.query, **kwargs)}
 
     @app.get("/api/brief")
     def brief_get(
@@ -792,7 +803,8 @@ def create_app():
             include_suppressed=include_suppressed,
         )
         kwargs = _service_retrieval_kwargs(token_budget=token_budget, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
-        return {"brief": service.brief(query, **kwargs)}
+        with caller_surface("api"):
+            return {"brief": service.brief(query, **kwargs)}
 
     @app.post("/api/explain")
     def explain(request: ExplainRequest = Body(...)):
@@ -804,7 +816,8 @@ def create_app():
             scope_mode=request.scope_mode,
             filters=_filters_from_body(request.filters),
         )
-        return service.explain(request.query, **kwargs)
+        with caller_surface("api"):
+            return service.explain(request.query, **kwargs)
 
     @app.get("/api/explain")
     def explain_get(
@@ -833,7 +846,8 @@ def create_app():
             scope_mode=scope_mode,
             filters=filters,
         )
-        return service.explain(query, **kwargs)
+        with caller_surface("api"):
+            return service.explain(query, **kwargs)
 
     @app.post("/api/retrieval/benchmarks/run")
     def retrieval_benchmark_run(request: RetrievalBenchmarkRunRequest = Body(...)):

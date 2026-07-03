@@ -450,6 +450,54 @@ def test_acceleration_status_route_is_exposed(monkeypatch):
     assert payload["worker_families"][0]["ocr_cache_misses"] == 1
 
 
+def test_dashboard_model_activity_route_is_bounded_and_safe(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    def fake_collect_model_activity_payload(**kwargs):
+        calls.append(kwargs)
+        return {
+            "window_minutes": kwargs["window_minutes"],
+            "active_count": 1,
+            "recent_count": 2,
+            "last_event_at": "2026-07-03T01:26:06+00:00",
+            "service_breakdown": [{"service": "model-runner", "count": 2, "active": 1, "failures": 0}],
+            "class_breakdown": [{"activity_class": "retrieval", "count": 2}],
+            "events": [
+                {
+                    "id": "event-1",
+                    "service": "model-runner",
+                    "endpoint": "/v1/rerank",
+                    "action": "rerank",
+                    "activity_class": "retrieval",
+                    "caller_surface": "mcp",
+                    "model": "Qwen/Qwen3-Reranker-4B",
+                    "status": "completed",
+                    "started_at": "2026-07-03T01:25:58+00:00",
+                    "completed_at": "2026-07-03T01:26:00+00:00",
+                    "duration_ms": 1842,
+                    "error_class": None,
+                    "error_message": None,
+                }
+            ],
+            "scheduler": {"mode": "postgres", "running_count": 1, "waiting_count": 0, "recent_count": 6},
+        }
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+    monkeypatch.setattr("flux_llm_kb.rest_api.collect_model_activity_payload", fake_collect_model_activity_payload)
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.get("/api/dashboard/model-activity", params={"window_minutes": 9999, "limit": 9999})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["window_minutes"] == 360
+    assert payload["events"][0]["endpoint"] == "/v1/rerank"
+    assert payload["scheduler"]["running_count"] == 1
+    assert calls == [{"window_minutes": 360, "limit": 200}]
+
+
 def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .service import KnowledgeService
+from .model_activity import caller_surface
 
 
 def create_server():
@@ -40,32 +41,35 @@ def create_server():
     @mcp.tool(name="kb.search")
     def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Search Flux memory with balanced broad relevance. Broad lookup excludes code results by default; pass filters={"file_kinds":["code"]} alone or use kb.code_search for code."""
-        return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
+        with caller_surface("mcp"):
+            return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
 
     @mcp.tool(name="kb.explain")
     def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Search Flux memory with explanations. Broad explain excludes code results by default; pass filters={"file_kinds":["code"]} alone for code."""
-        return service.explain(
-            query,
-            limit=limit,
-            token_budget=token_budget,
-            cwd=cwd,
-            root_name=root_name,
-            scope_mode=scope_mode,
-            filters=filters,
-        )
+        with caller_surface("mcp"):
+            return service.explain(
+                query,
+                limit=limit,
+                token_budget=token_budget,
+                cwd=cwd,
+                root_name=root_name,
+                scope_mode=scope_mode,
+                filters=filters,
+            )
 
     @mcp.tool(name="kb.brief")
     def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Build a compact brief from balanced search. Broad briefs exclude code results by default; pass filters={"file_kinds":["code"]} alone for code-specific briefs."""
-        return service.brief(
-            query,
-            token_budget=token_budget,
-            cwd=cwd,
-            root_name=root_name,
-            scope_mode=scope_mode,
-            filters=filters,
-        )
+        with caller_surface("mcp"):
+            return service.brief(
+                query,
+                token_budget=token_budget,
+                cwd=cwd,
+                root_name=root_name,
+                scope_mode=scope_mode,
+                filters=filters,
+            )
 
     @mcp.tool(name="kb.remember")
     def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None):

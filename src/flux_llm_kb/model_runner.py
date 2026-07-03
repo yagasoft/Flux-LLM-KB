@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from pathlib import Path
 
 from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
+from .model_activity import record_model_activity
 from .onnxruntime_logging import configure_onnxruntime_logging
 
 
@@ -185,13 +186,20 @@ class ModelRunnerClient:
 
     def health(self) -> dict[str, Any]:
         try:
-            with urlopen(f"{self.base_url}/health", timeout=min(self.timeout_seconds, 10)) as response:
-                return json.loads(response.read().decode("utf-8"))
+            with record_model_activity(
+                service="model-runner",
+                endpoint="/health",
+                action="health",
+                activity_class="health",
+            ):
+                with urlopen(f"{self.base_url}/health", timeout=min(self.timeout_seconds, 10)) as response:
+                    return json.loads(response.read().decode("utf-8"))
         except Exception as exc:  # pragma: no cover - environment-specific
             raise ModelRunnerError(str(exc)) from exc
 
     def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return _post_json_to_base_url(self.base_url, path, payload, self.timeout_seconds)
+        with record_model_activity(**_model_runner_activity_kwargs(path, payload)):
+            return _post_json_to_base_url(self.base_url, path, payload, self.timeout_seconds)
 
 
 def _resolve_model_runner_base_url(explicit_base_url: str | None = None) -> str:
@@ -296,7 +304,85 @@ def _proxy_paddle_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     base_url = _paddle_runner_base_url()
     if not base_url:
         raise ModelRunnerError("Paddle runner base URL is not configured")
-    return _post_json_to_base_url(base_url, path, payload, _paddle_runner_timeout_seconds())
+    with record_model_activity(**_paddle_activity_kwargs(path, payload)):
+        return _post_json_to_base_url(base_url, path, payload, _paddle_runner_timeout_seconds())
+
+
+def _model_runner_activity_kwargs(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    endpoint = str(path or "")
+    if endpoint == "/v1/embeddings":
+        return {
+            "service": "model-runner",
+            "endpoint": endpoint,
+            "action": "embedding",
+            "activity_class": "retrieval",
+            "model": str(payload.get("model") or DEFAULT_EMBEDDING_MODEL),
+            "metadata": {
+                "input_count": _payload_item_count(payload, "texts", "input"),
+                "dimensions": int(payload.get("dimensions") or 0),
+            },
+        }
+    if endpoint == "/v1/rerank":
+        return {
+            "service": "model-runner",
+            "endpoint": endpoint,
+            "action": "rerank",
+            "activity_class": "retrieval",
+            "model": str(payload.get("model") or DEFAULT_RERANKER_MODEL),
+            "metadata": {
+                "passage_count": _payload_item_count(payload, "passages"),
+                "quantization": str(payload.get("quantization") or DEFAULT_RERANKER_QUANTIZATION),
+            },
+        }
+    if endpoint == "/v1/ocr/document":
+        return {
+            "service": "model-runner",
+            "endpoint": endpoint,
+            "action": "ocr_document",
+            "activity_class": "vision_ocr",
+            "model": str(payload.get("model") or DEFAULT_OCR_DOCUMENT_MODEL),
+            "metadata": {"document": True},
+        }
+    if endpoint == "/v1/ocr/image":
+        return {
+            "service": "model-runner",
+            "endpoint": endpoint,
+            "action": "ocr_image",
+            "activity_class": "vision_ocr",
+            "model": str(payload.get("model") or DEFAULT_OCR_SIMPLE_MODEL),
+            "metadata": {"document": False},
+        }
+    return {
+        "service": "model-runner",
+        "endpoint": endpoint,
+        "action": "request",
+        "activity_class": "sidecar",
+        "model": str(payload.get("model") or ""),
+        "metadata": {},
+    }
+
+
+def _paddle_activity_kwargs(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    endpoint = str(path or "")
+    document = endpoint.endswith("/document")
+    return {
+        "service": "paddle-runner",
+        "endpoint": endpoint,
+        "action": "ocr_document" if document else "ocr_image",
+        "activity_class": "vision_ocr",
+        "model": str(payload.get("model") or (DEFAULT_OCR_DOCUMENT_MODEL if document else DEFAULT_OCR_SIMPLE_MODEL)),
+        "metadata": {"document": document},
+    }
+
+
+def _payload_item_count(payload: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, str):
+            return 1
+    return 0
 
 
 def _paddle_runner_health() -> dict[str, Any] | None:
@@ -304,8 +390,14 @@ def _paddle_runner_health() -> dict[str, Any] | None:
     if not base_url:
         return None
     try:
-        with urlopen(f"{base_url}/health", timeout=min(_paddle_runner_timeout_seconds(), 10)) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        with record_model_activity(
+            service="paddle-runner",
+            endpoint="/health",
+            action="health",
+            activity_class="health",
+        ):
+            with urlopen(f"{base_url}/health", timeout=min(_paddle_runner_timeout_seconds(), 10)) as response:
+                payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:  # pragma: no cover - deployment-specific
         return {"ok": False, "message": str(exc)}
     return payload if isinstance(payload, dict) else {"ok": False, "message": "Paddle runner returned invalid health payload"}

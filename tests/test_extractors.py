@@ -1514,6 +1514,73 @@ def test_extract_image_uses_qwen_thinking_when_ollama_response_is_empty(monkeypa
     assert result.metadata["vision"]["fallback_field"] == "thinking"
 
 
+def test_ollama_vision_records_safe_model_activity(monkeypatch, tmp_path):
+    from flux_llm_kb import extractors
+
+    image = tmp_path / "vision.png"
+    image.write_bytes(PNG_BYTES)
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeScheduler:
+        def acquire(self, _profile):
+            return FakeLease()
+
+        def record_model_residency(self, _residency):
+            return None
+
+    class FakeResponse:
+        def read(self, _limit=-1):
+            return b'{"response": "diagram summary"}'
+
+    monkeypatch.setattr(extractors, "_vision_request_image_bytes", lambda _path: (b"image-bytes", {"original_size_bytes": 10}))
+    monkeypatch.setattr(extractors, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+    monkeypatch.setattr("flux_llm_kb.gpu_scheduler.get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(extractors, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+
+    result = extractors._vision_with_ollama_compatible(
+        image,
+        source_label="private-image.png",
+        provider="ollama",
+        base_url="http://ollama:11434",
+        model="qwen3-vl:8b",
+        keep_alive="10m",
+        timeout_seconds=1,
+        metadata={"provider": "ollama", "model": "qwen3-vl:8b"},
+    )
+
+    assert result.status == "completed"
+    assert records == [
+        {
+            "service": "ollama",
+            "endpoint": "/api/generate",
+            "action": "vision_generate",
+            "activity_class": "vision_ocr",
+            "caller_surface": "worker",
+            "model": "qwen3-vl:8b",
+            "metadata": {"keep_alive": True},
+        }
+    ]
+    assert "private-image.png" not in str(records)
+    assert "image-bytes" not in str(records)
+
+
 def test_extract_image_resizes_large_payload_for_local_vision(monkeypatch, tmp_path):
     from PIL import Image
 

@@ -626,6 +626,56 @@ type RetrievalPayload = {
   stats?: Record<string, unknown>;
 };
 
+type ModelActivityEvent = {
+  id?: string;
+  service?: string;
+  endpoint?: string;
+  action?: string;
+  activity_class?: string;
+  caller_surface?: string | null;
+  model?: string | null;
+  status?: "running" | "completed" | "failed" | "busy" | "stale_running" | string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+  error_class?: string | null;
+  error_message?: string | null;
+};
+
+type ModelActivityBreakdown = {
+  service?: string;
+  activity_class?: string;
+  count?: number;
+  active?: number;
+  failures?: number;
+};
+
+type ModelActivityScheduler = {
+  mode?: string;
+  running_count?: number;
+  waiting_count?: number;
+  recent_count?: number;
+  rejections?: number;
+  timeouts?: number;
+  evictions_recent_count?: number;
+  last_eviction_at?: string | null;
+  oldest_wait_age_ms?: number | null;
+  last_activity_at?: string | null;
+  resident_models?: Array<{ service?: string; model?: string; task_type?: string | null; last_used_at?: string | null }>;
+  live_gpu_memory?: { available?: boolean; used_mb?: number | null; total_mb?: number | null };
+};
+
+type ModelActivityPayload = {
+  window_minutes?: number;
+  active_count?: number;
+  recent_count?: number;
+  last_event_at?: string | null;
+  service_breakdown?: ModelActivityBreakdown[];
+  class_breakdown?: ModelActivityBreakdown[];
+  events?: ModelActivityEvent[];
+  scheduler?: ModelActivityScheduler;
+};
+
 type SearchResult = {
   kind?: string;
   logical_kind?: "file" | "mail" | "episode" | string;
@@ -783,6 +833,7 @@ type LoadState = {
   crawl: CrawlPayload;
   jobs: JobsPayload;
   retrieval: RetrievalPayload;
+  modelActivity: ModelActivityPayload;
   mail: MailStatus;
   outlook: OutlookStatus;
   settings: SettingRow[];
@@ -1067,6 +1118,7 @@ const emptyState: LoadState = {
   crawl: { roots: [] },
   jobs: { jobs: [] },
   retrieval: {},
+  modelActivity: { events: [], service_breakdown: [], class_breakdown: [], scheduler: {} },
   mail: { profiles: [] },
   outlook: { profiles: [], pending_requests: [] },
   settings: []
@@ -1189,16 +1241,17 @@ export default function App() {
     const effectiveJobFilters = options.jobFilters ?? jobFilters;
     const effectiveJobOffset = options.jobOffset ?? jobOffset;
     const effectiveJobSort = options.jobSort ?? jobSort;
-    const [health, crawl, jobs, retrieval, mail, outlook, settings] = await Promise.all([
+    const [health, crawl, jobs, retrieval, modelActivity, mail, outlook, settings] = await Promise.all([
       getJson<HealthPayload>("/api/dashboard/health", {}),
       getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }),
       getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset, effectiveJobSort), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }),
       getJson<RetrievalPayload>("/api/dashboard/retrieval-stats", {}),
+      getJson<ModelActivityPayload>("/api/dashboard/model-activity", { events: [], service_breakdown: [], class_breakdown: [], scheduler: {} }),
       getJson<MailStatus>("/api/mail/status", { profiles: [] }),
       getJson<OutlookStatus>("/api/outlook-host/status", { profiles: [], pending_requests: [] }),
       getJson<SettingRow[]>("/api/settings", [])
     ]);
-    setState({ health, crawl, jobs, retrieval, mail, outlook, settings });
+    setState({ health, crawl, jobs, retrieval, modelActivity, mail, outlook, settings });
     setLastUpdated(new Date());
     setLoading(false);
   }
@@ -2585,6 +2638,7 @@ function PerformanceTab({ state, selectedRoot }: { state: LoadState; selectedRoo
   return (
     <section className="tab-grid">
       <OperatorEvidencePanel />
+      <ModelActivityPanel activity={state.modelActivity} />
       <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
     </section>
   );
@@ -2818,6 +2872,69 @@ function OperatorEvidencePanel() {
       {gateRows.length > 0 ? <MiniTable rows={gateRows} /> : <p className="muted">No operator gate evidence yet.</p>}
       {blockerRows.length > 0 && <MiniTable rows={blockerRows} />}
       {codeRows.length > 0 && <MiniTable rows={codeRows} />}
+    </Panel>
+  );
+}
+
+function ModelActivityPanel({ activity }: { activity: ModelActivityPayload }) {
+  const scheduler = activity.scheduler ?? {};
+  const serviceRows = (activity.service_breakdown ?? []).slice(0, 6).map((row) => [
+    row.service ?? "unknown",
+    `${row.count ?? 0} event${row.count === 1 ? "" : "s"}`,
+    `${row.active ?? 0} active / ${row.failures ?? 0} failed`
+  ] as [string, string, string]);
+  const classRows = (activity.class_breakdown ?? []).slice(0, 6).map((row) => [
+    modelActivityClassLabel(row.activity_class ?? "unknown"),
+    `${row.count ?? 0} event${row.count === 1 ? "" : "s"}`,
+    "activity class"
+  ] as [string, string, string]);
+  const eventRows = (activity.events ?? []).slice(0, 8).map((event) => [
+    event.endpoint ?? event.action ?? "model activity",
+    `${event.service ?? "service"} / ${humanizeIdentifier(event.status ?? "observed")}`,
+    modelActivityEventDetail(event),
+    modelActivityEventTiming(event)
+  ] as [string, string, string, string]);
+  const residentRows = (scheduler.resident_models ?? []).slice(0, 5).map((model) => [
+    `${model.service ?? "service"} resident`,
+    model.model ?? "resident model",
+    [model.task_type ? humanizeIdentifier(model.task_type) : null, model.last_used_at ? `last ${formatDate(model.last_used_at)}` : null].filter(Boolean).join("; ") || "resident"
+  ] as [string, string, string]);
+  const failures = (activity.events ?? []).filter((event) => event.status === "failed" || event.status === "busy").slice(0, 4);
+  return (
+    <Panel title="Model activity">
+      <div className="summary-cards">
+        <Stat label="Activity" value={modelActivityCountText(activity)} />
+        <Stat label="Last Event" value={formatDate(activity.last_event_at)} />
+        <Stat label="Scheduler Mode" value={scheduler.mode ? humanizeIdentifier(scheduler.mode) : "Unknown"} />
+        <Stat label="GPU Memory" value={formatGpuMemory(scheduler.live_gpu_memory)} />
+      </div>
+      <div className="settings-list">
+        <div className="settings-row">
+          <strong>Scheduler</strong>
+          <span>{formatSchedulerLeaseCounts(scheduler)}</span>
+          <em>{`${scheduler.recent_count ?? 0} recent`}</em>
+        </div>
+        <div className="settings-row">
+          <strong>Scheduler pressure</strong>
+          <span>{formatSchedulerRejections(scheduler)}</span>
+          <em>{formatSchedulerEvictions(scheduler)}</em>
+        </div>
+      </div>
+      {serviceRows.length > 0 ? <MiniTable rows={serviceRows} /> : <p className="muted">No recent model service activity.</p>}
+      {classRows.length > 0 ? <MiniTable rows={classRows} /> : null}
+      {residentRows.length > 0 ? <MiniTable rows={residentRows} /> : null}
+      {eventRows.length > 0 ? <MiniTable rows={eventRows} /> : null}
+      {failures.length > 0 ? (
+        <div className="settings-list">
+          {failures.map((event) => (
+            <div className="settings-row" key={event.id ?? `${event.service}-${event.started_at}`}>
+              <strong>{event.error_class ?? humanizeIdentifier(event.status ?? "failure")}</strong>
+              <span>{event.error_message ?? "Failure recorded"}</span>
+              <em>{`${event.service ?? "model activity"} failure`}</em>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </Panel>
   );
 }
@@ -5215,6 +5332,7 @@ function JobsTab({
   const jobOffsetValue = numberFromUnknown(state.jobs.offset) ?? 0;
   const jobCount = numberFromUnknown(state.jobs.count) ?? corpusJobs.length;
   const hasNext = Boolean(state.jobs.has_next ?? (jobOffsetValue + corpusJobs.length < jobCount));
+  const jobsEmptyHint = jobs.length === 0 ? jobsModelActivityHint(state.modelActivity) : "";
   const familyRows = (state.health.acceleration?.worker_families ?? []).slice(0, 8).map((family) => [
     family.family ?? "general",
     `${family.pending ?? 0} pending / ${family.running ?? 0} running`,
@@ -5248,6 +5366,7 @@ function JobsTab({
           onRestoreCorpusJobDeletionRequest={onRestoreCorpusJobDeletionRequest}
           onJobFileAction={onJobFileAction}
         />
+        {jobsEmptyHint ? <p className="panel-note">{jobsEmptyHint}</p> : null}
       </Panel>
       <Panel title="Worker Family Status">
         {familyRows.length > 0 ? <MiniTable rows={familyRows} /> : <p className="muted">No worker-family status yet.</p>}
@@ -5992,6 +6111,79 @@ function humanizeIdentifier(value: string) {
     .filter(Boolean)
     .map((word) => formatIdentifierWord(word))
     .join(" ");
+}
+
+function modelActivityCountText(activity: ModelActivityPayload) {
+  return `${activity.recent_count ?? activity.events?.length ?? 0} recent / ${activity.active_count ?? 0} active`;
+}
+
+function modelActivityEventDetail(event: ModelActivityEvent) {
+  const parts = [
+    event.model,
+    event.caller_surface ? humanizeIdentifier(event.caller_surface) : null,
+    event.activity_class ? modelActivityClassLabel(event.activity_class) : null
+  ].filter(Boolean);
+  return parts.join("; ") || humanizeIdentifier(event.action ?? "activity");
+}
+
+function modelActivityClassLabel(value: string) {
+  return humanizeIdentifier(value);
+}
+
+function modelActivityEventTiming(event: ModelActivityEvent) {
+  const duration = typeof event.duration_ms === "number" ? `${event.duration_ms}ms` : null;
+  const when = event.completed_at ?? event.started_at ?? null;
+  return [duration, when ? formatDate(when) : null].filter(Boolean).join("; ") || "-";
+}
+
+function formatSchedulerLeaseCounts(scheduler: ModelActivityScheduler) {
+  return `${scheduler.running_count ?? 0} running / ${scheduler.waiting_count ?? 0} waiting`;
+}
+
+function formatSchedulerRejections(scheduler: ModelActivityScheduler) {
+  return `${scheduler.rejections ?? 0} rejected / ${scheduler.timeouts ?? 0} timed out`;
+}
+
+function formatSchedulerEvictions(scheduler: ModelActivityScheduler) {
+  const count = scheduler.evictions_recent_count ?? 0;
+  return `${count} recent eviction${count === 1 ? "" : "s"}`;
+}
+
+function formatGpuMemory(memory?: ModelActivityScheduler["live_gpu_memory"]) {
+  if (!memory?.available || memory.used_mb == null || memory.total_mb == null) return "Unavailable";
+  return `${Math.round(memory.used_mb)}/${Math.round(memory.total_mb)} MB`;
+}
+
+function jobsModelActivityHint(activity: ModelActivityPayload) {
+  const scheduler = activity.scheduler ?? {};
+  const hasModelActivity = (activity.active_count ?? 0) > 0 || (activity.recent_count ?? 0) > 0 || (activity.events?.length ?? 0) > 0;
+  const hasSchedulerActivity = schedulerHasActivity(scheduler);
+  if (!hasModelActivity && !hasSchedulerActivity) return "";
+  let source = "Recent model activity was detected.";
+  if (hasModelActivity && hasSchedulerActivity) {
+    source = "Recent model activity and GPU scheduler activity were detected.";
+  } else if (hasSchedulerActivity) {
+    source = "GPU scheduler activity was detected.";
+  }
+  const running = scheduler.running_count ?? 0;
+  const waiting = scheduler.waiting_count ?? 0;
+  const schedulerDetail = hasSchedulerActivity
+    ? ` ${running} running ${running === 1 ? "lease" : "leases"}, ${waiting} waiting ${waiting === 1 ? "request" : "requests"}.`
+    : "";
+  return `No active crawl jobs. ${source}${schedulerDetail}`;
+}
+
+function schedulerHasActivity(scheduler: ModelActivityScheduler) {
+  return [
+    scheduler.running_count,
+    scheduler.waiting_count,
+    scheduler.recent_count,
+    scheduler.rejections,
+    scheduler.timeouts,
+    scheduler.evictions_recent_count
+  ].some((value) => (value ?? 0) > 0)
+    || (scheduler.resident_models?.length ?? 0) > 0
+    || Boolean(scheduler.live_gpu_memory?.available);
 }
 
 function formatPercentMetric(value: number | undefined) {

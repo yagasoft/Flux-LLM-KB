@@ -641,6 +641,250 @@ def test_model_runner_client_forwards_awq_model_for_reranking():
     assert payload["awq_model"] == "example/Qwen3-Reranker-4B-AWQ"
 
 
+def test_model_runner_client_records_safe_embedding_activity(monkeypatch):
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(
+        model_runner,
+        "_post_json_to_base_url",
+        lambda *_args, **_kwargs: {"ok": True, "vectors": [[0.1, 0.2]]},
+    )
+
+    vectors = model_runner.ModelRunnerClient("http://model-runner:8790").embed(
+        ["private prompt text"],
+        model="Snowflake/test",
+        dimensions=2,
+    )
+
+    assert vectors == [[0.1, 0.2]]
+    assert records == [
+        {
+            "service": "model-runner",
+            "endpoint": "/v1/embeddings",
+            "action": "embedding",
+            "activity_class": "retrieval",
+            "model": "Snowflake/test",
+            "metadata": {"input_count": 1, "dimensions": 2},
+        }
+    ]
+    assert "private prompt text" not in str(records)
+
+
+def test_model_runner_client_records_safe_rerank_activity(monkeypatch):
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(
+        model_runner,
+        "_post_json_to_base_url",
+        lambda *_args, **_kwargs: {"ok": True, "scores": [0.9]},
+    )
+
+    scores = model_runner.ModelRunnerClient("http://model-runner:8790").rerank(
+        "private query",
+        ["private passage"],
+        model="Qwen/test",
+        quantization="awq_int4",
+    )
+
+    assert scores == [0.9]
+    assert records == [
+        {
+            "service": "model-runner",
+            "endpoint": "/v1/rerank",
+            "action": "rerank",
+            "activity_class": "retrieval",
+            "model": "Qwen/test",
+            "metadata": {"passage_count": 1, "quantization": "awq_int4"},
+        }
+    ]
+    assert "private query" not in str(records)
+    assert "private passage" not in str(records)
+
+
+def test_model_runner_client_records_safe_ocr_activity(monkeypatch, tmp_path):
+    records: list[dict[str, object]] = []
+    image = tmp_path / "scan.png"
+    image.write_bytes(b"private image bytes")
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(
+        model_runner,
+        "_post_json_to_base_url",
+        lambda *_args, **_kwargs: {"ok": True, "text": "remote OCR"},
+    )
+
+    payload = model_runner.ModelRunnerClient("http://model-runner:8790").ocr_file(
+        image,
+        model="PaddleOCR-VL",
+        document=True,
+    )
+
+    assert payload["text"] == "remote OCR"
+    assert records == [
+        {
+            "service": "model-runner",
+            "endpoint": "/v1/ocr/document",
+            "action": "ocr_document",
+            "activity_class": "vision_ocr",
+            "model": "PaddleOCR-VL",
+            "metadata": {"document": True},
+        }
+    ]
+    assert "private image bytes" not in str(records)
+    assert str(image) not in str(records)
+
+
+def test_paddle_proxy_records_safe_ocr_activity(monkeypatch):
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_post_json(base_url, path, payload, timeout_seconds):
+        return {"ok": True, "model": payload["model"], "text": "remote OCR"}
+
+    monkeypatch.setenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", "http://paddle-runner:8791")
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(model_runner, "_post_json_to_base_url", fake_post_json)
+
+    result = model_runner._proxy_paddle_request(
+        "/v1/ocr/image",
+        {"path": "E:/Private/report.pdf", "content_b64": "private-bytes", "model": "PP-OCRv5"},
+    )
+
+    assert result["text"] == "remote OCR"
+    assert records == [
+        {
+            "service": "paddle-runner",
+            "endpoint": "/v1/ocr/image",
+            "action": "ocr_image",
+            "activity_class": "vision_ocr",
+            "model": "PP-OCRv5",
+            "metadata": {"document": False},
+        }
+    ]
+    assert "E:/Private" not in str(records)
+    assert "private-bytes" not in str(records)
+
+
+def test_paddle_runner_health_records_safe_activity(monkeypatch):
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok": true, "paddle_device": "gpu:0"}'
+
+    monkeypatch.setenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", "http://paddle-runner:8791")
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(model_runner, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    payload = model_runner._paddle_runner_health()
+
+    assert payload == {"ok": True, "paddle_device": "gpu:0"}
+    assert records == [
+        {
+            "service": "paddle-runner",
+            "endpoint": "/health",
+            "action": "health",
+            "activity_class": "health",
+        }
+    ]
+
+
+def test_model_runner_client_health_records_safe_activity(monkeypatch):
+    records: list[dict[str, object]] = []
+
+    class FakeRecorder:
+        def __init__(self, **kwargs):
+            records.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    monkeypatch.setattr(model_runner, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
+    monkeypatch.setattr(model_runner, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    payload = model_runner.ModelRunnerClient("http://model-runner:8790").health()
+
+    assert payload == {"ok": True}
+    assert records == [
+        {
+            "service": "model-runner",
+            "endpoint": "/health",
+            "action": "health",
+            "activity_class": "health",
+        }
+    ]
+
+
 def test_embeddings_endpoint_accepts_openai_input_and_rejects_invalid_payload(monkeypatch):
     from fastapi.testclient import TestClient
 
