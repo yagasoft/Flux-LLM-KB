@@ -224,6 +224,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-api
     restart: unless-stopped
+    mem_limit: "2gb"
+    memswap_limit: "2gb"
     gpus: all
     depends_on:
       postgres:
@@ -303,6 +305,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-worker
     restart: unless-stopped
+    mem_limit: "2gb"
+    memswap_limit: "2gb"
     gpus: all
     depends_on:
       postgres:
@@ -378,6 +382,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-asr
     restart: unless-stopped
+    mem_limit: "4gb"
+    memswap_limit: "4gb"
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -422,6 +428,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-model-runner
     restart: unless-stopped
+    mem_limit: "10gb"
+    memswap_limit: "10gb"
     gpus: all
     depends_on:
       paddle-runner:
@@ -480,6 +488,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-paddle-runner
     restart: unless-stopped
+    mem_limit: "8gb"
+    memswap_limit: "8gb"
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -529,6 +539,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-ollama
     restart: unless-stopped
+    mem_limit: "6gb"
+    memswap_limit: "6gb"
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -550,6 +562,8 @@ services:
     image: vespaengine/vespa:8
     container_name: flux-vespa
     restart: unless-stopped
+    mem_limit: "5gb"
+    memswap_limit: "5gb"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -566,21 +580,23 @@ services:
     image: postgres:16
     container_name: flux-llm-kb-postgres
     restart: unless-stopped
-    shm_size: "4gb"
+    mem_limit: "3gb"
+    memswap_limit: "3gb"
+    shm_size: "1gb"
     command: >
       postgres
-      -c shared_buffers=8GB
-      -c effective_cache_size=36GB
-      -c work_mem=64MB
-      -c maintenance_work_mem=2GB
-      -c autovacuum_work_mem=512MB
-      -c temp_buffers=64MB
+      -c shared_buffers=768MB
+      -c effective_cache_size=2GB
+      -c work_mem=16MB
+      -c maintenance_work_mem=256MB
+      -c autovacuum_work_mem=128MB
+      -c temp_buffers=16MB
       -c effective_io_concurrency=200
       -c random_page_cost=1.1
-      -c max_worker_processes=16
-      -c max_parallel_workers=12
-      -c max_parallel_workers_per_gather=6
-      -c max_parallel_maintenance_workers=4
+      -c max_worker_processes=8
+      -c max_parallel_workers=4
+      -c max_parallel_workers_per_gather=2
+      -c max_parallel_maintenance_workers=2
       -c track_io_timing=on
       -c wal_compression=on
       -c max_wal_size=8GB

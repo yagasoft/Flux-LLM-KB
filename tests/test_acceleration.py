@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -200,6 +201,105 @@ def test_collect_status_reports_fake_nvidia_and_onnx_providers():
         "cache_hits": 4,
         "cache_misses": 2,
     }
+
+
+def test_collect_status_reports_docker_container_resources():
+    def fake_run(command, **_kwargs):
+        if command[:4] == ["docker", "inspect", "--size", "--format"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "Name": "/flux-llm-kb-api",
+                                "Config": {"Image": "flux-llm-kb-api:abc123"},
+                                "State": {"Status": "running", "Running": True},
+                                "HostConfig": {"Memory": 2 * 1024**3, "MemorySwap": 2 * 1024**3},
+                                "SizeRw": 128 * 1024**2,
+                                "SizeRootFs": 2 * 1024**3,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "Name": "/flux-llm-kb-postgres",
+                                "Config": {"Image": "postgres:16"},
+                                "State": {"Status": "running", "Running": True},
+                                "HostConfig": {"Memory": 3 * 1024**3, "MemorySwap": 3 * 1024**3},
+                                "SizeRw": 64 * 1024**2,
+                                "SizeRootFs": 512 * 1024**2,
+                            }
+                        ),
+                    ]
+                ),
+                stderr="",
+            )
+        if command[:4] == ["docker", "stats", "--no-stream", "--format"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "Name": "flux-llm-kb-api",
+                                "CPUPerc": "12.34%",
+                                "MemUsage": "512MiB / 2GiB",
+                                "MemPerc": "25.00%",
+                                "BlockIO": "1MiB / 64MiB",
+                                "NetIO": "10kB / 20kB",
+                                "PIDs": "42",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "Name": "flux-llm-kb-postgres",
+                                "CPUPerc": "1.50%",
+                                "MemUsage": "768MiB / 3GiB",
+                                "MemPerc": "25.00%",
+                                "BlockIO": "2MiB / 8MiB",
+                                "NetIO": "30kB / 40kB",
+                                "PIDs": "19",
+                            }
+                        ),
+                    ]
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="missing")
+
+    payload = collect_acceleration_status(
+        settings={
+            "acceleration.cache_root": "",
+            "acceleration.local_inference.enabled": False,
+            "acceleration.local_inference.provider": "ollama",
+            "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+            "acceleration.local_inference.probe_timeout_seconds": 1,
+        },
+        command_runner=fake_run,
+        module_importer=lambda _name: (_ for _ in ()).throw(ModuleNotFoundError("missing")),
+        worker_family_stats=lambda: [],
+        benchmark_stats=lambda: [],
+    )
+
+    docker = payload["docker"]
+    assert docker["state"] == "available"
+    assert docker["totals"]["memory_limit_bytes"] == 5 * 1024**3
+    assert docker["totals"]["memory_usage_bytes"] == 1280 * 1024**2
+    assert docker["totals"]["size_rw_bytes"] == 192 * 1024**2
+    api = next(container for container in docker["containers"] if container["service"] == "api")
+    assert api["container_name"] == "flux-llm-kb-api"
+    assert api["status"] == "running"
+    assert api["cpu_percent"] == 12.34
+    assert api["memory_usage_bytes"] == 512 * 1024**2
+    assert api["memory_limit_bytes"] == 2 * 1024**3
+    assert api["memory_swap_limit_bytes"] == 2 * 1024**3
+    assert api["memory_percent"] == 25.0
+    assert api["block_io_read_bytes"] == 1024**2
+    assert api["block_io_write_bytes"] == 64 * 1024**2
+    assert api["network_rx_bytes"] == 10_000
+    assert api["network_tx_bytes"] == 20_000
+    assert api["pids"] == 42
+    assert api["size_rw_bytes"] == 128 * 1024**2
 
 
 def test_onnxruntime_status_sets_warning_severity_before_provider_discovery():

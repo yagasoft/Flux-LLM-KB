@@ -6,6 +6,41 @@ $ErrorActionPreference = "Stop"
 $appRoot = Join-Path $InstallRoot "app"
 $composePath = Join-Path $appRoot "docker-compose.yml"
 $appEnvPath = Join-Path $appRoot ".env"
+$fluxContainers = @(
+    "flux-llm-kb-api",
+    "flux-llm-kb-worker",
+    "flux-llm-kb-model-runner",
+    "flux-llm-kb-paddle-runner",
+    "flux-llm-kb-asr",
+    "flux-ollama",
+    "flux-vespa",
+    "flux-llm-kb-postgres"
+)
+
+function Format-FluxDockerMemoryLimit {
+    param([string]$Value)
+    if (-not $Value) {
+        return "unavailable"
+    }
+    $bytes = 0L
+    if (-not [long]::TryParse($Value, [ref]$bytes)) {
+        return $Value
+    }
+    if ($bytes -eq 0) {
+        return "unbounded"
+    }
+    $gib = [math]::Round(([double]$bytes / 1GB), 2)
+    return "${gib} GiB ($bytes bytes)"
+}
+
+function Get-FluxDockerInspectValue {
+    param([string]$Container, [string]$Format)
+    $value = docker inspect --format $Format $Container 2>$null
+    if ($LASTEXITCODE -eq 0 -and $value) {
+        return $value.Trim()
+    }
+    return $null
+}
 
 Write-Host "Flux production status"
 Write-Host "Install root: $InstallRoot"
@@ -32,6 +67,19 @@ if ($LASTEXITCODE -eq 0 -and $dockerMemory) {
     Write-Host "Docker-visible memory: ${dockerMemoryGiB} GiB ($dockerMemory bytes)"
 } else {
     Write-Host "Docker-visible memory: unavailable"
+}
+
+Write-Host "Flux Docker memory limits"
+foreach ($container in $fluxContainers) {
+    $memory = Get-FluxDockerInspectValue -Container $container -Format "{{.HostConfig.Memory}}"
+    $swap = Get-FluxDockerInspectValue -Container $container -Format "{{.HostConfig.MemorySwap}}"
+    if ($memory -or $swap) {
+        $formattedMemory = Format-FluxDockerMemoryLimit -Value $memory
+        $formattedSwap = Format-FluxDockerMemoryLimit -Value $swap
+        Write-Host "${container}: HostConfig.Memory=$formattedMemory; HostConfig.MemorySwap=$formattedSwap"
+    } else {
+        Write-Host "${container}: HostConfig.Memory=unavailable; HostConfig.MemorySwap=unavailable"
+    }
 }
 foreach ($container in @("flux-llm-kb-postgres", "flux-llm-kb-api", "flux-llm-kb-worker", "flux-ollama")) {
     $mounts = docker inspect --format "{{json .Mounts}}" $container 2>$null

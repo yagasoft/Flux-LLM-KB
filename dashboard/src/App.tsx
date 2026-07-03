@@ -111,6 +111,46 @@ type AccelerationStatus = {
     fixtures?: Array<Record<string, unknown>>;
     totals?: Record<string, number>;
   };
+  docker?: DockerResourceStatus;
+};
+
+type DockerResourceStatus = {
+  ok?: boolean;
+  state?: string;
+  message?: string;
+  containers?: DockerContainerResource[];
+  totals?: {
+    reported?: number;
+    running?: number;
+    memory_limit_bytes?: number;
+    memory_swap_limit_bytes?: number;
+    memory_usage_bytes?: number;
+    size_rw_bytes?: number;
+    size_root_fs_bytes?: number;
+    block_io_read_bytes?: number;
+    block_io_write_bytes?: number;
+  };
+};
+
+type DockerContainerResource = {
+  service?: string;
+  container_name?: string;
+  image?: string;
+  status?: string;
+  running?: boolean;
+  cpu_percent?: number | null;
+  memory_usage_bytes?: number | null;
+  memory_limit_bytes?: number | null;
+  memory_swap_limit_bytes?: number | null;
+  memory_stats_limit_bytes?: number | null;
+  memory_percent?: number | null;
+  block_io_read_bytes?: number | null;
+  block_io_write_bytes?: number | null;
+  network_rx_bytes?: number | null;
+  network_tx_bytes?: number | null;
+  pids?: number | null;
+  size_rw_bytes?: number | null;
+  size_root_fs_bytes?: number | null;
 };
 
 type AccelerationCapability = {
@@ -3340,6 +3380,7 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
   const capabilities = acceleration?.capabilities ?? {};
   const cache = acceleration?.cache ?? {};
   const families = acceleration?.worker_families ?? [];
+  const docker = acceleration?.docker;
   const watcherBackend = capabilities.watcher_backend;
   const benchmarkHistory = acceleration?.benchmarks?.history ?? [];
   const benchmarkDiagnostics = benchmarkResult?.diagnostics ?? [];
@@ -3446,6 +3487,11 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
         parts.join("; ") || "no backpressure"
       ] as [string, string, string];
     });
+  const dockerRows = (docker?.containers ?? []).slice(0, 8).map((container) => [
+    container.service ?? container.container_name ?? "container",
+    humanizeIdentifier(container.status ?? "unknown"),
+    dockerContainerResourceSummary(container)
+  ] as [string, string, string]);
   const benchmarkRows = benchmarkHistory.slice(0, 5).map((run) => {
     const elapsedDelta = run.previous_elapsed_delta_ms;
     const throughputDelta = run.previous_throughput_delta;
@@ -3547,7 +3593,13 @@ function AccelerationPanel({ acceleration, selectedRoot }: { acceleration?: Acce
           <span>{watcherBackend?.selected_backend ?? watcherBackend?.provider ?? "unknown"}</span>
           <em>{[watcherBackend?.policy, watcherBackend?.fallback_reason].filter(Boolean).join(" / ") || (watcherBackend?.native ? "native" : "fallback")}</em>
         </div>
+        <div className="settings-row">
+          <strong>Container resources</strong>
+          <span>{dockerResourceOverview(docker)}</span>
+          <em>{dockerResourceMemoryOverview(docker)}</em>
+        </div>
       </div>
+      {dockerRows.length > 0 ? <MiniTable rows={dockerRows} /> : <p className="muted">No Docker container resource telemetry yet.</p>}
       {familyRows.length > 0 ? <MiniTable rows={familyRows} /> : <p className="muted">No worker-family telemetry yet.</p>}
       {backpressureRows.length > 0 && (
         <div className="settings-list">
@@ -3667,6 +3719,52 @@ function accelerationCapabilityMessage(capability?: AccelerationCapability): str
   if (capability.provider) return capability.provider;
   if (capability.count != null) return `${capability.count}`;
   return capability.ok ? "available" : "unavailable";
+}
+
+function dockerResourceOverview(docker?: DockerResourceStatus): string {
+  const totals = docker?.totals ?? {};
+  const running = totals.running ?? (docker?.containers ?? []).filter((container) => container.running).length;
+  const reported = totals.reported ?? docker?.containers?.length ?? 0;
+  return `${running} running / ${reported} reported`;
+}
+
+function dockerResourceMemoryOverview(docker?: DockerResourceStatus): string {
+  const totals = docker?.totals ?? {};
+  const used = formatBytes(totals.memory_usage_bytes);
+  const limit = formatBytes(totals.memory_limit_bytes, "unbounded");
+  return `memory ${used} / ${limit}`;
+}
+
+function dockerContainerResourceSummary(container: DockerContainerResource): string {
+  const name = container.container_name ?? container.service ?? "container";
+  const cpu = container.cpu_percent == null ? "CPU unknown" : `CPU ${formatCompactNumber(container.cpu_percent)}%`;
+  const memoryLimit = container.memory_limit_bytes ?? container.memory_stats_limit_bytes;
+  const memoryPercent = container.memory_percent == null ? "" : ` (${formatCompactNumber(container.memory_percent)}%)`;
+  const memory = `memory ${formatBytes(container.memory_usage_bytes)} / ${formatBytes(memoryLimit, "unbounded")}${memoryPercent}`;
+  const writable = container.size_rw_bytes == null ? null : `writable ${formatBytes(container.size_rw_bytes)}`;
+  const blockIo =
+    container.block_io_read_bytes == null && container.block_io_write_bytes == null
+      ? null
+      : `block I/O ${formatBytes(container.block_io_read_bytes)} / ${formatBytes(container.block_io_write_bytes)}`;
+  return [name, cpu, memory, writable, blockIo].filter(Boolean).join("; ");
+}
+
+function formatBytes(value: number | null | undefined, zeroLabel = "0 B"): string {
+  if (value == null || Number.isNaN(value)) return "unknown";
+  if (value === 0) return zeroLabel;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let amount = Math.abs(value);
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  const sign = value < 0 ? "-" : "";
+  return `${sign}${formatCompactNumber(amount)} ${units[unitIndex]}`;
+}
+
+function formatCompactNumber(value: number): string {
+  return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function ActionableDiagnostics({

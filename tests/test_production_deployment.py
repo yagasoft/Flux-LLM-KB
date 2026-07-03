@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -10,6 +11,18 @@ def _script(name: str) -> str:
 
 def _dev_script(name: str) -> str:
     return (ROOT / "scripts" / "dev" / name).read_text(encoding="utf-8")
+
+
+PRODUCTION_MEMORY_LIMITS_GB = {
+    "api": 2,
+    "worker": 2,
+    "model-runner": 10,
+    "paddle-runner": 8,
+    "asr": 4,
+    "ollama": 6,
+    "vespa": 5,
+    "postgres": 3,
+}
 
 
 def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
@@ -210,6 +223,46 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "host.docker.internal:11434" not in compose
         assert "0.0.0.0:11434:11434" not in compose
         assert "127.0.0.1:11434:11434" not in compose
+
+
+def test_production_compose_sets_hard_container_memory_budget():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        compose = _embedded_compose_template(_script(script_name))
+        service_blocks = _compose_service_blocks(compose)
+        total_gb = 0
+
+        assert "deploy:" not in compose
+        assert "resources:" not in compose
+        for service, expected_gb in PRODUCTION_MEMORY_LIMITS_GB.items():
+            block = service_blocks[service]
+            memory = _service_compose_value(block, "mem_limit")
+            swap = _service_compose_value(block, "memswap_limit")
+
+            assert memory == f"{expected_gb}gb"
+            assert swap == memory
+            total_gb += _compose_gb(memory)
+
+        assert total_gb == 40
+
+
+def test_production_status_reports_all_container_memory_limits():
+    status = _script("status-flux.ps1")
+
+    assert "Flux Docker memory limits" in status
+    assert ".HostConfig.Memory" in status
+    assert ".HostConfig.MemorySwap" in status
+    assert "unbounded" in status
+    for container in (
+        "flux-llm-kb-api",
+        "flux-llm-kb-worker",
+        "flux-llm-kb-model-runner",
+        "flux-llm-kb-paddle-runner",
+        "flux-llm-kb-asr",
+        "flux-ollama",
+        "flux-vespa",
+        "flux-llm-kb-postgres",
+    ):
+        assert container in status
 
 
 def test_production_host_agent_uses_host_loopback_to_docker_ollama():
@@ -438,18 +491,18 @@ def test_postgres_compose_uses_performance_first_local_tuning():
     install_compose = _embedded_compose_template(_script("install-flux.ps1"))
 
     for compose in (dev_compose, install_compose):
-        assert "-c shared_buffers=8GB" in compose
-        assert "-c effective_cache_size=36GB" in compose
-        assert "-c work_mem=64MB" in compose
-        assert "-c maintenance_work_mem=2GB" in compose
-        assert "-c autovacuum_work_mem=512MB" in compose
-        assert "-c temp_buffers=64MB" in compose
-        assert "-c max_worker_processes=16" in compose
-        assert "-c max_parallel_workers=12" in compose
+        assert "-c shared_buffers=768MB" in compose
+        assert "-c effective_cache_size=2GB" in compose
+        assert "-c work_mem=16MB" in compose
+        assert "-c maintenance_work_mem=256MB" in compose
+        assert "-c autovacuum_work_mem=128MB" in compose
+        assert "-c temp_buffers=16MB" in compose
+        assert "-c max_worker_processes=8" in compose
+        assert "-c max_parallel_workers=4" in compose
         assert "-c effective_io_concurrency=200" in compose
         assert "-c random_page_cost=1.1" in compose
-        assert "-c max_parallel_workers_per_gather=6" in compose
-        assert "-c max_parallel_maintenance_workers=4" in compose
+        assert "-c max_parallel_workers_per_gather=2" in compose
+        assert "-c max_parallel_maintenance_workers=2" in compose
         assert "-c track_io_timing=on" in compose
         assert "-c wal_compression=on" in compose
         assert "-c max_wal_size=8GB" in compose
@@ -458,7 +511,7 @@ def test_postgres_compose_uses_performance_first_local_tuning():
         assert "-c checkpoint_completion_target=0.9" in compose
 
     for compose in (dev_compose, install_compose):
-        assert 'shm_size: "4gb"' in compose
+        assert 'shm_size: "1gb"' in compose
 
 
 def test_worker_compose_commands_use_settings_driven_parallelism_defaults():
@@ -769,3 +822,42 @@ def _embedded_compose_template(script: str) -> str:
         end = script.find(terminator, start + len(marker))
         return script[start:end]
     return ""
+
+
+def _compose_service_blocks(compose: str) -> dict[str, str]:
+    blocks: dict[str, list[str]] = {}
+    current_service = ""
+    current_lines: list[str] = []
+    in_services = False
+    for line in compose.splitlines():
+        if line == "services:":
+            in_services = True
+            continue
+        if not in_services:
+            continue
+        if line and not line.startswith(" "):
+            break
+        match = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if match:
+            if current_service:
+                blocks[current_service] = current_lines
+            current_service = match.group(1)
+            current_lines = [line]
+            continue
+        if current_service:
+            current_lines.append(line)
+    if current_service:
+        blocks[current_service] = current_lines
+    return {service: "\n".join(lines) for service, lines in blocks.items()}
+
+
+def _service_compose_value(service_block: str, key: str) -> str:
+    match = re.search(rf"^    {re.escape(key)}:\s+\"?([^\"\n]+)\"?\s*$", service_block, re.MULTILINE)
+    assert match is not None, f"{key} not found in service block:\n{service_block}"
+    return match.group(1)
+
+
+def _compose_gb(value: str) -> int:
+    match = re.fullmatch(r"(\d+)gb", value)
+    assert match is not None
+    return int(match.group(1))

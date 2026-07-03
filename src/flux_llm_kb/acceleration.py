@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -82,6 +83,17 @@ BENCHMARK_FIXTURES: tuple[dict[str, str], ...] = (
     {"name": "archive-container-heavy", "description": "Nested archives, packages, and embedded documents"},
     {"name": "image-heavy", "description": "Images, diagrams, and scanned PDFs"},
     {"name": "audio-video-heavy", "description": "Audio, video, and sidecar transcripts"},
+)
+
+FLUX_DOCKER_SERVICE_CONTAINERS: tuple[tuple[str, str], ...] = (
+    ("api", "flux-llm-kb-api"),
+    ("worker", "flux-llm-kb-worker"),
+    ("model-runner", "flux-llm-kb-model-runner"),
+    ("paddle-runner", "flux-llm-kb-paddle-runner"),
+    ("asr", "flux-llm-kb-asr"),
+    ("ollama", "flux-ollama"),
+    ("vespa", "flux-vespa"),
+    ("postgres", "flux-llm-kb-postgres"),
 )
 
 
@@ -229,6 +241,7 @@ def collect_acceleration_status(
         "cache": cache,
         "worker_families": family_stats,
         "benchmarks": benchmarks,
+        "docker": _docker_resource_status(runner),
     }
 
 
@@ -341,6 +354,166 @@ def _disk_status(cache_root: str) -> dict[str, Any]:
         "total_bytes": usage.total,
         "free_bytes": usage.free,
     }
+
+
+def _docker_resource_status(command_runner: Callable[..., Any]) -> dict[str, Any]:
+    service_by_container = {container: service for service, container in FLUX_DOCKER_SERVICE_CONTAINERS}
+    container_names = [container for _service, container in FLUX_DOCKER_SERVICE_CONTAINERS]
+    try:
+        inspect_result = command_runner(
+            ["docker", "inspect", "--size", "--format", "{{json .}}", *container_names],
+            timeout=3,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "state": "missing", "message": "docker not found", "containers": [], "totals": {}}
+    except Exception as exc:
+        return {"ok": False, "state": "unavailable", "message": str(exc), "containers": [], "totals": {}}
+
+    inspect_stdout = str(getattr(inspect_result, "stdout", "") or "")
+    inspect_stderr = str(getattr(inspect_result, "stderr", "") or "").strip()
+    containers: dict[str, dict[str, Any]] = {}
+    for line in inspect_stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        name = str(payload.get("Name") or "").lstrip("/")
+        if not name:
+            continue
+        state = payload.get("State") if isinstance(payload.get("State"), dict) else {}
+        host_config = payload.get("HostConfig") if isinstance(payload.get("HostConfig"), dict) else {}
+        config = payload.get("Config") if isinstance(payload.get("Config"), dict) else {}
+        containers[name] = {
+            "service": service_by_container.get(name, name),
+            "container_name": name,
+            "image": config.get("Image"),
+            "status": state.get("Status"),
+            "running": bool(state.get("Running")),
+            "memory_limit_bytes": _int_or_none(host_config.get("Memory")),
+            "memory_swap_limit_bytes": _int_or_none(host_config.get("MemorySwap")),
+            "size_rw_bytes": _int_or_none(payload.get("SizeRw")),
+            "size_root_fs_bytes": _int_or_none(payload.get("SizeRootFs")),
+        }
+
+    running_names = [name for name, row in containers.items() if row.get("running")]
+    stats_message = ""
+    if running_names:
+        try:
+            stats_result = command_runner(
+                ["docker", "stats", "--no-stream", "--format", "{{json .}}", *running_names],
+                timeout=5,
+            )
+            if getattr(stats_result, "returncode", 1) == 0:
+                _merge_docker_stats(containers, str(getattr(stats_result, "stdout", "") or ""))
+            else:
+                stats_message = str(getattr(stats_result, "stderr", "") or getattr(stats_result, "stdout", "") or "").strip()
+        except Exception as exc:
+            stats_message = str(exc)
+
+    ordered = [containers[name] for name in container_names if name in containers]
+    totals = {
+        "reported": len(ordered),
+        "running": sum(1 for row in ordered if row.get("running")),
+        "memory_limit_bytes": _sum_positive_bytes(ordered, "memory_limit_bytes"),
+        "memory_swap_limit_bytes": _sum_positive_bytes(ordered, "memory_swap_limit_bytes"),
+        "memory_usage_bytes": _sum_positive_bytes(ordered, "memory_usage_bytes"),
+        "size_rw_bytes": _sum_positive_bytes(ordered, "size_rw_bytes"),
+        "size_root_fs_bytes": _sum_positive_bytes(ordered, "size_root_fs_bytes"),
+        "block_io_read_bytes": _sum_positive_bytes(ordered, "block_io_read_bytes"),
+        "block_io_write_bytes": _sum_positive_bytes(ordered, "block_io_write_bytes"),
+    }
+    state = "available" if ordered else "unavailable"
+    messages = [message for message in (inspect_stderr, stats_message) if message]
+    return {
+        "ok": bool(ordered),
+        "state": state,
+        "message": "; ".join(messages) if messages else ("available" if ordered else "Flux containers not found"),
+        "containers": ordered,
+        "totals": totals,
+    }
+
+
+def _merge_docker_stats(containers: dict[str, dict[str, Any]], stdout: str) -> None:
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        name = str(payload.get("Name") or payload.get("Container") or "").strip()
+        row = containers.get(name)
+        if row is None:
+            continue
+        memory_used, memory_limit = _parse_docker_size_pair(str(payload.get("MemUsage") or ""))
+        block_read, block_write = _parse_docker_size_pair(str(payload.get("BlockIO") or ""))
+        network_rx, network_tx = _parse_docker_size_pair(str(payload.get("NetIO") or ""))
+        row.update(
+            {
+                "cpu_percent": _parse_percent(payload.get("CPUPerc")),
+                "memory_usage_bytes": memory_used,
+                "memory_stats_limit_bytes": memory_limit,
+                "memory_percent": _parse_percent(payload.get("MemPerc")),
+                "block_io_read_bytes": block_read,
+                "block_io_write_bytes": block_write,
+                "network_rx_bytes": network_rx,
+                "network_tx_bytes": network_tx,
+                "pids": _int_or_none(payload.get("PIDs")),
+            }
+        )
+
+
+def _parse_percent(value: Any) -> float | None:
+    raw = str(value or "").strip().rstrip("%")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _parse_docker_size_pair(value: str) -> tuple[int | None, int | None]:
+    if "/" not in value:
+        return _parse_docker_size_bytes(value), None
+    left, right = value.split("/", 1)
+    return _parse_docker_size_bytes(left), _parse_docker_size_bytes(right)
+
+
+def _parse_docker_size_bytes(value: str) -> int | None:
+    match = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B|[kmgt]?B)\s*$", str(value or ""))
+    if not match:
+        return None
+    amount = float(match.group(1))
+    unit = match.group(2).lower()
+    multipliers = {
+        "b": 1,
+        "kb": 1000,
+        "mb": 1000**2,
+        "gb": 1000**3,
+        "tb": 1000**4,
+        "kib": 1024,
+        "mib": 1024**2,
+        "gib": 1024**3,
+        "tib": 1024**4,
+    }
+    multiplier = multipliers.get(unit)
+    if multiplier is None:
+        return None
+    return int(amount * multiplier)
+
+
+def _sum_positive_bytes(rows: list[dict[str, Any]], key: str) -> int:
+    total = 0
+    for row in rows:
+        value = _int_or_none(row.get(key))
+        if value and value > 0:
+            total += value
+    return total
 
 
 def _nvidia_status(command_runner: Callable[..., Any]) -> dict[str, Any]:

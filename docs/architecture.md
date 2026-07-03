@@ -502,18 +502,27 @@ host-accessed watched roots. Host-agent and Outlook-host run as Windows
 Scheduled Tasks in the logged-in user session. Image builds use a BuildKit
 wheelhouse cache with exact runtime/Paddle constraints and offline dependency
 resolution by default, so package updates are explicit instead of accidental
-side effects of broad dependency ranges. Production Compose uses a high-memory
-local PostgreSQL profile only when Docker Desktop exposes enough
-Linux VM memory: larger shared buffers, bounded `work_mem`, larger maintenance
-memory, WAL/checkpoint headroom, and an enlarged `/dev/shm`. Runtime status
-prints Docker-visible memory and Postgres shared-memory sizing so future changes
-are based on container-visible limits.
+side effects of broad dependency ranges. Generated production Compose sets
+direct Docker memory ceilings for all Flux containers: API 2 GB, worker 2 GB,
+model-runner 10 GB, paddle-runner 8 GB, ASR 4 GB, Ollama 6 GB, Vespa 5 GB, and
+PostgreSQL 3 GB, for a 40 GB total Docker-managed budget. `memswap_limit`
+matches `mem_limit` on each production service so containers do not gain extra
+swap-backed memory. PostgreSQL uses a lean local profile
+(`shared_buffers=768MB`, `effective_cache_size=2GB`, `work_mem=16MB`,
+`maintenance_work_mem=256MB`, and `shm_size: "1gb"`) because Vespa and the model
+runners carry the heavy retrieval and inference paths while PostgreSQL handles
+persistence, hydration, and bounded fallback lookup. Runtime status prints
+Docker-visible memory, configured per-container memory/swap limits, and
+Postgres shared-memory sizing so future changes are based on container-visible
+limits.
 
 The V2.8 acceleration status model is read-only. It detects CPU count, Windows
 memory when available, cache-root disk space, NVIDIA/CUDA through `nvidia-smi`,
 optional ONNX Runtime providers, selected watcher backend policy/native state,
-and optional local model servers. Local vision inference is enabled by default
-for the configured local provider and accepts only loopback HTTP(S) URLs. The permanent cache layout is resolved from
+optional local model servers, and Docker container CPU, memory, writable-layer,
+and block-I/O consumption for the Flux services when Docker is available. Local
+vision inference is enabled by default for the configured local provider and
+accepts only loopback HTTP(S) URLs. The permanent cache layout is resolved from
 `acceleration.cache_root`, `FLUX_KB_CACHE_ROOT`, `FLUX_KB_INSTALL_ROOT`, or the
 user cache, and exposes named directories for models, OCR, ASR, vision,
 thumbnails, parser output, embeddings, private mail content sidecars, and temp

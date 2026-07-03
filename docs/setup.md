@@ -48,12 +48,18 @@ in Docker named volumes; Windows bind mounts are reserved for host-managed
 private config, mail spool, and Windows-only watched roots. API access remains local at
 `http://127.0.0.1:8765/dashboard`.
 
-The local Docker profile assumes a high-memory single-user workstation. Generated
-Compose files give PostgreSQL larger shared buffers, work memory, maintenance
-memory, WAL/checkpoint headroom, and a larger `/dev/shm` mount while keeping API,
-worker, Outlook host, and Ollama memory headroom. `status-flux.ps1` prints the
-Docker-visible memory limit and Postgres `/dev/shm` size so tuning decisions use
-the Linux VM/container limit, not only Windows host free RAM.
+The local Docker profile assumes a single-user workstation with direct container
+memory ceilings. Generated production Compose files set a 40 GB Docker-managed
+budget across API 2 GB, worker 2 GB, model-runner 10 GB, paddle-runner 8 GB,
+ASR 4 GB, Ollama 6 GB, Vespa 5 GB, and PostgreSQL 3 GB. Each production service
+sets `memswap_limit` equal to `mem_limit`, so Docker cannot add swap-backed
+headroom beyond the configured cap. PostgreSQL uses a leaner local profile
+(`shared_buffers=768MB`, `effective_cache_size=2GB`, `work_mem=16MB`,
+`maintenance_work_mem=256MB`, and `shm_size: "1gb"`) because Vespa and the
+model runners own the heavy retrieval and inference workload. `status-flux.ps1`
+prints Docker-visible memory, every Flux container's configured memory/swap
+limit, and Postgres `/dev/shm` size so tuning decisions use the Linux
+VM/container limits, not only Windows host free RAM.
 
 When production GPU mode is available, the generated Compose deployment also
 builds a small `flux-ollama` image derived from the official `ollama/ollama`
@@ -329,8 +335,9 @@ V2.8 acceleration foundation settings are also catalog-backed. The default cache
 root resolves under the production install root when `FLUX_KB_INSTALL_ROOT` is
 set, otherwise under the local user cache. `flux-kb acceleration status` and the
 dashboard Performance tab show CPU/disk hints, optional NVIDIA and ONNX Runtime
-availability, local model-server state, cache directories, and worker-family
-queue counts. Local vision inference is enabled by default for the local
+availability, local model-server state, Docker container CPU/memory/writable
+layer/block-I/O usage, cache directories, and worker-family queue counts. Local
+vision inference is enabled by default for the local
 loopback/Ollama path and accepts only loopback HTTP(S) URLs such as
 `http://127.0.0.1:11434`, the Docker host gateway
 `http://host.docker.internal:11434`, or the internal production Compose service

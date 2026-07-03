@@ -76,6 +76,49 @@ const health = {
           }
         }
       ]
+    },
+    docker: {
+      ok: true,
+      state: "available",
+      totals: {
+        memory_usage_bytes: 1280 * 1024 * 1024,
+        memory_limit_bytes: 5 * 1024 * 1024 * 1024,
+        size_rw_bytes: 192 * 1024 * 1024,
+        block_io_read_bytes: 3 * 1024 * 1024,
+        block_io_write_bytes: 72 * 1024 * 1024
+      },
+      containers: [
+        {
+          service: "api",
+          container_name: "flux-llm-kb-api",
+          status: "running",
+          running: true,
+          cpu_percent: 12.34,
+          memory_usage_bytes: 512 * 1024 * 1024,
+          memory_limit_bytes: 2 * 1024 * 1024 * 1024,
+          memory_swap_limit_bytes: 2 * 1024 * 1024 * 1024,
+          memory_percent: 25,
+          block_io_read_bytes: 1024 * 1024,
+          block_io_write_bytes: 64 * 1024 * 1024,
+          size_rw_bytes: 128 * 1024 * 1024,
+          pids: 42
+        },
+        {
+          service: "postgres",
+          container_name: "flux-llm-kb-postgres",
+          status: "running",
+          running: true,
+          cpu_percent: 1.5,
+          memory_usage_bytes: 768 * 1024 * 1024,
+          memory_limit_bytes: 3 * 1024 * 1024 * 1024,
+          memory_swap_limit_bytes: 3 * 1024 * 1024 * 1024,
+          memory_percent: 25,
+          block_io_read_bytes: 2 * 1024 * 1024,
+          block_io_write_bytes: 8 * 1024 * 1024,
+          size_rw_bytes: 64 * 1024 * 1024,
+          pids: 19
+        }
+      ]
     }
   },
   workers: {
@@ -1520,6 +1563,10 @@ describe("Flux dashboard", () => {
     expect(screen.getAllByText("watchdog").length).toBeGreaterThan(0);
     expect(screen.getByText("auto")).toBeInTheDocument();
     expect(screen.getByText("D:/FluxLLMKB/private/cache")).toBeInTheDocument();
+    expect(screen.getByText("Container resources")).toBeInTheDocument();
+    expect(screen.getByText("2 running / 2 reported")).toBeInTheDocument();
+    expect(screen.getByText("memory 1.25 GB / 5 GB")).toBeInTheDocument();
+    expect(screen.getByText("flux-llm-kb-api; CPU 12.34%; memory 512 MB / 2 GB (25%); writable 128 MB; block I/O 1 MB / 64 MB")).toBeInTheDocument();
     expect(screen.getAllByText("media").length).toBeGreaterThan(0);
     expect(screen.getByText("p95 95ms; OCR 6 hit / 2 miss; ASR 4 hit / 1 miss; 9 segments; Vision 5 hit / 2 miss; 3 descriptions; 1 blocked; 4 decorative skips; Frames 6 sampled; thumbnails 7 hit / 8 miss; Search index 10 vectors; 2 skipped; 1 batches; cache 3 hit / 4 miss")).toBeInTheDocument();
     expect(screen.getByText("Family Backpressure")).toBeInTheDocument();
