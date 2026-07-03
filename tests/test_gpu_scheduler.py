@@ -5,7 +5,9 @@ import time
 
 import pytest
 
+from flux_llm_kb import gpu_scheduler
 from flux_llm_kb.gpu_scheduler import (
+    GpuEvictionCandidate,
     GpuLeaseRecord,
     GpuLeaseTimeout,
     GpuLease,
@@ -335,6 +337,159 @@ def test_postgres_scheduler_reset_component_residency_casts_sql_parameters():
         "model-runner",
         ["embedding", "rerank"],
     )
+
+
+def test_postgres_eviction_keeps_residency_when_vram_does_not_recover(monkeypatch):
+    records: list[dict[str, object]] = []
+    evicted: list[GpuEvictionCandidate] = []
+    sleeps: list[float] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, object]:
+            return {"ok": True, "candidate": candidate.model_id}
+
+        def _record_eviction(
+            self,
+            lease_id: str,
+            candidate: GpuEvictionCandidate,
+            *,
+            status: str,
+            error: str = "",
+            metadata: dict[str, object] | None = None,
+        ) -> None:
+            records.append(
+                {
+                    "lease_id": lease_id,
+                    "candidate": candidate,
+                    "status": status,
+                    "error": error,
+                    "metadata": metadata or {},
+                }
+            )
+
+        def _mark_residency_evicted(self, candidate: GpuEvictionCandidate) -> None:
+            evicted.append(candidate)
+
+    monkeypatch.setattr(gpu_scheduler, "_live_free_vram_mb", lambda: 1_200)
+    monkeypatch.setattr(gpu_scheduler.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
+    scheduler = RecordingScheduler(_config(mode="postgres", eviction_request_timeout_seconds=0.0), database_url="postgresql://example")
+    profile = GpuTaskProfile(task_type="ollama_vision", model_id="qwen3-vl:8b", estimated_vram_mb=9_000)
+    candidate = GpuEvictionCandidate(task_type="embedding", model_id="snowflake", estimated_vram_mb=2_500, component="model-runner")
+
+    assert scheduler._attempt_evictions(profile, "lease-1", [candidate]) is False
+
+    assert evicted == []
+    assert len(records) == 1
+    assert records[0]["status"] == "failed"
+    assert "VRAM did not recover" in str(records[0]["error"])
+    assert sleeps == [10.0, 10.0]
+
+
+def test_postgres_eviction_retries_twice_before_failed_verification(monkeypatch):
+    attempts: list[str] = []
+    sleeps: list[float] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, object]:
+            attempts.append(candidate.model_id)
+            return {"ok": True}
+
+        def _record_eviction(
+            self,
+            lease_id: str,
+            candidate: GpuEvictionCandidate,
+            *,
+            status: str,
+            error: str = "",
+            metadata: dict[str, object] | None = None,
+        ) -> None:
+            attempts.append(f"{status}:{metadata.get('attempts') if metadata else None}")
+
+        def _mark_residency_evicted(self, candidate: GpuEvictionCandidate) -> None:
+            attempts.append("marked")
+
+    monkeypatch.setattr(gpu_scheduler, "_live_free_vram_mb", lambda: 500)
+    monkeypatch.setattr(gpu_scheduler.time, "sleep", lambda seconds: sleeps.append(float(seconds)))
+    scheduler = RecordingScheduler(_config(mode="postgres", eviction_request_timeout_seconds=0.0), database_url="postgresql://example")
+    profile = GpuTaskProfile(task_type="ocr_document", model_id="PaddleOCR-VL", estimated_vram_mb=8_000)
+    candidate = GpuEvictionCandidate(task_type="rerank", model_id="qwen", estimated_vram_mb=7_000, component="model-runner")
+
+    assert scheduler._attempt_evictions(profile, "lease-1", [candidate]) is False
+
+    assert attempts == ["qwen", "qwen", "qwen", "failed:3"]
+    assert sleeps == [10.0, 10.0]
+
+
+def test_postgres_eviction_marks_residency_only_after_vram_recovers(monkeypatch):
+    records: list[dict[str, object]] = []
+    evicted: list[GpuEvictionCandidate] = []
+    free_vram = iter([1_200, 5_000])
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, object]:
+            return {"ok": True, "candidate": candidate.model_id}
+
+        def _record_eviction(
+            self,
+            lease_id: str,
+            candidate: GpuEvictionCandidate,
+            *,
+            status: str,
+            error: str = "",
+            metadata: dict[str, object] | None = None,
+        ) -> None:
+            records.append({"status": status, "error": error, "metadata": metadata or {}})
+
+        def _mark_residency_evicted(self, candidate: GpuEvictionCandidate) -> None:
+            evicted.append(candidate)
+
+    monkeypatch.setattr(gpu_scheduler, "_live_free_vram_mb", lambda: next(free_vram))
+    scheduler = RecordingScheduler(_config(mode="postgres", eviction_request_timeout_seconds=0.0), database_url="postgresql://example")
+    profile = GpuTaskProfile(task_type="ocr_image", model_id="PP-OCRv5", estimated_vram_mb=2_000)
+    candidate = GpuEvictionCandidate(task_type="embedding", model_id="snowflake", estimated_vram_mb=2_500, component="model-runner")
+
+    assert scheduler._attempt_evictions(profile, "lease-1", [candidate]) is True
+
+    assert evicted == [candidate]
+    assert records == [{"status": "succeeded", "error": "", "metadata": records[0]["metadata"]}]
+    assert records[0]["metadata"]["attempts"] == 1
+
+
+def test_postgres_eviction_waits_for_verification_before_retrying_admission(monkeypatch):
+    order: list[str] = []
+    free_vram = iter([1_200, 5_000])
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, object]:
+            order.append("unload")
+            return {"ok": True}
+
+        def _record_eviction(
+            self,
+            lease_id: str,
+            candidate: GpuEvictionCandidate,
+            *,
+            status: str,
+            error: str = "",
+            metadata: dict[str, object] | None = None,
+        ) -> None:
+            order.append(f"record:{status}")
+
+        def _mark_residency_evicted(self, candidate: GpuEvictionCandidate) -> None:
+            order.append("mark-residency")
+
+    def live_free_vram() -> int:
+        order.append("verify")
+        return next(free_vram)
+
+    monkeypatch.setattr(gpu_scheduler, "_live_free_vram_mb", live_free_vram)
+    scheduler = RecordingScheduler(_config(mode="postgres", eviction_request_timeout_seconds=0.0), database_url="postgresql://example")
+    profile = GpuTaskProfile(task_type="ocr_image", model_id="PP-OCRv5", estimated_vram_mb=2_000)
+    candidate = GpuEvictionCandidate(task_type="embedding", model_id="snowflake", estimated_vram_mb=2_500, component="model-runner")
+
+    assert scheduler._attempt_evictions(profile, "lease-1", [candidate]) is True
+
+    assert order == ["verify", "unload", "verify", "record:succeeded", "mark-residency"]
 
 
 def test_gpu_lease_heartbeats_until_released():

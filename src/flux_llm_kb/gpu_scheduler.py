@@ -13,6 +13,11 @@ from uuid import uuid4
 
 
 GPU_LEASE_STATUSES = frozenset({"waiting", "running", "released", "timed_out", "recovered", "rejected"})
+GPU_EVICTION_MAX_ATTEMPTS = 3
+GPU_EVICTION_RETRY_DELAY_SECONDS = 10.0
+GPU_EVICTION_VERIFICATION_POLL_INTERVAL_SECONDS = 0.5
+GPU_EVICTION_MIN_FREED_FRACTION = 0.5
+GPU_EVICTION_MIN_FREED_MB = 256
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,14 @@ class GpuAdmissionDecision:
     incremental_vram_mb: int = 0
     resident_hit: bool = False
     eviction_candidates: list[GpuEvictionCandidate] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GpuEvictionVerificationResult:
+    verified: bool
+    payload: dict[str, Any] = field(default_factory=dict)
+    error: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class GpuSchedulerError(RuntimeError):
@@ -838,15 +851,183 @@ class PostgresGpuScheduler(BaseGpuScheduler):
         attempted = False
         for candidate in list(candidates)[: max(0, int(self.config.eviction_max_models or 0))]:
             attempted = True
-            try:
-                payload = self._evict_candidate(candidate)
-            except Exception as exc:  # pragma: no cover - network/deployment-specific
-                self._record_eviction(lease_id, candidate, status="failed", error=str(exc), metadata={"request_task_type": profile.task_type})
-                continue
-            self._record_eviction(lease_id, candidate, status="succeeded", metadata={"request_task_type": profile.task_type, "response": payload})
-            self._mark_residency_evicted(candidate)
-            return True
+            result = self._evict_candidate_with_retries(profile, candidate)
+            metadata = {"request_task_type": profile.task_type, **dict(result.metadata or {})}
+            if result.verified:
+                if result.payload:
+                    metadata["response"] = result.payload
+                self._record_eviction(lease_id, candidate, status="succeeded", metadata=metadata)
+                self._mark_residency_evicted(candidate)
+                return True
+            self._record_eviction(
+                lease_id,
+                candidate,
+                status="failed",
+                error=result.error,
+                metadata=metadata,
+            )
         return False if attempted else False
+
+    def _evict_candidate_with_retries(
+        self,
+        profile: GpuTaskProfile,
+        candidate: GpuEvictionCandidate,
+    ) -> GpuEvictionVerificationResult:
+        errors: list[str] = []
+        last_result = GpuEvictionVerificationResult(
+            verified=False,
+            error="eviction was not attempted",
+            metadata={"attempts": 0},
+        )
+        for attempt in range(1, GPU_EVICTION_MAX_ATTEMPTS + 1):
+            try:
+                result = self._evict_candidate_once(profile, candidate, attempt=attempt)
+            except Exception as exc:  # pragma: no cover - network/deployment-specific
+                result = GpuEvictionVerificationResult(
+                    verified=False,
+                    error=str(exc),
+                    metadata={"attempt": attempt},
+                )
+            if result.verified:
+                metadata = {
+                    **dict(result.metadata or {}),
+                    "attempts": attempt,
+                }
+                if errors:
+                    metadata["attempt_errors"] = errors
+                return GpuEvictionVerificationResult(
+                    verified=True,
+                    payload=result.payload,
+                    metadata=metadata,
+                )
+            error = result.error or "eviction verification failed"
+            errors.append(error)
+            last_result = result
+            if attempt < GPU_EVICTION_MAX_ATTEMPTS:
+                time.sleep(GPU_EVICTION_RETRY_DELAY_SECONDS)
+        return GpuEvictionVerificationResult(
+            verified=False,
+            payload=last_result.payload,
+            error=errors[-1] if errors else last_result.error,
+            metadata={
+                **dict(last_result.metadata or {}),
+                "attempts": GPU_EVICTION_MAX_ATTEMPTS,
+                "attempt_errors": errors,
+            },
+        )
+
+    def _evict_candidate_once(
+        self,
+        profile: GpuTaskProfile,
+        candidate: GpuEvictionCandidate,
+        *,
+        attempt: int,
+    ) -> GpuEvictionVerificationResult:
+        before_free_vram_mb = _live_free_vram_mb()
+        if before_free_vram_mb is None:
+            return GpuEvictionVerificationResult(
+                verified=False,
+                error="live GPU memory was unavailable before eviction",
+                metadata={"attempt": attempt, "before_free_vram_mb": None},
+            )
+        payload = self._evict_candidate(candidate)
+        return self._verify_eviction_vram_recovered(
+            profile,
+            candidate,
+            before_free_vram_mb=before_free_vram_mb,
+            payload=payload,
+            attempt=attempt,
+        )
+
+    def _verify_eviction_vram_recovered(
+        self,
+        profile: GpuTaskProfile,
+        candidate: GpuEvictionCandidate,
+        *,
+        before_free_vram_mb: int,
+        payload: dict[str, Any],
+        attempt: int,
+    ) -> GpuEvictionVerificationResult:
+        timeout = max(0.0, float(self.config.eviction_request_timeout_seconds or 0.0))
+        deadline = time.monotonic() + timeout
+        last_after_free_vram_mb: int | None = None
+        while True:
+            after_free_vram_mb = _live_free_vram_mb()
+            if after_free_vram_mb is None:
+                return GpuEvictionVerificationResult(
+                    verified=False,
+                    payload=payload,
+                    error="live GPU memory was unavailable after eviction",
+                    metadata={
+                        "attempt": attempt,
+                        "before_free_vram_mb": before_free_vram_mb,
+                        "after_free_vram_mb": None,
+                    },
+                )
+            last_after_free_vram_mb = after_free_vram_mb
+            verification = self._eviction_verification_metadata(
+                profile,
+                candidate,
+                before_free_vram_mb=before_free_vram_mb,
+                after_free_vram_mb=after_free_vram_mb,
+                attempt=attempt,
+            )
+            if verification["verified"]:
+                return GpuEvictionVerificationResult(
+                    verified=True,
+                    payload=payload,
+                    metadata=verification,
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return GpuEvictionVerificationResult(
+                    verified=False,
+                    payload=payload,
+                    error=(
+                        "VRAM did not recover after eviction"
+                        f" (before_free_vram_mb={before_free_vram_mb}, "
+                        f"after_free_vram_mb={last_after_free_vram_mb}, "
+                        f"freed_vram_mb={verification['freed_vram_mb']}, "
+                        f"required_vram_mb={verification['required_vram_mb']}, "
+                        f"available_vram_mb={verification['available_vram_mb']})"
+                    ),
+                    metadata=verification,
+                )
+            time.sleep(min(GPU_EVICTION_VERIFICATION_POLL_INTERVAL_SECONDS, remaining))
+
+    def _eviction_verification_metadata(
+        self,
+        profile: GpuTaskProfile,
+        candidate: GpuEvictionCandidate,
+        *,
+        before_free_vram_mb: int,
+        after_free_vram_mb: int,
+        attempt: int,
+    ) -> dict[str, Any]:
+        required_vram_mb = max(0, int(profile.estimated_vram_mb or 0))
+        available_vram_mb = _available_vram_mb(self.config, live_free_vram_mb=after_free_vram_mb)
+        freed_vram_mb = max(0, int(after_free_vram_mb) - int(before_free_vram_mb))
+        min_freed_vram_mb = _eviction_min_freed_vram_mb(candidate)
+        request_fits = required_vram_mb <= available_vram_mb
+        freed_enough = freed_vram_mb >= min_freed_vram_mb
+        verified = bool(request_fits or freed_enough)
+        reason = ""
+        if request_fits:
+            reason = "request_fits_after_eviction"
+        elif freed_enough:
+            reason = "freed_vram_threshold_met"
+        return {
+            "attempt": attempt,
+            "verified": verified,
+            "verification_reason": reason,
+            "before_free_vram_mb": before_free_vram_mb,
+            "after_free_vram_mb": after_free_vram_mb,
+            "freed_vram_mb": freed_vram_mb,
+            "min_freed_vram_mb": min_freed_vram_mb,
+            "required_vram_mb": required_vram_mb,
+            "available_vram_mb": available_vram_mb,
+            "candidate_estimated_vram_mb": max(0, int(candidate.estimated_vram_mb or 0)),
+        }
 
     def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, Any]:
         component = candidate.component or _component_for_task_type(candidate.task_type)
@@ -1281,6 +1462,13 @@ def _empty_eviction_status() -> dict[str, Any]:
         "last_errors": [],
         "recent": [],
     }
+
+
+def _eviction_min_freed_vram_mb(candidate: GpuEvictionCandidate) -> int:
+    estimate = max(0, int(candidate.estimated_vram_mb or 0))
+    if estimate <= 0:
+        return 1
+    return min(estimate, max(GPU_EVICTION_MIN_FREED_MB, int(estimate * GPU_EVICTION_MIN_FREED_FRACTION)))
 
 
 def _eviction_status(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
