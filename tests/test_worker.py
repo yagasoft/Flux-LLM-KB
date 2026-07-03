@@ -613,6 +613,55 @@ def test_backfill_blocks_terminal_blocked_jobs_without_completing(monkeypatch, b
     assert calls["cleared_errors"] == [{"root_name": None}]
 
 
+def test_backfill_blocks_paddle_dependency_result_without_retry(monkeypatch):
+    calls = {"completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-ocr",
+                "job_type": "corpus_extract_pdf_ocr_pages",
+                "job_family": "documents",
+                "resource_class": "gpu",
+                "payload": {"path": "scan.pdf", "root_name": "docs"},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    from flux_llm_kb import worker
+
+    monkeypatch.setattr(
+        worker,
+        "process_corpus_job",
+        lambda _job: worker.JobProcessResult(
+            status="blocked_missing_dependency",
+            message="PaddleOCR-VL requires additional dependencies",
+            telemetry={"error_type": "DependencyError", "ocr_cache_hits": 0, "ocr_cache_misses": 1},
+        ),
+    )
+
+    result = KnowledgeService().run_corpus_backfill(kind="documents", limit=1, workers=1)
+
+    assert result["blocked"] == 1
+    assert result["retried"] == 0
+    assert result["failed"] == 0
+    assert calls["completed"] == []
+    assert calls["retried"] == []
+    assert calls["blocked"][0]["job_id"] == "job-ocr"
+    assert calls["blocked"][0]["error"] == "PaddleOCR-VL requires additional dependencies"
+    assert "status" not in calls["blocked"][0]
+    assert calls["blocked"][0]["telemetry"]["error_type"] == "DependencyError"
+
+
 def test_backfill_processes_claimed_jobs_in_parallel_when_workers_gt_one(monkeypatch):
     active = 0
     max_active = 0

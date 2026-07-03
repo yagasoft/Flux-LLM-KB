@@ -160,6 +160,29 @@ def test_record_model_activity_marks_scheduler_rejections_busy(monkeypatch):
     assert finished[0]["error_class"] == "GpuLeaseRejected"
 
 
+def test_record_model_activity_marks_paddle_dependency_errors_blocked(monkeypatch):
+    finished: list[dict[str, object]] = []
+
+    class DependencyError(RuntimeError):
+        pass
+
+    monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **_kwargs: "event-dependency", raising=False)
+    monkeypatch.setattr(model_activity.database, "finish_model_activity_event", lambda **kwargs: finished.append(kwargs), raising=False)
+
+    try:
+        with model_activity.record_model_activity(service="worker", endpoint="/v1/ocr/document", action="ocr_document", activity_class="vision_ocr"):
+            raise DependencyError("PaddleOCR-VL dependency missing for E:/Private/report.pdf token=secret")
+    except DependencyError:
+        pass
+
+    assert finished[0]["status"] == "blocked_missing_dependency"
+    assert finished[0]["error_class"] == "DependencyError"
+    message = str(finished[0]["error_message"])
+    assert "PaddleOCR-VL dependency missing" in message
+    assert "E:/Private" not in message
+    assert "secret" not in message.lower()
+
+
 def test_record_model_activity_is_best_effort_when_database_fails(monkeypatch):
     def broken_start(**_kwargs):
         raise RuntimeError("database unavailable")

@@ -3179,7 +3179,7 @@ function ModelActivityPanel({
     model.model ?? "resident model",
     [model.task_type ? humanizeIdentifier(model.task_type) : null, model.last_used_at ? `last ${formatDate(model.last_used_at)}` : null].filter(Boolean).join("; ") || "resident"
   ] as [string, string, string]);
-  const failures = visibleEvents.filter((event) => event.status === "failed" || event.status === "busy").slice(0, 4);
+  const failures = visibleEvents.filter(isModelActivityIssue).slice(0, 4);
   return (
     <Panel
       title="Model activity"
@@ -3255,7 +3255,7 @@ function ModelActivityPanel({
             <div className="settings-row" key={event.id ?? `${event.service}-${event.started_at}`}>
               <strong>{event.error_class ?? humanizeIdentifier(event.status ?? "failure")}</strong>
               <span>{event.error_message ?? "Failure recorded"}</span>
-              <em>{`${event.service ?? "model activity"} failure`}</em>
+              <em>{modelActivityIssueLabel(event)}</em>
             </div>
           ))}
         </div>
@@ -6576,6 +6576,17 @@ function humanizeIdentifier(value: string) {
 
 function modelActivityCountText(activity: ModelActivityPayload) {
   return `${activity.recent_count ?? activity.events?.length ?? 0} recent / ${activity.active_count ?? 0} active`;
+}
+
+function isModelActivityIssue(event: ModelActivityEvent) {
+  return event.status === "failed" || event.status === "busy" || event.status === "blocked_missing_dependency";
+}
+
+function modelActivityIssueLabel(event: ModelActivityEvent) {
+  const service = event.service ?? "model activity";
+  if (event.status === "blocked_missing_dependency") return `${service} missing dependency`;
+  if (event.status === "busy") return `${service} busy`;
+  return `${service} failure`;
 }
 
 function modelActivityServiceRows(events: ModelActivityEvent[]) {

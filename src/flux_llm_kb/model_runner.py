@@ -220,6 +220,21 @@ def _resolve_model_runner_base_url(explicit_base_url: str | None = None) -> str:
     return DEFAULT_MODEL_RUNNER_BASE_URL
 
 
+def configured_model_runner_base_url() -> str:
+    env_base_url = (os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL") or "").strip()
+    if env_base_url:
+        return env_base_url
+    try:
+        from .settings import SettingsService
+
+        resolved = SettingsService().resolve("model_runner.base_url")
+    except Exception:
+        return ""
+    if getattr(resolved, "source", "default") == "default":
+        return ""
+    return str(getattr(resolved, "raw_value", "") or "").strip()
+
+
 class ModelRunnerRerankScorer:
     def __init__(self, client: ModelRunnerClient | None = None) -> None:
         self.client = client or ModelRunnerClient()

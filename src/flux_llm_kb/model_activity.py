@@ -12,7 +12,7 @@ from .error_diagnostics import redact_secrets
 from .gpu_scheduler import get_gpu_scheduler
 
 
-ALLOWED_STATUSES = {"running", "completed", "failed", "busy", "stale_running"}
+ALLOWED_STATUSES = {"running", "completed", "failed", "busy", "stale_running", "blocked_missing_dependency"}
 ALLOWED_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "control_plane", "model_loading"}
 CONTROL_PLANE_ACTIVITY_CLASSES = {"health", "control_plane"}
 ALLOWED_METADATA_KEYS = {
@@ -393,7 +393,23 @@ def _status_for_exception(exc: Exception) -> str:
     name = exc.__class__.__name__
     if name in {"ModelRunnerBusy", "GpuLeaseRejected", "GpuLeaseTimeout"}:
         return "busy"
+    if _is_missing_dependency_exception(exc):
+        return "blocked_missing_dependency"
     return "failed"
+
+
+def _is_missing_dependency_exception(exc: Exception) -> bool:
+    if isinstance(exc, ModuleNotFoundError):
+        return True
+    name = exc.__class__.__name__
+    message = str(exc or "").lower()
+    if name in {"DependencyError", "ImportError"}:
+        return True
+    return (
+        "requires additional dependencies" in message
+        or "paddlex[ocr]" in message
+        or "module not installed" in message
+    )
 
 
 def _duration_ms(started: float) -> int:

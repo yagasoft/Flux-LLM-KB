@@ -4,6 +4,7 @@ param(
     [string]$CommitMessage = "Complete feature",
     [switch]$DryRun,
     [switch]$SkipDeploy,
+    [switch]$NoPackageInstall,
     [switch]$KeepWorktree,
     [int]$StepTimeoutSeconds = 600,
     [int]$DeployStepTimeoutSeconds = 1800,
@@ -233,6 +234,9 @@ if (-not $editableLocation) {
 }
 
 if ($needsRepair) {
+    if ($env:FLUX_KB_NO_PACKAGE_INSTALL -eq "1") {
+        throw "Python editable install repair requires package installation but -NoPackageInstall was set."
+    }
     python -m pip install -e "$MainRoot[dev]"
 }
 '@
@@ -331,7 +335,11 @@ try {
     Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
     Invoke-FeatureStep -Name "compileall" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m compileall -q src tests'
     Invoke-FeatureStep -Name "flux-lint" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli lint'
-    Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci --include=dev'
+    if ($NoPackageInstall) {
+        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command '$vitest = Join-Path (Get-Location) "dashboard\node_modules\vitest\dist\cli.js"; $vite = Join-Path (Get-Location) "dashboard\node_modules\vite\bin\vite.js"; if (-not (Test-Path -LiteralPath $vitest)) { throw "Dashboard vitest dependency missing; rerun without -NoPackageInstall or provide existing dashboard\node_modules." }; if (-not (Test-Path -LiteralPath $vite)) { throw "Dashboard vite dependency missing; rerun without -NoPackageInstall or provide existing dashboard\node_modules." }; "Skipped dashboard package install; existing dashboard node_modules verified."'
+    } else {
+        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci --include=dev'
+    }
     Invoke-FeatureStep -Name "dashboard-test" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/dist/cli.js run } finally { Pop-Location }'
     Invoke-FeatureStep -Name "dashboard-build" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'
     Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A; if ((git status --porcelain) -ne `$null) { git commit -m '$CommitMessage' }"
@@ -357,13 +365,20 @@ try {
     }
     $previousRepairMainRoot = $env:FLUX_KB_REPAIR_MAIN_ROOT
     $previousRepairFeatureWorktree = $env:FLUX_KB_REPAIR_FEATURE_WORKTREE
+    $previousNoPackageInstall = $env:FLUX_KB_NO_PACKAGE_INSTALL
     try {
         $env:FLUX_KB_REPAIR_MAIN_ROOT = $MainRoot
         $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $FeatureWorktree
+        $env:FLUX_KB_NO_PACKAGE_INSTALL = if ($NoPackageInstall) { "1" } else { "0" }
         Invoke-FeatureStep -Name "repair-python-editable-install" -Cwd $MainRoot -Command $RepairEditableInstallCommand
     } finally {
         $env:FLUX_KB_REPAIR_MAIN_ROOT = $previousRepairMainRoot
         $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $previousRepairFeatureWorktree
+        if ($null -eq $previousNoPackageInstall) {
+            Remove-Item Env:\FLUX_KB_NO_PACKAGE_INSTALL -ErrorAction SilentlyContinue
+        } else {
+            $env:FLUX_KB_NO_PACKAGE_INSTALL = $previousNoPackageInstall
+        }
     }
     if (-not $KeepWorktree) {
         $previousCleanupMainRoot = $env:FLUX_KB_CLEANUP_MAIN_ROOT

@@ -77,6 +77,11 @@ def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
     assert install_step in script
     assert test_step in script
     assert build_step in script
+    assert "[switch]$NoPackageInstall" in script
+    assert 'if ($NoPackageInstall)' in script
+    assert "Skipped dashboard package install; existing dashboard node_modules verified." in script
+    assert "Dashboard vitest dependency missing" in script
+    assert "Dashboard vite dependency missing" in script
     assert script.index(install_step) < script.index(test_step) < script.index(build_step)
 
 
@@ -88,6 +93,9 @@ def test_complete_feature_script_repairs_shared_editable_install_before_worktree
     assert "Editable project location:" in script
     assert "Test-Path -LiteralPath $editableLocation" in script
     assert "Test-UnderPath -Path $editableLocation -Root $FeatureWorktree" in script
+    assert "Python editable install repair requires package installation but -NoPackageInstall was set." in script
+    assert "$env:FLUX_KB_NO_PACKAGE_INSTALL = if ($NoPackageInstall)" in script
+    assert "$previousNoPackageInstall = $env:FLUX_KB_NO_PACKAGE_INSTALL" in script
     assert 'python -m pip install -e "$MainRoot[dev]"' in script
 
 

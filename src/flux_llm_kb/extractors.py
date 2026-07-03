@@ -93,6 +93,7 @@ OCR_ENGINE = "paddleocr"
 OCR_SIMPLE_MODEL = "PP-OCRv5"
 OCR_DOCUMENT_MODEL = "PaddleOCR-VL"
 OCR_CACHE_SCHEMA = "flux-paddleocr-cache-v3"
+LOCAL_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|/)[^\s,;]+")
 ASR_CACHE_SCHEMA = "flux-asr-cache-v1"
 VISION_CACHE_SCHEMA = "flux-vision-cache-v1"
 THUMBNAIL_CACHE_SCHEMA = "flux-thumbnail-cache-v1"
@@ -6268,7 +6269,7 @@ def _ocr_image_with_paddleocr(
             message=str(exc),
         )
     except Exception as exc:
-        if isinstance(exc, ModuleNotFoundError):
+        if _is_paddle_ocr_missing_dependency(exc):
             return OcrResult(
                 status="blocked_missing_dependency",
                 metadata={
@@ -6281,7 +6282,7 @@ def _ocr_image_with_paddleocr(
                     "cache_misses": 1,
                     "preprocess": preprocess,
                 },
-                message="paddleocr module not installed",
+                message=_paddle_ocr_missing_dependency_message(exc),
             )
         return OcrResult(
             status="failed",
@@ -6436,11 +6437,36 @@ def _is_paddleocr_document_model(model: str) -> bool:
     return str(model or "").startswith("PaddleOCR-VL")
 
 
-def _run_paddleocr_document(path: Path, *, model: str) -> str:
-    if os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL"):
-        from .model_runner import ModelRunnerClient
+def _is_paddle_ocr_missing_dependency(exc: Exception) -> bool:
+    if isinstance(exc, ModuleNotFoundError):
+        return True
+    name = exc.__class__.__name__
+    message = str(exc or "")
+    lower = message.lower()
+    if name in {"DependencyError", "ImportError"} and (
+        "paddlex" in lower
+        or "paddleocr" in lower
+        or "paddleocr-vl" in lower
+        or "requires additional dependencies" in lower
+    ):
+        return True
+    return "paddlex[ocr]" in lower or "paddleocr module not installed" in lower
 
-        payload = ModelRunnerClient().ocr_file(path, model=model, document=True)
+
+def _paddle_ocr_missing_dependency_message(exc: Exception) -> str:
+    if isinstance(exc, ModuleNotFoundError):
+        missing = getattr(exc, "name", None) or str(exc) or "paddleocr"
+        return f"{missing} module not installed"
+    message = _safe_external_error_detail(str(exc), max_length=300) or "PaddleOCR dependency missing"
+    return LOCAL_PATH_RE.sub("[REDACTED:path]", message)
+
+
+def _run_paddleocr_document(path: Path, *, model: str) -> str:
+    from .model_runner import ModelRunnerClient, configured_model_runner_base_url
+
+    model_runner_base_url = configured_model_runner_base_url()
+    if model_runner_base_url:
+        payload = ModelRunnerClient(base_url=model_runner_base_url).ocr_file(path, model=model, document=True)
         return str(payload.get("text") or "")
     from .model_runner import _ocr_document_with_paddle
 
@@ -6459,10 +6485,11 @@ def _run_paddleocr_document(path: Path, *, model: str) -> str:
 def _run_paddleocr_image(path: Path, *, model: str) -> str:
     if _is_paddleocr_document_model(model):
         raise ValueError("PaddleOCR-VL document OCR must use the document OCR pipeline")
-    if os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL"):
-        from .model_runner import ModelRunnerClient
+    from .model_runner import ModelRunnerClient, configured_model_runner_base_url
 
-        payload = ModelRunnerClient().ocr_file(path, model=model, document=str(model).startswith("PaddleOCR-VL"))
+    model_runner_base_url = configured_model_runner_base_url()
+    if model_runner_base_url:
+        payload = ModelRunnerClient(base_url=model_runner_base_url).ocr_file(path, model=model, document=str(model).startswith("PaddleOCR-VL"))
         return str(payload.get("text") or "")
 
     _configure_optional_onnxruntime_logging()

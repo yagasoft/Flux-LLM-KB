@@ -1095,6 +1095,34 @@ def test_extract_image_blocks_when_paddleocr_is_missing(monkeypatch, tmp_path):
     assert result.metadata["ocr"]["cache_misses"] == 1
 
 
+def test_extract_paddleocr_vl_dependency_error_blocks_missing_dependency(monkeypatch, tmp_path):
+    path = tmp_path / "scan-document.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
+
+    class DependencyError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DependencyError(
+                "`PaddleOCR-VL` requires additional dependencies for E:/Private/report.pdf. "
+                'Run pip install "paddlex[ocr]".'
+            )
+        ),
+    )
+
+    result = extractors._ocr_image_with_paddleocr(path, model="PaddleOCR-VL")
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.metadata["status"] == "blocked_missing_dependency"
+    assert result.metadata["model"] == "PaddleOCR-VL"
+    assert "PaddleOCR-VL" in str(result.message)
+    assert "E:/Private" not in str(result.message)
+
+
 def test_run_paddleocr_image_configures_onnxruntime_before_importing_paddleocr(monkeypatch, tmp_path):
     path = tmp_path / "scan.png"
     path.write_bytes(PNG_BYTES)
@@ -1215,6 +1243,71 @@ def test_direct_worker_paddleocr_vl_document_records_safe_activity(monkeypatch, 
         }
     ]
     assert str(path) not in str(records)
+
+
+def test_worker_paddleocr_vl_document_uses_configured_model_runner_url(monkeypatch, tmp_path):
+    from flux_llm_kb import settings
+
+    path = tmp_path / "private-document.png"
+    path.write_bytes(PNG_BYTES)
+    calls: list[dict[str, object]] = []
+
+    class FakeSettingsService:
+        def resolve(self, key):
+            assert key == "model_runner.base_url"
+            return SimpleNamespace(raw_value="http://configured-model-runner:8790", source="db")
+
+    class FakeModelRunnerClient:
+        def __init__(self, base_url=None, **_kwargs):
+            calls.append({"base_url": base_url})
+
+        def ocr_file(self, input_path, *, model, document=False):
+            calls.append({"path": Path(input_path).name, "model": model, "document": document})
+            return {"ok": True, "text": "remote document OCR"}
+
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(settings, "SettingsService", FakeSettingsService)
+    monkeypatch.setattr("flux_llm_kb.model_runner.ModelRunnerClient", FakeModelRunnerClient)
+    monkeypatch.setattr(
+        "flux_llm_kb.model_runner._ocr_document_with_paddle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("local PaddleOCR-VL must not run")),
+    )
+
+    text = extractors._run_paddleocr_document(path, model="PaddleOCR-VL")
+
+    assert text == "remote document OCR"
+    assert calls == [
+        {"base_url": "http://configured-model-runner:8790"},
+        {"path": "private-document.png", "model": "PaddleOCR-VL", "document": True},
+    ]
+
+
+def test_worker_paddleocr_vl_document_ignores_unconfigured_default_model_runner_url(monkeypatch, tmp_path):
+    from flux_llm_kb import settings
+
+    path = tmp_path / "private-document.png"
+    path.write_bytes(PNG_BYTES)
+
+    class FakeSettingsService:
+        def resolve(self, key):
+            assert key == "model_runner.base_url"
+            return SimpleNamespace(raw_value="http://127.0.0.1:8790", source="default")
+
+    class FakeModelRunnerClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("unconfigured default model-runner URL must not be used")
+
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(settings, "SettingsService", FakeSettingsService)
+    monkeypatch.setattr("flux_llm_kb.model_runner.ModelRunnerClient", FakeModelRunnerClient)
+    monkeypatch.setattr(
+        "flux_llm_kb.model_runner._ocr_document_with_paddle",
+        lambda input_path, *, model, **_kwargs: f"local OCR {Path(input_path).name} {model}",
+    )
+
+    text = extractors._run_paddleocr_document(path, model="PaddleOCR-VL")
+
+    assert text == "local OCR private-document.png PaddleOCR-VL"
 
 
 def test_pdf_ocr_pages_routes_paddleocr_vl_through_document_pipeline(monkeypatch, tmp_path):

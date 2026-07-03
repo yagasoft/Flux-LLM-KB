@@ -15758,7 +15758,7 @@ def _find_canonical_asset_id(cur: Any, content_hash: str | None, current_id: str
     return row[0] if row else None
 
 
-_MODEL_ACTIVITY_STATUSES = {"running", "completed", "failed", "busy", "stale_running"}
+_MODEL_ACTIVITY_STATUSES = {"running", "completed", "failed", "busy", "stale_running", "blocked_missing_dependency"}
 _MODEL_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "control_plane", "model_loading"}
 _MODEL_ACTIVITY_METADATA_KEYS = {
     "batch_size",

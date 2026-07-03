@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS model_activity_events (
     activity_class text NOT NULL CHECK (activity_class IN ('retrieval', 'vision_ocr', 'sidecar', 'health', 'control_plane', 'model_loading')),
     caller_surface text NOT NULL DEFAULT '',
     model text NOT NULL DEFAULT '',
-    status text NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'busy', 'stale_running')),
+    status text NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'busy', 'stale_running', 'blocked_missing_dependency')),
     started_at timestamptz NOT NULL DEFAULT now(),
     completed_at timestamptz,
     duration_ms integer CHECK (duration_ms IS NULL OR duration_ms >= 0),
