@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from .database import DEFAULT_DATABASE_URL
 from .reranking import (
     DEFAULT_MAX_RERANK_PASSAGE_TOKENS,
+    DEFAULT_RERANK_MICROBATCH_SIZE,
     DEFAULT_RERANK_TOP_N,
     DEFAULT_RERANKER_AWQ_MODEL,
     DEFAULT_RERANKER_MODEL,
@@ -461,6 +462,17 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         apply_mode=APPLY_RELOAD,
         affected_components=("retrieval", "model-runner"),
         validator=_range_int(1, 200),
+    ),
+    SettingDefinition(
+        key="retrieval.rerank_microbatch_size",
+        category="retrieval",
+        default=DEFAULT_RERANK_MICROBATCH_SIZE,
+        value_type="int",
+        description="Passages sent per model-runner rerank request.",
+        env_var="FLUX_KB_RETRIEVAL_RERANK_MICROBATCH_SIZE",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("retrieval",),
+        validator=_range_int(1, 32),
     ),
     SettingDefinition(
         key="retrieval.max_rerank_passage_tokens",

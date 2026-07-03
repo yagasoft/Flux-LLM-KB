@@ -31,6 +31,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.reranker_awq_model" in keys
     assert "retrieval.reranker_quantization" in keys
     assert "retrieval.rerank_top_n" in keys
+    assert "retrieval.rerank_microbatch_size" in keys
     assert "retrieval.max_rerank_passage_tokens" in keys
     assert "retrieval.gpu_vram_budget_mb" in keys
     assert "gpu.scheduler.enabled" in keys

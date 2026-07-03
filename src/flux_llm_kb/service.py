@@ -118,6 +118,7 @@ class KnowledgeService:
         raw_results = self._search_raw(
             query,
             limit=limit,
+            rerank_limit=limit,
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,
@@ -134,6 +135,7 @@ class KnowledgeService:
         cwd: str | None,
         root_name: str | None,
         scope_mode: str,
+        rerank_limit: int | None = None,
         filters: dict[str, Any] | None = None,
         diagnostics: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
@@ -144,19 +146,36 @@ class KnowledgeService:
                 limit=limit,
                 scope=RetrievalScope(mode="global"),
                 label="global",
+                rerank_limit=rerank_limit,
                 filters=filters,
                 diagnostics=diagnostics,
             )
         if scope.mode == "workspace_boosted":
-            return self._search_workspace_boosted(query, limit=limit, scope=scope, filters=filters, diagnostics=diagnostics)
+            return self._search_workspace_boosted(
+                query,
+                limit=limit,
+                rerank_limit=rerank_limit,
+                scope=scope,
+                filters=filters,
+                diagnostics=diagnostics,
+            )
 
-        scoped_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters, diagnostics=diagnostics)
+        scoped_results = self._search_once(
+            query,
+            limit=limit,
+            rerank_limit=rerank_limit,
+            scope=scope,
+            label="local",
+            filters=filters,
+            diagnostics=diagnostics,
+        )
         if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
             return scoped_results
 
         return self._search_once(
             query,
             limit=limit,
+            rerank_limit=rerank_limit,
             scope=RetrievalScope(mode="global"),
             label="global_fallback",
             filters=filters,
@@ -168,18 +187,28 @@ class KnowledgeService:
         query: str,
         *,
         limit: int,
+        rerank_limit: int | None = None,
         scope: RetrievalScope,
         filters: dict[str, Any] | None = None,
         diagnostics: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit or 5), 50))
-        local_results = self._search_once(query, limit=limit, scope=scope, label="local", filters=filters, diagnostics=diagnostics)
+        local_results = self._search_once(
+            query,
+            limit=limit,
+            rerank_limit=rerank_limit,
+            scope=scope,
+            label="local",
+            filters=filters,
+            diagnostics=diagnostics,
+        )
         local_keys = {_result_identity(item) for item in local_results}
 
         cross_candidate_limit = min(max(limit * 2, 8), 50)
         cross_results = self._search_once(
             query,
             limit=cross_candidate_limit,
+            rerank_limit=rerank_limit,
             scope=RetrievalScope(mode="global"),
             label_scope=scope,
             label="cross_workspace",
@@ -207,6 +236,7 @@ class KnowledgeService:
         query: str,
         *,
         limit: int,
+        rerank_limit: int | None = None,
         scope: RetrievalScope,
         label: str,
         label_scope: RetrievalScope | None = None,
@@ -225,8 +255,9 @@ class KnowledgeService:
         corpus_diagnostics: dict[str, Any] | None = {} if diagnostics is not None else None
         if corpus_diagnostics is not None:
             corpus_kwargs["diagnostics"] = corpus_diagnostics
+        evidence_kwargs = {**corpus_kwargs, "rerank_limit": rerank_limit if rerank_limit is not None else limit}
         evidence_items = (
-            _search_evidence_with_configured_engine(query, **corpus_kwargs)
+            _search_evidence_with_configured_engine(query, **evidence_kwargs)
             if (include_corpus or include_episodes) and (not is_local or scope.root_name or episode_workspace_key)
             else None
         )
@@ -320,6 +351,7 @@ class KnowledgeService:
         raw_results = self._search_raw(
             query,
             limit=max(result_limit, 10),
+            rerank_limit=result_limit,
             cwd=cwd,
             root_name=root_name,
             scope_mode=scope_mode,

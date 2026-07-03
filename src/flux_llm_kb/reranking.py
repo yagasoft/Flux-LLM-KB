@@ -15,7 +15,7 @@ from .model_runner import (
 
 DEFAULT_RERANK_TOP_N = 80
 DEFAULT_MAX_RERANK_PASSAGE_TOKENS = 1536
-DEFAULT_RERANK_MICROBATCH_SIZE = 8
+DEFAULT_RERANK_MICROBATCH_SIZE = 2
 
 
 class QwenReranker:
@@ -27,8 +27,8 @@ class QwenReranker:
         quantization: str | None = None,
         awq_model: str | None = None,
         top_n: int = DEFAULT_RERANK_TOP_N,
-        microbatch_size: int = DEFAULT_RERANK_MICROBATCH_SIZE,
-        max_passage_tokens: int = DEFAULT_MAX_RERANK_PASSAGE_TOKENS,
+        microbatch_size: int | None = None,
+        max_passage_tokens: int | None = None,
     ) -> None:
         self.scorer = scorer or ModelRunnerRerankScorer()
         resolved_model = str(
@@ -66,8 +66,26 @@ class QwenReranker:
         self.load_model = self.quantization_profile.load_model
         self.awq_model = self.quantization_profile.awq_model
         self.top_n = max(1, min(int(top_n or DEFAULT_RERANK_TOP_N), 200))
-        self.microbatch_size = max(1, min(int(microbatch_size or DEFAULT_RERANK_MICROBATCH_SIZE), 32))
-        self.max_passage_tokens = max(1, min(int(max_passage_tokens or DEFAULT_MAX_RERANK_PASSAGE_TOKENS), 4096))
+        resolved_microbatch_size = (
+            _runtime_setting(
+                "retrieval.rerank_microbatch_size",
+                DEFAULT_RERANK_MICROBATCH_SIZE,
+                "FLUX_KB_RETRIEVAL_RERANK_MICROBATCH_SIZE",
+            )
+            if microbatch_size is None
+            else microbatch_size
+        )
+        self.microbatch_size = max(1, min(int(resolved_microbatch_size or DEFAULT_RERANK_MICROBATCH_SIZE), 32))
+        resolved_max_passage_tokens = (
+            _runtime_setting(
+                "retrieval.max_rerank_passage_tokens",
+                DEFAULT_MAX_RERANK_PASSAGE_TOKENS,
+                "FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS",
+            )
+            if max_passage_tokens is None
+            else max_passage_tokens
+        )
+        self.max_passage_tokens = max(1, min(int(resolved_max_passage_tokens or DEFAULT_MAX_RERANK_PASSAGE_TOKENS), 4096))
 
     def rerank(self, query: str, candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
         bounded = [dict(candidate) for candidate in list(candidates)[: self.top_n]]

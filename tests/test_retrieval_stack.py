@@ -5,7 +5,7 @@ from urllib.error import HTTPError
 
 from pathlib import Path
 
-from flux_llm_kb import database, worker
+from flux_llm_kb import database, reranking, service as service_module, worker
 from flux_llm_kb.embeddings import (
     EmbeddingInput,
     EmbeddingResult,
@@ -397,6 +397,52 @@ def test_qwen_reranker_uses_quantized_microbatches_and_token_bounds(monkeypatch)
     assert all(item["reranker"]["awq_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4" for item in reranked)
 
 
+def test_qwen_reranker_defaults_to_two_passage_microbatches(monkeypatch):
+    monkeypatch.setattr(reranking, "_runtime_setting", lambda _key, default, _env_var=None: default)
+    scorer = FakeQwenScorer()
+    reranker = QwenReranker(scorer=scorer, top_n=5)
+
+    reranker.rerank(
+        "rank these",
+        [
+            {"id": "a", "summary": "one"},
+            {"id": "b", "summary": "two"},
+            {"id": "c", "summary": "three"},
+            {"id": "d", "summary": "four"},
+            {"id": "e", "summary": "five"},
+        ],
+    )
+
+    assert reranker.microbatch_size == 2
+    assert [len(call["passages"]) for call in scorer.calls] == [2, 2, 1]
+
+
+def test_qwen_reranker_uses_runtime_microbatch_size(monkeypatch):
+    monkeypatch.setattr(
+        reranking,
+        "_runtime_setting",
+        lambda key, default, _env_var=None: 4 if key == "retrieval.rerank_microbatch_size" else default,
+    )
+    reranker = QwenReranker(scorer=FakeQwenScorer(), top_n=4)
+
+    assert reranker.microbatch_size == 4
+
+
+def test_qwen_reranker_uses_runtime_max_passage_tokens(monkeypatch):
+    monkeypatch.setattr(
+        reranking,
+        "_runtime_setting",
+        lambda key, default, _env_var=None: 3 if key == "retrieval.max_rerank_passage_tokens" else default,
+    )
+    scorer = FakeQwenScorer()
+    reranker = QwenReranker(scorer=scorer, top_n=1)
+
+    reranker.rerank("rank", [{"id": "a", "title": "A", "summary": "one two three four five"}])
+
+    assert reranker.max_passage_tokens == 3
+    assert scorer.calls[0]["passages"] == ["A\none two three"]
+
+
 def test_qwen_reranker_resolves_runtime_quantization_aliases(monkeypatch):
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", "int4_awq")
@@ -780,6 +826,154 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
     assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
 
 
+def test_search_once_passes_user_limit_as_rerank_limit(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_search_evidence(_query, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(service_module, "_search_evidence_with_configured_engine", fake_search_evidence)
+
+    service_module.KnowledgeService()._search_once(
+        "quality",
+        limit=1,
+        scope=service_module.RetrievalScope(mode="global"),
+        label="global",
+    )
+
+    assert captured["limit"] == 20
+    assert captured["rerank_limit"] == 1
+
+
+def test_explain_passes_result_limit_as_rerank_limit(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_search_evidence(_query, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(service_module, "_search_evidence_with_configured_engine", fake_search_evidence)
+
+    payload = service_module.KnowledgeService().explain("quality", limit=1, scope_mode="global")
+
+    assert payload["results"] == []
+    assert captured["limit"] == 40
+    assert captured["rerank_limit"] == 1
+
+
+def _install_vespa_rerank_pool_fakes(monkeypatch, *, candidate_count: int, runtime_top_n: int | None = None):
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            pass
+
+        def embed_batch(self, _inputs):
+            return [
+                EmbeddingResult(
+                    owner_table="query",
+                    owner_id="query",
+                    model=SNOWFLAKE_EMBEDDING_MODEL,
+                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                    vector=[1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+                    metadata={"source_hash": "query-hash"},
+                )
+            ]
+
+    class FakeAdapter:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def query(self, *_args, **_kwargs):
+            return [
+                {"owner_table": "asset_chunks", "owner_id": f"chunk-{index}", "score": 1.0 - index / 100.0}
+                for index in range(candidate_count)
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return self
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeReranker:
+        instances = []
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "awq_int4"
+        requested_quantization = "awq_int4"
+        quantization_backend = "compressed_tensors_awq"
+        load_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        awq_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        max_passage_tokens = 1536
+        microbatch_size = 8
+
+        def __init__(self, **kwargs):
+            self.top_n = kwargs["top_n"]
+            self.candidate_count = 0
+            FakeReranker.instances.append(self)
+
+        def rerank(self, _query, candidates):
+            self.candidate_count = len(candidates)
+            return [{**candidate, "reranker": {"score": float(100 - idx)}} for idx, candidate in enumerate(candidates)]
+
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", FakeReranker)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    if runtime_top_n is not None:
+        monkeypatch.setattr(database, "get_runtime_setting", lambda key: {"value": runtime_top_n} if key == "retrieval.rerank_top_n" else None)
+    monkeypatch.setattr(
+        database,
+        "_hydrate_corpus_candidate_details",
+        lambda *_args, **kwargs: {
+            item_id: {
+                "title": f"Doc {item_id}",
+                "summary": f"Candidate text for {item_id}",
+                "raw_scores": {"vespa_rrf": 1.0},
+                "asset_id": f"asset-{item_id}",
+                "source_path": f"docs/{item_id}.md",
+                "root_name": "docs",
+                "duplicate_count": 0,
+                "trust_rank": 500,
+            }
+            for item_id in kwargs["candidate_ids"]
+        },
+    )
+    monkeypatch.setattr(
+        database,
+        "_rank_corpus_candidates",
+        lambda _query, *, streams, details, filters=None: [
+            SimpleNamespace(item_id=item_id, score=1.0 - index / 100.0, streams=("vespa_rrf",))
+            for index, item_id in enumerate(details)
+        ],
+    )
+    monkeypatch.setattr(database, "_hydrate_episode_candidate_details", lambda *_args, **_kwargs: {}, raising=False)
+    monkeypatch.setattr(database, "_hydrate_claim_candidate_details", lambda *_args, **_kwargs: {}, raising=False)
+    return FakeReranker
+
+
+def test_vespa_corpus_search_bounds_limit_one_rerank_pool(monkeypatch):
+    fake_reranker = _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=30)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_corpus_chunks_vespa("quality", limit=1, root_name="docs", vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert len(results) == 1
+    assert fake_reranker.instances[0].top_n == 12
+    assert fake_reranker.instances[0].candidate_count == 12
+    assert diagnostics["reranker"]["input_count"] == 12
+    assert diagnostics["reranker"]["microbatch_count"] == 2
+    assert diagnostics["reranker"]["passage_chars"]["max"] > 0
+
+
 def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypatch):
     class FakeProvider:
         def __init__(self, **_kwargs):
@@ -906,6 +1100,32 @@ def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypa
     assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
     assert results[1]["streams"] == ["vespa_rrf", "vespa_lexical"]
     assert results[2]["streams"] == ["vespa_rrf", "vespa_dense"]
+
+
+def test_vespa_evidence_search_bounds_limit_one_rerank_pool(monkeypatch):
+    fake_reranker = _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=30)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_evidence_vespa("quality", limit=1, root_name="docs", filters={}, vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert len(results) == 1
+    assert fake_reranker.instances[0].top_n == 12
+    assert fake_reranker.instances[0].candidate_count == 12
+    assert diagnostics["reranker"]["input_count"] == 12
+    assert diagnostics["reranker"]["microbatch_count"] == 2
+    assert diagnostics["reranker"]["passage_words"]["max"] > 0
+
+
+def test_vespa_evidence_search_rerank_pool_respects_runtime_ceiling(monkeypatch):
+    fake_reranker = _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=80, runtime_top_n=16)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_evidence_vespa("quality", limit=10, root_name="docs", filters={}, vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert len(results) == 10
+    assert fake_reranker.instances[0].top_n == 16
+    assert fake_reranker.instances[0].candidate_count == 16
+    assert diagnostics["reranker"]["input_count"] == 16
 
 
 def test_vespa_episode_hydration_marks_only_stale_claim_episode_non_current():

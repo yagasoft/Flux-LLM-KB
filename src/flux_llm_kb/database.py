@@ -59,6 +59,9 @@ _VESPA_VALID_OWNER_TABLES = {"asset_chunks", "episodes", "claims"}
 _VESPA_BM25_FEATURES = ("bm25(title)", "bm25(body)", "bm25(source_path)", "bm25(symbols)")
 _VESPA_DENSE_FEATURES = ("dense_score", "closeness(field, embedding)", "closeness(field,embedding)")
 _CODE_IMPLEMENTATION_RELATIONSHIPS = {"definition", "route", "config", "migration"}
+_DEFAULT_RERANK_POOL_TOP_N = 80
+_MIN_RERANK_POOL_SIZE = 12
+_RERANK_POOL_LIMIT_MULTIPLIER = 4
 _CODE_NON_IMPLEMENTATION_INTENT_TERMS = {
     "call",
     "called",
@@ -1172,6 +1175,7 @@ def search_corpus_chunks_vespa(
     root_name: str | None = None,
     filters: dict[str, Any] | None = None,
     vespa_base_url: str | None = None,
+    rerank_limit: int | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from .embeddings import EmbeddingInput, SnowflakeEmbeddingProvider
@@ -1277,11 +1281,12 @@ def search_corpus_chunks_vespa(
         diagnostics["vespa"]["hydrated_count"] = len(details)
         diagnostics["vespa"]["hydration_latency_ms"] = hydrate_elapsed_ms
     fused = _rank_corpus_candidates(query, streams=streams, details=details, filters=filters)
+    rerank_pool_limit = _rerank_pool_limit(rerank_limit=rerank_limit, result_limit=limit, available_count=len(fused))
     hydrated = [
         _with_vespa_signal_streams(item)
-        for item in _corpus_results_from_fused(fused[: max(limit, min(len(fused), 80))], details)
+        for item in _corpus_results_from_fused(fused[:rerank_pool_limit], details)
     ]
-    reranker = QwenReranker(top_n=min(80, max(limit, len(hydrated))))
+    reranker = QwenReranker(top_n=rerank_pool_limit)
     rerank_started = time.perf_counter()
     reranked = reranker.rerank(query, hydrated)
     rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
@@ -1298,6 +1303,7 @@ def search_corpus_chunks_vespa(
             "latency_ms": rerank_elapsed_ms,
             "top_n": reranker.top_n,
             "max_passage_tokens": reranker.max_passage_tokens,
+            **_rerank_input_diagnostics(hydrated, reranker=reranker),
         }
         diagnostics["vespa"]["returned_count"] = min(limit, len(reranked))
     return reranked[:limit]
@@ -1310,6 +1316,7 @@ def search_evidence_vespa(
     root_name: str | None = None,
     filters: dict[str, Any] | None = None,
     vespa_base_url: str | None = None,
+    rerank_limit: int | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from .embeddings import SnowflakeEmbeddingProvider
@@ -1463,9 +1470,11 @@ def search_evidence_vespa(
     if diagnostics is not None:
         diagnostics["vespa"]["hydrated_count"] = len(results)
         diagnostics["vespa"]["hydration_latency_ms"] = hydrate_elapsed_ms
-    reranker = QwenReranker(top_n=min(80, max(limit, len(results))))
+    rerank_pool_limit = _rerank_pool_limit(rerank_limit=rerank_limit, result_limit=limit, available_count=len(results))
+    rerank_candidates = results[:rerank_pool_limit]
+    reranker = QwenReranker(top_n=rerank_pool_limit)
     rerank_started = time.perf_counter()
-    reranked = _sort_code_adjusted_reranked_results(reranker.rerank(query, results))
+    reranked = _sort_code_adjusted_reranked_results(reranker.rerank(query, rerank_candidates))
     rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
     if diagnostics is not None:
         diagnostics["reranker"] = {
@@ -1475,14 +1484,71 @@ def search_evidence_vespa(
             "quantization_backend": getattr(reranker, "quantization_backend", ""),
             "load_model": getattr(reranker, "load_model", reranker.model),
             "awq_model": getattr(reranker, "awq_model", ""),
-            "input_count": len(results),
+            "input_count": len(rerank_candidates),
             "returned_count": min(limit, len(reranked)),
             "latency_ms": rerank_elapsed_ms,
             "top_n": reranker.top_n,
             "max_passage_tokens": reranker.max_passage_tokens,
+            **_rerank_input_diagnostics(rerank_candidates, reranker=reranker),
         }
         diagnostics["vespa"]["returned_count"] = min(limit, len(reranked))
     return reranked[:limit]
+
+
+def _rerank_pool_limit(*, rerank_limit: int | None, result_limit: int, available_count: int) -> int:
+    if available_count <= 0:
+        return 1
+    try:
+        requested_limit = int(rerank_limit if rerank_limit is not None else result_limit)
+    except (TypeError, ValueError):
+        requested_limit = int(result_limit or 5)
+    requested_limit = max(1, min(requested_limit, 50))
+    target = max(requested_limit * _RERANK_POOL_LIMIT_MULTIPLIER, _MIN_RERANK_POOL_SIZE)
+    return max(1, min(int(available_count), _configured_rerank_top_n(), target))
+
+
+def _configured_rerank_top_n() -> int:
+    try:
+        from .settings import SettingsService
+
+        value = SettingsService().resolve("retrieval.rerank_top_n").raw_value
+    except Exception:
+        value = _DEFAULT_RERANK_POOL_TOP_N
+    try:
+        return max(1, min(int(value or _DEFAULT_RERANK_POOL_TOP_N), 200))
+    except (TypeError, ValueError):
+        return _DEFAULT_RERANK_POOL_TOP_N
+
+
+def _rerank_input_diagnostics(candidates: list[dict[str, Any]], *, reranker: Any) -> dict[str, Any]:
+    input_count = len(candidates)
+    microbatch_size = max(1, int(getattr(reranker, "microbatch_size", 8) or 8))
+    max_passage_tokens = max(1, int(getattr(reranker, "max_passage_tokens", 1536) or 1536))
+    passage_chars: list[int] = []
+    passage_words: list[int] = []
+    for candidate in candidates:
+        passage = _diagnostic_rerank_passage(candidate, max_tokens=max_passage_tokens)
+        passage_chars.append(len(passage))
+        passage_words.append(len(passage.split()))
+    return {
+        "microbatch_size": microbatch_size,
+        "microbatch_count": (input_count + microbatch_size - 1) // microbatch_size if input_count else 0,
+        "passage_chars": _numeric_summary(passage_chars),
+        "passage_words": _numeric_summary(passage_words),
+    }
+
+
+def _diagnostic_rerank_passage(candidate: dict[str, Any], *, max_tokens: int) -> str:
+    title = str(candidate.get("title") or "").strip()
+    body = str(candidate.get("summary") or candidate.get("body") or candidate.get("excerpt") or "").strip()
+    bounded_body = " ".join(body.split()[:max_tokens])
+    return "\n".join(part for part in (title, bounded_body) if part)
+
+
+def _numeric_summary(values: list[int]) -> dict[str, int | float]:
+    if not values:
+        return {"min": 0, "max": 0, "avg": 0.0}
+    return {"min": min(values), "max": max(values), "avg": round(sum(values) / len(values), 1)}
 
 
 def _sort_code_adjusted_reranked_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
