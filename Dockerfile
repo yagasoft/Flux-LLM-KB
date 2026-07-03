@@ -132,8 +132,8 @@ COPY src ./src
 COPY plugins ./plugins
 COPY README.md ./
 
-RUN python -m pip install --no-deps . \
-    && /opt/flux-paddle/bin/python -m pip install --no-deps .
+RUN python -m pip install --no-deps --no-build-isolation --no-index . \
+    && /opt/flux-paddle/bin/python -m pip install --no-deps --no-build-isolation --no-index .
 
 EXPOSE 8765
 
