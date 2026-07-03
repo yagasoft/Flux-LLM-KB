@@ -162,6 +162,10 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_RETRIEVAL_RERANKER_AWQ_MODEL: drawais/Qwen3-Reranker-4B-AWQ-INT4" in compose
         assert "FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: awq_int4" in compose
         assert "FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION: int4_awq" not in compose
+        assert compose.count("FLUX_KB_GPU_SCHEDULER_MODE: postgres") >= 3
+        assert compose.count("FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: \"10240\"") >= 3
+        assert compose.count("FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: \"1024\"") >= 3
+        assert compose.count("FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb") >= 5
         assert "FLUX_KB_OCR_ENGINE: paddleocr" in compose
         assert "FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5" in compose
         assert "FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL" in compose

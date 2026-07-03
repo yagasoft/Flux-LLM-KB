@@ -86,6 +86,106 @@ def test_asr_transcription_endpoint_uses_runtime_without_downloading(tmp_path):
     assert calls == {"transcribe": 1}
 
 
+def test_asr_transcription_endpoint_wraps_runtime_in_gpu_lease(tmp_path):
+    model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
+    events: list[str] = []
+
+    class FakeLease:
+        def __enter__(self):
+            events.append("lease-enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("lease-exit")
+            return False
+
+    class FakeScheduler:
+        def acquire(self, profile):
+            events.append(f"acquire:{profile.task_type}:{profile.model_id}")
+            return FakeLease()
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    class FakeRuntime:
+        def health(self):
+            return {"loaded": False}
+
+        def transcribe(self, audio_path: Path):
+            assert audio_path.exists()
+            events.append("transcribe")
+            return {"text": "leased", "segments": []}
+
+    client = TestClient(
+        create_app(
+            AsrServiceConfig(
+                model="large-v3-turbo",
+                model_path=model_path,
+                device="cuda",
+                compute_type="float16",
+            ),
+            runtime=FakeRuntime(),
+            gpu_scheduler=FakeScheduler(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "large-v3-turbo"},
+        files={"file": ("sample.wav", b"RIFF....WAVEfmt ", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "leased"
+    assert events == ["acquire:asr:large-v3-turbo", "lease-enter", "transcribe", "lease-exit"]
+
+
+def test_asr_transcription_endpoint_returns_structured_gpu_rejection(tmp_path):
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
+
+    class RejectingScheduler:
+        def acquire(self, _profile):
+            raise GpuLeaseRejected("GPU task exceeds scheduler budget")
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    class RuntimeShouldNotRun:
+        def health(self):
+            return {"loaded": False}
+
+        def transcribe(self, _audio_path: Path):
+            raise AssertionError("runtime should not run when scheduler rejects the task")
+
+    client = TestClient(
+        create_app(
+            AsrServiceConfig(
+                model="large-v3-turbo",
+                model_path=model_path,
+                device="cuda",
+                compute_type="float16",
+            ),
+            runtime=RuntimeShouldNotRun(),
+            gpu_scheduler=RejectingScheduler(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "large-v3-turbo"},
+        files={"file": ("sample.wav", b"RIFF....WAVEfmt ", "audio/wav")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "gpu.scheduler_rejected",
+        "message": "GPU task exceeds scheduler budget",
+        "retryable": False,
+    }
+
+
 def test_asr_transcription_endpoint_returns_503_when_model_files_are_missing(tmp_path):
     client = TestClient(
         create_app(

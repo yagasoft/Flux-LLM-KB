@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import threading
 import sys
 from types import ModuleType, SimpleNamespace
+
+import pytest
 
 from flux_llm_kb import model_runner
 
@@ -600,3 +603,91 @@ def test_model_runner_client_forwards_awq_model_for_reranking():
     assert payload["model"] == model_runner.DEFAULT_RERANKER_MODEL
     assert payload["quantization"] == "awq_int4"
     assert payload["awq_model"] == "example/Qwen3-Reranker-4B-AWQ"
+
+
+def test_embeddings_endpoint_accepts_openai_input_and_rejects_invalid_payload(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    calls: list[list[str]] = []
+
+    def fake_embed(texts, *, model, dimensions):
+        calls.append(list(texts))
+        return [[0.1, 0.2] for _text in texts]
+
+    monkeypatch.setattr(model_runner, "_embed_with_sentence_transformers", fake_embed)
+    client = TestClient(model_runner.create_app())
+
+    string_response = client.post("/v1/embeddings", json={"input": "hello", "dimensions": 2})
+    list_response = client.post("/v1/embeddings", json={"input": ["one", "two"], "dimensions": 2})
+    invalid_response = client.post("/v1/embeddings", json={"input": {"not": "valid"}, "dimensions": 2})
+    missing_response = client.post("/v1/embeddings", json={"model": "Snowflake/test"})
+
+    assert string_response.status_code == 200
+    assert string_response.json()["vectors"] == [[0.1, 0.2]]
+    assert list_response.status_code == 200
+    assert list_response.json()["vectors"] == [[0.1, 0.2], [0.1, 0.2]]
+    assert invalid_response.status_code == 400
+    assert missing_response.status_code == 400
+    assert calls == [["hello"], ["one", "two"]]
+
+
+def test_embedding_encode_is_serialised_inside_model_runner(monkeypatch):
+    class FakeVectors:
+        def __init__(self, count: int) -> None:
+            self.count = count
+
+        def tolist(self):
+            return [[1.0, 2.0] for _ in range(self.count)]
+
+    class FakeEncoder:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def encode(self, texts, **_kwargs):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                barrier.wait(timeout=1.0)
+            except threading.BrokenBarrierError:
+                pass
+            finally:
+                with self.lock:
+                    self.active -= 1
+            return FakeVectors(len(texts))
+
+    barrier = threading.Barrier(2)
+    encoder = FakeEncoder()
+    monkeypatch.setattr(model_runner, "_load_embedding_model", lambda _model: encoder)
+
+    def run_encode():
+        return model_runner._embed_with_sentence_transformers(["a"], model="Snowflake/test", dimensions=2)
+
+    first = threading.Thread(target=run_encode)
+    second = threading.Thread(target=run_encode)
+    first.start()
+    second.start()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert encoder.max_active == 1
+
+
+def test_model_runner_busy_response_is_structured_and_retryable(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from flux_llm_kb.gpu_scheduler import GpuLeaseTimeout
+
+    def busy(*_args, **_kwargs):
+        raise GpuLeaseTimeout("GPU scheduler timed out", retry_after_seconds=3.0)
+
+    monkeypatch.setattr(model_runner, "_embed_with_sentence_transformers", busy)
+
+    response = TestClient(model_runner.create_app()).post("/v1/embeddings", json={"input": "hello", "dimensions": 2})
+
+    assert response.status_code == 429
+    assert response.json()["detail"]["code"] == "gpu.scheduler_busy"
+    assert response.json()["detail"]["retryable"] is True
+    assert response.json()["detail"]["retry_after_seconds"] == 3.0

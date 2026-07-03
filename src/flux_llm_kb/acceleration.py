@@ -221,6 +221,7 @@ def collect_acceleration_status(
             "memory": _memory_status(),
             "disk": _disk_status(cache["root"]),
             "nvidia": _nvidia_status(runner),
+            "gpu_scheduler": _gpu_scheduler_status(),
             "onnxruntime": _onnxruntime_status(importer),
             "local_model": _local_model_status(resolved, opener),
             "watcher_backend": _watcher_backend_status(importer, str(resolved.get("watcher.backend") or "auto")),
@@ -259,6 +260,25 @@ def _run_command(command: list[str], **kwargs: Any) -> Any:
     from .processes import run_no_window
 
     return run_no_window(command, text=True, capture_output=True, **kwargs)
+
+
+def _gpu_scheduler_status() -> dict[str, Any]:
+    try:
+        from .gpu_scheduler import get_gpu_scheduler
+
+        status = get_gpu_scheduler().status()
+        return {
+            "ok": bool(status.get("enabled", True)) and status.get("status") != "unavailable",
+            "mode": status.get("mode"),
+            "running": len(status.get("running") or []),
+            "waiting": len(status.get("waiting") or []),
+            "timeouts": int(status.get("timeouts") or 0),
+            "rejections": int(status.get("rejections") or 0),
+            "budget": status.get("budget") or {},
+            "live_gpu_memory": status.get("live_gpu_memory") or {},
+        }
+    except Exception as exc:
+        return {"ok": False, "mode": "unknown", "error": str(exc)}
 
 
 def _cpu_status() -> dict[str, Any]:

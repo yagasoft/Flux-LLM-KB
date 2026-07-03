@@ -383,6 +383,12 @@ def create_app():
 
         return acceleration.collect_acceleration_status()
 
+    @app.get("/api/gpu/scheduler")
+    def gpu_scheduler_status():
+        from .gpu_scheduler import get_gpu_scheduler
+
+        return get_gpu_scheduler().status()
+
     @app.post("/api/acceleration/benchmarks/run")
     def acceleration_benchmark_run(request: BenchmarkRunRequest = Body(...)):
         if _should_proxy_benchmark(request.scope, request.root_name, request.path):

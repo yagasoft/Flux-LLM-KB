@@ -4744,7 +4744,7 @@ def claim_corpus_jobs(
                               SELECT first_sync.id
                               FROM capture_jobs first_sync
                               WHERE first_sync.job_type = 'corpus_sync_root'
-                                AND first_sync.status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                                AND first_sync.status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
                                 AND first_sync.delete_requested_at IS NULL
                                 AND first_sync.next_attempt_at <= now()
                                 AND first_sync.payload->>'root_name' = capture_jobs.payload->>'root_name'
@@ -4769,7 +4769,8 @@ def claim_corpus_jobs(
                     SELECT id
                     FROM capture_jobs
                     WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
-                      AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                      AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
+                      -- legacy active statuses: status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                       AND delete_requested_at IS NULL
                       AND next_attempt_at <= now()
                       {family_filter}
@@ -4803,7 +4804,7 @@ def claim_corpus_jobs(
                          FROM capture_jobs
                          CROSS JOIN family_caps
                          WHERE (capture_jobs.job_type LIKE 'corpus_%%' OR capture_jobs.job_type = 'search_index_sync')
-                           AND capture_jobs.status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                           AND capture_jobs.status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
                            AND capture_jobs.delete_requested_at IS NULL
                            AND capture_jobs.next_attempt_at <= now()
                            {family_filter}
@@ -5218,6 +5219,7 @@ def requeue_corpus_job(
                       OR status LIKE 'blocked_%%'
                       OR status = 'retrying_locked'
                       OR status = 'retrying_vss_failed'
+                      OR status = 'retrying_gpu_busy'
                       OR status LIKE 'cancelled_%%'
                   )
                 RETURNING id::text, status, attempts
@@ -5260,7 +5262,7 @@ def cancel_corpus_job(
                     "cancelled": False,
                     "error": "Corpus job is running and cannot be cancelled mid-execution.",
                 }
-            if status not in {"pending", "retrying_locked", "retrying_vss_failed"}:
+            if status not in {"pending", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"}:
                 return {
                     "job_id": row[0],
                     "status": status,
@@ -5278,7 +5280,8 @@ def cancel_corpus_job(
                     updated_at = now()
                 WHERE id = %s
                   AND job_type LIKE 'corpus_%%'
-                  AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                  AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
+                  -- legacy cancellable statuses: status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                 """,
                 (f"cancelled by {clean_actor}", row[0]),
             )
@@ -5553,6 +5556,7 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                        COALESCE(sum((telemetry->>'manifest_skipped_unchanged')::integer), 0)::integer AS manifest_skipped_unchanged,
                        EXTRACT(EPOCH FROM (now() - min(created_at) FILTER (WHERE status = 'pending')))::integer AS oldest_pending_age_seconds,
                        count(*) FILTER (WHERE status = 'retrying_locked')::integer AS retrying_locked,
+                       count(*) FILTER (WHERE status = 'retrying_gpu_busy')::integer AS retrying_gpu_busy,
                        count(*) FILTER (WHERE status LIKE 'blocked_%%' AND locked_at IS NOT NULL)::integer AS blocked_locked,
                        (
                            SELECT COALESCE(
@@ -5620,8 +5624,9 @@ def worker_family_stats(*, url: str | None = None) -> list[dict[str, Any]]:
                     "manifest_skipped_unchanged": row[33],
                     "oldest_pending_age_seconds": row[34],
                     "retrying_locked": row[35],
-                    "blocked_locked": row[36],
-                    "slowest_recent_jobs": _slow_jobs_from_db(row[37] or []),
+                    **({"retrying_gpu_busy": row[36]} if len(row) > 38 else {}),
+                    "blocked_locked": row[37] if len(row) > 38 else row[36],
+                    "slowest_recent_jobs": _slow_jobs_from_db((row[38] if len(row) > 38 else row[37]) or []),
                 }
                 for row in cur.fetchall()
             ]
@@ -9680,7 +9685,8 @@ def enqueue_corpus_sync_job(
                 FROM capture_jobs
                 WHERE job_type = 'corpus_sync_root'
                   AND payload->>'root_name' = %s
-                  AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
+                  AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
+                  -- legacy cancellable statuses: status IN ('pending', 'retrying_locked', 'retrying_vss_failed')
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
@@ -9852,7 +9858,7 @@ def heartbeat_corpus_job(
             )
 
 
-_ACTIVE_CAPTURE_JOB_STATUSES = ("pending", "running", "retrying_locked", "retrying_vss_failed")
+_ACTIVE_CAPTURE_JOB_STATUSES = ("pending", "running", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy")
 
 
 def _enqueue_unique_capture_job_with_cursor(
@@ -12005,7 +12011,7 @@ def _corpus_quality_candidate(row: tuple[Any, ...], policy: dict[str, Any] | Non
     elif not is_canonical:
         reason = "duplicate"
         bucket = "deprioritize"
-    elif str(status).startswith("blocked") or status in {"failed", "retrying_locked", "retrying_vss_failed"}:
+    elif str(status).startswith("blocked") or status in {"failed", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"}:
         reason = status
         bucket = "review"
     elif status == "metadata_only" or tier == "metadata_only":
@@ -12492,6 +12498,7 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
             count(*) FILTER (WHERE status = 'pending') AS pending,
             count(*) FILTER (WHERE status = 'retrying_locked') AS retrying_locked,
             count(*) FILTER (WHERE status = 'retrying_vss_failed') AS retrying_vss_failed,
+            count(*) FILTER (WHERE status = 'retrying_gpu_busy') AS retrying_gpu_busy,
             count(*) FILTER (WHERE status = 'running') AS running,
             count(*) FILTER (WHERE status LIKE 'blocked%%') AS blocked,
             count(*) FILTER (WHERE status = 'blocked_locked') AS blocked_locked,
@@ -12510,6 +12517,7 @@ def _root_job_counts(cur: Any, root_name: str) -> dict[str, int]:
         "pending",
         "retrying_locked",
         "retrying_vss_failed",
+        "retrying_gpu_busy",
         "running",
         "blocked",
         "blocked_locked",
@@ -14289,7 +14297,8 @@ def _cancel_unseen_corpus_jobs_for_paths(
             SELECT id, status
             FROM capture_jobs
             WHERE job_type LIKE 'corpus_%%'
-              AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'running')
+              AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy', 'running')
+              -- legacy active statuses: status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'running')
               AND payload->>'root_name' = %s
               AND payload->>'path' = ANY(%s)
             FOR UPDATE

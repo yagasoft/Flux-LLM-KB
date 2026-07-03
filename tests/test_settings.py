@@ -33,6 +33,21 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.rerank_top_n" in keys
     assert "retrieval.max_rerank_passage_tokens" in keys
     assert "retrieval.gpu_vram_budget_mb" in keys
+    assert "gpu.scheduler.enabled" in keys
+    assert "gpu.scheduler.mode" in keys
+    assert "gpu.scheduler.total_vram_mb" in keys
+    assert "gpu.scheduler.vram_budget_mb" in keys
+    assert "gpu.scheduler.safety_margin_mb" in keys
+    assert "gpu.scheduler.default_timeout_seconds" in keys
+    assert "gpu.scheduler.lease_ttl_seconds" in keys
+    assert "gpu.scheduler.heartbeat_interval_seconds" in keys
+    assert "gpu.scheduler.stale_after_seconds" in keys
+    assert "gpu.scheduler.embedding_vram_mb" in keys
+    assert "gpu.scheduler.rerank_vram_mb" in keys
+    assert "gpu.scheduler.ocr_image_vram_mb" in keys
+    assert "gpu.scheduler.ocr_document_vram_mb" in keys
+    assert "gpu.scheduler.asr_vram_mb" in keys
+    assert "gpu.scheduler.ollama_vision_vram_mb" in keys
     assert "model_runner.base_url" in keys
     assert "ocr.engine" in keys
     assert "ocr.simple_model" in keys
@@ -119,6 +134,27 @@ def test_worker_default_workers_uses_environment_override(monkeypatch):
     assert resolved.value == 12
     assert resolved.raw_value == 12
     assert resolved.source == "env"
+
+
+def test_gpu_scheduler_settings_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("gpu.scheduler.enabled").raw_value is True
+    assert service.resolve("gpu.scheduler.mode").raw_value == "auto"
+    assert service.resolve("gpu.scheduler.vram_budget_mb").raw_value == 10240
+    assert service.resolve("gpu.scheduler.safety_margin_mb").raw_value == 1024
+    assert service.resolve("gpu.scheduler.default_timeout_seconds").raw_value == 30
+    assert service.resolve("gpu.scheduler.lease_ttl_seconds").raw_value == 120
+    assert service.resolve("gpu.scheduler.embedding_vram_mb").raw_value > 0
+
+    monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_MODE", "postgres")
+    monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB", "8192")
+    monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_DEFAULT_TIMEOUT_SECONDS", "9")
+
+    assert service.resolve("gpu.scheduler.mode").raw_value == "postgres"
+    assert service.resolve("gpu.scheduler.vram_budget_mb").raw_value == 8192
+    assert service.resolve("gpu.scheduler.default_timeout_seconds").raw_value == 9
 
 
 def test_reranker_quantization_settings_canonicalize_legacy_aliases(monkeypatch):

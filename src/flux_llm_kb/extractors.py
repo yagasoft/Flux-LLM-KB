@@ -4814,17 +4814,22 @@ def _asr_with_faster_whisper(
         if extract_error is not None:
             return extract_error
         try:
+            from .gpu_scheduler import GpuLeaseTimeout, get_gpu_scheduler, task_profile
+
             faster_whisper = importlib.import_module("faster_whisper")
             model_kwargs: dict[str, Any] = {"local_files_only": True}
             if device != "auto":
                 model_kwargs["device"] = device
             if compute_type != "default":
                 model_kwargs["compute_type"] = compute_type
-            model = faster_whisper.WhisperModel(str(model_path), **model_kwargs)
-            segments_iter, info = model.transcribe(str(audio_path))
+            profile = task_profile("asr", model_id=str(model_path), component="worker")
+            with get_gpu_scheduler().acquire(profile):
+                model = faster_whisper.WhisperModel(str(model_path), **model_kwargs)
+                segments_iter, info = model.transcribe(str(audio_path))
+                segments = list(segments_iter)
             parts: list[str] = []
             segment_count = 0
-            for segment in segments_iter:
+            for segment in segments:
                 text = str(getattr(segment, "text", "") or "").strip()
                 if text:
                     parts.append(text)
@@ -4843,6 +4848,8 @@ def _asr_with_faster_whisper(
             if language:
                 result_metadata["language"] = language
             return AsrResult(status="completed", text=text, metadata=result_metadata)
+        except GpuLeaseTimeout:
+            raise
         except Exception as exc:
             return AsrResult(status="failed", metadata={**metadata, "status": "failed"}, message=str(exc))
 
@@ -5783,8 +5790,12 @@ def _vision_with_ollama_compatible(
             method="POST",
         )
         request_attempted = True
-        response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
-        raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+        from .gpu_scheduler import GpuLeaseTimeout, get_gpu_scheduler, task_profile
+
+        profile = task_profile("ollama_vision", model_id=model, component="worker")
+        with get_gpu_scheduler().acquire(profile):
+            response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
+            raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
         decoded = json.loads(raw or "{}")
         text, response_field = _vision_response_text(decoded)
         redacted, _ = redact_text(text)
@@ -5808,6 +5819,8 @@ def _vision_with_ollama_compatible(
                 "source_label": source_label,
             },
         )
+    except GpuLeaseTimeout:
+        raise
     except Exception as exc:
         message = str(exc)
         failed_metadata = {**metadata, "status": "failed", "error": message[:500]}
@@ -6163,6 +6176,8 @@ def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None
             raw_text = _run_paddleocr_document(ocr_input, model=model)
         else:
             raw_text = _run_paddleocr_image(ocr_input, model=model)
+    except _gpu_lease_timeout_type():
+        raise
     except subprocess.TimeoutExpired as exc:
         return OcrResult(
             status="blocked_missing_dependency",
@@ -6337,12 +6352,25 @@ def _run_paddleocr_image(path: Path, *, model: str) -> str:
     }
     if model:
         kwargs["ocr_version"] = model
-    ocr = PaddleOCR(**kwargs)
-    if hasattr(ocr, "predict"):
-        result = ocr.predict(str(path))
-    else:
-        result = ocr.ocr(str(path), cls=True)
+    from .gpu_scheduler import get_gpu_scheduler, task_profile
+
+    profile = task_profile("ocr_image", model_id=model, component="worker")
+    with get_gpu_scheduler().acquire(profile):
+        ocr = PaddleOCR(**kwargs)
+        if hasattr(ocr, "predict"):
+            result = ocr.predict(str(path))
+        else:
+            result = ocr.ocr(str(path), cls=True)
     return _paddleocr_text(result)
+
+
+def _gpu_lease_timeout_type():
+    try:
+        from .gpu_scheduler import GpuLeaseTimeout
+
+        return GpuLeaseTimeout
+    except Exception:  # pragma: no cover - import fallback
+        return RuntimeError
 
 
 def _configure_optional_onnxruntime_logging() -> None:

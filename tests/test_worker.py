@@ -712,6 +712,65 @@ def test_backfill_handles_parallel_job_exceptions_independently(monkeypatch):
     assert retried[0]["error"] == "boom"
 
 
+def test_search_index_sync_gpu_lease_timeout_is_retryable(monkeypatch):
+    from flux_llm_kb.gpu_scheduler import GpuLeaseTimeout
+
+    monkeypatch.setattr(
+        database,
+        "sync_search_index",
+        lambda **_kwargs: (_ for _ in ()).throw(GpuLeaseTimeout("GPU busy", retry_after_seconds=5.0)),
+    )
+
+    result = worker.process_search_index_sync_job({"payload": {"owner_class": "all", "limit": 10}})
+
+    assert result.status == "retrying_gpu_busy"
+    assert result.message == "GPU busy"
+    assert result.telemetry == {
+        "error_type": "GpuLeaseTimeout",
+        "retry_after_seconds": 5.0,
+        "gpu_scheduler_status": "busy",
+    }
+
+
+def test_backfill_retries_gpu_busy_result_without_terminal_failure(monkeypatch):
+    calls = {"retried": [], "blocked": [], "completed": [], "repaired": [], "cleared_errors": []}
+
+    monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **_kwargs: {"recovered": 0})
+    monkeypatch.setattr(database, "purge_unseen_corpus_assets", lambda **_kwargs: {"assets_purged": 0}, raising=False)
+    monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(
+        database,
+        "claim_corpus_jobs",
+        lambda **_kwargs: [
+            {
+                "id": "job-search",
+                "job_type": "search_index_sync",
+                "job_family": "embedding",
+                "resource_class": "gpu",
+                "payload": {"owner_class": "all", "limit": 10},
+                "attempts": 1,
+            }
+        ],
+    )
+    monkeypatch.setattr(worker, "process_search_index_sync_job", lambda _job: worker.JobProcessResult(status="retrying_gpu_busy", message="GPU busy", telemetry={"retry_after_seconds": 5.0}))
+    monkeypatch.setattr(database, "complete_corpus_job", lambda **kwargs: calls["completed"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "repair_extracted_corpus_asset_statuses", lambda **kwargs: calls["repaired"].append(kwargs) or {"repaired": 0})
+    monkeypatch.setattr(database, "clear_completed_corpus_job_errors", lambda **kwargs: calls["cleared_errors"].append(kwargs) or {"cleared": 0})
+    monkeypatch.setattr(database, "record_audit_event", lambda **_kwargs: None)
+
+    result = KnowledgeService().run_corpus_backfill(kind="embedding", limit=1, workers=1)
+
+    assert result["retried"] == 1
+    assert result["failed"] == 0
+    assert calls["completed"] == []
+    assert calls["blocked"] == []
+    assert calls["retried"][0]["job_id"] == "job-search"
+    assert calls["retried"][0]["status"] == "retrying_gpu_busy"
+    assert calls["retried"][0]["cooldown_seconds"] == 5
+
+
 def test_backfill_cancels_orphaned_root_jobs_without_retrying(monkeypatch):
     calls = {"cancelled": [], "completed": [], "blocked": [], "retried": [], "repaired": [], "cleared_errors": []}
     monkeypatch.setattr(

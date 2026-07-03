@@ -234,6 +234,10 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_GPU_SCHEDULER_MODE: postgres
+      FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
+      FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
       FLUX_KB_API_HOST: 0.0.0.0
       FLUX_KB_API_PORT: "8765"
       FLUX_KB_INSTALL_ROOT: /app/runtime
@@ -305,6 +309,10 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_GPU_SCHEDULER_MODE: postgres
+      FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
+      FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
       FLUX_KB_INSTALL_ROOT: /app/runtime
       FLUX_KB_APP_ROOT: /app
       FLUX_KB_PRIVATE_DIR: /app/private
@@ -359,6 +367,10 @@ services:
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_GPU_SCHEDULER_MODE: postgres
+      FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
+      FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
       FLUX_KB_ASR_PROVIDER: openai_compatible
       FLUX_KB_ASR_MODEL: large-v3-turbo
       FLUX_KB_ASR_MODEL_PATH: /models/faster-whisper-large-v3-turbo
@@ -394,6 +406,10 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       FLUX_KB_MODEL_RUNNER_ROLE: model-runner
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_GPU_SCHEDULER_MODE: postgres
+      FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
+      FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
       FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
       FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
@@ -439,6 +455,10 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       LD_LIBRARY_PATH: /opt/flux-paddle/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cublas/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/nccl/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cufft/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/curand/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cusolver/lib:/opt/flux-paddle/lib/python3.12/site-packages/nvidia/cusparse/lib
       FLUX_KB_MODEL_RUNNER_ROLE: paddle-runner
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_GPU_SCHEDULER_MODE: postgres
+      FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
+      FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
       FLUX_KB_OCR_ENGINE: paddleocr
       FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
       FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
@@ -592,6 +612,9 @@ FLUX_KB_ASR_MODEL=large-v3-turbo
 FLUX_KB_ASR_BASE_URL=http://asr:8788
 FLUX_KB_ASR_DEVICE=cuda
 FLUX_KB_ASR_COMPUTE_TYPE=float16
+FLUX_KB_GPU_SCHEDULER_MODE=postgres
+FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB=10240
+FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB=1024
 FLUX_KB_LOCAL_INFERENCE_ENABLED=true
 FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://ollama:11434
 FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE=2m
@@ -606,6 +629,8 @@ FLUX_KB_ASR_MODEL=
 FLUX_KB_ASR_BASE_URL=
 FLUX_KB_ASR_DEVICE=auto
 FLUX_KB_ASR_COMPUTE_TYPE=default
+FLUX_KB_GPU_SCHEDULER_ENABLED=false
+FLUX_KB_GPU_SCHEDULER_MODE=disabled
 FLUX_KB_LOCAL_INFERENCE_ENABLED=false
 FLUX_KB_LOCAL_INFERENCE_BASE_URL=http://127.0.0.1:11434
 FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE=
@@ -840,6 +865,10 @@ function Set-FluxProductionRuntimeSettings {
             $env:FLUX_KB_VISION_ENABLED = "true"
             $env:FLUX_KB_VISION_MODEL = "qwen3-vl:8b"
             $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = "80000000"
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.enabled", "true", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.mode", "postgres", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.vram_budget_mb", "10240", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.safety_margin_mb", "1024", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.provider", "openai_compatible", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.model", "large-v3-turbo", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.base_url", "http://127.0.0.1:$AsrHostPort", "--confirm")
@@ -863,6 +892,8 @@ function Set-FluxProductionRuntimeSettings {
             $env:FLUX_KB_VISION_ENABLED = "false"
             $env:FLUX_KB_VISION_MODEL = ""
             $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = "4096000"
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.enabled", "false", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.mode", "disabled", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.provider", "local_faster_whisper", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.model", "", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.base_url", "", "--confirm")

@@ -9,9 +9,12 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+
+from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, get_gpu_scheduler, task_profile
 
 
 ASR_MODEL_ALIASES = {
@@ -65,6 +68,7 @@ class AsrRuntime:
         self.config = config
         self.loaded = False
         self._model: Any | None = None
+        self._model_lock = threading.Lock()
 
     def health(self) -> dict[str, Any]:
         return {"loaded": self.loaded}
@@ -76,18 +80,19 @@ class AsrRuntime:
             raise FileNotFoundError(f"required model files are missing: {missing}")
 
     def _load_model(self) -> Any:
-        if self._model is not None:
+        with self._model_lock:
+            if self._model is not None:
+                return self._model
+            self._ensure_model_files()
+            faster_whisper = importlib.import_module("faster_whisper")
+            kwargs: dict[str, Any] = {"local_files_only": True}
+            if self.config.device != "auto":
+                kwargs["device"] = self.config.device
+            if self.config.compute_type != "default":
+                kwargs["compute_type"] = self.config.compute_type
+            self._model = faster_whisper.WhisperModel(str(self.config.model_path), **kwargs)
+            self.loaded = True
             return self._model
-        self._ensure_model_files()
-        faster_whisper = importlib.import_module("faster_whisper")
-        kwargs: dict[str, Any] = {"local_files_only": True}
-        if self.config.device != "auto":
-            kwargs["device"] = self.config.device
-        if self.config.compute_type != "default":
-            kwargs["compute_type"] = self.config.compute_type
-        self._model = faster_whisper.WhisperModel(str(self.config.model_path), **kwargs)
-        self.loaded = True
-        return self._model
 
     def transcribe(self, audio_path: Path) -> dict[str, Any]:
         model = self._load_model()
@@ -107,9 +112,10 @@ class AsrRuntime:
         return {"text": "\n".join(parts).strip(), "segments": segments}
 
 
-def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = None):
+def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = None, gpu_scheduler: Any | None = None):
     service_config = config or AsrServiceConfig.from_env()
     service_runtime = runtime or AsrRuntime(service_config)
+    scheduler = gpu_scheduler or get_gpu_scheduler()
     app = FastAPI(title="Flux local ASR service")
 
     @app.get("/health")
@@ -125,6 +131,7 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             "compute_type": service_config.compute_type,
             **file_status,
             **runtime_health,
+            "gpu_scheduler": scheduler.status() if hasattr(scheduler, "status") else {"mode": "unknown"},
         }
 
     @app.post("/v1/audio/transcriptions")
@@ -146,7 +153,24 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             temp_path = Path(handle.name)
             shutil.copyfileobj(file.file, handle)
         try:
-            return dict(service_runtime.transcribe(temp_path))
+            profile = task_profile("asr", model_id=service_config.model, component="asr")
+            with scheduler.acquire(profile):
+                return dict(service_runtime.transcribe(temp_path))
+        except GpuLeaseTimeout as exc:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "gpu.scheduler_busy",
+                    "message": str(exc),
+                    "retryable": True,
+                    "retry_after_seconds": float(exc.retry_after_seconds),
+                },
+            ) from exc
+        except GpuLeaseRejected as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "gpu.scheduler_rejected", "message": str(exc), "retryable": False},
+            ) from exc
         except FileNotFoundError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         finally:

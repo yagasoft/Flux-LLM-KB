@@ -6,13 +6,15 @@ from dataclasses import dataclass
 import json
 import os
 import tempfile
+import threading
 import time
 from typing import Any, Iterable
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from pathlib import Path
 
+from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
 from .onnxruntime_logging import configure_onnxruntime_logging
 
 
@@ -32,10 +34,25 @@ _EMBEDDING_MODELS: dict[str, Any] = {}
 _RERANKER_MODELS: dict[tuple[str, str, str], Any] = {}
 _PADDLE_OCR_MODELS: dict[str, Any] = {}
 _PADDLE_OCR_VL_MODELS: dict[str, Any] = {}
+_PADDLE_OCR_FACTORY_IDS: dict[str, int] = {}
+_PADDLE_OCR_VL_FACTORY_IDS: dict[str, int] = {}
+_LOCKS_GUARD = threading.Lock()
+_EMBEDDING_MODEL_LOCKS: dict[str, threading.Lock] = {}
+_EMBEDDING_ENCODE_LOCKS: dict[str, threading.Lock] = {}
+_RERANKER_MODEL_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+_RERANKER_PREDICT_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+_PADDLE_OCR_MODEL_LOCKS: dict[str, threading.Lock] = {}
+_PADDLE_OCR_VL_MODEL_LOCKS: dict[str, threading.Lock] = {}
 
 
 class ModelRunnerError(RuntimeError):
     pass
+
+
+class ModelRunnerBusy(ModelRunnerError):
+    def __init__(self, message: str, *, retry_after_seconds: float = 1.0) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = max(0.1, float(retry_after_seconds))
 
 
 @dataclass(frozen=True)
@@ -220,6 +237,8 @@ def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], ti
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
+    except HTTPError as exc:  # pragma: no cover - network-specific
+        _raise_model_runner_http_error(exc)
     except URLError as exc:  # pragma: no cover - network-specific
         raise ModelRunnerError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover - network-specific
@@ -231,8 +250,37 @@ def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], ti
     if not isinstance(response_payload, dict):
         raise ModelRunnerError("model-runner returned a non-object payload")
     if response_payload.get("ok") is False:
+        _raise_model_runner_payload_error(response_payload)
         raise ModelRunnerError(str(response_payload.get("message") or "model-runner request failed"))
     return response_payload
+
+
+def _raise_model_runner_http_error(exc: HTTPError) -> None:
+    try:
+        raw = exc.read().decode("utf-8")
+        payload = json.loads(raw)
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, dict) and detail.get("code") == "gpu.scheduler_busy":
+            raise ModelRunnerBusy(
+                str(detail.get("message") or "model-runner GPU scheduler is busy"),
+                retry_after_seconds=float(detail.get("retry_after_seconds") or 1.0),
+            ) from exc
+        if isinstance(detail, str):
+            raise ModelRunnerError(detail) from exc
+        _raise_model_runner_payload_error(payload)
+    raise ModelRunnerError(str(exc)) from exc
+
+
+def _raise_model_runner_payload_error(payload: dict[str, Any]) -> None:
+    detail = payload.get("detail")
+    if isinstance(detail, dict) and detail.get("code") == "gpu.scheduler_busy":
+        raise ModelRunnerBusy(
+            str(detail.get("message") or "model-runner GPU scheduler is busy"),
+            retry_after_seconds=float(detail.get("retry_after_seconds") or 1.0),
+        )
 
 
 def _paddle_runner_base_url() -> str:
@@ -305,6 +353,10 @@ def health_payload(role: str | None = None) -> dict[str, Any]:
         "ocr_document_model": os.environ.get("FLUX_KB_OCR_DOCUMENT_MODEL", DEFAULT_OCR_DOCUMENT_MODEL),
         "models_dir": os.environ.get("FLUX_KB_MODEL_RUNNER_MODELS_DIR", "/models"),
     }
+    try:
+        payload["gpu_scheduler"] = get_gpu_scheduler().status()
+    except Exception as exc:
+        payload["gpu_scheduler"] = {"status": "unavailable", "error": str(exc)}
     if resolved_role != "paddle-runner" and _paddle_runner_base_url():
         payload["paddle_runner_base_url"] = _paddle_runner_base_url()
         payload["paddle_runner"] = paddle_runner
@@ -312,7 +364,10 @@ def health_payload(role: str | None = None) -> dict[str, Any]:
 
 
 def _load_embedding_model(model: str) -> Any:
-    if model not in _EMBEDDING_MODELS:
+    lock = _named_lock(_EMBEDDING_MODEL_LOCKS, model)
+    with lock:
+        if model in _EMBEDDING_MODELS:
+            return _EMBEDDING_MODELS[model]
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
@@ -327,12 +382,18 @@ def _load_embedding_model(model: str) -> Any:
             _EMBEDDING_MODELS[model] = SentenceTransformer(model, device=device, trust_remote_code=True)
         except TypeError:
             _EMBEDDING_MODELS[model] = SentenceTransformer(model, device=device)
+        _record_resident_model("embedding", model, _EMBEDDING_MODELS[model])
     return _EMBEDDING_MODELS[model]
 
 
 def _embed_with_sentence_transformers(texts: list[str], *, model: str, dimensions: int) -> list[list[float]]:
-    encoder = _load_embedding_model(model)
-    vectors = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+    if not texts:
+        return []
+    profile = task_profile("embedding", model_id=model, component=_scheduler_component(), exclusive=False, share_group="embedding")
+    with get_gpu_scheduler().acquire(profile):
+        encoder = _load_embedding_model(model)
+        with _named_lock(_EMBEDDING_ENCODE_LOCKS, model):
+            vectors = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
     result = [[float(value) for value in vector] for vector in vectors.tolist()]
     for vector in result:
         if len(vector) != dimensions:
@@ -343,7 +404,10 @@ def _embed_with_sentence_transformers(texts: list[str], *, model: str, dimension
 def _load_reranker_model(model: str, quantization: str, *, awq_model: str | None = None) -> Any:
     profile = resolve_reranker_quantization(quantization, model=model, awq_model=awq_model)
     cache_key = (profile.model, profile.quantization, profile.load_model)
-    if cache_key not in _RERANKER_MODELS:
+    lock = _named_lock(_RERANKER_MODEL_LOCKS, cache_key)
+    with lock:
+        if cache_key in _RERANKER_MODELS:
+            return _RERANKER_MODELS[cache_key]
         if profile.quantization == "awq_int4":
             try:
                 import compressed_tensors  # noqa: F401
@@ -364,6 +428,7 @@ def _load_reranker_model(model: str, quantization: str, *, awq_model: str | None
                 profile=profile,
                 max_length=int(os.environ.get("FLUX_KB_RETRIEVAL_MAX_RERANK_PASSAGE_TOKENS", "1536")),
             )
+            _record_resident_model("rerank", profile.load_model, _RERANKER_MODELS[cache_key])
             return _RERANKER_MODELS[cache_key]
         try:
             import torch
@@ -392,6 +457,7 @@ def _load_reranker_model(model: str, quantization: str, *, awq_model: str | None
         reranker = CrossEncoder(profile.load_model, **model_kwargs)
         _attach_reranker_profile(reranker, profile)
         _RERANKER_MODELS[cache_key] = reranker
+        _record_resident_model("rerank", profile.load_model, reranker)
     return _RERANKER_MODELS[cache_key]
 
 
@@ -491,18 +557,27 @@ def _rerank_with_transformers(
 ) -> list[float]:
     if not passages:
         return []
-    reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
-    scores = reranker.predict([(query, passage) for passage in passages])
+    resolved_profile = resolve_reranker_quantization(quantization, model=model, awq_model=awq_model)
+    lease_profile = task_profile("rerank", model_id=resolved_profile.load_model, component=_scheduler_component())
+    cache_key = (resolved_profile.model, resolved_profile.quantization, resolved_profile.load_model)
+    with get_gpu_scheduler().acquire(lease_profile):
+        reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
+        with _named_lock(_RERANKER_PREDICT_LOCKS, cache_key):
+            scores = reranker.predict([(query, passage) for passage in passages])
     return [float(score) for score in scores]
 
 
 def _load_paddleocr(model: str) -> Any:
-    if model not in _PADDLE_OCR_MODELS:
+    lock = _named_lock(_PADDLE_OCR_MODEL_LOCKS, model)
+    with lock:
         _configure_optional_onnxruntime_logging()
         try:
             from paddleocr import PaddleOCR
         except ImportError as exc:
             raise ModelRunnerError("paddleocr is required for OCR") from exc
+        factory_id = id(PaddleOCR)
+        if model in _PADDLE_OCR_MODELS and _PADDLE_OCR_FACTORY_IDS.get(model) == factory_id:
+            return _PADDLE_OCR_MODELS[model]
         kwargs: dict[str, Any] = {
             "lang": "en",
             "use_doc_orientation_classify": False,
@@ -514,6 +589,8 @@ def _load_paddleocr(model: str) -> Any:
         if model:
             kwargs["ocr_version"] = model
         _PADDLE_OCR_MODELS[model] = PaddleOCR(**kwargs)
+        _PADDLE_OCR_FACTORY_IDS[model] = factory_id
+        _record_resident_model("ocr_image", model, _PADDLE_OCR_MODELS[model])
     return _PADDLE_OCR_MODELS[model]
 
 
@@ -542,18 +619,24 @@ def _configure_optional_onnxruntime_logging() -> None:
 
 
 def _load_paddleocr_vl(model: str) -> Any:
-    if model not in _PADDLE_OCR_VL_MODELS:
+    lock = _named_lock(_PADDLE_OCR_VL_MODEL_LOCKS, model)
+    with lock:
         _configure_optional_onnxruntime_logging()
         try:
             from paddlex import create_pipeline
         except ImportError as exc:
             raise ModelRunnerError("paddlex[ocr] is required for PaddleOCR-VL document OCR") from exc
+        factory_id = id(create_pipeline)
+        if model in _PADDLE_OCR_VL_MODELS and _PADDLE_OCR_VL_FACTORY_IDS.get(model) == factory_id:
+            return _PADDLE_OCR_VL_MODELS[model]
         _PADDLE_OCR_VL_MODELS[model] = create_pipeline(
             pipeline=model,
             device=_paddle_device(),
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
         )
+        _PADDLE_OCR_VL_FACTORY_IDS[model] = factory_id
+        _record_resident_model("ocr_document", model, _PADDLE_OCR_VL_MODELS[model])
     return _PADDLE_OCR_VL_MODELS[model]
 
 
@@ -602,11 +685,13 @@ def _ocr_image_with_paddle(path: str, *, model: str) -> str:
     if _paddle_runner_base_url():
         payload = _proxy_paddle_request("/v1/ocr/image", {"path": str(path), "model": model})
         return str(payload.get("text") or "")
-    ocr = _load_paddleocr(model)
-    if hasattr(ocr, "predict"):
-        result = ocr.predict(str(path))
-    else:
-        result = ocr.ocr(str(path), cls=True)
+    profile = task_profile("ocr_image", model_id=model, component=_scheduler_component())
+    with get_gpu_scheduler().acquire(profile):
+        ocr = _load_paddleocr(model)
+        if hasattr(ocr, "predict"):
+            result = ocr.predict(str(path))
+        else:
+            result = ocr.ocr(str(path), cls=True)
     return _paddleocr_text(result)
 
 
@@ -615,8 +700,10 @@ def _ocr_document_with_paddle(path: str, *, model: str) -> str:
         payload = _proxy_paddle_request("/v1/ocr/document", {"path": str(path), "model": model})
         return str(payload.get("text") or "")
     if model.startswith("PaddleOCR-VL"):
-        pipeline = _load_paddleocr_vl(model)
-        return _paddleocr_text(list(pipeline.predict(str(path))))
+        profile = task_profile("ocr_document", model_id=model, component=_scheduler_component())
+        with get_gpu_scheduler().acquire(profile):
+            pipeline = _load_paddleocr_vl(model)
+            return _paddleocr_text(list(pipeline.predict(str(path))))
     return _ocr_image_with_paddle(path, model=model)
 
 
@@ -757,7 +844,7 @@ def download_paddle_models(models_dir: str) -> dict[str, Any]:
 
 def create_app():
     try:
-        from fastapi import FastAPI
+        from fastapi import FastAPI, HTTPException
     except ImportError as exc:  # pragma: no cover - deployment-only
         raise RuntimeError("fastapi is required to serve the model-runner") from exc
 
@@ -767,32 +854,51 @@ def create_app():
     def health() -> dict[str, Any]:
         return health_payload()
 
+    @app.get("/v1/gpu/status")
+    def gpu_status() -> dict[str, Any]:
+        return get_gpu_scheduler().status()
+
     @app.post("/v1/embeddings")
     def embeddings(payload: dict[str, Any]) -> dict[str, Any]:
-        model = str(payload.get("model") or DEFAULT_EMBEDDING_MODEL)
-        dimensions = int(payload.get("dimensions") or 1024)
-        texts = payload.get("texts") if isinstance(payload.get("texts"), list) else []
-        return {
-            "ok": True,
-            "model": model,
-            "dimensions": dimensions,
-            "vectors": _embed_with_sentence_transformers([str(text or "") for text in texts], model=model, dimensions=dimensions),
-        }
+        try:
+            model = str(payload.get("model") or DEFAULT_EMBEDDING_MODEL)
+            dimensions = int(payload.get("dimensions") or 1024)
+            texts = _embedding_texts_from_payload(payload)
+            vectors = _embed_with_sentence_transformers(texts, model=model, dimensions=dimensions)
+            return {
+                "ok": True,
+                "model": model,
+                "dimensions": dimensions,
+                "vectors": vectors,
+                "data": [{"object": "embedding", "index": index, "embedding": vector} for index, vector in enumerate(vectors)],
+                "object": "list",
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except GpuLeaseTimeout as exc:
+            raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
+        except GpuLeaseRejected as exc:
+            raise HTTPException(status_code=503, detail={"code": "gpu.scheduler_rejected", "message": str(exc), "retryable": False}) from exc
 
     @app.post("/v1/rerank")
     def rerank(payload: dict[str, Any]) -> dict[str, Any]:
-        passages = payload.get("passages") if isinstance(payload.get("passages"), list) else []
-        model = str(payload.get("model") or DEFAULT_RERANKER_MODEL)
-        quantization = str(payload.get("quantization") or DEFAULT_RERANKER_QUANTIZATION)
-        awq_model = payload.get("awq_model") or payload.get("reranker_awq_model")
-        profile = resolve_reranker_quantization(quantization, model=model, awq_model=str(awq_model) if awq_model else None)
-        scores = _rerank_with_transformers(
-            str(payload.get("query") or ""),
-            [str(passage or "") for passage in passages],
-            model=model,
-            quantization=quantization,
-            awq_model=profile.awq_model,
-        )
+        try:
+            passages = payload.get("passages") if isinstance(payload.get("passages"), list) else []
+            model = str(payload.get("model") or DEFAULT_RERANKER_MODEL)
+            quantization = str(payload.get("quantization") or DEFAULT_RERANKER_QUANTIZATION)
+            awq_model = payload.get("awq_model") or payload.get("reranker_awq_model")
+            profile = resolve_reranker_quantization(quantization, model=model, awq_model=str(awq_model) if awq_model else None)
+            scores = _rerank_with_transformers(
+                str(payload.get("query") or ""),
+                [str(passage or "") for passage in passages],
+                model=model,
+                quantization=quantization,
+                awq_model=profile.awq_model,
+            )
+        except GpuLeaseTimeout as exc:
+            raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
+        except GpuLeaseRejected as exc:
+            raise HTTPException(status_code=503, detail={"code": "gpu.scheduler_rejected", "message": str(exc), "retryable": False}) from exc
         return {
             "ok": True,
             "model": profile.model,
@@ -815,7 +921,10 @@ def create_app():
         model = str(payload.get("model") or DEFAULT_OCR_SIMPLE_MODEL)
         if _paddle_runner_base_url():
             return _proxy_paddle_request("/v1/ocr/image", {**payload, "model": model})
-        return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_image_with_paddle(str(input_path or path), model=model))}
+        try:
+            return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_image_with_paddle(str(input_path or path), model=model))}
+        except GpuLeaseTimeout as exc:
+            raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
     @app.post("/v1/ocr/document")
     def ocr_document(payload: dict[str, Any]) -> dict[str, Any]:
@@ -823,9 +932,68 @@ def create_app():
         model = str(payload.get("model") or DEFAULT_OCR_DOCUMENT_MODEL)
         if _paddle_runner_base_url():
             return _proxy_paddle_request("/v1/ocr/document", {**payload, "model": model})
-        return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model))}
+        try:
+            return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model))}
+        except GpuLeaseTimeout as exc:
+            raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
     return app
+
+
+def _embedding_texts_from_payload(payload: dict[str, Any]) -> list[str]:
+    if "texts" in payload:
+        texts = payload.get("texts")
+        if not isinstance(texts, list):
+            raise ValueError("embedding texts must be a list of strings")
+        if any(not isinstance(text, str) for text in texts):
+            raise ValueError("embedding texts must be a list of strings")
+        return list(texts)
+    if "input" in payload:
+        value = payload.get("input")
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list) and all(isinstance(text, str) for text in value):
+            return list(value)
+        raise ValueError("embedding input must be a string or list of strings")
+    raise ValueError("embedding request requires texts or input")
+
+
+def _gpu_busy_detail(exc: GpuLeaseTimeout) -> dict[str, Any]:
+    return {
+        "code": "gpu.scheduler_busy",
+        "message": str(exc),
+        "retryable": True,
+        "retry_after_seconds": float(exc.retry_after_seconds),
+    }
+
+
+def _scheduler_component() -> str:
+    return os.environ.get("FLUX_KB_MODEL_RUNNER_ROLE", "model-runner")
+
+
+def _named_lock(pool: dict[Any, threading.Lock], key: Any) -> threading.Lock:
+    with _LOCKS_GUARD:
+        lock = pool.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            pool[key] = lock
+        return lock
+
+
+def _record_resident_model(task_type: str, model_id: str, _model: Any) -> None:
+    try:
+        profile = task_profile(task_type, model_id=model_id, component=_scheduler_component())
+        get_gpu_scheduler().record_model_residency(
+            GpuModelResidency(
+                model_id=model_id,
+                task_type=task_type,
+                estimated_vram_mb=profile.estimated_vram_mb,
+                resident=True,
+                last_used_at=time.time(),
+            )
+        )
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:

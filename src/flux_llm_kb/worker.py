@@ -102,6 +102,8 @@ def process_corpus_job(job: dict) -> JobProcessResult:
     except host_vss.VssSnapshotError as exc:
         return JobProcessResult(status="retrying_vss_failed", message=str(exc), telemetry=_telemetry_from_vss_error(exc))
     except Exception as exc:
+        if _is_gpu_busy_exception(exc):
+            return _gpu_busy_result(exc)
         return JobProcessResult(
             status="failed",
             message=str(exc),
@@ -254,6 +256,8 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
     except ValueError as exc:
         return JobProcessResult(status="failed", message=str(exc))
     except Exception as exc:
+        if _is_gpu_busy_exception(exc):
+            return _gpu_busy_result(exc)
         return JobProcessResult(
             status="failed",
             message=str(exc),
@@ -277,6 +281,23 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
         message = "; ".join(str(item) for item in (result.get("errors") or [])[:3]) or f"{failed} search-index documents failed"
         return JobProcessResult(status="failed", message=message, telemetry=telemetry)
     return JobProcessResult(status="indexed", telemetry=telemetry)
+
+
+def _is_gpu_busy_exception(exc: Exception) -> bool:
+    return exc.__class__.__name__ in {"GpuLeaseTimeout", "ModelRunnerBusy"}
+
+
+def _gpu_busy_result(exc: Exception) -> JobProcessResult:
+    retry_after = float(getattr(exc, "retry_after_seconds", 1.0) or 1.0)
+    return JobProcessResult(
+        status="retrying_gpu_busy",
+        message=str(exc),
+        telemetry={
+            "error_type": exc.__class__.__name__,
+            "retry_after_seconds": retry_after,
+            "gpu_scheduler_status": "busy",
+        },
+    )
 
 
 def _is_locked_error(exc: OSError) -> bool:

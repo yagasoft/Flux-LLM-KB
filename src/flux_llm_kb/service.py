@@ -3535,6 +3535,17 @@ class KnowledgeService:
                         telemetry=telemetry,
                     )
                     retried += 1
+            elif process_result.status == "retrying_gpu_busy":
+                retry_after = int(float((process_result.telemetry or {}).get("retry_after_seconds") or 1))
+                database.retry_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or "retrying_gpu_busy",
+                    cooldown_seconds=max(1, retry_after),
+                    status="retrying_gpu_busy",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                retried += 1
             elif process_result.status == "failed":
                 if int(job.get("attempts") or 0) >= _configured_failure_max_attempts():
                     database.block_corpus_job(

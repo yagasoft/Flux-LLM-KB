@@ -493,6 +493,10 @@ def main(argv: list[str] | None = None) -> int:
     reliability_roots.add_argument("--freshness-hours", type=int, default=336)
     reliability_roots.add_argument("--limit", type=int, default=100)
 
+    gpu_parser = subparsers.add_parser("gpu", help="Inspect local GPU scheduler state")
+    gpu_subparsers = gpu_parser.add_subparsers(dest="gpu_command", required=True)
+    gpu_subparsers.add_parser("status", help="Show running, waiting, and recent GPU leases")
+
     mail_parser = subparsers.add_parser("mail", help="Manage mail ingestion")
     mail_subparsers = mail_parser.add_subparsers(dest="mail_command", required=True)
     mail_profile = mail_subparsers.add_parser("profile", help="Manage mail profiles")
@@ -617,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
         "codex": _codex,
         "settings": _settings,
         "acceleration": _acceleration,
+        "gpu": _gpu,
         "code": _code,
         "diagnostics": _diagnostics,
         "mail": _mail,
@@ -1356,6 +1361,17 @@ def _acceleration(args: argparse.Namespace) -> int:
             raise ValueError(args.reliability_command)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.acceleration_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _gpu(args: argparse.Namespace) -> int:
+    if args.gpu_command == "status":
+        from .gpu_scheduler import get_gpu_scheduler
+
+        payload = get_gpu_scheduler().status()
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.gpu_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
