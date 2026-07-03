@@ -1749,6 +1749,9 @@ class KnowledgeService:
     def search_index_rebuild(self, *, root_name: str | None = None, confirmed: bool = False) -> dict[str, Any]:
         return database.mark_search_index_rebuild(root_name=root_name, confirmed=confirmed)
 
+    def purge_deleted_corpora(self, *, confirmed: bool = False) -> dict[str, Any]:
+        return database.purge_deleted_corpus_residue(confirmed=confirmed)
+
     def reprocess_derived_state(
         self,
         *,

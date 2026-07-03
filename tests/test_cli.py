@@ -1085,6 +1085,10 @@ def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsy
             calls["rebuild"] = kwargs
             return {"rebuild": kwargs}
 
+        def purge_deleted_corpora(self, **kwargs):
+            calls["purge_deleted_corpora"] = kwargs
+            return {"purge_deleted_corpora": kwargs}
+
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
     assert cli.main(["search-index", "status", "--root", "docs"]) == 0
@@ -1105,6 +1109,16 @@ def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsy
         "root_name": "docs",
         "confirmed": True,
     }
+
+    assert cli.main(["search-index", "purge-deleted-corpora"]) == 0
+    dry_run_payload = json.loads(capsys.readouterr().out)
+    assert dry_run_payload["purge_deleted_corpora"] == {"confirmed": False}
+    assert calls["purge_deleted_corpora"] == {"confirmed": False}
+
+    assert cli.main(["search-index", "purge-deleted-corpora", "--confirm"]) == 0
+    confirmed_payload = json.loads(capsys.readouterr().out)
+    assert confirmed_payload["purge_deleted_corpora"] == {"confirmed": True}
+    assert calls["purge_deleted_corpora"] == {"confirmed": True}
 
 
 def test_cli_maintenance_reprocess_routes_to_service(monkeypatch, capsys):

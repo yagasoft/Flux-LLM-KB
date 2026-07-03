@@ -70,6 +70,11 @@ def main(argv: list[str] | None = None) -> int:
     search_index_rebuild = search_index_subparsers.add_parser("rebuild", help="Mark Vespa search-index records pending for rebuild")
     search_index_rebuild.add_argument("--root", dest="root_name")
     search_index_rebuild.add_argument("--confirm", action="store_true")
+    search_index_purge_deleted = search_index_subparsers.add_parser(
+        "purge-deleted-corpora",
+        help="Purge Vespa and derived-cache residue for deleted corpus roots",
+    )
+    search_index_purge_deleted.add_argument("--confirm", action="store_true")
 
     maintenance_parser = subparsers.add_parser("maintenance", help="Run confirmation-gated maintenance operations")
     maintenance_subparsers = maintenance_parser.add_subparsers(dest="maintenance_command", required=True)
@@ -1209,6 +1214,8 @@ def _search_index(args: argparse.Namespace) -> int:
         payload = service.search_index_sync(owner_class=args.owner_class, root_name=args.root_name, limit=args.limit)
     elif args.search_index_command == "rebuild":
         payload = service.search_index_rebuild(root_name=args.root_name, confirmed=args.confirm)
+    elif args.search_index_command == "purge-deleted-corpora":
+        payload = service.purge_deleted_corpora(confirmed=args.confirm)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.search_index_command)
     print(json.dumps(payload, indent=2, sort_keys=True))

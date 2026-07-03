@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -637,6 +638,160 @@ def test_mark_search_index_record_deleted_clears_failed_stage_metadata():
     assert "- 'last_error'" in sql
     assert "jsonb_build_object('deleted_from_vespa', true)" in sql
     assert params == ("id:flux:flux_evidence::asset_chunks--chunk-1",)
+
+
+def test_purge_derived_cache_entries_removes_root_owned_json_and_thumbnail_caches(monkeypatch, tmp_path):
+    cache_root = tmp_path / "cache"
+    cache_dirs = {
+        name: cache_root / name
+        for name in ("models", "ocr", "asr", "vision", "thumbnails", "parser", "embeddings", "mail_content", "temp")
+    }
+    for path in cache_dirs.values():
+        path.mkdir(parents=True)
+
+    root_hash = "a" * 64
+    shared_hash = "b" * 64
+    stale_hash = "c" * 64
+    root_ocr = cache_dirs["ocr"] / "root.json"
+    shared_ocr = cache_dirs["ocr"] / "shared.json"
+    stale_ocr = cache_dirs["ocr"] / "stale.json"
+    root_ocr.write_text(json.dumps({"schema": "flux-paddleocr-cache-v2", "source_hash": root_hash, "text": "root"}), encoding="utf-8")
+    shared_ocr.write_text(
+        json.dumps({"schema": "flux-paddleocr-cache-v2", "source_hash": shared_hash, "text": "shared"}),
+        encoding="utf-8",
+    )
+    stale_ocr.write_text(json.dumps({"schema": "flux-paddleocr-cache-v2", "source_hash": stale_hash, "text": "stale"}), encoding="utf-8")
+    root_asr = cache_dirs["asr"] / "root.json"
+    root_asr.write_text(
+        json.dumps({"schema": "flux-asr-cache-v1", "source_hash": root_hash, "model_key": "m", "text": "root"}),
+        encoding="utf-8",
+    )
+
+    timestamp_key = "4.000"
+    thumb_key = hashlib.sha256(f"flux-thumbnail-cache-v1:{root_hash}:{timestamp_key}".encode("utf-8")).hexdigest()
+    thumbnail = cache_dirs["thumbnails"] / f"{thumb_key}.png"
+    thumbnail.write_bytes(b"root-thumbnail")
+    thumbnail_hash = hashlib.sha256(b"root-thumbnail").hexdigest()
+    frame_vision = cache_dirs["vision"] / "frame.json"
+    frame_vision.write_text(
+        json.dumps({"schema": "flux-vision-cache-v1", "source_hash": thumbnail_hash, "text": "frame"}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "flux_llm_kb.acceleration.resolve_cache_layout",
+        lambda: {
+            "root": str(cache_root),
+            "source": "test",
+            "directories": {name: str(path) for name, path in cache_dirs.items()},
+        },
+    )
+
+    result = database.purge_derived_cache_entries(
+        source_hashes={root_hash, shared_hash},
+        active_source_hashes={shared_hash},
+        frame_timestamps_by_hash={root_hash: [4.0]},
+        purge_unreferenced=True,
+        dry_run=False,
+    )
+
+    assert result["deleted"]["ocr"] == 2
+    assert result["deleted"]["asr"] == 1
+    assert result["deleted"]["vision"] == 1
+    assert result["deleted"]["thumbnails"] == 1
+    assert result["skipped_shared"]["ocr"] == 1
+    assert not root_ocr.exists()
+    assert shared_ocr.exists()
+    assert not stale_ocr.exists()
+    assert not root_asr.exists()
+    assert not thumbnail.exists()
+    assert not frame_vision.exists()
+
+
+def test_delete_monitored_root_runs_sidecar_cache_and_search_cleanup_before_db_removal(monkeypatch):
+    executed = []
+    root_hash = "a" * 64
+    shared_hash = "b" * 64
+
+    class FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+            self.rowcount = 1
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, name FROM monitored_roots" in sql:
+                return ("root-1", "docs")
+            return None
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "FROM source_assets a" in sql and "LEFT JOIN asset_chunks" in sql:
+                return [
+                    (
+                        root_hash,
+                        {"frame_sampling": {"timestamps": [4.0]}, "staged_jobs": [{"payload": {"segment_index": 0}}]},
+                    ),
+                    (shared_hash, {}),
+                ]
+            if "SELECT DISTINCT a.content_hash" in sql:
+                return [(shared_hash, {})]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    calls = []
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(
+        database,
+        "delete_managed_mail_sidecars_for_root",
+        lambda **kwargs: calls.append(("sidecars", kwargs)) or {"deleted": 1, "missing": 0, "failed": 0, "blocked": 0},
+    )
+    monkeypatch.setattr(
+        database,
+        "purge_derived_cache_entries",
+        lambda **kwargs: calls.append(("cache", kwargs)) or {"deleted": {}, "missing": {}, "skipped_shared": {}, "errors": []},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
+        "purge_corpus_search_index_for_roots",
+        lambda **kwargs: calls.append(("search", kwargs))
+        or {"vespa_documents_deleted": 2, "search_index_records_deleted": 2, "errors": []},
+        raising=False,
+    )
+
+    result = database.delete_monitored_root(root_id="docs", purge_index=True, actor="cli")
+
+    assert result["deleted"] is True
+    assert [name for name, _kwargs in calls] == ["sidecars", "cache", "search"]
+    assert calls[1][1]["source_hashes"] == {root_hash, shared_hash}
+    assert calls[1][1]["active_source_hashes"] == {shared_hash}
+    assert calls[1][1]["frame_timestamps_by_hash"] == {root_hash: [4.0]}
+    assert calls[2][1]["root_names"] == ["docs"]
+    delete_chunk_index = next(index for index, (sql, _params) in enumerate(executed) if "DELETE FROM asset_chunks" in sql)
+    assert calls[0][1] == {"root_name": "docs"}
+    assert any("SELECT DISTINCT a.content_hash" in sql for sql, _params in executed[:delete_chunk_index])
 
 
 def test_worker_family_stats_aggregates_queue_counts_and_durations(monkeypatch):

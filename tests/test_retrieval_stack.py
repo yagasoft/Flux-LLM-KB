@@ -616,6 +616,127 @@ def test_sync_search_index_uses_configured_vespa_base_url(monkeypatch):
     assert captured["base_url"] == "http://vespa:8080"
 
 
+def test_purge_deleted_corpus_residue_deletes_only_corpus_roots_absent_from_monitor(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+            if "DELETE FROM search_index_records" in sql:
+                self.rowcount = 3
+            elif "DELETE FROM semantic_duplicate_clusters" in sql:
+                self.rowcount = 2
+            elif "DELETE FROM capture_jobs" in sql:
+                self.rowcount = 4
+            else:
+                self.rowcount = 0
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "FROM search_index_records rec" in sql and "LEFT JOIN monitored_roots" in sql:
+                return [
+                    ("id:flux:flux_evidence::asset_chunks--old-1", "mohesr-documents", "pending"),
+                    ("id:flux:flux_evidence::asset_chunks--old-2", "mohesr-documents", "failed"),
+                    ("id:flux:flux_evidence::asset_chunks--old-3", "llm-kb", "deleted"),
+                ]
+            if "FROM semantic_duplicate_clusters sc" in sql:
+                return [("orphan-cluster",)]
+            if "FROM capture_jobs j" in sql:
+                return [("orphan-job",)]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeAdapter:
+        def __init__(self):
+            self.deleted = []
+            self.counts = []
+
+        def delete(self, document_id):
+            self.deleted.append(document_id)
+            return {"ok": True}
+
+        def count_by_root_name(self, root_name, *, owner_table=None):
+            self.counts.append((root_name, owner_table))
+            return 0
+
+    cache_calls = []
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(
+        database,
+        "purge_derived_cache_entries",
+        lambda **kwargs: cache_calls.append(kwargs)
+        or {
+            "dry_run": kwargs["dry_run"],
+            "deleted": {},
+            "missing": {},
+            "skipped_shared": {},
+            "errors": [],
+        },
+        raising=False,
+    )
+
+    adapter = FakeAdapter()
+    dry_run = database.purge_deleted_corpus_residue(confirmed=False, adapter=adapter)
+    assert dry_run["dry_run"] is True
+    assert dry_run["roots"] == ["llm-kb", "mohesr-documents", "orphan-cluster", "orphan-job"]
+    assert dry_run["vespa_documents_planned"] == 3
+    assert adapter.deleted == []
+    assert not any("DELETE FROM" in sql for sql, _params in executed)
+
+    executed.clear()
+    confirmed = database.purge_deleted_corpus_residue(confirmed=True, adapter=adapter)
+
+    assert confirmed["dry_run"] is False
+    assert adapter.deleted == [
+        "id:flux:flux_evidence::asset_chunks--old-1",
+        "id:flux:flux_evidence::asset_chunks--old-2",
+        "id:flux:flux_evidence::asset_chunks--old-3",
+    ]
+    assert sorted(adapter.counts) == [
+        ("llm-kb", "asset_chunks"),
+        ("mohesr-documents", "asset_chunks"),
+        ("orphan-cluster", "asset_chunks"),
+        ("orphan-job", "asset_chunks"),
+    ]
+    assert confirmed["search_index_records_deleted"] == 3
+    assert confirmed["semantic_duplicate_clusters_deleted"] == 2
+    assert confirmed["jobs_deleted"] == 4
+    assert confirmed["vespa_remaining_by_root"] == {
+        "llm-kb": 0,
+        "mohesr-documents": 0,
+        "orphan-cluster": 0,
+        "orphan-job": 0,
+    }
+    assert cache_calls[-1]["purge_unreferenced"] is True
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "rec.owner_table = 'asset_chunks'" in sql
+    assert "LEFT JOIN monitored_roots" in sql
+    assert "memory_class = 'corpus'" in sql
+    assert "job_type = 'search_index_sync'" in sql
+
+
 def test_search_index_fetch_all_owner_class_does_not_starve_episodes_or_claims():
     executed = []
 

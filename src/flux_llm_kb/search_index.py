@@ -182,6 +182,25 @@ class VespaSearchAdapter:
         path = f"/document/v1/{VESPA_NAMESPACE}/{VESPA_SCHEMA}/docid/{document_id.rsplit('::', 1)[-1]}"
         return self.http.delete(path)
 
+    def count_by_root_name(self, root_name: str, *, owner_table: str | None = None) -> int:
+        filters = ["root_name contains @root_name"]
+        payload: dict[str, Any] = {
+            "yql": "",
+            "root_name": _vespa_text(root_name),
+            "hits": 0,
+            "timeout": "5s",
+        }
+        if owner_table:
+            filters.append("owner_table contains @owner_table")
+            payload["owner_table"] = _vespa_text(owner_table)
+        payload["yql"] = f"select * from sources * where {' and '.join(filters)}"
+        response = self.http.post_json("/search/", payload)
+        fields = response.get("root", {}).get("fields", {})
+        try:
+            return int(fields.get("totalCount") or 0)
+        except (TypeError, ValueError):
+            return 0
+
     def query(
         self,
         query: str,

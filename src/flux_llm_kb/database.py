@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -25,7 +26,7 @@ from .embeddings import (
     EmbeddingResult,
     embedding_source_hash,
 )
-from . import mail_content_store
+from . import acceleration, mail_content_store
 from .migrations import load_migrations
 from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciprocal_rank_fusion
 from .text_safety import sanitize_postgres_text_value, strip_postgres_nul
@@ -3051,6 +3052,18 @@ def delete_monitored_root(
             if not row:
                 return {"id": root_id, "name": None, "deleted": False, "purged_index": purge_index}
             actual_root_id, name = row
+            root_source_hashes, root_frame_timestamps = _collect_root_cache_inputs(cur, root_id=actual_root_id)
+            active_source_hashes, active_frame_timestamps = _collect_active_cache_inputs(cur, exclude_root_id=actual_root_id)
+            sidecar_cleanup = delete_managed_mail_sidecars_for_root(root_name=name)
+            cache_cleanup = purge_derived_cache_entries(
+                source_hashes=root_source_hashes,
+                active_source_hashes=active_source_hashes,
+                frame_timestamps_by_hash=root_frame_timestamps,
+                active_frame_timestamps_by_hash=active_frame_timestamps,
+                purge_unreferenced=False,
+                dry_run=False,
+            )
+            search_index_cleanup = purge_corpus_search_index_for_roots(root_names=[name], confirmed=True)
             cur.execute(
                 """
                 UPDATE monitored_roots
@@ -3080,7 +3093,7 @@ def delete_monitored_root(
             cur.execute(
                 """
                 DELETE FROM capture_jobs
-                WHERE job_type LIKE 'corpus_%%'
+                WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                   AND payload->>'root_name' = %s
                 """,
                 (name,),
@@ -3093,9 +3106,26 @@ def delete_monitored_root(
                 INSERT INTO audit_events (event_type, actor, target_table, target_id, details)
                 VALUES ('monitored_root.deleted', %s, 'monitored_roots', %s, %s::jsonb)
                 """,
-                (actor, actual_root_id, _json({"name": name, "purged_index": purge_index})),
+                (
+                    actor,
+                    actual_root_id,
+                    _json(
+                        {
+                            "name": name,
+                            "purged_index": purge_index,
+                            "sidecar_cleanup": sidecar_cleanup,
+                            "cache_cleanup": cache_cleanup,
+                            "search_index_cleanup": search_index_cleanup,
+                        }
+                    ),
+                ),
             )
-            return {"id": actual_root_id, "name": name, "deleted": True, "purged_index": purge_index}
+            return {
+                "id": actual_root_id,
+                "name": name,
+                "deleted": True,
+                "purged_index": purge_index,
+            }
 
 
 def set_watch_enabled(
@@ -11550,7 +11580,10 @@ def delete_managed_mail_sidecars_for_root(*, root_name: str, url: str | None = N
                 """,
                 (normalized_root,),
             )
-            rows = cur.fetchall()
+            try:
+                rows = cur.fetchall()
+            except AttributeError:
+                rows = []
 
     summary: dict[str, Any] = {
         "root_name": normalized_root,
@@ -11597,6 +11630,271 @@ def delete_managed_mail_sidecars_for_root(*, root_name: str, url: str | None = N
                 }
             )
     return summary
+
+
+_DERIVED_CACHE_JSON_DIRECTORIES = ("ocr", "asr", "vision", "parser", "embeddings")
+_DERIVED_CACHE_DIRECTORIES = (*_DERIVED_CACHE_JSON_DIRECTORIES, "thumbnails")
+
+
+def purge_derived_cache_entries(
+    *,
+    source_hashes: Iterable[str] | None = None,
+    active_source_hashes: Iterable[str] | None = None,
+    frame_timestamps_by_hash: dict[str, Iterable[Any]] | None = None,
+    active_frame_timestamps_by_hash: dict[str, Iterable[Any]] | None = None,
+    purge_unreferenced: bool = False,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    """Purge root-owned derived extraction caches without removing shared active cache entries."""
+
+    layout = acceleration.resolve_cache_layout()
+    cache_root = Path(str(layout.get("root") or "")).expanduser().resolve()
+    directories = layout.get("directories") if isinstance(layout.get("directories"), dict) else {}
+    target_hashes = _normalised_cache_hashes(source_hashes or [])
+    active_hashes = _normalised_cache_hashes(active_source_hashes or [])
+    removable_hashes = {value for value in target_hashes if value not in active_hashes}
+    root_frame_timestamps = _normalised_frame_timestamp_map(frame_timestamps_by_hash or {})
+    active_frame_timestamps = _normalised_frame_timestamp_map(active_frame_timestamps_by_hash or {})
+    expected_active_thumbnails = _thumbnail_cache_paths_for_hashes(
+        cache_root=cache_root,
+        directories=directories,
+        timestamps_by_hash=active_frame_timestamps,
+    )
+    active_thumbnail_hashes = _file_sha256_values(expected_active_thumbnails)
+    removable_thumbnail_paths = _thumbnail_cache_paths_for_hashes(
+        cache_root=cache_root,
+        directories=directories,
+        timestamps_by_hash={key: value for key, value in root_frame_timestamps.items() if key in removable_hashes},
+    )
+    removable_thumbnail_hashes = _file_sha256_values(removable_thumbnail_paths)
+    removable_json_hashes = removable_hashes | removable_thumbnail_hashes
+    preserved_json_hashes = active_hashes | active_thumbnail_hashes
+
+    result: dict[str, Any] = {
+        "dry_run": bool(dry_run),
+        "source": layout.get("source"),
+        "root": str(cache_root),
+        "requested_hashes": len(target_hashes),
+        "active_hashes": len(active_hashes),
+        "purge_unreferenced": bool(purge_unreferenced),
+        "deleted": {name: 0 for name in _DERIVED_CACHE_DIRECTORIES},
+        "missing": {name: 0 for name in _DERIVED_CACHE_DIRECTORIES},
+        "skipped_shared": {name: 0 for name in _DERIVED_CACHE_DIRECTORIES},
+        "errors": [],
+    }
+
+    for name in _DERIVED_CACHE_JSON_DIRECTORIES:
+        directory = _cache_layout_directory(cache_root=cache_root, directories=directories, name=name)
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                result["errors"].append({"cache": name, "path": str(path), "error": str(exc)})
+                continue
+            source_hash = _normalise_cache_hash(payload.get("source_hash"))
+            if not source_hash:
+                continue
+            if source_hash in preserved_json_hashes:
+                if source_hash in target_hashes:
+                    result["skipped_shared"][name] += 1
+                continue
+            should_delete = source_hash in removable_json_hashes or (purge_unreferenced and source_hash not in preserved_json_hashes)
+            if not should_delete:
+                continue
+            _delete_cache_file(path, name=name, result=result, dry_run=dry_run)
+
+    thumbnail_dir = _cache_layout_directory(cache_root=cache_root, directories=directories, name="thumbnails")
+    if thumbnail_dir.exists():
+        expected_active = {path.resolve() for path in expected_active_thumbnails}
+        explicit_thumbnail_targets = {path.resolve() for path in removable_thumbnail_paths}
+        if purge_unreferenced:
+            thumbnail_targets = {
+                path.resolve()
+                for path in thumbnail_dir.glob("*")
+                if path.is_file() and path.resolve() not in expected_active
+            }
+        else:
+            thumbnail_targets = explicit_thumbnail_targets
+        for path in sorted(thumbnail_targets):
+            if path in expected_active:
+                result["skipped_shared"]["thumbnails"] += 1
+                continue
+            _delete_cache_file(path, name="thumbnails", result=result, dry_run=dry_run)
+
+    return result
+
+
+def _collect_root_cache_inputs(cur: Any, *, root_id: str) -> tuple[set[str], dict[str, list[float]]]:
+    cur.execute(
+        """
+        SELECT DISTINCT a.content_hash, a.metadata
+        FROM source_assets a
+        LEFT JOIN asset_chunks c ON c.asset_id = a.id
+        WHERE a.root_id = %s
+          AND a.content_hash IS NOT NULL
+        """,
+        (root_id,),
+    )
+    try:
+        rows = cur.fetchall()
+    except AttributeError:
+        rows = []
+    return _cache_inputs_from_asset_rows(rows)
+
+
+def _collect_active_cache_inputs(cur: Any, *, exclude_root_id: str | None = None) -> tuple[set[str], dict[str, list[float]]]:
+    params: tuple[Any, ...] = ()
+    root_filter = ""
+    if exclude_root_id:
+        root_filter = "AND a.root_id <> %s"
+        params = (exclude_root_id,)
+    cur.execute(
+        f"""
+        SELECT DISTINCT a.content_hash, a.metadata
+        FROM source_assets a
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE a.deleted_at IS NULL
+          AND a.content_hash IS NOT NULL
+          {root_filter}
+        """,
+        params,
+    )
+    try:
+        rows = cur.fetchall()
+    except AttributeError:
+        rows = []
+    return _cache_inputs_from_asset_rows(rows)
+
+
+def _cache_inputs_from_asset_rows(rows: Iterable[tuple[Any, Any]]) -> tuple[set[str], dict[str, list[float]]]:
+    hashes: set[str] = set()
+    timestamps: dict[str, list[float]] = {}
+    for raw_hash, metadata in rows:
+        source_hash = _normalise_cache_hash(raw_hash)
+        if not source_hash:
+            continue
+        hashes.add(source_hash)
+        extracted = _frame_timestamps_from_metadata(metadata if isinstance(metadata, dict) else {})
+        if extracted:
+            timestamps[source_hash] = extracted
+    return hashes, timestamps
+
+
+def _frame_timestamps_from_metadata(metadata: dict[str, Any]) -> list[float]:
+    timestamps: list[float] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            raw = value.get("timestamps")
+            if isinstance(raw, list):
+                for item in raw:
+                    try:
+                        timestamps.append(round(float(item), 3))
+                    except (TypeError, ValueError):
+                        continue
+            for key in ("frame_sampling", "embedded_frame_sampling"):
+                nested = value.get(key)
+                if isinstance(nested, dict):
+                    visit(nested)
+            for key in ("staged_jobs", "followup_jobs"):
+                jobs = value.get(key)
+                if isinstance(jobs, list):
+                    for job in jobs:
+                        visit(job)
+            payload = value.get("payload")
+            if isinstance(payload, dict):
+                visit(payload)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(metadata)
+    return sorted(set(timestamps))
+
+
+def _normalise_cache_hash(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text.startswith("sha256:"):
+        text = text.split(":", 1)[1]
+    return text if re.fullmatch(r"[0-9a-f]{64}", text) else ""
+
+
+def _normalised_cache_hashes(values: Iterable[Any]) -> set[str]:
+    return {item for item in (_normalise_cache_hash(value) for value in values) if item}
+
+
+def _normalised_frame_timestamp_map(value: dict[str, Iterable[Any]]) -> dict[str, list[float]]:
+    result: dict[str, list[float]] = {}
+    for raw_hash, raw_timestamps in value.items():
+        source_hash = _normalise_cache_hash(raw_hash)
+        if not source_hash:
+            continue
+        timestamps: list[float] = []
+        for item in raw_timestamps or []:
+            try:
+                timestamps.append(round(float(item), 3))
+            except (TypeError, ValueError):
+                continue
+        if timestamps:
+            result[source_hash] = sorted(set(timestamps))
+    return result
+
+
+def _cache_layout_directory(*, cache_root: Path, directories: dict[str, Any], name: str) -> Path:
+    path = Path(str(directories.get(name) or cache_root / name)).expanduser().resolve()
+    expected = (cache_root / name).resolve()
+    if path != expected and (path == cache_root or cache_root not in path.parents):
+        raise ValueError(f"refusing to clear cache path outside cache root: {path}")
+    return path
+
+
+def _thumbnail_cache_paths_for_hashes(
+    *,
+    cache_root: Path,
+    directories: dict[str, Any],
+    timestamps_by_hash: dict[str, list[float]],
+) -> set[Path]:
+    thumbnail_dir = _cache_layout_directory(cache_root=cache_root, directories=directories, name="thumbnails")
+    paths: set[Path] = set()
+    for source_hash, timestamps in timestamps_by_hash.items():
+        for timestamp in timestamps:
+            timestamp_key = f"{float(timestamp):.3f}"
+            key = hashlib.sha256(f"flux-thumbnail-cache-v1:{source_hash}:{timestamp_key}".encode("utf-8")).hexdigest()
+            paths.add((thumbnail_dir / f"{key}.png").resolve())
+    return paths
+
+
+def _file_sha256_values(paths: Iterable[Path]) -> set[str]:
+    values: set[str] = set()
+    for path in paths:
+        try:
+            if not path.exists() or not path.is_file():
+                continue
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            values.add(digest.hexdigest())
+        except OSError:
+            continue
+    return values
+
+
+def _delete_cache_file(path: Path, *, name: str, result: dict[str, Any], dry_run: bool) -> None:
+    try:
+        if not path.exists():
+            result["missing"][name] += 1
+            return
+        if not path.is_file():
+            result["errors"].append({"cache": name, "path": str(path), "error": "cache entry is not a file"})
+            return
+        result["deleted"][name] += 1
+        if not dry_run:
+            path.unlink()
+    except OSError as exc:
+        result["errors"].append({"cache": name, "path": str(path), "error": str(exc)})
 
 
 def _fetch_semantic_duplicate_candidates(
@@ -13666,6 +13964,249 @@ def mark_search_index_rebuild(
             )
             marked = int(cur.rowcount or 0)
     return {"marked_pending": marked, "root_name": root_name, "confirmed": True}
+
+
+def purge_deleted_corpus_residue(
+    *,
+    confirmed: bool = False,
+    adapter: Any | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            records = _fetch_deleted_corpus_search_index_records(cur)
+            residue_roots = _fetch_deleted_corpus_residue_roots(cur)
+            active_hashes, active_frame_timestamps = _collect_active_cache_inputs(cur)
+    roots = sorted(
+        {
+            str(record.get("root_name") or "").strip()
+            for record in records
+            if str(record.get("root_name") or "").strip()
+        }
+        | residue_roots
+    )
+    cache_result = purge_derived_cache_entries(
+        active_source_hashes=active_hashes,
+        active_frame_timestamps_by_hash=active_frame_timestamps,
+        purge_unreferenced=True,
+        dry_run=not confirmed,
+    )
+    if roots:
+        purge_result = purge_corpus_search_index_for_roots(
+            root_names=roots,
+            confirmed=confirmed,
+            adapter=adapter,
+            url=url,
+        )
+    else:
+        purge_result = {
+            "dry_run": not confirmed,
+            "roots": [],
+            "vespa_documents_planned": 0,
+            "vespa_documents_deleted": 0,
+            "search_index_records_deleted": 0,
+            "semantic_duplicate_clusters_deleted": 0,
+            "jobs_deleted": 0,
+            "vespa_remaining_by_root": {},
+            "errors": [],
+        }
+    return {
+        **purge_result,
+        "roots": roots,
+        "cache": cache_result,
+    }
+
+
+def purge_corpus_search_index_for_roots(
+    *,
+    root_names: Iterable[str],
+    confirmed: bool = False,
+    adapter: Any | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    roots = sorted({str(root_name or "").strip() for root_name in root_names if str(root_name or "").strip()})
+    result: dict[str, Any] = {
+        "dry_run": not confirmed,
+        "roots": roots,
+        "vespa_documents_planned": 0,
+        "vespa_documents_deleted": 0,
+        "search_index_records_deleted": 0,
+        "semantic_duplicate_clusters_deleted": 0,
+        "jobs_deleted": 0,
+        "vespa_remaining_by_root": {},
+        "errors": [],
+    }
+    if not roots:
+        return result
+
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            records = _fetch_corpus_search_index_records_for_roots(cur, roots=roots)
+            result["vespa_documents_planned"] = len(records)
+            if not confirmed:
+                return result
+
+            vespa = adapter or _vespa_search_adapter()
+            successful_document_ids: list[str] = []
+            for record in records:
+                document_id = str(record.get("vespa_document_id") or "")
+                if not document_id:
+                    continue
+                try:
+                    vespa.delete(document_id)
+                except Exception as exc:
+                    result["errors"].append(
+                        {
+                            "stage": "vespa_delete",
+                            "root_name": record.get("root_name"),
+                            "vespa_document_id": document_id,
+                            "error": str(exc)[:1000],
+                        }
+                    )
+                    continue
+                successful_document_ids.append(document_id)
+                result["vespa_documents_deleted"] += 1
+
+            if successful_document_ids:
+                cur.execute(
+                    """
+                    DELETE FROM search_index_records
+                    WHERE owner_table = 'asset_chunks'
+                      AND vespa_document_id = ANY(%s::text[])
+                    """,
+                    (successful_document_ids,),
+                )
+                result["search_index_records_deleted"] = int(cur.rowcount or 0)
+
+            cur.execute(
+                """
+                DELETE FROM semantic_duplicate_clusters
+                WHERE memory_class = 'corpus'
+                  AND root_name = ANY(%s::text[])
+                """,
+                (roots,),
+            )
+            result["semantic_duplicate_clusters_deleted"] = int(cur.rowcount or 0)
+
+            cur.execute(
+                """
+                DELETE FROM capture_jobs
+                WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
+                  AND payload->>'root_name' = ANY(%s::text[])
+                """,
+                (roots,),
+            )
+            result["jobs_deleted"] = int(cur.rowcount or 0)
+
+            for root_name in roots:
+                if hasattr(vespa, "count_by_root_name"):
+                    try:
+                        result["vespa_remaining_by_root"][root_name] = int(
+                            vespa.count_by_root_name(root_name, owner_table="asset_chunks")
+                        )
+                    except Exception as exc:
+                        result["vespa_remaining_by_root"][root_name] = None
+                        result["errors"].append(
+                            {
+                                "stage": "vespa_verify",
+                                "root_name": root_name,
+                                "error": str(exc)[:1000],
+                            }
+                        )
+
+    return result
+
+
+def _fetch_deleted_corpus_search_index_records(cur: Any) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT rec.vespa_document_id, rec.root_name, rec.index_status
+        FROM search_index_records rec
+        LEFT JOIN monitored_roots r ON r.name = rec.root_name
+        WHERE rec.owner_table = 'asset_chunks'
+          AND NULLIF(rec.root_name, '') IS NOT NULL
+          AND r.id IS NULL
+        ORDER BY rec.root_name, rec.updated_at
+        """
+    )
+    try:
+        rows = cur.fetchall()
+    except AttributeError:
+        rows = []
+    return [_corpus_search_index_record_row(row) for row in rows]
+
+
+def _fetch_deleted_corpus_residue_roots(cur: Any) -> set[str]:
+    roots: set[str] = set()
+    cur.execute(
+        """
+        SELECT DISTINCT sc.root_name
+        FROM semantic_duplicate_clusters sc
+        LEFT JOIN monitored_roots r ON r.name = sc.root_name
+        WHERE sc.memory_class = 'corpus'
+          AND NULLIF(sc.root_name, '') IS NOT NULL
+          AND r.id IS NULL
+        ORDER BY sc.root_name
+        """
+    )
+    try:
+        semantic_rows = cur.fetchall()
+    except AttributeError:
+        semantic_rows = []
+    roots.update(str(row[0] or "").strip() for row in semantic_rows if str(row[0] or "").strip())
+
+    cur.execute(
+        """
+        SELECT DISTINCT j.payload->>'root_name'
+        FROM capture_jobs j
+        LEFT JOIN monitored_roots r ON r.name = j.payload->>'root_name'
+        WHERE (j.job_type LIKE 'corpus_%%' OR j.job_type = 'search_index_sync')
+          AND NULLIF(j.payload->>'root_name', '') IS NOT NULL
+          AND r.id IS NULL
+        ORDER BY j.payload->>'root_name'
+        """
+    )
+    try:
+        job_rows = cur.fetchall()
+    except AttributeError:
+        job_rows = []
+    roots.update(str(row[0] or "").strip() for row in job_rows if str(row[0] or "").strip())
+    return roots
+
+
+def _fetch_corpus_search_index_records_for_roots(cur: Any, *, roots: list[str]) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        SELECT rec.vespa_document_id, rec.root_name, rec.index_status
+        FROM search_index_records rec
+        LEFT JOIN monitored_roots r ON r.name = rec.root_name
+        WHERE rec.owner_table = 'asset_chunks'
+          AND rec.root_name = ANY(%s::text[])
+        ORDER BY rec.root_name, rec.updated_at
+        """,
+        (roots,),
+    )
+    try:
+        rows = cur.fetchall()
+    except AttributeError:
+        rows = []
+    return [_corpus_search_index_record_row(row) for row in rows]
+
+
+def _corpus_search_index_record_row(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "vespa_document_id": str(row[0] or ""),
+        "root_name": str(row[1] or ""),
+        "index_status": str(row[2] or ""),
+    }
+
+
+def _vespa_search_adapter() -> Any:
+    from .search_index import VespaSearchAdapter
+
+    return VespaSearchAdapter(base_url=os.environ.get("FLUX_KB_RETRIEVAL_VESPA_BASE_URL") or "http://127.0.0.1:8080")
 
 
 def sync_search_index(
