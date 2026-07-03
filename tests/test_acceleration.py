@@ -302,6 +302,39 @@ def test_collect_status_reports_docker_container_resources():
     assert api["size_rw_bytes"] == 128 * 1024**2
 
 
+def test_collect_status_falls_back_to_host_agent_docker_resources(monkeypatch):
+    host_payload = {
+        "ok": True,
+        "state": "available",
+        "source": "host_agent",
+        "containers": [{"service": "api", "container_name": "flux-llm-kb-api"}],
+        "totals": {"reported": 1, "running": 1},
+    }
+
+    def fake_run(_command, **_kwargs):
+        raise FileNotFoundError("docker")
+
+    from flux_llm_kb import host_agent
+
+    monkeypatch.setattr(host_agent, "remote_docker_resources", lambda: host_payload)
+
+    payload = collect_acceleration_status(
+        settings={
+            "acceleration.cache_root": "",
+            "acceleration.local_inference.enabled": False,
+            "acceleration.local_inference.provider": "ollama",
+            "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+            "acceleration.local_inference.probe_timeout_seconds": 1,
+        },
+        command_runner=fake_run,
+        module_importer=lambda _name: (_ for _ in ()).throw(ModuleNotFoundError("missing")),
+        worker_family_stats=lambda: [],
+        benchmark_stats=lambda: [],
+    )
+
+    assert payload["docker"] == host_payload
+
+
 def test_onnxruntime_status_sets_warning_severity_before_provider_discovery():
     calls: list[tuple[str, object]] = []
 

@@ -881,6 +881,54 @@ def test_host_agent_liveness_endpoint_is_minimal(monkeypatch):
     assert "vss" not in payload
 
 
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
+def test_host_agent_docker_resources_endpoint_reports_host_docker(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    expected = {
+        "ok": True,
+        "state": "available",
+        "containers": [{"service": "api", "container_name": "flux-llm-kb-api"}],
+        "totals": {"reported": 1, "running": 1},
+    }
+    monkeypatch.setattr(host_agent, "collect_docker_resource_status", lambda: expected)
+
+    response = TestClient(host_agent.create_app()).get("/docker/resources")
+
+    assert response.status_code == 200
+    assert response.json() == expected
+
+
+def test_remote_docker_resources_routes_to_host_agent(monkeypatch):
+    timeouts: list[float | None] = []
+    urls: list[str] = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"ok": true, "state": "available", "containers": [], "totals": {}}'
+
+    def fake_urlopen(_request, timeout=None):
+        timeouts.append(timeout)
+        urls.append(_request.full_url)
+        return FakeResponse()
+
+    monkeypatch.setattr(host_agent.request, "urlopen", fake_urlopen)
+
+    result = host_agent.remote_docker_resources(agent_url="http://127.0.0.1:8799")
+
+    assert result["state"] == "available"
+    assert urls == ["http://127.0.0.1:8799/docker/resources"]
+    assert timeouts == [host_agent.HOST_AGENT_REQUEST_TIMEOUT_SECONDS]
+
+
 def test_run_server_exits_cleanly_when_host_agent_already_owns_port(monkeypatch):
     def fail_run(*_args, **_kwargs):
         raise AssertionError("uvicorn.run should not be called for an already-running host agent")

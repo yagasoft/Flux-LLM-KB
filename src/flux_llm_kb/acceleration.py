@@ -241,7 +241,7 @@ def collect_acceleration_status(
         "cache": cache,
         "worker_families": family_stats,
         "benchmarks": benchmarks,
-        "docker": _docker_resource_status(runner),
+        "docker": _docker_resource_status_with_host_fallback(collect_docker_resource_status(command_runner=runner)),
     }
 
 
@@ -273,6 +273,27 @@ def _run_command(command: list[str], **kwargs: Any) -> Any:
     from .processes import run_no_window
 
     return run_no_window(command, text=True, capture_output=True, **kwargs)
+
+
+def collect_docker_resource_status(*, command_runner: Callable[..., Any] | None = None) -> dict[str, Any]:
+    runner = command_runner or _run_command
+    return _docker_resource_status(runner)
+
+
+def _docker_resource_status_with_host_fallback(local_status: dict[str, Any]) -> dict[str, Any]:
+    if local_status.get("ok"):
+        return local_status
+    if local_status.get("state") not in {"missing", "unavailable"}:
+        return local_status
+    try:
+        from .host_agent import remote_docker_resources
+
+        host_status = remote_docker_resources()
+    except Exception:
+        return local_status
+    if host_status.get("ok") or host_status.get("containers"):
+        return host_status
+    return local_status
 
 
 def _gpu_scheduler_status() -> dict[str, Any]:

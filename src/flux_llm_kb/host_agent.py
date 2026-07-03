@@ -17,6 +17,7 @@ from urllib import error, request
 from pydantic import BaseModel, ConfigDict
 
 from . import database, host_vss
+from .acceleration import collect_docker_resource_status
 from .glob_policy import effective_glob_policy
 from .processes import run_no_window
 from .runtime_heartbeat import WatcherHeartbeatRunner
@@ -549,6 +550,10 @@ def create_app(*, start_watcher: bool = False):
             include_model_probe=req.include_model_probe,
         )
 
+    @app.get("/docker/resources")
+    def docker_resources():
+        return collect_docker_resource_status()
+
     return app
 
 
@@ -701,6 +706,23 @@ def remote_benchmark(
         )
     except HostAgentClientError as exc:
         return {"status": "host_agent_offline", "message": str(exc), "root_name": root_name, "path": path}
+
+
+def remote_docker_resources(agent_url: str | None = None) -> dict[str, Any]:
+    try:
+        payload = _request_json("GET", f"{_agent_url(agent_url)}/docker/resources")
+    except HostAgentClientError as exc:
+        return {"ok": False, "state": "host_agent_offline", "message": str(exc), "containers": [], "totals": {}}
+    if isinstance(payload, dict):
+        payload.setdefault("source", "host_agent")
+        return payload
+    return {
+        "ok": False,
+        "state": "host_agent_unavailable",
+        "message": "host agent returned invalid Docker resource payload",
+        "containers": [],
+        "totals": {},
+    }
 
 
 def remote_file_action(
