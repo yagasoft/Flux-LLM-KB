@@ -847,7 +847,7 @@ describe("Flux dashboard", () => {
       const url = String(input);
       if (url === "/api/dashboard/health") return json(healthPayload);
       if (url === "/api/dashboard/crawl") return json(crawlPayload);
-      if (url === "/api/dashboard/model-activity") return json(modelActivityPayload);
+      if (url.startsWith("/api/dashboard/model-activity")) return json(modelActivityPayload);
       if (url.startsWith("/api/dashboard/jobs/") && url.includes("/tool-invocations")) {
         jobToolInvocationRequestUrls.push(url);
         return json(jobToolInvocationPayload);
@@ -1639,6 +1639,72 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).getByText("/v1/rerank")).toBeInTheDocument();
     expect(within(panel as HTMLElement).queryByText("/health")).not.toBeInTheDocument();
     expect(within(panel as HTMLElement).queryByText("Control Plane")).not.toBeInTheDocument();
+  });
+
+  test("performance can opt into control-plane model activity diagnostics", async () => {
+    const user = userEvent.setup();
+    modelActivityPayload = {
+      ...modelActivityPayload,
+      recent_count: 2,
+      active_count: 0,
+      service_breakdown: [
+        { service: "model-runner", count: 2, active: 0, failures: 0 }
+      ],
+      class_breakdown: [
+        { activity_class: "control_plane", count: 1 },
+        { activity_class: "retrieval", count: 1 }
+      ],
+      events: [
+        {
+          id: "event-health",
+          service: "model-runner",
+          endpoint: "/health",
+          action: "health",
+          activity_class: "control_plane",
+          caller_surface: "",
+          model: "",
+          status: "completed",
+          started_at: "2026-07-03T01:25:50+00:00",
+          completed_at: "2026-07-03T01:25:50+00:00",
+          duration_ms: 10,
+          error_class: null,
+          error_message: null
+        },
+        {
+          id: "event-rerank",
+          service: "model-runner",
+          endpoint: "/v1/rerank",
+          action: "rerank",
+          activity_class: "retrieval",
+          caller_surface: "mcp",
+          model: "Qwen/Qwen3-Reranker-4B",
+          status: "completed",
+          started_at: "2026-07-03T01:25:58+00:00",
+          completed_at: "2026-07-03T01:26:00+00:00",
+          duration_ms: 1842,
+          error_class: null,
+          error_message: null
+        }
+      ]
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Performance" }));
+
+    let panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).queryByText("/health")).not.toBeInTheDocument();
+
+    await user.click(within(panel as HTMLElement).getByRole("checkbox", { name: "Show control-plane diagnostics" }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/api/dashboard/model-activity?include_control_plane=true");
+    });
+    panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(within(panel as HTMLElement).getByText("/health")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getAllByText("Control Plane").length).toBeGreaterThan(0);
   });
 
   test("retrieval tab owns code diagnostics and code-search quality controls", async () => {

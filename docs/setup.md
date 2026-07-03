@@ -56,8 +56,11 @@ Docker-visible memory limit and Postgres `/dev/shm` size so tuning decisions use
 the Linux VM/container limit, not only Windows host free RAM.
 
 When production GPU mode is available, the generated Compose deployment also
-starts a dedicated `ollama/ollama` service named `flux-ollama`. Flux API and
-worker containers call it through `http://ollama:11434`; Ollama is not baked into
+builds a small `flux-ollama` image derived from the official `ollama/ollama`
+runtime and runs it as the dedicated `flux-ollama` service. The derived image
+installs the OS `ffmpeg` package so Ollama vision has both `ffmpeg` and
+`ffprobe` available for image/video/media decode paths. Flux API and worker
+containers call Ollama through `http://ollama:11434`; Ollama is not baked into
 the Flux image and is not run inside the API or worker containers. Models persist
 in the `flux_llm_kb_ollama_models` Docker named volume, so image rebuilds and
 container recreation do not re-download large model blobs. After a GPU
@@ -65,6 +68,14 @@ deployment, install the configured vision model explicitly:
 
 ```powershell
 docker exec flux-ollama ollama pull qwen3-vl:8b
+```
+
+Verify the deployed media runtime and a tiny local vision decode request after
+deployment:
+
+```powershell
+docker exec flux-ollama sh -lc "command -v ffmpeg && command -v ffprobe"
+.\scripts\deploy\test-ollama-vision.ps1 -OllamaHostPort 11435 -Model qwen3-vl:8b
 ```
 
 Production GPU mode defaults to `qwen3-vl:8b` and a 2-minute Ollama keepalive so
@@ -166,7 +177,9 @@ DuckDB/PyArrow for columnar data, an SVG renderer (`rsvg-convert` from
 and mail export helpers such as `readpst` or `msgconvert` when you plan to
 index exported mail stores. Missing dependencies leave the affected jobs in
 `blocked_missing_dependency` instead of silently pretending content was indexed.
-The production Docker image installs this practical processor pack. Windows
+The production Docker image installs this practical processor pack, including
+`libgl1` and `libglib2.0-0` for current Paddle/OpenCV-style OCR import paths.
+Windows
 host-agent installs use the `processors` Python extra and still depend on host
 tools such as Office COM, LibreOffice, archive tools, and media utilities being
 available on the host PATH. Production host launchers also use

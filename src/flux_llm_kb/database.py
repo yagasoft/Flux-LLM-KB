@@ -15666,6 +15666,45 @@ _MODEL_ACTIVITY_METADATA_KEYS = {
     "passage_count",
     "quantization",
 }
+MODEL_ACTIVITY_TEST_DATABASE_URL_ENV = "FLUX_KB_TEST_DATABASE_URL"
+MODEL_ACTIVITY_TEST_WRITE_OPT_IN_ENV = "FLUX_KB_ALLOW_MODEL_ACTIVITY_TEST_WRITES"
+
+
+def _model_activity_test_write_opted_in() -> bool:
+    return str(os.environ.get(MODEL_ACTIVITY_TEST_WRITE_OPT_IN_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _model_activity_write_url(url: str | None) -> str:
+    if url:
+        return str(url)
+    test_url = os.environ.get(MODEL_ACTIVITY_TEST_DATABASE_URL_ENV)
+    if os.environ.get("PYTEST_CURRENT_TEST") and _model_activity_test_write_opted_in() and test_url:
+        return test_url
+    return database_url()
+
+
+def _guard_model_activity_test_write(url: str | None) -> None:
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    target_url = str(url or database_url())
+    test_url = os.environ.get(MODEL_ACTIVITY_TEST_DATABASE_URL_ENV)
+    opted_in = _model_activity_test_write_opted_in()
+    if opted_in and test_url and target_url == test_url:
+        return
+    if opted_in and not test_url:
+        raise RuntimeError(
+            "model activity writes are disabled under pytest because "
+            f"{MODEL_ACTIVITY_TEST_DATABASE_URL_ENV} is not set"
+        )
+    if opted_in and test_url and target_url != test_url:
+        raise RuntimeError(
+            "model activity writes are disabled under pytest unless the target URL matches "
+            f"{MODEL_ACTIVITY_TEST_DATABASE_URL_ENV}"
+        )
+    raise RuntimeError(
+        "model activity writes are disabled under pytest unless "
+        f"{MODEL_ACTIVITY_TEST_WRITE_OPT_IN_ENV}=1 and {MODEL_ACTIVITY_TEST_DATABASE_URL_ENV} is used"
+    )
 
 
 def start_model_activity_event(
@@ -15679,12 +15718,14 @@ def start_model_activity_event(
     metadata: dict[str, Any] | None = None,
     url: str | None = None,
 ) -> str:
+    target_url = _model_activity_write_url(url)
+    _guard_model_activity_test_write(target_url)
     psycopg = _load_psycopg()
     try:
         from psycopg.types.json import Jsonb
     except ImportError:  # pragma: no cover - depends on optional psycopg extras
         Jsonb = lambda value: _json(value)  # type: ignore[assignment]
-    with psycopg.connect(url or database_url()) as conn:
+    with psycopg.connect(target_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -15718,8 +15759,10 @@ def finish_model_activity_event(
     error_message: str | None = None,
     url: str | None = None,
 ) -> None:
+    target_url = _model_activity_write_url(url)
+    _guard_model_activity_test_write(target_url)
     psycopg = _load_psycopg()
-    with psycopg.connect(url or database_url()) as conn:
+    with psycopg.connect(target_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -15791,8 +15834,10 @@ def list_model_activity_events(
 
 def prune_model_activity_events(*, retention_hours: int = 24, url: str | None = None) -> None:
     safe_retention = max(1, min(int(retention_hours or 24), 168))
+    target_url = _model_activity_write_url(url)
+    _guard_model_activity_test_write(target_url)
     psycopg = _load_psycopg()
-    with psycopg.connect(url or database_url()) as conn:
+    with psycopg.connect(target_url) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """

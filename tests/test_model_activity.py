@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from flux_llm_kb import model_activity
+import pytest
+
+from flux_llm_kb import database, model_activity
 from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
 
 
@@ -105,6 +107,67 @@ def test_record_model_activity_is_best_effort_when_database_fails(monkeypatch):
 
     with model_activity.record_model_activity(service="model-runner", endpoint="/v1/rerank", action="rerank", activity_class="retrieval"):
         pass
+
+
+@pytest.mark.parametrize("model", ["llava:latest", "qwen2.5vl:7b", "qwen3-vl:8b"])
+def test_model_activity_recorder_does_not_write_live_database_under_pytest(monkeypatch, model):
+    calls = {"load_psycopg": 0}
+
+    def fail_load_psycopg():
+        calls["load_psycopg"] += 1
+        raise AssertionError("live database write attempted")
+
+    monkeypatch.delenv("FLUX_KB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("FLUX_KB_ALLOW_MODEL_ACTIVITY_TEST_WRITES", raising=False)
+    monkeypatch.setattr(database, "_load_psycopg", fail_load_psycopg)
+
+    with model_activity.record_model_activity(
+        service="ollama",
+        endpoint="/api/generate",
+        action="vision_generate",
+        activity_class="vision_ocr",
+        model=model,
+    ):
+        pass
+
+    assert calls["load_psycopg"] == 0
+
+
+def test_model_activity_database_writes_are_blocked_under_pytest_without_disposable_db(monkeypatch):
+    def fail_load_psycopg():
+        raise AssertionError("live database write attempted")
+
+    monkeypatch.delenv("FLUX_KB_TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("FLUX_KB_ALLOW_MODEL_ACTIVITY_TEST_WRITES", raising=False)
+    monkeypatch.setattr(database, "_load_psycopg", fail_load_psycopg)
+
+    with pytest.raises(RuntimeError, match="model activity writes are disabled under pytest"):
+        database.start_model_activity_event(
+            service="ollama",
+            endpoint="/api/generate",
+            action="vision_generate",
+            activity_class="vision_ocr",
+            model="llava:latest",
+        )
+
+
+def test_model_activity_database_write_guard_requires_opt_in_test_database(monkeypatch):
+    live_url = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb"
+    test_url = "postgresql://flux:flux@127.0.0.1:55432/flux_llm_kb_test"
+
+    monkeypatch.setenv("FLUX_KB_TEST_DATABASE_URL", test_url)
+    monkeypatch.delenv("FLUX_KB_ALLOW_MODEL_ACTIVITY_TEST_WRITES", raising=False)
+
+    with pytest.raises(RuntimeError, match="model activity writes are disabled under pytest"):
+        database._guard_model_activity_test_write(test_url)
+
+    monkeypatch.setenv("FLUX_KB_ALLOW_MODEL_ACTIVITY_TEST_WRITES", "1")
+
+    with pytest.raises(RuntimeError, match="FLUX_KB_TEST_DATABASE_URL"):
+        database._guard_model_activity_test_write(live_url)
+
+    assert database._model_activity_write_url(None) == test_url
+    database._guard_model_activity_test_write(test_url)
 
 
 def test_collect_model_activity_payload_summarizes_events_and_scheduler(monkeypatch):

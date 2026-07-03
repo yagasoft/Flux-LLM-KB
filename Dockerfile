@@ -41,6 +41,8 @@ RUN --mount=type=cache,id=flux-llm-kb-apt-cache,target=/var/cache/apt,sharing=lo
             libarchive-tools \
             libemail-address-perl \
             libemail-outlook-message-perl \
+            libgl1 \
+            libglib2.0-0 \
             libimage-exiftool-perl \
             librsvg2-bin \
             libreoffice \

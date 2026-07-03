@@ -521,7 +521,12 @@ services:
       start_period: 10s
 
   ollama:
-    image: ollama/ollama:latest
+    image: flux-ollama:`${FLUX_KB_IMAGE_TAG}
+    labels:
+      org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
+      org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
+      org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-ollama
     restart: unless-stopped
     gpus: all
@@ -535,7 +540,7 @@ services:
     volumes:
       - flux_llm_kb_ollama_models:/root/.ollama
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: ["CMD-SHELL", "command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null && ollama list >/dev/null"]
       interval: 10s
       timeout: 10s
       retries: 30
@@ -1149,6 +1154,32 @@ function Invoke-FluxDockerImageAvailable {
     Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("pull", $Image) -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds -StepName "docker pull $Image"
 }
 
+function Invoke-FluxOllamaImageBuild {
+    param(
+        [string]$SourceRoot,
+        [pscustomobject]$BuildMetadata,
+        [string]$ImageTag,
+        [int]$TimeoutSeconds
+    )
+    Invoke-FluxDockerImageAvailable -Image "ollama/ollama:latest" -WorkingDirectory $SourceRoot -TimeoutSeconds 600
+    $ollamaDockerfile = Join-Path $SourceRoot "docker\ollama\Dockerfile"
+    $ollamaContext = Join-Path $SourceRoot "docker\ollama"
+    $ollamaBuildArgs = @(
+        "build",
+        "--progress=plain",
+        "--pull=false",
+        "--build-arg", "OLLAMA_BASE_IMAGE=ollama/ollama:latest",
+        "--build-arg", "FLUX_KB_IMAGE_REVISION=$($BuildMetadata.Revision)",
+        "--build-arg", "FLUX_KB_IMAGE_SOURCE=$($BuildMetadata.Source)",
+        "--build-arg", "FLUX_KB_IMAGE_CREATED=$($BuildMetadata.Created)",
+        "--build-arg", "FLUX_KB_IMAGE_VERSION=$($BuildMetadata.Version)",
+        "-f", $ollamaDockerfile,
+        "-t", "flux-ollama:$imageTag", "-t", "flux-ollama:local",
+        $ollamaContext
+    )
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments $ollamaBuildArgs -WorkingDirectory $SourceRoot -TimeoutSeconds $TimeoutSeconds -StepName "docker build ollama runtime"
+}
+
 function Invoke-FluxAsrModelDownload {
     param(
         [string]$AppRoot,
@@ -1503,6 +1534,7 @@ $dockerBuildArgs += @("-t", "flux-llm-kb-api:$imageTag", "-t", "flux-llm-kb-api:
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments $dockerBuildArgs -WorkingDirectory $SourceRoot -TimeoutSeconds $DockerBuildTimeoutSeconds -StepName "docker build"
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:$imageTag") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker version"
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:local") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker local"
+Invoke-FluxOllamaImageBuild -SourceRoot $SourceRoot -BuildMetadata $buildMetadata -ImageTag $imageTag -TimeoutSeconds $DockerBuildTimeoutSeconds
 Invoke-FluxDockerImageAvailable -Image "postgres:16" -WorkingDirectory $SourceRoot -TimeoutSeconds 300
 
 $gpuEnabled = Assert-FluxGpuAvailable -ImageTag $imageTag -GpuMode $GpuMode

@@ -178,14 +178,15 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL" in compose
         assert compose.count("PADDLE_PDX_MODEL_SOURCE: bos") == 2
         assert "  ollama:" in compose
-        assert "image: ollama/ollama:latest" in compose
+        assert "image: flux-ollama:`${FLUX_KB_IMAGE_TAG}" in compose
+        assert "image: ollama/ollama:latest" not in compose
         assert "container_name: flux-ollama" in compose
         assert compose.count("OLLAMA_LOAD_TIMEOUT: 30m") == 1
         assert compose.count("OLLAMA_KEEP_ALIVE: 2m") == 1
         assert "flux_llm_kb_ollama_models:/root/.ollama" in compose
         assert "../models/ollama:/root/.ollama" not in compose
         assert '"127.0.0.1:${OllamaHostPort}:11434"' in compose
-        assert 'test: ["CMD", "ollama", "list"]' in compose
+        assert 'test: ["CMD-SHELL", "command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null && ollama list >/dev/null"]' in compose
         assert "ollama:" in compose
         assert "  asr:" in compose
         assert "container_name: flux-llm-kb-asr" in compose
@@ -281,6 +282,42 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
         assert "vespa deploy --wait 300 /tmp/flux-vespa-app" in script
         assert "Copy-FluxVespaApplication -SourceRoot $SourceRoot -AppRoot $appRoot" in script
         assert "qwen3-vl:32b" not in script
+
+
+def test_production_deploy_builds_derived_ollama_runtime_image():
+    ollama_dockerfile = ROOT / "docker" / "ollama" / "Dockerfile"
+    assert ollama_dockerfile.exists()
+    dockerfile = ollama_dockerfile.read_text(encoding="utf-8")
+
+    assert "FROM ${OLLAMA_BASE_IMAGE}" in dockerfile
+    assert "apt-get install -y --no-install-recommends ffmpeg" in dockerfile
+    assert "command -v ffmpeg" in dockerfile
+    assert "command -v ffprobe" in dockerfile
+
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+        compose = _embedded_compose_template(script)
+
+        assert 'Join-Path $SourceRoot "docker\\ollama\\Dockerfile"' in script
+        assert '"--build-arg", "OLLAMA_BASE_IMAGE=ollama/ollama:latest"' in script
+        assert '"-t", "flux-ollama:$imageTag", "-t", "flux-ollama:local"' in script
+        assert 'StepName "docker build ollama runtime"' in script
+        assert "image: flux-ollama:`${FLUX_KB_IMAGE_TAG}" in compose
+
+
+def test_deploy_ollama_vision_smoke_script_checks_media_runtime_and_decode_path():
+    script_path = ROOT / "scripts" / "deploy" / "test-ollama-vision.ps1"
+    assert script_path.exists()
+    script = script_path.read_text(encoding="utf-8")
+
+    assert "[int]$OllamaHostPort = 11435" in script
+    assert '[string]$Model = "qwen3-vl:8b"' in script
+    assert 'docker exec flux-ollama sh -lc "command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null"' in script
+    assert "/api/generate" in script
+    assert "images" in script
+    assert "iVBORw0KGgo" in script
+    assert "ffprobe" in script
+    assert "decode" in script.lower()
 
 
 def test_model_runner_download_avoids_hf_xet_and_allows_large_model_cache_warmup():
@@ -459,6 +496,8 @@ def test_dockerfile_installs_practical_extractor_pack():
         "ccache",
         "rpm2cpio",
         "ffmpeg",
+        "libgl1",
+        "libglib2.0-0",
         "calibre",
         "pst-utils",
         "libemail-address-perl",
@@ -613,7 +652,7 @@ def test_production_deploy_scripts_pass_authoritative_image_metadata_to_docker_b
             ("org.opencontainers.image.created", "FLUX_KB_IMAGE_CREATED"),
             ("org.opencontainers.image.version", "FLUX_KB_IMAGE_VERSION"),
         ):
-            assert compose.count(f"{label}: `${{{env_name}}}") == 5
+            assert compose.count(f"{label}: `${{{env_name}}}") == 6
 
 
 def test_verify_image_traceability_script_checks_image_and_container_labels():

@@ -1313,21 +1313,26 @@ export default function App() {
   const [selectedClaimId, setSelectedClaimId] = useState("");
   const [claimGraph, setClaimGraph] = useState<GraphPayload>({ edges: [] });
   const [reviewLoading, setReviewLoading] = useState(false);
+  const [showControlPlaneActivity, setShowControlPlaneActivity] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
 
-  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number; jobSort?: JobSortState } = {}) {
+  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number; jobSort?: JobSortState; showControlPlaneActivity?: boolean } = {}) {
     if (options.showLoading ?? false) {
       setLoading(true);
     }
     const effectiveJobFilters = options.jobFilters ?? jobFilters;
     const effectiveJobOffset = options.jobOffset ?? jobOffset;
     const effectiveJobSort = options.jobSort ?? jobSort;
+    const effectiveShowControlPlaneActivity = options.showControlPlaneActivity ?? showControlPlaneActivity;
+    const modelActivityUrl = effectiveShowControlPlaneActivity
+      ? "/api/dashboard/model-activity?include_control_plane=true"
+      : "/api/dashboard/model-activity";
     const [health, crawl, jobs, retrieval, modelActivity, mail, outlook, settings] = await Promise.all([
       getJson<HealthPayload>("/api/dashboard/health", {}),
       getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }),
       getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset, effectiveJobSort), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }),
       getJson<RetrievalPayload>("/api/dashboard/retrieval-stats", {}),
-      getJson<ModelActivityPayload>("/api/dashboard/model-activity", { events: [], service_breakdown: [], class_breakdown: [], scheduler: {} }),
+      getJson<ModelActivityPayload>(modelActivityUrl, { events: [], service_breakdown: [], class_breakdown: [], scheduler: {} }),
       getJson<MailStatus>("/api/mail/status", { profiles: [] }),
       getJson<OutlookStatus>("/api/outlook-host/status", { profiles: [], pending_requests: [] }),
       getJson<SettingRow[]>("/api/settings", [])
@@ -1340,6 +1345,11 @@ export default function App() {
   useEffect(() => {
     void load({ showLoading: true });
   }, []);
+
+  function updateControlPlaneActivity(next: boolean) {
+    setShowControlPlaneActivity(next);
+    void load({ showControlPlaneActivity: next });
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1402,7 +1412,7 @@ export default function App() {
       void load({ showLoading: false });
     }, pollSeconds * 1000);
     return () => window.clearInterval(timer);
-  }, [pollSeconds, jobFilters, jobOffset, jobSort]);
+  }, [pollSeconds, jobFilters, jobOffset, jobSort, showControlPlaneActivity]);
 
   async function requestProfileSync(profile = selectedProfile) {
     if (!profile) {
@@ -2196,7 +2206,12 @@ export default function App() {
         )}
 
         {activeTab === "performance" && (
-          <PerformanceTab state={state} selectedRoot={selectedRoot} />
+          <PerformanceTab
+            state={state}
+            selectedRoot={selectedRoot}
+            includeControlPlaneActivity={showControlPlaneActivity}
+            onIncludeControlPlaneActivityChange={updateControlPlaneActivity}
+          />
         )}
 
         {activeTab === "corpus" && (
@@ -2797,11 +2812,25 @@ function DiagnosticsTab({
   );
 }
 
-function PerformanceTab({ state, selectedRoot }: { state: LoadState; selectedRoot?: RootSummary | MonitoredRoot }) {
+function PerformanceTab({
+  state,
+  selectedRoot,
+  includeControlPlaneActivity,
+  onIncludeControlPlaneActivityChange
+}: {
+  state: LoadState;
+  selectedRoot?: RootSummary | MonitoredRoot;
+  includeControlPlaneActivity: boolean;
+  onIncludeControlPlaneActivityChange: (include: boolean) => void;
+}) {
   return (
     <section className="tab-grid">
       <OperatorEvidencePanel />
-      <ModelActivityPanel activity={state.modelActivity} />
+      <ModelActivityPanel
+        activity={state.modelActivity}
+        includeControlPlane={includeControlPlaneActivity}
+        onIncludeControlPlaneChange={onIncludeControlPlaneActivityChange}
+      />
       <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
     </section>
   );
@@ -3039,9 +3068,17 @@ function OperatorEvidencePanel() {
   );
 }
 
-function ModelActivityPanel({ activity }: { activity: ModelActivityPayload }) {
+function ModelActivityPanel({
+  activity,
+  includeControlPlane,
+  onIncludeControlPlaneChange
+}: {
+  activity: ModelActivityPayload;
+  includeControlPlane: boolean;
+  onIncludeControlPlaneChange: (include: boolean) => void;
+}) {
   const scheduler = activity.scheduler ?? {};
-  const visibleEvents = (activity.events ?? []).filter((event) => !isControlPlaneActivity(event.activity_class));
+  const visibleEvents = includeControlPlane ? (activity.events ?? []) : (activity.events ?? []).filter((event) => !isControlPlaneActivity(event.activity_class));
   const visibleActivity = {
     ...activity,
     events: visibleEvents,
@@ -3067,7 +3104,20 @@ function ModelActivityPanel({ activity }: { activity: ModelActivityPayload }) {
   ] as [string, string, string]);
   const failures = visibleEvents.filter((event) => event.status === "failed" || event.status === "busy").slice(0, 4);
   return (
-    <Panel title="Model activity">
+    <Panel
+      title="Model activity"
+      action={(
+        <label className="inline-check">
+          <input
+            aria-label="Show control-plane diagnostics"
+            type="checkbox"
+            checked={includeControlPlane}
+            onChange={(event) => onIncludeControlPlaneChange(event.target.checked)}
+          />
+          Control plane
+        </label>
+      )}
+    >
       <div className="summary-cards">
         <Stat label="Activity" value={modelActivityCountText(visibleActivity)} />
         <Stat label="Last Event" value={formatDate(activity.last_event_at)} />

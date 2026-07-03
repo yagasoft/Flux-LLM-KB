@@ -34,7 +34,7 @@ RETENTION_HOURS = 24
 STALE_RUNNING_AFTER_MINUTES = 60
 
 _CALLER_SURFACE: ContextVar[str] = ContextVar("flux_model_activity_caller_surface", default="")
-_PATH_RE = re.compile(r"\b(?:[A-Za-z]:[\\/]|/)[^\s,;]+")
+_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|/)[^\s,;]+")
 
 
 @contextmanager

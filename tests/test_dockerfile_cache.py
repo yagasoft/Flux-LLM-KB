@@ -147,6 +147,14 @@ def test_dockerfile_keeps_compiler_for_quantized_qwen_runtime() -> None:
     assert "ccache \\" in dockerfile
 
 
+def test_dockerfile_installs_focused_media_ocr_runtime_libraries() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert "ffmpeg \\" in dockerfile
+    assert "libgl1 \\" in dockerfile
+    assert "libglib2.0-0 \\" in dockerfile
+
+
 def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> None:
     dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
 

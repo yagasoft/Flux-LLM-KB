@@ -64,6 +64,7 @@ from .crawler import (
     CorpusPolicy,
     classify_file,
 )
+from .error_diagnostics import redact_secrets
 from .onnxruntime_logging import configure_onnxruntime_logging
 from .model_activity import record_model_activity
 from .processes import run_no_window
@@ -5063,10 +5064,42 @@ def _read_http_error_detail(exc: HTTPError) -> str:
     except json.JSONDecodeError:
         return text
     if isinstance(payload, dict):
-        detail = payload.get("detail")
-        if isinstance(detail, str):
+        detail = _http_error_payload_detail(payload)
+        if detail:
             return detail
     return text
+
+
+def _http_error_payload_detail(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("detail", "error", "message"):
+        item = payload.get(key)
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+        nested = _http_error_payload_detail(item)
+        if nested:
+            return nested
+    return ""
+
+
+def _safe_external_error_detail(text: str, *, max_length: int = 500) -> str:
+    clean = redact_secrets(str(text or ""))
+    clean, _ = redact_text(clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if len(clean) > max_length:
+        return clean[: max_length - 1].rstrip() + "..."
+    return clean
+
+
+def _ollama_http_error_message(exc: HTTPError) -> str:
+    detail = _safe_external_error_detail(_read_http_error_detail(exc))
+    message = f"Ollama vision request failed with HTTP {exc.code}"
+    if detail:
+        return f"{message}: {detail}"
+    return message
 
 
 def _asr_metadata(
@@ -5811,7 +5844,10 @@ def _vision_with_ollama_compatible(
             metadata={"keep_alive": bool(keep_alive)},
         ):
             with scheduler.acquire(profile):
-                response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
+                try:
+                    response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
+                except HTTPError as exc:
+                    raise RuntimeError(_ollama_http_error_message(exc)) from exc
                 raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
         decoded = json.loads(raw or "{}")
         try:

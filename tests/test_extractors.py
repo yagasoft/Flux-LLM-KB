@@ -11,13 +11,14 @@ import tarfile
 from io import BytesIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from urllib.error import HTTPError
 from urllib.parse import quote
 from zipfile import ZipFile
 import zlib
 
 import pytest
 
-from flux_llm_kb import extractors
+from flux_llm_kb import extractors, model_activity
 from flux_llm_kb.crawler import AssetChunk, CorpusPolicy
 from flux_llm_kb.extractors import (
     MEDIA_SEGMENT_CHUNK_INDEX_STRIDE,
@@ -1579,6 +1580,64 @@ def test_ollama_vision_records_safe_model_activity(monkeypatch, tmp_path):
     ]
     assert "private-image.png" not in str(records)
     assert "image-bytes" not in str(records)
+
+
+def test_ollama_vision_records_http_error_body_without_payload_leak(monkeypatch, tmp_path):
+    image = tmp_path / "vision.png"
+    image.write_bytes(PNG_BYTES)
+    finished: list[dict[str, object]] = []
+
+    class FakeLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeScheduler:
+        def acquire(self, _profile):
+            return FakeLease()
+
+        def record_model_residency(self, _residency):
+            return None
+
+    body = b'{"error":"failed to decode image/media: ffprobe failed on buffer"}'
+
+    def fake_urlopen(_request, **_kwargs):
+        raise HTTPError(
+            url="http://ollama:11434/api/generate",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=BytesIO(body),
+        )
+
+    monkeypatch.setattr(extractors, "_vision_request_image_bytes", lambda _path: (b"image-bytes", {"submitted_bytes": 10}))
+    monkeypatch.setattr(extractors, "urlopen", fake_urlopen, raising=False)
+    monkeypatch.setattr("flux_llm_kb.gpu_scheduler.get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **_kwargs: "event-vision", raising=False)
+    monkeypatch.setattr(model_activity.database, "finish_model_activity_event", lambda **kwargs: finished.append(kwargs), raising=False)
+
+    result = extractors._vision_with_ollama_compatible(
+        image,
+        source_label="private-image.png",
+        provider="ollama",
+        base_url="http://ollama:11434",
+        model="qwen3-vl:8b",
+        keep_alive="2m",
+        timeout_seconds=1,
+        metadata={"provider": "ollama", "model": "qwen3-vl:8b"},
+    )
+
+    assert result.status == "failed"
+    assert "failed to decode image/media" in (result.message or "")
+    assert result.metadata["error"].startswith("Ollama vision request failed")
+    assert "ffprobe failed on buffer" in result.metadata["error"]
+    assert finished[0]["status"] == "failed"
+    assert finished[0]["error_class"] == "RuntimeError"
+    assert "failed to decode image/media" in str(finished[0]["error_message"])
+    assert "image-bytes" not in str(finished)
+    assert "private-image.png" not in str(finished)
 
 
 def test_extract_image_resizes_large_payload_for_local_vision(monkeypatch, tmp_path):
