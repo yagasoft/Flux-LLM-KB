@@ -212,9 +212,12 @@ def test_load_migrations_returns_ordered_sql_files():
     model_activity_migration = next(item for item in migrations if item.name == "0038_model_activity_events")
     assert "CREATE TABLE IF NOT EXISTS model_activity_events" in model_activity_migration.sql
     assert "status IN ('running', 'completed', 'failed', 'busy', 'stale_running')" in model_activity_migration.sql
-    assert "activity_class IN ('retrieval', 'vision_ocr', 'sidecar', 'health', 'model_loading')" in model_activity_migration.sql
+    assert "activity_class IN ('retrieval', 'vision_ocr', 'sidecar', 'health', 'control_plane', 'model_loading')" in model_activity_migration.sql
     assert "idx_model_activity_events_started" in model_activity_migration.sql
     assert "idx_model_activity_events_running" in model_activity_migration.sql
+    control_plane_migration = next(item for item in migrations if item.name == "0039_model_activity_control_plane")
+    assert "DROP CONSTRAINT IF EXISTS model_activity_events_activity_class_check" in control_plane_migration.sql
+    assert "'control_plane'" in control_plane_migration.sql
     assert "DROP TABLE IF EXISTS embeddings" in purge_migration.sql
     assert "DROP INDEX IF EXISTS idx_asset_chunks_body_trgm" in purge_migration.sql
     assert "DROP EXTENSION IF EXISTS vector" in purge_migration.sql

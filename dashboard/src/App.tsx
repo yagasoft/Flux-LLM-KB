@@ -3041,17 +3041,20 @@ function OperatorEvidencePanel() {
 
 function ModelActivityPanel({ activity }: { activity: ModelActivityPayload }) {
   const scheduler = activity.scheduler ?? {};
-  const serviceRows = (activity.service_breakdown ?? []).slice(0, 6).map((row) => [
-    row.service ?? "unknown",
-    `${row.count ?? 0} event${row.count === 1 ? "" : "s"}`,
-    `${row.active ?? 0} active / ${row.failures ?? 0} failed`
-  ] as [string, string, string]);
-  const classRows = (activity.class_breakdown ?? []).slice(0, 6).map((row) => [
-    modelActivityClassLabel(row.activity_class ?? "unknown"),
-    `${row.count ?? 0} event${row.count === 1 ? "" : "s"}`,
+  const visibleEvents = (activity.events ?? []).filter((event) => !isControlPlaneActivity(event.activity_class));
+  const visibleActivity = {
+    ...activity,
+    events: visibleEvents,
+    recent_count: visibleEvents.length,
+    active_count: visibleEvents.filter((event) => event.status === "running").length
+  };
+  const serviceRows = modelActivityServiceRows(visibleEvents).slice(0, 6);
+  const classRows = modelActivityClassRows(visibleEvents).slice(0, 6).map((row) => [
+    modelActivityClassLabel(row.activity_class),
+    `${row.count} event${row.count === 1 ? "" : "s"}`,
     "activity class"
   ] as [string, string, string]);
-  const eventRows = (activity.events ?? []).slice(0, 8).map((event) => [
+  const eventRows = visibleEvents.slice(0, 8).map((event) => [
     event.endpoint ?? event.action ?? "model activity",
     `${event.service ?? "service"} / ${humanizeIdentifier(event.status ?? "observed")}`,
     modelActivityEventDetail(event),
@@ -3062,11 +3065,11 @@ function ModelActivityPanel({ activity }: { activity: ModelActivityPayload }) {
     model.model ?? "resident model",
     [model.task_type ? humanizeIdentifier(model.task_type) : null, model.last_used_at ? `last ${formatDate(model.last_used_at)}` : null].filter(Boolean).join("; ") || "resident"
   ] as [string, string, string]);
-  const failures = (activity.events ?? []).filter((event) => event.status === "failed" || event.status === "busy").slice(0, 4);
+  const failures = visibleEvents.filter((event) => event.status === "failed" || event.status === "busy").slice(0, 4);
   return (
     <Panel title="Model activity">
       <div className="summary-cards">
-        <Stat label="Activity" value={modelActivityCountText(activity)} />
+        <Stat label="Activity" value={modelActivityCountText(visibleActivity)} />
         <Stat label="Last Event" value={formatDate(activity.last_event_at)} />
         <Stat label="Scheduler Mode" value={scheduler.mode ? humanizeIdentifier(scheduler.mode) : "Unknown"} />
         <Stat label="GPU Memory" value={formatGpuMemory(scheduler.live_gpu_memory)} />
@@ -6356,6 +6359,41 @@ function humanizeIdentifier(value: string) {
 
 function modelActivityCountText(activity: ModelActivityPayload) {
   return `${activity.recent_count ?? activity.events?.length ?? 0} recent / ${activity.active_count ?? 0} active`;
+}
+
+function modelActivityServiceRows(events: ModelActivityEvent[]) {
+  const rows = new Map<string, { count: number; active: number; failures: number }>();
+  for (const event of events) {
+    const service = event.service ?? "unknown";
+    const row = rows.get(service) ?? { count: 0, active: 0, failures: 0 };
+    row.count += 1;
+    if (event.status === "running") row.active += 1;
+    if (event.status === "failed") row.failures += 1;
+    rows.set(service, row);
+  }
+  return Array.from(rows.entries())
+    .sort((left, right) => right[1].count - left[1].count || left[0].localeCompare(right[0]))
+    .map(([service, row]) => [
+      service,
+      `${row.count} event${row.count === 1 ? "" : "s"}`,
+      `${row.active} active / ${row.failures} failed`
+    ] as [string, string, string]);
+}
+
+function modelActivityClassRows(events: ModelActivityEvent[]) {
+  const counts = new Map<string, number>();
+  for (const event of events) {
+    const activityClass = event.activity_class ?? "sidecar";
+    counts.set(activityClass, (counts.get(activityClass) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([activity_class, count]) => ({ activity_class, count }));
+}
+
+function isControlPlaneActivity(value?: string) {
+  const normalized = String(value ?? "").toLowerCase();
+  return normalized === "health" || normalized === "control_plane";
 }
 
 function modelActivityEventDetail(event: ModelActivityEvent) {

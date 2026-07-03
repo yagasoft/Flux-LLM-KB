@@ -206,6 +206,64 @@ def test_collect_model_activity_payload_summarizes_events_and_scheduler(monkeypa
     assert payload["scheduler"]["live_gpu_memory"] == {"available": True, "used_mb": 8120, "total_mb": 16380}
 
 
+def test_collect_model_activity_payload_hides_control_plane_by_default(monkeypatch):
+    now = datetime(2026, 7, 3, 1, 30, tzinfo=UTC)
+    events = [
+        {
+            "id": "event-health",
+            "service": "model-runner",
+            "endpoint": "/health",
+            "action": "health",
+            "activity_class": "control_plane",
+            "caller_surface": "",
+            "model": "",
+            "status": "completed",
+            "started_at": now - timedelta(seconds=30),
+            "completed_at": now - timedelta(seconds=29),
+            "duration_ms": 10,
+            "error_class": None,
+            "error_message": None,
+            "metadata": {},
+        },
+        {
+            "id": "event-rerank",
+            "service": "model-runner",
+            "endpoint": "/v1/rerank",
+            "action": "rerank",
+            "activity_class": "retrieval",
+            "caller_surface": "mcp",
+            "model": "Qwen/Qwen3-Reranker-4B",
+            "status": "completed",
+            "started_at": now - timedelta(seconds=20),
+            "completed_at": now - timedelta(seconds=18),
+            "duration_ms": 1842,
+            "error_class": None,
+            "error_message": None,
+            "metadata": {"batch_size": 2},
+        },
+    ]
+
+    calls: list[dict[str, object]] = []
+
+    def fake_list_model_activity_events(**kwargs):
+        calls.append(kwargs)
+        return events
+
+    monkeypatch.setattr(model_activity, "_utc_now", lambda: now)
+    monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(model_activity.database, "list_model_activity_events", fake_list_model_activity_events, raising=False)
+    monkeypatch.setattr(model_activity, "get_gpu_scheduler", lambda: SimpleNamespace(status=lambda: {"enabled": True, "mode": "postgres"}))
+
+    payload = model_activity.collect_model_activity_payload(window_minutes=60, limit=50)
+
+    assert payload["recent_count"] == 1
+    assert payload["service_breakdown"] == [{"service": "model-runner", "count": 1, "active": 0, "failures": 0}]
+    assert payload["class_breakdown"] == [{"activity_class": "retrieval", "count": 1}]
+    assert [event["id"] for event in payload["events"]] == ["event-rerank"]
+    assert calls == [{"window_minutes": 60, "limit": 50, "include_control_plane": False}]
+    assert "/health" not in str(payload)
+
+
 def test_collect_model_activity_payload_tolerates_scheduler_failures(monkeypatch):
     monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: None, raising=False)
     monkeypatch.setattr(model_activity.database, "list_model_activity_events", lambda **_kwargs: [], raising=False)

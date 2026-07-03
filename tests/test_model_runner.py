@@ -841,9 +841,53 @@ def test_paddle_runner_health_records_safe_activity(monkeypatch):
             "service": "paddle-runner",
             "endpoint": "/health",
             "action": "health",
-            "activity_class": "health",
+            "activity_class": "control_plane",
         }
     ]
+
+
+def test_model_runner_health_does_not_probe_paddle_runner(monkeypatch):
+    calls: list[str] = []
+
+    def fail_paddle_health():
+        calls.append("paddle")
+        raise AssertionError("basic model-runner health must not fan out to paddle-runner")
+
+    monkeypatch.setenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", "http://paddle-runner:8791")
+    monkeypatch.setattr(model_runner, "_paddle_runner_health", fail_paddle_health)
+    monkeypatch.setattr(model_runner, "_paddle_cuda_status", lambda: (True, 1))
+    monkeypatch.setattr(model_runner, "_paddle_device", lambda: "gpu:0")
+
+    payload = model_runner.health_payload(role="model-runner")
+
+    assert payload["ok"] is True
+    assert "paddle_runner" not in payload
+    assert calls == []
+
+
+def test_model_runner_readiness_reports_paddle_runner_status(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    calls: list[str] = []
+
+    def fake_paddle_health():
+        calls.append("paddle")
+        return {"ok": True, "service": "paddle-runner", "paddle_device": "gpu:0"}
+
+    monkeypatch.setenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", "http://paddle-runner:8791")
+    monkeypatch.setattr(model_runner, "_paddle_runner_health", fake_paddle_health)
+    monkeypatch.setattr(model_runner, "_paddle_cuda_status", lambda: (True, 1))
+    monkeypatch.setattr(model_runner, "_paddle_device", lambda: "gpu:0")
+
+    response = TestClient(model_runner.create_app()).get("/readiness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["service"] == "model-runner"
+    assert payload["dependencies"]["paddle_runner"]["ok"] is True
+    assert payload["dependencies"]["paddle_runner"]["paddle_device"] == "gpu:0"
+    assert calls == ["paddle"]
 
 
 def test_model_runner_client_health_records_safe_activity(monkeypatch):
@@ -880,7 +924,7 @@ def test_model_runner_client_health_records_safe_activity(monkeypatch):
             "service": "model-runner",
             "endpoint": "/health",
             "action": "health",
-            "activity_class": "health",
+            "activity_class": "control_plane",
         }
     ]
 

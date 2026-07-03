@@ -495,7 +495,7 @@ def test_dashboard_model_activity_route_is_bounded_and_safe(monkeypatch):
     assert payload["window_minutes"] == 360
     assert payload["events"][0]["endpoint"] == "/v1/rerank"
     assert payload["scheduler"]["running_count"] == 1
-    assert calls == [{"window_minutes": 360, "limit": 200}]
+    assert calls == [{"window_minutes": 360, "limit": 200, "include_control_plane": False}]
 
 
 def test_watcher_worker_and_benchmark_routes_are_exposed(monkeypatch):

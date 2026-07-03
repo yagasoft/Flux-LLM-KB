@@ -13,7 +13,8 @@ from .gpu_scheduler import get_gpu_scheduler
 
 
 ALLOWED_STATUSES = {"running", "completed", "failed", "busy", "stale_running"}
-ALLOWED_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "model_loading"}
+ALLOWED_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "control_plane", "model_loading"}
+CONTROL_PLANE_ACTIVITY_CLASSES = {"health", "control_plane"}
 ALLOWED_METADATA_KEYS = {
     "batch_size",
     "dimensions",
@@ -87,7 +88,12 @@ def record_model_activity(
         )
 
 
-def collect_model_activity_payload(window_minutes: int | str | None = DEFAULT_WINDOW_MINUTES, limit: int | str | None = DEFAULT_LIMIT) -> dict[str, Any]:
+def collect_model_activity_payload(
+    window_minutes: int | str | None = DEFAULT_WINDOW_MINUTES,
+    limit: int | str | None = DEFAULT_LIMIT,
+    *,
+    include_control_plane: bool = False,
+) -> dict[str, Any]:
     safe_window = bounded_window_minutes(window_minutes)
     safe_limit = bounded_limit(limit)
     try:
@@ -95,11 +101,21 @@ def collect_model_activity_payload(window_minutes: int | str | None = DEFAULT_WI
     except Exception:
         pass
     try:
-        rows = database.list_model_activity_events(window_minutes=safe_window, limit=safe_limit)
+        rows = database.list_model_activity_events(
+            window_minutes=safe_window,
+            limit=safe_limit,
+            include_control_plane=include_control_plane,
+        )
     except Exception:
         rows = []
     now = _utc_now()
     events = [_event_payload(row, now=now) for row in rows]
+    if not include_control_plane:
+        events = [
+            item
+            for item in events
+            if str(item.get("activity_class") or "").lower() not in CONTROL_PLANE_ACTIVITY_CLASSES
+        ]
     active_count = sum(1 for item in events if item["status"] == "running")
     last_event_at = _latest_iso(
         [

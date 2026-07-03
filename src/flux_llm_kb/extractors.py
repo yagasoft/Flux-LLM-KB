@@ -91,7 +91,7 @@ MEDIA_TRANSCRIPT_SIDECAR_SUFFIXES = (".txt", ".md", ".vtt", ".srt")
 OCR_ENGINE = "paddleocr"
 OCR_SIMPLE_MODEL = "PP-OCRv5"
 OCR_DOCUMENT_MODEL = "PaddleOCR-VL"
-OCR_CACHE_SCHEMA = "flux-paddleocr-cache-v2"
+OCR_CACHE_SCHEMA = "flux-paddleocr-cache-v3"
 ASR_CACHE_SCHEMA = "flux-asr-cache-v1"
 VISION_CACHE_SCHEMA = "flux-vision-cache-v1"
 THUMBNAIL_CACHE_SCHEMA = "flux-thumbnail-cache-v1"
@@ -3733,7 +3733,13 @@ def _extract_svg_image(path: Path) -> ExtractionResult:
         if raster["status"] != "completed":
             return ExtractionResult(status=raster["status"], metadata=metadata, message=raster["message"])
         rendered_path = Path(raster["path"])
-        ocr = _ocr_image_with_paddleocr(rendered_path, model=OCR_SIMPLE_MODEL, cache_path=path)
+        ocr = _ocr_image_with_paddleocr(
+            rendered_path,
+            model=OCR_SIMPLE_MODEL,
+            cache_path=path,
+            route="simple_image",
+            route_reason="svg_raster",
+        )
         vision = _vision_image(rendered_path, source_label=path.name, cache_path=path)
         return _image_ocr_vision_result(path, metadata=metadata, ocr=ocr, vision=vision)
 
@@ -3746,7 +3752,7 @@ def _extract_image(path: Path) -> ExtractionResult:
     if decorative is not None:
         metadata["decorative"] = decorative
         return ExtractionResult(status="indexed", metadata=metadata)
-    ocr = _ocr_image(path)
+    ocr = _ocr_image(path, metadata=metadata)
     vision = _vision_image(path, source_label=path.name)
     return _image_ocr_vision_result(path, metadata=metadata, ocr=ocr, vision=vision)
 
@@ -6054,21 +6060,14 @@ def _png_dimensions(path: Path) -> tuple[int, int] | None:
         return None
 
 
-def _ocr_image(path: Path) -> OcrResult:
-    cached = _read_ocr_cache(path)
-    if cached is not None:
-        return OcrResult(
-            status="completed",
-            text=cached,
-            metadata={
-                "engine": OCR_ENGINE,
-                "model": OCR_SIMPLE_MODEL,
-                "status": "cache_hit",
-                "cache_hits": 1,
-                "cache_misses": 0,
-            },
-        )
-    return _ocr_image_with_paddleocr(path, model=OCR_SIMPLE_MODEL)
+def _ocr_image(path: Path, *, metadata: dict[str, Any] | None = None) -> OcrResult:
+    route = _ocr_image_route(path, metadata=metadata)
+    return _ocr_image_with_paddleocr(
+        path,
+        model=route["model"],
+        route=route["route"],
+        route_reason=route["reason"],
+    )
 
 
 def _ocr_pdf(path: Path, *, page_count: int) -> OcrResult:
@@ -6150,7 +6149,12 @@ def _ocr_pdf_pages(
                     message=render.stderr.strip() or "pdftoppm failed",
                 )
             rendered_path = output_prefix.with_name(f"{output_prefix.name}-{page_number}.png")
-            page_ocr = _ocr_image_with_paddleocr(rendered_path, model=OCR_DOCUMENT_MODEL)
+            page_ocr = _ocr_image_with_paddleocr(
+                rendered_path,
+                model=OCR_DOCUMENT_MODEL,
+                route="document_image",
+                route_reason="pdf_page",
+            )
             base_metadata["pages_attempted"] = page_index
             base_metadata["cache_hits"] += int(page_ocr.metadata.get("cache_hits") or 0)
             base_metadata["cache_misses"] += int(page_ocr.metadata.get("cache_misses") or 0)
@@ -6171,9 +6175,18 @@ def _ocr_pdf_pages(
     return OcrResult(status="completed", text="\n".join(parts), metadata={**base_metadata, "status": "completed"})
 
 
-def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None = None) -> OcrResult:
+def _ocr_image_with_paddleocr(
+    path: Path,
+    *,
+    model: str,
+    cache_path: Path | None = None,
+    route: str | None = None,
+    route_reason: str | None = None,
+) -> OcrResult:
     source_path = cache_path or path
-    cached = _read_ocr_cache(source_path)
+    resolved_route = route or ("document_image" if _is_paddleocr_document_model(model) else "simple_image")
+    resolved_reason = route_reason or ("document_model" if _is_paddleocr_document_model(model) else "ordinary_image")
+    cached = _read_ocr_cache(source_path, model=model)
     if cached is not None:
         return OcrResult(
             status="completed",
@@ -6181,6 +6194,8 @@ def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None
             metadata={
                 "engine": OCR_ENGINE,
                 "model": model,
+                "route": resolved_route,
+                "route_reason": resolved_reason,
                 "status": "cache_hit",
                 "cache_hits": 1,
                 "cache_misses": 0,
@@ -6207,6 +6222,8 @@ def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None
             metadata={
                 "engine": OCR_ENGINE,
                 "model": model,
+                "route": resolved_route,
+                "route_reason": resolved_reason,
                 "status": "blocked_timeout",
                 "cache_hits": 0,
                 "cache_misses": 1,
@@ -6221,6 +6238,8 @@ def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None
                 metadata={
                     "engine": OCR_ENGINE,
                     "model": model,
+                    "route": resolved_route,
+                    "route_reason": resolved_reason,
                     "status": "blocked_missing_dependency",
                     "cache_hits": 0,
                     "cache_misses": 1,
@@ -6233,6 +6252,8 @@ def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None
             metadata={
                 "engine": OCR_ENGINE,
                 "model": model,
+                "route": resolved_route,
+                "route_reason": resolved_reason,
                 "status": "failed",
                 "cache_hits": 0,
                 "cache_misses": 1,
@@ -6245,13 +6266,15 @@ def _ocr_image_with_paddleocr(path: Path, *, model: str, cache_path: Path | None
             temp_dir_obj.cleanup()
     redacted, _ = redact_text(str(raw_text or "").strip())
     text = redacted.strip()
-    _write_ocr_cache(source_path, text)
+    _write_ocr_cache(source_path, text, model=model)
     return OcrResult(
         status="completed",
         text=text,
         metadata={
             "engine": OCR_ENGINE,
             "model": model,
+            "route": resolved_route,
+            "route_reason": resolved_reason,
             "status": "completed",
             "cache_hits": 0,
             "cache_misses": 1,
@@ -6304,9 +6327,42 @@ def _scaled_ocr_input(path: Path, *, temp_root: Path, base_metadata: dict[str, A
         return path, {**base_metadata, "status": "scale_failed", "message": str(exc)[:200]}
 
 
-def _read_ocr_cache(path: Path) -> str | None:
+def _ocr_image_route(path: Path, *, metadata: dict[str, Any] | None = None) -> dict[str, str]:
+    suffix = path.suffix.lower()
+    if suffix in {".tif", ".tiff"}:
+        return {"model": OCR_DOCUMENT_MODEL, "route": "document_image", "reason": "tiff_scan"}
+    name = path.stem.lower()
+    name_tokens = set(re.split(r"[^a-z0-9]+", name))
+    document_name_tokens = ("scan", "scanned", "document", "invoice", "receipt", "form", "page")
+    if any(token in name_tokens for token in document_name_tokens):
+        width = _int_or_none((metadata or {}).get("width"))
+        height = _int_or_none((metadata or {}).get("height"))
+        if width is None or height is None:
+            dimensions = _image_dimensions(path)
+            if dimensions:
+                width, height = dimensions
+        if _is_document_like_image_dimensions(width, height):
+            return {"model": OCR_DOCUMENT_MODEL, "route": "document_image", "reason": "document_name"}
+    return {"model": OCR_SIMPLE_MODEL, "route": "simple_image", "reason": "ordinary_image"}
+
+
+def _is_document_like_image_dimensions(width: int | None, height: int | None) -> bool:
+    if not width or not height:
+        return True
+    pixels = width * height
+    if pixels < 800_000:
+        return False
+    long_edge = max(width, height)
+    short_edge = min(width, height)
+    if short_edge <= 0:
+        return False
+    ratio = long_edge / short_edge
+    return 1.15 <= ratio <= 1.8
+
+
+def _read_ocr_cache(path: Path, *, model: str) -> str | None:
     try:
-        cache_file = _ocr_cache_file(path)
+        cache_file = _ocr_cache_file(path, model=model)
         payload = json.loads(cache_file.read_text(encoding="utf-8"))
     except Exception:
         return None
@@ -6318,14 +6374,15 @@ def _read_ocr_cache(path: Path) -> str | None:
     return text if isinstance(text, str) else None
 
 
-def _write_ocr_cache(path: Path, text: str) -> None:
+def _write_ocr_cache(path: Path, text: str, *, model: str) -> None:
     try:
-        cache_file = _ocr_cache_file(path)
+        cache_file = _ocr_cache_file(path, model=model)
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema": OCR_CACHE_SCHEMA,
             "source_hash": _sha256_file(path),
             "engine": OCR_ENGINE,
+            "model": model,
             "text": text,
         }
         cache_file.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
@@ -6333,9 +6390,9 @@ def _write_ocr_cache(path: Path, text: str) -> None:
         return
 
 
-def _ocr_cache_file(path: Path) -> Path:
+def _ocr_cache_file(path: Path, *, model: str) -> Path:
     source_hash = _sha256_file(path)
-    key = hashlib.sha256(f"{OCR_CACHE_SCHEMA}:{OCR_ENGINE}:{source_hash}".encode("utf-8")).hexdigest()
+    key = hashlib.sha256(f"{OCR_CACHE_SCHEMA}:{OCR_ENGINE}:{model}:{source_hash}".encode("utf-8")).hexdigest()
     return Path(resolve_cache_layout()["directories"]["ocr"]) / f"{key}.json"
 
 

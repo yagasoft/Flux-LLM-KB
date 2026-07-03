@@ -15655,7 +15655,7 @@ def _find_canonical_asset_id(cur: Any, content_hash: str | None, current_id: str
 
 
 _MODEL_ACTIVITY_STATUSES = {"running", "completed", "failed", "busy", "stale_running"}
-_MODEL_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "model_loading"}
+_MODEL_ACTIVITY_CLASSES = {"retrieval", "vision_ocr", "sidecar", "health", "control_plane", "model_loading"}
 _MODEL_ACTIVITY_METADATA_KEYS = {
     "batch_size",
     "dimensions",
@@ -15746,6 +15746,7 @@ def list_model_activity_events(
     *,
     window_minutes: int = 60,
     limit: int = 50,
+    include_control_plane: bool = True,
     url: str | None = None,
 ) -> list[dict[str, Any]]:
     safe_window = max(5, min(int(window_minutes or 60), 360))
@@ -15759,12 +15760,13 @@ def list_model_activity_events(
                        model, status, started_at, completed_at, duration_ms,
                        error_class, error_message, metadata
                   FROM model_activity_events
-                 WHERE started_at >= now() - (%s * interval '1 minute')
-                    OR status = 'running'
+                 WHERE (started_at >= now() - (%s * interval '1 minute')
+                    OR status = 'running')
+                   AND (%s OR activity_class NOT IN ('health', 'control_plane'))
                  ORDER BY started_at DESC
                  LIMIT %s
                 """,
-                (safe_window, safe_limit),
+                (safe_window, bool(include_control_plane), safe_limit),
             )
             return [
                 {

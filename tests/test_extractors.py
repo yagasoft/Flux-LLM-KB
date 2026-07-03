@@ -1633,6 +1633,62 @@ def test_extract_image_reindexes_combined_ocr_and_vision_chunks(monkeypatch, tmp
     assert [chunk.body for chunk in result.chunks] == ["OCR text", "Vision text"]
 
 
+def test_extract_screenshot_image_uses_simple_paddleocr_route(monkeypatch, tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "homepage-screenshot.png"
+    Image.new("RGB", (1600, 1000), "white").save(path)
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
+    calls: list[dict[str, object]] = []
+
+    def fake_simple(image_path, *, model):
+        calls.append({"path": Path(image_path).name, "model": model})
+        return "Screenshot OCR text"
+
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_image", fake_simple)
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ordinary screenshots must not use PaddleOCR-VL")),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["ocr"]["model"] == "PP-OCRv5"
+    assert result.metadata["ocr"]["route"] == "simple_image"
+    assert result.metadata["ocr"]["route_reason"] == "ordinary_image"
+    assert calls == [{"path": "homepage-screenshot.png", "model": "PP-OCRv5"}]
+
+
+def test_extract_scanned_tiff_uses_paddleocr_vl_route(monkeypatch, tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "scanned-page.tiff"
+    Image.new("RGB", (1200, 1600), "white").save(path)
+    monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
+    calls: list[dict[str, object]] = []
+
+    def fake_document(image_path, *, model):
+        calls.append({"path": Path(image_path).name, "model": model})
+        return "Scanned document OCR text"
+
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("scanned TIFF pages must use PaddleOCR-VL")),
+    )
+    monkeypatch.setattr("flux_llm_kb.extractors._run_paddleocr_document", fake_document)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.metadata["ocr"]["model"] == "PaddleOCR-VL"
+    assert result.metadata["ocr"]["route"] == "document_image"
+    assert result.metadata["ocr"]["route_reason"] == "tiff_scan"
+    assert calls == [{"path": "scanned-page.tiff", "model": "PaddleOCR-VL"}]
+
+
 def test_extract_image_records_failed_local_vision_attempt_when_ocr_succeeds(monkeypatch, tmp_path):
     path = tmp_path / "diagram.png"
     path.write_bytes(PNG_BYTES)

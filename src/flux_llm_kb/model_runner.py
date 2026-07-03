@@ -190,7 +190,7 @@ class ModelRunnerClient:
                 service="model-runner",
                 endpoint="/health",
                 action="health",
-                activity_class="health",
+                activity_class="control_plane",
             ):
                 with urlopen(f"{self.base_url}/health", timeout=min(self.timeout_seconds, 10)) as response:
                     return json.loads(response.read().decode("utf-8"))
@@ -394,7 +394,7 @@ def _paddle_runner_health() -> dict[str, Any] | None:
             service="paddle-runner",
             endpoint="/health",
             action="health",
-            activity_class="health",
+            activity_class="control_plane",
         ):
             with urlopen(f"{base_url}/health", timeout=min(_paddle_runner_timeout_seconds(), 10)) as response:
                 payload = json.loads(response.read().decode("utf-8"))
@@ -418,14 +418,8 @@ def health_payload(role: str | None = None) -> dict[str, Any]:
             cuda_available = bool(torch.cuda.is_available())
         except Exception:
             cuda_available = False
-    paddle_runner = None if resolved_role == "paddle-runner" else _paddle_runner_health()
-    if paddle_runner is not None and paddle_runner.get("ok") is True:
-        paddle_cuda_available = bool(paddle_runner.get("paddle_cuda_available"))
-        paddle_cuda_device_count = int(paddle_runner.get("paddle_cuda_device_count") or 0)
-        paddle_device = str(paddle_runner.get("paddle_device") or "cpu")
-    else:
-        paddle_cuda_available, paddle_cuda_device_count = _paddle_cuda_status()
-        paddle_device = _paddle_device()
+    paddle_cuda_available, paddle_cuda_device_count = _paddle_cuda_status()
+    paddle_device = _paddle_device()
     payload = {
         "ok": True,
         "service": resolved_role,
@@ -450,9 +444,25 @@ def health_payload(role: str | None = None) -> dict[str, Any]:
         payload["gpu_scheduler"] = get_gpu_scheduler().status()
     except Exception as exc:
         payload["gpu_scheduler"] = {"status": "unavailable", "error": str(exc)}
+    return payload
+
+
+def readiness_payload(role: str | None = None) -> dict[str, Any]:
+    resolved_role = role or os.environ.get("FLUX_KB_MODEL_RUNNER_ROLE", "model-runner")
+    payload = dict(health_payload(role=resolved_role))
+    dependencies: dict[str, Any] = {}
     if resolved_role != "paddle-runner" and _paddle_runner_base_url():
+        dependencies["paddle_runner"] = _paddle_runner_health()
         payload["paddle_runner_base_url"] = _paddle_runner_base_url()
-        payload["paddle_runner"] = paddle_runner
+    payload["dependencies"] = dependencies
+    failed = [
+        name
+        for name, dependency in dependencies.items()
+        if isinstance(dependency, dict) and dependency.get("ok") is False
+    ]
+    if failed:
+        payload["ok"] = False
+        payload["failed_dependencies"] = failed
     return payload
 
 
@@ -955,6 +965,10 @@ def create_app():
     @app.get("/health")
     def health() -> dict[str, Any]:
         return health_payload()
+
+    @app.get("/readiness")
+    def readiness() -> dict[str, Any]:
+        return readiness_payload()
 
     @app.get("/v1/gpu/status")
     def gpu_status() -> dict[str, Any]:

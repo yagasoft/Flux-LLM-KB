@@ -632,10 +632,11 @@ def create_app():
         return collect_crawl_payload()
 
     @app.get("/api/dashboard/model-activity")
-    def dashboard_model_activity(window_minutes: int = 60, limit: int = 50):
+    def dashboard_model_activity(window_minutes: int = 60, limit: int = 50, include_control_plane: bool = False):
         return collect_model_activity_payload(
             window_minutes=bounded_window_minutes(window_minutes),
             limit=bounded_limit(limit),
+            include_control_plane=include_control_plane,
         )
 
     @app.get("/api/dashboard/jobs")

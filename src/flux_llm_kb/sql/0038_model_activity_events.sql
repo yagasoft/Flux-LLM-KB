@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS model_activity_events (
     service text NOT NULL CHECK (length(service) > 0),
     endpoint text NOT NULL DEFAULT '',
     action text NOT NULL DEFAULT '',
-    activity_class text NOT NULL CHECK (activity_class IN ('retrieval', 'vision_ocr', 'sidecar', 'health', 'model_loading')),
+    activity_class text NOT NULL CHECK (activity_class IN ('retrieval', 'vision_ocr', 'sidecar', 'health', 'control_plane', 'model_loading')),
     caller_surface text NOT NULL DEFAULT '',
     model text NOT NULL DEFAULT '',
     status text NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'busy', 'stale_running')),

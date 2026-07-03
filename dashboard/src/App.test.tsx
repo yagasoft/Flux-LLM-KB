@@ -1567,7 +1567,7 @@ describe("Flux dashboard", () => {
 
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
-    expect(within(panel as HTMLElement).getByText("3 recent / 1 active")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("2 recent / 0 active")).toBeInTheDocument();
     expect(within(panel as HTMLElement).getByText("model-runner")).toBeInTheDocument();
     expect(within(panel as HTMLElement).getByText("ollama")).toBeInTheDocument();
     expect(within(panel as HTMLElement).getByText("Retrieval")).toBeInTheDocument();
@@ -1580,6 +1580,65 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).getByText("Snowflake/snowflake-arctic-embed-l-v2.0")).toBeInTheDocument();
     expect(within(panel as HTMLElement).getByText("/v1/rerank")).toBeInTheDocument();
     expect(within(panel as HTMLElement).getByText("redacted failure")).toBeInTheDocument();
+  });
+
+  test("performance hides control-plane health events from model activity", async () => {
+    const user = userEvent.setup();
+    modelActivityPayload = {
+      ...modelActivityPayload,
+      recent_count: 2,
+      active_count: 0,
+      service_breakdown: [
+        { service: "model-runner", count: 2, active: 0, failures: 0 }
+      ],
+      class_breakdown: [
+        { activity_class: "control_plane", count: 1 },
+        { activity_class: "retrieval", count: 1 }
+      ],
+      events: [
+        {
+          id: "event-health",
+          service: "model-runner",
+          endpoint: "/health",
+          action: "health",
+          activity_class: "control_plane",
+          caller_surface: "",
+          model: "",
+          status: "completed",
+          started_at: "2026-07-03T01:25:50+00:00",
+          completed_at: "2026-07-03T01:25:50+00:00",
+          duration_ms: 10,
+          error_class: null,
+          error_message: null
+        },
+        {
+          id: "event-rerank",
+          service: "model-runner",
+          endpoint: "/v1/rerank",
+          action: "rerank",
+          activity_class: "retrieval",
+          caller_surface: "mcp",
+          model: "Qwen/Qwen3-Reranker-4B",
+          status: "completed",
+          started_at: "2026-07-03T01:25:58+00:00",
+          completed_at: "2026-07-03T01:26:00+00:00",
+          duration_ms: 1842,
+          error_class: null,
+          error_message: null
+        }
+      ]
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Performance" }));
+
+    const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("/v1/rerank")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).queryByText("/health")).not.toBeInTheDocument();
+    expect(within(panel as HTMLElement).queryByText("Control Plane")).not.toBeInTheDocument();
   });
 
   test("retrieval tab owns code diagnostics and code-search quality controls", async () => {
