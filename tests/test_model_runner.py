@@ -468,6 +468,42 @@ def test_model_runner_health_reports_paddle_cuda_status(monkeypatch):
     assert payload["reranker_awq_model"] == model_runner.DEFAULT_RERANKER_AWQ_MODEL
 
 
+def test_model_runner_app_start_clears_stale_component_residency(monkeypatch):
+    events: list[str] = []
+
+    class FakeScheduler:
+        def reset_component_residency(self, component):
+            events.append(component)
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    monkeypatch.setenv("FLUX_KB_MODEL_RUNNER_ROLE", "model-runner")
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+
+    model_runner.create_app()
+
+    assert events == ["model-runner"]
+
+
+def test_paddle_runner_app_start_clears_stale_component_residency(monkeypatch):
+    events: list[str] = []
+
+    class FakeScheduler:
+        def reset_component_residency(self, component):
+            events.append(component)
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    monkeypatch.setenv("FLUX_KB_MODEL_RUNNER_ROLE", "paddle-runner")
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+
+    model_runner.create_app()
+
+    assert events == ["paddle-runner"]
+
+
 def test_rerank_endpoint_reports_canonical_quantization_metadata(monkeypatch):
     app = model_runner.create_app()
     from fastapi.testclient import TestClient

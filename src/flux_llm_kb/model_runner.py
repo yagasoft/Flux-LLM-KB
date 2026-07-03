@@ -858,6 +858,7 @@ def create_app():
         raise RuntimeError("fastapi is required to serve the model-runner") from exc
 
     app = FastAPI(title="Flux model-runner")
+    _clear_startup_residency()
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -988,6 +989,13 @@ def _gpu_busy_detail(exc: GpuLeaseTimeout) -> dict[str, Any]:
 
 def _scheduler_component() -> str:
     return os.environ.get("FLUX_KB_MODEL_RUNNER_ROLE", "model-runner")
+
+
+def _clear_startup_residency() -> None:
+    try:
+        get_gpu_scheduler().reset_component_residency(_scheduler_component())
+    except Exception:
+        pass
 
 
 def _named_lock(pool: dict[Any, threading.Lock], key: Any) -> threading.Lock:

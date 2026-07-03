@@ -163,6 +163,9 @@ class BaseGpuScheduler:
     def record_model_residency(self, residency: GpuModelResidency) -> None:
         return None
 
+    def reset_component_residency(self, component: str) -> None:
+        return None
+
 
 def plan_gpu_admission(
     profile: GpuTaskProfile,
@@ -364,7 +367,8 @@ class InProcessGpuScheduler(BaseGpuScheduler):
                     decision = plan_gpu_admission(
                         profile,
                         active_leases=self._running_locked(),
-                        resident_models=(),
+                        waiting_leases=waiters,
+                        resident_models=self._resident_models.values(),
                         config=self.config,
                         live_free_vram_mb=None,
                         now=now,
@@ -426,6 +430,16 @@ class InProcessGpuScheduler(BaseGpuScheduler):
                 self._resident_models[key] = residency
             else:
                 self._resident_models.pop(key, None)
+            self._condition.notify_all()
+
+    def reset_component_residency(self, component: str) -> None:
+        target = str(component or "").strip()
+        if not target:
+            return
+        with self._condition:
+            for key, residency in list(self._resident_models.items()):
+                if _resident_component(residency) == target:
+                    self._resident_models.pop(key, None)
             self._condition.notify_all()
 
     def status(self) -> dict[str, Any]:
@@ -510,6 +524,9 @@ class DisabledGpuScheduler(BaseGpuScheduler):
     def heartbeat(self, lease_id: str) -> None:
         self._leases.heartbeat(lease_id)
 
+    def reset_component_residency(self, component: str) -> None:
+        self._leases.reset_component_residency(component)
+
     def status(self) -> dict[str, Any]:
         payload = self._leases.status()
         payload["enabled"] = False
@@ -591,6 +608,27 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 bool(residency.resident),
                 Jsonb(dict(residency.metadata or {})),
             ),
+        )
+
+    def reset_component_residency(self, component: str) -> None:
+        target = str(component or "").strip()
+        if not target:
+            return
+        task_types = _task_types_for_component(target)
+        self._execute(
+            """
+            UPDATE gpu_model_residency
+               SET resident = false,
+                   last_used_at = now(),
+                   metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('startup_cleared_by', %s)
+             WHERE resident = true
+               AND (
+                    metadata->>'component' = %s
+                 OR metadata->>'owner' = %s
+                 OR task_type = ANY(%s)
+               )
+            """,
+            (target, target, target, task_types),
         )
 
     def status(self) -> dict[str, Any]:
@@ -1168,6 +1206,18 @@ def _component_for_task_type(task_type: str) -> str:
     if task_type == "ollama_vision":
         return "ollama"
     return ""
+
+
+def _task_types_for_component(component: str) -> list[str]:
+    if component == "model-runner":
+        return ["embedding", "rerank"]
+    if component == "paddle-runner":
+        return ["ocr_image", "ocr_document"]
+    if component == "asr":
+        return ["asr"]
+    if component == "ollama":
+        return ["ollama_vision"]
+    return []
 
 
 def _post_json(base_url: str, path: str, payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:

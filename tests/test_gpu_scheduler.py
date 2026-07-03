@@ -290,6 +290,28 @@ def test_admission_reports_eviction_candidates_before_rejecting_for_vram():
     ]
 
 
+def test_in_process_scheduler_clears_residency_for_one_component():
+    scheduler = InProcessGpuScheduler(_config())
+    scheduler.record_model_residency(
+        _resident(
+            "embedding",
+            "Snowflake/snowflake-arctic-embed-l-v2.0",
+            estimated_vram_mb=2_500,
+            last_used_at=1.0,
+            component="model-runner",
+        )
+    )
+    scheduler.record_model_residency(
+        _resident("ocr_document", "PaddleOCR-VL", estimated_vram_mb=8_000, last_used_at=2.0, component="paddle-runner")
+    )
+
+    scheduler.reset_component_residency("model-runner")
+
+    residents = {(item["task_type"], item["model_id"]) for item in scheduler.status()["model_residency"]}
+    assert ("embedding", "Snowflake/snowflake-arctic-embed-l-v2.0") not in residents
+    assert ("ocr_document", "PaddleOCR-VL") in residents
+
+
 def test_admission_recovers_stale_running_leases_before_planning():
     profile = GpuTaskProfile(task_type="embedding", model_id="snowflake", estimated_vram_mb=2_000)
 

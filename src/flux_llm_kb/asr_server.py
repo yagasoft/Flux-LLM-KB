@@ -127,6 +127,7 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
     service_runtime = runtime or AsrRuntime(service_config)
     scheduler = gpu_scheduler or get_gpu_scheduler()
     app = FastAPI(title="Flux local ASR service")
+    _clear_startup_residency(scheduler)
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -213,6 +214,13 @@ def _record_asr_residency(scheduler: Any, config: AsrServiceConfig, *, resident:
                 metadata={"component": "asr"},
             )
         )
+    except Exception:
+        pass
+
+
+def _clear_startup_residency(scheduler: Any) -> None:
+    try:
+        scheduler.reset_component_residency("asr")
     except Exception:
         pass
 

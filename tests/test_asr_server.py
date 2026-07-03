@@ -41,6 +41,30 @@ def test_asr_health_reports_missing_model_files(tmp_path):
     assert set(payload["missing_files"]) == set(REQUIRED_MODEL_FILES)
 
 
+def test_asr_app_start_clears_stale_component_residency(tmp_path):
+    model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
+    events: list[str] = []
+
+    class FakeScheduler:
+        def reset_component_residency(self, component):
+            events.append(component)
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    create_app(
+        AsrServiceConfig(
+            model="large-v3-turbo",
+            model_path=model_path,
+            device="cuda",
+            compute_type="float16",
+        ),
+        gpu_scheduler=FakeScheduler(),
+    )
+
+    assert events == ["asr"]
+
+
 def test_asr_transcription_endpoint_uses_runtime_without_downloading(tmp_path):
     model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
     calls = {"transcribe": 0}
