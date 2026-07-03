@@ -71,6 +71,20 @@ def main(argv: list[str] | None = None) -> int:
     search_index_rebuild.add_argument("--root", dest="root_name")
     search_index_rebuild.add_argument("--confirm", action="store_true")
 
+    maintenance_parser = subparsers.add_parser("maintenance", help="Run confirmation-gated maintenance operations")
+    maintenance_subparsers = maintenance_parser.add_subparsers(dest="maintenance_command", required=True)
+    maintenance_reprocess = maintenance_subparsers.add_parser("reprocess", help="Refresh derived corpus, OCR/ASR, and search-index state")
+    maintenance_scope = maintenance_reprocess.add_mutually_exclusive_group(required=True)
+    maintenance_scope.add_argument("--all-roots", action="store_true")
+    maintenance_scope.add_argument("--root", dest="root_name")
+    maintenance_reprocess.add_argument("--confirm", action="store_true")
+    maintenance_reprocess.add_argument("--force", action="store_true")
+    maintenance_reprocess.add_argument("--clear-caches", default="all")
+    maintenance_reprocess.add_argument("--process", action="store_true")
+    maintenance_reprocess.add_argument("--limit", type=int, default=1000)
+    maintenance_reprocess.add_argument("--workers", type=int)
+    maintenance_reprocess.add_argument("--max-passes", type=int, default=1)
+
     automation_parser = subparsers.add_parser("automation", help="Inspect or run guarded operator automation")
     automation_subparsers = automation_parser.add_subparsers(dest="automation_command", required=True)
     automation_subparsers.add_parser("status", help="Show guarded automation status and eligible actions")
@@ -583,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
         "explain": _explain,
         "retrieval": _retrieval,
         "search-index": _search_index,
+        "maintenance": _maintenance,
         "automation": _automation,
         "governance": _governance,
         "remember": _remember,
@@ -1191,6 +1206,27 @@ def _search_index(args: argparse.Namespace) -> int:
         payload = service.search_index_rebuild(root_name=args.root_name, confirmed=args.confirm)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.search_index_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _maintenance(args: argparse.Namespace) -> int:
+    from .service import KnowledgeService
+
+    if args.maintenance_command == "reprocess":
+        payload = KnowledgeService().reprocess_derived_state(
+            all_roots=args.all_roots,
+            root_name=args.root_name,
+            confirm=args.confirm,
+            force=args.force,
+            clear_caches=args.clear_caches,
+            process=args.process,
+            limit=args.limit,
+            workers=args.workers,
+            max_passes=args.max_passes,
+        )
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.maintenance_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

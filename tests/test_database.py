@@ -5032,6 +5032,103 @@ def test_requeue_svg_source_assets_resets_svg_assets_and_creates_image_jobs(monk
     assert "fonts/glyphicons.svg" in params_json
 
 
+def test_invalidate_reprocess_derived_state_requeues_physical_assets_and_marks_index_pending(monkeypatch):
+    executed = []
+    rows = [
+        ("asset-doc", "docs", "scan.pdf", "document"),
+        ("asset-video", "docs", "clip.mp4", "video"),
+    ]
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            normalized = " ".join(str(sql).split())
+            executed.append((sql, params))
+            if "UPDATE capture_jobs" in normalized and "status = 'obsolete'" in normalized:
+                self.rowcount = 2
+            elif "UPDATE source_assets" in normalized and "metadata->>'container_asset_id'" in normalized:
+                self.rowcount = 1
+            elif "DELETE FROM asset_chunks" in normalized and "asset_id = ANY" in normalized:
+                self.rowcount = 2
+            elif "UPDATE source_assets" in normalized and "extraction_status = 'queued'" in normalized:
+                self.rowcount = 2
+            elif "UPDATE search_index_records" in normalized:
+                self.rowcount = 3
+            else:
+                self.rowcount = 0
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "FROM monitored_roots" in sql:
+                return [("root-1", "docs")]
+            if "FROM source_assets" in sql and "metadata ? 'container_asset_id'" in sql:
+                return rows
+            return []
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return (f"job-{len([item for item in executed if 'INSERT INTO capture_jobs' in item[0]])}", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.invalidate_reprocess_derived_state(
+        root_name="docs",
+        all_roots=False,
+        force=True,
+        limit=20,
+        actor="test",
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    params_json = "\n".join(str(params) for _statement, params in executed)
+    assert result["assets_requeued"] == 2
+    assert result["jobs_obsoleted"] == 2
+    assert result["container_children_deleted"] == 1
+    assert result["chunks_deleted"] == 2
+    assert result["search_records_marked"] == 3
+    assert "a.deleted_at IS NULL" in sql
+    assert "a.canonical_asset_id IS NULL" in sql
+    assert "NOT (a.metadata ? 'container_asset_id')" in sql
+    assert "message.eml" in sql
+    assert "body.html" in sql
+    assert "status = 'obsolete'" in sql
+    assert "DELETE FROM code_references" in sql
+    assert "DELETE FROM code_symbols" in sql
+    assert "DELETE FROM asset_chunks" in sql
+    assert "extraction_status = 'queued'" in sql
+    assert "UPDATE search_index_records" in sql
+    assert "index_status = 'pending'" in sql
+    assert "INSERT INTO capture_jobs" in sql
+    assert "corpus_extract_document" in params_json
+    assert "corpus_extract_video" in params_json
+    assert "maintenance_reprocess_derived_state" in params_json
+
+
 def test_apply_extraction_result_persists_nested_container_child_metadata(monkeypatch):
     executed = []
 

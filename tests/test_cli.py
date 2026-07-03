@@ -1107,6 +1107,72 @@ def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsy
     }
 
 
+def test_cli_maintenance_reprocess_routes_to_service(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = {}
+
+    class FakeService:
+        def reprocess_derived_state(self, **kwargs):
+            calls["reprocess"] = kwargs
+            return {"settings_mutated": False, "dry_run": not kwargs["confirm"], "scope": kwargs}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["maintenance", "reprocess", "--all-roots"]) == 0
+    dry_run_payload = json.loads(capsys.readouterr().out)
+
+    assert dry_run_payload["dry_run"] is True
+    assert calls["reprocess"] == {
+        "all_roots": True,
+        "root_name": None,
+        "confirm": False,
+        "force": False,
+        "clear_caches": "all",
+        "process": False,
+        "limit": 1000,
+        "workers": None,
+        "max_passes": 1,
+    }
+
+    assert (
+        cli.main(
+            [
+                "maintenance",
+                "reprocess",
+                "--root",
+                "docs",
+                "--confirm",
+                "--force",
+                "--clear-caches",
+                "ocr,asr,embeddings",
+                "--process",
+                "--limit",
+                "25",
+                "--workers",
+                "2",
+                "--max-passes",
+                "3",
+            ]
+        )
+        == 0
+    )
+    confirmed_payload = json.loads(capsys.readouterr().out)
+
+    assert confirmed_payload["dry_run"] is False
+    assert calls["reprocess"] == {
+        "all_roots": False,
+        "root_name": "docs",
+        "confirm": True,
+        "force": True,
+        "clear_caches": "ocr,asr,embeddings",
+        "process": True,
+        "limit": 25,
+        "workers": 2,
+        "max_passes": 3,
+    }
+
+
 def test_cli_claim_upsert_and_transition_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 

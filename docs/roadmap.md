@@ -435,10 +435,12 @@ condition instead of blocking executable roadmap progress.
    Plain-English explanation: approved review and evaluation are the missing
    safety gate between today's manual review tools and tomorrow's automation.
 2. Priority: P0. Plain-English purpose: prove indexer and filesystem reliability
-   on real workloads after adding bounded VSS snapshot fallback. Progress: 95%.
+   on real workloads after adding bounded VSS snapshot fallback. Progress: 96%.
    Model-actionable item: keep using `flux-kb acceleration evidence` and
    `flux-kb acceleration reliability run --scope all-roots --full` with labels
-   and comparisons to validate high-volume roots, cloud-sync delayed
+   and comparisons, plus dry-run and confirmed
+   `flux-kb maintenance reprocess` passes when derived corpus/search-index
+   state needs a deliberate refresh, to validate high-volume roots, cloud-sync delayed
    availability, open Office files, large writes, rename-save patterns, watcher
    reconciliation, decoupled heartbeat freshness, queued watch-event sync jobs,
    lock/churn evidence, worker-cap telemetry, and default-cap tuning from
@@ -449,9 +451,11 @@ condition instead of blocking executable roadmap progress.
    or show additional provider-specific acceleration beyond the current local
    model-runner/Vespa services is justified.
    Remaining Work: run and compare live all-root evidence after deployments,
-   validate VSS fallback on locked host-agent local files, and keep additional
-   provider-specific acceleration beyond the current local services blocked
-   until telemetry justifies design work.
+   validate force reprocess dry-runs and confirmed bounded passes on production
+   roots before relying on them for blocker cleanup, validate VSS fallback on
+   locked host-agent local files, and keep additional provider-specific
+   acceleration beyond the current local services blocked until telemetry
+   justifies design work.
 3. Priority: P0. Progress: 91%. Plain-English purpose: make code-aware
    retrieval diagnosable after feedback exists.
    Model-actionable item: validate the expanded code-aware retrieval path on

@@ -10093,6 +10093,426 @@ def requeue_metadata_only_source_assets(
     return {"queued": len(jobs), "jobs": jobs, "limit": row_limit, "root_name": root_name}
 
 
+_REPROCESS_METADATA_DROP_KEYS = (
+    "ocr",
+    "asr",
+    "vision",
+    "vision_escalation",
+    "frame_sampling",
+    "video_frames",
+    "thumbnail",
+    "thumbnails",
+    "staged_extraction",
+    "staged_jobs",
+    "svg",
+    "svg_parse",
+    "svg_raster",
+    "decorative",
+    "metadata_only_requeued",
+    "metadata_only_requeue_job_id",
+    "svg_requeued",
+    "svg_requeue_reason",
+    "svg_requeue_job_id",
+)
+
+
+def inventory_reprocess_derived_state(
+    *,
+    root_name: str | None = None,
+    all_roots: bool = False,
+    force: bool = False,
+    limit: int = 1000,
+    url: str | None = None,
+) -> dict[str, Any]:
+    row_limit = max(1, min(int(limit or 1000), 10000))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            roots = _reprocess_scope_roots(cur, root_name=root_name, all_roots=all_roots)
+            root_ids = [row["id"] for row in roots]
+            root_names = [row["name"] for row in roots]
+            if not roots:
+                return {
+                    "scope": {"all_roots": bool(all_roots), "root_name": root_name, "root_names": []},
+                    "counts": {
+                        "roots": 0,
+                        "candidate_assets": 0,
+                        "source_assets": 0,
+                        "asset_chunks": 0,
+                        "running_jobs": 0,
+                        "pending_jobs": 0,
+                        "search_index_records": 0,
+                    },
+                    "running_jobs": [],
+                    "limit": row_limit,
+                    "force": bool(force),
+                }
+
+            candidate_where = _reprocess_asset_candidate_where(force=force)
+            cur.execute(
+                f"""
+                SELECT count(*)::integer
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.id = ANY(%s::uuid[])
+                  AND {candidate_where}
+                """,
+                (root_ids,),
+            )
+            candidate_assets = int((cur.fetchone() or (0,))[0] or 0)
+            cur.execute(
+                """
+                SELECT count(*)::integer
+                FROM source_assets a
+                WHERE a.root_id = ANY(%s::uuid[])
+                  AND a.deleted_at IS NULL
+                """,
+                (root_ids,),
+            )
+            source_assets = int((cur.fetchone() or (0,))[0] or 0)
+            cur.execute(
+                """
+                SELECT count(*)::integer
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                WHERE a.root_id = ANY(%s::uuid[])
+                """,
+                (root_ids,),
+            )
+            asset_chunks = int((cur.fetchone() or (0,))[0] or 0)
+            cur.execute(
+                """
+                SELECT count(*)::integer
+                FROM capture_jobs
+                WHERE status IN ('pending', 'retrying', 'retrying_locked', 'retrying_vss_failed', 'failed')
+                  AND (
+                      (job_type LIKE 'corpus_%%' AND payload->>'root_name' = ANY(%s::text[]))
+                      OR (
+                          job_type = 'search_index_sync'
+                          AND (payload->>'root_name' = ANY(%s::text[]) OR COALESCE(payload->>'root_name', '') = '')
+                      )
+                  )
+                """,
+                (root_names, root_names),
+            )
+            pending_jobs = int((cur.fetchone() or (0,))[0] or 0)
+            cur.execute(
+                """
+                SELECT id::text, job_type, status, payload, locked_by, updated_at
+                FROM capture_jobs
+                WHERE status = 'running'
+                  AND (
+                      (job_type LIKE 'corpus_%%' AND payload->>'root_name' = ANY(%s::text[]))
+                      OR (
+                          job_type = 'search_index_sync'
+                          AND (payload->>'root_name' = ANY(%s::text[]) OR COALESCE(payload->>'root_name', '') = '')
+                      )
+                  )
+                ORDER BY updated_at DESC
+                LIMIT 20
+                """,
+                (root_names, root_names),
+            )
+            running_jobs = [
+                {
+                    "id": row[0],
+                    "job_type": row[1],
+                    "status": row[2],
+                    "payload": row[3] if isinstance(row[3], dict) else {},
+                    "locked_by": row[4],
+                    "updated_at": row[5].isoformat() if hasattr(row[5], "isoformat") else row[5],
+                }
+                for row in cur.fetchall()
+            ]
+            search_where, search_params = _reprocess_search_index_scope(root_names=root_names, all_roots=all_roots)
+            cur.execute(
+                f"""
+                SELECT count(*)::integer
+                FROM search_index_records
+                WHERE {search_where}
+                """,
+                search_params,
+            )
+            search_index_records = int((cur.fetchone() or (0,))[0] or 0)
+    return {
+        "scope": {"all_roots": bool(all_roots), "root_name": root_name, "root_names": root_names},
+        "counts": {
+            "roots": len(roots),
+            "candidate_assets": candidate_assets,
+            "source_assets": source_assets,
+            "asset_chunks": asset_chunks,
+            "running_jobs": len(running_jobs),
+            "pending_jobs": pending_jobs,
+            "search_index_records": search_index_records,
+        },
+        "running_jobs": running_jobs,
+        "limit": row_limit,
+        "force": bool(force),
+    }
+
+
+def invalidate_reprocess_derived_state(
+    *,
+    root_name: str | None = None,
+    all_roots: bool = False,
+    force: bool = False,
+    limit: int = 1000,
+    actor: str = "system",
+    url: str | None = None,
+) -> dict[str, Any]:
+    row_limit = max(1, min(int(limit or 1000), 10000))
+    psycopg = _load_psycopg()
+    jobs: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            roots = _reprocess_scope_roots(cur, root_name=root_name, all_roots=all_roots)
+            root_ids = [row["id"] for row in roots]
+            root_names = [row["name"] for row in roots]
+            if not roots:
+                return _empty_reprocess_invalidation(root_name=root_name, all_roots=all_roots, limit=row_limit)
+
+            candidate_where = _reprocess_asset_candidate_where(force=force)
+            cur.execute(
+                f"""
+                SELECT a.id::text, r.name, a.path, a.file_kind
+                FROM source_assets a
+                JOIN monitored_roots r ON r.id = a.root_id
+                WHERE r.id = ANY(%s::uuid[])
+                  AND {candidate_where}
+                ORDER BY a.updated_at ASC, a.id ASC
+                LIMIT %s
+                """,
+                (root_ids, row_limit),
+            )
+            candidates = [
+                {"asset_id": row[0], "root_name": row[1], "path": row[2], "file_kind": row[3]}
+                for row in cur.fetchall()
+            ]
+            asset_ids = [row["asset_id"] for row in candidates]
+
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = 'obsolete',
+                    telemetry = jsonb_strip_nulls(
+                        COALESCE(telemetry, '{}'::jsonb) || jsonb_build_object(
+                            'obsolete_previous_status', status,
+                            'obsolete_previous_result_status', telemetry->>'result_status',
+                            'result_status', 'obsolete',
+                            'obsolete_reason', 'maintenance_reprocess_derived_state',
+                            'actor', %s
+                        )
+                    ),
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
+                  AND status IN ('pending', 'retrying', 'retrying_locked', 'retrying_vss_failed', 'failed')
+                  AND (
+                      (job_type LIKE 'corpus_%%' AND payload->>'root_name' = ANY(%s::text[]))
+                      OR (
+                          job_type = 'search_index_sync'
+                          AND (payload->>'root_name' = ANY(%s::text[]) OR COALESCE(payload->>'root_name', '') = '')
+                      )
+                  )
+                """,
+                (actor, root_names, root_names),
+            )
+            jobs_obsoleted = int(cur.rowcount or 0)
+
+            container_children_deleted = 0
+            chunks_deleted = 0
+            assets_requeued = 0
+            if asset_ids:
+                cur.execute(
+                    """
+                    UPDATE source_assets
+                    SET extraction_status = 'deleted',
+                        deleted_at = COALESCE(deleted_at, now()),
+                        metadata = COALESCE(metadata, '{}'::jsonb) || %s::jsonb,
+                        updated_at = now()
+                    WHERE root_id = ANY(%s::uuid[])
+                      AND metadata->>'container_asset_id' = ANY(%s::text[])
+                      AND deleted_at IS NULL
+                    """,
+                    (
+                        _json({"deleted_reason": "maintenance_reprocess_derived_state", "actor": actor}),
+                        root_ids,
+                        asset_ids,
+                    ),
+                )
+                container_children_deleted = int(cur.rowcount or 0)
+                cur.execute("DELETE FROM code_references WHERE source_asset_id = ANY(%s::uuid[])", (asset_ids,))
+                cur.execute("DELETE FROM code_symbols WHERE source_asset_id = ANY(%s::uuid[])", (asset_ids,))
+                cur.execute("DELETE FROM asset_chunks WHERE asset_id = ANY(%s::uuid[])", (asset_ids,))
+                chunks_deleted = int(cur.rowcount or 0)
+                metadata_reset_expr = _metadata_drop_expression(
+                    "COALESCE(metadata, '{}'::jsonb)",
+                    _REPROCESS_METADATA_DROP_KEYS,
+                )
+                cur.execute(
+                    f"""
+                    UPDATE source_assets
+                    SET extraction_status = 'queued',
+                        indexed_at = NULL,
+                        metadata = {metadata_reset_expr}
+                                   || %s::jsonb,
+                        updated_at = now()
+                    WHERE id = ANY(%s::uuid[])
+                      AND deleted_at IS NULL
+                    """,
+                    (
+                        _json(
+                            {
+                                "maintenance_reprocess": True,
+                                "maintenance_reprocess_force": bool(force),
+                                "maintenance_reprocess_actor": actor,
+                            }
+                        ),
+                        asset_ids,
+                    ),
+                )
+                assets_requeued = int(cur.rowcount or 0)
+
+            search_where, search_params = _reprocess_search_index_scope(root_names=root_names, all_roots=all_roots)
+            cur.execute(
+                f"""
+                UPDATE search_index_records
+                SET index_status = 'pending',
+                    source_hash = NULL,
+                    last_error = NULL,
+                    sync_started_at = NULL,
+                    sync_completed_at = NULL,
+                    metadata = COALESCE(metadata, '{{}}'::jsonb) || %s::jsonb,
+                    updated_at = now()
+                WHERE index_status <> 'deleted'
+                  AND {search_where}
+                """,
+                (_json({"sync_reason": "maintenance_reprocess_derived_state", "actor": actor}), *search_params),
+            )
+            search_records_marked = int(cur.rowcount or 0)
+
+            for item in candidates:
+                job_type = _corpus_extract_job_type_for_file_kind(str(item["file_kind"] or ""))
+                schedule = _job_schedule_metadata(job_type)
+                payload = {
+                    "root_name": item["root_name"],
+                    "path": item["path"],
+                    "reason": "maintenance_reprocess_derived_state",
+                }
+                queued = _enqueue_unique_capture_job_with_cursor(
+                    cur,
+                    job_type=job_type,
+                    payload=payload,
+                    job_family=schedule["job_family"],
+                    resource_class=schedule["resource_class"],
+                    priority=schedule["priority"],
+                    time_budget_seconds=schedule["time_budget_seconds"],
+                    telemetry={
+                        "stage": "queued",
+                        "root_name": item["root_name"],
+                        "path": item["path"],
+                        "reason": "maintenance_reprocess_derived_state",
+                    },
+                    audit_details={
+                        "job_type": job_type,
+                        "root_name": item["root_name"],
+                        "path": item["path"],
+                        "reason": "maintenance_reprocess_derived_state",
+                    },
+                )
+                jobs.append(
+                    {
+                        "job_id": queued["job_id"],
+                        "root_name": item["root_name"],
+                        "path": item["path"],
+                        "job_type": job_type,
+                        "deduped": queued["deduped"],
+                        "reused": queued["reused"],
+                    }
+                )
+    return {
+        "scope": {"all_roots": bool(all_roots), "root_name": root_name, "root_names": root_names},
+        "limit": row_limit,
+        "force": bool(force),
+        "jobs_obsoleted": jobs_obsoleted,
+        "assets_requeued": assets_requeued,
+        "container_children_deleted": container_children_deleted,
+        "chunks_deleted": chunks_deleted,
+        "search_records_marked": search_records_marked,
+        "jobs": jobs,
+    }
+
+
+def _empty_reprocess_invalidation(*, root_name: str | None, all_roots: bool, limit: int) -> dict[str, Any]:
+    return {
+        "scope": {"all_roots": bool(all_roots), "root_name": root_name, "root_names": []},
+        "limit": limit,
+        "force": False,
+        "jobs_obsoleted": 0,
+        "assets_requeued": 0,
+        "container_children_deleted": 0,
+        "chunks_deleted": 0,
+        "search_records_marked": 0,
+        "jobs": [],
+    }
+
+
+def _reprocess_scope_roots(cur: Any, *, root_name: str | None, all_roots: bool) -> list[dict[str, str]]:
+    if all_roots and root_name:
+        raise ValueError("use either all_roots or root_name, not both")
+    if not all_roots and not root_name:
+        raise ValueError("reprocess scope requires all_roots or root_name")
+    if all_roots:
+        cur.execute(
+            """
+            SELECT id::text, name
+            FROM monitored_roots
+            WHERE enabled
+            ORDER BY name
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id::text, name
+            FROM monitored_roots
+            WHERE enabled
+              AND name = %s
+            ORDER BY name
+            """,
+            (root_name,),
+        )
+    return [{"id": row[0], "name": row[1]} for row in cur.fetchall()]
+
+
+def _reprocess_asset_candidate_where(*, force: bool) -> str:
+    force_clause = "" if force else "AND (a.extraction_status <> 'indexed' OR NOT EXISTS (SELECT 1 FROM asset_chunks c WHERE c.asset_id = a.id))"
+    return f"""
+        a.deleted_at IS NULL
+        AND a.canonical_asset_id IS NULL
+        AND NOT (a.metadata ? 'container_asset_id')
+        AND NOT (
+            array_length(string_to_array(a.path, '/'), 1) = 2
+            AND lower(split_part(a.path, '/', 2)) IN ('message.eml', 'message.msg', 'body.html')
+        )
+        {force_clause}
+    """
+
+
+def _reprocess_search_index_scope(*, root_names: list[str], all_roots: bool) -> tuple[str, tuple[Any, ...]]:
+    if all_roots:
+        return "(owner_table IN ('episodes', 'claims') OR root_name = ANY(%s::text[]))", (root_names,)
+    return "root_name = ANY(%s::text[])", (root_names,)
+
+
+def _metadata_drop_expression(column: str, keys: tuple[str, ...]) -> str:
+    expression = column
+    for key in keys:
+        expression = f"({expression} - '{key}')"
+    return expression
+
+
 def requeue_svg_source_assets(
     *,
     root_name: str | None = None,

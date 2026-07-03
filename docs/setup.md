@@ -227,6 +227,8 @@ flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb search-index status --root projects
 flux-kb search-index sync --owner-class all --root projects --limit 100
 flux-kb search-index rebuild --owner-class all --root projects --limit 100
+flux-kb maintenance reprocess --all-roots
+flux-kb maintenance reprocess --root projects --force --confirm --clear-caches ocr,asr,vision --process --limit 1000 --max-passes 2
 flux-kb crawl worker status --family all
 flux-kb acceleration benchmark run --fixture all --files 10 --mode scan --passes 2 --label after-change --compare-label baseline
 flux-kb acceleration benchmark run --fixture image-heavy --files 20 --mode soak --workers 2 --family media
@@ -436,6 +438,15 @@ text. Use `flux-kb search-index status` to inspect coverage,
 `flux-kb search-index rebuild` when Vespa documents need rebuilding. The same
 counters appear in the dashboard Performance tab as indexed, skipped, deleted,
 failed, and stale records.
+For a broader maintenance refresh, use `flux-kb maintenance reprocess` with
+either `--all-roots` or `--root <name>`. Without `--confirm`, the command is a
+dry-run inventory only. Confirmed runs require `--force` before they reset
+healthy indexed assets, clear stale chunks/code metadata, obsolete pending
+extraction/search jobs, mark `search_index_records` pending, and enqueue fresh
+corpus plus search-index work. `--clear-caches all` clears only derived OCR,
+ASR, vision, thumbnail, parser, and embedding caches; it never clears model
+caches, temp files, or private `mail_content` sidecars. Confirmed runs refuse
+to start while scoped corpus or search-index jobs are already running.
 Qwen reranking uses explicit quantisation settings. The default
 `retrieval.reranker_quantization=awq_int4` loads
 `retrieval.reranker_awq_model`, defaulting to

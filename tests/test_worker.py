@@ -3399,6 +3399,149 @@ def test_corpus_worker_recovers_interrupted_imap_runs_on_start(monkeypatch):
     assert result["last_result"]["mail_orphan_recovery"] == {"recovered": 1}
 
 
+def test_reprocess_derived_state_blocks_confirmed_runs_when_scoped_jobs_are_running(monkeypatch, tmp_path):
+    events = []
+    cache_root = tmp_path / "cache"
+    ocr_cache = cache_root / "ocr"
+    ocr_cache.mkdir(parents=True)
+    (ocr_cache / "cached.txt").write_text("cached", encoding="utf-8")
+
+    monkeypatch.setattr(
+        database,
+        "inventory_reprocess_derived_state",
+        lambda **kwargs: events.append(("inventory", kwargs))
+        or {
+            "scope": {"all_roots": True, "root_name": None, "root_names": ["docs"]},
+            "counts": {"running_jobs": 2, "candidate_assets": 5},
+            "running_jobs": [{"id": "job-1"}, {"id": "job-2"}],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
+        "invalidate_reprocess_derived_state",
+        lambda **kwargs: events.append(("invalidate", kwargs)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service_module.acceleration,
+        "resolve_cache_layout",
+        lambda: {"root": str(cache_root), "source": "test", "directories": {"ocr": str(ocr_cache)}},
+        raising=False,
+    )
+
+    result = KnowledgeService().reprocess_derived_state(
+        all_roots=True,
+        confirm=True,
+        force=True,
+        clear_caches="ocr",
+        process=True,
+        limit=10,
+        workers=1,
+        max_passes=1,
+    )
+
+    assert result["settings_mutated"] is False
+    assert result["dry_run"] is False
+    assert result["blocked_reasons"] == ["2 scoped corpus/search-index job(s) are already running"]
+    assert [event[0] for event in events] == ["inventory"]
+    assert result["cache_actions"]["dry_run"] is True
+    assert (ocr_cache / "cached.txt").exists()
+
+
+def test_reprocess_derived_state_clears_only_derived_caches_and_runs_backfills(monkeypatch, tmp_path):
+    cache_root = tmp_path / "cache"
+    cache_dirs = {
+        name: cache_root / name
+        for name in ("models", "ocr", "asr", "vision", "thumbnails", "parser", "embeddings", "mail_content", "temp")
+    }
+    for name, path in cache_dirs.items():
+        path.mkdir(parents=True)
+        (path / f"{name}.txt").write_text(name, encoding="utf-8")
+
+    events = []
+    inventory_calls = {"count": 0}
+
+    def fake_inventory(**kwargs):
+        inventory_calls["count"] += 1
+        events.append(("inventory", kwargs))
+        return {
+            "scope": {"all_roots": True, "root_name": None, "root_names": ["docs"]},
+            "counts": {
+                "candidate_assets": 4 if inventory_calls["count"] == 1 else 0,
+                "running_jobs": 0,
+                "search_index_records": 3,
+            },
+            "running_jobs": [],
+        }
+
+    monkeypatch.setattr(database, "inventory_reprocess_derived_state", fake_inventory, raising=False)
+    monkeypatch.setattr(
+        database,
+        "invalidate_reprocess_derived_state",
+        lambda **kwargs: events.append(("invalidate", kwargs))
+        or {
+            "jobs_obsoleted": 2,
+            "assets_requeued": 4,
+            "container_children_deleted": 1,
+            "chunks_deleted": 4,
+            "search_records_marked": 3,
+            "jobs": [{"job_id": "job-1"}],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        database,
+        "enqueue_search_index_sync",
+        lambda **kwargs: events.append(("search_sync", kwargs)) or {"queued": 1, "job_id": "job-search"},
+    )
+    monkeypatch.setattr(
+        service_module.acceleration,
+        "resolve_cache_layout",
+        lambda: {"root": str(cache_root), "source": "test", "directories": {name: str(path) for name, path in cache_dirs.items()}},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        KnowledgeService,
+        "run_corpus_backfill",
+        lambda self, **kwargs: events.append(("backfill", kwargs)) or {"claimed": 0, "completed": 0},
+    )
+
+    result = KnowledgeService().reprocess_derived_state(
+        all_roots=True,
+        confirm=True,
+        force=True,
+        clear_caches="all",
+        process=True,
+        limit=7,
+        workers=2,
+        max_passes=2,
+    )
+
+    assert result["settings_mutated"] is False
+    assert result["jobs_obsoleted"] == 2
+    assert result["assets_requeued"] == 4
+    assert result["search_records_marked"] == 3
+    assert result["cache_actions"]["cleared"] == ["asr", "embeddings", "ocr", "parser", "thumbnails", "vision"]
+    assert all(not any(cache_dirs[name].iterdir()) for name in ("ocr", "asr", "vision", "thumbnails", "parser", "embeddings"))
+    assert (cache_dirs["models"] / "models.txt").exists()
+    assert (cache_dirs["mail_content"] / "mail_content.txt").exists()
+    assert (cache_dirs["temp"] / "temp.txt").exists()
+    assert [event[0] for event in events] == [
+        "inventory",
+        "invalidate",
+        "backfill",
+        "backfill",
+        "search_sync",
+        "backfill",
+        "backfill",
+        "inventory",
+    ]
+    assert events[2][1] == {"kind": "all", "limit": 7, "workers": 2}
+    assert events[3][1] == {"kind": "all", "limit": 7, "workers": 2}
+    assert events[5][1] == {"kind": "search-index", "limit": 7, "workers": 2}
+
+
 def test_corpus_worker_uses_unique_instance_lease_for_backfill_and_heartbeat(monkeypatch):
     heartbeats = []
     backfill_calls = []

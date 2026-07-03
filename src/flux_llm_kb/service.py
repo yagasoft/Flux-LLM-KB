@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -27,7 +28,7 @@ from .acceleration import (
     kind_to_job_families,
 )
 from .crawler import CorpusPolicy, _is_included, scan_path, strict_indexing_enabled
-from . import __version__, database, governance, operator_automation
+from . import __version__, acceleration, database, governance, operator_automation
 from .glob_policy import effective_glob_policy
 from .extractors import extractor_availability
 from .indexer_diagnostics import (
@@ -1715,6 +1716,120 @@ class KnowledgeService:
 
     def search_index_rebuild(self, *, root_name: str | None = None, confirmed: bool = False) -> dict[str, Any]:
         return database.mark_search_index_rebuild(root_name=root_name, confirmed=confirmed)
+
+    def reprocess_derived_state(
+        self,
+        *,
+        all_roots: bool = False,
+        root_name: str | None = None,
+        confirm: bool = False,
+        force: bool = False,
+        clear_caches: str = "all",
+        process: bool = False,
+        limit: int = 1000,
+        workers: int | None = None,
+        max_passes: int = 1,
+    ) -> dict[str, Any]:
+        if all_roots and root_name:
+            raise ValueError("use either --all-roots or --root, not both")
+        if not all_roots and not root_name:
+            raise ValueError("maintenance reprocess requires --all-roots or --root")
+        row_limit = max(1, min(int(limit or 1000), 10000))
+        pass_count = max(1, min(int(max_passes or 1), 20))
+        inventory_before = database.inventory_reprocess_derived_state(
+            all_roots=all_roots,
+            root_name=root_name,
+            force=force,
+            limit=row_limit,
+        )
+        selected_caches = _parse_reprocess_cache_selection(clear_caches)
+        dry_run = not bool(confirm)
+        blocked_reasons: list[str] = []
+        running_jobs = inventory_before.get("running_jobs") if isinstance(inventory_before.get("running_jobs"), list) else []
+        if confirm and running_jobs:
+            blocked_reasons.append(f"{len(running_jobs)} scoped corpus/search-index job(s) are already running")
+            cache_actions = _reprocess_cache_actions(selected_caches, dry_run=True)
+            return {
+                "settings_mutated": False,
+                "dry_run": False,
+                "scope": inventory_before.get("scope", {}),
+                "counts_before": inventory_before.get("counts", {}),
+                "counts_after": inventory_before.get("counts", {}),
+                "cache_actions": cache_actions,
+                "jobs_obsoleted": 0,
+                "assets_requeued": 0,
+                "search_records_marked": 0,
+                "backfill": [],
+                "verification": {"running_jobs": len(running_jobs), "status": "blocked"},
+                "blocked_reasons": blocked_reasons,
+            }
+        if dry_run:
+            cache_actions = _reprocess_cache_actions(selected_caches, dry_run=True)
+            return {
+                "settings_mutated": False,
+                "dry_run": True,
+                "scope": inventory_before.get("scope", {}),
+                "counts_before": inventory_before.get("counts", {}),
+                "counts_after": inventory_before.get("counts", {}),
+                "cache_actions": cache_actions,
+                "jobs_obsoleted": 0,
+                "assets_requeued": 0,
+                "search_records_marked": 0,
+                "backfill": [],
+                "verification": {"running_jobs": len(running_jobs), "status": "dry_run"},
+                "blocked_reasons": [],
+            }
+
+        cache_actions = _reprocess_cache_actions(selected_caches, dry_run=False)
+        invalidation = database.invalidate_reprocess_derived_state(
+            all_roots=all_roots,
+            root_name=root_name,
+            force=force,
+            limit=row_limit,
+            actor="maintenance",
+        )
+        backfill_runs: list[dict[str, Any]] = []
+        if process:
+            for pass_index in range(1, pass_count + 1):
+                corpus_result = self.run_corpus_backfill(kind="all", limit=row_limit, workers=workers)
+                backfill_runs.append(
+                    {
+                        "pass": pass_index,
+                        "corpus": corpus_result,
+                    }
+                )
+        search_sync = database.enqueue_search_index_sync(
+            owner_class="all",
+            root_name=None if all_roots else root_name,
+            limit=row_limit,
+        )
+        if process:
+            for run in backfill_runs:
+                run["search_index"] = self.run_corpus_backfill(kind="search-index", limit=row_limit, workers=workers)
+        inventory_after = database.inventory_reprocess_derived_state(
+            all_roots=all_roots,
+            root_name=root_name,
+            force=force,
+            limit=row_limit,
+        )
+        return {
+            "settings_mutated": False,
+            "dry_run": False,
+            "scope": inventory_before.get("scope", {}),
+            "counts_before": inventory_before.get("counts", {}),
+            "counts_after": inventory_after.get("counts", {}),
+            "cache_actions": cache_actions,
+            "jobs_obsoleted": int(invalidation.get("jobs_obsoleted") or 0),
+            "assets_requeued": int(invalidation.get("assets_requeued") or 0),
+            "search_records_marked": int(invalidation.get("search_records_marked") or 0),
+            "backfill": backfill_runs,
+            "verification": {
+                "status": "processed" if process else "queued",
+                "search_index_sync": search_sync,
+                "running_jobs_after": int((inventory_after.get("counts") or {}).get("running_jobs") or 0),
+            },
+            "blocked_reasons": blocked_reasons,
+        }
 
     def list_capture_review_jobs(self, *, status: str = "pending_review", limit: int = 50) -> dict[str, Any]:
         return {"status": status, "jobs": database.list_capture_review_jobs(status=status, limit=limit)}
@@ -4404,6 +4519,90 @@ def _claim_lifecycle_snapshot(claim: dict[str, Any]) -> dict[str, Any]:
         "lifecycle_state": claim.get("lifecycle_state"),
         "retention_action": claim.get("retention_action"),
     }
+
+
+_REPROCESS_DERIVED_CACHES = ("asr", "embeddings", "ocr", "parser", "thumbnails", "vision")
+_REPROCESS_PROTECTED_CACHES = {"mail_content", "models", "temp"}
+
+
+def _parse_reprocess_cache_selection(value: str | None) -> list[str]:
+    raw = str(value or "all").strip().lower()
+    if raw in {"", "all"}:
+        return list(_REPROCESS_DERIVED_CACHES)
+    if raw == "none":
+        return []
+    selected = sorted({item.strip().lower() for item in raw.split(",") if item.strip()})
+    blocked = [item for item in selected if item in _REPROCESS_PROTECTED_CACHES]
+    unknown = [item for item in selected if item not in _REPROCESS_DERIVED_CACHES and item not in _REPROCESS_PROTECTED_CACHES]
+    if blocked:
+        raise ValueError(f"protected cache directories cannot be cleared by maintenance reprocess: {', '.join(blocked)}")
+    if unknown:
+        raise ValueError(f"unsupported cache selection: {', '.join(unknown)}")
+    return selected
+
+
+def _reprocess_cache_actions(selected: list[str], *, dry_run: bool) -> dict[str, Any]:
+    layout = acceleration.resolve_cache_layout()
+    root = Path(str(layout.get("root") or "")).expanduser()
+    directories = layout.get("directories") if isinstance(layout.get("directories"), dict) else {}
+    root_resolved = root.resolve()
+    planned: list[str] = []
+    cleared: list[str] = []
+    missing: list[str] = []
+    entries_removed: dict[str, int] = {}
+    bytes_removed: dict[str, int] = {}
+    for name in sorted(selected):
+        if name in _REPROCESS_PROTECTED_CACHES:
+            raise ValueError(f"protected cache directory cannot be cleared: {name}")
+        if name not in _REPROCESS_DERIVED_CACHES:
+            raise ValueError(f"unsupported cache selection: {name}")
+        path = Path(str(directories.get(name) or root / name)).expanduser()
+        resolved = path.resolve()
+        expected = root_resolved / name
+        if resolved != expected and (resolved == root_resolved or root_resolved not in resolved.parents):
+            raise ValueError(f"refusing to clear cache path outside cache root: {path}")
+        planned.append(name)
+        if not path.exists():
+            missing.append(name)
+            entries_removed[name] = 0
+            bytes_removed[name] = 0
+            continue
+        entry_count, byte_count = _cache_tree_stats(path)
+        entries_removed[name] = entry_count
+        bytes_removed[name] = byte_count
+        if dry_run:
+            continue
+        for child in path.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        cleared.append(name)
+    return {
+        "source": layout.get("source"),
+        "root": str(root),
+        "requested": sorted(selected),
+        "planned": planned,
+        "cleared": cleared,
+        "missing": missing,
+        "entries": entries_removed,
+        "bytes": bytes_removed,
+        "dry_run": bool(dry_run),
+        "protected": sorted(_REPROCESS_PROTECTED_CACHES),
+    }
+
+
+def _cache_tree_stats(path: Path) -> tuple[int, int]:
+    count = 0
+    size = 0
+    for child in path.rglob("*"):
+        count += 1
+        try:
+            if child.is_file():
+                size += int(child.stat().st_size)
+        except OSError:
+            continue
+    return count, size
 
 
 _CAPTURE_BACKFILL_MAX_BYTES = 1024 * 1024
