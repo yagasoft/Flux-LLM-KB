@@ -165,6 +165,13 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert compose.count("FLUX_KB_GPU_SCHEDULER_MODE: postgres") >= 3
         assert compose.count("FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: \"10240\"") >= 3
         assert compose.count("FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: \"1024\"") >= 3
+        assert compose.count("FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: \"true\"") >= 5
+        assert compose.count("FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: \"10\"") >= 5
+        assert compose.count("FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: \"4\"") >= 5
+        assert compose.count("FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790") >= 5
+        assert compose.count("FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791") >= 5
+        assert compose.count("FLUX_KB_ASR_BASE_URL: http://asr:8788") >= 5
+        assert compose.count("FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434") >= 5
         assert compose.count("FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb") >= 5
         assert "FLUX_KB_OCR_ENGINE: paddleocr" in compose
         assert "FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5" in compose
@@ -189,13 +196,13 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "condition: service_healthy" in compose
         assert compose.count("FLUX_KB_ASR_PROVIDER: openai_compatible") == 3
         assert compose.count("FLUX_KB_ASR_MODEL: large-v3-turbo") == 3
-        assert compose.count("FLUX_KB_ASR_BASE_URL: http://asr:8788") == 2
+        assert compose.count("FLUX_KB_ASR_BASE_URL: http://asr:8788") >= 5
         assert "FLUX_KB_ASR_MODEL_PATH: /models/faster-whisper-large-v3-turbo" in compose
         assert compose.count("FLUX_KB_ASR_DEVICE: cuda") == 3
         assert compose.count("FLUX_KB_ASR_COMPUTE_TYPE: float16") == 3
         assert "FLUX_KB_LOCAL_INFERENCE_ENABLED: \"true\"" in compose
         assert "FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434" in compose
-        assert compose.count("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m") == 2
+        assert compose.count("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m") >= 5
         assert "FLUX_KB_VISION_ENABLED: \"true\"" in compose
         assert "FLUX_KB_VISION_MODEL: qwen3-vl:8b" in compose
         assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in compose

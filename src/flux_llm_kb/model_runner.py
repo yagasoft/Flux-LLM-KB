@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gc
 from dataclasses import dataclass
 import json
 import os
@@ -389,6 +390,8 @@ def _load_embedding_model(model: str) -> Any:
 def _embed_with_sentence_transformers(texts: list[str], *, model: str, dimensions: int) -> list[list[float]]:
     if not texts:
         return []
+    if model in _EMBEDDING_MODELS:
+        _record_model_residency_state("embedding", model, resident=True)
     profile = task_profile("embedding", model_id=model, component=_scheduler_component(), exclusive=False, share_group="embedding")
     with get_gpu_scheduler().acquire(profile):
         encoder = _load_embedding_model(model)
@@ -560,6 +563,8 @@ def _rerank_with_transformers(
     resolved_profile = resolve_reranker_quantization(quantization, model=model, awq_model=awq_model)
     lease_profile = task_profile("rerank", model_id=resolved_profile.load_model, component=_scheduler_component())
     cache_key = (resolved_profile.model, resolved_profile.quantization, resolved_profile.load_model)
+    if cache_key in _RERANKER_MODELS:
+        _record_model_residency_state("rerank", resolved_profile.load_model, resident=True)
     with get_gpu_scheduler().acquire(lease_profile):
         reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
         with _named_lock(_RERANKER_PREDICT_LOCKS, cache_key):
@@ -685,6 +690,8 @@ def _ocr_image_with_paddle(path: str, *, model: str) -> str:
     if _paddle_runner_base_url():
         payload = _proxy_paddle_request("/v1/ocr/image", {"path": str(path), "model": model})
         return str(payload.get("text") or "")
+    if model in _PADDLE_OCR_MODELS:
+        _record_model_residency_state("ocr_image", model, resident=True)
     profile = task_profile("ocr_image", model_id=model, component=_scheduler_component())
     with get_gpu_scheduler().acquire(profile):
         ocr = _load_paddleocr(model)
@@ -700,6 +707,8 @@ def _ocr_document_with_paddle(path: str, *, model: str) -> str:
         payload = _proxy_paddle_request("/v1/ocr/document", {"path": str(path), "model": model})
         return str(payload.get("text") or "")
     if model.startswith("PaddleOCR-VL"):
+        if model in _PADDLE_OCR_VL_MODELS:
+            _record_model_residency_state("ocr_document", model, resident=True)
         profile = task_profile("ocr_document", model_id=model, component=_scheduler_component())
         with get_gpu_scheduler().acquire(profile):
             pipeline = _load_paddleocr_vl(model)
@@ -858,6 +867,16 @@ def create_app():
     def gpu_status() -> dict[str, Any]:
         return get_gpu_scheduler().status()
 
+    @app.post("/v1/gpu/unload")
+    def gpu_unload(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _unload_resident_model(
+                str(payload.get("task_type") or ""),
+                str(payload.get("model_id") or ""),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/v1/embeddings")
     def embeddings(payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -981,6 +1000,10 @@ def _named_lock(pool: dict[Any, threading.Lock], key: Any) -> threading.Lock:
 
 
 def _record_resident_model(task_type: str, model_id: str, _model: Any) -> None:
+    _record_model_residency_state(task_type, model_id, resident=True)
+
+
+def _record_model_residency_state(task_type: str, model_id: str, *, resident: bool) -> None:
     try:
         profile = task_profile(task_type, model_id=model_id, component=_scheduler_component())
         get_gpu_scheduler().record_model_residency(
@@ -988,10 +1011,73 @@ def _record_resident_model(task_type: str, model_id: str, _model: Any) -> None:
                 model_id=model_id,
                 task_type=task_type,
                 estimated_vram_mb=profile.estimated_vram_mb,
-                resident=True,
+                resident=resident,
                 last_used_at=time.time(),
+                metadata={"component": _scheduler_component()},
             )
         )
+    except Exception:
+        pass
+
+
+def _unload_resident_model(task_type: str, model_id: str) -> dict[str, Any]:
+    task = str(task_type or "").strip()
+    model = str(model_id or "").strip()
+    if not task:
+        raise ValueError("task_type is required")
+    if not model:
+        raise ValueError("model_id is required")
+    removed: list[Any] = []
+    if task == "embedding":
+        lock = _named_lock(_EMBEDDING_MODEL_LOCKS, model)
+        with lock:
+            if model in _EMBEDDING_MODELS:
+                removed.append(_EMBEDDING_MODELS.pop(model))
+    elif task == "rerank":
+        keys = [key for key in list(_RERANKER_MODELS) if key[2] == model]
+        for key in keys:
+            lock = _named_lock(_RERANKER_MODEL_LOCKS, key)
+            with lock:
+                if key in _RERANKER_MODELS:
+                    removed.append(_RERANKER_MODELS.pop(key))
+    elif task == "ocr_image":
+        lock = _named_lock(_PADDLE_OCR_MODEL_LOCKS, model)
+        with lock:
+            if model in _PADDLE_OCR_MODELS:
+                removed.append(_PADDLE_OCR_MODELS.pop(model))
+            _PADDLE_OCR_FACTORY_IDS.pop(model, None)
+    elif task == "ocr_document":
+        lock = _named_lock(_PADDLE_OCR_VL_MODEL_LOCKS, model)
+        with lock:
+            if model in _PADDLE_OCR_VL_MODELS:
+                removed.append(_PADDLE_OCR_VL_MODELS.pop(model))
+            _PADDLE_OCR_VL_FACTORY_IDS.pop(model, None)
+    else:
+        raise ValueError(f"unsupported GPU unload task_type: {task}")
+    unloaded = bool(removed)
+    removed.clear()
+    _record_model_residency_state(task, model, resident=False)
+    _release_gpu_memory()
+    return {"ok": True, "task_type": task, "model_id": model, "unloaded": unloaded, "resident": False}
+
+
+def _release_gpu_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    try:
+        import paddle
+
+        empty_cache = getattr(getattr(paddle, "device", None), "cuda", None)
+        if empty_cache is not None and hasattr(empty_cache, "empty_cache"):
+            empty_cache.empty_cache()
     except Exception:
         pass
 

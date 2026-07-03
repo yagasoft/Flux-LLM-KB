@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import os
 import threading
 import time
 from typing import Any, Iterable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 
@@ -37,6 +41,13 @@ class GpuSchedulerConfig:
     lease_ttl_seconds: float = 120.0
     heartbeat_interval_seconds: float = 10.0
     stale_after_seconds: float = 180.0
+    eviction_enabled: bool = True
+    eviction_request_timeout_seconds: float = 10.0
+    eviction_max_models: int = 4
+    model_runner_base_url: str = ""
+    paddle_runner_base_url: str = ""
+    asr_base_url: str = ""
+    ollama_base_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,6 +81,16 @@ class GpuModelResidency:
 
 
 @dataclass(frozen=True)
+class GpuEvictionCandidate:
+    task_type: str
+    model_id: str
+    estimated_vram_mb: int
+    component: str
+    last_used_at: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class GpuAdmissionDecision:
     granted: bool
     rejected: bool
@@ -78,6 +99,9 @@ class GpuAdmissionDecision:
     resident_vram_mb: int
     available_vram_mb: int
     recovered_lease_ids: list[str] = field(default_factory=list)
+    incremental_vram_mb: int = 0
+    resident_hit: bool = False
+    eviction_candidates: list[GpuEvictionCandidate] = field(default_factory=list)
 
 
 class GpuSchedulerError(RuntimeError):
@@ -146,6 +170,7 @@ def plan_gpu_admission(
     active_leases: Iterable[GpuLeaseRecord],
     config: GpuSchedulerConfig,
     resident_models: Iterable[GpuModelResidency] | None = None,
+    waiting_leases: Iterable[GpuLeaseRecord] | None = None,
     live_free_vram_mb: int | None = None,
     now: float | None = None,
 ) -> GpuAdmissionDecision:
@@ -160,10 +185,17 @@ def plan_gpu_admission(
             continue
         active.append(lease)
 
-    residents = [
+    resident_items = [
         resident
         for resident in resident_models or ()
-        if resident.resident and resident.model_id and resident.model_id != profile.model_id
+        if resident.resident and resident.model_id
+    ]
+    requested_key = (profile.task_type, profile.model_id)
+    resident_hit = any((resident.task_type, resident.model_id) == requested_key for resident in resident_items)
+    residents = [
+        resident
+        for resident in resident_items
+        if (resident.task_type, resident.model_id) != requested_key
     ]
     resident_vram = sum(max(0, int(resident.estimated_vram_mb or 0)) for resident in residents)
     active_vram = sum(max(0, int(lease.estimated_vram_mb or 0)) for lease in active)
@@ -173,9 +205,22 @@ def plan_gpu_admission(
     estimated_resident_vram = 0 if live_free_vram_mb is not None else resident_vram
     estimated_active_vram = 0 if live_free_vram_mb is not None else active_vram
     effective_available = max(0, available_vram - estimated_resident_vram)
-    requested_vram = max(0, int(profile.estimated_vram_mb or 0))
+    requested_vram = 0 if resident_hit else max(0, int(profile.estimated_vram_mb or 0))
 
     if requested_vram > effective_available:
+        eviction_candidates = (
+            select_gpu_eviction_candidates(
+                profile,
+                resident_models=resident_items,
+                active_leases=active,
+                waiting_leases=waiting_leases or (),
+                required_vram_mb=requested_vram,
+                available_vram_mb=effective_available,
+                max_candidates=config.eviction_max_models if config.eviction_enabled else 0,
+            )
+            if config.eviction_enabled
+            else []
+        )
         return GpuAdmissionDecision(
             granted=False,
             rejected=True,
@@ -184,6 +229,9 @@ def plan_gpu_admission(
             resident_vram_mb=resident_vram,
             available_vram_mb=effective_available,
             recovered_lease_ids=recovered,
+            incremental_vram_mb=requested_vram,
+            resident_hit=resident_hit,
+            eviction_candidates=eviction_candidates,
         )
     if any(lease.exclusive for lease in active) or (profile.exclusive and active):
         return GpuAdmissionDecision(
@@ -194,6 +242,8 @@ def plan_gpu_admission(
             resident_vram_mb=resident_vram,
             available_vram_mb=effective_available,
             recovered_lease_ids=recovered,
+            incremental_vram_mb=requested_vram,
+            resident_hit=resident_hit,
         )
     if active and not profile.exclusive:
         active_groups = {lease.share_group for lease in active if lease.share_group}
@@ -206,6 +256,8 @@ def plan_gpu_admission(
                 resident_vram_mb=resident_vram,
                 available_vram_mb=effective_available,
                 recovered_lease_ids=recovered,
+                incremental_vram_mb=requested_vram,
+                resident_hit=resident_hit,
             )
     if estimated_active_vram + requested_vram > effective_available:
         return GpuAdmissionDecision(
@@ -216,6 +268,8 @@ def plan_gpu_admission(
             resident_vram_mb=resident_vram,
             available_vram_mb=effective_available,
             recovered_lease_ids=recovered,
+            incremental_vram_mb=requested_vram,
+            resident_hit=resident_hit,
         )
     return GpuAdmissionDecision(
         granted=True,
@@ -225,7 +279,64 @@ def plan_gpu_admission(
         resident_vram_mb=resident_vram,
         available_vram_mb=effective_available,
         recovered_lease_ids=recovered,
+        incremental_vram_mb=requested_vram,
+        resident_hit=resident_hit,
     )
+
+
+def select_gpu_eviction_candidates(
+    profile: GpuTaskProfile,
+    *,
+    resident_models: Iterable[GpuModelResidency],
+    active_leases: Iterable[GpuLeaseRecord],
+    waiting_leases: Iterable[GpuLeaseRecord] | None = None,
+    required_vram_mb: int,
+    available_vram_mb: int,
+    max_candidates: int | None = None,
+) -> list[GpuEvictionCandidate]:
+    deficit = max(0, int(required_vram_mb or 0) - int(available_vram_mb or 0))
+    if deficit <= 0:
+        return []
+    if max_candidates is not None and int(max_candidates) <= 0:
+        return []
+    protected: set[tuple[str, str]] = set()
+    if profile.model_id:
+        protected.add((profile.task_type, profile.model_id))
+    for lease in list(active_leases or ()) + list(waiting_leases or ()):
+        if lease.status not in {"running", "waiting"} or not lease.model_id:
+            continue
+        protected.add((lease.task_type, lease.model_id))
+
+    idle: list[GpuEvictionCandidate] = []
+    for residency in resident_models:
+        if not residency.resident or not residency.model_id:
+            continue
+        key = (residency.task_type, residency.model_id)
+        if key in protected:
+            continue
+        idle.append(
+            GpuEvictionCandidate(
+                task_type=residency.task_type,
+                model_id=residency.model_id,
+                estimated_vram_mb=max(0, int(residency.estimated_vram_mb or 0)),
+                component=_resident_component(residency),
+                last_used_at=residency.last_used_at,
+                metadata=dict(residency.metadata or {}),
+            )
+        )
+
+    idle.sort(key=lambda item: (float(item.last_used_at or 0.0), item.task_type, item.model_id))
+    selected: list[GpuEvictionCandidate] = []
+    freed = 0
+    limit = int(max_candidates) if max_candidates is not None else None
+    for candidate in idle:
+        if limit is not None and len(selected) >= limit:
+            break
+        selected.append(candidate)
+        freed += candidate.estimated_vram_mb
+        if freed >= deficit:
+            break
+    return selected
 
 
 class InProcessGpuScheduler(BaseGpuScheduler):
@@ -334,6 +445,7 @@ class InProcessGpuScheduler(BaseGpuScheduler):
                 "live_gpu_memory": live_gpu_memory(),
                 "timeouts": counts.get("timed_out", 0),
                 "rejections": counts.get("rejected", 0),
+                "evictions": _empty_eviction_status(),
             }
 
     def _make_record(
@@ -422,6 +534,12 @@ class PostgresGpuScheduler(BaseGpuScheduler):
             decision_record = self._try_grant(profile, lease_id)
             if isinstance(decision_record, GpuLeaseRecord):
                 return GpuLease(self, decision_record)
+            if isinstance(decision_record, GpuAdmissionDecision):
+                last_reason = decision_record.reason
+                if self._attempt_evictions(profile, lease_id, decision_record.eviction_candidates):
+                    continue
+                self._mark_terminal(lease_id, "rejected")
+                raise GpuLeaseRejected("vram_budget_exceeded")
             if decision_record == "rejected":
                 raise GpuLeaseRejected("vram_budget_exceeded")
             if isinstance(decision_record, str):
@@ -499,6 +617,16 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                     """,
                     (),
                 )
+                eviction_rows = _fetch_dicts(
+                    conn,
+                    """
+                    SELECT *
+                      FROM gpu_evictions
+                     WHERE created_at >= now() - interval '6 hours'
+                     ORDER BY created_at ASC
+                    """,
+                    (),
+                )
             records = [_record_from_row(row) for row in rows]
             counts = _status_counts(records)
             return {
@@ -513,6 +641,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 "live_gpu_memory": live_gpu_memory(),
                 "timeouts": counts.get("timed_out", 0),
                 "rejections": counts.get("rejected", 0),
+                "evictions": _eviction_status(eviction_rows),
             }
         except Exception as exc:  # pragma: no cover - deployment-dependent
             return {
@@ -528,6 +657,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 "live_gpu_memory": live_gpu_memory(),
                 "timeouts": 0,
                 "rejections": 0,
+                "evictions": _empty_eviction_status(),
             }
 
     def _insert_waiting(self, profile: GpuTaskProfile, lease_id: str) -> None:
@@ -554,7 +684,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
             ),
         )
 
-    def _try_grant(self, profile: GpuTaskProfile, lease_id: str) -> GpuLeaseRecord | str:
+    def _try_grant(self, profile: GpuTaskProfile, lease_id: str) -> GpuLeaseRecord | GpuAdmissionDecision | str:
         self._recover_stale()
         with self._connection() as conn:
             with conn.transaction():
@@ -591,6 +721,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 decision = plan_gpu_admission(
                     profile,
                     active_leases=active,
+                    waiting_leases=waiting,
                     resident_models=residents,
                     config=self.config,
                     live_free_vram_mb=_live_free_vram_mb(),
@@ -606,6 +737,8 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                         """,
                         (recovered_id,),
                     )
+                if decision.rejected and decision.eviction_candidates:
+                    return decision
                 if decision.rejected:
                     _execute_cursor(
                         conn,
@@ -630,6 +763,91 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 )
                 granted = _fetch_dicts(conn, "SELECT * FROM gpu_leases WHERE id = %s", (lease_id,))
                 return _record_from_row(granted[0])
+
+    def _attempt_evictions(
+        self,
+        profile: GpuTaskProfile,
+        lease_id: str,
+        candidates: Iterable[GpuEvictionCandidate],
+    ) -> bool:
+        if not self.config.eviction_enabled:
+            return False
+        attempted = False
+        for candidate in list(candidates)[: max(0, int(self.config.eviction_max_models or 0))]:
+            attempted = True
+            try:
+                payload = self._evict_candidate(candidate)
+            except Exception as exc:  # pragma: no cover - network/deployment-specific
+                self._record_eviction(lease_id, candidate, status="failed", error=str(exc), metadata={"request_task_type": profile.task_type})
+                continue
+            self._record_eviction(lease_id, candidate, status="succeeded", metadata={"request_task_type": profile.task_type, "response": payload})
+            self._mark_residency_evicted(candidate)
+            return True
+        return False if attempted else False
+
+    def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, Any]:
+        component = candidate.component or _component_for_task_type(candidate.task_type)
+        if component == "ollama":
+            return self._evict_ollama(candidate)
+        base_url = {
+            "model-runner": self.config.model_runner_base_url,
+            "paddle-runner": self.config.paddle_runner_base_url,
+            "asr": self.config.asr_base_url,
+        }.get(component, "")
+        if not base_url:
+            raise GpuSchedulerError(f"GPU eviction URL is not configured for {component or candidate.task_type}")
+        payload = {"task_type": candidate.task_type, "model_id": candidate.model_id}
+        return _post_json(base_url, "/v1/gpu/unload", payload, timeout_seconds=self.config.eviction_request_timeout_seconds)
+
+    def _evict_ollama(self, candidate: GpuEvictionCandidate) -> dict[str, Any]:
+        base_url = self.config.ollama_base_url
+        if not base_url:
+            raise GpuSchedulerError("Ollama eviction URL is not configured")
+        payload = {"model": candidate.model_id, "prompt": "", "keep_alive": 0, "stream": False}
+        return _post_json(base_url, "/api/generate", payload, timeout_seconds=self.config.eviction_request_timeout_seconds)
+
+    def _record_eviction(
+        self,
+        lease_id: str,
+        candidate: GpuEvictionCandidate,
+        *,
+        status: str,
+        error: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        Jsonb = _jsonb_adapter()
+        self._execute(
+            """
+            INSERT INTO gpu_evictions (
+                lease_id, task_type, model_id, component, status, estimated_freed_vram_mb,
+                error, created_at, completed_at, metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, now(), now(), %s)
+            """,
+            (
+                lease_id,
+                candidate.task_type,
+                candidate.model_id,
+                candidate.component,
+                status,
+                int(candidate.estimated_vram_mb or 0),
+                error[:1000],
+                Jsonb(dict(metadata or {})),
+            ),
+        )
+
+    def _mark_residency_evicted(self, candidate: GpuEvictionCandidate) -> None:
+        self._execute(
+            """
+            UPDATE gpu_model_residency
+               SET resident = false,
+                   last_used_at = now(),
+                   metadata = metadata || '{"evicted_by_scheduler": true}'::jsonb
+             WHERE task_type = %s
+               AND model_id = %s
+            """,
+            (candidate.task_type, candidate.model_id),
+        )
 
     def _recover_stale(self) -> None:
         self._execute(
@@ -709,6 +927,13 @@ def scheduler_config_from_settings() -> GpuSchedulerConfig:
         lease_ttl_seconds=float(values["gpu.scheduler.lease_ttl_seconds"] or 120),
         heartbeat_interval_seconds=float(values["gpu.scheduler.heartbeat_interval_seconds"] or 10),
         stale_after_seconds=float(values["gpu.scheduler.stale_after_seconds"] or 180),
+        eviction_enabled=bool(values["gpu.scheduler.eviction_enabled"]),
+        eviction_request_timeout_seconds=float(values["gpu.scheduler.eviction_request_timeout_seconds"] or 10),
+        eviction_max_models=int(values["gpu.scheduler.eviction_max_models"] or 4),
+        model_runner_base_url=str(values.get("model_runner.base_url") or os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL") or ""),
+        paddle_runner_base_url=str(values.get("model_runner.paddle_runner_base_url") or os.environ.get("FLUX_KB_PADDLE_RUNNER_BASE_URL") or ""),
+        asr_base_url=str(values.get("acceleration.asr.base_url") or os.environ.get("FLUX_KB_ASR_BASE_URL") or ""),
+        ollama_base_url=str(values.get("acceleration.local_inference.base_url") or os.environ.get("FLUX_KB_LOCAL_INFERENCE_BASE_URL") or ""),
     )
 
 
@@ -813,12 +1038,19 @@ def _scheduler_setting_values() -> dict[str, Any]:
         "gpu.scheduler.lease_ttl_seconds": 120,
         "gpu.scheduler.heartbeat_interval_seconds": 10,
         "gpu.scheduler.stale_after_seconds": 180,
+        "gpu.scheduler.eviction_enabled": True,
+        "gpu.scheduler.eviction_request_timeout_seconds": 10,
+        "gpu.scheduler.eviction_max_models": 4,
         "gpu.scheduler.embedding_vram_mb": 2_500,
         "gpu.scheduler.rerank_vram_mb": 7_000,
         "gpu.scheduler.ocr_image_vram_mb": 2_000,
         "gpu.scheduler.ocr_document_vram_mb": 8_000,
         "gpu.scheduler.asr_vram_mb": 6_000,
         "gpu.scheduler.ollama_vision_vram_mb": 9_000,
+        "model_runner.base_url": os.environ.get("FLUX_KB_MODEL_RUNNER_BASE_URL", ""),
+        "model_runner.paddle_runner_base_url": os.environ.get("FLUX_KB_PADDLE_RUNNER_BASE_URL", ""),
+        "acceleration.asr.base_url": os.environ.get("FLUX_KB_ASR_BASE_URL", ""),
+        "acceleration.local_inference.base_url": os.environ.get("FLUX_KB_LOCAL_INFERENCE_BASE_URL", ""),
     }
     values = dict(keys)
     try:
@@ -881,6 +1113,9 @@ def _budget_payload(config: GpuSchedulerConfig) -> dict[str, Any]:
         "lease_ttl_seconds": config.lease_ttl_seconds,
         "heartbeat_interval_seconds": config.heartbeat_interval_seconds,
         "stale_after_seconds": config.stale_after_seconds,
+        "eviction_enabled": config.eviction_enabled,
+        "eviction_request_timeout_seconds": config.eviction_request_timeout_seconds,
+        "eviction_max_models": config.eviction_max_models,
     }
 
 
@@ -912,7 +1147,102 @@ def _residency_payload(residency: GpuModelResidency) -> dict[str, Any]:
         "estimated_vram_mb": residency.estimated_vram_mb,
         "resident": residency.resident,
         "last_used_at": residency.last_used_at,
+        "component": _resident_component(residency),
         "metadata": dict(residency.metadata or {}),
+    }
+
+
+def _resident_component(residency: GpuModelResidency) -> str:
+    metadata = dict(residency.metadata or {})
+    component = str(metadata.get("component") or metadata.get("owner") or "").strip()
+    return component or _component_for_task_type(residency.task_type)
+
+
+def _component_for_task_type(task_type: str) -> str:
+    if task_type in {"embedding", "rerank"}:
+        return "model-runner"
+    if task_type in {"ocr_image", "ocr_document"}:
+        return "paddle-runner"
+    if task_type == "asr":
+        return "asr"
+    if task_type == "ollama_vision":
+        return "ollama"
+    return ""
+
+
+def _post_json(base_url: str, path: str, payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/")),
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=max(0.1, float(timeout_seconds))) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:  # pragma: no cover - deployment-dependent
+        raw_error = exc.read().decode("utf-8", errors="replace")
+        raise GpuSchedulerError(f"GPU eviction endpoint returned HTTP {exc.code}: {raw_error[:300]}") from exc
+    except URLError as exc:  # pragma: no cover - deployment-dependent
+        raise GpuSchedulerError(str(exc)) from exc
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError as exc:
+        raise GpuSchedulerError("GPU eviction endpoint returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise GpuSchedulerError("GPU eviction endpoint returned a non-object payload")
+    if parsed.get("ok") is False:
+        raise GpuSchedulerError(str(parsed.get("message") or "GPU eviction endpoint rejected unload"))
+    return parsed
+
+
+def _empty_eviction_status() -> dict[str, Any]:
+    return {
+        "attempts": 0,
+        "successes": 0,
+        "failures": 0,
+        "estimated_freed_vram_mb": 0,
+        "last_errors": [],
+        "recent": [],
+    }
+
+
+def _eviction_status(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    items = [dict(row) for row in rows]
+    successes = [item for item in items if str(item.get("status") or "") == "succeeded"]
+    failures = [item for item in items if str(item.get("status") or "") == "failed"]
+    return {
+        "attempts": len(items),
+        "successes": len(successes),
+        "failures": len(failures),
+        "estimated_freed_vram_mb": sum(int(item.get("estimated_freed_vram_mb") or 0) for item in successes),
+        "last_errors": [
+            {
+                "task_type": str(item.get("task_type") or ""),
+                "model_id": str(item.get("model_id") or ""),
+                "component": str(item.get("component") or ""),
+                "error": str(item.get("error") or ""),
+                "created_at": _epoch_or_none(item.get("created_at")),
+            }
+            for item in failures[-5:]
+        ],
+        "recent": [_eviction_payload(item) for item in items[-20:]],
+    }
+
+
+def _eviction_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "lease_id": str(row.get("lease_id") or ""),
+        "task_type": str(row.get("task_type") or ""),
+        "model_id": str(row.get("model_id") or ""),
+        "component": str(row.get("component") or ""),
+        "status": str(row.get("status") or ""),
+        "estimated_freed_vram_mb": int(row.get("estimated_freed_vram_mb") or 0),
+        "error": str(row.get("error") or ""),
+        "created_at": _epoch_or_none(row.get("created_at")),
+        "completed_at": _epoch_or_none(row.get("completed_at")),
+        "metadata": dict(row.get("metadata") or {}),
     }
 
 

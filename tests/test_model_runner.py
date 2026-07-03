@@ -675,6 +675,49 @@ def test_embedding_encode_is_serialised_inside_model_runner(monkeypatch):
     assert encoder.max_active == 1
 
 
+def test_cached_embedding_refreshes_residency_before_requesting_lease(monkeypatch):
+    events: list[tuple[str, object]] = []
+
+    class FakeVectors:
+        def tolist(self):
+            return [[1.0, 2.0]]
+
+    class FakeEncoder:
+        def encode(self, texts, **_kwargs):
+            assert texts == ["cached"]
+            events.append(("encode", len(texts)))
+            return FakeVectors()
+
+    class FakeLease:
+        def __enter__(self):
+            events.append(("lease-enter", None))
+            return self
+
+        def __exit__(self, *_args):
+            events.append(("lease-exit", None))
+            return False
+
+    class FakeScheduler:
+        def record_model_residency(self, residency):
+            events.append(("resident", (residency.task_type, residency.model_id, residency.resident)))
+
+        def acquire(self, profile):
+            events.append(("acquire", profile.model_id))
+            return FakeLease()
+
+    model_runner._EMBEDDING_MODELS.clear()
+    model_runner._EMBEDDING_MODELS["Snowflake/cached"] = FakeEncoder()
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+
+    vectors = model_runner._embed_with_sentence_transformers(["cached"], model="Snowflake/cached", dimensions=2)
+
+    assert vectors == [[1.0, 2.0]]
+    assert events[:2] == [
+        ("resident", ("embedding", "Snowflake/cached", True)),
+        ("acquire", "Snowflake/cached"),
+    ]
+
+
 def test_model_runner_busy_response_is_structured_and_retryable(monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -691,3 +734,93 @@ def test_model_runner_busy_response_is_structured_and_retryable(monkeypatch):
     assert response.json()["detail"]["code"] == "gpu.scheduler_busy"
     assert response.json()["detail"]["retryable"] is True
     assert response.json()["detail"]["retry_after_seconds"] == 3.0
+
+
+def test_gpu_unload_endpoint_removes_exact_embedding_model_and_preserves_unrelated(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    records: list[object] = []
+
+    class FakeScheduler:
+        def record_model_residency(self, residency):
+            records.append(residency)
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    model_runner._EMBEDDING_MODELS.clear()
+    model_runner._EMBEDDING_MODELS["Snowflake/remove"] = object()
+    model_runner._EMBEDDING_MODELS["Snowflake/keep"] = object()
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+
+    response = TestClient(model_runner.create_app()).post(
+        "/v1/gpu/unload",
+        json={"task_type": "embedding", "model_id": "Snowflake/remove"},
+    )
+    repeat = TestClient(model_runner.create_app()).post(
+        "/v1/gpu/unload",
+        json={"task_type": "embedding", "model_id": "Snowflake/remove"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["unloaded"] is True
+    assert repeat.status_code == 200
+    assert repeat.json()["unloaded"] is False
+    assert "Snowflake/remove" not in model_runner._EMBEDDING_MODELS
+    assert "Snowflake/keep" in model_runner._EMBEDDING_MODELS
+    assert records[-1].resident is False
+    assert records[-1].task_type == "embedding"
+    assert records[-1].model_id == "Snowflake/remove"
+
+
+def test_gpu_unload_endpoint_removes_exact_rerank_and_ocr_models(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    records: list[object] = []
+
+    class FakeScheduler:
+        def record_model_residency(self, residency):
+            records.append(residency)
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    model_runner._RERANKER_MODELS.clear()
+    model_runner._PADDLE_OCR_MODELS.clear()
+    model_runner._PADDLE_OCR_VL_MODELS.clear()
+    model_runner._PADDLE_OCR_FACTORY_IDS.clear()
+    model_runner._PADDLE_OCR_VL_FACTORY_IDS.clear()
+    model_runner._RERANKER_MODELS[("Qwen/Qwen3-Reranker-4B", "awq_int4", "drawais/remove")] = object()
+    model_runner._RERANKER_MODELS[("Qwen/Qwen3-Reranker-4B", "awq_int4", "drawais/keep")] = object()
+    model_runner._PADDLE_OCR_MODELS["PP-OCRv5"] = object()
+    model_runner._PADDLE_OCR_MODELS["PP-OCRv4"] = object()
+    model_runner._PADDLE_OCR_FACTORY_IDS["PP-OCRv5"] = 1
+    model_runner._PADDLE_OCR_FACTORY_IDS["PP-OCRv4"] = 2
+    model_runner._PADDLE_OCR_VL_MODELS["PaddleOCR-VL"] = object()
+    model_runner._PADDLE_OCR_VL_MODELS["PaddleOCR-VL-keep"] = object()
+    model_runner._PADDLE_OCR_VL_FACTORY_IDS["PaddleOCR-VL"] = 3
+    model_runner._PADDLE_OCR_VL_FACTORY_IDS["PaddleOCR-VL-keep"] = 4
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+
+    client = TestClient(model_runner.create_app())
+    rerank_response = client.post("/v1/gpu/unload", json={"task_type": "rerank", "model_id": "drawais/remove"})
+    ocr_response = client.post("/v1/gpu/unload", json={"task_type": "ocr_image", "model_id": "PP-OCRv5"})
+    vl_response = client.post("/v1/gpu/unload", json={"task_type": "ocr_document", "model_id": "PaddleOCR-VL"})
+
+    assert rerank_response.status_code == 200
+    assert ocr_response.status_code == 200
+    assert vl_response.status_code == 200
+    assert rerank_response.json()["unloaded"] is True
+    assert ocr_response.json()["unloaded"] is True
+    assert vl_response.json()["unloaded"] is True
+    assert ("Qwen/Qwen3-Reranker-4B", "awq_int4", "drawais/remove") not in model_runner._RERANKER_MODELS
+    assert ("Qwen/Qwen3-Reranker-4B", "awq_int4", "drawais/keep") in model_runner._RERANKER_MODELS
+    assert "PP-OCRv5" not in model_runner._PADDLE_OCR_MODELS
+    assert "PP-OCRv4" in model_runner._PADDLE_OCR_MODELS
+    assert "PaddleOCR-VL" not in model_runner._PADDLE_OCR_VL_MODELS
+    assert "PaddleOCR-VL-keep" in model_runner._PADDLE_OCR_VL_MODELS
+    assert [(record.task_type, record.model_id, record.resident) for record in records[-3:]] == [
+        ("rerank", "drawais/remove", False),
+        ("ocr_image", "PP-OCRv5", False),
+        ("ocr_document", "PaddleOCR-VL", False),
+    ]

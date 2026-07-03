@@ -5790,13 +5790,26 @@ def _vision_with_ollama_compatible(
             method="POST",
         )
         request_attempted = True
-        from .gpu_scheduler import GpuLeaseTimeout, get_gpu_scheduler, task_profile
+        from .gpu_scheduler import GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
 
         profile = task_profile("ollama_vision", model_id=model, component="worker")
-        with get_gpu_scheduler().acquire(profile):
+        scheduler = get_gpu_scheduler()
+        with scheduler.acquire(profile):
             response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
             raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
         decoded = json.loads(raw or "{}")
+        try:
+            scheduler.record_model_residency(
+                GpuModelResidency(
+                    model_id=model,
+                    task_type="ollama_vision",
+                    estimated_vram_mb=profile.estimated_vram_mb,
+                    resident=True,
+                    metadata={"component": "ollama", "keep_alive": keep_alive},
+                )
+            )
+        except Exception:
+            pass
         text, response_field = _vision_response_text(decoded)
         redacted, _ = redact_text(text)
         clean = _clean_vision_caption_text(redacted)

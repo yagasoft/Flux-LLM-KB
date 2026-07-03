@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import gc
 import importlib
 import json
 import os
@@ -14,7 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
-from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, get_gpu_scheduler, task_profile
+from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
 
 
 ASR_MODEL_ALIASES = {
@@ -92,7 +93,16 @@ class AsrRuntime:
                 kwargs["compute_type"] = self.config.compute_type
             self._model = faster_whisper.WhisperModel(str(self.config.model_path), **kwargs)
             self.loaded = True
+            _record_asr_residency(get_gpu_scheduler(), self.config, resident=True)
             return self._model
+
+    def unload_model(self) -> bool:
+        with self._model_lock:
+            unloaded = self._model is not None
+            self._model = None
+            self.loaded = False
+        _release_gpu_memory()
+        return unloaded
 
     def transcribe(self, audio_path: Path) -> dict[str, Any]:
         model = self._load_model()
@@ -133,6 +143,18 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             **runtime_health,
             "gpu_scheduler": scheduler.status() if hasattr(scheduler, "status") else {"mode": "unknown"},
         }
+
+    @app.post("/v1/gpu/unload")
+    def gpu_unload(payload: dict[str, Any]) -> dict[str, Any]:
+        task_type = str(payload.get("task_type") or "")
+        model_id = str(payload.get("model_id") or "")
+        if task_type != "asr":
+            raise HTTPException(status_code=400, detail=f"unsupported GPU unload task_type: {task_type}")
+        if model_id and model_id not in {service_config.model, resolve_model_alias(service_config.model), str(service_config.model_path)}:
+            raise HTTPException(status_code=400, detail=f"model is not served: {model_id}")
+        unloaded = bool(service_runtime.unload_model()) if hasattr(service_runtime, "unload_model") else False
+        _record_asr_residency(scheduler, service_config, resident=False)
+        return {"ok": True, "task_type": "asr", "model_id": service_config.model, "unloaded": unloaded, "resident": False}
 
     @app.post("/v1/audio/transcriptions")
     async def transcriptions(
@@ -177,6 +199,35 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             temp_path.unlink(missing_ok=True)
 
     return app
+
+
+def _record_asr_residency(scheduler: Any, config: AsrServiceConfig, *, resident: bool) -> None:
+    try:
+        profile = task_profile("asr", model_id=config.model, component="asr")
+        scheduler.record_model_residency(
+            GpuModelResidency(
+                model_id=config.model,
+                task_type="asr",
+                estimated_vram_mb=profile.estimated_vram_mb,
+                resident=resident,
+                metadata={"component": "asr"},
+            )
+        )
+    except Exception:
+        pass
+
+
+def _release_gpu_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if hasattr(torch, "cuda") and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
 
 
 def _health_command(config: AsrServiceConfig) -> int:

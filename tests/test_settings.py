@@ -42,6 +42,9 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "gpu.scheduler.lease_ttl_seconds" in keys
     assert "gpu.scheduler.heartbeat_interval_seconds" in keys
     assert "gpu.scheduler.stale_after_seconds" in keys
+    assert "gpu.scheduler.eviction_enabled" in keys
+    assert "gpu.scheduler.eviction_request_timeout_seconds" in keys
+    assert "gpu.scheduler.eviction_max_models" in keys
     assert "gpu.scheduler.embedding_vram_mb" in keys
     assert "gpu.scheduler.rerank_vram_mb" in keys
     assert "gpu.scheduler.ocr_image_vram_mb" in keys
@@ -49,6 +52,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "gpu.scheduler.asr_vram_mb" in keys
     assert "gpu.scheduler.ollama_vision_vram_mb" in keys
     assert "model_runner.base_url" in keys
+    assert "model_runner.paddle_runner_base_url" in keys
     assert "ocr.engine" in keys
     assert "ocr.simple_model" in keys
     assert "ocr.document_model" in keys
@@ -146,15 +150,22 @@ def test_gpu_scheduler_settings_defaults_and_env_overrides(monkeypatch):
     assert service.resolve("gpu.scheduler.safety_margin_mb").raw_value == 1024
     assert service.resolve("gpu.scheduler.default_timeout_seconds").raw_value == 30
     assert service.resolve("gpu.scheduler.lease_ttl_seconds").raw_value == 120
+    assert service.resolve("gpu.scheduler.eviction_enabled").raw_value is True
+    assert service.resolve("gpu.scheduler.eviction_request_timeout_seconds").raw_value == 10
+    assert service.resolve("gpu.scheduler.eviction_max_models").raw_value == 4
     assert service.resolve("gpu.scheduler.embedding_vram_mb").raw_value > 0
 
     monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_MODE", "postgres")
     monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB", "8192")
     monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_DEFAULT_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED", "false")
+    monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS", "2")
 
     assert service.resolve("gpu.scheduler.mode").raw_value == "postgres"
     assert service.resolve("gpu.scheduler.vram_budget_mb").raw_value == 8192
     assert service.resolve("gpu.scheduler.default_timeout_seconds").raw_value == 9
+    assert service.resolve("gpu.scheduler.eviction_enabled").raw_value is False
+    assert service.resolve("gpu.scheduler.eviction_max_models").raw_value == 2
 
 
 def test_reranker_quantization_settings_canonicalize_legacy_aliases(monkeypatch):

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from flux_llm_kb.asr_server import ASR_MODEL_ALIASES, REQUIRED_MODEL_FILES, AsrServiceConfig, create_app, download_model
+from flux_llm_kb.asr_server import ASR_MODEL_ALIASES, REQUIRED_MODEL_FILES, AsrRuntime, AsrServiceConfig, create_app, download_model
 
 
 def _model_dir(path: Path) -> Path:
@@ -206,6 +206,42 @@ def test_asr_transcription_endpoint_returns_503_when_model_files_are_missing(tmp
 
     assert response.status_code == 503
     assert "required model files are missing" in response.json()["detail"]
+
+
+def test_asr_gpu_unload_endpoint_clears_loaded_model_and_is_idempotent(tmp_path):
+    model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
+    config = AsrServiceConfig(
+        model="large-v3-turbo",
+        model_path=model_path,
+        device="cuda",
+        compute_type="float16",
+    )
+    runtime = AsrRuntime(config)
+    runtime._model = object()
+    runtime.loaded = True
+    records: list[object] = []
+
+    class FakeScheduler:
+        def record_model_residency(self, residency):
+            records.append(residency)
+
+        def status(self):
+            return {"enabled": True, "mode": "test"}
+
+    client = TestClient(create_app(config, runtime=runtime, gpu_scheduler=FakeScheduler()))
+
+    response = client.post("/v1/gpu/unload", json={"task_type": "asr", "model_id": "large-v3-turbo"})
+    repeat = client.post("/v1/gpu/unload", json={"task_type": "asr", "model_id": "large-v3-turbo"})
+
+    assert response.status_code == 200
+    assert response.json()["unloaded"] is True
+    assert repeat.status_code == 200
+    assert repeat.json()["unloaded"] is False
+    assert runtime.loaded is False
+    assert runtime._model is None
+    assert records[-1].task_type == "asr"
+    assert records[-1].model_id == "large-v3-turbo"
+    assert records[-1].resident is False
 
 
 def test_download_model_resolves_large_v3_turbo_alias(monkeypatch, tmp_path):

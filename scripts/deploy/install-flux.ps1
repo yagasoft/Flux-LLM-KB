@@ -238,6 +238,9 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
       FLUX_KB_API_HOST: 0.0.0.0
       FLUX_KB_API_PORT: "8765"
       FLUX_KB_INSTALL_ROOT: /app/runtime
@@ -247,6 +250,7 @@ services:
       FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_CACHE_ROOT: /app/cache
       FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
       FLUX_KB_RETRIEVAL_SEARCH_ENGINE: vespa
       FLUX_KB_RETRIEVAL_VESPA_BASE_URL: http://vespa:8080
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
@@ -313,6 +317,9 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
       FLUX_KB_INSTALL_ROOT: /app/runtime
       FLUX_KB_APP_ROOT: /app
       FLUX_KB_PRIVATE_DIR: /app/private
@@ -320,6 +327,7 @@ services:
       FLUX_KB_LOG_DIR: /app/logs
       FLUX_KB_CACHE_ROOT: /app/cache
       FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
       FLUX_KB_RETRIEVAL_SEARCH_ENGINE: vespa
       FLUX_KB_RETRIEVAL_VESPA_BASE_URL: http://vespa:8080
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
@@ -371,6 +379,15 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
+      FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
+      FLUX_KB_ASR_BASE_URL: http://asr:8788
+      FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
+      FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m
       FLUX_KB_ASR_PROVIDER: openai_compatible
       FLUX_KB_ASR_MODEL: large-v3-turbo
       FLUX_KB_ASR_MODEL_PATH: /models/faster-whisper-large-v3-turbo
@@ -410,8 +427,15 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
       FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
       FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
+      FLUX_KB_ASR_BASE_URL: http://asr:8788
+      FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
+      FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m
       FLUX_KB_RETRIEVAL_EMBEDDING_MODEL: Snowflake/snowflake-arctic-embed-l-v2.0
       FLUX_KB_RETRIEVAL_EMBEDDING_DIMENSIONS: "1024"
       FLUX_KB_RETRIEVAL_RERANKER_MODEL: Qwen/Qwen3-Reranker-4B
@@ -459,6 +483,15 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
+      FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
+      FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
+      FLUX_KB_ASR_BASE_URL: http://asr:8788
+      FLUX_KB_LOCAL_INFERENCE_ENABLED: "true"
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
+      FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m
       FLUX_KB_OCR_ENGINE: paddleocr
       FLUX_KB_OCR_SIMPLE_MODEL: PP-OCRv5
       FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL
@@ -869,6 +902,9 @@ function Set-FluxProductionRuntimeSettings {
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.mode", "postgres", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.vram_budget_mb", "10240", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.safety_margin_mb", "1024", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.eviction_enabled", "true", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.eviction_request_timeout_seconds", "10", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.eviction_max_models", "4", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.provider", "openai_compatible", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.model", "large-v3-turbo", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.base_url", "http://127.0.0.1:$AsrHostPort", "--confirm")
@@ -894,6 +930,7 @@ function Set-FluxProductionRuntimeSettings {
             $env:FLUX_KB_VISION_MAX_IMAGE_PIXELS = "4096000"
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.enabled", "false", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.mode", "disabled", "--confirm")
+            Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "gpu.scheduler.eviction_enabled", "false", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.provider", "local_faster_whisper", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.model", "", "--confirm")
             Invoke-FluxSettingsCommand -VenvPython $VenvPython -Arguments @("settings", "set", "acceleration.asr.base_url", "", "--confirm")

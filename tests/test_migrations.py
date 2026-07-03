@@ -204,6 +204,11 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "WHEN status = 'running' THEN 0" in unique_jobs_migration.sql
     assert "DELETE FROM capture_jobs" in unique_jobs_migration.sql
     assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_capture_jobs_identity_key" in unique_jobs_migration.sql
+    gpu_eviction_migration = next(item for item in migrations if item.name == "0037_gpu_scheduler_evictions")
+    assert "CREATE TABLE IF NOT EXISTS gpu_evictions" in gpu_eviction_migration.sql
+    assert "lease_id text REFERENCES gpu_leases" in gpu_eviction_migration.sql
+    assert "estimated_freed_vram_mb" in gpu_eviction_migration.sql
+    assert "idx_gpu_evictions_created" in gpu_eviction_migration.sql
     assert "DROP TABLE IF EXISTS embeddings" in purge_migration.sql
     assert "DROP INDEX IF EXISTS idx_asset_chunks_body_trgm" in purge_migration.sql
     assert "DROP EXTENSION IF EXISTS vector" in purge_migration.sql
