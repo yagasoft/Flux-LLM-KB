@@ -191,7 +191,8 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_OCR_DOCUMENT_MODEL: PaddleOCR-VL" in compose
         assert compose.count("PADDLE_PDX_MODEL_SOURCE: bos") == 2
         assert "  ollama:" in compose
-        assert "image: flux-ollama:`${FLUX_KB_IMAGE_TAG}" in compose
+        assert "image: flux-ollama:local" in compose
+        assert "image: flux-ollama:`${FLUX_KB_IMAGE_TAG}" not in compose
         assert "image: ollama/ollama:latest" not in compose
         assert "container_name: flux-ollama" in compose
         assert compose.count("OLLAMA_LOAD_TIMEOUT: 30m") == 1
@@ -343,6 +344,8 @@ def test_production_deploy_builds_derived_ollama_runtime_image():
     dockerfile = ollama_dockerfile.read_text(encoding="utf-8")
 
     assert "FROM ${OLLAMA_BASE_IMAGE}" in dockerfile
+    assert 'ARG FLUX_KB_OLLAMA_RUNTIME_FINGERPRINT=""' in dockerfile
+    assert "org.flux_llm_kb.ollama.runtime_fingerprint=${FLUX_KB_OLLAMA_RUNTIME_FINGERPRINT}" in dockerfile
     assert "apt-get install -y --no-install-recommends ffmpeg" in dockerfile
     assert "command -v ffmpeg" in dockerfile
     assert "command -v ffprobe" in dockerfile
@@ -353,9 +356,15 @@ def test_production_deploy_builds_derived_ollama_runtime_image():
 
         assert 'Join-Path $SourceRoot "docker\\ollama\\Dockerfile"' in script
         assert '"--build-arg", "OLLAMA_BASE_IMAGE=ollama/ollama:latest"' in script
-        assert '"-t", "flux-ollama:$imageTag", "-t", "flux-ollama:local"' in script
+        assert '"--build-arg", "FLUX_KB_OLLAMA_RUNTIME_FINGERPRINT=$runtimeFingerprint"' in script
+        assert 'Get-FluxOllamaRuntimeFingerprint -SourceRoot $SourceRoot -BaseImage "ollama/ollama:latest"' in script
+        assert 'Get-FluxDockerImageLabel -Image "flux-ollama:local" -Label "org.flux_llm_kb.ollama.runtime_fingerprint"' in script
+        assert 'Write-Host "Skipping Ollama runtime image build; flux-ollama:local already matches runtime fingerprint $runtimeFingerprint."' in script
+        assert '"-t", "flux-ollama:local", "-t", "flux-ollama:$imageTag"' in script
+        assert script.index("Skipping Ollama runtime image build") < script.index('StepName "docker build ollama runtime"')
         assert 'StepName "docker build ollama runtime"' in script
-        assert "image: flux-ollama:`${FLUX_KB_IMAGE_TAG}" in compose
+        assert "image: flux-ollama:local" in compose
+        assert "image: flux-ollama:`${FLUX_KB_IMAGE_TAG}" not in compose
 
 
 def test_deploy_ollama_vision_smoke_script_checks_media_runtime_and_decode_path():

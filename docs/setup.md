@@ -61,16 +61,19 @@ prints Docker-visible memory, every Flux container's configured memory/swap
 limit, and Postgres `/dev/shm` size so tuning decisions use the Linux
 VM/container limits, not only Windows host free RAM.
 
-When production GPU mode is available, the generated Compose deployment also
-builds a small `flux-ollama` image derived from the official `ollama/ollama`
-runtime and runs it as the dedicated `flux-ollama` service. The derived image
-installs the OS `ffmpeg` package so Ollama vision has both `ffmpeg` and
-`ffprobe` available for image/video/media decode paths. Flux API and worker
-containers call Ollama through `http://ollama:11434`; Ollama is not baked into
-the Flux image and is not run inside the API or worker containers. Models persist
-in the `flux_llm_kb_ollama_models` Docker named volume, so image rebuilds and
-container recreation do not re-download large model blobs. After a GPU
-deployment, install the configured vision model explicitly:
+When production GPU mode is available, the generated Compose deployment runs a
+small `flux-ollama:local` image derived from the official `ollama/ollama`
+runtime as the dedicated `flux-ollama` service. The derived image installs the
+OS `ffmpeg` package so Ollama vision has both `ffmpeg` and `ffprobe` available
+for image/video/media decode paths. Deploy updates rebuild that derived runtime
+only when the `docker/ollama` context or local `ollama/ollama:latest` base image
+changes; runtime-changing deploys also tag it with the current deploy tag. Flux
+API and worker containers call Ollama through `http://ollama:11434`; Ollama is
+not baked into the Flux image and is not run inside the API or worker
+containers. Models persist in the `flux_llm_kb_ollama_models` Docker named
+volume, so image rebuilds and container recreation do not re-download large
+model blobs. After a GPU deployment, install the configured vision model
+explicitly:
 
 ```powershell
 docker exec flux-ollama ollama pull qwen3-vl:8b

@@ -531,7 +531,7 @@ services:
       start_period: 10s
 
   ollama:
-    image: flux-ollama:`${FLUX_KB_IMAGE_TAG}
+    image: flux-ollama:local
     labels:
       org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
       org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
@@ -1178,6 +1178,12 @@ function Invoke-FluxOllamaImageBuild {
         [int]$TimeoutSeconds
     )
     Invoke-FluxDockerImageAvailable -Image "ollama/ollama:latest" -WorkingDirectory $SourceRoot -TimeoutSeconds 600
+    $runtimeFingerprint = Get-FluxOllamaRuntimeFingerprint -SourceRoot $SourceRoot -BaseImage "ollama/ollama:latest"
+    $existingFingerprint = Get-FluxDockerImageLabel -Image "flux-ollama:local" -Label "org.flux_llm_kb.ollama.runtime_fingerprint"
+    if ($existingFingerprint -eq $runtimeFingerprint) {
+        Write-Host "Skipping Ollama runtime image build; flux-ollama:local already matches runtime fingerprint $runtimeFingerprint."
+        return
+    }
     $ollamaDockerfile = Join-Path $SourceRoot "docker\ollama\Dockerfile"
     $ollamaContext = Join-Path $SourceRoot "docker\ollama"
     $ollamaBuildArgs = @(
@@ -1189,8 +1195,9 @@ function Invoke-FluxOllamaImageBuild {
         "--build-arg", "FLUX_KB_IMAGE_SOURCE=$($BuildMetadata.Source)",
         "--build-arg", "FLUX_KB_IMAGE_CREATED=$($BuildMetadata.Created)",
         "--build-arg", "FLUX_KB_IMAGE_VERSION=$($BuildMetadata.Version)",
+        "--build-arg", "FLUX_KB_OLLAMA_RUNTIME_FINGERPRINT=$runtimeFingerprint",
         "-f", $ollamaDockerfile,
-        "-t", "flux-ollama:$imageTag", "-t", "flux-ollama:local",
+        "-t", "flux-ollama:local", "-t", "flux-ollama:$imageTag",
         $ollamaContext
     )
     Invoke-FluxNativeCommand -FilePath "docker" -Arguments $ollamaBuildArgs -WorkingDirectory $SourceRoot -TimeoutSeconds $TimeoutSeconds -StepName "docker build ollama runtime"
@@ -1306,6 +1313,71 @@ function Get-FluxDockerImageId {
     $process.WaitForExit()
     if ($process.ExitCode -ne 0) { return $null }
     return $stdout.Trim()
+}
+
+function Get-FluxDockerImageLabel {
+    param([string]$Image, [string]$Label)
+    if (-not $Image -or -not $Label) { return $null }
+    $template = "{{ index .Config.Labels `"$Label`" }}"
+    $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $processInfo.FileName = "docker"
+    $processInfo.Arguments = "image inspect --format " + (ConvertTo-FluxCommandArgument $template) + " " + (ConvertTo-FluxCommandArgument $Image)
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $process.StandardError.ReadToEnd() | Out-Null
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { return $null }
+    $value = $stdout.Trim()
+    if (-not $value -or $value -eq "<no value>") { return $null }
+    return $value
+}
+
+function Add-FluxFingerprintText {
+    param([System.IO.Stream]$Stream, [string]$Text)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+    if ($bytes.Length -gt 0) {
+        $Stream.Write($bytes, 0, $bytes.Length)
+    }
+}
+
+function Get-FluxOllamaRuntimeFingerprint {
+    param([string]$SourceRoot, [string]$BaseImage)
+    $ollamaContext = Join-Path $SourceRoot "docker\ollama"
+    if (-not (Test-Path $ollamaContext)) {
+        throw "Ollama Docker context not found at $ollamaContext"
+    }
+    $baseImageId = Get-FluxDockerImageId -Image $BaseImage
+    if (-not $baseImageId) {
+        throw "Unable to inspect Ollama base image: $BaseImage"
+    }
+
+    $resolvedContext = (Resolve-Path $ollamaContext).Path.TrimEnd("\", "/")
+    $stream = [System.IO.MemoryStream]::new()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        Add-FluxFingerprintText -Stream $stream -Text "base-image`n$BaseImage`n$baseImageId`n"
+        $files = @(Get-ChildItem -LiteralPath $resolvedContext -File -Recurse | Sort-Object FullName)
+        foreach ($file in $files) {
+            $relativePath = $file.FullName.Substring($resolvedContext.Length + 1).Replace("\", "/")
+            Add-FluxFingerprintText -Stream $stream -Text "file`n$relativePath`n$($file.Length)`n"
+            $fileBytes = [System.IO.File]::ReadAllBytes($file.FullName)
+            if ($fileBytes.Length -gt 0) {
+                $stream.Write($fileBytes, 0, $fileBytes.Length)
+            }
+            Add-FluxFingerprintText -Stream $stream -Text "`n"
+        }
+        $stream.Position = 0
+        return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
 }
 
 function New-FluxLocalDockerBaseAlias {

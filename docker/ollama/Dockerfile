@@ -7,11 +7,13 @@ ARG FLUX_KB_IMAGE_REVISION=""
 ARG FLUX_KB_IMAGE_SOURCE=""
 ARG FLUX_KB_IMAGE_CREATED=""
 ARG FLUX_KB_IMAGE_VERSION=""
+ARG FLUX_KB_OLLAMA_RUNTIME_FINGERPRINT=""
 
 LABEL org.opencontainers.image.revision=${FLUX_KB_IMAGE_REVISION} \
       org.opencontainers.image.source=${FLUX_KB_IMAGE_SOURCE} \
       org.opencontainers.image.created=${FLUX_KB_IMAGE_CREATED} \
-      org.opencontainers.image.version=${FLUX_KB_IMAGE_VERSION}
+      org.opencontainers.image.version=${FLUX_KB_IMAGE_VERSION} \
+      org.flux_llm_kb.ollama.runtime_fingerprint=${FLUX_KB_OLLAMA_RUNTIME_FINGERPRINT}
 
 ENV DEBIAN_FRONTEND=noninteractive
 
