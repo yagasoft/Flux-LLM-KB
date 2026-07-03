@@ -813,13 +813,18 @@ class KnowledgeService:
                 search_index_status = {}
             summary = search_index_status.get("summary") if isinstance(search_index_status.get("summary"), dict) else {}
             by_status = summary.get("by_status") if isinstance(summary.get("by_status"), dict) else {}
-            pending = (
-                int(by_status.get("pending") or 0)
-                + int(by_status.get("failed") or 0)
-                + int(by_status.get("syncing") or 0)
-                + int(summary.get("pending") or 0)
-                + int(summary.get("failed") or 0)
-            )
+            missing_by_class = search_index_status.get("missing") if isinstance(search_index_status.get("missing"), dict) else {}
+            missing = int(summary.get("missing") or 0)
+            pending = int(summary.get("pending_work") or 0)
+            if not pending:
+                pending = (
+                    int(by_status.get("pending") or 0)
+                    + int(by_status.get("failed") or 0)
+                    + int(by_status.get("syncing") or 0)
+                    + int(summary.get("pending") or 0)
+                    + int(summary.get("failed") or 0)
+                    + missing
+                )
             if pending:
                 plan.append(
                     _automation_plan_action(
@@ -827,9 +832,14 @@ class KnowledgeService:
                         label=labels["sync_search_index"],
                         source="search_index",
                         target_type="search_index_queue",
-                        target_id="pending_or_failed",
+                        target_id="pending_or_missing" if missing else "pending_or_failed",
                         reason=f"{pending} search-index record(s) need sync.",
-                        evidence={"pending_or_failed": pending, "by_status": by_status},
+                        evidence={
+                            "pending_or_failed": pending - missing,
+                            "missing": missing,
+                            "missing_by_class": missing_by_class,
+                            "by_status": by_status,
+                        },
                     )
                 )
         if bool(policy.get("auto_run_governance_shadow")):

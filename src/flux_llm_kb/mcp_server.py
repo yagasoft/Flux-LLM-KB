@@ -305,12 +305,12 @@ def create_server():
 
     @mcp.tool(name="kb.code_status")
     def code_status(root_name: str | None = None, cwd: str | None = None):
-        """Return privacy-safe code index coverage, parser status, and fallback summaries; pass cwd to resolve the exact root_name."""
+        """Use kb.code_status for privacy-safe code index coverage, parser status, and fallback summaries; pass cwd to resolve the exact root_name."""
         return service.code_status(root_name=root_name, cwd=cwd)
 
     @mcp.tool(name="kb.code_search")
     def code_search(query: str, root_name: str | None = None, cwd: str | None = None, mode: str = "literal_symbol", language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, path_glob: str | None = None, include_generated: bool = False, limit: int = 20):
-        """Search code in literal_symbol mode for symbols/paths or full_text mode for indexed code chunks; pass cwd rather than guessing root_name."""
+        """Use kb.code_search in literal_symbol mode for symbols/paths or full_text mode for indexed code chunks; pass cwd rather than guessing root_name."""
         return service.code_search(
             query=query,
             root_name=root_name,
@@ -326,7 +326,7 @@ def create_server():
 
     @mcp.tool(name="kb.code_symbol_lookup")
     def code_symbol_lookup(symbol: str, root_name: str | None = None, language: str | None = None, include_references: bool = True, limit: int = 20):
-        """Look up a code symbol and optional references with sanitized metadata."""
+        """Use kb.code_symbol_lookup to look up a code symbol and optional references with sanitized metadata."""
         return service.code_symbol_lookup(
             symbol=symbol,
             root_name=root_name,

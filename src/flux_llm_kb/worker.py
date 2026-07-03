@@ -272,6 +272,8 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
         "search_index_failed": int(result.get("failed") or 0),
         "search_index_embedding_model": result.get("embedding_model"),
         "search_index_embedding_dimensions": int(result.get("embedding_dimensions") or 0),
+        "search_index_embedding_batch_size": int(result.get("embedding_batch_size") or 0),
+        "search_index_embedding_batches": int(result.get("embedding_batches") or 0),
         "search_index_model_generation": result.get("model_generation"),
     }
     if result.get("errors"):

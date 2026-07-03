@@ -84,6 +84,9 @@ def test_mcp_exposes_claim_and_graph_tools():
     assert '@mcp.tool(name="kb.code_status")' in source
     assert '@mcp.tool(name="kb.code_search")' in source
     assert '@mcp.tool(name="kb.code_symbol_lookup")' in source
+    assert "Use kb.code_status" in source
+    assert "Use kb.code_search" in source
+    assert "Use kb.code_symbol_lookup" in source
     assert '@mcp.tool(name="kb.code_feedback_record")' in source
     assert '@mcp.tool(name="kb.code_feedback_summary")' in source
     assert '@mcp.tool(name="kb.operational_diagnostics")' in source

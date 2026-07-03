@@ -300,6 +300,7 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     skill = (root / "plugins" / "flux-llm-kb" / "skills" / "flux-memory" / "SKILL.md").read_text(encoding="utf-8")
 
     prompts = "\n".join(manifest["interface"]["defaultPrompt"])
+    manifest_text = json.dumps(manifest, sort_keys=True)
     assert "Make final responses indexable" in prompts
     assert "files changed or referenced" in prompts
     assert "concise redacted durable saves" in prompts
@@ -313,6 +314,7 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "local files, the prompt, or current tool output already answer" in skill
     assert "normal kb.brief/search for broad context" in skill
     assert "kb.code_search" in skill
+    assert "kb.code_symbol_lookup" in skill
     assert "Do not infer `root_name` from folder names" in skill
     assert "kb.code_status(cwd=" in skill
     assert 'mode="literal_symbol"' in skill
@@ -321,7 +323,11 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "as the only file kind" in skill
     assert "mixed code plus non-code file kinds are rejected" in skill
     assert "Broad `kb.search`, `kb.brief`, and `kb.explain` exclude code results by default" in skill
+    assert "mcp__flux_llm_kb.kb_code_status" in skill
+    assert "mcp__flux_llm_kb.kb_code_symbol_lookup" in skill
     assert "kb.code_search" in prompts
+    assert "kb.code_status" in prompts
+    assert "kb.code_symbol_lookup" in prompts
     assert "Do not infer root_name from folder names" in prompts
     assert "mode=\"full_text\"" in prompts
     assert 'filters={"file_kinds":["code"]}' in prompts
@@ -335,6 +341,12 @@ def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     assert "mcp__flux_llm_kb.kb_finalize_turn" in skill
     assert "avoid duplicating every prior" in skill
     assert "active workspace `cwd`" in skill
+    assert "code-search" in manifest["keywords"]
+    assert "code-status" in manifest["keywords"]
+    assert "symbol-lookup" in manifest["keywords"]
+    assert "kb.code_status" in manifest_text
+    assert "kb.code_search" in manifest_text
+    assert "kb.code_symbol_lookup" in manifest_text
 
 
 def test_codex_status_reports_discovery_cache_and_restart_need(tmp_path, monkeypatch):

@@ -14,13 +14,16 @@
     "codex",
     "mcp",
     "postgres",
-    "pgvector"
+    "pgvector",
+    "code-search",
+    "code-status",
+    "symbol-lookup"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Flux LLM-KB",
     "shortDescription": "Local-first knowledge memory for Codex",
-    "longDescription": "Flux LLM-KB captures, searches, and briefs local interaction and corpus memory through a PostgreSQL/pgvector knowledge kernel, with privacy-aware hooks and operational dashboard status.",
+    "longDescription": "Flux LLM-KB captures, searches, and briefs local interaction, corpus memory, and indexed code through a PostgreSQL/pgvector knowledge kernel, with privacy-aware hooks, kb.code_status, kb.code_search, kb.code_symbol_lookup, and operational dashboard status.",
     "developerName": "Yagasoft",
     "category": "Developer Tools",
     "capabilities": [

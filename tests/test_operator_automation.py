@@ -115,6 +115,39 @@ def test_operator_automation_run_records_sanitized_guarded_actions(monkeypatch):
     assert "capture-1" in serialized_actions
 
 
+def test_operator_automation_plans_search_index_sync_for_missing_corpus_records(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "search_index_status",
+        lambda **_kwargs: {
+            "summary": {
+                "total": 12,
+                "by_status": {"indexed": 12},
+                "missing": 7,
+                "pending_work": 7,
+            },
+            "missing": {"corpus": {"asset_chunks": 7}},
+        },
+    )
+
+    plan = KnowledgeService()._operator_automation_plan(
+        {
+            "auto_refresh_evidence": False,
+            "auto_ingest_approved_capture": False,
+            "auto_remediate_diagnostics": False,
+            "auto_sync_search_index": True,
+            "auto_run_governance_shadow": False,
+        },
+        limit=10,
+    )
+
+    assert [item["action"] for item in plan] == ["sync_search_index"]
+    assert plan[0]["target_id"] == "pending_or_missing"
+    assert "7 search-index record(s) need sync" in plan[0]["reason"]
+    assert plan[0]["evidence"]["missing"] == 7
+    assert plan[0]["evidence"]["missing_by_class"] == {"corpus": {"asset_chunks": 7}}
+
+
 def test_database_records_operator_automation_history_with_sanitized_evidence(monkeypatch):
     executed: list[tuple[str, tuple[object, ...]]] = []
     timestamp = datetime(2026, 6, 26, 10, 0, tzinfo=timezone.utc)

@@ -2245,6 +2245,73 @@ def test_enqueue_search_index_sync_creates_search_index_job(monkeypatch):
     }
 
 
+def test_search_index_status_reports_missing_corpus_records_without_changing_status_counts(monkeypatch):
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            sql = executed[-1][0]
+            if "GROUP BY index_status" in sql:
+                return [("failed", 2), ("indexed", 5), ("pending", 3), ("syncing", 1)]
+            if "FROM search_index_records" in sql and "ORDER BY updated_at DESC" in sql:
+                return [
+                    (
+                        "id:flux:flux_evidence::episodes--episode-1",
+                        "episodes",
+                        "episode-1",
+                        "llm-kb",
+                        "episode-hash",
+                        "Snowflake/snowflake-arctic-embed-l-v2.0",
+                        1024,
+                        "indexed",
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                ]
+            if "FROM asset_chunks c" in sql and "rec.owner_id IS NULL" in sql:
+                return [(7,)]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    status = database.search_index_status(root_name="llm-kb")
+
+    assert status["summary"]["by_status"] == {"failed": 2, "indexed": 5, "pending": 3, "syncing": 1}
+    assert status["summary"]["total"] == 11
+    assert status["summary"]["missing"] == 7
+    assert status["summary"]["pending_work"] == 13
+    assert status["missing"]["corpus"]["asset_chunks"] == 7
+    missing_sql = next(sql for sql, _params in executed if "rec.owner_id IS NULL" in sql)
+    assert "FROM asset_chunks c" in missing_sql
+    assert "FROM episodes" not in missing_sql
+    assert "FROM claims" not in missing_sql
+
+
 def test_enqueue_capture_job_reuses_active_duplicate(monkeypatch):
     executed: list[tuple[str, object]] = []
 
@@ -2444,6 +2511,98 @@ def test_sync_search_index_batches_candidates_and_feeds_vespa(monkeypatch):
     assert result["embedding_model"] == "Snowflake/snowflake-arctic-embed-l-v2.0"
     assert result["embedding_dimensions"] == 1024
     assert fed[0]["fields"]["owner_table"] == "asset_chunks"
+
+
+def test_sync_search_index_embeds_pending_rows_in_bounded_batches(monkeypatch):
+    batch_calls = []
+    fed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeProvider:
+        name = "model_runner"
+
+        def embed_batch(self, inputs):
+            batch_calls.append([item.owner_id for item in inputs])
+            return [
+                EmbeddingResult(
+                    owner_table=item.owner_table,
+                    owner_id=item.owner_id,
+                    model="Snowflake/snowflake-arctic-embed-l-v2.0",
+                    dimensions=1024,
+                    vector=[1.0] + [0.0] * 1023,
+                    metadata={"source_hash": f"hash-{item.owner_id}"},
+                )
+                for item in inputs
+            ]
+
+    class FakeAdapter:
+        def feed(self, document):
+            fed.append(document)
+            return {"ok": True}
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
+    def candidate(index):
+        return {
+            "vespa_document_id": f"id:flux:flux_evidence::asset_chunks--chunk-{index}",
+            "owner_table": "asset_chunks",
+            "owner_id": f"chunk-{index}",
+            "asset_id": f"asset-{index}",
+            "root_id": "33333333-3333-3333-3333-333333333333",
+            "root_name": "docs",
+            "title": f"Chunk {index}",
+            "body": f"body {index}",
+            "source_path": f"docs/chunk-{index}.md",
+            "symbols": [],
+            "language": "",
+            "file_kind": "text",
+            "lifecycle_state": "active",
+            "deleted": False,
+            "canonical": True,
+            "source_hash": f"old-hash-{index}",
+            "index_text": f"Chunk {index}\nbody {index}",
+            "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+            "embedding_dimensions": 1024,
+            "existing_source_hash": None,
+            "existing_index_status": None,
+            "existing_embedding_model": None,
+        }
+
+    monkeypatch.setenv("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE", "2")
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [candidate(index) for index in range(5)])
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **_kwargs: None)
+
+    result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=5, embedding_provider=FakeProvider(), adapter=FakeAdapter())
+
+    assert batch_calls == [["chunk-0", "chunk-1"], ["chunk-2", "chunk-3"], ["chunk-4"]]
+    assert result["embedding_batch_size"] == 2
+    assert result["embedding_batches"] == 3
+    assert result["requested"] == 5
+    assert result["indexed"] == 5
+    assert len(fed) == 5
 
 
 def test_delete_search_index_records_for_root_requires_root_and_filters_statuses(monkeypatch):
@@ -5822,6 +5981,96 @@ def test_corpus_search_filters_metadata_only_assets():
 
     assert "a.extraction_status = 'indexed'" in search_function
     assert "a.extraction_status <> 'metadata_only'" not in search_function
+
+
+def test_replace_asset_chunks_enqueues_corpus_search_index_sync(monkeypatch):
+    helper_calls: list[str] = []
+
+    class FakeCursor:
+        def __init__(self):
+            self._last_sql = ""
+
+        def execute(self, sql, params=()):
+            self._last_sql = sql
+
+        def fetchone(self):
+            if "SELECT a.path, r.name, r.root_path, r.metadata" in self._last_sql:
+                return None
+            if "INSERT INTO asset_chunks" in self._last_sql:
+                return ("chunk-1",)
+            return None
+
+    monkeypatch.setattr(
+        database,
+        "_enqueue_corpus_search_index_sync_for_asset",
+        lambda cur, *, asset_id: helper_calls.append(asset_id),
+        raising=False,
+    )
+
+    inserted = database._replace_asset_chunks(
+        FakeCursor(),
+        "asset-1",
+        (
+            AssetChunk(
+                chunk_index=0,
+                title="src/app.py::build_invoice",
+                body="def build_invoice(): return 1",
+                modality="text",
+                locator=None,
+                token_estimate=5,
+                metadata={},
+            ),
+        ),
+    )
+
+    assert inserted == 1
+    assert helper_calls == ["asset-1"]
+
+
+def test_append_or_upsert_asset_chunks_enqueues_corpus_search_index_sync(monkeypatch):
+    helper_calls: list[str] = []
+
+    class FakeCursor:
+        def __init__(self):
+            self._last_sql = ""
+
+        def execute(self, sql, params=()):
+            self._last_sql = sql
+
+        def fetchone(self):
+            if "SELECT a.path, r.name, r.root_path, r.metadata" in self._last_sql:
+                return None
+            if "SELECT id::text FROM asset_chunks" in self._last_sql:
+                return None
+            if "INSERT INTO asset_chunks" in self._last_sql:
+                return ("chunk-1",)
+            return None
+
+    monkeypatch.setattr(
+        database,
+        "_enqueue_corpus_search_index_sync_for_asset",
+        lambda cur, *, asset_id: helper_calls.append(asset_id),
+        raising=False,
+    )
+
+    inserted = database._append_or_upsert_asset_chunks(
+        FakeCursor(),
+        "asset-1",
+        (
+            AssetChunk(
+                chunk_index=0,
+                title="src/app.py::build_invoice",
+                body="def build_invoice(): return 1",
+                modality="text",
+                locator=None,
+                token_estimate=5,
+                metadata={},
+            ),
+        ),
+    )
+
+    assert inserted == 1
+    assert helper_calls == ["asset-1"]
 
 
 def test_managed_mail_chunks_store_private_text_off_db(monkeypatch):

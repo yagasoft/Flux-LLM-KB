@@ -1561,6 +1561,8 @@ def test_worker_processes_search_index_sync_jobs(monkeypatch):
             "failed": 0,
             "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
             "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "embedding_batch_size": 64,
+            "embedding_batches": 1,
             "model_generation": "snowflake-qwen-paddleocr-v1",
             **kwargs,
         },
@@ -1575,3 +1577,5 @@ def test_worker_processes_search_index_sync_jobs(monkeypatch):
     assert result.telemetry["search_index_indexed"] == 1
     assert result.telemetry["search_index_deleted"] == 1
     assert result.telemetry["search_index_embedding_dimensions"] == 1024
+    assert result.telemetry["search_index_embedding_batch_size"] == 64
+    assert result.telemetry["search_index_embedding_batches"] == 1

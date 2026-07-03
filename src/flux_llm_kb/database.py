@@ -48,6 +48,7 @@ _SEMANTIC_DUPLICATE_ALGORITHM = "snowflake-vespa-cosine-v1"
 UNSEEN_ASSET_CANCELLED_STATUS = "cancelled_unseen_asset"
 DEFAULT_UNSEEN_ASSET_PURGE_GRACE_SECONDS = 86400
 DEFAULT_UNSEEN_ASSET_PURGE_BATCH_SIZE = 500
+DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE = 64
 _CODE_EXACT_SYMBOL_BOOST = 0.10
 _CODE_IMPLEMENTATION_INTENT_BOOST = 0.025
 _VESPA_RRF_K = 60
@@ -13632,6 +13633,8 @@ def _replace_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, ...]) -> i
         chunk_id = cur.fetchone()[0]
         _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
         inserted += 1
+    if inserted:
+        _enqueue_corpus_search_index_sync_for_asset(cur, asset_id=asset_id)
     return inserted
 
 
@@ -13692,6 +13695,8 @@ def _append_or_upsert_asset_chunks(cur: Any, asset_id: str, chunks: tuple[Any, .
         chunk_id = cur.fetchone()[0]
         _insert_code_metadata_for_chunk(cur, asset_id=asset_id, chunk_id=chunk_id, chunk=chunk)
         inserted += 1
+    if inserted:
+        _enqueue_corpus_search_index_sync_for_asset(cur, asset_id=asset_id)
     return inserted
 
 
@@ -13849,6 +13854,8 @@ def search_index_status(*, root_name: str | None = None, url: str | None = None)
     psycopg = _load_psycopg()
     root_sql = "WHERE root_name = %s" if root_name else ""
     params: tuple[Any, ...] = (root_name,) if root_name else ()
+    corpus_root_sql = "AND r.name = %s" if root_name else ""
+    corpus_root_params: tuple[Any, ...] = (root_name,) if root_name else ()
     with psycopg.connect(url or database_url()) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -13891,6 +13898,31 @@ def search_index_status(*, root_name: str | None = None, url: str | None = None)
                 }
                 for row in cur.fetchall()
             ]
+            cur.execute(
+                f"""
+                SELECT count(*)::integer
+                FROM asset_chunks c
+                JOIN source_assets a ON a.id = c.asset_id
+                JOIN monitored_roots r ON r.id = a.root_id
+                LEFT JOIN search_index_records rec ON rec.owner_table = 'asset_chunks'
+                                                  AND rec.owner_id = c.id
+                                                  AND rec.embedding_model = %s
+                WHERE r.enabled
+                  AND a.deleted_at IS NULL
+                  AND a.canonical_asset_id IS NULL
+                  AND a.extraction_status = 'indexed'
+                  AND rec.owner_id IS NULL
+                  {corpus_root_sql}
+                """,
+                ("Snowflake/snowflake-arctic-embed-l-v2.0", *corpus_root_params),
+            )
+            missing_row = cur.fetchall()
+            missing_corpus_asset_chunks = int((missing_row[0][0] if missing_row else 0) or 0)
+    existing_pending_work = (
+        int(by_status.get("pending") or 0)
+        + int(by_status.get("failed") or 0)
+        + int(by_status.get("syncing") or 0)
+    )
     return {
         "root_name": root_name,
         "search_engine": "vespa",
@@ -13899,6 +13931,13 @@ def search_index_status(*, root_name: str | None = None, url: str | None = None)
         "summary": {
             "total": sum(by_status.values()),
             "by_status": by_status,
+            "missing": missing_corpus_asset_chunks,
+            "pending_work": existing_pending_work + missing_corpus_asset_chunks,
+        },
+        "missing": {
+            "corpus": {
+                "asset_chunks": missing_corpus_asset_chunks,
+            },
         },
         "recent": recent,
     }
@@ -13935,6 +13974,53 @@ def enqueue_search_index_sync(
                 audit_details={"job_type": "search_index_sync", "owner_class": payload["owner_class"], "root_name": root_name},
             )
     return {"queued": 0 if queued["deduped"] else 1, "job_id": queued["job_id"], "deduped": queued["deduped"], "reused": queued["reused"], **payload}
+
+
+def _enqueue_corpus_search_index_sync_for_asset(cur: Any, *, asset_id: str) -> dict[str, Any] | None:
+    cur.execute(
+        """
+        SELECT r.name
+        FROM source_assets a
+        JOIN monitored_roots r ON r.id = a.root_id
+        WHERE a.id = %s
+          AND r.enabled
+          AND a.deleted_at IS NULL
+          AND a.canonical_asset_id IS NULL
+          AND a.extraction_status = 'indexed'
+        """,
+        (asset_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    root_name = str(row[0] or "").strip()
+    if not root_name:
+        return None
+    payload = {
+        "owner_class": "corpus",
+        "root_name": root_name,
+        "limit": 5000,
+        "search_engine": "vespa",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+    }
+    schedule = _job_schedule_metadata("search_index_sync")
+    return _enqueue_unique_capture_job_with_cursor(
+        cur,
+        job_type="search_index_sync",
+        payload=payload,
+        job_family=schedule["job_family"],
+        resource_class=schedule["resource_class"],
+        priority=schedule["priority"],
+        time_budget_seconds=schedule["time_budget_seconds"],
+        telemetry={"stage": "queued", "owner_class": "corpus", "root_name": root_name, "reason": "corpus_chunks_changed"},
+        audit_details={
+            "job_type": "search_index_sync",
+            "owner_class": "corpus",
+            "root_name": root_name,
+            "reason": "corpus_chunks_changed",
+        },
+    )
 
 
 def mark_search_index_rebuild(
@@ -14209,6 +14295,15 @@ def _vespa_search_adapter() -> Any:
     return VespaSearchAdapter(base_url=os.environ.get("FLUX_KB_RETRIEVAL_VESPA_BASE_URL") or "http://127.0.0.1:8080")
 
 
+def _search_index_embedding_batch_size() -> int:
+    raw_value = os.environ.get("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE")
+    try:
+        value = int(raw_value) if raw_value is not None else DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE
+    except (TypeError, ValueError):
+        value = DEFAULT_SEARCH_INDEX_EMBEDDING_BATCH_SIZE
+    return max(1, min(value, 512))
+
+
 def sync_search_index(
     *,
     owner_class: str = "all",
@@ -14249,6 +14344,8 @@ def sync_search_index(
         "skipped_unchanged": 0,
         "failed": 0,
         "errors": [],
+        "embedding_batch_size": _search_index_embedding_batch_size(),
+        "embedding_batches": 0,
     }
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -14300,60 +14397,67 @@ def sync_search_index(
             if not pending:
                 return result
 
-            inputs = [
-                EmbeddingInput(
-                    owner_table=str(row["owner_table"]),
-                    owner_id=str(row["owner_id"]),
-                    text=str(row["index_text"]),
-                    model=SNOWFLAKE_EMBEDDING_MODEL,
-                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-                )
-                for row in pending
-            ]
-            try:
-                embeddings = provider.embed_batch(inputs)
-            except Exception as exc:
-                for row in pending:
-                    _upsert_search_index_record(
-                        cur,
-                        row=row,
-                        status="failed",
-                        last_error=str(exc),
-                        metadata={"failed_stage": "embedding"},
+            batch_size = int(result["embedding_batch_size"])
+            for offset in range(0, len(pending), batch_size):
+                batch_rows = pending[offset : offset + batch_size]
+                result["embedding_batches"] += 1
+                inputs = [
+                    EmbeddingInput(
+                        owner_table=str(row["owner_table"]),
+                        owner_id=str(row["owner_id"]),
+                        text=str(row["index_text"]),
+                        model=SNOWFLAKE_EMBEDDING_MODEL,
+                        dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
                     )
-                result["failed"] += len(pending)
-                result["errors"].append(str(exc)[:300])
-                return result
-
-            for row, embedding in zip(pending, embeddings):
-                row = {
-                    **row,
-                    "embedding": embedding.vector,
-                    "embedding_model": embedding.model,
-                    "embedding_dimensions": embedding.dimensions,
-                    "source_hash": str(embedding.metadata.get("source_hash") or row["source_hash"]),
-                }
+                    for row in batch_rows
+                ]
                 try:
-                    vespa.feed(build_vespa_document(row))
+                    embeddings = provider.embed_batch(inputs)
+                    if len(embeddings) != len(batch_rows):
+                        raise ValueError("embedding provider returned a different number of embeddings than requested")
                 except Exception as exc:
-                    result["failed"] += 1
+                    remaining_rows = pending[offset:]
+                    for row in remaining_rows:
+                        _upsert_search_index_record(
+                            cur,
+                            row=row,
+                            status="failed",
+                            last_error=str(exc),
+                            metadata={"failed_stage": "embedding"},
+                        )
+                    result["failed"] += len(remaining_rows)
                     result["errors"].append(str(exc)[:300])
+                    return result
+
+                for row, embedding in zip(batch_rows, embeddings):
+                    row = {
+                        **row,
+                        "embedding": embedding.vector,
+                        "embedding_model": embedding.model,
+                        "embedding_dimensions": embedding.dimensions,
+                        "source_hash": str(embedding.metadata.get("source_hash") or row["source_hash"]),
+                    }
+                    try:
+                        vespa.feed(build_vespa_document(row))
+                    except Exception as exc:
+                        result["failed"] += 1
+                        result["errors"].append(str(exc)[:300])
+                        _upsert_search_index_record(
+                            cur,
+                            row=row,
+                            status="failed",
+                            last_error=str(exc),
+                            metadata={"failed_stage": "feed"},
+                        )
+                        continue
                     _upsert_search_index_record(
                         cur,
                         row=row,
-                        status="failed",
-                        last_error=str(exc),
-                        metadata={"failed_stage": "feed"},
+                        status="indexed",
+                        last_error=None,
+                        metadata={"rank_profile": "hybrid", "source": "search_index_sync"},
                     )
-                    continue
-                _upsert_search_index_record(
-                    cur,
-                    row=row,
-                    status="indexed",
-                    last_error=None,
-                    metadata={"rank_profile": "hybrid", "source": "search_index_sync"},
-                )
-                result["indexed"] += 1
+                    result["indexed"] += 1
     result["errors"] = list(dict.fromkeys(result["errors"]))[:20]
     return result
 
