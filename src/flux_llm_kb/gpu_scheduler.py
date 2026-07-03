@@ -123,6 +123,10 @@ class GpuLease:
         self.scheduler = scheduler
         self.record = record
         self.released = False
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+        self._release_lock = threading.Lock()
+        self._start_heartbeat_loop()
 
     @property
     def id(self) -> str:
@@ -132,10 +136,12 @@ class GpuLease:
         self.scheduler.heartbeat(self.id)
 
     def release(self) -> None:
-        if self.released:
-            return
+        with self._release_lock:
+            if self.released:
+                return
+            self.released = True
+            self._heartbeat_stop.set()
         self.scheduler.release(self.id)
-        self.released = True
 
     def __enter__(self) -> "GpuLease":
         return self
@@ -143,6 +149,25 @@ class GpuLease:
     def __exit__(self, *_args: Any) -> bool:
         self.release()
         return False
+
+    def _start_heartbeat_loop(self) -> None:
+        interval = float(getattr(self.scheduler.config, "heartbeat_interval_seconds", 0.0) or 0.0)
+        if interval <= 0:
+            return
+
+        def _heartbeat_until_released() -> None:
+            while not self._heartbeat_stop.wait(interval):
+                try:
+                    self.scheduler.heartbeat(self.id)
+                except Exception:
+                    pass
+
+        self._heartbeat_thread = threading.Thread(
+            target=_heartbeat_until_released,
+            name=f"gpu-lease-heartbeat-{self.id[:8]}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
 
 
 class BaseGpuScheduler:

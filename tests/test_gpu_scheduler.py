@@ -8,6 +8,7 @@ import pytest
 from flux_llm_kb.gpu_scheduler import (
     GpuLeaseRecord,
     GpuLeaseTimeout,
+    GpuLease,
     GpuModelResidency,
     GpuSchedulerConfig,
     GpuTaskProfile,
@@ -334,6 +335,35 @@ def test_postgres_scheduler_reset_component_residency_casts_sql_parameters():
         "model-runner",
         ["embedding", "rerank"],
     )
+
+
+def test_gpu_lease_heartbeats_until_released():
+    heartbeats: list[str] = []
+    heartbeat_event = threading.Event()
+
+    class FakeScheduler:
+        config = GpuSchedulerConfig(heartbeat_interval_seconds=0.01)
+
+        def heartbeat(self, lease_id: str) -> None:
+            heartbeats.append(lease_id)
+            heartbeat_event.set()
+
+        def release(self, lease_id: str) -> None:
+            heartbeats.append(f"release:{lease_id}")
+
+    lease = GpuLease(
+        FakeScheduler(),  # type: ignore[arg-type]
+        _lease("lease-heartbeat", status="running"),
+    )
+
+    assert heartbeat_event.wait(timeout=0.2)
+    lease.release()
+    heartbeat_count = len([item for item in heartbeats if item == "lease-heartbeat"])
+    time.sleep(0.03)
+
+    assert heartbeat_count >= 1
+    assert len([item for item in heartbeats if item == "lease-heartbeat"]) == heartbeat_count
+    assert "release:lease-heartbeat" in heartbeats
 
 
 def test_admission_recovers_stale_running_leases_before_planning():
