@@ -620,12 +620,12 @@ class PostgresGpuScheduler(BaseGpuScheduler):
             UPDATE gpu_model_residency
                SET resident = false,
                    last_used_at = now(),
-                   metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('startup_cleared_by', %s)
+                   metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('startup_cleared_by', %s::text)
              WHERE resident = true
                AND (
                     metadata->>'component' = %s
                  OR metadata->>'owner' = %s
-                 OR task_type = ANY(%s)
+                 OR task_type = ANY(%s::text[])
                )
             """,
             (target, target, target, task_types),

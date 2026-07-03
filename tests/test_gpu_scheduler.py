@@ -12,6 +12,7 @@ from flux_llm_kb.gpu_scheduler import (
     GpuSchedulerConfig,
     GpuTaskProfile,
     InProcessGpuScheduler,
+    PostgresGpuScheduler,
     plan_gpu_admission,
     select_gpu_eviction_candidates,
 )
@@ -310,6 +311,29 @@ def test_in_process_scheduler_clears_residency_for_one_component():
     residents = {(item["task_type"], item["model_id"]) for item in scheduler.status()["model_residency"]}
     assert ("embedding", "Snowflake/snowflake-arctic-embed-l-v2.0") not in residents
     assert ("ocr_document", "PaddleOCR-VL") in residents
+
+
+def test_postgres_scheduler_reset_component_residency_casts_sql_parameters():
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _execute(self, statement: str, params: tuple[object, ...]) -> None:
+            calls.append((statement, params))
+
+    scheduler = RecordingScheduler(_config(mode="postgres"), database_url="postgresql://example")
+
+    scheduler.reset_component_residency("model-runner")
+
+    assert len(calls) == 1
+    statement, params = calls[0]
+    assert "jsonb_build_object('startup_cleared_by', %s::text)" in statement
+    assert "task_type = ANY(%s::text[])" in statement
+    assert params == (
+        "model-runner",
+        "model-runner",
+        "model-runner",
+        ["embedding", "rerank"],
+    )
 
 
 def test_admission_recovers_stale_running_leases_before_planning():
