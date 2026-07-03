@@ -4172,7 +4172,7 @@ def restore_capture_job_deletion_request(
                     delete_requested_by = NULL,
                     delete_reason = NULL,
                     telemetry = CASE
-                        WHEN %s IS NULL THEN
+                        WHEN %s::text IS NULL THEN
                             COALESCE(telemetry, '{}'::jsonb)
                             - 'obsolete_previous_status'
                             - 'obsolete_previous_result_status'

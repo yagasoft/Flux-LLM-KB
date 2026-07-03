@@ -1969,7 +1969,7 @@ describe("Flux dashboard", () => {
     expect(screen.queryByRole("group", { name: "Job root options" })).not.toBeInTheDocument();
   });
 
-  test("job queue opens corpus job target files and containing folders", async () => {
+  test("job queue opens corpus job target files and containing folders without success toasts", async () => {
     const user = userEvent.setup();
     jobsPayload = {
       jobs: [
@@ -2004,8 +2004,13 @@ describe("Flux dashboard", () => {
     expect(openFolder).toHaveAttribute("title", "Open containing folder");
 
     await user.click(openFile);
-    const openedToast = await screen.findByText("Open request opened.");
-    expect(openedToast.closest(".toast")).toHaveClass("success");
+    await waitFor(() => {
+      expect(corpusJobFileActionRequests).toEqual([
+        { url: "/api/dashboard/jobs/job-failed/file-actions", body: { action: "open" } }
+      ]);
+    });
+    expect(screen.queryByText("Open request opened.")).not.toBeInTheDocument();
+
     await user.click(openFolder);
 
     await waitFor(() => {
@@ -2014,7 +2019,7 @@ describe("Flux dashboard", () => {
         { url: "/api/dashboard/jobs/job-failed/file-actions", body: { action: "reveal" } }
       ]);
     });
-    expect(await screen.findByText("Open containing folder request opened.")).toBeInTheDocument();
+    expect(screen.queryByText("Open containing folder request opened.")).not.toBeInTheDocument();
   });
 
   test("job queue shows rejected file action details as a warning toast", async () => {
@@ -3643,6 +3648,7 @@ describe("Flux dashboard", () => {
     await waitFor(() => {
       expect(writeText).toHaveBeenCalledWith("E:/Flux Docs/plans/project-plan.md");
     });
+    await user.click(screen.getByRole("button", { name: "Dismiss notification" }));
     await user.click(screen.getByRole("button", { name: "Open with default app" }));
     await user.click(screen.getByRole("button", { name: "Reveal in folder" }));
 
@@ -3656,6 +3662,8 @@ describe("Flux dashboard", () => {
         expect.objectContaining({ method: "POST", body: JSON.stringify({ action: "reveal" }) })
       );
     });
+    expect(screen.queryByText("Open request opened.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Reveal request opened.")).not.toBeInTheDocument();
   });
 
   test("file detail disables unavailable actions with readable reasons", async () => {

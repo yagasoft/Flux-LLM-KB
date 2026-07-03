@@ -1841,7 +1841,9 @@ export default function App() {
     }
     try {
       const payload = await sendJson<FileActionResponse>(`/api/corpus/assets/${encodeURIComponent(detail.asset_id)}/actions`, "POST", { action });
-      setToast(fileActionToast(action, payload));
+      const nextToast = fileActionToast(action, payload);
+      if (nextToast) setToast(nextToast);
+      else setToastState(null);
     } catch (error) {
       setToast(`File action failed: ${errorMessage(error)}`, "error");
     }
@@ -1850,7 +1852,9 @@ export default function App() {
   async function runJobFileAction(jobId: string, action: "open" | "reveal") {
     try {
       const payload = await sendJson<FileActionResponse>(`/api/dashboard/jobs/${encodeURIComponent(jobId)}/file-actions`, "POST", { action });
-      setToast(fileActionToast(action, payload, action === "reveal" ? "Open containing folder" : undefined));
+      const nextToast = fileActionToast(action, payload, action === "reveal" ? "Open containing folder" : undefined);
+      if (nextToast) setToast(nextToast);
+      else setToastState(null);
     } catch (error) {
       setToast(`Job file action failed: ${errorMessage(error)}`, "error");
     }
@@ -6802,11 +6806,11 @@ function toastTone(message: string): ToastTone {
   return "success";
 }
 
-function fileActionToast(action: "open" | "reveal", payload: FileActionResponse, labelOverride?: string): ToastState {
+function fileActionToast(action: "open" | "reveal", payload: FileActionResponse, labelOverride?: string): ToastState | null {
   const state = payload.state;
   const label = labelOverride ?? (action === "open" ? "Open" : "Reveal");
   const detail = payload.message ? `: ${payload.message}` : "";
-  if (state === "opened") return { message: `${label} request opened.`, tone: "success" };
+  if (state === "opened") return null;
   if (state === "missing") return { message: `${label} request could not find the file${detail}.`, tone: "warning" };
   if (state === "deleted") return { message: `${label} request is unavailable because the asset is deleted from the index${detail}.`, tone: "warning" };
   if (state === "locked") return { message: `${label} request could not access the file because it is locked${detail}.`, tone: "warning" };

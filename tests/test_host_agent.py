@@ -461,6 +461,20 @@ def test_host_open_containing_folder_opens_parent_for_existing_file(monkeypatch,
     assert revealed == []
 
 
+def test_windows_launch_default_app_uses_foreground_shell_helper(monkeypatch, tmp_path):
+    target = tmp_path / "docs" / "report.pdf"
+    target.parent.mkdir()
+    target.write_text("pdf", encoding="utf-8")
+    launched: list[Path] = []
+    monkeypatch.setattr(host_agent.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(host_agent, "_windows_shell_execute_foreground", lambda path: launched.append(path), raising=False)
+    monkeypatch.setattr(host_agent.os, "startfile", lambda *_args, **_kwargs: pytest.fail("os.startfile should not be used"), raising=False)
+
+    host_agent._launch_default_app(target)
+
+    assert launched == [target]
+
+
 def test_windows_reveal_tolerates_empty_explorer_nonzero_for_existing_target(monkeypatch, tmp_path):
     target = tmp_path / "docs" / "report.pdf"
     target.parent.mkdir()

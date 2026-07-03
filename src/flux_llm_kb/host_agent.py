@@ -984,7 +984,7 @@ def _job_file_action_result(
 def _launch_default_app(path: Path) -> None:
     system = platform.system()
     if system == "Windows":
-        os.startfile(str(path))  # type: ignore[attr-defined]
+        _windows_shell_execute_foreground(path)
         return
     if system == "Darwin":
         result = run_no_window(["open", str(path)], capture_output=True, text=True, check=False)
@@ -992,6 +992,33 @@ def _launch_default_app(path: Path) -> None:
         result = run_no_window(["xdg-open", str(path)], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise OSError(result.stderr.strip() or result.stdout.strip() or "open failed")
+
+
+def _windows_shell_execute_foreground(path: Path) -> None:
+    try:
+        import ctypes
+    except Exception as exc:  # pragma: no cover - ctypes is expected on Windows.
+        raise OSError(str(exc)) from exc
+
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:  # pragma: no cover - Windows-only defensive branch.
+        raise OSError("Windows shell launch is unavailable")
+
+    user32 = getattr(windll, "user32", None)
+    if user32 is not None:
+        try:
+            user32.AllowSetForegroundWindow(-1)
+        except Exception:
+            pass
+
+    shell32 = getattr(windll, "shell32", None)
+    if shell32 is None:  # pragma: no cover - Windows-only defensive branch.
+        raise OSError("Windows ShellExecuteW is unavailable")
+    shell32.ShellExecuteW.restype = ctypes.c_void_p
+    result = shell32.ShellExecuteW(None, "open", str(path), None, None, 1)
+    code = int(result or 0)
+    if code <= 32:
+        raise OSError(f"open failed with ShellExecuteW code {code}")
 
 
 def _reveal_in_folder(path: Path) -> None:

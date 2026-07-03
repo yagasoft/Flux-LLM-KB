@@ -3787,6 +3787,60 @@ def test_restore_capture_job_deletion_request_restores_previous_status_and_audit
     assert audit_details["restored_status"] == "blocked_invalid_source"
 
 
+def test_restore_capture_job_deletion_request_handles_missing_previous_result_status(monkeypatch):
+    executed = []
+    rows = [
+        (
+            "job-1",
+            "obsolete",
+            "2026-07-01T09:00:00+00:00",
+            "dashboard",
+            "operator_cleanup",
+            {
+                "obsolete_previous_status": "blocked_invalid_source",
+                "result_status": "obsolete",
+            },
+        ),
+        ("job-1", "blocked_invalid_source", None, None, None),
+    ]
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return rows.pop(0) if rows else None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.restore_capture_job_deletion_request(job_id="job-1", actor="dashboard")
+
+    assert result["status"] == "blocked_invalid_source"
+    assert result["delete_requested"] is False
+    assert "WHEN %s::text IS NULL" in executed[1][0]
+    assert executed[1][1] == ("blocked_invalid_source", None, None, "job-1")
+
+
 def test_restore_capture_job_deletion_request_rejects_unmarked_or_missing_jobs(monkeypatch):
     executed = []
     rows = [("job-1", "failed", None, None, None, {"result_status": "failed"}), None]
