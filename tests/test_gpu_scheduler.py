@@ -8,6 +8,7 @@ import pytest
 from flux_llm_kb.gpu_scheduler import (
     GpuLeaseRecord,
     GpuLeaseTimeout,
+    GpuModelResidency,
     GpuSchedulerConfig,
     GpuTaskProfile,
     InProcessGpuScheduler,
@@ -117,6 +118,37 @@ def test_admission_rejects_when_profile_exceeds_available_vram():
     assert decision.granted is False
     assert decision.rejected is True
     assert decision.reason == "vram_budget_exceeded"
+
+
+def test_live_memory_admission_does_not_double_count_resident_models():
+    profile = GpuTaskProfile(
+        task_type="rerank",
+        model_id="drawais/Qwen3-Reranker-4B-AWQ-INT4",
+        estimated_vram_mb=7_000,
+        exclusive=True,
+    )
+    resident_embedding = GpuModelResidency(
+        model_id="Snowflake/snowflake-arctic-embed-l-v2.0",
+        task_type="embedding",
+        estimated_vram_mb=2_500,
+        resident=True,
+        last_used_at=10.0,
+        metadata={},
+    )
+
+    decision = plan_gpu_admission(
+        profile,
+        active_leases=[],
+        resident_models=[resident_embedding],
+        config=_config(vram_budget_mb=10_000, safety_margin_mb=1_000),
+        live_free_vram_mb=8_500,
+        now=10.0,
+    )
+
+    assert decision.granted is True
+    assert decision.reason == "granted"
+    assert decision.resident_vram_mb == 2_500
+    assert decision.available_vram_mb == 7_500
 
 
 def test_admission_recovers_stale_running_leases_before_planning():

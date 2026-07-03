@@ -168,7 +168,11 @@ def plan_gpu_admission(
     resident_vram = sum(max(0, int(resident.estimated_vram_mb or 0)) for resident in residents)
     active_vram = sum(max(0, int(lease.estimated_vram_mb or 0)) for lease in active)
     available_vram = _available_vram_mb(config, live_free_vram_mb=live_free_vram_mb)
-    effective_available = max(0, available_vram - resident_vram)
+    # Live free VRAM already reflects loaded resident models and running GPU work.
+    # Fall back to configured estimates only when live evidence is unavailable.
+    estimated_resident_vram = 0 if live_free_vram_mb is not None else resident_vram
+    estimated_active_vram = 0 if live_free_vram_mb is not None else active_vram
+    effective_available = max(0, available_vram - estimated_resident_vram)
     requested_vram = max(0, int(profile.estimated_vram_mb or 0))
 
     if requested_vram > effective_available:
@@ -203,7 +207,7 @@ def plan_gpu_admission(
                 available_vram_mb=effective_available,
                 recovered_lease_ids=recovered,
             )
-    if active_vram + requested_vram > effective_available:
+    if estimated_active_vram + requested_vram > effective_available:
         return GpuAdmissionDecision(
             granted=False,
             rejected=False,
