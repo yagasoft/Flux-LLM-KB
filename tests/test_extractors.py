@@ -1057,9 +1057,14 @@ def _configure_frame_sampling(
     count: int = 3,
     threshold: float = 0.35,
     max_duration: int = 1800,
+    vision_enabled: bool = False,
 ) -> None:
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
     monkeypatch.setenv("FLUX_KB_ASR_ENABLED", "false")
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "true" if vision_enabled else "false")
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_ENABLED", "true" if vision_enabled else "false")
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_PROVIDER", "ollama")
+    monkeypatch.setenv("FLUX_KB_LOCAL_INFERENCE_BASE_URL", "http://127.0.0.1:11434")
     monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLING_ENABLED", "true" if enabled else "false")
     monkeypatch.setenv("FLUX_KB_VIDEO_FRAME_SAMPLE_COUNT", str(count))
     monkeypatch.setenv("FLUX_KB_VIDEO_SCENE_THRESHOLD", str(threshold))
@@ -2054,7 +2059,7 @@ def test_extract_video_frames_completes_metadata_when_thumbnails_are_unavailable
 def test_extract_video_reindexes_transcript_and_frame_vision_chunks(monkeypatch, tmp_path):
     path = tmp_path / "clip.mp4"
     path.write_bytes(b"fake media")
-    _configure_frame_sampling(monkeypatch, tmp_path, count=2, threshold=0.35)
+    _configure_frame_sampling(monkeypatch, tmp_path, count=2, threshold=0.35, vision_enabled=True)
     monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
     monkeypatch.setattr(
         "flux_llm_kb.extractors._asr_media",

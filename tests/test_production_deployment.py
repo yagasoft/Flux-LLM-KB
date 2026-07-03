@@ -318,6 +318,8 @@ def test_deploy_ollama_vision_smoke_script_checks_media_runtime_and_decode_path(
     assert "iVBORw0KGgo" in script
     assert "ffprobe" in script
     assert "decode" in script.lower()
+    assert "thinking" in script
+    assert "$response.done -ne $true" in script
 
 
 def test_model_runner_download_avoids_hf_xet_and_allows_large_model_cache_warmup():

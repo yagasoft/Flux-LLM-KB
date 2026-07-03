@@ -57,9 +57,12 @@ try {
     throw "Ollama vision decode smoke test failed: $($_.Exception.Message)"
 }
 
-$text = [string]($response.response ?? $response.message.content ?? "")
-if (-not $text.Trim()) {
-    throw "Ollama vision decode smoke test returned no response text; the request reached Ollama but image decoding or generation may be broken."
+$textCandidates = @($response.response, $response.message.content, $response.thinking) | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([string]$_)
+}
+$text = if ($textCandidates.Count -gt 0) { [string]$textCandidates[0] } else { "" }
+if (-not $text.Trim() -and $response.done -ne $true) {
+    throw "Ollama vision decode smoke test returned neither response text nor a completed response; image decoding or generation may be broken."
 }
 
 Write-Host "Ollama vision decode smoke test passed for $Model."
