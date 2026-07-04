@@ -364,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
     crawl_backfill.add_argument("--workers", type=int)
     crawl_backfill.add_argument("--root", dest="root_name")
     crawl_backfill.add_argument("--family", choices=JOB_FAMILIES)
+    crawl_backfill.add_argument("--callback-url")
 
     crawl_worker = crawl_subparsers.add_parser("worker", help="Run the corpus extraction worker")
     crawl_worker_subparsers = crawl_worker.add_subparsers(dest="worker_command", required=True)
@@ -429,6 +430,29 @@ def main(argv: list[str] | None = None) -> int:
     settings_reset.add_argument("key")
     settings_apply = settings_subparsers.add_parser("apply", help="Acknowledge pending runtime control requests")
     settings_apply.add_argument("--component")
+
+    event_parser = subparsers.add_parser("event", help="Run RabbitMQ event-driven workers")
+    event_subparsers = event_parser.add_subparsers(dest="event_command", required=True)
+    event_worker = event_subparsers.add_parser("worker", help="Consume RabbitMQ work queues")
+    event_worker_subparsers = event_worker.add_subparsers(dest="event_worker_command", required=True)
+    event_worker_run = event_worker_subparsers.add_parser("run", help="Run a RabbitMQ command consumer")
+    event_worker_run.add_argument("--queue", default="flux.commands.corpus")
+    event_outbox = event_subparsers.add_parser("outbox", help="Publish PostgreSQL outbox rows to RabbitMQ")
+    event_outbox_subparsers = event_outbox.add_subparsers(dest="event_outbox_command", required=True)
+    event_outbox_relay = event_outbox_subparsers.add_parser("relay", help="Run the transactional outbox relay")
+    event_outbox_relay.add_argument("--once", action="store_true")
+    event_outbox_relay.add_argument("--interval", type=float, default=1.0)
+    event_outbox_relay.add_argument("--limit", type=int, default=100)
+    event_callbacks = event_subparsers.add_parser("callbacks", help="Dispatch signed webhook callbacks")
+    event_callbacks_subparsers = event_callbacks.add_subparsers(dest="event_callbacks_command", required=True)
+    event_callbacks_dispatch = event_callbacks_subparsers.add_parser("dispatch", help="Run the callback dispatcher")
+    event_callbacks_dispatch.add_argument("--queue", default="flux.callbacks.dispatch")
+    event_scheduler = event_subparsers.add_parser("scheduler", help="Enqueue due scheduled work into RabbitMQ")
+    event_scheduler_subparsers = event_scheduler.add_subparsers(dest="event_scheduler_command", required=True)
+    event_scheduler_run = event_scheduler_subparsers.add_parser("run", help="Run the event scheduler")
+    event_scheduler_run.add_argument("--once", action="store_true")
+    event_scheduler_run.add_argument("--interval", type=float, default=30.0)
+    event_scheduler_run.add_argument("--limit", type=int, default=25)
 
     acceleration_parser = subparsers.add_parser("acceleration", help="Inspect V2.8 acceleration capability and queue status")
     acceleration_subparsers = acceleration_parser.add_subparsers(dest="acceleration_command", required=True)
@@ -625,6 +649,7 @@ def main(argv: list[str] | None = None) -> int:
         "hook": _hook,
         "codex": _codex,
         "settings": _settings,
+        "event": _event_command,
         "acceleration": _acceleration,
         "gpu": _gpu,
         "code": _code,
@@ -1050,7 +1075,11 @@ def _crawl(args: argparse.Namespace) -> int:
         kwargs = {"kind": args.family or args.kind, "limit": args.limit, "workers": args.workers}
         if args.root_name:
             kwargs["root_name"] = args.root_name
-        payload = KnowledgeService().run_corpus_backfill(**kwargs)
+        if args.callback_url:
+            kwargs["callback_url"] = args.callback_url
+        service = KnowledgeService()
+        enqueue = getattr(service, "enqueue_corpus_backfill", None)
+        payload = enqueue(**kwargs) if enqueue else service.run_corpus_backfill(**kwargs)
     elif args.crawl_command == "worker":
         from .service import KnowledgeService
 
@@ -1084,6 +1113,39 @@ def _crawl(args: argparse.Namespace) -> int:
         payload = _crawl_watch(args)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.crawl_command)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def _event_command(args: argparse.Namespace) -> int:
+    if args.event_command == "worker":
+        if args.event_worker_command != "run":  # pragma: no cover - argparse prevents this
+            raise ValueError(args.event_worker_command)
+        from .event_worker import run_worker
+
+        payload = run_worker(queue_name=args.queue)
+    elif args.event_command == "outbox":
+        if args.event_outbox_command != "relay":  # pragma: no cover - argparse prevents this
+            raise ValueError(args.event_outbox_command)
+        import asyncio
+
+        from .outbox_relay import run_relay_loop
+
+        payload = asyncio.run(run_relay_loop(once=args.once, interval_seconds=args.interval, limit=args.limit))
+    elif args.event_command == "callbacks":
+        if args.event_callbacks_command != "dispatch":  # pragma: no cover - argparse prevents this
+            raise ValueError(args.event_callbacks_command)
+        from .callback_dispatcher import run_dispatcher
+
+        payload = run_dispatcher(queue_name=args.queue)
+    elif args.event_command == "scheduler":
+        if args.event_scheduler_command != "run":  # pragma: no cover - argparse prevents this
+            raise ValueError(args.event_scheduler_command)
+        from .event_scheduler import run_scheduler
+
+        payload = run_scheduler(once=args.once, interval_seconds=args.interval, limit=args.limit)
+    else:  # pragma: no cover - argparse prevents this
+        raise ValueError(args.event_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 

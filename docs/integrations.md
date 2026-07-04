@@ -34,7 +34,7 @@ Tools:
 | `kb.acceleration_status` | Return local capability, cache layout, and worker-family queue telemetry. |
 | `kb.watch_probe` | Run a temp-directory watcher backend probe without touching private watched roots. |
 | `kb.worker_status` | Return worker-family cap usage, backpressure, retry/lock, and slow-job status. |
-| `kb.crawl_backfill` | Run a bounded corpus backfill by kind or exact worker family, optionally scoped to one monitored root. |
+| `kb.crawl_backfill` | Enqueue a bounded corpus backfill by kind or exact worker family, optionally scoped to one monitored root and callback URL. |
 | `kb.benchmark_run` | Run deterministic synthetic scan, soak, watcher, or all-mode benchmarks and store metadata-only history. |
 | `kb.benchmark_history` | List metadata-only synthetic benchmark history with mode, label, warm-state, and previous-run delta filters. |
 | `kb.indexer_reliability_status` | Report metadata-only indexer reliability readiness from benchmark history and sanitized worker/watcher evidence. |
@@ -132,7 +132,7 @@ Endpoints:
 - `POST /api/host/validate-path`
 - `GET /api/crawl/status`
 - `POST /api/crawl/sync`
-- `POST /api/crawl/backfill`
+- `POST /api/crawl/backfill` enqueues work and returns `202` operation metadata with `operation_id`, `job_ids`, `status_url`, event topics, and optional callback tracking.
 - `POST /api/crawl/watch`
 - `POST /api/crawl/watch/probe`
 - `GET /api/crawl/watch/events`
@@ -272,6 +272,7 @@ flux-kb automation status
 flux-kb automation run --mode guarded --limit 25
 flux-kb automation actions --status all --limit 25
 flux-kb crawl backfill --root docs --family office --limit 20
+flux-kb crawl backfill --root docs --family office --limit 20 --callback-url http://127.0.0.1:8765/callback
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
 flux-kb retrieval benchmark run --suite governance-shadow --label before-automation
 flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
@@ -445,6 +446,12 @@ diagnostics remediate`, `POST /api/diagnostics/actions`, or
 `settings_mutated: false`.
 Diagnostic items include operator guidance that distinguishes policy blockers
 from invalid source/package inputs and real missing dependencies.
+Long-running corpus backfill surfaces are enqueue-only. REST, MCP, and CLI return
+accepted operation metadata; `--wait`-style observation can be added by clients,
+but processing remains in RabbitMQ workers. Callback URLs are accepted only for
+loopback, private-network, or explicitly allowlisted destinations. Callback
+requests are signed with `FLUX_KB_CALLBACK_SIGNING_SECRET`, use idempotency keys,
+and retry through RabbitMQ-backed `callback_deliveries` state.
 Guarded operator automation is available through `flux-kb automation
 status|run|actions`, `GET /api/automation/status`, `POST
 /api/automation/run`, `GET /api/automation/actions`, and

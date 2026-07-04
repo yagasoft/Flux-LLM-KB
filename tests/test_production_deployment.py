@@ -56,6 +56,7 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "python\\python.exe" in install
     assert "Invoke-FluxMigration" in install
     assert 'Invoke-FluxDockerImageAvailable -Image "postgres:16"' in install
+    assert 'Invoke-FluxDockerImageAvailable -Image "rabbitmq:4.3-management"' in install
     assert "-m flux_llm_kb.cli migrate" in install
     assert "Invoke-FluxCodexPluginInstall" in install
     assert "-m flux_llm_kb.cli codex install-plugin" in install
@@ -96,15 +97,17 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "docker build" in update
     assert "flux-llm-kb-api:" in update
     assert '"up", "-d", "--no-build"' in update
-    assert '"postgres", "vespa"' in update
-    assert '"paddle-runner", "model-runner", "api", "worker"' in update
+    assert '"postgres", "rabbitmq", "vespa"' in update
+    assert '"paddle-runner", "model-runner", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay"' in update
     assert "FLUX_KB_IMAGE_TAG" in update
+    assert "FLUX_KB_CALLBACK_SIGNING_SECRET=$callbackSecret" in update
     assert "private\\flux.env" in update
     assert 'Join-Path $appRoot "plugins"' in update
     assert "Resolve-FluxPythonExe" in update
     assert "RecreateVenv" in update
     assert "Invoke-FluxMigration" in update
     assert 'Invoke-FluxDockerImageAvailable -Image "postgres:16"' in update
+    assert 'Invoke-FluxDockerImageAvailable -Image "rabbitmq:4.3-management"' in update
     assert "-m flux_llm_kb.cli migrate" in update
     assert "Invoke-FluxCodexPluginInstall" in update
     assert "-m flux_llm_kb.cli codex install-plugin" in update
@@ -544,8 +547,11 @@ def test_worker_compose_commands_use_settings_driven_parallelism_defaults():
     update_compose = _embedded_compose_template(_script("update-flux.ps1"))
 
     for compose in (dev_compose, install_compose, update_compose):
-        assert "python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5" in compose
-        assert "--limit 10" not in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus" in compose
+        assert "python -m flux_llm_kb.cli event outbox relay --interval 1 --limit 100" in compose
+        assert "python -m flux_llm_kb.cli event scheduler run --interval 30 --limit 25" in compose
+        assert "python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch" in compose
+        assert "crawl worker run --limit 10" not in compose
         assert "--workers 1" not in compose
 
 
@@ -625,6 +631,8 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     assert "docker start" in update
     assert "flux-llm-kb-api" in update
     assert "flux-llm-kb-worker" in update
+    assert "flux-llm-kb-event-scheduler" in update
+    assert "flux-llm-kb-callback-worker" in update
     assert "flux-llm-kb-asr" in update
     assert "`$(seq 1 120)" in update
     assert "19071/ApplicationStatus" in update

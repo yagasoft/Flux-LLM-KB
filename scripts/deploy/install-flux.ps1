@@ -231,12 +231,16 @@ services:
         condition: service_healthy
       asr:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
@@ -314,12 +318,16 @@ services:
         condition: service_healthy
       asr:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     env_file:
       - ../private/flux.env
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
@@ -368,7 +376,70 @@ services:
       - flux_llm_kb_logs:/app/logs
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
-             python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5"
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus"
+
+  event-scheduler:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-event-scheduler
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event scheduler run --interval 30 --limit 25"
+
+  callback-worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-callback-worker
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch"
+
+  outbox-relay:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-outbox-relay
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event outbox relay --interval 1 --limit 100"
 
   asr:
     image: flux-llm-kb-api:`${FLUX_KB_IMAGE_TAG}
@@ -575,6 +646,27 @@ services:
       retries: 60
       start_period: 60s
 
+  rabbitmq:
+    image: rabbitmq:4.3-management
+    container_name: flux-llm-kb-rabbitmq
+    restart: unless-stopped
+    mem_limit: "1gb"
+    memswap_limit: "1gb"
+    environment:
+      RABBITMQ_DEFAULT_USER: flux
+      RABBITMQ_DEFAULT_PASS: flux
+      RABBITMQ_DEFAULT_VHOST: flux
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - flux_llm_kb_rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
   postgres:
     image: postgres:16
     container_name: flux-llm-kb-postgres
@@ -617,6 +709,8 @@ services:
       retries: 20
 
 volumes:
+  flux_llm_kb_rabbitmq_data:
+    name: flux_llm_kb_rabbitmq_data
   flux_llm_kb_postgres_data:
     name: flux_llm_kb_postgres_data
   flux_llm_kb_data:
@@ -655,6 +749,16 @@ function Write-FluxEnv {
         [bool]$GpuEnabled
     )
     $databaseUrl = "postgresql://flux:flux@postgres:5432/flux_llm_kb"
+    $callbackSecret = ""
+    if (Test-Path $TargetPath) {
+        $existingSecret = Select-String -LiteralPath $TargetPath -Pattern "^FLUX_KB_CALLBACK_SIGNING_SECRET=(.*)$" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $existingSecret) {
+            $callbackSecret = $existingSecret.Matches[0].Groups[1].Value
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($callbackSecret)) {
+        $callbackSecret = ([guid]::NewGuid().ToString("N") + [guid]::NewGuid().ToString("N"))
+    }
     $envText = @"
 FLUX_KB_DATABASE_URL=$databaseUrl
 FLUX_KB_INSTALL_ROOT=$InstallRoot
@@ -664,6 +768,11 @@ FLUX_KB_DATA_DIR=$InstallRoot\data
 FLUX_KB_LOG_DIR=$InstallRoot\logs
 FLUX_KB_IMAGE_TAG=$ImageTag
 FLUX_KB_HOST_DATABASE_URL=postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb
+FLUX_KB_RABBITMQ_URL=amqp://flux:flux@rabbitmq:5672/flux
+FLUX_KB_RABBITMQ_MANAGEMENT_URL=http://127.0.0.1:15672
+FLUX_KB_RABBITMQ_USERNAME=flux
+FLUX_KB_RABBITMQ_PASSWORD=flux
+FLUX_KB_CALLBACK_SIGNING_SECRET=$callbackSecret
 "@
     if ($GpuEnabled) {
         $envText += "`n" + @"
@@ -1414,6 +1523,7 @@ Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:local") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker local"
 Invoke-FluxOllamaImageBuild -SourceRoot $SourceRoot -BuildMetadata $buildMetadata -ImageTag $imageTag -TimeoutSeconds $DockerBuildTimeoutSeconds
 Invoke-FluxDockerImageAvailable -Image "postgres:16" -WorkingDirectory $SourceRoot -TimeoutSeconds 300
+Invoke-FluxDockerImageAvailable -Image "rabbitmq:4.3-management" -WorkingDirectory $SourceRoot -TimeoutSeconds 300
 
 $gpuEnabled = Assert-FluxGpuAvailable -ImageTag $imageTag -GpuMode $GpuMode
 
@@ -1463,12 +1573,12 @@ if ($gpuEnabled) {
 
 Push-Location $appRoot
 try {
-    $composeServices = @("postgres", "vespa")
+    $composeServices = @("postgres", "rabbitmq", "vespa")
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
     Invoke-FluxVespaApplicationDeploy -AppRoot $appRoot -TimeoutSeconds 300
-    $composeServices = @("paddle-runner", "model-runner", "api", "worker")
+    $composeServices = @("paddle-runner", "model-runner", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay")
     if ($gpuEnabled) {
-        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker")
+        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay")
     }
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
 } finally {

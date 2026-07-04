@@ -28,7 +28,7 @@ def test_dashboard_dev_scripts_refresh_build_and_runtime():
     status_script = (ROOT / "scripts" / "status-dashboard-dev.ps1").read_text(encoding="utf-8")
 
     assert "npm --prefix dashboard run build" in start_script
-    assert "docker compose up -d --build postgres api" in start_script
+    assert "docker compose up -d --build postgres rabbitmq api outbox-relay event-scheduler worker" in start_script
     assert "uvicorn flux_llm_kb.rest_api:create_app --factory" in start_script
     assert "--reload" not in start_script
     assert "http://127.0.0.1:8765/dashboard" in start_script

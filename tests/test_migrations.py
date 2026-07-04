@@ -29,6 +29,12 @@ def test_load_migrations_returns_ordered_sql_files():
     assert any("CREATE TABLE IF NOT EXISTS mail_oauth_tokens" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS outlook_sync_requests" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS outlook_host_state" in item.sql for item in migrations)
+    event_messaging = next(item for item in migrations if item.name == "0041_event_driven_messaging")
+    assert "CREATE TABLE IF NOT EXISTS message_outbox" in event_messaging.sql
+    assert "CREATE TABLE IF NOT EXISTS message_inbox" in event_messaging.sql
+    assert "CREATE TABLE IF NOT EXISTS callback_deliveries" in event_messaging.sql
+    assert "ADD COLUMN IF NOT EXISTS broker_message_id" in event_messaging.sql
+    assert "idx_message_outbox_pending" in event_messaging.sql
     assert any("sync_interval_seconds" in item.sql for item in migrations)
     graph_migration = next(item for item in migrations if item.name == "0010_graph_lifecycle")
     assert "CREATE TABLE IF NOT EXISTS claim_lifecycle_events" in graph_migration.sql

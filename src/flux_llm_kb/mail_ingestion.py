@@ -632,6 +632,35 @@ def sync_due_mail_profiles(
     return {"profiles": results, "count": len(results)}
 
 
+def process_imap_sync_run(
+    *,
+    run_id: str,
+    worker_id: str = "flux-kb-mail-worker",
+    broker_message_id: str | None = None,
+    access_token: str | None = None,
+    imap_client_factory: Any | None = None,
+) -> dict[str, Any]:
+    profile = database.claim_imap_sync_run_by_id(
+        run_id=run_id,
+        worker_id=worker_id,
+        broker_message_id=broker_message_id,
+    )
+    if profile is None:
+        return {"run_id": run_id, "status": "not_claimable", "retryable": False}
+    database.mark_mail_sync_run_running(run_id=profile["id"], worker_id=worker_id)
+    result = _sync_imap_profile(
+        profile,
+        access_token=access_token,
+        imap_client_factory=imap_client_factory,
+        run_id=profile["id"],
+        worker_id=worker_id,
+        attempt_count=max(1, int(profile.get("attempt_count") or 1)),
+    )
+    result["spool_sync"] = sync_mail_spool(profile_name=profile["name"])
+    result["retryable"] = result.get("status") == "backoff"
+    return result
+
+
 def sync_outlook_profile(profile_name: str) -> dict[str, Any]:
     profiles = database.list_mail_profiles(name=profile_name)
     if not profiles:

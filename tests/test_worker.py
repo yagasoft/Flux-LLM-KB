@@ -125,6 +125,61 @@ def test_backfill_processes_corpus_sync_root_jobs_with_progress(monkeypatch):
     assert result["capture_job_retention_days"] == 7
 
 
+def test_enqueue_corpus_backfill_returns_operation_metadata(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        database,
+        "enqueue_pending_corpus_job_commands",
+        lambda **kwargs: events.append(("enqueue", kwargs))
+        or {"queued": 1, "jobs": [{"job_id": "job-1", "message_id": "msg-1"}]},
+    )
+    monkeypatch.setattr(database, "record_audit_event", lambda **kwargs: events.append(("audit", kwargs)) or {"id": "audit-1"})
+
+    result = KnowledgeService().enqueue_corpus_backfill(kind="text", limit=3, workers=2, root_name="docs")
+
+    assert result["accepted"] is True
+    assert result["operation_type"] == "corpus_backfill"
+    assert result["queued"] == 1
+    assert result["job_ids"] == ["job-1"]
+    assert result["status_url"] == "/api/crawl/jobs"
+    assert "corpus.job.completed" in result["event_topics"]
+    assert events[0] == (
+        "enqueue",
+        {
+            "limit": 3,
+            "root_name": "docs",
+            "job_families": ["text", "office"],
+            "host_agent_roots": None,
+        },
+    )
+
+
+def test_enqueue_corpus_backfill_attaches_valid_callback(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        database,
+        "enqueue_pending_corpus_job_commands",
+        lambda **_kwargs: {"queued": 1, "jobs": [{"job_id": "11111111-1111-1111-1111-111111111111", "message_id": "msg-1"}]},
+    )
+    monkeypatch.setattr(
+        database,
+        "attach_callback_to_capture_jobs",
+        lambda **kwargs: events.append(("attach", kwargs)) or {"attached": 1, "job_ids": kwargs["job_ids"]},
+    )
+    monkeypatch.setattr(database, "record_audit_event", lambda **kwargs: events.append(("audit", kwargs)) or {"id": "audit-1"})
+
+    result = KnowledgeService().enqueue_corpus_backfill(
+        kind="text",
+        limit=1,
+        callback_url="http://127.0.0.1:8765/callback",
+    )
+
+    assert result["callback"]["attached_jobs"] == 1
+    assert events[0][0] == "attach"
+    assert events[0][1]["job_ids"] == ["11111111-1111-1111-1111-111111111111"]
+    assert events[0][1]["callback_url"] == "http://127.0.0.1:8765/callback"
+
+
 def test_backfill_recovers_stale_jobs_globally(monkeypatch):
     calls = {"recovered": [], "cancelled": [], "repaired": [], "cleared_errors": []}
 

@@ -183,9 +183,18 @@ def test_docker_compose_defines_corpus_worker_service() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert "  worker:" in compose
-    assert "python -m flux_llm_kb.cli crawl worker run" in compose
-    assert "--limit 10" not in compose
+    assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus" in compose
+    assert "  rabbitmq:" in compose
+    assert "image: rabbitmq:4.3-management" in compose
+    assert "  outbox-relay:" in compose
+    assert "python -m flux_llm_kb.cli event outbox relay" in compose
+    assert "  event-scheduler:" in compose
+    assert "python -m flux_llm_kb.cli event scheduler run --interval 30 --limit 25" in compose
+    assert "  callback-worker:" in compose
+    assert "python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch" in compose
+    assert "crawl worker run --limit 10" not in compose
     assert "FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb" in compose
+    assert "FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux" in compose
 
 
 def test_dashboard_dev_scripts_manage_worker_service() -> None:
@@ -193,6 +202,6 @@ def test_dashboard_dev_scripts_manage_worker_service() -> None:
     status_script = Path("scripts/status-dashboard-dev.ps1").read_text(encoding="utf-8")
     stop_script = Path("scripts/stop-dashboard-dev.ps1").read_text(encoding="utf-8")
 
-    assert "docker compose up -d --build postgres api worker" in start_script
-    assert "docker compose ps api worker postgres" in status_script
-    assert "docker compose stop api worker" in stop_script
+    assert "docker compose up -d --build postgres rabbitmq api outbox-relay event-scheduler worker" in start_script
+    assert "docker compose ps api worker search-index-worker mail-worker automation-worker governance-worker runtime-control-worker callback-worker event-scheduler outbox-relay rabbitmq postgres" in status_script
+    assert "docker compose stop api worker search-index-worker mail-worker automation-worker governance-worker runtime-control-worker callback-worker event-scheduler outbox-relay" in stop_script

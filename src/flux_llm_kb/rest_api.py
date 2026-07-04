@@ -248,6 +248,7 @@ def create_app():
         workers: int | None = None
         root_name: str | None = None
         family: str | None = None
+        callback_url: str | None = None
 
     class BenchmarkRunRequest(BaseModel):
         fixture: str = "all"
@@ -1474,10 +1475,15 @@ def create_app():
         kwargs: dict[str, object] = {"kind": request.kind, "limit": request.limit, "workers": request.workers}
         if request.family is not None:
             kwargs["family"] = request.family
+        if request.callback_url is not None:
+            kwargs["callback_url"] = request.callback_url
         if request.root_name is not None:
             kwargs["root_name"] = request.root_name
             if _should_proxy_host_root(request.root_name):
                 return host_agent_backfill(**kwargs)
+        enqueue = getattr(service, "enqueue_corpus_backfill", None)
+        if enqueue:
+            return JSONResponse(status_code=202, content=enqueue(**kwargs))
         return service.run_corpus_backfill(**kwargs)
 
     @app.post("/api/crawl/watch")
@@ -1755,7 +1761,10 @@ def host_agent_backfill(
     workers: int | None = None,
     root_name: str | None = None,
     family: str | None = None,
+    callback_url: str | None = None,
 ) -> dict:
+    if callback_url:
+        raise FluxApiError(400, "callback_url is not yet supported for host-agent proxied backfills")
     return remote_backfill(kind=kind, limit=limit, workers=workers, root_name=root_name, family=family)
 
 

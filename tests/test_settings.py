@@ -23,6 +23,19 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     keys = {definition.key for definition in SETTING_REGISTRY}
 
     assert "retrieval.token_budget" in keys
+    assert "messaging.rabbitmq_url" in keys
+    assert "messaging.rabbitmq_management_url" in keys
+    assert "messaging.rabbitmq_username" in keys
+    assert "messaging.rabbitmq_password" in keys
+    assert "messaging.prefetch" in keys
+    assert "messaging.retry_delay_ms" in keys
+    assert "messaging.delivery_limit" in keys
+    assert "messaging.consumer.corpus_concurrency" in keys
+    assert "messaging.consumer.mail_concurrency" in keys
+    assert "messaging.consumer.automation_concurrency" in keys
+    assert "callbacks.allowlist" in keys
+    assert "callbacks.signing_secret" in keys
+    assert "callbacks.timeout_seconds" in keys
     assert "retrieval.search_engine" in keys
     assert "retrieval.vespa_base_url" in keys
     assert "retrieval.embedding_model" in keys
@@ -147,6 +160,33 @@ def test_worker_default_workers_uses_environment_override(monkeypatch):
     assert resolved.value == 12
     assert resolved.raw_value == 12
     assert resolved.source == "env"
+
+
+def test_messaging_settings_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("messaging.rabbitmq_url").raw_value == "amqp://flux:flux@rabbitmq:5672/flux"
+    assert service.resolve("messaging.rabbitmq_management_url").raw_value == "http://127.0.0.1:15672"
+    assert service.resolve("messaging.prefetch").raw_value == 4
+    assert service.resolve("messaging.delivery_limit").raw_value == 8
+    assert service.resolve("messaging.consumer.corpus_concurrency").raw_value == 4
+    assert service.resolve("callbacks.allowlist").raw_value == []
+    assert service.resolve("callbacks.timeout_seconds").raw_value == 5
+
+    monkeypatch.setenv("FLUX_KB_RABBITMQ_URL", "amqp://flux:secret@localhost:5672/flux")
+    monkeypatch.setenv("FLUX_KB_RABBITMQ_PREFETCH", "12")
+    monkeypatch.setenv("FLUX_KB_RABBITMQ_DELIVERY_LIMIT", "5")
+    monkeypatch.setenv("FLUX_KB_CONSUMER_CORPUS_CONCURRENCY", "8")
+    monkeypatch.setenv("FLUX_KB_CALLBACK_ALLOWLIST", "https://hooks.example.local/flux,example.internal")
+    monkeypatch.setenv("FLUX_KB_CALLBACK_TIMEOUT_SECONDS", "9")
+
+    assert service.resolve("messaging.rabbitmq_url").raw_value == "amqp://flux:secret@localhost:5672/flux"
+    assert service.resolve("messaging.prefetch").raw_value == 12
+    assert service.resolve("messaging.delivery_limit").raw_value == 5
+    assert service.resolve("messaging.consumer.corpus_concurrency").raw_value == 8
+    assert service.resolve("callbacks.allowlist").raw_value == ["https://hooks.example.local/flux", "example.internal"]
+    assert service.resolve("callbacks.timeout_seconds").raw_value == 9
 
 
 def test_gpu_scheduler_settings_defaults_and_env_overrides(monkeypatch):

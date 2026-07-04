@@ -69,6 +69,10 @@ system rather than a large prompt-injected memory file.
 - `runtime_settings`, `runtime_setting_events`, `runtime_components`, and
   `runtime_control_requests`: settings catalog-backed configuration, audit trail, and
   reload/restart/reindex coordination.
+- `message_outbox`, `message_inbox`, and `callback_deliveries`: transactional
+  RabbitMQ publishing state, consumer idempotency state, and signed webhook
+  delivery/retry state. PostgreSQL remains the durable state and audit store;
+  RabbitMQ is the local delivery, acknowledgement, retry, and pub/sub plane.
 - `mail_profiles`, `mail_messages`, `mail_post_process_events`, and
   `mail_sync_runs`: IMAP and Outlook COM capture profiles, per-message export
   and post-process state, cursors, errors, claimable IMAP scheduler runs,
@@ -193,8 +197,9 @@ events when applied or recovered. If the target state changed since proposal,
 the action is marked `skipped_conflict` and a new shadow run is required.
 
 The librarian worker integration is default-off. When enabled it runs
-governance on cadence through `run_corpus_worker`; it remains shadow-only unless
-settings explicitly request auto mode and enable auto-apply. Even then,
+governance on cadence through the event scheduler and RabbitMQ governance queue;
+it remains shadow-only unless settings explicitly request auto mode and enable
+auto-apply. Even then,
 auto-apply is limited to low-risk `mark_review`, `stale_tag`, and
 `deprioritize` claim actions that pass the benchmark gate and protected-memory
 rules. Governance actions never mutate runtime settings, and every response
@@ -369,27 +374,40 @@ Cloud transcription remains off by default. Semantic media embeddings are a
 separate backfill phase so large media files do not slow normal crawl/watch
 loops.
 
-Deferred workers claim jobs with `FOR UPDATE SKIP LOCKED`, use retry/cooldown
-state in `capture_jobs`, and do not call cloud providers by default. Jobs move to
-explicit terminal states such as `completed`, `metadata_only`, or
-`blocked_missing_dependency`; policy limits and strict metadata-only outcomes
-use `blocked_by_policy`, corrupt or invalid package/source inputs use
-`blocked_invalid_source`, and locked reads move through `retrying_locked` with
-`next_attempt_at` cooldown and then `blocked_locked` after configured attempts.
+Long-running work is event-driven. REST, MCP, CLI, watcher, scheduler, and host
+surfaces write state rows plus `message_outbox` rows in one PostgreSQL
+transaction. The outbox relay publishes persistent messages to durable RabbitMQ
+topic exchanges (`flux.commands`, `flux.events`, `flux.callbacks`, `flux.retry`,
+and `flux.dead`) using publisher confirms. Consumers use explicit ACKs and
+`message_inbox` duplicate suppression; ACK happens only after the handler has
+updated durable state and written the completion, retry, or failure event. Raw
+corpus, mail, or private content is not placed in broker messages.
+
+Corpus/search-index workers consume RabbitMQ command queues and claim only the
+specific job id carried by the message. `capture_jobs` is now lifecycle state,
+not the worker queue. Jobs move to explicit terminal states such as `completed`,
+`metadata_only`, or `blocked_missing_dependency`; policy limits and strict
+metadata-only outcomes use `blocked_by_policy`, corrupt or invalid
+package/source inputs use `blocked_invalid_source`, and locked reads move
+through `retrying_locked` with `next_attempt_at` cooldown and then
+`blocked_locked` after configured attempts.
 If a Windows host-agent local file is locked and `host_agent.vss_enabled` is
 true, the worker first retries that extraction through a short-lived VSS
 snapshot. VSS create/read/delete failures move through `retrying_vss_failed`
 using the same lock cooldown and become `blocked_vss_failed` after configured
-locked-file attempts.
+locked-file attempts. Retryable worker outcomes reject the broker delivery so
+RabbitMQ delayed retry controls redelivery; terminal outcomes ACK and emit a
+`flux.events` lifecycle message.
 Corpus jobs are classified into fixed worker families (`text`, `office`,
 `image`, `diagram`, `archive`, `media`, `embedding`, `preview`, and `general`)
 with resource class, priority, and time budget metadata. Worker/backfill
-commands translate `--kind` options into these families before claiming jobs,
+commands translate `--kind` options into these families before command enqueue,
 including broader operator aliases such as `data`, `mail`, `reports`, and
-`metadata`, so family-specific workers do not lock unrelated work. Claiming can
-apply the configured `acceleration.worker_cap.*` map by ranking candidates per
-worker family and claiming no more than `configured_cap - current_running` for
-each family, even when the requested batch limit is larger. Status surfaces
+`metadata`, so family-specific command queues stay separated. Legacy/manual
+database batch claiming can still apply the configured
+`acceleration.worker_cap.*` map by ranking candidates per worker family and
+claiming no more than `configured_cap - current_running` for each family, even
+when the requested batch limit is larger. Status surfaces
 expose cap usage, `over_cap_running`, worker-family backpressure, oldest pending
 age, retrying locked counts, blocked locked counts, sanitized slow-job rows,
 parser cache hits/misses, and manifest skip counters. Worker and backfill
@@ -754,12 +772,12 @@ preserves the ready spool export, surfaces in the sync run, and keeps the folder
 cursor retry-safe by not advancing past the failed UID.
 
 Scheduled IMAP sync is represented as explicit `mail_sync_runs` lifecycle state.
-Due profiles are selected from enabled/sync-enabled profile settings and
-`next_sync_at`, then claimed with database row locks so competing workers do not
-process the same profile concurrently. Runs record queued, claimed, running,
-completed, failed, auth-blocked, and backoff states, with worker ownership,
-attempt count, errors, next attempts, and drift/missed-run fields for dashboard
-and health diagnostics. Manual dashboard sync also creates an explicit run.
+The event scheduler converts due profiles into RabbitMQ commands; mail workers
+then claim the exact run id from the command before processing. Runs record
+queued, claimed, running, completed, failed, auth-blocked, and backoff states,
+with worker ownership, attempt count, errors, next attempts, and drift/missed-run
+fields for dashboard and health diagnostics. Manual dashboard sync also creates
+an explicit run and command.
 
 Classic Outlook COM catch-up profiles pull selected folder paths from local
 Outlook for historical or missed messages. They are intentionally scoped
@@ -777,12 +795,13 @@ a `Restrict` filter from the previous cursor minus a small overlap, skips known
 overlap duplicates by `profile + folder + outlook EntryID`, and advances each
 folder cursor only for successfully exported or already-known messages.
 
-After the split, Outlook COM crawls when a sync request is queued or when a
-scheduled Outlook profile becomes due while the Windows host is running. If
-`sync_enabled=false`, it crawls only on manual requests such as dashboard
-“Sync Now” or `flux-kb outlook-host sync --profile <name>`. If
-`sync_enabled=true`, the host reconciles due profiles on startup and then at the
-configured interval. Missing host/Outlook states are explicit:
+After the split, Outlook COM crawls when a brokered sync request is queued or
+when a scheduled Outlook profile becomes due. Docker services enqueue request
+state and command messages; the Windows host process consumes/claims the exact
+request id because COM must run in the logged-in user session. If
+`sync_enabled=false`, Outlook crawls only on manual requests such as dashboard
+“Sync Now” or `flux-kb outlook-host sync --profile <name>`. Missing
+host/Outlook states are explicit:
 `host_offline`, `blocked_not_windows`, `blocked_missing_dependency`, or
 `blocked_outlook_unavailable`.
 
@@ -792,8 +811,9 @@ configured interval. Missing host/Outlook states are explicit:
 - CLI supports local automation, diagnostics, migration, and export.
 - REST mirrors the MCP operations for clients that do not support MCP.
 - Codex hooks enforce preflight retrieval and post-turn capture across workspaces.
-- Docker hosts the normal Flux API/dashboard/worker processes. The Outlook COM
-  bridge is deliberately outside Docker because COM requires the logged-in
-  Windows user session and classic Outlook.
+- Docker hosts the normal Flux API/dashboard processes, RabbitMQ, the
+  transactional outbox relay, event scheduler, RabbitMQ workers, and callback
+  dispatcher. The Outlook COM bridge is deliberately outside Docker because COM
+  requires the logged-in Windows user session and classic Outlook.
 - The generic host-agent bridge is also outside Docker when direct access to
   arbitrary host filesystem paths or native folder browsing is required.

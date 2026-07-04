@@ -51,6 +51,26 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(
+        database,
+        "message_queue_status",
+        lambda: {
+            "outbox": {"pending": 2, "publishing": 0, "failed": 1, "published": 10, "oldest_pending_age_seconds": 7},
+            "inbox": {"processing": 1, "handled": 5, "failed": 0},
+            "callbacks": {"pending": 1, "failed": 0, "blocked": 0, "delivered": 3},
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        health.messaging,
+        "management_queue_status",
+        lambda timeout_seconds=0.2: {
+            "available": True,
+            "totals": {"messages_ready": 4, "messages_unacknowledged": 1, "messages": 5, "consumers": 3},
+            "queues": [{"name": "flux.commands.corpus", "messages": 5}],
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
         health,
         "remote_status",
         lambda: {
@@ -115,6 +135,9 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["runtime"]["git"]["message"] == "host git"
     assert payload["workers"]["active"] == 1
     assert payload["workers"]["components"][0]["name"] == "corpus-worker:docker"
+    assert payload["messaging"]["outbox"]["pending"] == 2
+    assert payload["messaging"]["callbacks"]["delivered"] == 3
+    assert payload["messaging"]["broker"]["totals"]["messages_ready"] == 4
     assert payload["deployment"]["install_root"] == "D:\\FluxLLMKB"
     assert payload["deployment"]["image_tag"] == "abc123"
     assert "repo_coupled" in payload["deployment"]

@@ -8,7 +8,7 @@ import shutil
 import sys
 from typing import Any
 
-from . import database
+from . import database, messaging
 from .acceleration import collect_acceleration_status
 from .codex_integration import codex_status
 from .error_diagnostics import coerce_error_detail, error_envelope
@@ -80,6 +80,22 @@ def collect_dashboard_payload() -> dict[str, Any]:
         {"episodes": 0, "sources": 0, "source_assets": 0, "asset_chunks": 0, "embeddings": 0},
     )
     components = _safe(database.list_runtime_components, [])
+    messaging_status = _safe(
+        database.message_queue_status,
+        {
+            "outbox": {"pending": 0, "publishing": 0, "failed": 0, "published": 0, "oldest_pending_age_seconds": 0},
+            "inbox": {"processing": 0, "handled": 0, "failed": 0},
+            "callbacks": {"pending": 0, "failed": 0, "blocked": 0, "delivered": 0},
+        },
+    )
+    messaging_status["broker"] = _safe(
+        lambda: messaging.management_queue_status(timeout_seconds=0.2),
+        {
+            "available": False,
+            "totals": {"messages_ready": 0, "messages_unacknowledged": 0, "messages": 0, "consumers": 0},
+            "queues": [],
+        },
+    )
     workers = [item for item in components if str(item.get("name", "")).startswith("corpus-worker:")]
     checks = doctor_payload(db_report=db_report)["checks"]
     host_agent_status = remote_status()
@@ -150,6 +166,7 @@ def collect_dashboard_payload() -> dict[str, Any]:
             "active": sum(1 for item in workers if item.get("status") == "running"),
             "components": workers,
         },
+        "messaging": messaging_status,
         "deployment": _deployment_status(),
         "duplicates": {"assets": crawl.get("duplicate_assets", retrieval.get("duplicate_assets", 0))},
         "recent_errors": crawl["recent_errors"],

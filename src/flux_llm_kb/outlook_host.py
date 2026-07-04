@@ -168,6 +168,69 @@ def run_once(*, host_id: str = DEFAULT_HOST_ID, heartbeat_interval_seconds: floa
         }
 
 
+def process_request_by_id(
+    *,
+    request_id: str,
+    host_id: str = DEFAULT_HOST_ID,
+    broker_message_id: str | None = None,
+    heartbeat_interval_seconds: float = 30.0,
+) -> dict[str, Any]:
+    if platform.system() != "Windows":
+        return _blocked(host_id, "blocked_not_windows", "Outlook COM host requires Windows")
+    try:
+        import win32com.client  # noqa: F401 # type: ignore[import-not-found]
+    except ImportError:
+        return _blocked(host_id, "blocked_missing_dependency", "pywin32 is required for Outlook COM")
+
+    database.record_outlook_host_heartbeat(host_id=host_id, status="running", process_id=os.getpid(), metadata={})
+    request = database.claim_outlook_sync_request_by_id(
+        request_id=request_id,
+        host_id=host_id,
+        broker_message_id=broker_message_id,
+    )
+    if request is None:
+        return {"status": "not_claimable", "host_id": host_id, "request_id": request_id, "retryable": False}
+    try:
+        result = _run_with_active_heartbeat(
+            host_id=host_id,
+            metadata={"active_request_id": request["id"], "profile_name": request["profile_name"]},
+            interval_seconds=heartbeat_interval_seconds,
+            action=lambda: sync_outlook_profile(request["profile_name"]),
+        )
+        status_value = result.get("status", "completed")
+        database.complete_outlook_sync_request(
+            request_id=request["id"],
+            profile_name=request["profile_name"],
+            status=status_value,
+            result=result,
+            error=None if status_value in {"completed", "idle"} else str(result.get("errors") or result.get("error") or ""),
+        )
+        return {"host_id": host_id, "request_id": request["id"], **result, "retryable": False}
+    except Exception as exc:
+        database.complete_outlook_sync_request(
+            request_id=request["id"],
+            profile_name=request["profile_name"],
+            status="error",
+            result={},
+            error=str(exc),
+        )
+        database.record_outlook_host_heartbeat(
+            host_id=host_id,
+            status="blocked_outlook_unavailable",
+            process_id=os.getpid(),
+            last_error=str(exc),
+            metadata={},
+        )
+        return {
+            "host_id": host_id,
+            "request_id": request["id"],
+            "profile": request["profile_name"],
+            "status": "blocked_outlook_unavailable",
+            "error": str(exc),
+            "retryable": True,
+        }
+
+
 def _run_with_active_heartbeat(
     *,
     host_id: str,

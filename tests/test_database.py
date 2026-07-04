@@ -4866,6 +4866,56 @@ def test_enqueue_corpus_sync_job_uses_operator_schedule(monkeypatch):
     }
     assert insert_params[7] == schedule["priority"]
     assert insert_params[8] == schedule["time_budget_seconds"]
+    assert any("INSERT INTO message_outbox" in statement for statement, _params in executed)
+    assert any("routing_key = %s" in statement and "broker_message_id" in statement for statement, _params in executed)
+
+
+def test_enqueue_unique_capture_job_writes_broker_command_to_outbox(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status" in sql:
+                return None
+            if "INSERT INTO capture_jobs" in sql:
+                return ("job-new", "pending")
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-1", "message-1", "pending")
+            return None
+
+    result = database._enqueue_unique_capture_job_with_cursor(
+        FakeCursor(),
+        job_type="corpus_extract_text",
+        payload={"root_name": "docs", "path": "safe.md", "reason": "test"},
+        job_family="text",
+        resource_class="cpu",
+        telemetry={"stage": "queued"},
+    )
+
+    outbox_params = next(params for statement, params in executed if "INSERT INTO message_outbox" in statement)
+    payload = json.loads(outbox_params[9])
+    metadata_update = next(params for statement, params in executed if "routing_key = %s" in statement)
+
+    assert result["job_id"] == "job-new"
+    assert outbox_params[1] == "flux.commands"
+    assert outbox_params[2] == "corpus.process"
+    assert outbox_params[3] == "flux.corpus.process"
+    assert payload["payload"] == {
+        "job_id": "job-new",
+        "job_type": "corpus_extract_text",
+        "job_family": "text",
+        "resource_class": "cpu",
+        "root_name": "docs",
+        "path": "safe.md",
+        "reason": "test",
+    }
+    assert "raw_content" not in json.dumps(payload)
+    assert metadata_update[0] == "corpus.process"
+    assert metadata_update[2] == "message-1"
 
 
 def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
@@ -5026,7 +5076,8 @@ def test_enqueue_corpus_sync_job_creates_pending_followup_for_running_path_job(m
         "reused": False,
         "followup": True,
     }
-    assert "UPDATE capture_jobs" not in sql
+    assert "SET job_type = %s" not in sql
+    assert "SET routing_key = %s" in sql
     assert json.loads(insert_params[1]) == {"root_name": "docs", "reason": "watch_event", "path": "b.md"}
 
 
@@ -6515,7 +6566,7 @@ def test_imap_mail_claim_query_does_not_reference_update_alias_inside_from_join(
 
 def test_outlook_claim_query_does_not_reference_update_alias_inside_from_join():
     source = Path(database.__file__).read_text(encoding="utf-8")
-    claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def cancel_outlook_sync_request", 1)[0]
+    claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def enqueue_due_outlook_sync_commands", 1)[0]
 
     assert "SELECT r.id, p.name" in claim_function
     update_from = claim_function.split("FROM request", 1)[1]
@@ -6524,7 +6575,7 @@ def test_outlook_claim_query_does_not_reference_update_alias_inside_from_join():
 
 def test_outlook_claim_query_recovers_stale_claims_from_dead_hosts():
     source = Path(database.__file__).read_text(encoding="utf-8")
-    claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def cancel_outlook_sync_request", 1)[0]
+    claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def enqueue_due_outlook_sync_commands", 1)[0]
 
     assert "stale_claimed" in claim_function
     assert "r.status = 'claimed'" in claim_function

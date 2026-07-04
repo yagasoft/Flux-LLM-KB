@@ -3505,133 +3505,22 @@ class KnowledgeService:
         cancelled_missing_source = 0
         cancelled_unseen_asset = 0
         for job, duration_ms, process_result in self._process_claimed_corpus_jobs(claimed, workers=effective_workers):
-            telemetry = {
-                "job_family": job.get("job_family"),
-                "resource_class": job.get("resource_class"),
-                "result_status": process_result.status,
-            }
-            telemetry.update(process_result.telemetry or {})
-            if process_result.status in {"indexed", "metadata_only", "staged"}:
-                database.complete_corpus_job(job_id=job["id"], duration_ms=duration_ms, telemetry=telemetry)
+            outcome = self._finalize_corpus_job_process_result(job, duration_ms=duration_ms, process_result=process_result)
+            category = outcome["category"]
+            if category == "completed":
                 completed += 1
-            elif process_result.status == "cancelled_orphaned_root":
-                database.cancel_orphaned_corpus_job(
-                    job_id=job["id"],
-                    error=process_result.message or "monitored root not found",
-                    duration_ms=duration_ms,
-                    telemetry=telemetry,
-                )
-                cancelled_orphaned += 1
-            elif process_result.status == "cancelled_missing_source":
-                payload = job.get("payload") or {}
-                database.cancel_missing_source_corpus_job(
-                    job_id=job["id"],
-                    root_name=str(payload.get("root_name") or ""),
-                    relative_path=str(payload.get("path") or ""),
-                    error=process_result.message or "source file not found",
-                    duration_ms=duration_ms,
-                    telemetry=telemetry,
-                )
-                cancelled_missing_source += 1
-            elif process_result.status == "cancelled_unseen_asset":
-                database.cancel_unseen_corpus_job(
-                    job_id=job["id"],
-                    error=process_result.message or "cancelled_unseen_asset",
-                    duration_ms=duration_ms,
-                    telemetry=telemetry,
-                )
-                cancelled_unseen_asset += 1
-            elif process_result.status in {"blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source"}:
-                kwargs: dict[str, Any] = {}
-                if process_result.status != "blocked_missing_dependency":
-                    kwargs["status"] = process_result.status
-                database.block_corpus_job(
-                    job_id=job["id"],
-                    error=process_result.message or process_result.status,
-                    duration_ms=duration_ms,
-                    telemetry=telemetry,
-                    **kwargs,
-                )
+            elif category == "blocked":
                 blocked += 1
-            elif process_result.status == "retrying_locked":
-                if int(job.get("attempts") or 0) >= _configured_lock_max_attempts():
-                    database.block_corpus_job(
-                        job_id=job["id"],
-                        error=process_result.message or "blocked_locked",
-                        status="blocked_locked",
-                        duration_ms=duration_ms,
-                        telemetry=telemetry,
-                    )
-                    blocked += 1
-                else:
-                    database.retry_corpus_job(
-                        job_id=job["id"],
-                        error=process_result.message or "retrying_locked",
-                        cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
-                        status="retrying_locked",
-                        duration_ms=duration_ms,
-                        telemetry=telemetry,
-                    )
-                    retried += 1
-            elif process_result.status == "retrying_vss_failed":
-                if int(job.get("attempts") or 0) >= _configured_lock_max_attempts():
-                    database.block_corpus_job(
-                        job_id=job["id"],
-                        error=process_result.message or "blocked_vss_failed",
-                        status="blocked_vss_failed",
-                        duration_ms=duration_ms,
-                        telemetry=telemetry,
-                    )
-                    blocked += 1
-                else:
-                    database.retry_corpus_job(
-                        job_id=job["id"],
-                        error=process_result.message or "retrying_vss_failed",
-                        cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
-                        status="retrying_vss_failed",
-                        duration_ms=duration_ms,
-                        telemetry=telemetry,
-                    )
-                    retried += 1
-            elif process_result.status == "retrying_gpu_busy":
-                retry_after = int(float((process_result.telemetry or {}).get("retry_after_seconds") or 1))
-                database.retry_corpus_job(
-                    job_id=job["id"],
-                    error=process_result.message or "retrying_gpu_busy",
-                    cooldown_seconds=max(1, retry_after),
-                    status="retrying_gpu_busy",
-                    duration_ms=duration_ms,
-                    telemetry=telemetry,
-                )
+            elif category == "retried":
                 retried += 1
-            elif process_result.status == "failed":
-                if int(job.get("attempts") or 0) >= _configured_failure_max_attempts():
-                    database.block_corpus_job(
-                        job_id=job["id"],
-                        error=process_result.message or process_result.status,
-                        status="failed",
-                        duration_ms=duration_ms,
-                        telemetry=telemetry,
-                    )
-                    failed += 1
-                else:
-                    database.retry_corpus_job(
-                        job_id=job["id"],
-                        error=process_result.message or process_result.status,
-                        cooldown_seconds=_configured_retry_cooldown_seconds(),
-                        duration_ms=duration_ms,
-                        telemetry=telemetry,
-                    )
-                    retried += 1
-            else:
-                database.retry_corpus_job(
-                    job_id=job["id"],
-                    error=process_result.message or process_result.status,
-                    cooldown_seconds=_configured_retry_cooldown_seconds(),
-                    duration_ms=duration_ms,
-                    telemetry=telemetry,
-                )
-                retried += 1
+            elif category == "failed":
+                failed += 1
+            elif category == "cancelled_orphaned":
+                cancelled_orphaned += 1
+            elif category == "cancelled_missing_source":
+                cancelled_missing_source += 1
+            elif category == "cancelled_unseen_asset":
+                cancelled_unseen_asset += 1
         repaired = database.repair_extracted_corpus_asset_statuses(root_name=root_name)
         cleared_errors = database.clear_completed_corpus_job_errors(root_name=root_name)
         capture_job_purge = self._purge_expired_capture_jobs()
@@ -3687,6 +3576,93 @@ class KnowledgeService:
             "jobs": claimed,
         }
 
+    def enqueue_corpus_backfill(
+        self,
+        *,
+        kind: str = "all",
+        limit: int | None = None,
+        workers: int | None = None,
+        root_name: str | None = None,
+        host_agent_roots: bool | None = None,
+        family: str | None = None,
+        callback_url: str | None = None,
+    ) -> dict[str, Any]:
+        callback_decision = None
+        if callback_url:
+            from . import callbacks
+
+            allowlist = SettingsService().resolve("callbacks.allowlist").raw_value or []
+            callback_decision = callbacks.validate_callback_url(
+                callback_url,
+                callbacks.CallbackPolicy(allowlist=tuple(str(item) for item in allowlist)),
+            )
+            if not callback_decision.allowed:
+                raise ValueError(callback_decision.reason)
+        effective_limit = _resolved_worker_batch_size(limit)
+        effective_kind = family or kind
+        job_families = kind_to_job_families(effective_kind)
+        queued = database.enqueue_pending_corpus_job_commands(
+            limit=effective_limit,
+            root_name=root_name,
+            job_families=list(job_families) if job_families else None,
+            host_agent_roots=host_agent_roots,
+        )
+        operation_id = uuid4().hex
+        job_ids = [str(job.get("job_id")) for job in queued.get("jobs", []) if job.get("job_id")]
+        callback_attachment = None
+        if callback_url and job_ids:
+            callback_attachment = database.attach_callback_to_capture_jobs(
+                job_ids=job_ids,
+                operation_id=operation_id,
+                callback_url=callback_url,
+            )
+        payload = {
+            "accepted": True,
+            "operation_id": operation_id,
+            "operation_type": "corpus_backfill",
+            "kind": effective_kind,
+            "job_families": list(job_families) if job_families else None,
+            "root_name": root_name,
+            "host_agent_roots": host_agent_roots,
+            "requested_limit": effective_limit,
+            "requested_workers": workers,
+            "queued": queued.get("queued", 0),
+            "job_ids": job_ids,
+            "status_url": "/api/crawl/jobs",
+            "event_topics": [
+                "corpus.job.completed",
+                "corpus.job.retrying",
+                "corpus.job.failed",
+                "corpus.job.cancelled",
+            ],
+            "callback": (
+                {
+                    "requested": True,
+                    "url": callback_url,
+                    "policy": callback_decision.reason if callback_decision else None,
+                    "attached_jobs": (callback_attachment or {}).get("attached", 0),
+                }
+                if callback_url
+                else None
+            ),
+            "settings_mutated": False,
+        }
+        database.record_audit_event(
+            event_type="corpus.backfill_enqueued",
+            details={
+                "operation_id": operation_id,
+                "kind": effective_kind,
+                "job_families": payload["job_families"],
+                "root_name": root_name,
+                "host_agent_roots": host_agent_roots,
+                "queued": payload["queued"],
+                "requested_limit": effective_limit,
+                "requested_workers": workers,
+                "callback_requested": bool(callback_url),
+            },
+        )
+        return payload
+
     def _process_claimed_corpus_jobs(self, claimed: list[dict[str, Any]], *, workers: int) -> list[tuple[dict[str, Any], int, Any]]:
         bounded_workers = max(1, min(int(workers or 1), len(claimed) or 1))
         if bounded_workers <= 1 or len(claimed) <= 1:
@@ -3721,6 +3697,224 @@ class KnowledgeService:
             )
         duration_ms = max(0, int((time.perf_counter() - started) * 1000))
         return job, duration_ms, process_result
+
+    def process_corpus_job_by_id(
+        self,
+        *,
+        job_id: str,
+        worker_id: str | None = None,
+        broker_message_id: str | None = None,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> dict[str, Any]:
+        effective_worker_id = worker_id or _new_worker_instance_id("flux-kb-broker-corpus")
+        job = database.claim_corpus_job_by_id(
+            job_id=job_id,
+            worker_id=effective_worker_id,
+            broker_message_id=broker_message_id,
+        )
+        if job is None:
+            existing = database.get_capture_job(job_id=job_id)
+            if existing and existing.get("status") not in {"pending", "running", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"}:
+                existing_status = str(existing.get("status") or "unknown")
+                outcome = {
+                    "job_id": job_id,
+                    "status": existing_status,
+                    "category": _corpus_terminal_category(existing_status),
+                    "already_terminal": True,
+                    "retryable": False,
+                    "broker_message_id": broker_message_id,
+                }
+                self._emit_corpus_job_event_and_callback(
+                    existing,
+                    outcome=outcome,
+                    event_type=_corpus_job_event_type(outcome),
+                    correlation_id=correlation_id,
+                    causation_id=causation_id or broker_message_id,
+                )
+                return outcome
+            raise LookupError(f"claimable corpus job not found: {job_id}")
+        processed_job, duration_ms, process_result = self._process_claimed_corpus_job(job)
+        outcome = self._finalize_corpus_job_process_result(processed_job, duration_ms=duration_ms, process_result=process_result)
+        self._emit_corpus_job_event_and_callback(
+            processed_job,
+            outcome=outcome,
+            event_type=_corpus_job_event_type(outcome),
+            correlation_id=correlation_id,
+            causation_id=causation_id or broker_message_id,
+        )
+        return outcome
+
+    def _emit_corpus_job_event_and_callback(
+        self,
+        job: dict[str, Any],
+        *,
+        outcome: dict[str, Any],
+        event_type: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> dict[str, Any]:
+        event = database.enqueue_capture_job_event(
+            job_id=str(outcome.get("job_id") or job.get("id") or ""),
+            event_type=event_type,
+            status=str(outcome.get("status") or outcome.get("process_status") or "unknown"),
+            details=outcome,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
+        callback_meta = ((job.get("telemetry") or {}).get("event_callback") or {}) if isinstance(job.get("telemetry"), dict) else {}
+        callback_url = str(callback_meta.get("callback_url") or "").strip()
+        if callback_url and not bool(outcome.get("retryable")):
+            database.enqueue_callback_delivery(
+                event_message_id=str(event.get("message_id") or ""),
+                job_id=str(outcome.get("job_id") or job.get("id") or ""),
+                callback_url=callback_url,
+                payload={
+                    "operation_id": callback_meta.get("operation_id"),
+                    "event_type": event_type,
+                    "job_id": str(outcome.get("job_id") or job.get("id") or ""),
+                    "status": str(outcome.get("status") or ""),
+                    "result": outcome,
+                },
+                correlation_id=correlation_id,
+                causation_id=str(event.get("message_id") or causation_id or ""),
+            )
+        return event
+
+    def _finalize_corpus_job_process_result(self, job: dict[str, Any], *, duration_ms: int, process_result: Any) -> dict[str, Any]:
+        telemetry = {
+            "job_family": job.get("job_family"),
+            "resource_class": job.get("resource_class"),
+            "result_status": process_result.status,
+        }
+        telemetry.update(process_result.telemetry or {})
+        outcome = {
+            "job_id": job["id"],
+            "job_type": job.get("job_type"),
+            "job_family": job.get("job_family"),
+            "resource_class": job.get("resource_class"),
+            "process_status": process_result.status,
+            "duration_ms": duration_ms,
+            "retryable": False,
+            "telemetry": telemetry,
+        }
+        if process_result.status in {"indexed", "metadata_only", "staged"}:
+            database.complete_corpus_job(job_id=job["id"], duration_ms=duration_ms, telemetry=telemetry)
+            return {**outcome, "status": "completed", "category": "completed"}
+        if process_result.status == "cancelled_orphaned_root":
+            database.cancel_orphaned_corpus_job(
+                job_id=job["id"],
+                error=process_result.message or "monitored root not found",
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+            )
+            return {**outcome, "status": "cancelled_orphaned_root", "category": "cancelled_orphaned"}
+        if process_result.status == "cancelled_missing_source":
+            payload = job.get("payload") or {}
+            database.cancel_missing_source_corpus_job(
+                job_id=job["id"],
+                root_name=str(payload.get("root_name") or ""),
+                relative_path=str(payload.get("path") or ""),
+                error=process_result.message or "source file not found",
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+            )
+            return {**outcome, "status": "cancelled_missing_source", "category": "cancelled_missing_source"}
+        if process_result.status == "cancelled_unseen_asset":
+            database.cancel_unseen_corpus_job(
+                job_id=job["id"],
+                error=process_result.message or "cancelled_unseen_asset",
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+            )
+            return {**outcome, "status": "cancelled_unseen_asset", "category": "cancelled_unseen_asset"}
+        if process_result.status in {"blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source"}:
+            kwargs: dict[str, Any] = {}
+            if process_result.status != "blocked_missing_dependency":
+                kwargs["status"] = process_result.status
+            database.block_corpus_job(
+                job_id=job["id"],
+                error=process_result.message or process_result.status,
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+                **kwargs,
+            )
+            return {**outcome, "status": kwargs.get("status", "blocked_missing_dependency"), "category": "blocked"}
+        if process_result.status == "retrying_locked":
+            if int(job.get("attempts") or 0) >= _configured_lock_max_attempts():
+                database.block_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or "blocked_locked",
+                    status="blocked_locked",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                return {**outcome, "status": "blocked_locked", "category": "blocked"}
+            database.retry_corpus_job(
+                job_id=job["id"],
+                error=process_result.message or "retrying_locked",
+                cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
+                status="retrying_locked",
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+            )
+            return {**outcome, "status": "retrying_locked", "category": "retried", "retryable": True}
+        if process_result.status == "retrying_vss_failed":
+            if int(job.get("attempts") or 0) >= _configured_lock_max_attempts():
+                database.block_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or "blocked_vss_failed",
+                    status="blocked_vss_failed",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                return {**outcome, "status": "blocked_vss_failed", "category": "blocked"}
+            database.retry_corpus_job(
+                job_id=job["id"],
+                error=process_result.message or "retrying_vss_failed",
+                cooldown_seconds=_configured_lock_retry_cooldown_seconds(),
+                status="retrying_vss_failed",
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+            )
+            return {**outcome, "status": "retrying_vss_failed", "category": "retried", "retryable": True}
+        if process_result.status == "retrying_gpu_busy":
+            retry_after = int(float((process_result.telemetry or {}).get("retry_after_seconds") or 1))
+            database.retry_corpus_job(
+                job_id=job["id"],
+                error=process_result.message or "retrying_gpu_busy",
+                cooldown_seconds=max(1, retry_after),
+                status="retrying_gpu_busy",
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+            )
+            return {**outcome, "status": "retrying_gpu_busy", "category": "retried", "retryable": True}
+        if process_result.status == "failed":
+            if int(job.get("attempts") or 0) >= _configured_failure_max_attempts():
+                database.block_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or process_result.status,
+                    status="failed",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                return {**outcome, "status": "failed", "category": "failed"}
+            database.retry_corpus_job(
+                job_id=job["id"],
+                error=process_result.message or process_result.status,
+                cooldown_seconds=_configured_retry_cooldown_seconds(),
+                duration_ms=duration_ms,
+                telemetry=telemetry,
+            )
+            return {**outcome, "status": "pending", "category": "retried", "retryable": True}
+        database.retry_corpus_job(
+            job_id=job["id"],
+            error=process_result.message or process_result.status,
+            cooldown_seconds=_configured_retry_cooldown_seconds(),
+            duration_ms=duration_ms,
+            telemetry=telemetry,
+        )
+        return {**outcome, "status": "pending", "category": "retried", "retryable": True}
 
     def _purge_expired_capture_jobs(self) -> dict[str, Any]:
         try:
@@ -4467,6 +4661,32 @@ def _operator_automation_policy_from_settings() -> dict[str, Any]:
             operator_automation.DEFAULT_POLICY["auto_run_governance_shadow"],
         ),
     }
+
+
+def _corpus_job_event_type(outcome: dict[str, Any]) -> str:
+    category = str(outcome.get("category") or "")
+    if category == "completed":
+        return "corpus.job.completed"
+    if category == "retried":
+        return "corpus.job.retrying"
+    if category in {"blocked", "failed"}:
+        return "corpus.job.failed"
+    if category.startswith("cancelled"):
+        return "corpus.job.cancelled"
+    if category == "already_terminal":
+        return "corpus.job.terminal"
+    return "corpus.job.updated"
+
+
+def _corpus_terminal_category(status: str) -> str:
+    clean = str(status or "").strip()
+    if clean == "completed":
+        return "completed"
+    if clean in {"failed", "blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source", "blocked_locked", "blocked_vss_failed"}:
+        return "failed" if clean == "failed" else "blocked"
+    if clean.startswith("cancelled"):
+        return clean
+    return "already_terminal"
 
 
 def _operator_automation_recurring_state(policy: dict[str, Any], last_run: dict[str, Any] | None) -> dict[str, Any]:

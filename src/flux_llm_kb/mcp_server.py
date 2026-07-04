@@ -202,14 +202,18 @@ def create_server():
         return service.worker_status(family=family)
 
     @mcp.tool(name="kb.crawl_backfill")
-    def crawl_backfill(kind: str = "all", limit: int | None = None, workers: int | None = None, root_name: str | None = None, family: str | None = None):
-        """Run a bounded corpus backfill by kind or exact worker family, optionally scoped to a root."""
-        return service.run_corpus_backfill(
-            kind=family or kind,
-            limit=limit,
-            workers=workers,
-            root_name=root_name,
-        )
+    def crawl_backfill(kind: str = "all", limit: int | None = None, workers: int | None = None, root_name: str | None = None, family: str | None = None, callback_url: str | None = None):
+        """Enqueue a bounded corpus backfill by kind or exact worker family, optionally scoped to a root."""
+        enqueue = getattr(service, "enqueue_corpus_backfill", None)
+        if enqueue:
+            return enqueue(
+                kind=family or kind,
+                limit=limit,
+                workers=workers,
+                root_name=root_name,
+                callback_url=callback_url,
+            )
+        return service.run_corpus_backfill(kind=family or kind, limit=limit, workers=workers, root_name=root_name)
 
     @mcp.tool(name="kb.benchmark_run")
     def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all", scope: str = "synthetic", root_name: str | None = None, path: str | None = None, max_files: int | None = None, deployment_label: str | None = None, scenario: str = "standard", include_model_probe: bool = False):

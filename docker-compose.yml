@@ -6,8 +6,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
       FLUX_KB_API_HOST: 0.0.0.0
       FLUX_KB_API_PORT: "8765"
     ports:
@@ -25,13 +29,180 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     environment:
       FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
     volumes:
       - ./private:/app/private
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
-             python -m flux_llm_kb.cli crawl worker run --exclude-host-agent-roots --interval 5"
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus"
+
+  search-index-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-search-index-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    volumes:
+      - ./private:/app/private
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.search_index"
+
+  mail-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-mail-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    volumes:
+      - ./private:/app/private
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap"
+
+  automation-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-automation-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    volumes:
+      - ./private:/app/private
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.automation"
+
+  governance-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-governance-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    volumes:
+      - ./private:/app/private
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.governance"
+
+  runtime-control-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-runtime-control-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
+
+  callback-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-callback-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+      FLUX_KB_CALLBACK_SIGNING_SECRET: flux-local-dev-callback-secret
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch"
+
+  event-scheduler:
+    build:
+      context: .
+    container_name: flux-llm-kb-event-scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event scheduler run --interval 30 --limit 25"
+
+  outbox-relay:
+    build:
+      context: .
+    container_name: flux-llm-kb-outbox-relay
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event outbox relay --interval 1 --limit 100"
+
+  rabbitmq:
+    image: rabbitmq:4.3-management
+    container_name: flux-llm-kb-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: flux
+      RABBITMQ_DEFAULT_PASS: flux
+      RABBITMQ_DEFAULT_VHOST: flux
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - flux_llm_kb_rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   postgres:
     image: postgres:16
@@ -73,3 +244,4 @@ services:
 
 volumes:
   flux_llm_kb_postgres:
+  flux_llm_kb_rabbitmq:

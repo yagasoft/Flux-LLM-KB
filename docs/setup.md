@@ -12,10 +12,10 @@ database, not in this repository.
 
 The default PostgreSQL runtime uses the repository Docker Compose profile. If
 Docker or Compose is not available, `scripts/check-docker.ps1` exits with a clear error.
-The normal application runtime is Docker-backed: PostgreSQL, FastAPI, the
-dashboard, IMAP workers, corpus crawlers, and extraction workers live in
-containers. Outlook COM is the exception; it runs as a Windows host process
-outside Docker.
+The normal application runtime is Docker-backed: PostgreSQL, RabbitMQ, FastAPI,
+the dashboard, outbox relay, event scheduler, IMAP/corpus/search-index workers,
+and callback dispatcher live in containers. Outlook COM is the exception; it
+runs as a Windows host process outside Docker.
 
 ## Install
 
@@ -34,8 +34,8 @@ The production layout is:
 
 - `D:\FluxLLMKB\app`: deployed compose files, app venv, host launchers, version metadata
 - `D:\FluxLLMKB\private`: local env, OAuth tokens, mail spool, and private config
-- Docker named volumes: PostgreSQL data, container cache/data/runtime/logs, and
-  the Docker Ollama model cache
+- Docker named volumes: PostgreSQL data, RabbitMQ data, container
+  cache/data/runtime/logs, and the Docker Ollama model cache
 - `D:\FluxLLMKB\data`: legacy PostgreSQL bind-mount rollback data after migration
 - `D:\FluxLLMKB\logs`: host-agent and Outlook-host logs
 - `D:\FluxLLMKB\models\ollama`: legacy Ollama model-cache rollback data after migration
@@ -51,7 +51,8 @@ private config, mail spool, and Windows-only watched roots. API access remains l
 The local Docker profile assumes a single-user workstation with direct container
 memory ceilings. Generated production Compose files set a 40 GB Docker-managed
 budget across API 2 GB, worker 2 GB, model-runner 10 GB, paddle-runner 8 GB,
-ASR 4 GB, Ollama 6 GB, Vespa 5 GB, and PostgreSQL 3 GB. Each production service
+ASR 4 GB, Ollama 6 GB, Vespa 5 GB, PostgreSQL 3 GB, and 512 MB each for the
+outbox relay, event scheduler, and callback worker. Each production service
 sets `memswap_limit` equal to `mem_limit`, so Docker cannot add swap-backed
 headroom beyond the configured cap. PostgreSQL uses a leaner local profile
 (`shared_buffers=768MB`, `effective_cache_size=2GB`, `work_mem=16MB`,
@@ -586,10 +587,10 @@ process:
 flux-kb outlook-host run
 ```
 
-The dashboard and Docker-hosted API create sync requests. The Windows host polls
-and claims those requests, exports messages through classic Outlook COM, reports
-heartbeat/status, and indexes the ready spool. If the host is not running, the
-dashboard shows `host_offline` and the command above.
+The dashboard and Docker-hosted API create sync requests and broker commands.
+The Windows host claims the exact request id, exports messages through classic
+Outlook COM, reports heartbeat/status, and indexes the ready spool. If the host
+is not running, the dashboard shows `host_offline` and the command above.
 
 ## Dashboard Development
 
@@ -612,8 +613,13 @@ bounded local digest status.
 .\scripts\stop-dashboard-dev.ps1
 ```
 
-When Docker is on PATH, the script runs `docker compose up -d --build postgres
-api worker`. If Docker is unavailable on the current PATH, it falls back to a
-local FastAPI process on the same URL so browser refresh still shows the current
-build; in that fallback mode, start `flux-kb crawl worker run` separately when
-you need continuous local job processing.
+When Docker is on PATH, the script runs the local event stack: PostgreSQL,
+RabbitMQ, API, outbox relay, event scheduler, command workers, and callback
+worker. Long-running REST/MCP/CLI requests enqueue work and return accepted
+operation metadata; the relay publishes from `message_outbox`, RabbitMQ handles
+delivery/retry, and workers ACK only after durable state and event writes. If
+Docker is unavailable on the current PATH, the script falls back to a local
+FastAPI process on the same URL; in that fallback mode, run the needed event
+processes explicitly, for example `flux-kb event outbox relay`,
+`flux-kb event scheduler run`, and `flux-kb event worker run --queue
+flux.commands.corpus`.

@@ -976,6 +976,34 @@ def test_crawl_backfill_endpoint_runs_worker_once(monkeypatch):
     assert data_response.json()["backfill"] == {"kind": "data", "limit": 5, "workers": 1}
 
 
+def test_crawl_backfill_endpoint_returns_accepted_event_operation(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+
+    class FakeService:
+        def enqueue_corpus_backfill(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "accepted": True,
+                "operation_id": "op-1",
+                "job_ids": ["job-1"],
+                "status_url": "/api/crawl/jobs",
+                "event_topics": ["corpus.job.completed"],
+                "settings_mutated": False,
+            }
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    client = fastapi_testclient.TestClient(create_app())
+
+    response = client.post("/api/crawl/backfill", json={"kind": "text", "limit": 3, "workers": 1})
+
+    assert response.status_code == 202
+    assert response.json()["accepted"] is True
+    assert response.json()["operation_id"] == "op-1"
+    assert calls == [{"kind": "text", "limit": 3, "workers": 1}]
+
+
 def test_crawl_backfill_endpoint_omits_default_parallelism_knobs(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

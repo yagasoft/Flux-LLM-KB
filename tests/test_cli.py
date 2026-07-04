@@ -1067,6 +1067,48 @@ def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, cap
     assert report_worker_payload["worker"]["limit"] == 7
 
 
+def test_cli_crawl_backfill_prefers_event_enqueue_when_available(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def enqueue_corpus_backfill(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "accepted": True,
+                "operation_id": "op-1",
+                "job_ids": ["job-1"],
+                "status_url": "/api/crawl/jobs",
+                "event_topics": ["corpus.job.completed"],
+                "callback": {"requested": True, "url": kwargs.get("callback_url")},
+            }
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert (
+        cli.main(
+            [
+                "crawl",
+                "backfill",
+                "--kind",
+                "text",
+                "--limit",
+                "3",
+                "--callback-url",
+                "http://127.0.0.1:8765/callback",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["accepted"] is True
+    assert payload["operation_id"] == "op-1"
+    assert payload["callback"]["url"] == "http://127.0.0.1:8765/callback"
+    assert calls == [{"kind": "text", "limit": 3, "workers": None, "callback_url": "http://127.0.0.1:8765/callback"}]
+
+
 def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 

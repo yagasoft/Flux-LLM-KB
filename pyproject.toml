@@ -13,6 +13,7 @@ authors = [
   { name = "Flux-LLM-KB contributors" }
 ]
 dependencies = [
+  "aio-pika>=9.5",
   "psycopg[binary]>=3.2",
   "pydantic>=2.8",
 ]

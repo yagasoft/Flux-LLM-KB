@@ -11,7 +11,7 @@ import re
 import time
 from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlsplit, urlunsplit
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from .acceleration import (
     JOB_FAMILIES,
@@ -32,6 +32,7 @@ from .migrations import load_migrations
 from .redaction import redactions_enabled
 from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciprocal_rank_fusion
 from .text_safety import sanitize_postgres_text_value, strip_postgres_nul
+from . import messaging
 
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb?connect_timeout=1"
@@ -57,6 +58,7 @@ DEFAULT_SEARCH_INDEX_TEXT_MAX_CHARS = 12000
 MAX_SEARCH_INDEX_JOB_LIMIT = 1000
 MAX_SEARCH_INDEX_PAGE_SIZE = 500
 MAX_SEARCH_INDEX_TEXT_MAX_CHARS = 200000
+OUTBOX_RETRY_BACKOFF_SECONDS = 30
 _CODE_EXACT_SYMBOL_BOOST = 0.10
 _CODE_IMPLEMENTATION_INTENT_BOOST = 0.025
 _VESPA_RRF_K = 60
@@ -3051,6 +3053,498 @@ def record_audit_event(
             return {"id": row[0], "event_type": row[1]}
 
 
+def enqueue_message_outbox(
+    *,
+    message_id: str | None = None,
+    exchange: str,
+    routing_key: str,
+    message_type: str,
+    payload: dict[str, Any],
+    headers: dict[str, Any] | None = None,
+    aggregate_type: str | None = None,
+    aggregate_id: str | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            return _enqueue_message_outbox_with_cursor(
+                cur,
+                message_id=message_id,
+                exchange=exchange,
+                routing_key=routing_key,
+                message_type=message_type,
+                payload=payload,
+                headers=headers,
+                aggregate_type=aggregate_type,
+                aggregate_id=aggregate_id,
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+            )
+
+
+def _enqueue_message_outbox_with_cursor(
+    cur: Any,
+    *,
+    message_id: str | None = None,
+    exchange: str,
+    routing_key: str,
+    message_type: str,
+    payload: dict[str, Any],
+    headers: dict[str, Any] | None = None,
+    aggregate_type: str | None = None,
+    aggregate_id: str | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+) -> dict[str, Any]:
+    message = messaging.build_message(
+        message_id=message_id,
+        message_type=message_type,
+        routing_key=routing_key,
+        job_id=aggregate_id if aggregate_type == "capture_jobs" else None,
+        correlation_id=correlation_id,
+        causation_id=causation_id,
+        payload=payload,
+    )
+    broker_payload = message.to_broker_payload()
+    cur.execute(
+        """
+        INSERT INTO message_outbox (
+            message_id, exchange, routing_key, message_type, schema_version,
+            correlation_id, causation_id, aggregate_type, aggregate_id, payload, headers
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+        ON CONFLICT (message_id) DO UPDATE SET
+            updated_at = message_outbox.updated_at
+        RETURNING id::text, message_id, status
+        """,
+        (
+            message.message_id,
+            exchange,
+            routing_key,
+            message_type,
+            message.schema_version,
+            message.correlation_id,
+            message.causation_id,
+            aggregate_type,
+            aggregate_id,
+            _json(broker_payload),
+            _json(headers or {}),
+        ),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return {"id": None, "message_id": message.message_id, "status": "pending"}
+    return {"id": row[0], "message_id": row[1], "status": row[2]}
+
+
+def claim_pending_outbox_messages(
+    *,
+    limit: int = 100,
+    worker_id: str = "outbox-relay",
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    capped_limit = max(1, min(int(limit or 100), 1000))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH claimable AS (
+                    SELECT id
+                    FROM message_outbox
+                    WHERE status IN ('pending', 'failed')
+                      AND next_attempt_at <= now()
+                    ORDER BY created_at
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE message_outbox outbox
+                SET status = 'publishing',
+                    locked_by = %s,
+                    locked_at = now(),
+                    attempts = attempts + 1,
+                    updated_at = now()
+                FROM claimable
+                WHERE outbox.id = claimable.id
+                RETURNING outbox.id::text, outbox.message_id, outbox.exchange, outbox.routing_key,
+                          outbox.message_type, outbox.payload, outbox.headers, outbox.attempts
+                """,
+                (capped_limit, worker_id),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "message_id": row[1],
+                    "exchange": row[2],
+                    "routing_key": row[3],
+                    "message_type": row[4],
+                    "payload": row[5] or {},
+                    "headers": row[6] or {},
+                    "attempts": int(row[7] or 0),
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def mark_outbox_message_published(
+    *,
+    outbox_id: str,
+    broker_message_id: str,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE message_outbox
+                SET status = 'published',
+                    broker_message_id = NULLIF(%s, ''),
+                    published_at = now(),
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    last_error = NULL,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (broker_message_id, outbox_id),
+            )
+
+
+def mark_outbox_message_failed(
+    *,
+    outbox_id: str,
+    error: str,
+    retry_backoff_seconds: int = OUTBOX_RETRY_BACKOFF_SECONDS,
+    url: str | None = None,
+) -> None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE message_outbox
+                SET status = 'failed',
+                    last_error = %s,
+                    next_attempt_at = now() + make_interval(secs => %s),
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (str(error or "")[:1000], max(1, int(retry_backoff_seconds or 1)), outbox_id),
+            )
+
+
+def begin_message_inbox(
+    *,
+    consumer_name: str,
+    message_id: str,
+    message_type: str,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> bool:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO message_inbox (
+                    consumer_name, message_id, message_type, status, metadata
+                )
+                VALUES (%s, %s, %s, 'processing', %s::jsonb)
+                ON CONFLICT (consumer_name, message_id) DO UPDATE SET
+                    attempts = message_inbox.attempts + 1,
+                    last_seen_at = now(),
+                    status = CASE
+                        WHEN message_inbox.status = 'handled' THEN message_inbox.status
+                        ELSE 'processing'
+                    END,
+                    metadata = message_inbox.metadata || EXCLUDED.metadata
+                RETURNING status
+                """,
+                (consumer_name, message_id, message_type, _json(metadata or {})),
+            )
+            row = cur.fetchone()
+            return row is not None and row[0] != "handled"
+
+
+def complete_message_inbox(
+    *,
+    consumer_name: str,
+    message_id: str,
+    status: str = "handled",
+    error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> None:
+    clean_status = status if status in {"handled", "failed"} else "handled"
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE message_inbox
+                SET status = %s,
+                    handled_at = CASE WHEN %s = 'handled' THEN now() ELSE handled_at END,
+                    last_error = %s,
+                    metadata = metadata || %s::jsonb,
+                    last_seen_at = now()
+                WHERE consumer_name = %s
+                  AND message_id = %s
+                """,
+                (clean_status, clean_status, error, _json(metadata or {}), consumer_name, message_id),
+            )
+
+
+def _stable_message_id(*parts: str) -> str:
+    material = ":".join(str(part or "") for part in parts)
+    return str(uuid5(NAMESPACE_URL, f"flux-llm-kb:{material}"))
+
+
+def attach_callback_to_capture_jobs(
+    *,
+    job_ids: list[str] | tuple[str, ...],
+    operation_id: str,
+    callback_url: str,
+    url: str | None = None,
+) -> dict[str, Any]:
+    clean_job_ids = [str(job_id) for job_id in job_ids if str(job_id or "").strip()]
+    if not clean_job_ids:
+        return {"attached": 0, "job_ids": []}
+    metadata = {
+        "event_callback": {
+            "operation_id": str(operation_id),
+            "callback_url": str(callback_url),
+            "requested_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        }
+    }
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET telemetry = telemetry || %s::jsonb,
+                    updated_at = now()
+                WHERE id::text = ANY(%s)
+                  AND delete_requested_at IS NULL
+                RETURNING id::text
+                """,
+                (_json(metadata), clean_job_ids),
+            )
+            attached = [row[0] for row in cur.fetchall()]
+            return {"attached": len(attached), "job_ids": attached}
+
+
+def enqueue_callback_delivery(
+    *,
+    event_message_id: str,
+    job_id: str | None,
+    callback_url: str,
+    payload: dict[str, Any],
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    callback_message_id = _stable_message_id(
+        "callback-delivery",
+        str(event_message_id or ""),
+        str(job_id or ""),
+        str(callback_url or ""),
+    )
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO callback_deliveries (
+                    message_id, event_message_id, job_id, callback_url, status,
+                    idempotency_key, payload
+                )
+                VALUES (%s, %s, NULLIF(%s, '')::uuid, %s, 'pending', %s, %s::jsonb)
+                ON CONFLICT (message_id) DO UPDATE SET
+                    updated_at = callback_deliveries.updated_at
+                RETURNING id::text, message_id, status
+                """,
+                (
+                    callback_message_id,
+                    event_message_id,
+                    str(job_id or ""),
+                    callback_url,
+                    callback_message_id,
+                    _json(payload or {}),
+                ),
+            )
+            delivery = cur.fetchone()
+            outbox = _enqueue_message_outbox_with_cursor(
+                cur,
+                message_id=callback_message_id,
+                exchange=messaging.CALLBACKS_EXCHANGE,
+                routing_key=messaging.CALLBACK_DISPATCH_ROUTING_KEY,
+                message_type="flux.callback.dispatch",
+                payload={"callback_delivery_id": delivery[0], "job_id": str(job_id or "")},
+                aggregate_type="callback_deliveries",
+                aggregate_id=delivery[0],
+                correlation_id=correlation_id,
+                causation_id=causation_id or event_message_id,
+            )
+            return {
+                "id": delivery[0],
+                "message_id": delivery[1],
+                "status": delivery[2],
+                "outbox_message_id": outbox.get("message_id"),
+            }
+
+
+def claim_callback_delivery(
+    *,
+    delivery_id: str,
+    worker_id: str,
+    broker_message_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE callback_deliveries
+                SET status = 'running',
+                    attempts = attempts + 1,
+                    headers = headers || %s::jsonb,
+                    updated_at = now()
+                WHERE id = %s
+                  AND status IN ('pending', 'retrying')
+                  AND next_attempt_at <= now()
+                RETURNING id::text, message_id, event_message_id, job_id::text,
+                          callback_url, status, attempts, idempotency_key, headers, payload
+                """,
+                (_json({"worker_id": worker_id, "broker_message_id": broker_message_id}), delivery_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "message_id": row[1],
+                "event_message_id": row[2],
+                "job_id": row[3],
+                "callback_url": row[4],
+                "status": row[5],
+                "attempts": int(row[6] or 0),
+                "idempotency_key": row[7],
+                "headers": row[8] or {},
+                "payload": row[9] or {},
+            }
+
+
+def complete_callback_delivery(
+    *,
+    delivery_id: str,
+    status: str,
+    status_code: int | None = None,
+    error: str | None = None,
+    retry_backoff_seconds: int = OUTBOX_RETRY_BACKOFF_SECONDS,
+    url: str | None = None,
+) -> None:
+    clean_status = status if status in {"delivered", "retrying", "failed", "blocked"} else "failed"
+    retry_seconds = max(1, int(retry_backoff_seconds or 1))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE callback_deliveries
+                SET status = %s,
+                    last_status_code = %s,
+                    last_error = %s,
+                    next_attempt_at = CASE
+                        WHEN %s = 'retrying' THEN now() + make_interval(secs => %s)
+                        ELSE next_attempt_at
+                    END,
+                    completed_at = CASE
+                        WHEN %s IN ('delivered', 'failed', 'blocked') THEN now()
+                        ELSE completed_at
+                    END,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    clean_status,
+                    status_code,
+                    str(error or "")[:1000] if error else None,
+                    clean_status,
+                    retry_seconds,
+                    clean_status,
+                    delivery_id,
+                ),
+            )
+
+
+def message_queue_status(*, url: str | None = None) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status = 'pending')::integer AS pending,
+                    count(*) FILTER (WHERE status = 'publishing')::integer AS publishing,
+                    count(*) FILTER (WHERE status = 'failed')::integer AS failed,
+                    count(*) FILTER (WHERE status = 'published')::integer AS published,
+                    COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at)))::integer, 0) AS oldest_pending_age_seconds
+                FROM message_outbox
+                WHERE status IN ('pending', 'publishing', 'failed', 'published')
+                """
+            )
+            outbox = cur.fetchone()
+            cur.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status = 'processing')::integer AS processing,
+                    count(*) FILTER (WHERE status = 'handled')::integer AS handled,
+                    count(*) FILTER (WHERE status = 'failed')::integer AS failed
+                FROM message_inbox
+                """
+            )
+            inbox = cur.fetchone()
+            cur.execute(
+                """
+                SELECT
+                    count(*) FILTER (WHERE status IN ('pending', 'retrying'))::integer AS pending,
+                    count(*) FILTER (WHERE status = 'failed')::integer AS failed,
+                    count(*) FILTER (WHERE status = 'blocked')::integer AS blocked,
+                    count(*) FILTER (WHERE status = 'delivered')::integer AS delivered
+                FROM callback_deliveries
+                """
+            )
+            callbacks = cur.fetchone()
+            return {
+                "outbox": {
+                    "pending": int(outbox[0] or 0),
+                    "publishing": int(outbox[1] or 0),
+                    "failed": int(outbox[2] or 0),
+                    "published": int(outbox[3] or 0),
+                    "oldest_pending_age_seconds": int(outbox[4] or 0),
+                },
+                "inbox": {
+                    "processing": int(inbox[0] or 0),
+                    "handled": int(inbox[1] or 0),
+                    "failed": int(inbox[2] or 0),
+                },
+                "callbacks": {
+                    "pending": int(callbacks[0] or 0),
+                    "failed": int(callbacks[1] or 0),
+                    "blocked": int(callbacks[2] or 0),
+                    "delivered": int(callbacks[3] or 0),
+                },
+            }
+
+
 def add_monitored_root(
     *,
     name: str,
@@ -5227,6 +5721,191 @@ def claim_corpus_jobs(
                 }
                 for row in cur.fetchall()
             ]
+
+
+def enqueue_pending_corpus_job_commands(
+    *,
+    limit: int = 100,
+    root_name: str | None = None,
+    job_families: list[str] | tuple[str, ...] | None = None,
+    host_agent_roots: bool | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    capped_limit = max(1, min(int(limit or 100), 1000))
+    family_filter = "AND job_family = ANY(%s)" if job_families else ""
+    root_filter = "AND payload->>'root_name' = %s" if root_name else ""
+    host_root_filter = ""
+    if host_agent_roots is True:
+        host_root_filter = """
+                      AND EXISTS (
+                          SELECT 1
+                          FROM monitored_roots r
+                          WHERE r.name = capture_jobs.payload->>'root_name'
+                            AND r.metadata->>'host_access' = 'host_agent'
+                      )
+        """
+    elif host_agent_roots is False:
+        host_root_filter = """
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM monitored_roots r
+                          WHERE r.name = capture_jobs.payload->>'root_name'
+                            AND r.metadata->>'host_access' = 'host_agent'
+                      )
+        """
+    params: list[Any] = []
+    if job_families:
+        params.append(list(job_families))
+    if root_name:
+        params.append(root_name)
+    params.append(capped_limit)
+    psycopg = _load_psycopg()
+    jobs: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id::text, job_type, payload, job_family, resource_class, status
+                FROM capture_jobs
+                WHERE (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
+                  AND status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
+                  AND delete_requested_at IS NULL
+                  AND next_attempt_at <= now()
+                  {family_filter}
+                  {root_filter}
+                  {host_root_filter}
+                ORDER BY priority DESC, created_at
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                outbox = _enqueue_capture_job_command_with_cursor(
+                    cur,
+                    job_id=row[0],
+                    job_type=row[1],
+                    payload=row[2] or {},
+                    job_family=row[3],
+                    resource_class=row[4],
+                )
+                jobs.append(
+                    {
+                        "job_id": row[0],
+                        "job_type": row[1],
+                        "job_family": row[3],
+                        "resource_class": row[4],
+                        "status": row[5],
+                        "message_id": (outbox or {}).get("message_id"),
+                    }
+                )
+    return {"queued": len(jobs), "jobs": jobs, "root_name": root_name, "job_families": list(job_families or [])}
+
+
+def get_capture_job(*, job_id: str, url: str | None = None) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
+                       status, payload, attempts, last_error, telemetry, broker_message_id
+                FROM capture_jobs
+                WHERE id = %s
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            return _capture_job_from_row(row) if row else None
+
+
+def claim_corpus_job_by_id(
+    *,
+    job_id: str,
+    worker_id: str,
+    broker_message_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET status = 'running',
+                    attempts = CASE WHEN status = 'running' THEN attempts ELSE attempts + 1 END,
+                    started_at = COALESCE(started_at, now()),
+                    completed_at = NULL,
+                    locked_at = now(),
+                    locked_by = %s,
+                    progress_heartbeat_at = now(),
+                    broker_message_id = COALESCE(%s, broker_message_id),
+                    broker_delivery_count = broker_delivery_count + 1,
+                    updated_at = now()
+                WHERE id = %s
+                  AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
+                  AND delete_requested_at IS NULL
+                  AND (
+                      status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
+                      OR (status = 'running' AND (%s IS NULL OR broker_message_id = %s))
+                  )
+                RETURNING id::text, job_type, job_family, resource_class, priority, time_budget_seconds,
+                          status, payload, attempts, last_error, telemetry, broker_message_id
+                """,
+                (worker_id, broker_message_id, job_id, broker_message_id, broker_message_id),
+            )
+            row = cur.fetchone()
+            return _capture_job_from_row(row) if row else None
+
+
+def _capture_job_from_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "job_type": row[1],
+        "job_family": row[2],
+        "resource_class": row[3],
+        "priority": row[4],
+        "time_budget_seconds": row[5],
+        "status": row[6],
+        "payload": row[7] or {},
+        "attempts": row[8],
+        "last_error": row[9],
+        "telemetry": row[10] or {},
+        "broker_message_id": row[11] if len(row) > 11 else None,
+    }
+
+
+def enqueue_capture_job_event(
+    *,
+    job_id: str,
+    event_type: str,
+    status: str,
+    details: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "job_id": str(job_id),
+        "status": str(status),
+        "details": details or {},
+    }
+    event_message_id = _stable_message_id("capture-job-event", str(job_id), str(event_type), str(status))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            return _enqueue_message_outbox_with_cursor(
+                cur,
+                message_id=event_message_id,
+                exchange=messaging.EVENTS_EXCHANGE,
+                routing_key=event_type,
+                message_type=event_type,
+                payload=payload,
+                aggregate_type="capture_jobs",
+                aggregate_id=str(job_id),
+                correlation_id=correlation_id,
+                causation_id=causation_id,
+            )
 
 
 def record_runtime_component_heartbeat(
@@ -8477,12 +9156,40 @@ def enqueue_runtime_control_request(
                 (setting_key, action, affected_components, actor, _json(metadata or {})),
             )
             row = cur.fetchone()
+            outbox = _enqueue_message_outbox_with_cursor(
+                cur,
+                exchange=messaging.COMMANDS_EXCHANGE,
+                routing_key=messaging.RUNTIME_CONTROL_ROUTING_KEY,
+                message_type="flux.runtime_control.apply",
+                payload={
+                    "request_id": row[0],
+                    "setting_key": row[1],
+                    "action": row[2],
+                    "affected_components": list(row[3] or []),
+                    "actor": actor,
+                },
+                aggregate_type="runtime_control_requests",
+                aggregate_id=row[0],
+            )
+            cur.execute(
+                """
+                UPDATE runtime_control_requests
+                SET broker_message_id = %s,
+                    correlation_id = %s,
+                    routing_key = %s,
+                    queued_at = COALESCE(queued_at, now()),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (outbox.get("message_id"), outbox.get("message_id"), messaging.RUNTIME_CONTROL_ROUTING_KEY, row[0]),
+            )
             return {
                 "id": row[0],
                 "setting_key": row[1],
                 "action": row[2],
                 "affected_components": list(row[3] or []),
                 "status": row[4],
+                "message_id": outbox.get("message_id"),
             }
 
 
@@ -8843,6 +9550,139 @@ def claim_due_imap_sync_runs(
                 (capped_limit, worker_id, worker_id),
             )
             return [_mail_sync_run_row(row, include_profile=True) for row in cur.fetchall()]
+
+
+def enqueue_due_imap_sync_commands(
+    *,
+    limit: int = 10,
+    requested_by: str = "scheduler",
+    url: str | None = None,
+) -> dict[str, Any]:
+    capped_limit = max(1, min(limit, 100))
+    psycopg = _load_psycopg()
+    runs: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            _expire_stale_imap_sync_runs(cur)
+            cur.execute(
+                """
+                WITH due_profiles AS (
+                    SELECT p.id,
+                           p.name,
+                           GREATEST(EXTRACT(EPOCH FROM (now() - COALESCE(p.next_sync_at, now())))::integer, 0) AS drift_seconds,
+                           CASE
+                               WHEN p.next_sync_at IS NULL OR p.sync_interval_seconds <= 0 THEN 0
+                               ELSE GREATEST(FLOOR(EXTRACT(EPOCH FROM (now() - p.next_sync_at)) / p.sync_interval_seconds)::integer, 0)
+                           END AS missed_runs
+                    FROM mail_profiles p
+                    WHERE p.source_type = 'imap'
+                      AND p.enabled
+                      AND p.sync_enabled
+                      AND (p.next_sync_at IS NULL OR p.next_sync_at <= now())
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM mail_sync_runs active
+                          WHERE active.profile_id = p.id
+                            AND active.status IN ('queued', 'claimed', 'running', 'backoff')
+                      )
+                    ORDER BY COALESCE(p.next_sync_at, now()), p.name
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                )
+                INSERT INTO mail_sync_runs (
+                    profile_id, status, trigger, requested_by, drift_seconds, missed_runs
+                )
+                SELECT id, 'queued', 'schedule', %s, drift_seconds, missed_runs
+                FROM due_profiles
+                RETURNING id::text, profile_id::text, status, trigger, requested_by, drift_seconds, missed_runs
+                """,
+                (capped_limit, requested_by),
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                outbox = _enqueue_message_outbox_with_cursor(
+                    cur,
+                    exchange=messaging.COMMANDS_EXCHANGE,
+                    routing_key=messaging.MAIL_IMAP_SYNC_ROUTING_KEY,
+                    message_type="flux.mail.imap.sync",
+                    payload={
+                        "run_id": row[0],
+                        "profile_id": row[1],
+                        "trigger": row[3],
+                        "requested_by": row[4],
+                    },
+                    aggregate_type="mail_sync_runs",
+                    aggregate_id=row[0],
+                )
+                cur.execute(
+                    """
+                    UPDATE mail_sync_runs
+                    SET broker_message_id = %s,
+                        correlation_id = %s,
+                        routing_key = %s,
+                        queued_at = COALESCE(queued_at, now()),
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (outbox.get("message_id"), outbox.get("message_id"), messaging.MAIL_IMAP_SYNC_ROUTING_KEY, row[0]),
+                )
+                runs.append(
+                    {
+                        "run_id": row[0],
+                        "profile_id": row[1],
+                        "status": row[2],
+                        "message_id": outbox.get("message_id"),
+                    }
+                )
+    return {"queued": len(runs), "runs": runs}
+
+
+def claim_imap_sync_run_by_id(
+    *,
+    run_id: str,
+    worker_id: str,
+    broker_message_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE mail_sync_runs r
+                SET status = 'claimed',
+                    claimed_by = %s,
+                    claimed_at = now(),
+                    worker_id = %s,
+                    attempt_count = CASE WHEN r.status = 'claimed' THEN r.attempt_count ELSE r.attempt_count + 1 END,
+                    broker_message_id = COALESCE(%s, r.broker_message_id),
+                    broker_delivery_count = r.broker_delivery_count + 1,
+                    updated_at = now()
+                FROM mail_profiles p
+                WHERE p.id = r.profile_id
+                  AND r.id = %s
+                  AND p.source_type = 'imap'
+                  AND p.enabled
+                  AND (
+                      r.status IN ('queued', 'backoff')
+                      OR (r.status = 'claimed' AND (%s IS NULL OR r.broker_message_id = %s))
+                  )
+                  AND (r.next_attempt_at IS NULL OR r.next_attempt_at <= now())
+                RETURNING r.id::text, p.name, r.status, r.trigger, r.requested_by,
+                          r.claimed_by, r.claimed_at, r.worker_id, r.attempt_count,
+                          r.last_error, r.next_attempt_at, r.drift_seconds,
+                          r.missed_runs, r.started_at, r.finished_at, r.messages_seen,
+                          r.messages_exported, r.last_cursor, r.errors,
+                          p.id::text, p.source_type, p.account, p.server,
+                          p.folder_paths, p.spool_path, p.post_process_policy,
+                          p.enabled, p.trust_rank, p.metadata, p.sync_enabled,
+                          p.sync_interval_seconds, p.sync_window_days,
+                          p.max_messages_per_run, p.last_sync_at, p.next_sync_at
+                """,
+                (worker_id, worker_id, broker_message_id, run_id, broker_message_id, broker_message_id),
+            )
+            row = cur.fetchone()
+            return _mail_sync_run_row(row, include_profile=True) if row else None
 
 
 def mark_mail_sync_run_running(
@@ -9684,11 +10524,33 @@ def create_outlook_sync_request(
                 (profile[0], actor),
             )
             row = cur.fetchone()
+            outbox = _enqueue_message_outbox_with_cursor(
+                cur,
+                exchange=messaging.COMMANDS_EXCHANGE,
+                routing_key=messaging.OUTLOOK_SYNC_ROUTING_KEY,
+                message_type="flux.mail.outlook.sync",
+                payload={"request_id": row[0], "profile_name": profile_name, "requested_by": actor},
+                aggregate_type="outlook_sync_requests",
+                aggregate_id=row[0],
+            )
+            cur.execute(
+                """
+                UPDATE outlook_sync_requests
+                SET broker_message_id = %s,
+                    correlation_id = %s,
+                    routing_key = %s,
+                    queued_at = COALESCE(queued_at, now()),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (outbox.get("message_id"), outbox.get("message_id"), messaging.OUTLOOK_SYNC_ROUTING_KEY, row[0]),
+            )
             return {
                 "id": row[0],
                 "profile_name": profile_name,
                 "status": row[1],
                 "created_at": row[2].isoformat(),
+                "message_id": outbox.get("message_id"),
             }
 
 
@@ -9813,6 +10675,116 @@ def claim_outlook_sync_request(*, host_id: str = "default", url: str | None = No
             )
             row = cur.fetchone()
             return {"id": row[0], "profile_name": due[1], "status": row[1]}
+
+
+def enqueue_due_outlook_sync_commands(
+    *,
+    limit: int = 10,
+    requested_by: str = "scheduler",
+    url: str | None = None,
+) -> dict[str, Any]:
+    capped_limit = max(1, min(limit, 100))
+    psycopg = _load_psycopg()
+    requests: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name
+                FROM mail_profiles
+                WHERE source_type = 'outlook_com'
+                  AND enabled
+                  AND sync_enabled
+                  AND (next_sync_at IS NULL OR next_sync_at <= now())
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM outlook_sync_requests active
+                      WHERE active.profile_id = mail_profiles.id
+                        AND active.status IN ('pending', 'claimed', 'running')
+                  )
+                ORDER BY COALESCE(next_sync_at, now())
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+                """,
+                (capped_limit,),
+            )
+            due_rows = cur.fetchall()
+            for profile_id, profile_name in due_rows:
+                cur.execute(
+                    """
+                    INSERT INTO outlook_sync_requests (profile_id, requested_by, status)
+                    VALUES (%s, %s, 'pending')
+                    RETURNING id::text, status
+                    """,
+                    (profile_id, requested_by),
+                )
+                row = cur.fetchone()
+                outbox = _enqueue_message_outbox_with_cursor(
+                    cur,
+                    exchange=messaging.COMMANDS_EXCHANGE,
+                    routing_key=messaging.OUTLOOK_SYNC_ROUTING_KEY,
+                    message_type="flux.mail.outlook.sync",
+                    payload={"request_id": row[0], "profile_name": profile_name, "requested_by": requested_by},
+                    aggregate_type="outlook_sync_requests",
+                    aggregate_id=row[0],
+                )
+                cur.execute(
+                    """
+                    UPDATE outlook_sync_requests
+                    SET broker_message_id = %s,
+                        correlation_id = %s,
+                        routing_key = %s,
+                        queued_at = COALESCE(queued_at, now()),
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (outbox.get("message_id"), outbox.get("message_id"), messaging.OUTLOOK_SYNC_ROUTING_KEY, row[0]),
+                )
+                requests.append({"id": row[0], "profile_name": profile_name, "status": row[1], "message_id": outbox.get("message_id")})
+    return {"queued": len(requests), "requests": requests}
+
+
+def claim_outlook_sync_request_by_id(
+    *,
+    request_id: str,
+    host_id: str = "default",
+    broker_message_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH request AS (
+                    SELECT r.id, p.name
+                    FROM outlook_sync_requests r
+                    JOIN mail_profiles p ON p.id = r.profile_id
+                    WHERE r.id = %s
+                      AND r.status IN ('pending', 'claimed')
+                      AND p.enabled
+                      AND p.source_type = 'outlook_com'
+                      AND (%s IS NULL OR r.broker_message_id IS NULL OR r.broker_message_id = %s)
+                    LIMIT 1
+                    FOR UPDATE
+                )
+                UPDATE outlook_sync_requests r
+                SET status = 'claimed',
+                    claimed_by = %s,
+                    claimed_at = now(),
+                    broker_message_id = COALESCE(%s, r.broker_message_id),
+                    broker_delivery_count = r.broker_delivery_count + 1,
+                    updated_at = now()
+                FROM request
+                WHERE r.id = request.id
+                RETURNING r.id::text, request.name, r.status
+                """,
+                (request_id, broker_message_id, broker_message_id, host_id, broker_message_id),
+            )
+            row = cur.fetchone()
+            if row:
+                return {"id": row[0], "profile_name": row[1], "status": row[2]}
+            return None
 
 
 def cancel_outlook_sync_request(
@@ -10290,6 +11262,14 @@ def _enqueue_unique_capture_job_with_cursor(
     if existing is not None:
         existing_status = str(existing[1] or "unknown")
         if existing_status in _ACTIVE_CAPTURE_JOB_STATUSES:
+            _enqueue_capture_job_command_with_cursor(
+                cur,
+                job_id=existing[0],
+                job_type=clean_job_type,
+                payload=clean_payload,
+                job_family=resolved_job_family,
+                resource_class=resolved_resource_class,
+            )
             return {
                 "job_id": existing[0],
                 "status": existing_status,
@@ -10351,6 +11331,14 @@ def _enqueue_unique_capture_job_with_cursor(
                 _json({**details, "previous_status": existing_status, "status": updated[1]}),
             ),
         )
+        _enqueue_capture_job_command_with_cursor(
+            cur,
+            job_id=updated[0],
+            job_type=clean_job_type,
+            payload=clean_payload,
+            job_family=resolved_job_family,
+            resource_class=resolved_resource_class,
+        )
         return {
             "job_id": updated[0],
             "status": updated[1],
@@ -10388,6 +11376,14 @@ def _enqueue_unique_capture_job_with_cursor(
         """,
         (inserted[0], _json(details)),
     )
+    _enqueue_capture_job_command_with_cursor(
+        cur,
+        job_id=inserted[0],
+        job_type=clean_job_type,
+        payload=clean_payload,
+        job_family=resolved_job_family,
+        resource_class=resolved_resource_class,
+    )
     return {
         "job_id": inserted[0],
         "status": inserted[1],
@@ -10395,6 +11391,62 @@ def _enqueue_unique_capture_job_with_cursor(
         "deduped": False,
         "reused": False,
     }
+
+
+def _enqueue_capture_job_command_with_cursor(
+    cur: Any,
+    *,
+    job_id: str,
+    job_type: str,
+    payload: dict[str, Any],
+    job_family: str,
+    resource_class: str,
+) -> dict[str, Any] | None:
+    routing_key, message_type = _capture_job_command_contract(job_type)
+    if not routing_key:
+        return None
+    command_payload: dict[str, Any] = {
+        "job_id": str(job_id),
+        "job_type": str(job_type),
+        "job_family": str(job_family),
+        "resource_class": str(resource_class),
+    }
+    for key in ("root_name", "path", "reason", "path_batch_index", "path_batch_total"):
+        if key in payload:
+            command_payload[key] = payload[key]
+    if isinstance(payload.get("paths"), list):
+        command_payload["paths_count"] = len(payload["paths"])
+    outbox = _enqueue_message_outbox_with_cursor(
+        cur,
+        exchange=messaging.COMMANDS_EXCHANGE,
+        routing_key=routing_key,
+        message_type=message_type,
+        payload=command_payload,
+        aggregate_type="capture_jobs",
+        aggregate_id=str(job_id),
+    )
+    cur.execute(
+        """
+        UPDATE capture_jobs
+        SET routing_key = %s,
+            queued_at = COALESCE(queued_at, now()),
+            correlation_id = COALESCE(correlation_id, %s),
+            broker_message_id = COALESCE(broker_message_id, %s),
+            updated_at = now()
+        WHERE id = %s
+        """,
+        (routing_key, outbox.get("message_id"), outbox.get("message_id"), job_id),
+    )
+    return outbox
+
+
+def _capture_job_command_contract(job_type: str) -> tuple[str | None, str | None]:
+    clean = str(job_type or "").strip()
+    if clean == "search_index_sync":
+        return messaging.SEARCH_INDEX_PROCESS_ROUTING_KEY, "flux.search_index.process"
+    if clean.startswith("corpus_"):
+        return messaging.CORPUS_PROCESS_ROUTING_KEY, "flux.corpus.process"
+    return None, None
 
 
 def enqueue_capture_job(
