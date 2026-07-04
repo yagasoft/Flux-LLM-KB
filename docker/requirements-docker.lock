@@ -2,7 +2,13 @@
 # Keep this file exact-version only. Broad ranges in image builds can make pip
 # select newer remote GPU wheels and burn deployment bandwidth.
 compressed-tensors==0.17.1
+aio-pika==9.6.2
+aiormq==6.9.4
 loguru==0.7.3
+multidict==6.7.1
 nvidia-cuda-runtime-cu12==12.6.77
 nvidia-cublas-cu12==12.6.4.1
 nvidia-cudnn-cu12==9.10.2.21
+pamqp==3.3.0
+propcache==0.5.2
+yarl==1.24.2

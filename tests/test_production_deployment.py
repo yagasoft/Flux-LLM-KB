@@ -658,6 +658,13 @@ def test_production_update_can_keep_worker_paused_during_model_cutover():
     assert "$deployCommand += ' -SkipWorkerStart'" in complete_feature
 
 
+def test_complete_feature_seeds_missing_docker_wheels_during_deploy():
+    complete_feature = _dev_script("complete-feature.ps1")
+
+    assert "[bool]$DeployPipOffline = $false" in complete_feature
+    assert "-PipOffline:$deployPipOfflineValue" in complete_feature
+
+
 def test_production_deploy_defaults_match_prefilled_wheel_cache_args():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")

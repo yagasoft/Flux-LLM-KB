@@ -45,6 +45,12 @@ def test_dockerfile_uses_locked_wheelhouse_constraints() -> None:
     assert "--find-links /opt/flux-wheelhouse $pip_index_args $pip_extra_index_args --constraint \"$constraint\"" in dockerfile
     assert "download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock" in dockerfile
     assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock" in dockerfile
+    assert "aio-pika==9.6.2" in runtime_lock
+    assert "aiormq==6.9.4" in runtime_lock
+    assert "pamqp==3.3.0" in runtime_lock
+    assert "yarl==1.24.2" in runtime_lock
+    assert "multidict==6.7.1" in runtime_lock
+    assert "propcache==0.5.2" in runtime_lock
     assert "compressed-tensors==0.17.1" in runtime_lock
     assert "loguru==0.7.3" in runtime_lock
     assert "nvidia-cuda-runtime-cu12==12.6.77" in runtime_lock

@@ -10,6 +10,7 @@ param(
     [int]$DeployStepTimeoutSeconds = 1800,
     [string]$PytestWorkers = "auto",
     [switch]$SkipWorkerStart,
+    [bool]$DeployPipOffline = $false,
     [string]$PostDeployReclaimOutlookProfile = ""
 )
 
@@ -382,7 +383,8 @@ try {
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
     if (-not $SkipDeploy) {
-        $deployCommand = '.\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild'
+        $deployPipOfflineValue = if ($DeployPipOffline) { '$true' } else { '$false' }
+        $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue"
         if ($SkipWorkerStart) {
             $deployCommand += ' -SkipWorkerStart'
         }

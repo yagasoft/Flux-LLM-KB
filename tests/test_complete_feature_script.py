@@ -169,7 +169,9 @@ def test_complete_feature_script_propagates_nested_native_exit_codes():
 def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
-    assert "$deployCommand = '.\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild'" in script
+    assert "[bool]$DeployPipOffline = $false" in script
+    assert "$deployPipOfflineValue = if ($DeployPipOffline) { '$true' } else { '$false' }" in script
+    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue\"" in script
     assert "Invoke-FeatureStep -Name \"deploy-production\" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds" in script
 
 
