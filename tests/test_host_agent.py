@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -234,6 +236,40 @@ def test_host_agent_broker_consumer_uses_host_agent_queue(monkeypatch):
     assert calls == [{"queue_name": messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE, "worker_id": "host-1"}]
     assert heartbeats[-1]["name"] == "corpus-worker:host-agent-broker"
     assert heartbeats[-1]["metadata"]["queue"] == messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE
+
+
+def test_host_agent_broker_consumer_refreshes_heartbeat_while_worker_blocks(monkeypatch):
+    from flux_llm_kb import event_worker, messaging
+
+    started = threading.Event()
+    release = threading.Event()
+    heartbeats = []
+
+    def fake_run_worker(**kwargs):
+        assert kwargs == {"queue_name": messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE, "worker_id": "host-1"}
+        started.set()
+        assert release.wait(timeout=1)
+        return {"status": "stopped"}
+
+    monkeypatch.setattr(event_worker, "run_worker", fake_run_worker)
+    monkeypatch.setattr(host_agent, "_safe_record_runtime_component_heartbeat", lambda **kwargs: heartbeats.append(kwargs))
+
+    loop = host_agent.HostAgentBrokerConsumerLoop(worker_id="host-1", heartbeat_interval_seconds=0.01)
+    thread = threading.Thread(target=loop.run_once)
+    thread.start()
+    assert started.wait(timeout=1)
+
+    deadline = time.monotonic() + 1
+    while len(heartbeats) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    release.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert len(heartbeats) >= 2
+    assert all(item["name"] == "corpus-worker:host-agent-broker" for item in heartbeats)
+    assert {item["metadata"]["queue"] for item in heartbeats} == {messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE}
 
 
 def test_cli_host_agent_run_starts_broker_consumer_by_default(monkeypatch, capsys):

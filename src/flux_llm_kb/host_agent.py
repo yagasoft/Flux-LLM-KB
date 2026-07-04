@@ -30,6 +30,7 @@ HOST_AGENT_BROWSE_TIMEOUT_SECONDS = 300
 HOST_AGENT_BACKFILL_TIMEOUT_SECONDS = 600
 HOST_AGENT_BENCHMARK_TIMEOUT_SECONDS = 600
 WATCHER_HEARTBEAT_INTERVAL_SECONDS = 10.0
+HOST_AGENT_BROKER_HEARTBEAT_INTERVAL_SECONDS = 10.0
 
 
 class ValidateRequest(BaseModel):
@@ -437,12 +438,14 @@ class HostAgentBrokerConsumerLoop:
         queue_name: str | None = None,
         worker_id: str | None = None,
         retry_delay_seconds: float = 5.0,
+        heartbeat_interval_seconds: float = HOST_AGENT_BROKER_HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         from . import messaging
 
         self.queue_name = queue_name or messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE
         self.worker_id = worker_id or f"host-agent:{platform.node() or 'local'}:{os.getpid()}"
         self.retry_delay_seconds = retry_delay_seconds
+        self.heartbeat_interval_seconds = heartbeat_interval_seconds
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -461,29 +464,39 @@ class HostAgentBrokerConsumerLoop:
     def run_once(self) -> dict[str, Any]:
         from . import event_worker
 
-        metadata = {"queue": self.queue_name, "worker_id": self.worker_id, "last_error": None}
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_until_stopped,
+            args=(heartbeat_stop,),
+            name="flux-host-agent-broker-heartbeat",
+            daemon=True,
+        )
+        self._record_broker_heartbeat(status="running", metadata={"last_error": None})
+        heartbeat_thread.start()
+        try:
+            return event_worker.run_worker(queue_name=self.queue_name, worker_id=self.worker_id)
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)
+
+    def _heartbeat_until_stopped(self, stop_event: threading.Event) -> None:
+        while not stop_event.wait(self.heartbeat_interval_seconds):
+            self._record_broker_heartbeat(status="running", metadata={"last_error": None})
+
+    def _record_broker_heartbeat(self, *, status: str, metadata: dict[str, Any] | None = None) -> None:
         _safe_record_runtime_component_heartbeat(
             name="corpus-worker:host-agent-broker",
-            status="running",
-            metadata=metadata,
+            status=status,
+            metadata={"queue": self.queue_name, "worker_id": self.worker_id, **(metadata or {})},
         )
-        return event_worker.run_worker(queue_name=self.queue_name, worker_id=self.worker_id)
 
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
                 result = self.run_once()
-                _safe_record_runtime_component_heartbeat(
-                    name="corpus-worker:host-agent-broker",
-                    status="stopped",
-                    metadata={"queue": self.queue_name, "worker_id": self.worker_id, "last_result": result},
-                )
+                self._record_broker_heartbeat(status="stopped", metadata={"last_result": result})
             except Exception as exc:  # pragma: no cover - defensive long-running loop
-                _safe_record_runtime_component_heartbeat(
-                    name="corpus-worker:host-agent-broker",
-                    status="error",
-                    metadata={"queue": self.queue_name, "worker_id": self.worker_id, "last_error": str(exc)},
-                )
+                self._record_broker_heartbeat(status="error", metadata={"last_error": str(exc)})
             if self._stop.wait(self.retry_delay_seconds):
                 return
 
