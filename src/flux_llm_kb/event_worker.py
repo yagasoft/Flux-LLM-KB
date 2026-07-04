@@ -66,7 +66,11 @@ class EventWorker:
             raise
 
     def _dispatch(self, message: messaging.FluxMessage) -> dict[str, Any]:
-        if message.routing_key in {messaging.CORPUS_PROCESS_ROUTING_KEY, messaging.SEARCH_INDEX_PROCESS_ROUTING_KEY}:
+        if message.routing_key in {
+            messaging.CORPUS_PROCESS_ROUTING_KEY,
+            messaging.CORPUS_HOST_AGENT_PROCESS_ROUTING_KEY,
+            messaging.SEARCH_INDEX_PROCESS_ROUTING_KEY,
+        }:
             job_id = str(message.payload.get("job_id") or message.job_id or "").strip()
             if not job_id:
                 raise ValueError("corpus/search-index command requires job_id")
@@ -107,6 +111,7 @@ class EventWorker:
                 trigger=str(message.payload.get("trigger") or "broker"),
                 actor=str(message.payload.get("requested_by") or self.worker_id),
                 limit=int(message.payload.get("limit") or 25),
+                dry_run=bool(message.payload.get("dry_run")),
             )
         if message.routing_key == messaging.GOVERNANCE_ROUTING_KEY:
             return self.service.run_governance(
@@ -115,7 +120,11 @@ class EventWorker:
                 limit=int(message.payload.get("limit") or 25),
             )
         if message.routing_key == messaging.RUNTIME_CONTROL_ROUTING_KEY:
-            return {"status": "acknowledged", **self.database.ack_runtime_control_requests(actor=self.worker_id)}
+            component = str(message.payload.get("component") or "").strip() or None
+            return {
+                "status": "acknowledged",
+                **self.database.ack_runtime_control_requests(component=component, actor=self.worker_id),
+            }
         if message.routing_key == messaging.GPU_EVICTION_ROUTING_KEY:
             eviction_id = str(message.payload.get("eviction_id") or "").strip()
             if not eviction_id:
@@ -130,13 +139,13 @@ class EventWorker:
         raise ValueError(f"unsupported routing key: {message.routing_key}")
 
 
-async def run_worker_loop(*, queue_name: str = "flux.commands.corpus") -> dict[str, Any]:
-    worker = EventWorker()
+async def run_worker_loop(*, queue_name: str = messaging.COMMAND_CORPUS_QUEUE, worker_id: str | None = None) -> dict[str, Any]:
+    worker = EventWorker(worker_id=worker_id)
     consumer = messaging.RabbitMqConsumer()
     async with consumer:
         await consumer.consume(queue_name=queue_name, handler=lambda message: worker.handle(message))
     return {"status": "stopped", "queue": queue_name}
 
 
-def run_worker(*, queue_name: str = "flux.commands.corpus") -> dict[str, Any]:
-    return asyncio.run(run_worker_loop(queue_name=queue_name))
+def run_worker(*, queue_name: str = messaging.COMMAND_CORPUS_QUEUE, worker_id: str | None = None) -> dict[str, Any]:
+    return asyncio.run(run_worker_loop(queue_name=queue_name, worker_id=worker_id))

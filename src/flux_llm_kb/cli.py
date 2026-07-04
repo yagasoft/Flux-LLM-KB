@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -437,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
     event_worker_subparsers = event_worker.add_subparsers(dest="event_worker_command", required=True)
     event_worker_run = event_worker_subparsers.add_parser("run", help="Run a RabbitMQ command consumer")
     event_worker_run.add_argument("--queue", default="flux.commands.corpus")
+    event_worker_run.add_argument("--worker-id")
     event_outbox = event_subparsers.add_parser("outbox", help="Publish PostgreSQL outbox rows to RabbitMQ")
     event_outbox_subparsers = event_outbox.add_subparsers(dest="event_outbox_command", required=True)
     event_outbox_relay = event_outbox_subparsers.add_parser("relay", help="Run the transactional outbox relay")
@@ -447,6 +449,11 @@ def main(argv: list[str] | None = None) -> int:
     event_callbacks_subparsers = event_callbacks.add_subparsers(dest="event_callbacks_command", required=True)
     event_callbacks_dispatch = event_callbacks_subparsers.add_parser("dispatch", help="Run the callback dispatcher")
     event_callbacks_dispatch.add_argument("--queue", default="flux.callbacks.dispatch")
+    event_subscriber = event_subparsers.add_parser("subscriber", help="Consume durable RabbitMQ event subscriber queues")
+    event_subscriber_subparsers = event_subscriber.add_subparsers(dest="event_subscriber_command", required=True)
+    event_subscriber_run = event_subscriber_subparsers.add_parser("run", help="Run a RabbitMQ event subscriber")
+    event_subscriber_run.add_argument("--queue", default="flux.events.audit")
+    event_subscriber_run.add_argument("--subscriber", default="audit")
     event_scheduler = event_subparsers.add_parser("scheduler", help="Enqueue due scheduled work into RabbitMQ")
     event_scheduler_subparsers = event_scheduler.add_subparsers(dest="event_scheduler_command", required=True)
     event_scheduler_run = event_scheduler_subparsers.add_parser("run", help="Run the event scheduler")
@@ -608,6 +615,11 @@ def main(argv: list[str] | None = None) -> int:
     outlook_host_run = outlook_host_subparsers.add_parser("run", help="Run the Outlook COM host loop")
     outlook_host_run.add_argument("--host-id", default="default")
     outlook_host_run.add_argument("--interval-seconds", type=int, default=15)
+    outlook_host_run.add_argument(
+        "--legacy-db-loop",
+        action="store_true",
+        help="Run the old DB-claim loop; development only and requires FLUX_KB_ALLOW_INLINE_WORKERS=1",
+    )
     outlook_host_subparsers.add_parser("status", help="Show Outlook COM host status")
     outlook_host_sync = outlook_host_subparsers.add_parser("sync", help="Request an Outlook COM profile sync")
     outlook_host_sync.add_argument("--profile", required=True)
@@ -999,7 +1011,7 @@ def _automation(args: argparse.Namespace) -> int:
     if args.automation_command == "status":
         payload = service.operator_automation_status()
     elif args.automation_command == "run":
-        payload = service.run_operator_automation(
+        payload = service.enqueue_operator_automation(
             mode=args.mode,
             trigger="manual",
             actor="cli",
@@ -1079,7 +1091,9 @@ def _crawl(args: argparse.Namespace) -> int:
             kwargs["callback_url"] = args.callback_url
         service = KnowledgeService()
         enqueue = getattr(service, "enqueue_corpus_backfill", None)
-        payload = enqueue(**kwargs) if enqueue else service.run_corpus_backfill(**kwargs)
+        if enqueue is None:
+            raise RuntimeError("crawl backfill requires enqueue_corpus_backfill; direct inline backfill is not a production path")
+        payload = enqueue(**kwargs)
     elif args.crawl_command == "worker":
         from .service import KnowledgeService
 
@@ -1088,6 +1102,12 @@ def _crawl(args: argparse.Namespace) -> int:
         elif args.worker_command != "run":  # pragma: no cover - argparse prevents this
             raise ValueError(args.worker_command)
         else:
+            if os.environ.get("FLUX_KB_ALLOW_INLINE_WORKERS") != "1":
+                raise SystemExit(
+                    "crawl worker run is a development-only inline runner. "
+                    "Use `flux-kb event worker run --queue flux.commands.corpus`, "
+                    "or set FLUX_KB_ALLOW_INLINE_WORKERS=1 for local debugging."
+                )
             host_agent_roots = None
             component_name = "corpus-worker:manual"
             if args.host_agent_roots:
@@ -1123,7 +1143,7 @@ def _event_command(args: argparse.Namespace) -> int:
             raise ValueError(args.event_worker_command)
         from .event_worker import run_worker
 
-        payload = run_worker(queue_name=args.queue)
+        payload = run_worker(queue_name=args.queue, worker_id=args.worker_id)
     elif args.event_command == "outbox":
         if args.event_outbox_command != "relay":  # pragma: no cover - argparse prevents this
             raise ValueError(args.event_outbox_command)
@@ -1138,6 +1158,12 @@ def _event_command(args: argparse.Namespace) -> int:
         from .callback_dispatcher import run_dispatcher
 
         payload = run_dispatcher(queue_name=args.queue)
+    elif args.event_command == "subscriber":
+        if args.event_subscriber_command != "run":  # pragma: no cover - argparse prevents this
+            raise ValueError(args.event_subscriber_command)
+        from .event_subscriber import run_subscriber
+
+        payload = run_subscriber(queue_name=args.queue, subscriber_name=args.subscriber)
     elif args.event_command == "scheduler":
         if args.event_scheduler_command != "run":  # pragma: no cover - argparse prevents this
             raise ValueError(args.event_scheduler_command)
@@ -1232,7 +1258,7 @@ def _settings(args: argparse.Namespace) -> int:
     elif args.settings_command == "reset":
         payload = service.reset(args.key, actor="cli")
     elif args.settings_command == "apply":
-        payload = service.apply(component=args.component, actor="cli")
+        payload = service.enqueue_apply(component=args.component, actor="cli")
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.settings_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1310,7 +1336,7 @@ def _governance(args: argparse.Namespace) -> int:
 
     service = KnowledgeService()
     if args.governance_command == "run":
-        payload = service.run_governance(mode=args.mode, actor="cli", limit=args.limit)
+        payload = service.enqueue_governance_run(mode=args.mode, actor="cli", limit=args.limit)
     elif args.governance_command == "actions":
         if args.governance_actions_command == "list":
             payload = service.governance_actions(status=args.status, limit=args.limit)
@@ -1505,7 +1531,7 @@ def _mail(args: argparse.Namespace) -> int:
     elif args.mail_command == "status":
         payload = mail_ingestion.mail_status()
     elif args.mail_command == "sync":
-        payload = mail_ingestion.sync_mail_profile(profile_name=args.profile)
+        payload = database.enqueue_imap_sync_command(profile_name=args.profile, requested_by="cli")
     elif args.mail_command == "spool-dedupe":
         if args.profile:
             profiles = database.list_mail_profiles(name=args.profile)
@@ -1555,7 +1581,17 @@ def _outlook_host(args: argparse.Namespace) -> int:
     elif args.outlook_host_command == "sync":
         payload = outlook_host.request_sync(args.profile, actor="cli")
     elif args.outlook_host_command == "run":
-        payload = outlook_host.run_forever(host_id=args.host_id, interval_seconds=args.interval_seconds)
+        if args.legacy_db_loop:
+            if os.environ.get("FLUX_KB_ALLOW_INLINE_WORKERS") != "1":
+                raise SystemExit(
+                    "outlook-host run --legacy-db-loop is a development-only DB claim loop. "
+                    "Set FLUX_KB_ALLOW_INLINE_WORKERS=1 to use it intentionally."
+                )
+            payload = outlook_host.run_forever(host_id=args.host_id, interval_seconds=args.interval_seconds)
+        else:
+            from . import event_worker, messaging
+
+            payload = event_worker.run_worker(queue_name=messaging.COMMAND_OUTLOOK_QUEUE, worker_id=args.host_id)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.outlook_host_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1598,12 +1634,11 @@ def _mail_oauth(args: argparse.Namespace) -> dict:
 def _mail_watch_run(profile_name: str | None) -> dict:
     import time
 
-    from .mail_ingestion import sync_mail_profile
     from .settings import SettingsService
 
     interval = int(SettingsService().resolve("mail.imap.poll_interval_seconds").raw_value)
     while True:
-        sync_mail_profile(profile_name=profile_name)
+        database.enqueue_imap_sync_command(profile_name=profile_name, requested_by="mail-watch")
         time.sleep(interval)
 
 

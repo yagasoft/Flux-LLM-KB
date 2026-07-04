@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from flux_llm_kb import cli
 
 
@@ -447,7 +449,7 @@ def test_cli_code_and_diagnostics_commands_use_service(monkeypatch, capsys):
             calls.append(("diagnostics_remediate", kwargs))
             return {"settings_mutated": False, "action": kwargs["action"]}
 
-        def run_corpus_backfill(self, **kwargs):
+        def enqueue_corpus_backfill(self, **kwargs):
             calls.append(("crawl_backfill", kwargs))
             return {"settings_mutated": False, "backfill": kwargs}
 
@@ -772,9 +774,9 @@ def test_cli_governance_commands_use_service(monkeypatch, capsys):
     calls = []
 
     class FakeService:
-        def run_governance(self, **kwargs):
+        def enqueue_governance_run(self, **kwargs):
             calls.append(("run", kwargs))
-            return {"run": {"id": "run-1"}, "settings_mutated": False, "memory_mutated": False}
+            return {"accepted": True, "operation_id": "op-governance", "settings_mutated": False, "memory_mutated": False}
 
         def governance_actions(self, **kwargs):
             calls.append(("actions", kwargs))
@@ -799,7 +801,7 @@ def test_cli_governance_commands_use_service(monkeypatch, capsys):
     monkeypatch.setattr(service, "KnowledgeService", FakeService)
 
     assert cli.main(["governance", "run", "--mode", "shadow", "--limit", "5"]) == 0
-    assert json.loads(capsys.readouterr().out)["run"]["id"] == "run-1"
+    assert json.loads(capsys.readouterr().out)["operation_id"] == "op-governance"
     assert cli.main(["governance", "actions", "list", "--status", "proposed", "--limit", "2"]) == 0
     assert json.loads(capsys.readouterr().out)["telemetry"]["by_status"]["proposed"] == 1
     assert cli.main(["governance", "actions", "apply", "action-1", "--rationale", "reviewed", "--confirm"]) == 0
@@ -818,6 +820,25 @@ def test_cli_governance_commands_use_service(monkeypatch, capsys):
         ("digest", {}),
         ("policy", {}),
     ]
+
+
+def test_cli_automation_run_enqueues_broker_command(monkeypatch, capsys):
+    from flux_llm_kb import service
+
+    calls = []
+
+    class FakeService:
+        def enqueue_operator_automation(self, **kwargs):
+            calls.append(kwargs)
+            return {"accepted": True, "operation_id": "op-automation", "settings_mutated": False}
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    assert cli.main(["automation", "run", "--mode", "guarded", "--limit", "3", "--dry-run"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["operation_id"] == "op-automation"
+    assert calls == [{"mode": "guarded", "trigger": "manual", "actor": "cli", "limit": 3, "dry_run": True}]
 
 
 def test_cli_remember_passes_workspace_scope(monkeypatch, capsys):
@@ -998,6 +1019,8 @@ def test_cli_crawl_delete_requires_and_passes_purge_index(monkeypatch, capsys):
 def test_cli_crawl_worker_run_once_invokes_backfill_loop(monkeypatch, capsys):
     from flux_llm_kb import service
 
+    monkeypatch.setenv("FLUX_KB_ALLOW_INLINE_WORKERS", "1")
+
     class FakeService:
         def run_corpus_worker(self, **kwargs):
             return {"worker": kwargs}
@@ -1013,6 +1036,8 @@ def test_cli_crawl_worker_run_once_invokes_backfill_loop(monkeypatch, capsys):
 
 def test_cli_crawl_worker_run_omits_default_parallelism_knobs(monkeypatch, capsys):
     from flux_llm_kb import service
+
+    monkeypatch.setenv("FLUX_KB_ALLOW_INLINE_WORKERS", "1")
 
     class FakeService:
         def run_corpus_worker(self, **kwargs):
@@ -1030,10 +1055,11 @@ def test_cli_crawl_worker_run_omits_default_parallelism_knobs(monkeypatch, capsy
 def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, capsys):
     from flux_llm_kb import service
 
+    monkeypatch.setenv("FLUX_KB_ALLOW_INLINE_WORKERS", "1")
     calls = {}
 
     class FakeService:
-        def run_corpus_backfill(self, **kwargs):
+        def enqueue_corpus_backfill(self, **kwargs):
             calls["backfill"] = kwargs
             return {"backfill": kwargs}
 
@@ -1065,6 +1091,34 @@ def test_cli_crawl_backfill_and_worker_accept_specialized_kinds(monkeypatch, cap
     report_worker_payload = json.loads(capsys.readouterr().out)
     assert report_worker_payload["worker"]["kind"] == "reports"
     assert report_worker_payload["worker"]["limit"] == 7
+
+
+def test_cli_crawl_backfill_requires_event_enqueue(monkeypatch):
+    from flux_llm_kb import service
+
+    class FakeService:
+        def run_corpus_backfill(self, **_kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("inline backfill should not run from CLI")
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    with pytest.raises(RuntimeError, match="enqueue_corpus_backfill"):
+        cli.main(["crawl", "backfill", "--kind", "text", "--limit", "1"])
+
+
+def test_cli_crawl_worker_run_requires_inline_dev_guard(monkeypatch):
+    from flux_llm_kb import service
+
+    monkeypatch.delenv("FLUX_KB_ALLOW_INLINE_WORKERS", raising=False)
+
+    class FakeService:
+        def run_corpus_worker(self, **_kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("inline worker should not run without dev guard")
+
+    monkeypatch.setattr(service, "KnowledgeService", FakeService)
+
+    with pytest.raises(SystemExit, match="FLUX_KB_ALLOW_INLINE_WORKERS"):
+        cli.main(["crawl", "worker", "run", "--once"])
 
 
 def test_cli_crawl_backfill_prefers_event_enqueue_when_available(monkeypatch, capsys):
@@ -1107,6 +1161,23 @@ def test_cli_crawl_backfill_prefers_event_enqueue_when_available(monkeypatch, ca
     assert payload["operation_id"] == "op-1"
     assert payload["callback"]["url"] == "http://127.0.0.1:8765/callback"
     assert calls == [{"kind": "text", "limit": 3, "workers": None, "callback_url": "http://127.0.0.1:8765/callback"}]
+
+
+def test_cli_event_subscriber_run_invokes_event_subscriber(monkeypatch, capsys):
+    from flux_llm_kb import event_subscriber
+
+    calls = []
+    monkeypatch.setattr(
+        event_subscriber,
+        "run_subscriber",
+        lambda **kwargs: calls.append(kwargs) or {"status": "stopped", "queue": kwargs["queue_name"]},
+    )
+
+    assert cli.main(["event", "subscriber", "run", "--queue", "flux.events.audit", "--subscriber", "audit"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["queue"] == "flux.events.audit"
+    assert calls == [{"queue_name": "flux.events.audit", "subscriber_name": "audit"}]
 
 
 def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsys):

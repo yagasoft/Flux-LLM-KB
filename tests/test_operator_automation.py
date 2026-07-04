@@ -229,9 +229,12 @@ def test_operator_automation_rest_cli_and_mcp_contracts(monkeypatch, capsys):
             calls.append(("status", {}))
             return {"settings_mutated": False, "policy": {"enabled": False}, "eligible_actions": []}
 
-        def run_operator_automation(self, **kwargs):
-            calls.append(("run", kwargs))
-            return {"settings_mutated": False, "run": {"status": "completed"}, "summary": {"applied": 1}}
+        def enqueue_operator_automation(self, **kwargs):
+            calls.append(("enqueue", kwargs))
+            return {"accepted": True, "operation_id": "op-automation", "settings_mutated": False}
+
+        def run_operator_automation(self, **_kwargs):  # pragma: no cover - public surfaces must not process inline
+            raise AssertionError("automation public surfaces must enqueue")
 
         def operator_automation_actions(self, **kwargs):
             calls.append(("actions", kwargs))
@@ -242,13 +245,15 @@ def test_operator_automation_rest_cli_and_mcp_contracts(monkeypatch, capsys):
 
     client = fastapi_testclient.TestClient(create_app())
     assert client.get("/api/automation/status").json()["policy"]["enabled"] is False
-    assert client.post("/api/automation/run", json={"mode": "guarded", "limit": 5, "dry_run": True}).json()["settings_mutated"] is False
+    automation_response = client.post("/api/automation/run", json={"mode": "guarded", "limit": 5, "dry_run": True})
+    assert automation_response.status_code == 202
+    assert automation_response.json()["operation_id"] == "op-automation"
     assert client.get("/api/automation/actions?status=all&limit=3").json()["actions"][0]["action"] == "refresh_retrieval_evidence"
 
     assert cli.main(["automation", "status"]) == 0
     assert json.loads(capsys.readouterr().out)["policy"]["enabled"] is False
     assert cli.main(["automation", "run", "--mode", "guarded", "--limit", "5", "--dry-run"]) == 0
-    assert json.loads(capsys.readouterr().out)["summary"]["applied"] == 1
+    assert json.loads(capsys.readouterr().out)["operation_id"] == "op-automation"
     assert cli.main(["automation", "actions", "--status", "all", "--limit", "3"]) == 0
     assert json.loads(capsys.readouterr().out)["actions"][0]["action"] == "refresh_retrieval_evidence"
 

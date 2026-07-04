@@ -881,7 +881,16 @@ def create_app():
 
     @app.post("/api/automation/run")
     def automation_run(request: AutomationRunRequest = Body(...)):
-        return service.run_operator_automation(mode=request.mode, actor="api", trigger="manual", limit=request.limit, dry_run=request.dry_run)
+        return JSONResponse(
+            status_code=202,
+            content=service.enqueue_operator_automation(
+                mode=request.mode,
+                actor="api",
+                trigger="manual",
+                limit=request.limit,
+                dry_run=request.dry_run,
+            ),
+        )
 
     @app.get("/api/automation/actions")
     def automation_actions(status: str = "all", run_id: str | None = None, action: str | None = None, limit: int = 50):
@@ -893,7 +902,10 @@ def create_app():
 
     @app.post("/api/governance/run")
     def governance_run(request: GovernanceRunRequest = Body(...)):
-        return service.run_governance(mode=request.mode, actor="api", limit=request.limit)
+        return JSONResponse(
+            status_code=202,
+            content=service.enqueue_governance_run(mode=request.mode, actor="api", limit=request.limit),
+        )
 
     @app.get("/api/governance/actions")
     def governance_actions(status: str = "proposed", limit: int = 50):
@@ -1484,7 +1496,7 @@ def create_app():
         enqueue = getattr(service, "enqueue_corpus_backfill", None)
         if enqueue:
             return JSONResponse(status_code=202, content=enqueue(**kwargs))
-        return service.run_corpus_backfill(**kwargs)
+        raise RuntimeError("crawl backfill requires enqueue_corpus_backfill; direct inline backfill is not an API path")
 
     @app.post("/api/crawl/watch")
     def crawl_watch(request: WatchRequest = Body(...)):
@@ -1545,7 +1557,7 @@ def create_app():
     def settings_apply(request: SettingsApplyRequest = Body(...)):
         from .settings import SettingsService
 
-        return SettingsService().apply(component=request.component, actor="dashboard")
+        return JSONResponse(status_code=202, content=SettingsService().enqueue_apply(component=request.component, actor="dashboard"))
 
     @app.post("/api/settings/{key}/reset")
     def settings_reset(key: str):
@@ -1653,9 +1665,9 @@ def create_app():
 
     @app.post("/api/mail/sync")
     def mail_sync(request: MailSyncRequest = Body(...)):
-        from .mail_ingestion import sync_mail_profile
+        from . import database
 
-        return sync_mail_profile(profile_name=request.profile_name)
+        return JSONResponse(status_code=202, content=database.enqueue_imap_sync_command(profile_name=request.profile_name, requested_by="dashboard"))
 
     @app.post("/api/mail/watch")
     def mail_watch(_: MailSyncRequest = Body(...)):

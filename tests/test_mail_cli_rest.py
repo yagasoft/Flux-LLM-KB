@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from flux_llm_kb import cli, database
 from flux_llm_kb.rest_api import create_app
 
@@ -508,6 +510,80 @@ def test_cli_outlook_host_sync_requests_profile(monkeypatch, capsys):
 
     assert payload["profile_name"] == "outlook-catchup"
     assert payload["status"] == "pending"
+
+
+def test_cli_outlook_host_run_consumes_broker_queue(monkeypatch, capsys):
+    from flux_llm_kb import event_worker
+    from flux_llm_kb import outlook_host
+
+    calls = []
+    monkeypatch.setattr(event_worker, "run_worker", lambda **kwargs: calls.append(kwargs) or {"status": "stopped", **kwargs})
+    monkeypatch.setattr(
+        outlook_host,
+        "run_forever",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy DB loop must not run by default")),
+    )
+
+    assert cli.main(["outlook-host", "run", "--host-id", "host-1"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["queue_name"] == "flux.commands.outlook"
+    assert payload["worker_id"] == "host-1"
+    assert calls == [{"queue_name": "flux.commands.outlook", "worker_id": "host-1"}]
+
+
+def test_cli_outlook_host_run_legacy_db_loop_requires_dev_guard(monkeypatch):
+    from flux_llm_kb import outlook_host
+
+    monkeypatch.delenv("FLUX_KB_ALLOW_INLINE_WORKERS", raising=False)
+    monkeypatch.setattr(
+        outlook_host,
+        "run_forever",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("legacy DB loop must not run without guard")),
+    )
+
+    with pytest.raises(SystemExit, match="FLUX_KB_ALLOW_INLINE_WORKERS"):
+        cli.main(["outlook-host", "run", "--legacy-db-loop"])
+
+
+def test_cli_mail_sync_enqueues_imap_command(monkeypatch, capsys):
+    from flux_llm_kb import database
+
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "enqueue_imap_sync_command",
+        lambda **kwargs: calls.append(kwargs) or {"accepted": True, "operation_id": "op-mail", "runs": [{"run_id": "run-1"}]},
+        raising=False,
+    )
+
+    assert cli.main(["mail", "sync", "--profile", "gmail"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["operation_id"] == "op-mail"
+    assert calls == [{"profile_name": "gmail", "requested_by": "cli"}]
+
+
+def test_rest_mail_sync_enqueues_imap_command(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from flux_llm_kb import database
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    monkeypatch.setattr(
+        database,
+        "enqueue_imap_sync_command",
+        lambda **kwargs: calls.append(kwargs) or {"accepted": True, "operation_id": "op-mail", "runs": [{"run_id": "run-1"}]},
+        raising=False,
+    )
+
+    client = TestClient(create_app())
+    response = client.post("/api/mail/sync", json={"profile_name": "gmail"})
+
+    assert response.status_code == 202
+    assert response.json()["operation_id"] == "op-mail"
+    assert calls == [{"profile_name": "gmail", "requested_by": "dashboard"}]
 
 
 def test_cli_mail_profile_add_imap_accepts_schedule_fields(monkeypatch, tmp_path, capsys):

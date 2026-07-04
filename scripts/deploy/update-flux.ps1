@@ -485,6 +485,69 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch"
 
+  event-audit-worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-event-audit-worker
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event subscriber run --queue flux.events.audit --subscriber audit"
+
+  event-dashboard-worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-event-dashboard-worker
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event subscriber run --queue flux.events.dashboard --subscriber dashboard"
+
+  event-diagnostics-worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-event-diagnostics-worker
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event subscriber run --queue flux.events.diagnostics --subscriber diagnostics"
+
   outbox-relay:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-outbox-relay
@@ -1676,13 +1739,15 @@ function Invoke-FluxDockerComposeUp {
     Invoke-FluxVespaApplicationDeploy -AppRoot $AppRoot -TimeoutSeconds 300
     $commandWorkerServices = @("worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker")
     $commandWorkerContainers = @("flux-llm-kb-worker", "flux-llm-kb-search-index-worker", "flux-llm-kb-mail-worker", "flux-llm-kb-outlook-worker", "flux-llm-kb-automation-worker", "flux-llm-kb-governance-worker", "flux-llm-kb-runtime-control-worker", "flux-llm-kb-gpu-eviction-worker")
-    $services = @("paddle-runner", "model-runner", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker", "outbox-relay")
-    $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
-    $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
+    $eventSubscriberServices = @("event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker")
+    $eventSubscriberContainers = @("flux-llm-kb-event-audit-worker", "flux-llm-kb-event-dashboard-worker", "flux-llm-kb-event-diagnostics-worker")
+    $services = @("paddle-runner", "model-runner", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker") + $eventSubscriberServices + @("outbox-relay")
+    $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker") + $eventSubscriberContainers + @("flux-llm-kb-outbox-relay")
+    $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker") + $eventSubscriberContainers + @("flux-llm-kb-outbox-relay")
     if ($GpuEnabled) {
-        $services = @("paddle-runner", "model-runner", "ollama", "asr", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker", "outbox-relay")
-        $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
-        $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
+        $services = @("paddle-runner", "model-runner", "ollama", "asr", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker") + $eventSubscriberServices + @("outbox-relay")
+        $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker") + $eventSubscriberContainers + @("flux-llm-kb-outbox-relay")
+        $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker") + $eventSubscriberContainers + @("flux-llm-kb-outbox-relay")
     }
     if ($SkipWorkerStart) {
         $services = @($services | Where-Object { $commandWorkerServices -notcontains $_ })

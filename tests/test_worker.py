@@ -2328,7 +2328,7 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
     assert calls[1][1]["details"]["action"] == "retry_corpus_job"
     assert calls[1][1]["details"]["target_id"] == "job-1"
 
-    monkeypatch.setattr(KnowledgeService, "run_corpus_backfill", lambda self, **kwargs: {"backfill": kwargs})
+    monkeypatch.setattr(KnowledgeService, "enqueue_corpus_backfill", lambda self, **kwargs: {"accepted": True, "backfill": kwargs})
     backfill = KnowledgeService().remediate_diagnostic(
         action="run_backfill",
         target_type="family",
@@ -2338,7 +2338,7 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
         reason="operator backfill",
     )
 
-    assert backfill["result"] == {"backfill": {"kind": "office", "limit": 10, "workers": 1, "root_name": "docs"}}
+    assert backfill["result"] == {"accepted": True, "backfill": {"kind": "office", "limit": 10, "workers": 1, "root_name": "docs"}}
     assert calls[2][0] == "audit"
     assert calls[2][1]["target_id"] is None
     assert calls[2][1]["details"]["target_id"] == "office"
@@ -3782,8 +3782,8 @@ def test_reprocess_derived_state_clears_only_derived_caches_and_runs_backfills(m
     )
     monkeypatch.setattr(
         KnowledgeService,
-        "run_corpus_backfill",
-        lambda self, **kwargs: events.append(("backfill", kwargs)) or {"claimed": 0, "completed": 0},
+        "enqueue_corpus_backfill",
+        lambda self, **kwargs: events.append(("backfill_enqueue", kwargs)) or {"accepted": True, "queued": 1, "request": kwargs},
     )
 
     result = KnowledgeService().reprocess_derived_state(
@@ -3809,16 +3809,17 @@ def test_reprocess_derived_state_clears_only_derived_caches_and_runs_backfills(m
     assert [event[0] for event in events] == [
         "inventory",
         "invalidate",
-        "backfill",
-        "backfill",
+        "backfill_enqueue",
+        "backfill_enqueue",
         "search_sync",
-        "backfill",
-        "backfill",
+        "backfill_enqueue",
+        "backfill_enqueue",
         "inventory",
     ]
     assert events[2][1] == {"kind": "all", "limit": 7, "workers": 2}
     assert events[3][1] == {"kind": "all", "limit": 7, "workers": 2}
     assert events[5][1] == {"kind": "search-index", "limit": 7, "workers": 2}
+    assert result["verification"]["status"] == "queued"
 
 
 def test_corpus_worker_uses_unique_instance_lease_for_backfill_and_heartbeat(monkeypatch):

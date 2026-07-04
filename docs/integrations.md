@@ -273,6 +273,7 @@ flux-kb automation run --mode guarded --limit 25
 flux-kb automation actions --status all --limit 25
 flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb crawl backfill --root docs --family office --limit 20 --callback-url http://127.0.0.1:8765/callback
+flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id host-agent
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
 flux-kb retrieval benchmark run --suite governance-shadow --label before-automation
 flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
@@ -569,8 +570,9 @@ flux-kb outlook-host run
 
 `flux-kb mail sync --profile <outlook-profile>` does not attempt COM from the
 Docker-hosted worker. It reports that the Windows Outlook host is required. Run
-`flux-kb outlook-host run` in the logged-in Windows session for scheduled pulls,
-or queue a one-off request with `flux-kb outlook-host sync --profile <name>`.
+`flux-kb outlook-host run` in the logged-in Windows session to consume brokered
+Outlook work from `flux.commands.outlook`, or queue a one-off request with
+`flux-kb outlook-host sync --profile <name>`.
 Outlook COM profile setup does not require an IMAP server or account value; the
 Windows Outlook profile owns that connection.
 

@@ -395,10 +395,10 @@ class HostAgentWorkerLoop:
             return {"status": "no_enabled_host_roots", "roots": 0, "completed": 0, "blocked": 0, "retried": 0, "failed": 0}
 
         service = self.service_factory() if self.service_factory else _service()
-        totals = {"completed": 0, "blocked": 0, "retried": 0, "failed": 0, "claimed": 0}
+        totals = {"queued": 0, "jobs": 0}
         results: list[dict[str, Any]] = []
         for root in roots:
-            result = service.run_corpus_backfill(
+            result = service.enqueue_corpus_backfill(
                 kind="all",
                 limit=batch_size,
                 workers=self.workers,
@@ -406,9 +406,9 @@ class HostAgentWorkerLoop:
                 host_agent_roots=True,
             )
             results.append(result)
-            for key in totals:
-                totals[key] += int(result.get(key) or 0)
-        payload = {"status": "running", "roots": len(roots), **totals, "results": results}
+            totals["queued"] += int(result.get("queued") or 0)
+            totals["jobs"] += len(result.get("job_ids") or result.get("jobs") or [])
+        payload = {"status": "queued", "roots": len(roots), **totals, "results": results}
         _safe_record_runtime_component_heartbeat(
             name="corpus-worker:host-agent",
             status="running",
@@ -465,6 +465,7 @@ def _safe_record_runtime_component_heartbeat(
 def create_app(*, start_watcher: bool = False):
     try:
         from fastapi import Body, FastAPI
+        from fastapi.responses import JSONResponse
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install host agent REST support with `pip install -e .[api]`") from exc
 
@@ -525,10 +526,14 @@ def create_app(*, start_watcher: bool = False):
             "limit": req.limit,
             "workers": req.workers,
             "root_name": req.root_name,
+            "host_agent_roots": True,
         }
         if req.family is not None:
             kwargs["family"] = req.family
-        return _service().run_corpus_backfill(**kwargs)
+        enqueue = getattr(_service(), "enqueue_corpus_backfill", None)
+        if enqueue is None:
+            raise RuntimeError("host-agent backfill requires enqueue_corpus_backfill; direct inline backfill is not a REST path")
+        return JSONResponse(status_code=202, content=enqueue(**kwargs))
 
     @app.post("/acceleration/benchmarks/run")
     def benchmark_run(req: BenchmarkRequest = Body(...)):

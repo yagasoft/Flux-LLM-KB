@@ -478,6 +478,69 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch"
 
+  event-audit-worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-event-audit-worker
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event subscriber run --queue flux.events.audit --subscriber audit"
+
+  event-dashboard-worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-event-dashboard-worker
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event subscriber run --queue flux.events.dashboard --subscriber dashboard"
+
+  event-diagnostics-worker:
+    image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
+    container_name: flux-llm-kb-event-diagnostics-worker
+    restart: unless-stopped
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    env_file:
+      - ../private/flux.env
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event subscriber run --queue flux.events.diagnostics --subscriber diagnostics"
+
   outbox-relay:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-outbox-relay
@@ -1637,9 +1700,9 @@ try {
     $composeServices = @("postgres", "rabbitmq", "vespa")
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
     Invoke-FluxVespaApplicationDeploy -AppRoot $appRoot -TimeoutSeconds 300
-    $composeServices = @("paddle-runner", "model-runner", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "outbox-relay")
+    $composeServices = @("paddle-runner", "model-runner", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker", "outbox-relay")
     if ($gpuEnabled) {
-        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "outbox-relay")
+        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker", "outbox-relay")
     }
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
 } finally {

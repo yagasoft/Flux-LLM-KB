@@ -598,6 +598,25 @@ class KnowledgeService:
             "policy": proposal_payload["policy"],
         }
 
+    def enqueue_governance_run(self, *, mode: str = "shadow", actor: str = "api", limit: int = 25) -> dict[str, Any]:
+        operation_id = uuid4().hex
+        command = database.enqueue_governance_run_command(
+            operation_id=operation_id,
+            mode=mode,
+            actor=actor,
+            limit=limit,
+        )
+        return {
+            "accepted": True,
+            "operation_id": operation_id,
+            "operation_type": "governance_run",
+            "message_id": command.get("message_id"),
+            "status_url": "/api/governance/runs",
+            "event_topics": ["governance.completed", "governance.failed"],
+            "settings_mutated": False,
+            "memory_mutated": False,
+        }
+
     def governance_runs(self, *, limit: int = 20) -> dict[str, Any]:
         return {
             "settings_mutated": False,
@@ -660,6 +679,34 @@ class KnowledgeService:
             "manual_required": operator_automation.manual_required_items(),
             "recent_actions": actions,
             "runs": runs,
+        }
+
+    def enqueue_operator_automation(
+        self,
+        *,
+        mode: str = "guarded",
+        trigger: str = "manual",
+        actor: str = "api",
+        limit: int = 25,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        operation_id = uuid4().hex
+        command = database.enqueue_operator_automation_command(
+            operation_id=operation_id,
+            mode=mode,
+            trigger=trigger,
+            actor=actor,
+            limit=limit,
+            dry_run=dry_run,
+        )
+        return {
+            "accepted": True,
+            "operation_id": operation_id,
+            "operation_type": "operator_automation_run",
+            "message_id": command.get("message_id"),
+            "status_url": "/api/automation/actions",
+            "event_topics": ["operator.automation.completed", "operator.automation.failed"],
+            "settings_mutated": False,
         }
 
     def operator_automation_actions(
@@ -1849,7 +1896,10 @@ class KnowledgeService:
         backfill_runs: list[dict[str, Any]] = []
         if process:
             for pass_index in range(1, pass_count + 1):
-                corpus_result = self.run_corpus_backfill(kind="all", limit=row_limit, workers=workers)
+                corpus_kwargs: dict[str, Any] = {"kind": "all", "limit": row_limit, "workers": workers}
+                if not all_roots:
+                    corpus_kwargs["root_name"] = root_name
+                corpus_result = self.enqueue_corpus_backfill(**corpus_kwargs)
                 backfill_runs.append(
                     {
                         "pass": pass_index,
@@ -1863,7 +1913,10 @@ class KnowledgeService:
         )
         if process:
             for run in backfill_runs:
-                run["search_index"] = self.run_corpus_backfill(kind="search-index", limit=row_limit, workers=workers)
+                search_kwargs: dict[str, Any] = {"kind": "search-index", "limit": row_limit, "workers": workers}
+                if not all_roots:
+                    search_kwargs["root_name"] = root_name
+                run["search_index"] = self.enqueue_corpus_backfill(**search_kwargs)
         inventory_after = database.inventory_reprocess_derived_state(
             all_roots=all_roots,
             root_name=root_name,
@@ -1882,7 +1935,7 @@ class KnowledgeService:
             "search_records_marked": int(invalidation.get("search_records_marked") or 0),
             "backfill": backfill_runs,
             "verification": {
-                "status": "processed" if process else "queued",
+                "status": "queued",
                 "search_index_sync": search_sync,
                 "running_jobs_after": int((inventory_after.get("counts") or {}).get("running_jobs") or 0),
             },
@@ -4198,7 +4251,7 @@ class KnowledgeService:
             effective_family = family or (target_id if normalized_target_type == "family" else None)
             if not root_name or not effective_family:
                 raise ValueError("run_backfill requires root_name and exact worker family")
-            result = self.run_corpus_backfill(kind=effective_family, limit=10, workers=1, root_name=root_name)
+            result = self.enqueue_corpus_backfill(kind=effective_family, limit=10, workers=1, root_name=root_name)
         elif normalized_action == "repair_asset_statuses":
             if not root_name:
                 raise ValueError("repair_asset_statuses requires root_name")

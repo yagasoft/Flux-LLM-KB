@@ -117,6 +117,18 @@ class SettingsService:
     def apply(self, *, component: str | None = None, actor: str = "cli") -> dict[str, Any]:
         return database.ack_runtime_control_requests(component=component, actor=actor)
 
+    def enqueue_apply(self, *, component: str | None = None, actor: str = "cli") -> dict[str, Any]:
+        command = database.enqueue_runtime_control_apply_command(component=component, actor=actor)
+        return {
+            "accepted": True,
+            "operation_id": command["operation_id"],
+            "operation_type": "runtime_control_apply",
+            "message_id": command.get("message_id"),
+            "status_url": "/api/settings",
+            "event_topics": ["runtime_control.acknowledged", "runtime_control.failed"],
+            "settings_mutated": False,
+        }
+
 
 def _resolved(definition: SettingDefinition, *, value: Any, raw_value: Any, source: str) -> ResolvedSetting:
     return ResolvedSetting(

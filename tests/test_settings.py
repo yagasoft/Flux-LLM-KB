@@ -588,6 +588,18 @@ def test_setting_update_requires_confirmation_for_reindex(monkeypatch):
     assert calls[0]["value"] == "Snowflake/snowflake-arctic-embed-l-v2.1"
 
 
+def test_setting_apply_enqueues_runtime_control_command(monkeypatch):
+    calls = []
+    monkeypatch.setattr(database, "enqueue_runtime_control_apply_command", lambda **kwargs: calls.append(kwargs) or {"accepted": True, "operation_id": "op-apply"})
+
+    result = SettingsService().enqueue_apply(component="api", actor="tester")
+
+    assert result["accepted"] is True
+    assert result["operation_id"] == "op-apply"
+    assert result["operation_type"] == "runtime_control_apply"
+    assert calls == [{"component": "api", "actor": "tester"}]
+
+
 def test_setting_reset_removes_database_override(monkeypatch):
     calls = []
     monkeypatch.setattr(database, "delete_runtime_setting", lambda **kwargs: calls.append(kwargs) or {"deleted": True})

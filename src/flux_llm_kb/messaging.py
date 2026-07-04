@@ -25,6 +25,7 @@ RETRY_EXCHANGE = "flux.retry"
 DEAD_EXCHANGE = "flux.dead"
 
 CORPUS_PROCESS_ROUTING_KEY = "corpus.process"
+CORPUS_HOST_AGENT_PROCESS_ROUTING_KEY = "corpus.host_agent.process"
 SEARCH_INDEX_PROCESS_ROUTING_KEY = "search_index.process"
 MAIL_IMAP_SYNC_ROUTING_KEY = "mail.imap.sync"
 OUTLOOK_SYNC_ROUTING_KEY = "mail.outlook.sync"
@@ -33,6 +34,21 @@ AUTOMATION_ROUTING_KEY = "operator.automation.run"
 GOVERNANCE_ROUTING_KEY = "governance.run"
 GPU_EVICTION_ROUTING_KEY = "gpu.eviction.request"
 CALLBACK_DISPATCH_ROUTING_KEY = "callback.dispatch"
+
+COMMAND_CORPUS_QUEUE = "flux.commands.corpus"
+COMMAND_CORPUS_HOST_AGENT_QUEUE = "flux.commands.corpus_host_agent"
+COMMAND_SEARCH_INDEX_QUEUE = "flux.commands.search_index"
+COMMAND_MAIL_IMAP_QUEUE = "flux.commands.mail_imap"
+COMMAND_OUTLOOK_QUEUE = "flux.commands.outlook"
+COMMAND_RUNTIME_CONTROL_QUEUE = "flux.commands.runtime_control"
+COMMAND_AUTOMATION_QUEUE = "flux.commands.automation"
+COMMAND_GOVERNANCE_QUEUE = "flux.commands.governance"
+COMMAND_GPU_EVICTION_QUEUE = "flux.commands.gpu_eviction"
+
+EVENT_AUDIT_QUEUE = "flux.events.audit"
+EVENT_DASHBOARD_QUEUE = "flux.events.dashboard"
+EVENT_DIAGNOSTICS_QUEUE = "flux.events.diagnostics"
+EVENT_SUBSCRIBER_QUEUES = (EVENT_AUDIT_QUEUE, EVENT_DASHBOARD_QUEUE, EVENT_DIAGNOSTICS_QUEUE)
 
 COMMAND_EXCHANGE_KEY = "commands"
 EVENTS_EXCHANGE_KEY = "events"
@@ -202,14 +218,20 @@ def default_topology(config: RabbitMqConfig | None = None) -> RabbitMqTopology:
         DEAD_EXCHANGE_KEY: ExchangeSpec(DEAD_EXCHANGE),
     }
     commands = (
-        ("flux.commands.corpus", CORPUS_PROCESS_ROUTING_KEY, "flux.retry.corpus", "retry.corpus"),
-        ("flux.commands.search_index", SEARCH_INDEX_PROCESS_ROUTING_KEY, "flux.retry.search_index", "retry.search_index"),
-        ("flux.commands.mail_imap", MAIL_IMAP_SYNC_ROUTING_KEY, "flux.retry.mail_imap", "retry.mail_imap"),
-        ("flux.commands.outlook", OUTLOOK_SYNC_ROUTING_KEY, "flux.retry.outlook", "retry.outlook"),
-        ("flux.commands.runtime_control", RUNTIME_CONTROL_ROUTING_KEY, "flux.retry.runtime_control", "retry.runtime_control"),
-        ("flux.commands.automation", AUTOMATION_ROUTING_KEY, "flux.retry.automation", "retry.automation"),
-        ("flux.commands.governance", GOVERNANCE_ROUTING_KEY, "flux.retry.governance", "retry.governance"),
-        ("flux.commands.gpu_eviction", GPU_EVICTION_ROUTING_KEY, "flux.retry.gpu_eviction", "retry.gpu_eviction"),
+        (COMMAND_CORPUS_QUEUE, CORPUS_PROCESS_ROUTING_KEY, "flux.retry.corpus", "retry.corpus"),
+        (
+            COMMAND_CORPUS_HOST_AGENT_QUEUE,
+            CORPUS_HOST_AGENT_PROCESS_ROUTING_KEY,
+            "flux.retry.corpus_host_agent",
+            "retry.corpus_host_agent",
+        ),
+        (COMMAND_SEARCH_INDEX_QUEUE, SEARCH_INDEX_PROCESS_ROUTING_KEY, "flux.retry.search_index", "retry.search_index"),
+        (COMMAND_MAIL_IMAP_QUEUE, MAIL_IMAP_SYNC_ROUTING_KEY, "flux.retry.mail_imap", "retry.mail_imap"),
+        (COMMAND_OUTLOOK_QUEUE, OUTLOOK_SYNC_ROUTING_KEY, "flux.retry.outlook", "retry.outlook"),
+        (COMMAND_RUNTIME_CONTROL_QUEUE, RUNTIME_CONTROL_ROUTING_KEY, "flux.retry.runtime_control", "retry.runtime_control"),
+        (COMMAND_AUTOMATION_QUEUE, AUTOMATION_ROUTING_KEY, "flux.retry.automation", "retry.automation"),
+        (COMMAND_GOVERNANCE_QUEUE, GOVERNANCE_ROUTING_KEY, "flux.retry.governance", "retry.governance"),
+        (COMMAND_GPU_EVICTION_QUEUE, GPU_EVICTION_ROUTING_KEY, "flux.retry.gpu_eviction", "retry.gpu_eviction"),
     )
     queues: list[QueueSpec] = []
     for queue_name, routing_key, retry_queue, retry_key in commands:
@@ -263,6 +285,39 @@ def default_topology(config: RabbitMqConfig | None = None) -> RabbitMqTopology:
             ),
         )
     )
+    event_subscribers = (
+        (EVENT_AUDIT_QUEUE, "audit"),
+        (EVENT_DASHBOARD_QUEUE, "dashboard"),
+        (EVENT_DIAGNOSTICS_QUEUE, "diagnostics"),
+    )
+    for queue_name, subscriber in event_subscribers:
+        retry_key = f"retry.events.{subscriber}"
+        retry_queue = f"flux.retry.events.{subscriber}"
+        queues.append(
+            QueueSpec(
+                name=queue_name,
+                exchange=EVENTS_EXCHANGE,
+                routing_key="#",
+                arguments=_quorum_arguments(
+                    delivery_limit=cfg.delivery_limit,
+                    dead_letter_exchange=RETRY_EXCHANGE,
+                    dead_letter_routing_key=retry_key,
+                ),
+            )
+        )
+        queues.append(
+            QueueSpec(
+                name=retry_queue,
+                exchange=RETRY_EXCHANGE,
+                routing_key=retry_key,
+                arguments=_quorum_arguments(
+                    delivery_limit=cfg.delivery_limit,
+                    dead_letter_exchange="",
+                    dead_letter_routing_key=queue_name,
+                    message_ttl=cfg.retry_delay_ms,
+                ),
+            )
+        )
     queues.append(
         QueueSpec(
             name="flux.dead.letters",
@@ -285,9 +340,9 @@ def _quorum_arguments(
         "x-queue-type": "quorum",
         "x-delivery-limit": max(1, int(delivery_limit or 1)),
     }
-    if dead_letter_exchange:
+    if dead_letter_exchange is not None:
         arguments["x-dead-letter-exchange"] = dead_letter_exchange
-    if dead_letter_routing_key:
+    if dead_letter_routing_key is not None:
         arguments["x-dead-letter-routing-key"] = dead_letter_routing_key
     if message_ttl is not None:
         arguments["x-message-ttl"] = max(1000, int(message_ttl))
@@ -489,7 +544,34 @@ def management_queue_status(config: RabbitMqConfig | None = None, *, timeout_sec
         "messages": sum(item["messages"] for item in items),
         "consumers": sum(item["consumers"] for item in items),
     }
-    return {"available": True, "management_url": cfg.management_url, "vhost": vhost, "totals": totals, "queues": items}
+    topology = default_topology(cfg)
+    live_queue_names = {item["name"] for item in items}
+    required_queue_names = [queue.name for queue in topology.queues]
+    missing_required = [name for name in required_queue_names if name not in live_queue_names]
+    missing_event_subscribers = [name for name in EVENT_SUBSCRIBER_QUEUES if name not in live_queue_names]
+    event_subscribers = [
+        {
+            "name": name,
+            "present": name in live_queue_names,
+            "consumers": next((item["consumers"] for item in items if item["name"] == name), 0),
+        }
+        for name in EVENT_SUBSCRIBER_QUEUES
+    ]
+    return {
+        "available": True,
+        "management_url": cfg.management_url,
+        "vhost": vhost,
+        "totals": totals,
+        "queues": items,
+        "topology": {
+            "required_queues": required_queue_names,
+            "missing_required_queues": missing_required,
+            "required_event_subscribers": list(EVENT_SUBSCRIBER_QUEUES),
+            "missing_event_subscribers": missing_event_subscribers,
+            "event_subscribers": event_subscribers,
+            "ok": not missing_required,
+        },
+    }
 
 
 def _amqp_vhost(url: str) -> str:

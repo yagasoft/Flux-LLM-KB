@@ -99,6 +99,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert '"up", "-d", "--no-build"' in update
     assert '"postgres", "rabbitmq", "vespa"' in update
     assert '"worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker"' in update
+    assert '"event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker"' in update
     assert "FLUX_KB_IMAGE_TAG" in update
     assert "FLUX_KB_CALLBACK_SIGNING_SECRET=$callbackSecret" in update
     assert "private\\flux.env" in update
@@ -558,6 +559,9 @@ def test_worker_compose_commands_use_settings_driven_parallelism_defaults():
         assert "python -m flux_llm_kb.cli event outbox relay --interval 1 --limit 100" in compose
         assert "python -m flux_llm_kb.cli event scheduler run --interval 30 --limit 25" in compose
         assert "python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch" in compose
+        assert "python -m flux_llm_kb.cli event subscriber run --queue flux.events.audit --subscriber audit" in compose
+        assert "python -m flux_llm_kb.cli event subscriber run --queue flux.events.dashboard --subscriber dashboard" in compose
+        assert "python -m flux_llm_kb.cli event subscriber run --queue flux.events.diagnostics --subscriber diagnostics" in compose
         assert "crawl worker run --limit 10" not in compose
         assert "--workers 1" not in compose
 
@@ -640,6 +644,9 @@ def test_production_update_bounds_compose_up_and_recovers_created_services():
     assert "flux-llm-kb-worker" in update
     assert "flux-llm-kb-event-scheduler" in update
     assert "flux-llm-kb-callback-worker" in update
+    assert "flux-llm-kb-event-audit-worker" in update
+    assert "flux-llm-kb-event-dashboard-worker" in update
+    assert "flux-llm-kb-event-diagnostics-worker" in update
     assert "flux-llm-kb-asr" in update
     assert "`$(seq 1 120)" in update
     assert "19071/ApplicationStatus" in update

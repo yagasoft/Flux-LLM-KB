@@ -38,6 +38,10 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "CREATE TABLE IF NOT EXISTS callback_deliveries" in event_messaging.sql
     assert "ADD COLUMN IF NOT EXISTS broker_message_id" in event_messaging.sql
     assert "idx_message_outbox_pending" in event_messaging.sql
+    event_journal = next(item for item in migrations if item.name == "0044_event_journal")
+    assert "CREATE TABLE IF NOT EXISTS event_journal" in event_journal.sql
+    assert "UNIQUE (subscriber_name, message_id)" in event_journal.sql
+    assert "idx_event_journal_routing" in event_journal.sql
     runtime_control_updated_at = next(item for item in migrations if item.name == "0042_runtime_control_updated_at")
     assert "ALTER TABLE runtime_control_requests" in runtime_control_updated_at.sql
     assert "ADD COLUMN IF NOT EXISTS updated_at" in runtime_control_updated_at.sql

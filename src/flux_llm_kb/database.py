@@ -3300,6 +3300,144 @@ def complete_message_inbox(
             )
 
 
+def enqueue_operator_automation_command(
+    *,
+    operation_id: str,
+    mode: str = "guarded",
+    trigger: str = "manual",
+    actor: str = "api",
+    limit: int = 25,
+    dry_run: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "operation_id": str(operation_id),
+        "mode": str(mode or "guarded"),
+        "trigger": str(trigger or "manual"),
+        "requested_by": str(actor or "api"),
+        "limit": max(1, min(int(limit or 25), 500)),
+        "dry_run": bool(dry_run),
+    }
+    outbox = enqueue_message_outbox(
+        exchange=messaging.COMMANDS_EXCHANGE,
+        routing_key=messaging.AUTOMATION_ROUTING_KEY,
+        message_type="flux.operator.automation.run",
+        payload=payload,
+        aggregate_type="operator_automation_runs",
+        aggregate_id=str(operation_id),
+        correlation_id=str(operation_id),
+        url=url,
+    )
+    return {"operation_id": str(operation_id), "message_id": outbox.get("message_id"), "status": outbox.get("status"), "payload": payload}
+
+
+def enqueue_governance_run_command(
+    *,
+    operation_id: str,
+    mode: str = "shadow",
+    actor: str = "api",
+    limit: int = 25,
+    url: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "operation_id": str(operation_id),
+        "mode": str(mode or "shadow"),
+        "requested_by": str(actor or "api"),
+        "limit": max(1, min(int(limit or 25), 500)),
+    }
+    outbox = enqueue_message_outbox(
+        exchange=messaging.COMMANDS_EXCHANGE,
+        routing_key=messaging.GOVERNANCE_ROUTING_KEY,
+        message_type="flux.governance.run",
+        payload=payload,
+        aggregate_type="memory_governance_runs",
+        aggregate_id=str(operation_id),
+        correlation_id=str(operation_id),
+        url=url,
+    )
+    return {"operation_id": str(operation_id), "message_id": outbox.get("message_id"), "status": outbox.get("status"), "payload": payload}
+
+
+def enqueue_runtime_control_apply_command(
+    *,
+    operation_id: str | None = None,
+    component: str | None = None,
+    actor: str = "api",
+    url: str | None = None,
+) -> dict[str, Any]:
+    effective_operation_id = str(operation_id or _stable_message_id("runtime-control-apply", str(component or "all"), str(actor or "api"), str(time.time())))
+    payload = {
+        "operation_id": effective_operation_id,
+        "component": str(component).strip() if component else None,
+        "requested_by": str(actor or "api"),
+    }
+    outbox = enqueue_message_outbox(
+        exchange=messaging.COMMANDS_EXCHANGE,
+        routing_key=messaging.RUNTIME_CONTROL_ROUTING_KEY,
+        message_type="flux.runtime_control.apply",
+        payload=payload,
+        aggregate_type="runtime_control_requests",
+        aggregate_id=effective_operation_id,
+        correlation_id=effective_operation_id,
+        url=url,
+    )
+    return {"operation_id": effective_operation_id, "message_id": outbox.get("message_id"), "status": outbox.get("status"), "payload": payload}
+
+
+def record_event_journal(
+    *,
+    subscriber_name: str,
+    message_id: str,
+    message_type: str,
+    exchange: str,
+    routing_key: str,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    job_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    clean_subscriber = str(subscriber_name or "").strip()
+    if not clean_subscriber:
+        raise ValueError("subscriber_name is required")
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO event_journal (
+                    subscriber_name, message_id, message_type, exchange, routing_key,
+                    correlation_id, causation_id, job_id, payload, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                ON CONFLICT (subscriber_name, message_id) DO UPDATE SET
+                    metadata = event_journal.metadata || EXCLUDED.metadata
+                RETURNING id::text, subscriber_name, message_id, routing_key, received_at
+                """,
+                (
+                    clean_subscriber,
+                    str(message_id),
+                    str(message_type),
+                    str(exchange),
+                    str(routing_key),
+                    _postgres_text_or_none(correlation_id),
+                    _postgres_text_or_none(causation_id),
+                    _postgres_text_or_none(job_id),
+                    _json(payload or {}),
+                    _json(metadata or {}),
+                ),
+            )
+            row = cur.fetchone()
+            return {
+                "id": row[0],
+                "subscriber_name": row[1],
+                "message_id": row[2],
+                "routing_key": row[3],
+                "received_at": row[4].isoformat() if row[4] else None,
+            }
+
+
 GPU_EVICTION_ACTIVE_STATUSES = ("queued", "running", "retrying")
 GPU_EVICTION_TERMINAL_STATUSES = ("succeeded", "failed", "skipped")
 GPU_EVICTION_REQUEST_MESSAGE_TYPE = "flux.gpu.eviction.request"
@@ -3825,6 +3963,26 @@ def message_queue_status(*, url: str | None = None) -> dict[str, Any]:
                 """
             )
             callbacks = cur.fetchone()
+            cur.execute(
+                """
+                SELECT subscriber_name, count(*)::integer, max(received_at)
+                FROM event_journal
+                GROUP BY subscriber_name
+                ORDER BY subscriber_name
+                """
+            )
+            event_rows = cur.fetchall()
+            event_journal = {
+                "total": sum(int(row[1] or 0) for row in event_rows),
+                "subscribers": [
+                    {
+                        "subscriber_name": str(row[0] or ""),
+                        "received": int(row[1] or 0),
+                        "last_received_at": row[2].isoformat() if row[2] else None,
+                    }
+                    for row in event_rows
+                ],
+            }
             return {
                 "outbox": {
                     "pending": int(outbox[0] or 0),
@@ -3844,6 +4002,7 @@ def message_queue_status(*, url: str | None = None) -> dict[str, Any]:
                     "blocked": int(callbacks[2] or 0),
                     "delivered": int(callbacks[3] or 0),
                 },
+                "event_journal": event_journal,
             }
 
 
@@ -6090,6 +6249,7 @@ def enqueue_pending_corpus_job_commands(
                     payload=row[2] or {},
                     job_family=row[3],
                     resource_class=row[4],
+                    host_agent_route=host_agent_roots is True,
                 )
                 jobs.append(
                     {
@@ -9768,6 +9928,125 @@ def create_imap_sync_run(
             return _mail_sync_run_row(row)
 
 
+def enqueue_imap_sync_command(
+    *,
+    profile_name: str | None = None,
+    requested_by: str = "dashboard",
+    url: str | None = None,
+) -> dict[str, Any]:
+    if profile_name is None or not str(profile_name).strip():
+        return enqueue_due_imap_sync_commands(limit=10, requested_by=requested_by, url=url) | {
+            "accepted": True,
+            "operation_id": _stable_message_id("imap-sync-due", str(requested_by), str(time.time())),
+            "operation_type": "mail_imap_sync",
+            "status_url": "/api/mail/status",
+            "event_topics": ["mail.imap.completed", "mail.imap.failed", "mail.imap.retrying"],
+        }
+    clean_profile = str(profile_name).strip()
+    psycopg = _load_psycopg()
+    runs: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            _expire_stale_imap_sync_runs(cur)
+            cur.execute(
+                """
+                WITH profile AS (
+                    SELECT id, name
+                    FROM mail_profiles
+                    WHERE name = %s
+                      AND source_type = 'imap'
+                      AND enabled
+                    FOR UPDATE
+                ),
+                active AS (
+                    SELECT r.id::text, r.profile_id::text, p.name, r.status, r.trigger,
+                           r.requested_by, r.broker_message_id, r.correlation_id
+                    FROM mail_sync_runs r
+                    JOIN profile p ON p.id = r.profile_id
+                    WHERE r.status IN ('queued', 'claimed', 'running', 'backoff')
+                    ORDER BY r.started_at DESC
+                    LIMIT 1
+                ),
+                inserted AS (
+                    INSERT INTO mail_sync_runs (
+                        profile_id, status, trigger, requested_by, drift_seconds, missed_runs
+                    )
+                    SELECT p.id, 'queued', 'manual', %s, 0, 0
+                    FROM profile p
+                    WHERE NOT EXISTS (SELECT 1 FROM active)
+                    RETURNING id::text, profile_id::text, status, trigger, requested_by,
+                              broker_message_id, correlation_id
+                )
+                SELECT i.id, i.profile_id, p.name, i.status, i.trigger,
+                       i.requested_by, i.broker_message_id, i.correlation_id
+                FROM inserted i
+                CROSS JOIN profile p
+                UNION ALL
+                SELECT id, profile_id, name, status, trigger, requested_by,
+                       broker_message_id, correlation_id
+                FROM active
+                LIMIT 1
+                """,
+                (clean_profile, requested_by),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError(f"IMAP profile not found or disabled: {clean_profile}")
+            run_id = str(row[0])
+            profile_id = str(row[1])
+            broker_message_id = str(row[6] or "")
+            correlation_id = str(row[7] or broker_message_id or "")
+            if not broker_message_id:
+                outbox = _enqueue_message_outbox_with_cursor(
+                    cur,
+                    exchange=messaging.COMMANDS_EXCHANGE,
+                    routing_key=messaging.MAIL_IMAP_SYNC_ROUTING_KEY,
+                    message_type="flux.mail.imap.sync",
+                    payload={
+                        "run_id": run_id,
+                        "profile_id": profile_id,
+                        "trigger": row[4],
+                        "requested_by": row[5],
+                    },
+                    aggregate_type="mail_sync_runs",
+                    aggregate_id=run_id,
+                )
+                broker_message_id = str(outbox.get("message_id") or "")
+                correlation_id = broker_message_id
+                cur.execute(
+                    """
+                    UPDATE mail_sync_runs
+                    SET broker_message_id = %s,
+                        correlation_id = %s,
+                        routing_key = %s,
+                        queued_at = COALESCE(queued_at, now()),
+                        updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (broker_message_id, correlation_id, messaging.MAIL_IMAP_SYNC_ROUTING_KEY, run_id),
+                )
+            runs.append(
+                {
+                    "run_id": run_id,
+                    "profile_id": profile_id,
+                    "profile_name": str(row[2]),
+                    "status": str(row[3]),
+                    "message_id": broker_message_id,
+                }
+            )
+    operation_id = _stable_message_id("imap-sync", clean_profile, runs[0]["run_id"])
+    return {
+        "accepted": True,
+        "operation_id": operation_id,
+        "operation_type": "mail_imap_sync",
+        "queued": len(runs),
+        "runs": runs,
+        "status_url": "/api/mail/status",
+        "event_topics": ["mail.imap.completed", "mail.imap.failed", "mail.imap.retrying"],
+        "settings_mutated": False,
+    }
+
+
 def claim_due_imap_sync_runs(
     *,
     limit: int = 10,
@@ -11703,8 +11982,9 @@ def _enqueue_capture_job_command_with_cursor(
     payload: dict[str, Any],
     job_family: str,
     resource_class: str,
+    host_agent_route: bool = False,
 ) -> dict[str, Any] | None:
-    routing_key, message_type = _capture_job_command_contract(job_type)
+    routing_key, message_type = _capture_job_command_contract(job_type, host_agent_route=host_agent_route)
     if not routing_key:
         return None
     command_payload: dict[str, Any] = {
@@ -11742,11 +12022,13 @@ def _enqueue_capture_job_command_with_cursor(
     return outbox
 
 
-def _capture_job_command_contract(job_type: str) -> tuple[str | None, str | None]:
+def _capture_job_command_contract(job_type: str, *, host_agent_route: bool = False) -> tuple[str | None, str | None]:
     clean = str(job_type or "").strip()
     if clean == "search_index_sync":
         return messaging.SEARCH_INDEX_PROCESS_ROUTING_KEY, "flux.search_index.process"
     if clean.startswith("corpus_"):
+        if host_agent_route:
+            return messaging.CORPUS_HOST_AGENT_PROCESS_ROUTING_KEY, "flux.corpus.host_agent.process"
         return messaging.CORPUS_PROCESS_ROUTING_KEY, "flux.corpus.process"
     return None, None
 

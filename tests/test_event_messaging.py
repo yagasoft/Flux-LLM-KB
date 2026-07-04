@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from flux_llm_kb import callback_dispatcher, callbacks, event_scheduler, messaging, outbox_relay
+from flux_llm_kb import callback_dispatcher, callbacks, event_scheduler, event_subscriber, messaging, outbox_relay
 
 
 def test_flux_message_envelope_rejects_raw_content_payload():
@@ -63,11 +63,117 @@ def test_rabbitmq_topology_uses_quorum_retry_and_dead_lettering():
     assert topology.exchanges["dead"].name == "flux.dead"
     assert queues["flux.commands.corpus"].arguments["x-queue-type"] == "quorum"
     assert queues["flux.commands.corpus"].arguments["x-dead-letter-exchange"] == "flux.retry"
+    assert queues["flux.commands.corpus_host_agent"].routing_key == "corpus.host_agent.process"
+    assert queues["flux.commands.corpus_host_agent"].arguments["x-dead-letter-exchange"] == "flux.retry"
+    assert queues["flux.retry.corpus_host_agent"].arguments["x-dead-letter-exchange"] == "flux.commands"
+    assert queues["flux.retry.corpus_host_agent"].arguments["x-dead-letter-routing-key"] == "corpus.host_agent.process"
     assert queues["flux.retry.corpus"].arguments["x-message-ttl"] >= 1000
     assert queues["flux.retry.corpus"].arguments["x-dead-letter-exchange"] == "flux.commands"
     assert queues["flux.callbacks.dispatch"].arguments["x-dead-letter-exchange"] == "flux.retry"
     assert queues["flux.retry.callback"].arguments["x-dead-letter-exchange"] == "flux.callbacks"
     assert queues["flux.dead.letters"].arguments["x-queue-type"] == "quorum"
+
+
+def test_rabbitmq_topology_declares_durable_event_subscriber_queues():
+    topology = messaging.default_topology()
+    queues = {queue.name: queue for queue in topology.queues}
+
+    for queue_name in ("flux.events.audit", "flux.events.dashboard", "flux.events.diagnostics"):
+        queue = queues[queue_name]
+        retry_queue = queues[f"flux.retry.events.{queue_name.rsplit('.', 1)[-1]}"]
+        assert queue.exchange == "flux.events"
+        assert queue.routing_key == "#"
+        assert queue.arguments["x-queue-type"] == "quorum"
+        assert queue.arguments["x-dead-letter-exchange"] == "flux.retry"
+        assert retry_queue.arguments["x-message-ttl"] >= 1000
+        assert retry_queue.arguments["x-dead-letter-exchange"] == ""
+        assert retry_queue.arguments["x-dead-letter-routing-key"] == queue_name
+
+
+def test_management_queue_status_reports_missing_required_event_queues(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return False
+
+        def read(self):
+            return json.dumps(
+                [
+                    {"name": "flux.commands.corpus", "messages_ready": 0, "messages_unacknowledged": 0, "messages": 0, "consumers": 1},
+                ]
+            ).encode("utf-8")
+
+    monkeypatch.setattr(messaging, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    status = messaging.management_queue_status()
+
+    assert status["available"] is True
+    assert "flux.events.audit" in status["topology"]["missing_required_queues"]
+    assert "flux.events.dashboard" in status["topology"]["missing_event_subscribers"]
+
+
+def test_event_subscriber_records_journal_before_ack():
+    events: list[tuple[str, dict]] = []
+
+    class FakeDatabase:
+        def begin_message_inbox(self, **kwargs):
+            events.append(("begin", kwargs))
+            return True
+
+        def record_event_journal(self, **kwargs):
+            events.append(("journal", kwargs))
+            return {"message_id": kwargs["message_id"], "subscriber_name": kwargs["subscriber_name"]}
+
+        def complete_message_inbox(self, **kwargs):
+            events.append(("complete", kwargs))
+
+    message = messaging.build_message(
+        message_type="corpus.job.completed",
+        routing_key="corpus.job.completed",
+        job_id="job-1",
+        payload={"job_id": "job-1", "status": "completed"},
+        correlation_id="corr-1",
+        causation_id="cmd-1",
+    )
+    subscriber = event_subscriber.EventSubscriber(subscriber_name="audit", database_module=FakeDatabase())
+
+    result = subscriber.handle(message)
+
+    assert result["status"] == "handled"
+    assert [event[0] for event in events] == ["begin", "journal", "complete"]
+    assert events[1][1]["exchange"] == "flux.events"
+    assert events[1][1]["routing_key"] == "corpus.job.completed"
+    assert events[1][1]["correlation_id"] == "corr-1"
+    assert events[2][1]["status"] == "handled"
+
+
+def test_event_subscriber_suppresses_duplicate_events():
+    events: list[tuple[str, dict]] = []
+
+    class FakeDatabase:
+        def begin_message_inbox(self, **kwargs):
+            events.append(("begin", kwargs))
+            return False
+
+        def record_event_journal(self, **kwargs):  # pragma: no cover - should not run
+            events.append(("journal", kwargs))
+
+        def complete_message_inbox(self, **kwargs):  # pragma: no cover - should not run
+            events.append(("complete", kwargs))
+
+    message = messaging.build_message(
+        message_type="corpus.job.completed",
+        routing_key="corpus.job.completed",
+        payload={"job_id": "job-1"},
+    )
+    subscriber = event_subscriber.EventSubscriber(subscriber_name="audit", database_module=FakeDatabase())
+
+    result = subscriber.handle(message)
+
+    assert result == {"status": "duplicate", "message_id": message.message_id, "acked": True}
+    assert [event[0] for event in events] == ["begin"]
 
 
 def test_callback_policy_allows_loopback_private_and_allowlisted_hosts():

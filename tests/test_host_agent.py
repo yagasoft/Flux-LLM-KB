@@ -44,8 +44,8 @@ def test_host_agent_backfill_endpoint_routes_to_service(monkeypatch):
     from fastapi.testclient import TestClient
 
     class FakeService:
-        def run_corpus_backfill(self, **kwargs):
-            return {"backfill": kwargs, "completed": 3}
+        def enqueue_corpus_backfill(self, **kwargs):
+            return {"accepted": True, "backfill": kwargs, "queued": 3}
 
     monkeypatch.setattr("flux_llm_kb.service.KnowledgeService", lambda: FakeService())
 
@@ -56,12 +56,13 @@ def test_host_agent_backfill_endpoint_routes_to_service(monkeypatch):
         json={"kind": "all", "limit": 10, "workers": 1, "root_name": "watch-test"},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.json()["backfill"] == {
         "kind": "all",
         "limit": 10,
         "workers": 1,
         "root_name": "watch-test",
+        "host_agent_roots": True,
     }
 
 
@@ -72,8 +73,8 @@ def test_host_agent_backfill_endpoint_omits_default_parallelism_knobs(monkeypatc
     from fastapi.testclient import TestClient
 
     class FakeService:
-        def run_corpus_backfill(self, **kwargs):
-            return {"backfill": kwargs}
+        def enqueue_corpus_backfill(self, **kwargs):
+            return {"accepted": True, "backfill": kwargs}
 
     monkeypatch.setattr("flux_llm_kb.service.KnowledgeService", lambda: FakeService())
 
@@ -81,12 +82,13 @@ def test_host_agent_backfill_endpoint_omits_default_parallelism_knobs(monkeypatc
 
     response = client.post("/crawl/backfill", json={"kind": "all", "root_name": "watch-test"})
 
-    assert response.status_code == 200
+    assert response.status_code == 202
     assert response.json()["backfill"] == {
         "kind": "all",
         "limit": None,
         "workers": None,
         "root_name": "watch-test",
+        "host_agent_roots": True,
     }
 
 
@@ -204,6 +206,38 @@ def test_host_agent_startup_runs_watcher_and_worker_loops(monkeypatch):
 
     assert "watcher-stop" in events
     assert "worker-stop" in events
+
+
+def test_host_agent_worker_loop_enqueues_host_agent_backfills(monkeypatch):
+    calls = []
+    heartbeats = []
+
+    class FakeService:
+        def enqueue_corpus_backfill(self, **kwargs):
+            calls.append(kwargs)
+            return {"accepted": True, "queued": 2, "job_ids": ["job-1", "job-2"], "request": kwargs}
+
+        def run_corpus_backfill(self, **_kwargs):  # pragma: no cover - must not be called
+            raise AssertionError("host-agent loop must not claim DB work directly")
+
+    monkeypatch.setattr(
+        host_agent,
+        "_load_host_roots",
+        lambda root_name=None: [{"name": "host-docs"}, {"name": "host-mail"}] if root_name is None else [{"name": root_name}],
+    )
+    monkeypatch.setattr(host_agent, "_configured_worker_batch_size", lambda: 17)
+    monkeypatch.setattr(host_agent, "_service", lambda: FakeService())
+    monkeypatch.setattr(host_agent, "_safe_record_runtime_component_heartbeat", lambda **kwargs: heartbeats.append(kwargs))
+
+    payload = host_agent.HostAgentWorkerLoop(limit=None, workers=2).run_once()
+
+    assert payload["status"] == "queued"
+    assert payload["queued"] == 4
+    assert calls == [
+        {"kind": "all", "limit": 17, "workers": 2, "root_name": "host-docs", "host_agent_roots": True},
+        {"kind": "all", "limit": 17, "workers": 2, "root_name": "host-mail", "host_agent_roots": True},
+    ]
+    assert heartbeats[-1]["metadata"]["last_result"]["status"] == "queued"
 
 
 def test_remote_backfill_allows_host_root_processing(monkeypatch):

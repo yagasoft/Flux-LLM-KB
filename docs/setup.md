@@ -245,6 +245,7 @@ flux-kb crawl watch probe --timeout 2
 flux-kb crawl watch run
 flux-kb host-agent status
 flux-kb host-agent run
+flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id host-agent
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb search-index status --root projects
@@ -585,12 +586,18 @@ process:
 
 ```powershell
 flux-kb outlook-host run
+flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id host-agent
 ```
 
 The dashboard and Docker-hosted API create sync requests and broker commands.
-The Windows host claims the exact request id, exports messages through classic
-Outlook COM, reports heartbeat/status, and indexes the ready spool. If the host
-is not running, the dashboard shows `host_offline` and the command above.
+The Windows host consumes exact Outlook request ids from `flux.commands.outlook`,
+exports messages through classic Outlook COM, reports heartbeat/status, and
+indexes the ready spool. Host-agent file roots enqueue to
+`flux.commands.corpus_host_agent`, which should be consumed by a host-side event
+worker so Docker workers do not pick work for host-only paths. If the host is not
+running, the dashboard shows `host_offline` and the command above. The old
+Outlook DB-claim loop is development-only behind `--legacy-db-loop` and
+`FLUX_KB_ALLOW_INLINE_WORKERS=1`.
 
 ## Dashboard Development
 
@@ -615,7 +622,8 @@ bounded local digest status.
 
 When Docker is on PATH, the script runs the local event stack: PostgreSQL,
 RabbitMQ, API, outbox relay, event scheduler, command workers, and callback
-worker, including `gpu-eviction-worker` for brokered resident-model unload
+worker, plus durable event-subscriber workers for audit/dashboard/diagnostics
+event journals and `gpu-eviction-worker` for brokered resident-model unload
 requests. Long-running REST/MCP/CLI requests enqueue work and return accepted
 operation metadata; the relay publishes from `message_outbox`, RabbitMQ handles
 delivery/retry, and workers ACK only after durable state and event writes. If
@@ -623,5 +631,6 @@ Docker is unavailable on the current PATH, the script falls back to a local
 FastAPI process on the same URL; in that fallback mode, run the needed event
 processes explicitly, for example `flux-kb event outbox relay`,
 `flux-kb event scheduler run`, `flux-kb event worker run --queue
-flux.commands.corpus`, and `flux-kb event worker run --queue
-flux.commands.gpu_eviction`.
+flux.commands.corpus`, `flux-kb event worker run --queue
+flux.commands.corpus_host_agent --worker-id host-agent`, and
+`flux-kb event worker run --queue flux.commands.gpu_eviction`.

@@ -4918,6 +4918,37 @@ def test_enqueue_unique_capture_job_writes_broker_command_to_outbox(monkeypatch)
     assert metadata_update[2] == "message-1"
 
 
+def test_enqueue_capture_job_command_routes_host_agent_jobs_to_host_queue():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            if "INSERT INTO message_outbox" in executed[-1][0]:
+                return ("outbox-1", "message-1", "pending")
+            return None
+
+    outbox = database._enqueue_capture_job_command_with_cursor(
+        FakeCursor(),
+        job_id="job-host",
+        job_type="corpus_extract_text",
+        payload={"root_name": "host-docs", "path": "safe.md"},
+        job_family="text",
+        resource_class="cpu",
+        host_agent_route=True,
+    )
+
+    outbox_params = next(params for statement, params in executed if "INSERT INTO message_outbox" in statement)
+    metadata_update = next(params for statement, params in executed if "routing_key = %s" in statement)
+
+    assert outbox["message_id"] == "message-1"
+    assert outbox_params[2] == "corpus.host_agent.process"
+    assert outbox_params[3] == "flux.corpus.host_agent.process"
+    assert metadata_update[0] == "corpus.host_agent.process"
+
+
 def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(monkeypatch):
     executed = []
 

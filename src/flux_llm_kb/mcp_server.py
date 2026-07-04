@@ -213,7 +213,7 @@ def create_server():
                 root_name=root_name,
                 callback_url=callback_url,
             )
-        return service.run_corpus_backfill(kind=family or kind, limit=limit, workers=workers, root_name=root_name)
+        raise RuntimeError("crawl_backfill requires enqueue_corpus_backfill; direct inline backfill is not an MCP path")
 
     @mcp.tool(name="kb.benchmark_run")
     def benchmark_run(fixture: str = "all", files: int = 10, mode: str = "scan", passes: int = 1, label: str | None = None, compare_label: str | None = None, workers: int = 1, family: str = "all", scope: str = "synthetic", root_name: str | None = None, path: str | None = None, max_files: int | None = None, deployment_label: str | None = None, scenario: str = "standard", include_model_probe: bool = False):
@@ -412,8 +412,8 @@ def create_server():
 
     @mcp.tool(name="kb.automation_run")
     def automation_run(mode: str = "guarded", limit: int = 25, dry_run: bool = False):
-        """Run one guarded operator automation pass; never mutates runtime settings."""
-        return service.run_operator_automation(mode=mode, trigger="manual", actor="mcp", limit=limit, dry_run=dry_run)
+        """Enqueue one guarded operator automation pass; never mutates runtime settings inline."""
+        return service.enqueue_operator_automation(mode=mode, trigger="manual", actor="mcp", limit=limit, dry_run=dry_run)
 
     @mcp.tool(name="kb.automation_actions")
     def automation_actions(status: str = "all", run_id: str | None = None, action: str | None = None, limit: int = 50):
@@ -422,8 +422,8 @@ def create_server():
 
     @mcp.tool(name="kb.governance_run")
     def governance_run(mode: str = "shadow", limit: int = 25):
-        """Generate a memory governance proposal run; defaults to shadow mode and never mutates runtime settings."""
-        return service.run_governance(mode=mode, actor="mcp", limit=limit)
+        """Enqueue a memory governance proposal run; defaults to shadow mode and never mutates runtime settings inline."""
+        return service.enqueue_governance_run(mode=mode, actor="mcp", limit=limit)
 
     @mcp.tool(name="kb.governance_actions")
     def governance_actions(status: str = "proposed", limit: int = 50):
