@@ -6468,7 +6468,12 @@ def _run_paddleocr_document(path: Path, *, model: str) -> str:
 
     model_runner_base_url = configured_model_runner_base_url()
     if model_runner_base_url:
-        payload = ModelRunnerClient(base_url=model_runner_base_url).ocr_file(path, model=model, document=True)
+        payload = ModelRunnerClient(base_url=model_runner_base_url).ocr_file(
+            path,
+            model=model,
+            document=True,
+            timeout_seconds=_background_gpu_timeout_seconds("ocr_document"),
+        )
         return str(payload.get("text") or "")
     from .model_runner import _ocr_document_with_paddle
 
@@ -6491,7 +6496,13 @@ def _run_paddleocr_image(path: Path, *, model: str) -> str:
 
     model_runner_base_url = configured_model_runner_base_url()
     if model_runner_base_url:
-        payload = ModelRunnerClient(base_url=model_runner_base_url).ocr_file(path, model=model, document=str(model).startswith("PaddleOCR-VL"))
+        task_type = "ocr_document" if str(model).startswith("PaddleOCR-VL") else "ocr_image"
+        payload = ModelRunnerClient(base_url=model_runner_base_url).ocr_file(
+            path,
+            model=model,
+            document=str(model).startswith("PaddleOCR-VL"),
+            timeout_seconds=_background_gpu_timeout_seconds(task_type),
+        )
         return str(payload.get("text") or "")
 
     _configure_optional_onnxruntime_logging()
@@ -6534,6 +6545,15 @@ def _gpu_lease_timeout_type():
         return GpuLeaseTimeout
     except Exception:  # pragma: no cover - import fallback
         return RuntimeError
+
+
+def _background_gpu_timeout_seconds(task_type: str) -> float | None:
+    try:
+        from .gpu_scheduler import task_profile
+
+        return task_profile(task_type, component="worker").timeout_seconds
+    except Exception:
+        return None
 
 
 def _configure_optional_onnxruntime_logging() -> None:

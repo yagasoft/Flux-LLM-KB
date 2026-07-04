@@ -732,6 +732,25 @@ def test_model_runner_client_can_send_ocr_file_bytes(tmp_path, monkeypatch):
     assert base64.b64decode(payload["content_b64"]) == b"image-bytes"
 
 
+def test_model_runner_client_forwards_ocr_timeout(tmp_path):
+    image = tmp_path / "page.png"
+    image.write_bytes(b"image-bytes")
+    calls: list[dict[str, object]] = []
+
+    class FakeClient(model_runner.ModelRunnerClient):
+        def _post_json(self, path, payload, **kwargs):
+            calls.append({"path": path, "payload": payload, "kwargs": kwargs})
+            return {"ok": True, "text": "OCR text"}
+
+    client = FakeClient(base_url="http://model-runner:8790")
+
+    result = client.ocr_file(image, model="PP-OCRv5", timeout_seconds=0.5)
+
+    assert result["text"] == "OCR text"
+    assert calls[0]["payload"]["timeout_seconds"] == 0.5
+    assert calls[0]["kwargs"] == {"timeout_seconds": 0.5}
+
+
 def test_model_runner_client_forwards_awq_model_for_reranking():
     calls: list[dict[str, object]] = []
 

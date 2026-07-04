@@ -785,6 +785,17 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         validator=_min_int(0),
     ),
     SettingDefinition(
+        key="gpu.scheduler.background_timeout_seconds",
+        category="acceleration",
+        default=1,
+        value_type="int",
+        description="Short GPU lease wait used by background workers before broker retry handles backoff.",
+        env_var="FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("worker", "model-runner", "paddle-runner", "asr"),
+        validator=_min_int(0),
+    ),
+    SettingDefinition(
         key="gpu.scheduler.lease_ttl_seconds",
         category="acceleration",
         default=120,

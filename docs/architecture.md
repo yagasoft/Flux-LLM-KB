@@ -383,6 +383,18 @@ and `flux.dead`) using publisher confirms. Consumers use explicit ACKs and
 updated durable state and written the completion, retry, or failure event. Raw
 corpus, mail, or private content is not placed in broker messages.
 
+GPU resident-model eviction follows the same delivery boundary. Lease admission
+records a waiting lease, plans candidate idle models from PostgreSQL residency
+state, writes `gpu_evictions` rows plus `flux.commands` outbox messages, marks
+the admission attempt as retryable busy, and returns without calling unload
+endpoints inline. The `flux.commands.gpu_eviction` consumer claims one eviction
+row, performs one unload-and-live-VRAM-verification attempt through the local
+model-runner, Paddle runner, ASR, or Ollama endpoint, updates residency only
+after verification, writes `flux.gpu.eviction.*` events, and ACKs only after the
+state/event transaction is durable. Retryable eviction failures reject the
+broker delivery so RabbitMQ delayed retry controls redelivery; terminal rows are
+idempotent on duplicate delivery.
+
 Corpus/search-index workers consume RabbitMQ command queues and claim only the
 specific job id carried by the message. `capture_jobs` is now lifecycle state,
 not the worker queue. Jobs move to explicit terminal states such as `completed`,

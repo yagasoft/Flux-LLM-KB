@@ -4918,6 +4918,72 @@ def test_enqueue_unique_capture_job_writes_broker_command_to_outbox(monkeypatch)
     assert metadata_update[2] == "message-1"
 
 
+def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status, broker_message_id" in sql:
+                return None
+            if "INSERT INTO gpu_evictions" in sql:
+                return ("42",)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-1", "message-1", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def transaction(self):
+            return self
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_gpu_eviction_request(
+        lease_id="lease-1",
+        request_profile={"task_type": "ocr_document", "model_id": "PaddleOCR-VL", "estimated_vram_mb": 8_000},
+        candidate={"task_type": "embedding", "model_id": "snowflake", "estimated_vram_mb": 2_500, "component": "model-runner"},
+    )
+
+    outbox_params = next(params for statement, params in executed if "INSERT INTO message_outbox" in statement)
+    payload = json.loads(outbox_params[9])
+
+    assert result == {"id": "42", "eviction_id": "42", "status": "queued", "message_id": "message-1", "deduped": False}
+    assert outbox_params[1] == "flux.commands"
+    assert outbox_params[2] == "gpu.eviction.request"
+    assert outbox_params[3] == "flux.gpu.eviction.request"
+    assert payload["payload"] == {
+        "eviction_id": "42",
+        "lease_id": "lease-1",
+        "task_type": "embedding",
+        "model_id": "snowflake",
+        "component": "model-runner",
+        "estimated_vram_mb": 2500,
+    }
+    assert "raw_content" not in json.dumps(payload)
+
+
 def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
     executed = []
     schedule = database._job_schedule_metadata("corpus_sync_root")

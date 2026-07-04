@@ -153,6 +153,27 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
 
+  gpu-eviction-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-gpu-eviction-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+      FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790
+      FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791
+      FLUX_KB_ASR_BASE_URL: http://asr:8788
+      FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.gpu_eviction"
+
   callback-worker:
     build:
       context: .

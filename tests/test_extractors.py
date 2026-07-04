@@ -1274,8 +1274,8 @@ def test_worker_paddleocr_vl_document_uses_configured_model_runner_url(monkeypat
         def __init__(self, base_url=None, **_kwargs):
             calls.append({"base_url": base_url})
 
-        def ocr_file(self, input_path, *, model, document=False):
-            calls.append({"path": Path(input_path).name, "model": model, "document": document})
+        def ocr_file(self, input_path, *, model, document=False, timeout_seconds=None):
+            calls.append({"path": Path(input_path).name, "model": model, "document": document, "timeout_seconds": timeout_seconds})
             return {"ok": True, "text": "remote document OCR"}
 
     monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
@@ -1291,7 +1291,7 @@ def test_worker_paddleocr_vl_document_uses_configured_model_runner_url(monkeypat
     assert text == "remote document OCR"
     assert calls == [
         {"base_url": "http://configured-model-runner:8790"},
-        {"path": "private-document.png", "model": "PaddleOCR-VL", "document": True},
+        {"path": "private-document.png", "model": "PaddleOCR-VL", "document": True, "timeout_seconds": 1.0},
     ]
 
 

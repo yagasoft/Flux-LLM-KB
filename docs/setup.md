@@ -615,11 +615,13 @@ bounded local digest status.
 
 When Docker is on PATH, the script runs the local event stack: PostgreSQL,
 RabbitMQ, API, outbox relay, event scheduler, command workers, and callback
-worker. Long-running REST/MCP/CLI requests enqueue work and return accepted
+worker, including `gpu-eviction-worker` for brokered resident-model unload
+requests. Long-running REST/MCP/CLI requests enqueue work and return accepted
 operation metadata; the relay publishes from `message_outbox`, RabbitMQ handles
 delivery/retry, and workers ACK only after durable state and event writes. If
 Docker is unavailable on the current PATH, the script falls back to a local
 FastAPI process on the same URL; in that fallback mode, run the needed event
 processes explicitly, for example `flux-kb event outbox relay`,
-`flux-kb event scheduler run`, and `flux-kb event worker run --queue
-flux.commands.corpus`.
+`flux-kb event scheduler run`, `flux-kb event worker run --queue
+flux.commands.corpus`, and `flux-kb event worker run --queue
+flux.commands.gpu_eviction`.

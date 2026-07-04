@@ -79,6 +79,48 @@ def test_event_worker_marks_retryable_result_failed_and_rejects_for_broker_retry
     assert events[-1][1]["error"] == "retrying_gpu_busy"
 
 
+def test_event_worker_dispatches_gpu_eviction_request(monkeypatch):
+    events = []
+
+    class FakeDatabase:
+        def begin_message_inbox(self, **kwargs):
+            events.append(("begin", kwargs))
+            return True
+
+        def complete_message_inbox(self, **kwargs):
+            events.append(("complete", kwargs))
+
+    def fake_process_gpu_eviction_request(**kwargs):
+        events.append(("evict", kwargs))
+        return {"eviction_id": kwargs["eviction_id"], "status": "succeeded", "retryable": False}
+
+    monkeypatch.setattr(event_worker, "process_gpu_eviction_request", fake_process_gpu_eviction_request, raising=False)
+    message = messaging.build_message(
+        message_type="flux.gpu.eviction.request",
+        routing_key=messaging.GPU_EVICTION_ROUTING_KEY,
+        payload={"eviction_id": "eviction-1"},
+        correlation_id="corr-1",
+        causation_id="cause-1",
+    )
+    worker = event_worker.EventWorker(database_module=FakeDatabase(), worker_id="worker-1")
+
+    result = worker.handle(message)
+
+    assert result["status"] == "handled"
+    assert events[1] == (
+        "evict",
+        {
+            "eviction_id": "eviction-1",
+            "worker_id": "worker-1",
+            "broker_message_id": message.message_id,
+            "correlation_id": "corr-1",
+            "causation_id": "cause-1",
+        },
+    )
+    assert events[-1][0] == "complete"
+    assert events[-1][1]["status"] == "handled"
+
+
 def test_process_corpus_job_by_id_writes_terminal_state_before_event(monkeypatch):
     events = []
     job = {

@@ -244,6 +244,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -331,6 +332,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -426,6 +428,14 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
 
+  gpu-eviction-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-gpu-eviction-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.gpu_eviction"
+
   event-scheduler:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-scheduler
@@ -508,6 +518,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -558,6 +569,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -616,6 +628,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -1624,9 +1637,9 @@ try {
     $composeServices = @("postgres", "rabbitmq", "vespa")
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
     Invoke-FluxVespaApplicationDeploy -AppRoot $appRoot -TimeoutSeconds 300
-    $composeServices = @("paddle-runner", "model-runner", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "event-scheduler", "callback-worker", "outbox-relay")
+    $composeServices = @("paddle-runner", "model-runner", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "outbox-relay")
     if ($gpuEnabled) {
-        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "event-scheduler", "callback-worker", "outbox-relay")
+        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "outbox-relay")
     }
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
 } finally {

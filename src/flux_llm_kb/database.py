@@ -3300,6 +3300,308 @@ def complete_message_inbox(
             )
 
 
+GPU_EVICTION_ACTIVE_STATUSES = ("queued", "running", "retrying")
+GPU_EVICTION_TERMINAL_STATUSES = ("succeeded", "failed", "skipped")
+GPU_EVICTION_REQUEST_MESSAGE_TYPE = "flux.gpu.eviction.request"
+
+
+def enqueue_gpu_eviction_request(
+    *,
+    lease_id: str,
+    request_profile: dict[str, Any],
+    candidate: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    url: str | None = None,
+) -> dict[str, Any]:
+    clean_lease_id = str(lease_id or "").strip()
+    if not clean_lease_id:
+        raise ValueError("lease_id is required")
+    task_type = str(candidate.get("task_type") or "").strip()
+    model_id = str(candidate.get("model_id") or "").strip()
+    component = str(candidate.get("component") or "").strip()
+    if not task_type:
+        raise ValueError("GPU eviction candidate task_type is required")
+    if not model_id:
+        raise ValueError("GPU eviction candidate model_id is required")
+    message_id = _stable_message_id("gpu-eviction", clean_lease_id, task_type, model_id, component)
+    request_metadata = {
+        "request_profile": dict(request_profile or {}),
+        "candidate": dict(candidate or {}),
+        **dict(metadata or {}),
+    }
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id::text, status, broker_message_id
+                      FROM gpu_evictions
+                     WHERE lease_id = %s
+                       AND task_type = %s
+                       AND model_id = %s
+                       AND component = %s
+                       AND status IN ('queued', 'running', 'retrying')
+                     ORDER BY id ASC
+                     LIMIT 1
+                     FOR UPDATE
+                    """,
+                    (clean_lease_id, task_type, model_id, component),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    return {
+                        "id": existing[0],
+                        "eviction_id": existing[0],
+                        "status": existing[1],
+                        "message_id": existing[2] or message_id,
+                        "deduped": True,
+                    }
+                cur.execute(
+                    """
+                    INSERT INTO gpu_evictions (
+                        lease_id, task_type, model_id, component, status, estimated_freed_vram_mb,
+                        created_at, queued_at, metadata
+                    )
+                    VALUES (%s, %s, %s, %s, 'queued', %s, now(), now(), %s::jsonb)
+                    RETURNING id::text
+                    """,
+                    (
+                        clean_lease_id,
+                        task_type,
+                        model_id,
+                        component,
+                        max(0, int(candidate.get("estimated_vram_mb") or 0)),
+                        _json(request_metadata),
+                    ),
+                )
+                inserted = cur.fetchone()
+                eviction_id = str(inserted[0])
+                command_payload = {
+                    "eviction_id": eviction_id,
+                    "lease_id": clean_lease_id,
+                    "task_type": task_type,
+                    "model_id": model_id,
+                    "component": component,
+                    "estimated_vram_mb": max(0, int(candidate.get("estimated_vram_mb") or 0)),
+                }
+                outbox = _enqueue_message_outbox_with_cursor(
+                    cur,
+                    message_id=message_id,
+                    exchange=messaging.COMMANDS_EXCHANGE,
+                    routing_key=messaging.GPU_EVICTION_ROUTING_KEY,
+                    message_type=GPU_EVICTION_REQUEST_MESSAGE_TYPE,
+                    payload=command_payload,
+                    aggregate_type="gpu_evictions",
+                    aggregate_id=eviction_id,
+                    correlation_id=message_id,
+                )
+                cur.execute(
+                    """
+                    UPDATE gpu_evictions
+                       SET broker_message_id = %s,
+                           correlation_id = %s,
+                           routing_key = %s,
+                           queued_at = COALESCE(queued_at, now())
+                     WHERE id::text = %s
+                    """,
+                    (outbox.get("message_id"), outbox.get("message_id"), messaging.GPU_EVICTION_ROUTING_KEY, eviction_id),
+                )
+                return {
+                    "id": eviction_id,
+                    "eviction_id": eviction_id,
+                    "status": "queued",
+                    "message_id": outbox.get("message_id"),
+                    "deduped": False,
+                }
+
+
+def claim_gpu_eviction_request(
+    *,
+    eviction_id: str,
+    worker_id: str,
+    broker_message_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id::text, lease_id, task_type, model_id, component, status,
+                           estimated_freed_vram_mb, error, metadata, broker_message_id,
+                           routing_key, correlation_id, causation_id, broker_delivery_count
+                      FROM gpu_evictions
+                     WHERE id::text = %s
+                     FOR UPDATE
+                    """,
+                    (str(eviction_id),),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                current = _gpu_eviction_request_from_row(row)
+                if current["status"] in GPU_EVICTION_TERMINAL_STATUSES:
+                    return current
+                cur.execute(
+                    """
+                    UPDATE gpu_evictions
+                       SET status = 'running',
+                           started_at = COALESCE(started_at, now()),
+                           broker_message_id = COALESCE(%s, broker_message_id),
+                           broker_delivery_count = broker_delivery_count + 1,
+                           metadata = metadata || %s::jsonb
+                     WHERE id::text = %s
+                       AND status IN ('queued', 'running', 'retrying')
+                     RETURNING id::text, lease_id, task_type, model_id, component, status,
+                               estimated_freed_vram_mb, error, metadata, broker_message_id,
+                               routing_key, correlation_id, causation_id, broker_delivery_count
+                    """,
+                    (
+                        broker_message_id,
+                        _json({"last_worker_id": str(worker_id or "")}),
+                        str(eviction_id),
+                    ),
+                )
+                updated = cur.fetchone()
+                return _gpu_eviction_request_from_row(updated) if updated else current
+
+
+def complete_gpu_eviction_request(
+    *,
+    eviction_id: str,
+    status: str,
+    error: str = "",
+    metadata: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    clean_status = status if status in GPU_EVICTION_TERMINAL_STATUSES else "failed"
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE gpu_evictions
+                       SET status = %s,
+                           error = %s,
+                           completed_at = now(),
+                           metadata = metadata || %s::jsonb
+                     WHERE id::text = %s
+                     RETURNING id::text, lease_id, task_type, model_id, component, status,
+                               estimated_freed_vram_mb, error, metadata, broker_message_id,
+                               routing_key, correlation_id, causation_id, broker_delivery_count
+                    """,
+                    (clean_status, str(error or "")[:1000], _json(metadata or {}), str(eviction_id)),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                request = _gpu_eviction_request_from_row(row)
+                _enqueue_gpu_eviction_event_with_cursor(
+                    cur,
+                    request=request,
+                    event_status=clean_status,
+                    correlation_id=correlation_id or request.get("correlation_id"),
+                    causation_id=causation_id or request.get("broker_message_id"),
+                )
+                return request
+
+
+def retry_gpu_eviction_request(
+    *,
+    eviction_id: str,
+    error: str,
+    metadata: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    url: str | None = None,
+) -> dict[str, Any] | None:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE gpu_evictions
+                       SET status = 'retrying',
+                           error = %s,
+                           completed_at = NULL,
+                           metadata = metadata || %s::jsonb
+                     WHERE id::text = %s
+                     RETURNING id::text, lease_id, task_type, model_id, component, status,
+                               estimated_freed_vram_mb, error, metadata, broker_message_id,
+                               routing_key, correlation_id, causation_id, broker_delivery_count
+                    """,
+                    (str(error or "")[:1000], _json(metadata or {}), str(eviction_id)),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                request = _gpu_eviction_request_from_row(row)
+                _enqueue_gpu_eviction_event_with_cursor(
+                    cur,
+                    request=request,
+                    event_status="retrying",
+                    correlation_id=correlation_id or request.get("correlation_id"),
+                    causation_id=causation_id or request.get("broker_message_id"),
+                )
+                return request
+
+
+def _gpu_eviction_request_from_row(row: Any) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "eviction_id": row[0],
+        "lease_id": row[1],
+        "task_type": row[2],
+        "model_id": row[3],
+        "component": row[4],
+        "status": row[5],
+        "estimated_freed_vram_mb": int(row[6] or 0),
+        "error": row[7] or "",
+        "metadata": row[8] or {},
+        "broker_message_id": row[9],
+        "routing_key": row[10],
+        "correlation_id": row[11],
+        "causation_id": row[12],
+        "broker_delivery_count": int(row[13] or 0),
+    }
+
+
+def _enqueue_gpu_eviction_event_with_cursor(
+    cur: Any,
+    *,
+    request: dict[str, Any],
+    event_status: str,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "eviction_id": str(request.get("id") or request.get("eviction_id") or ""),
+        "lease_id": str(request.get("lease_id") or ""),
+        "status": str(event_status or request.get("status") or ""),
+        "task_type": str(request.get("task_type") or ""),
+        "model_id": str(request.get("model_id") or ""),
+        "component": str(request.get("component") or ""),
+        "error": str(request.get("error") or ""),
+    }
+    return _enqueue_message_outbox_with_cursor(
+        cur,
+        exchange=messaging.EVENTS_EXCHANGE,
+        routing_key=f"gpu.eviction.{event_status}",
+        message_type=f"flux.gpu.eviction.{event_status}",
+        payload=payload,
+        aggregate_type="gpu_evictions",
+        aggregate_id=payload["eviction_id"],
+        correlation_id=correlation_id,
+        causation_id=causation_id,
+    )
+
+
 def _stable_message_id(*parts: str) -> str:
     material = ":".join(str(part or "") for part in parts)
     return str(uuid5(NAMESPACE_URL, f"flux-llm-kb:{material}"))

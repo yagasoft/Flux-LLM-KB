@@ -43,6 +43,7 @@ class GpuSchedulerConfig:
     vram_budget_mb: int = 10_240
     safety_margin_mb: int = 1_024
     default_timeout_seconds: float = 30.0
+    background_timeout_seconds: float = 1.0
     lease_ttl_seconds: float = 120.0
     heartbeat_interval_seconds: float = 10.0
     stale_after_seconds: float = 180.0
@@ -592,8 +593,13 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 return GpuLease(self, decision_record)
             if isinstance(decision_record, GpuAdmissionDecision):
                 last_reason = decision_record.reason
-                if self._attempt_evictions(profile, lease_id, decision_record.eviction_candidates):
-                    continue
+                queued = self._enqueue_eviction_requests(profile, lease_id, list(decision_record.eviction_candidates))
+                if int(queued.get("queued") or queued.get("deduped") or 0) > 0:
+                    self._mark_terminal(lease_id, "timed_out")
+                    raise GpuLeaseTimeout(
+                        f"GPU scheduler queued eviction before retrying {profile.task_type}",
+                        retry_after_seconds=_retry_after_seconds(last_reason),
+                    )
                 self._mark_terminal(lease_id, "rejected")
                 raise GpuLeaseRejected("vram_budget_exceeded")
             if decision_record == "rejected":
@@ -869,6 +875,39 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 metadata=metadata,
             )
         return False if attempted else False
+
+    def _enqueue_eviction_requests(
+        self,
+        profile: GpuTaskProfile,
+        lease_id: str,
+        candidates: list[GpuEvictionCandidate],
+    ) -> dict[str, Any]:
+        if not self.config.eviction_enabled:
+            return {"queued": 0, "deduped": 0, "eviction_ids": []}
+        selected = list(candidates)[: max(0, int(self.config.eviction_max_models or 0))]
+        if not selected:
+            return {"queued": 0, "deduped": 0, "eviction_ids": []}
+        from . import database
+
+        request_profile = _gpu_task_profile_payload(profile)
+        queued = 0
+        deduped = 0
+        eviction_ids: list[str] = []
+        for candidate in selected:
+            result = database.enqueue_gpu_eviction_request(
+                lease_id=lease_id,
+                request_profile=request_profile,
+                candidate=_gpu_eviction_candidate_payload(candidate),
+                metadata={"source": "gpu_scheduler"},
+            )
+            eviction_id = str(result.get("eviction_id") or result.get("id") or "")
+            if eviction_id:
+                eviction_ids.append(eviction_id)
+            if result.get("deduped"):
+                deduped += 1
+            else:
+                queued += 1
+        return {"queued": queued, "deduped": deduped, "eviction_ids": eviction_ids}
 
     def _evict_candidate_with_retries(
         self,
@@ -1160,6 +1199,115 @@ def create_gpu_scheduler(component: str = "") -> BaseGpuScheduler:
     return InProcessGpuScheduler(config)
 
 
+def process_gpu_eviction_request(
+    *,
+    eviction_id: str,
+    worker_id: str,
+    broker_message_id: str | None = None,
+    correlation_id: str | None = None,
+    causation_id: str | None = None,
+    database_module: Any | None = None,
+) -> dict[str, Any]:
+    from . import database as default_database
+
+    db = database_module or default_database
+    request = db.claim_gpu_eviction_request(
+        eviction_id=eviction_id,
+        worker_id=worker_id,
+        broker_message_id=broker_message_id,
+    )
+    if request is None:
+        raise ValueError(f"GPU eviction request not found: {eviction_id}")
+    if request.get("status") in {"succeeded", "failed", "skipped"}:
+        return {
+            "eviction_id": request.get("eviction_id") or request.get("id"),
+            "status": request.get("status"),
+            "already_terminal": True,
+            "retryable": False,
+        }
+    config = scheduler_config_from_settings()
+    profile = _gpu_task_profile_from_eviction_request(request)
+    candidate = _gpu_eviction_candidate_from_request(request)
+    attempt = max(1, int(request.get("broker_delivery_count") or 1))
+    scheduler = PostgresGpuScheduler(config)
+    if not config.eviction_enabled:
+        completed = db.complete_gpu_eviction_request(
+            eviction_id=eviction_id,
+            status="skipped",
+            error="GPU eviction is disabled",
+            metadata={"attempt": attempt},
+            correlation_id=correlation_id,
+            causation_id=causation_id or broker_message_id,
+        )
+        return {
+            "eviction_id": eviction_id,
+            "status": "skipped",
+            "retryable": False,
+            "result": completed or {},
+        }
+    try:
+        result = scheduler._evict_candidate_once(profile, candidate, attempt=attempt)
+        if result.verified:
+            scheduler._mark_residency_evicted(candidate)
+    except Exception as exc:  # pragma: no cover - deployment/network specific
+        result = GpuEvictionVerificationResult(
+            verified=False,
+            error=str(exc),
+            metadata={"attempt": attempt, "error_type": exc.__class__.__name__},
+        )
+    metadata = {
+        "request_task_type": profile.task_type,
+        "request_model_id": profile.model_id,
+        "attempt": attempt,
+        **dict(result.metadata or {}),
+    }
+    if result.payload:
+        metadata["response"] = result.payload
+    if result.verified:
+        completed = db.complete_gpu_eviction_request(
+            eviction_id=eviction_id,
+            status="succeeded",
+            metadata=metadata,
+            correlation_id=correlation_id,
+            causation_id=causation_id or broker_message_id,
+        )
+        return {
+            "eviction_id": eviction_id,
+            "status": "succeeded",
+            "retryable": False,
+            "result": completed or {},
+        }
+    error = result.error or "GPU eviction verification failed"
+    if attempt >= _gpu_eviction_delivery_limit():
+        failed = db.complete_gpu_eviction_request(
+            eviction_id=eviction_id,
+            status="failed",
+            error=error,
+            metadata=metadata,
+            correlation_id=correlation_id,
+            causation_id=causation_id or broker_message_id,
+        )
+        return {
+            "eviction_id": eviction_id,
+            "status": "failed",
+            "retryable": False,
+            "result": failed or {},
+        }
+    retry = db.retry_gpu_eviction_request(
+        eviction_id=eviction_id,
+        error=error,
+        metadata=metadata,
+        correlation_id=correlation_id,
+        causation_id=causation_id or broker_message_id,
+    )
+    return {
+        "eviction_id": eviction_id,
+        "status": "retrying",
+        "retryable": True,
+        "result": retry or {},
+    }
+
+
 def scheduler_config_from_settings() -> GpuSchedulerConfig:
     values = _scheduler_setting_values()
     mode = str(values["gpu.scheduler.mode"] or "auto")
@@ -1170,6 +1318,7 @@ def scheduler_config_from_settings() -> GpuSchedulerConfig:
         vram_budget_mb=int(values["gpu.scheduler.vram_budget_mb"] or 10_240),
         safety_margin_mb=int(values["gpu.scheduler.safety_margin_mb"] or 1_024),
         default_timeout_seconds=float(values["gpu.scheduler.default_timeout_seconds"] or 30),
+        background_timeout_seconds=float(values["gpu.scheduler.background_timeout_seconds"] or 1),
         lease_ttl_seconds=float(values["gpu.scheduler.lease_ttl_seconds"] or 120),
         heartbeat_interval_seconds=float(values["gpu.scheduler.heartbeat_interval_seconds"] or 10),
         stale_after_seconds=float(values["gpu.scheduler.stale_after_seconds"] or 180),
@@ -1210,12 +1359,15 @@ def task_profile(
         exclusive = normalized != "embedding"
     if share_group is None:
         share_group = normalized if not exclusive else ""
+    effective_timeout_seconds = timeout_seconds
+    if effective_timeout_seconds is None and str(component or "") == "worker":
+        effective_timeout_seconds = float(values.get("gpu.scheduler.background_timeout_seconds") or 1)
     return GpuTaskProfile(
         task_type=normalized,
         model_id=model_id,
         estimated_vram_mb=estimate,
         priority=priority,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=effective_timeout_seconds,
         lease_ttl_seconds=float(values["gpu.scheduler.lease_ttl_seconds"] or 120),
         exclusive=bool(exclusive),
         share_group=str(share_group or ""),
@@ -1223,6 +1375,82 @@ def task_profile(
         request_id=request_id,
         metadata=dict(metadata or {}),
     )
+
+
+def _gpu_task_profile_payload(profile: GpuTaskProfile) -> dict[str, Any]:
+    return {
+        "task_type": profile.task_type,
+        "model_id": profile.model_id,
+        "estimated_vram_mb": max(0, int(profile.estimated_vram_mb or 0)),
+        "priority": int(profile.priority or 0),
+        "timeout_seconds": profile.timeout_seconds,
+        "lease_ttl_seconds": profile.lease_ttl_seconds,
+        "exclusive": bool(profile.exclusive),
+        "share_group": profile.share_group,
+        "component": profile.component,
+        "request_id": profile.request_id,
+        "metadata": dict(profile.metadata or {}),
+    }
+
+
+def _gpu_eviction_candidate_payload(candidate: GpuEvictionCandidate) -> dict[str, Any]:
+    return {
+        "task_type": candidate.task_type,
+        "model_id": candidate.model_id,
+        "estimated_vram_mb": max(0, int(candidate.estimated_vram_mb or 0)),
+        "component": candidate.component,
+        "last_used_at": candidate.last_used_at,
+        "metadata": dict(candidate.metadata or {}),
+    }
+
+
+def _gpu_task_profile_from_eviction_request(request: dict[str, Any]) -> GpuTaskProfile:
+    metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+    raw_profile = metadata.get("request_profile") if isinstance(metadata.get("request_profile"), dict) else {}
+    return GpuTaskProfile(
+        task_type=str(raw_profile.get("task_type") or "unknown"),
+        model_id=str(raw_profile.get("model_id") or ""),
+        estimated_vram_mb=max(0, int(raw_profile.get("estimated_vram_mb") or 0)),
+        priority=int(raw_profile.get("priority") or 0),
+        timeout_seconds=_optional_float(raw_profile.get("timeout_seconds")),
+        lease_ttl_seconds=_optional_float(raw_profile.get("lease_ttl_seconds")),
+        exclusive=bool(raw_profile.get("exclusive", True)),
+        share_group=str(raw_profile.get("share_group") or ""),
+        component=str(raw_profile.get("component") or ""),
+        request_id=str(raw_profile.get("request_id") or ""),
+        metadata=dict(raw_profile.get("metadata") if isinstance(raw_profile.get("metadata"), dict) else {}),
+    )
+
+
+def _gpu_eviction_candidate_from_request(request: dict[str, Any]) -> GpuEvictionCandidate:
+    metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+    raw_candidate = metadata.get("candidate") if isinstance(metadata.get("candidate"), dict) else {}
+    return GpuEvictionCandidate(
+        task_type=str(request.get("task_type") or raw_candidate.get("task_type") or ""),
+        model_id=str(request.get("model_id") or raw_candidate.get("model_id") or ""),
+        estimated_vram_mb=max(0, int(request.get("estimated_freed_vram_mb") or raw_candidate.get("estimated_vram_mb") or 0)),
+        component=str(request.get("component") or raw_candidate.get("component") or ""),
+        last_used_at=_optional_float(raw_candidate.get("last_used_at")),
+        metadata=dict(raw_candidate.get("metadata") if isinstance(raw_candidate.get("metadata"), dict) else {}),
+    )
+
+
+def _gpu_eviction_delivery_limit() -> int:
+    try:
+        from . import messaging
+
+        return max(1, int(messaging.RabbitMqConfig.from_env().delivery_limit or 1))
+    except Exception:
+        return 8
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def live_gpu_memory() -> dict[str, Any]:
@@ -1281,6 +1509,7 @@ def _scheduler_setting_values() -> dict[str, Any]:
         "gpu.scheduler.vram_budget_mb": 10_240,
         "gpu.scheduler.safety_margin_mb": 1_024,
         "gpu.scheduler.default_timeout_seconds": 30,
+        "gpu.scheduler.background_timeout_seconds": 1,
         "gpu.scheduler.lease_ttl_seconds": 120,
         "gpu.scheduler.heartbeat_interval_seconds": 10,
         "gpu.scheduler.stale_after_seconds": 180,
@@ -1485,6 +1714,9 @@ def _post_json(base_url: str, path: str, payload: dict[str, Any], *, timeout_sec
 def _empty_eviction_status() -> dict[str, Any]:
     return {
         "attempts": 0,
+        "queued": 0,
+        "running": 0,
+        "retrying": 0,
         "successes": 0,
         "failures": 0,
         "estimated_freed_vram_mb": 0,
@@ -1502,10 +1734,16 @@ def _eviction_min_freed_vram_mb(candidate: GpuEvictionCandidate) -> int:
 
 def _eviction_status(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
     items = [dict(row) for row in rows]
+    queued = [item for item in items if str(item.get("status") or "") == "queued"]
+    running = [item for item in items if str(item.get("status") or "") == "running"]
+    retrying = [item for item in items if str(item.get("status") or "") == "retrying"]
     successes = [item for item in items if str(item.get("status") or "") == "succeeded"]
     failures = [item for item in items if str(item.get("status") or "") == "failed"]
     return {
         "attempts": len(items),
+        "queued": len(queued),
+        "running": len(running),
+        "retrying": len(retrying),
         "successes": len(successes),
         "failures": len(failures),
         "estimated_freed_vram_mb": sum(int(item.get("estimated_freed_vram_mb") or 0) for item in successes),
@@ -1525,6 +1763,7 @@ def _eviction_status(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
 def _eviction_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
+        "id": str(row.get("id") or ""),
         "lease_id": str(row.get("lease_id") or ""),
         "task_type": str(row.get("task_type") or ""),
         "model_id": str(row.get("model_id") or ""),
@@ -1533,7 +1772,12 @@ def _eviction_payload(row: dict[str, Any]) -> dict[str, Any]:
         "estimated_freed_vram_mb": int(row.get("estimated_freed_vram_mb") or 0),
         "error": str(row.get("error") or ""),
         "created_at": _epoch_or_none(row.get("created_at")),
+        "queued_at": _epoch_or_none(row.get("queued_at")),
+        "started_at": _epoch_or_none(row.get("started_at")),
         "completed_at": _epoch_or_none(row.get("completed_at")),
+        "broker_message_id": str(row.get("broker_message_id") or ""),
+        "routing_key": str(row.get("routing_key") or ""),
+        "broker_delivery_count": int(row.get("broker_delivery_count") or 0),
         "metadata": dict(row.get("metadata") or {}),
     }
 

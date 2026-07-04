@@ -5,6 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import database, messaging
+from .gpu_scheduler import process_gpu_eviction_request
 from .service import KnowledgeService
 
 
@@ -115,6 +116,17 @@ class EventWorker:
             )
         if message.routing_key == messaging.RUNTIME_CONTROL_ROUTING_KEY:
             return {"status": "acknowledged", **self.database.ack_runtime_control_requests(actor=self.worker_id)}
+        if message.routing_key == messaging.GPU_EVICTION_ROUTING_KEY:
+            eviction_id = str(message.payload.get("eviction_id") or "").strip()
+            if not eviction_id:
+                raise ValueError("GPU eviction command requires eviction_id")
+            return process_gpu_eviction_request(
+                eviction_id=eviction_id,
+                worker_id=self.worker_id,
+                broker_message_id=message.message_id,
+                correlation_id=message.correlation_id,
+                causation_id=message.causation_id,
+            )
         raise ValueError(f"unsupported routing key: {message.routing_key}")
 
 

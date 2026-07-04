@@ -221,6 +221,14 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "lease_id text REFERENCES gpu_leases" in gpu_eviction_migration.sql
     assert "estimated_freed_vram_mb" in gpu_eviction_migration.sql
     assert "idx_gpu_evictions_created" in gpu_eviction_migration.sql
+    brokered_gpu_eviction_migration = next(item for item in migrations if item.name == "0043_brokered_gpu_evictions")
+    assert "DROP CONSTRAINT IF EXISTS gpu_evictions_status_check" in brokered_gpu_eviction_migration.sql
+    assert "status IN ('queued', 'running', 'retrying', 'succeeded', 'failed', 'skipped')" in brokered_gpu_eviction_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS broker_message_id" in brokered_gpu_eviction_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS routing_key" in brokered_gpu_eviction_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS correlation_id" in brokered_gpu_eviction_migration.sql
+    assert "ADD COLUMN IF NOT EXISTS broker_delivery_count" in brokered_gpu_eviction_migration.sql
+    assert "idx_gpu_evictions_active" in brokered_gpu_eviction_migration.sql
     model_activity_migration = next(item for item in migrations if item.name == "0038_model_activity_events")
     assert "CREATE TABLE IF NOT EXISTS model_activity_events" in model_activity_migration.sql
     assert "status IN ('running', 'completed', 'failed', 'busy', 'stale_running', 'blocked_missing_dependency')" in model_activity_migration.sql

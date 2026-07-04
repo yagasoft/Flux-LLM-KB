@@ -251,6 +251,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -338,6 +339,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -433,6 +435,14 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
 
+  gpu-eviction-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-gpu-eviction-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.gpu_eviction"
+
   event-scheduler:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-scheduler
@@ -515,6 +525,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -565,6 +576,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -623,6 +635,7 @@ services:
       FLUX_KB_GPU_SCHEDULER_MODE: postgres
       FLUX_KB_GPU_SCHEDULER_VRAM_BUDGET_MB: "10240"
       FLUX_KB_GPU_SCHEDULER_SAFETY_MARGIN_MB: "1024"
+      FLUX_KB_GPU_SCHEDULER_BACKGROUND_TIMEOUT_SECONDS: "1"
       FLUX_KB_GPU_SCHEDULER_EVICTION_ENABLED: "true"
       FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS: "10"
       FLUX_KB_GPU_SCHEDULER_EVICTION_MAX_MODELS: "4"
@@ -1661,8 +1674,8 @@ function Invoke-FluxDockerComposeUp {
         -RecoverableContainers @("flux-llm-kb-rabbitmq", "flux-vespa") `
         -TimeoutSeconds $TimeoutSeconds
     Invoke-FluxVespaApplicationDeploy -AppRoot $AppRoot -TimeoutSeconds 300
-    $commandWorkerServices = @("worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker")
-    $commandWorkerContainers = @("flux-llm-kb-worker", "flux-llm-kb-search-index-worker", "flux-llm-kb-mail-worker", "flux-llm-kb-outlook-worker", "flux-llm-kb-automation-worker", "flux-llm-kb-governance-worker", "flux-llm-kb-runtime-control-worker")
+    $commandWorkerServices = @("worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker")
+    $commandWorkerContainers = @("flux-llm-kb-worker", "flux-llm-kb-search-index-worker", "flux-llm-kb-mail-worker", "flux-llm-kb-outlook-worker", "flux-llm-kb-automation-worker", "flux-llm-kb-governance-worker", "flux-llm-kb-runtime-control-worker", "flux-llm-kb-gpu-eviction-worker")
     $services = @("paddle-runner", "model-runner", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker", "outbox-relay")
     $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
     $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")

@@ -179,20 +179,39 @@ class ModelRunnerClient:
             raise ModelRunnerError("model-runner rerank response did not include scores")
         return [float(score) for score in scores]
 
-    def ocr_image(self, path: str, *, model: str) -> dict[str, Any]:
-        return self._post_json("/v1/ocr/image", {"path": path, "model": model})
+    def ocr_image(self, path: str, *, model: str, timeout_seconds: float | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"path": path, "model": model}
+        if timeout_seconds is not None:
+            payload["timeout_seconds"] = float(timeout_seconds)
+            return self._post_json("/v1/ocr/image", payload, timeout_seconds=timeout_seconds)
+        return self._post_json("/v1/ocr/image", payload)
 
-    def ocr_document(self, path: str, *, pages: list[int] | None, model: str) -> dict[str, Any]:
-        return self._post_json("/v1/ocr/document", {"path": path, "pages": pages or [], "model": model})
+    def ocr_document(self, path: str, *, pages: list[int] | None, model: str, timeout_seconds: float | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"path": path, "pages": pages or [], "model": model}
+        if timeout_seconds is not None:
+            payload["timeout_seconds"] = float(timeout_seconds)
+            return self._post_json("/v1/ocr/document", payload, timeout_seconds=timeout_seconds)
+        return self._post_json("/v1/ocr/document", payload)
 
-    def ocr_file(self, path: str | Path, *, model: str, document: bool = False) -> dict[str, Any]:
+    def ocr_file(
+        self,
+        path: str | Path,
+        *,
+        model: str,
+        document: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         file_path = Path(path)
-        payload = {
+        payload: dict[str, Any] = {
             "filename": file_path.name,
             "content_b64": base64.b64encode(file_path.read_bytes()).decode("ascii"),
             "model": model,
         }
+        if timeout_seconds is not None:
+            payload["timeout_seconds"] = float(timeout_seconds)
         endpoint = "/v1/ocr/document" if document else "/v1/ocr/image"
+        if timeout_seconds is not None:
+            return self._post_json(endpoint, payload, timeout_seconds=timeout_seconds)
         return self._post_json(endpoint, payload)
 
     def health(self) -> dict[str, Any]:
@@ -888,9 +907,13 @@ def _ocr_image_with_paddle(
     record_activity: bool = True,
     activity_service: str | None = None,
     activity_caller_surface: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
     if _paddle_runner_base_url():
-        payload = _proxy_paddle_request("/v1/ocr/image", {"path": str(path), "model": model})
+        payload: dict[str, Any] = {"path": str(path), "model": model}
+        if timeout_seconds is not None:
+            payload["timeout_seconds"] = float(timeout_seconds)
+        payload = _proxy_paddle_request("/v1/ocr/image", payload)
         return str(payload.get("text") or "")
     activity_kwargs = _direct_ocr_activity_kwargs(
         service=activity_service or _scheduler_component(),
@@ -901,13 +924,13 @@ def _ocr_image_with_paddle(
     )
     recorder = record_model_activity(**activity_kwargs) if record_activity else nullcontext()
     with recorder:
-        return _ocr_image_with_paddle_direct(path, model=model)
+        return _ocr_image_with_paddle_direct(path, model=model, timeout_seconds=timeout_seconds)
 
 
-def _ocr_image_with_paddle_direct(path: str, *, model: str) -> str:
+def _ocr_image_with_paddle_direct(path: str, *, model: str, timeout_seconds: float | None = None) -> str:
     if model in _PADDLE_OCR_MODELS:
         _record_model_residency_state("ocr_image", model, resident=True)
-    profile = task_profile("ocr_image", model_id=model, component=_scheduler_component())
+    profile = task_profile("ocr_image", model_id=model, component=_scheduler_component(), timeout_seconds=timeout_seconds)
     with get_gpu_scheduler().acquire(profile):
         ocr = _load_paddleocr(model)
         if hasattr(ocr, "predict"):
@@ -924,9 +947,13 @@ def _ocr_document_with_paddle(
     record_activity: bool = True,
     activity_service: str | None = None,
     activity_caller_surface: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
     if _paddle_runner_base_url():
-        payload = _proxy_paddle_request("/v1/ocr/document", {"path": str(path), "model": model})
+        payload: dict[str, Any] = {"path": str(path), "model": model}
+        if timeout_seconds is not None:
+            payload["timeout_seconds"] = float(timeout_seconds)
+        payload = _proxy_paddle_request("/v1/ocr/document", payload)
         return str(payload.get("text") or "")
     if model.startswith("PaddleOCR-VL"):
         activity_kwargs = _direct_ocr_activity_kwargs(
@@ -938,20 +965,21 @@ def _ocr_document_with_paddle(
         )
         recorder = record_model_activity(**activity_kwargs) if record_activity else nullcontext()
         with recorder:
-            return _ocr_document_with_paddle_direct(path, model=model)
+            return _ocr_document_with_paddle_direct(path, model=model, timeout_seconds=timeout_seconds)
     return _ocr_image_with_paddle(
         path,
         model=model,
         record_activity=record_activity,
         activity_service=activity_service,
         activity_caller_surface=activity_caller_surface,
+        timeout_seconds=timeout_seconds,
     )
 
 
-def _ocr_document_with_paddle_direct(path: str, *, model: str) -> str:
+def _ocr_document_with_paddle_direct(path: str, *, model: str, timeout_seconds: float | None = None) -> str:
     if model in _PADDLE_OCR_VL_MODELS:
         _record_model_residency_state("ocr_document", model, resident=True)
-    profile = task_profile("ocr_document", model_id=model, component=_scheduler_component())
+    profile = task_profile("ocr_document", model_id=model, component=_scheduler_component(), timeout_seconds=timeout_seconds)
     with get_gpu_scheduler().acquire(profile):
         pipeline = _load_paddleocr_vl(model)
         return _paddleocr_text(list(pipeline.predict(str(path))))
@@ -1187,9 +1215,17 @@ def create_app():
         path = str(payload.get("path") or "")
         model = str(payload.get("model") or DEFAULT_OCR_SIMPLE_MODEL)
         try:
+            timeout_seconds = _optional_timeout_seconds_from_payload(payload)
             if _paddle_runner_base_url():
                 return _proxy_paddle_request("/v1/ocr/image", {**payload, "model": model})
-            return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_image_with_paddle(str(input_path or path), model=model))}
+            return {
+                "ok": True,
+                "model": model,
+                "text": _with_ocr_input_path(
+                    payload,
+                    lambda input_path: _ocr_image_with_paddle(str(input_path or path), model=model, timeout_seconds=timeout_seconds),
+                ),
+            }
         except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
@@ -1198,9 +1234,17 @@ def create_app():
         path = str(payload.get("path") or "")
         model = str(payload.get("model") or DEFAULT_OCR_DOCUMENT_MODEL)
         try:
+            timeout_seconds = _optional_timeout_seconds_from_payload(payload)
             if _paddle_runner_base_url():
                 return _proxy_paddle_request("/v1/ocr/document", {**payload, "model": model})
-            return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model))}
+            return {
+                "ok": True,
+                "model": model,
+                "text": _with_ocr_input_path(
+                    payload,
+                    lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model, timeout_seconds=timeout_seconds),
+                ),
+            }
         except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 

@@ -7,6 +7,7 @@ import pytest
 
 from flux_llm_kb import gpu_scheduler
 from flux_llm_kb.gpu_scheduler import (
+    GpuAdmissionDecision,
     GpuEvictionCandidate,
     GpuLeaseRecord,
     GpuLeaseTimeout,
@@ -512,6 +513,73 @@ def test_postgres_eviction_waits_for_verification_before_retrying_admission(monk
     assert scheduler._attempt_evictions(profile, "lease-1", [candidate]) is True
 
     assert order == ["verify", "unload", "verify", "record:succeeded", "mark-residency"]
+
+
+def test_postgres_scheduler_queues_eviction_and_returns_retryable_busy_instead_of_inline_unload(monkeypatch):
+    events: list[tuple[str, object]] = []
+    candidate = GpuEvictionCandidate(
+        task_type="embedding",
+        model_id="snowflake",
+        estimated_vram_mb=2_500,
+        component="model-runner",
+    )
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _insert_waiting(self, profile: GpuTaskProfile, lease_id: str) -> None:
+            events.append(("insert", lease_id))
+
+        def _try_grant(self, profile: GpuTaskProfile, lease_id: str):
+            return GpuAdmissionDecision(
+                granted=False,
+                rejected=True,
+                reason="vram_busy",
+                active_vram_mb=0,
+                resident_vram_mb=2_500,
+                available_vram_mb=500,
+                eviction_candidates=[candidate],
+            )
+
+        def _enqueue_eviction_requests(
+            self,
+            profile: GpuTaskProfile,
+            lease_id: str,
+            candidates: list[GpuEvictionCandidate],
+        ) -> dict[str, object]:
+            events.append(("enqueue", lease_id, candidates))
+            return {"queued": len(candidates)}
+
+        def _attempt_evictions(self, *_args, **_kwargs) -> bool:
+            raise AssertionError("lease admission must not unload models inline")
+
+        def _mark_terminal(self, lease_id: str, status: str) -> None:
+            events.append(("terminal", lease_id, status))
+
+    monkeypatch.setattr(gpu_scheduler.time, "sleep", lambda _seconds: None)
+    scheduler = RecordingScheduler(_config(mode="postgres", eviction_enabled=True), database_url="postgresql://example")
+    profile = GpuTaskProfile(task_type="ocr_document", model_id="PaddleOCR-VL", estimated_vram_mb=8_000)
+
+    with pytest.raises(GpuLeaseTimeout) as exc:
+        scheduler.acquire(profile)
+
+    assert exc.value.retry_after_seconds == 5.0
+    assert events[1] == ("enqueue", events[0][1], [candidate])
+    assert events[2] == ("terminal", events[0][1], "timed_out")
+
+
+def test_worker_task_profile_uses_background_timeout_setting(monkeypatch):
+    values = {
+        "gpu.scheduler.vram_budget_mb": 10_240,
+        "gpu.scheduler.lease_ttl_seconds": 120,
+        "gpu.scheduler.background_timeout_seconds": 0.5,
+        "gpu.scheduler.ocr_image_vram_mb": 2_000,
+    }
+    monkeypatch.setattr(gpu_scheduler, "_scheduler_setting_values", lambda: values)
+
+    worker_profile = task_profile("ocr_image", model_id="PP-OCRv5", component="worker")
+    model_runner_profile = task_profile("ocr_image", model_id="PP-OCRv5", component="model-runner")
+
+    assert worker_profile.timeout_seconds == 0.5
+    assert model_runner_profile.timeout_seconds is None
 
 
 def test_gpu_lease_heartbeats_until_released():
