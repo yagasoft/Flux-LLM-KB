@@ -38,6 +38,40 @@ def test_model_runner_http_503_string_detail_is_retryable_busy(monkeypatch):
     assert exc_info.value.retry_after_seconds == 1.0
 
 
+def test_model_runner_client_rerank_uses_request_timeout_for_http_wait(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"ok": true, "scores": [0.5]}'
+
+    def fake_urlopen(request, timeout):
+        captured["timeout"] = timeout
+        captured["body"] = request.data
+        return FakeResponse()
+
+    monkeypatch.setattr(model_runner, "urlopen", fake_urlopen)
+    client = model_runner.ModelRunnerClient("http://model-runner:8790", timeout_seconds=600)
+
+    scores = client.rerank(
+        "rank",
+        ["passage"],
+        model=model_runner.DEFAULT_RERANKER_MODEL,
+        quantization=model_runner.DEFAULT_RERANKER_QUANTIZATION,
+        timeout_seconds=3.5,
+    )
+
+    assert scores == [0.5]
+    assert captured["timeout"] == 3.5
+    assert b'"timeout_seconds": 3.5' in captured["body"]
+
+
 def test_model_runner_client_uses_catalog_base_url_when_env_is_absent(monkeypatch):
     from flux_llm_kb import settings
 
@@ -702,7 +736,7 @@ def test_model_runner_client_forwards_awq_model_for_reranking():
     calls: list[dict[str, object]] = []
 
     class FakeClient(model_runner.ModelRunnerClient):
-        def _post_json(self, path, payload):
+        def _post_json(self, path, payload, **_kwargs):
             calls.append({"path": path, "payload": payload})
             return {"ok": True, "scores": [0.9]}
 
@@ -749,8 +783,8 @@ def test_model_runner_client_forwards_rerank_scheduler_timeout():
     calls: list[dict[str, object]] = []
 
     class FakeClient(model_runner.ModelRunnerClient):
-        def _post_json(self, path, payload):
-            calls.append({"path": path, "payload": payload})
+        def _post_json(self, path, payload, **kwargs):
+            calls.append({"path": path, "payload": payload, "timeout_seconds": kwargs.get("timeout_seconds")})
             return {"ok": True, "scores": [0.9]}
 
     client = FakeClient(base_url="http://model-runner:8790")
@@ -766,6 +800,7 @@ def test_model_runner_client_forwards_rerank_scheduler_timeout():
 
     assert scores == [0.9]
     assert calls[0]["payload"]["timeout_seconds"] == 5.0
+    assert calls[0]["timeout_seconds"] == 5
 
 
 def test_model_runner_client_records_safe_embedding_activity(monkeypatch):

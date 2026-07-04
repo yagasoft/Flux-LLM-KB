@@ -173,7 +173,7 @@ class ModelRunnerClient:
             request_payload["awq_model"] = awq_model
         if timeout_seconds is not None:
             request_payload["timeout_seconds"] = float(timeout_seconds)
-        payload = self._post_json("/v1/rerank", request_payload)
+        payload = self._post_json("/v1/rerank", request_payload, timeout_seconds=timeout_seconds)
         scores = payload.get("scores")
         if not isinstance(scores, list):
             raise ModelRunnerError("model-runner rerank response did not include scores")
@@ -208,9 +208,10 @@ class ModelRunnerClient:
         except Exception as exc:  # pragma: no cover - environment-specific
             raise ModelRunnerError(str(exc)) from exc
 
-    def _post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_json(self, path: str, payload: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
         with record_model_activity(**_model_runner_activity_kwargs(path, payload)):
-            return _post_json_to_base_url(self.base_url, path, payload, self.timeout_seconds)
+            request_timeout = self.timeout_seconds if timeout_seconds is None else max(0.001, float(timeout_seconds))
+            return _post_json_to_base_url(self.base_url, path, payload, request_timeout)
 
 
 def _resolve_model_runner_base_url(explicit_base_url: str | None = None) -> str:
@@ -269,7 +270,7 @@ class ModelRunnerRerankScorer:
         )
 
 
-def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
+def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = Request(
         urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/")),

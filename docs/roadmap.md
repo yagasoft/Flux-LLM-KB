@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-07-03
+Last reviewed: 2026-07-04
 
 This file is the canonical public roadmap and implementation-status tracker for
 Flux-LLM-KB. It is intentionally separate from live runtime state. Do not add
@@ -10,6 +10,27 @@ content, local deployment-only details, or private memory exports here.
 Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
+
+## 2026-07-04 Bounded Qwen Reranking Policy Update
+
+Affected `Progress %` entries remain conservative:
+
+- `Storage and retrieval core`: remains `92%`. Interactive Vespa retrieval now
+  treats Qwen as a bounded quality enhancement: the full request shares one
+  total rerank budget, microbatch timeouts use the remaining budget, and budget
+  expiry returns Vespa-ranked or partial-rerank fallback with explicit
+  diagnostics.
+- `V2.8 Indexer Acceleration And Local Inference Optimization`: remains `99%`.
+  Production defaults now cap interactive Qwen pools and microbatches more
+  aggressively while preserving Snowflake/Vespa first-stage retrieval.
+- `Observability and benchmarks`: remains `99%`. Explain diagnostics now need
+  live validation for `budget_exceeded`, `vespa_ranked`, and
+  `partial_rerank_then_vespa` fallback paths after deployment.
+
+Remaining Work: deploy and live-validate bounded KB Search/Brief latency, then
+repair or requeue the historical failed search-index records as a separate
+operator-approved task. Do not use failed search-index state as proof that Vespa
+fallback quality is fully validated.
 
 ## 2026-07-04 Retrieval Tail-Latency Closeout Update
 

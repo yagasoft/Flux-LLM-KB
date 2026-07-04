@@ -35,6 +35,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.max_rerank_passage_tokens" in keys
     assert "retrieval.embedding_wait_timeout_seconds" in keys
     assert "retrieval.rerank_wait_timeout_seconds" in keys
+    assert "retrieval.rerank_total_budget_seconds" in keys
     assert "retrieval.query_embedding_cache_ttl_seconds" in keys
     assert "retrieval.query_embedding_cache_max_entries" in keys
     assert "retrieval.brief_search_limit" in keys
@@ -208,6 +209,7 @@ def test_retrieval_interactive_latency_settings_defaults_and_env_overrides(monke
 
     assert service.resolve("retrieval.embedding_wait_timeout_seconds").raw_value == 5
     assert service.resolve("retrieval.rerank_wait_timeout_seconds").raw_value == 5
+    assert service.resolve("retrieval.rerank_total_budget_seconds").raw_value == 5
     assert service.resolve("retrieval.query_embedding_cache_ttl_seconds").raw_value == 120
     assert service.resolve("retrieval.query_embedding_cache_max_entries").raw_value == 256
     assert service.resolve("retrieval.brief_search_limit").raw_value == 5
@@ -215,6 +217,7 @@ def test_retrieval_interactive_latency_settings_defaults_and_env_overrides(monke
 
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_EMBEDDING_WAIT_TIMEOUT_SECONDS", "7")
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANK_WAIT_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANK_TOTAL_BUDGET_SECONDS", "4")
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_QUERY_EMBEDDING_CACHE_TTL_SECONDS", "30")
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_QUERY_EMBEDDING_CACHE_MAX_ENTRIES", "32")
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_BRIEF_SEARCH_LIMIT", "4")
@@ -222,6 +225,7 @@ def test_retrieval_interactive_latency_settings_defaults_and_env_overrides(monke
 
     assert service.resolve("retrieval.embedding_wait_timeout_seconds").raw_value == 7
     assert service.resolve("retrieval.rerank_wait_timeout_seconds").raw_value == 9
+    assert service.resolve("retrieval.rerank_total_budget_seconds").raw_value == 4
     assert service.resolve("retrieval.query_embedding_cache_ttl_seconds").raw_value == 30
     assert service.resolve("retrieval.query_embedding_cache_max_entries").raw_value == 32
     assert service.resolve("retrieval.brief_search_limit").raw_value == 4

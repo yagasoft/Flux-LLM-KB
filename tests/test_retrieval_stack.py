@@ -3,6 +3,8 @@ from io import BytesIO
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
+import pytest
+
 from pathlib import Path
 
 from flux_llm_kb import database, reranking, service as service_module, worker
@@ -20,7 +22,18 @@ from flux_llm_kb.search_index import (
     VespaSearchAdapter,
     build_vespa_document,
 )
-from flux_llm_kb.model_runner import ModelRunnerBusy
+from flux_llm_kb.model_runner import ModelRunnerBusy, ModelRunnerError
+
+
+class SequenceClock:
+    def __init__(self, *values):
+        self.values = list(values)
+        self.last = self.values[-1] if self.values else 0.0
+
+    def __call__(self):
+        if self.values:
+            self.last = self.values.pop(0)
+        return self.last
 
 
 class FakeModelRunner:
@@ -452,7 +465,7 @@ def test_qwen_reranker_uses_quantized_microbatches_and_token_bounds(monkeypatch)
     assert all(item["reranker"]["awq_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4" for item in reranked)
 
 
-def test_qwen_reranker_defaults_to_two_passage_microbatches(monkeypatch):
+def test_qwen_reranker_defaults_to_one_passage_microbatches(monkeypatch):
     monkeypatch.setattr(reranking, "_runtime_setting", lambda _key, default, _env_var=None: default)
     scorer = FakeQwenScorer()
     reranker = QwenReranker(scorer=scorer, top_n=5)
@@ -468,8 +481,8 @@ def test_qwen_reranker_defaults_to_two_passage_microbatches(monkeypatch):
         ],
     )
 
-    assert reranker.microbatch_size == 2
-    assert [len(call["passages"]) for call in scorer.calls] == [2, 2, 1]
+    assert reranker.microbatch_size == 1
+    assert [len(call["passages"]) for call in scorer.calls] == [1, 1, 1, 1, 1]
 
 
 def test_qwen_reranker_uses_runtime_microbatch_size(monkeypatch):
@@ -510,7 +523,130 @@ def test_qwen_reranker_uses_runtime_wait_timeout(monkeypatch):
     reranker.rerank("rank", [{"id": "a", "summary": "candidate"}])
 
     assert reranker.timeout_seconds == 7.0
-    assert scorer.calls[0]["timeout_seconds"] == 7.0
+    assert scorer.calls[0]["timeout_seconds"] == 5.0
+
+
+def test_qwen_reranker_budget_exhausted_before_first_microbatch_returns_vespa_order(monkeypatch):
+    from flux_llm_kb.reranking import RerankBudgetExceeded
+
+    monkeypatch.setattr(reranking, "_runtime_setting", lambda _key, default, _env_var=None: default)
+    scorer = FakeQwenScorer()
+    reranker = QwenReranker(
+        scorer=scorer,
+        top_n=3,
+        microbatch_size=1,
+        total_budget_seconds=1,
+        clock=SequenceClock(0.0, 2.0),
+    )
+    candidates = [{"id": "a", "summary": "one"}, {"id": "b", "summary": "two"}]
+
+    try:
+        reranker.rerank("rank", candidates)
+    except RerankBudgetExceeded as exc:
+        assert [item["id"] for item in exc.results] == ["a", "b"]
+        assert exc.fallback == "vespa_ranked"
+        assert exc.scored_count == 0
+        assert exc.unscored_count == 2
+        assert exc.completed_microbatch_count == 0
+    else:
+        raise AssertionError("expected rerank budget to be exceeded")
+    assert scorer.calls == []
+
+
+def test_qwen_reranker_budget_exceeded_after_partial_microbatch_merges_with_vespa_order(monkeypatch):
+    from flux_llm_kb.reranking import RerankBudgetExceeded
+
+    class FixedScoreScorer(FakeQwenScorer):
+        def score(self, query, passages, *, model, quantization, awq_model=None, timeout_seconds=None):
+            super().score(query, passages, model=model, quantization=quantization, awq_model=awq_model, timeout_seconds=timeout_seconds)
+            return [0.25, 0.75]
+
+    monkeypatch.setattr(reranking, "_runtime_setting", lambda _key, default, _env_var=None: default)
+    scorer = FixedScoreScorer()
+    reranker = QwenReranker(
+        scorer=scorer,
+        top_n=4,
+        microbatch_size=2,
+        total_budget_seconds=5,
+        clock=SequenceClock(0.0, 0.0, 6.0),
+    )
+    candidates = [
+        {"id": "a", "summary": "one"},
+        {"id": "b", "summary": "two"},
+        {"id": "c", "summary": "three"},
+        {"id": "d", "summary": "four"},
+    ]
+
+    try:
+        reranker.rerank("rank", candidates)
+    except RerankBudgetExceeded as exc:
+        assert [item["id"] for item in exc.results] == ["b", "a", "c", "d"]
+        assert exc.fallback == "partial_rerank_then_vespa"
+        assert exc.scored_count == 2
+        assert exc.unscored_count == 2
+        assert exc.completed_microbatch_count == 1
+        assert exc.total_budget_seconds == 5.0
+    else:
+        raise AssertionError("expected rerank budget to be exceeded")
+
+
+def test_qwen_reranker_passes_remaining_total_budget_as_request_timeout(monkeypatch):
+    monkeypatch.setattr(reranking, "_runtime_setting", lambda _key, default, _env_var=None: default)
+    scorer = FakeQwenScorer()
+    reranker = QwenReranker(
+        scorer=scorer,
+        top_n=3,
+        microbatch_size=1,
+        total_budget_seconds=5,
+        clock=SequenceClock(100.0, 100.0, 101.5, 104.0),
+    )
+
+    reranker.rerank("rank", [{"id": "a", "summary": "one"}, {"id": "b", "summary": "two"}, {"id": "c", "summary": "three"}])
+
+    assert [round(call["timeout_seconds"], 3) for call in scorer.calls] == [5.0, 3.5, 1.0]
+
+
+def test_qwen_reranker_preserves_model_runner_busy_errors(monkeypatch):
+    class BusyScorer:
+        def score(self, *_args, **_kwargs):
+            raise ModelRunnerBusy("GPU scheduler busy")
+
+    monkeypatch.setattr(reranking, "_runtime_setting", lambda _key, default, _env_var=None: default)
+    reranker = QwenReranker(scorer=BusyScorer(), top_n=1, microbatch_size=1, total_budget_seconds=5)
+
+    with pytest.raises(ModelRunnerBusy):
+        reranker.rerank("rank", [{"id": "a", "summary": "one"}])
+
+
+def test_qwen_reranker_converts_timeout_after_deadline_to_partial_budget_result(monkeypatch):
+    from flux_llm_kb.reranking import RerankBudgetExceeded
+
+    class TimeoutAfterFirstScorer:
+        def __init__(self):
+            self.calls = 0
+
+        def score(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return [0.8]
+            raise ModelRunnerError("timed out")
+
+    monkeypatch.setattr(reranking, "_runtime_setting", lambda _key, default, _env_var=None: default)
+    scorer = TimeoutAfterFirstScorer()
+    reranker = QwenReranker(
+        scorer=scorer,
+        top_n=2,
+        microbatch_size=1,
+        total_budget_seconds=5,
+        clock=SequenceClock(0.0, 0.0, 1.0, 6.0),
+    )
+
+    with pytest.raises(RerankBudgetExceeded) as exc_info:
+        reranker.rerank("rank", [{"id": "a", "summary": "one"}, {"id": "b", "summary": "two"}])
+
+    assert [item["id"] for item in exc_info.value.results] == ["a", "b"]
+    assert exc_info.value.fallback == "partial_rerank_then_vespa"
+    assert exc_info.value.completed_microbatch_count == 1
 
 
 def test_qwen_reranker_resolves_runtime_quantization_aliases(monkeypatch):
@@ -1235,10 +1371,10 @@ def test_vespa_corpus_search_bounds_limit_one_rerank_pool(monkeypatch):
     results = database.search_corpus_chunks_vespa("quality", limit=1, root_name="docs", vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
 
     assert len(results) == 1
-    assert fake_reranker.instances[0].top_n == 12
-    assert fake_reranker.instances[0].candidate_count == 12
-    assert diagnostics["reranker"]["input_count"] == 12
-    assert diagnostics["reranker"]["microbatch_count"] == 2
+    assert fake_reranker.instances[0].top_n == 4
+    assert fake_reranker.instances[0].candidate_count == 4
+    assert diagnostics["reranker"]["input_count"] == 4
+    assert diagnostics["reranker"]["microbatch_count"] == 1
     assert diagnostics["reranker"]["passage_chars"]["max"] > 0
 
 
@@ -1263,6 +1399,53 @@ def _install_busy_reranker(monkeypatch):
     return BusyReranker
 
 
+def _install_budget_exceeded_reranker(monkeypatch, *, partial: bool):
+    from flux_llm_kb.reranking import RerankBudgetExceeded
+
+    class BudgetExceededReranker:
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "awq_int4"
+        requested_quantization = "awq_int4"
+        quantization_backend = "compressed_tensors_awq"
+        load_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        awq_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        max_passage_tokens = 1536
+        microbatch_size = 1
+        timeout_seconds = 5.0
+        total_budget_seconds = 5.0
+
+        def __init__(self, **kwargs):
+            self.top_n = kwargs["top_n"]
+
+        def rerank(self, _query, candidates):
+            candidates = list(candidates)
+            if partial:
+                partial_results = [{**candidates[1], "reranker": {"score": 0.9}}, {**candidates[0], "reranker": {"score": 0.2}}, *candidates[2:]]
+                raise RerankBudgetExceeded(
+                    "rerank budget exceeded",
+                    results=partial_results,
+                    fallback="partial_rerank_then_vespa",
+                    total_budget_seconds=5.0,
+                    budget_elapsed_ms=5001,
+                    scored_count=2,
+                    unscored_count=max(0, len(candidates) - 2),
+                    completed_microbatch_count=2,
+                )
+            raise RerankBudgetExceeded(
+                "rerank budget exceeded",
+                results=candidates,
+                fallback="vespa_ranked",
+                total_budget_seconds=5.0,
+                budget_elapsed_ms=5001,
+                scored_count=0,
+                unscored_count=len(candidates),
+                completed_microbatch_count=0,
+            )
+
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", BudgetExceededReranker)
+    return BudgetExceededReranker
+
+
 def test_vespa_corpus_search_returns_vespa_ranked_results_when_reranker_busy(monkeypatch):
     _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=3)
     _install_busy_reranker(monkeypatch)
@@ -1276,6 +1459,25 @@ def test_vespa_corpus_search_returns_vespa_ranked_results_when_reranker_busy(mon
     assert diagnostics["reranker"]["fallback"] == "vespa_ranked"
     assert diagnostics["reranker"]["input_count"] == 3
     assert diagnostics["reranker"]["returned_count"] == 2
+    assert diagnostics["vespa"]["returned_count"] == 2
+
+
+def test_vespa_corpus_search_returns_vespa_ranked_results_when_rerank_budget_exceeded(monkeypatch):
+    _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=3)
+    _install_budget_exceeded_reranker(monkeypatch, partial=False)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_corpus_chunks_vespa("quality", limit=2, root_name="docs", vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert [result["id"] for result in results] == ["chunk-0", "chunk-1"]
+    assert diagnostics["reranker"]["skipped"] is True
+    assert diagnostics["reranker"]["reason"] == "budget_exceeded"
+    assert diagnostics["reranker"]["fallback"] == "vespa_ranked"
+    assert diagnostics["reranker"]["total_budget_seconds"] == 5.0
+    assert diagnostics["reranker"]["budget_elapsed_ms"] == 5001
+    assert diagnostics["reranker"]["scored_count"] == 0
+    assert diagnostics["reranker"]["unscored_count"] == 3
+    assert diagnostics["reranker"]["completed_microbatch_count"] == 0
     assert diagnostics["vespa"]["returned_count"] == 2
 
 
@@ -1414,10 +1616,10 @@ def test_vespa_evidence_search_bounds_limit_one_rerank_pool(monkeypatch):
     results = database.search_evidence_vespa("quality", limit=1, root_name="docs", filters={}, vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
 
     assert len(results) == 1
-    assert fake_reranker.instances[0].top_n == 12
-    assert fake_reranker.instances[0].candidate_count == 12
-    assert diagnostics["reranker"]["input_count"] == 12
-    assert diagnostics["reranker"]["microbatch_count"] == 2
+    assert fake_reranker.instances[0].top_n == 4
+    assert fake_reranker.instances[0].candidate_count == 4
+    assert diagnostics["reranker"]["input_count"] == 4
+    assert diagnostics["reranker"]["microbatch_count"] == 1
     assert diagnostics["reranker"]["passage_words"]["max"] > 0
 
 
@@ -1437,6 +1639,25 @@ def test_vespa_evidence_search_returns_vespa_ranked_results_when_reranker_busy(m
     assert diagnostics["vespa"]["returned_count"] == 2
 
 
+def test_vespa_evidence_search_returns_partial_rerank_then_vespa_when_budget_exceeded(monkeypatch):
+    _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=4)
+    _install_budget_exceeded_reranker(monkeypatch, partial=True)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_evidence_vespa("quality", limit=3, root_name="docs", filters={}, vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert [result["id"] for result in results] == ["chunk-1", "chunk-0", "chunk-2"]
+    assert diagnostics["reranker"]["skipped"] is True
+    assert diagnostics["reranker"]["reason"] == "budget_exceeded"
+    assert diagnostics["reranker"]["fallback"] == "partial_rerank_then_vespa"
+    assert diagnostics["reranker"]["total_budget_seconds"] == 5.0
+    assert diagnostics["reranker"]["budget_elapsed_ms"] == 5001
+    assert diagnostics["reranker"]["scored_count"] == 2
+    assert diagnostics["reranker"]["unscored_count"] == 2
+    assert diagnostics["reranker"]["completed_microbatch_count"] == 2
+    assert diagnostics["vespa"]["returned_count"] == 3
+
+
 def test_vespa_evidence_search_rerank_pool_respects_runtime_ceiling(monkeypatch):
     fake_reranker = _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=80, runtime_top_n=16)
     diagnostics: dict[str, object] = {}
@@ -1444,9 +1665,9 @@ def test_vespa_evidence_search_rerank_pool_respects_runtime_ceiling(monkeypatch)
     results = database.search_evidence_vespa("quality", limit=10, root_name="docs", filters={}, vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
 
     assert len(results) == 10
-    assert fake_reranker.instances[0].top_n == 16
-    assert fake_reranker.instances[0].candidate_count == 16
-    assert diagnostics["reranker"]["input_count"] == 16
+    assert fake_reranker.instances[0].top_n == 10
+    assert fake_reranker.instances[0].candidate_count == 10
+    assert diagnostics["reranker"]["input_count"] == 10
 
 
 def test_vespa_episode_hydration_marks_only_stale_claim_episode_non_current():

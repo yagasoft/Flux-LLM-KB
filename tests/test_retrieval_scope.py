@@ -1,5 +1,5 @@
 from flux_llm_kb import database
-from flux_llm_kb.service import KnowledgeService
+from flux_llm_kb.service import KnowledgeService, RetrievalScope
 
 
 def _episode(item_id, title, streams, score=0.5, summary=None):
@@ -268,6 +268,47 @@ def test_workspace_boosted_blends_local_and_strong_cross_workspace_results(monke
     assert scopes["local-chunk"] == "local"
     assert scopes["global-episode"] == "cross_workspace"
     assert scopes["global-chunk"] == "cross_workspace"
+
+
+def test_workspace_boosted_shares_one_rerank_deadline_across_local_and_cross_scopes(monkeypatch):
+    observed = []
+
+    def fake_search_once(
+        self,
+        query,
+        *,
+        limit,
+        rerank_limit=None,
+        scope,
+        label,
+        label_scope=None,
+        filters=None,
+        diagnostics=None,
+        rerank_deadline=None,
+    ):
+        observed.append((label, rerank_deadline))
+        if label == "local":
+            return [_episode("local-episode", "Local scoped decision", ["lexical"], score=0.8)]
+        return [
+            _episode_with_metadata(
+                "cross-episode",
+                "Cross workspace decision",
+                ["fuzzy"],
+                score=0.7,
+                metadata={"workspace_key": "path:e:/other"},
+            )
+        ]
+
+    monkeypatch.setattr(KnowledgeService, "_search_once", fake_search_once)
+    scope = RetrievalScope(mode="workspace_boosted", root_name="flux", root_path="E:\\LLM KB", workspace_key="root:flux")
+
+    results = KnowledgeService()._search_workspace_boosted("latency", limit=2, rerank_limit=2, scope=scope)
+
+    assert [label for label, _deadline in observed] == ["local", "cross_workspace"]
+    deadlines = [deadline for _label, deadline in observed]
+    assert deadlines[0] is not None
+    assert deadlines[0] == deadlines[1]
+    assert [item["id"] for item in results] == ["local-episode", "cross-episode"]
 
 
 def test_workspace_boosted_labels_unscoped_global_episode_without_cross_workspace_claim(monkeypatch):

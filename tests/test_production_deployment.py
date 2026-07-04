@@ -323,7 +323,9 @@ def test_production_deploy_persists_host_side_qwen_runtime_settings():
         assert '"settings", "set", "retrieval.reranker_awq_model", "drawais/Qwen3-Reranker-4B-AWQ-INT4", "--confirm"' in script
         assert '"settings", "set", "retrieval.reranker_quantization", "awq_int4", "--confirm"' in script
         assert '"settings", "set", "retrieval.reranker_quantization", "int4_awq", "--confirm"' not in script
-        assert '"settings", "set", "retrieval.rerank_top_n", "80", "--confirm"' in script
+        assert '"settings", "set", "retrieval.rerank_top_n", "12", "--confirm"' in script
+        assert '"settings", "set", "retrieval.rerank_microbatch_size", "1", "--confirm"' in script
+        assert '"settings", "set", "retrieval.rerank_total_budget_seconds", "5", "--confirm"' in script
         assert '"settings", "set", "retrieval.max_rerank_passage_tokens", "1536", "--confirm"' in script
         assert '"settings", "set", "retrieval.gpu_vram_budget_mb", "10240", "--confirm"' in script
         assert '"settings", "set", "ocr.engine", "paddleocr", "--confirm"' in script

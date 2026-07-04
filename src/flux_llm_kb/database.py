@@ -69,9 +69,9 @@ _VESPA_VALID_OWNER_TABLES = {"asset_chunks", "episodes", "claims"}
 _VESPA_BM25_FEATURES = ("bm25(title)", "bm25(body)", "bm25(source_path)", "bm25(symbols)")
 _VESPA_DENSE_FEATURES = ("dense_score", "closeness(field, embedding)", "closeness(field,embedding)")
 _CODE_IMPLEMENTATION_RELATIONSHIPS = {"definition", "route", "config", "migration"}
-_DEFAULT_RERANK_POOL_TOP_N = 80
-_MIN_RERANK_POOL_SIZE = 12
-_RERANK_POOL_LIMIT_MULTIPLIER = 4
+_DEFAULT_RERANK_POOL_TOP_N = 12
+_MIN_RERANK_POOL_SIZE = 4
+_RERANK_POOL_LIMIT_MULTIPLIER = 1
 _DEFAULT_QUERY_EMBEDDING_CACHE_TTL_SECONDS = 120
 _DEFAULT_QUERY_EMBEDDING_CACHE_MAX_ENTRIES = 256
 _DEFAULT_EMBEDDING_WAIT_TIMEOUT_SECONDS = 5
@@ -1194,6 +1194,7 @@ def search_corpus_chunks_vespa(
     filters: dict[str, Any] | None = None,
     vespa_base_url: str | None = None,
     rerank_limit: int | None = None,
+    rerank_deadline: float | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from .reranking import QwenReranker
@@ -1293,7 +1294,7 @@ def search_corpus_chunks_vespa(
         _with_vespa_signal_streams(item)
         for item in _corpus_results_from_fused(fused[:rerank_pool_limit], details)
     ]
-    reranker = QwenReranker(top_n=rerank_pool_limit)
+    reranker = QwenReranker(top_n=rerank_pool_limit, deadline=rerank_deadline)
     rerank_started = time.perf_counter()
     try:
         reranked = reranker.rerank(query, hydrated)
@@ -1302,7 +1303,7 @@ def search_corpus_chunks_vespa(
         if reason is None:
             raise
         rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
-        fallback = hydrated[:limit]
+        fallback, fallback_name, budget_metadata = _rerank_fallback_results(exc, candidates=hydrated, limit=limit)
         _record_skipped_reranker_diagnostics(
             diagnostics,
             reranker=reranker,
@@ -1310,6 +1311,8 @@ def search_corpus_chunks_vespa(
             returned_count=len(fallback),
             latency_ms=rerank_elapsed_ms,
             reason=reason,
+            fallback=fallback_name,
+            extra=budget_metadata,
         )
         if diagnostics is not None:
             diagnostics["vespa"]["returned_count"] = len(fallback)
@@ -1334,6 +1337,7 @@ def search_evidence_vespa(
     filters: dict[str, Any] | None = None,
     vespa_base_url: str | None = None,
     rerank_limit: int | None = None,
+    rerank_deadline: float | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     from .reranking import QwenReranker
@@ -1478,7 +1482,7 @@ def search_evidence_vespa(
         diagnostics["vespa"]["hydration_latency_ms"] = hydrate_elapsed_ms
     rerank_pool_limit = _rerank_pool_limit(rerank_limit=rerank_limit, result_limit=limit, available_count=len(results))
     rerank_candidates = results[:rerank_pool_limit]
-    reranker = QwenReranker(top_n=rerank_pool_limit)
+    reranker = QwenReranker(top_n=rerank_pool_limit, deadline=rerank_deadline)
     rerank_started = time.perf_counter()
     try:
         reranked = _sort_code_adjusted_reranked_results(reranker.rerank(query, rerank_candidates))
@@ -1487,7 +1491,7 @@ def search_evidence_vespa(
         if reason is None:
             raise
         rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
-        fallback = rerank_candidates[:limit]
+        fallback, fallback_name, budget_metadata = _rerank_fallback_results(exc, candidates=rerank_candidates, limit=limit)
         _record_skipped_reranker_diagnostics(
             diagnostics,
             reranker=reranker,
@@ -1495,6 +1499,8 @@ def search_evidence_vespa(
             returned_count=len(fallback),
             latency_ms=rerank_elapsed_ms,
             reason=reason,
+            fallback=fallback_name,
+            extra=budget_metadata,
         )
         if diagnostics is not None:
             diagnostics["vespa"]["returned_count"] = len(fallback)
@@ -1656,6 +1662,7 @@ def _reranker_base_diagnostics(
         "top_n": reranker.top_n,
         "max_passage_tokens": reranker.max_passage_tokens,
         "wait_timeout_seconds": getattr(reranker, "timeout_seconds", None),
+        "total_budget_seconds": getattr(reranker, "total_budget_seconds", None),
         **_rerank_input_diagnostics(candidates, reranker=reranker),
     }
 
@@ -1664,8 +1671,12 @@ def _rerank_fallback_reason(exc: Exception) -> str | None:
     try:
         from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout
         from .model_runner import ModelRunnerBusy, ModelRunnerError
+        from .reranking import RerankBudgetExceeded
     except Exception:
         GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
+        RerankBudgetExceeded = ()  # type: ignore[assignment]
+    if isinstance(exc, RerankBudgetExceeded):
+        return "budget_exceeded"
     if isinstance(exc, ModelRunnerBusy):
         return "model_runner_busy"
     if isinstance(exc, GpuLeaseTimeout):
@@ -1679,6 +1690,30 @@ def _rerank_fallback_reason(exc: Exception) -> str | None:
     return None
 
 
+def _rerank_fallback_results(
+    exc: Exception,
+    *,
+    candidates: list[dict[str, Any]],
+    limit: int,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    try:
+        from .reranking import RerankBudgetExceeded
+    except Exception:
+        RerankBudgetExceeded = ()  # type: ignore[assignment]
+    if isinstance(exc, RerankBudgetExceeded):
+        results = [dict(item) for item in getattr(exc, "results", [])]
+        fallback = str(getattr(exc, "fallback", "") or "vespa_ranked")
+        metadata = {
+            "total_budget_seconds": getattr(exc, "total_budget_seconds", None),
+            "budget_elapsed_ms": getattr(exc, "budget_elapsed_ms", None),
+            "scored_count": getattr(exc, "scored_count", None),
+            "unscored_count": getattr(exc, "unscored_count", None),
+            "completed_microbatch_count": getattr(exc, "completed_microbatch_count", None),
+        }
+        return results[:limit], fallback, {key: value for key, value in metadata.items() if value is not None}
+    return candidates[:limit], "vespa_ranked", {}
+
+
 def _record_skipped_reranker_diagnostics(
     diagnostics: dict[str, Any] | None,
     *,
@@ -1687,6 +1722,8 @@ def _record_skipped_reranker_diagnostics(
     returned_count: int,
     latency_ms: int,
     reason: str,
+    fallback: str = "vespa_ranked",
+    extra: dict[str, Any] | None = None,
 ) -> None:
     if diagnostics is None:
         return
@@ -1695,9 +1732,11 @@ def _record_skipped_reranker_diagnostics(
         {
             "skipped": True,
             "reason": reason,
-            "fallback": "vespa_ranked",
+            "fallback": fallback,
         }
     )
+    if extra:
+        payload.update(extra)
     diagnostics["reranker"] = payload
 
 

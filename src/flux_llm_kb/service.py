@@ -140,6 +140,7 @@ class KnowledgeService:
         diagnostics: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         scope = _resolve_retrieval_scope(cwd=cwd, root_name=root_name, scope_mode=scope_mode)
+        rerank_deadline = time.monotonic() + _configured_rerank_total_budget_seconds()
         if scope.mode == "global" or not scope.is_scoped:
             return self._search_once(
                 query,
@@ -149,6 +150,7 @@ class KnowledgeService:
                 rerank_limit=rerank_limit,
                 filters=filters,
                 diagnostics=diagnostics,
+                rerank_deadline=rerank_deadline,
             )
         if scope.mode == "workspace_boosted":
             return self._search_workspace_boosted(
@@ -158,6 +160,7 @@ class KnowledgeService:
                 scope=scope,
                 filters=filters,
                 diagnostics=diagnostics,
+                rerank_deadline=rerank_deadline,
             )
 
         scoped_results = self._search_once(
@@ -168,6 +171,7 @@ class KnowledgeService:
             label="local",
             filters=filters,
             diagnostics=diagnostics,
+            rerank_deadline=rerank_deadline,
         )
         if scope.mode == "local_only" or _has_lexical_or_fuzzy_evidence(scoped_results):
             return scoped_results
@@ -180,6 +184,7 @@ class KnowledgeService:
             label="global_fallback",
             filters=filters,
             diagnostics=diagnostics,
+            rerank_deadline=rerank_deadline,
         )
 
     def _search_workspace_boosted(
@@ -191,8 +196,11 @@ class KnowledgeService:
         scope: RetrievalScope,
         filters: dict[str, Any] | None = None,
         diagnostics: dict[str, Any] | None = None,
+        rerank_deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit or 5), 50))
+        if rerank_deadline is None:
+            rerank_deadline = time.monotonic() + _configured_rerank_total_budget_seconds()
         local_results = self._search_once(
             query,
             limit=limit,
@@ -201,6 +209,7 @@ class KnowledgeService:
             label="local",
             filters=filters,
             diagnostics=diagnostics,
+            rerank_deadline=rerank_deadline,
         )
         local_keys = {_result_identity(item) for item in local_results}
 
@@ -214,6 +223,7 @@ class KnowledgeService:
             label="cross_workspace",
             filters=filters,
             diagnostics=diagnostics,
+            rerank_deadline=rerank_deadline,
         )
         cross_results = [
             item
@@ -242,14 +252,17 @@ class KnowledgeService:
         label_scope: RetrievalScope | None = None,
         filters: dict[str, Any] | None = None,
         diagnostics: dict[str, Any] | None = None,
+        rerank_deadline: float | None = None,
     ) -> list[dict[str, Any]]:
+        if rerank_deadline is None:
+            rerank_deadline = time.monotonic() + _configured_rerank_total_budget_seconds()
         corpus_limit = max(limit * 4, 20)
         is_local = label == "local"
         logical_kinds = set(filters.get("logical_kinds") or []) if isinstance(filters, dict) else set()
         include_episodes = not logical_kinds or "episode" in logical_kinds
         include_corpus = not logical_kinds or bool(logical_kinds.intersection({"file", "mail"}))
         episode_workspace_key = scope.workspace_key or (f"root:{scope.root_name}" if scope.root_name else None)
-        corpus_kwargs: dict[str, Any] = {"limit": corpus_limit, "root_name": scope.root_name}
+        corpus_kwargs: dict[str, Any] = {"limit": corpus_limit, "root_name": scope.root_name, "rerank_deadline": rerank_deadline}
         if filters is not None:
             corpus_kwargs["filters"] = filters
         corpus_diagnostics: dict[str, Any] | None = {} if diagnostics is not None else None
@@ -5584,6 +5597,13 @@ def _configured_brief_rerank_limit() -> int:
         return 3
 
 
+def _configured_rerank_total_budget_seconds() -> float:
+    try:
+        return float(max(1, min(int(SettingsService().resolve("retrieval.rerank_total_budget_seconds").raw_value), 600)))
+    except Exception:
+        return 5.0
+
+
 def _configured_retrieval_search_engine() -> str:
     try:
         return str(SettingsService().resolve("retrieval.search_engine").raw_value or "vespa").strip().lower()
@@ -5601,9 +5621,11 @@ def _configured_vespa_base_url() -> str:
 def _search_corpus_with_configured_engine(query: str, **kwargs: Any) -> list[dict[str, Any]]:
     diagnostics = kwargs.get("diagnostics") if isinstance(kwargs.get("diagnostics"), dict) else None
     if database.search_corpus_chunks is not _DEFAULT_SEARCH_CORPUS_CHUNKS:
-        return database.search_corpus_chunks(query, **kwargs)
+        fallback_kwargs = {key: value for key, value in kwargs.items() if key != "rerank_deadline"}
+        return database.search_corpus_chunks(query, **fallback_kwargs)
     if _configured_retrieval_search_engine() != "vespa":
-        return database.search_corpus_chunks_postgres_diagnostic(query, **kwargs)
+        fallback_kwargs = {key: value for key, value in kwargs.items() if key != "rerank_deadline"}
+        return database.search_corpus_chunks_postgres_diagnostic(query, **fallback_kwargs)
     try:
         return database.search_corpus_chunks_vespa(
             query,
@@ -5615,7 +5637,8 @@ def _search_corpus_with_configured_engine(query: str, **kwargs: Any) -> list[dic
             diagnostics.setdefault("degraded_mode", {})["reason"] = str(exc)[:300]
             diagnostics["degraded_mode"]["search_engine"] = "vespa"
             diagnostics["degraded_mode"]["fallback"] = "postgres_lexical_diagnostic"
-        return database.search_corpus_chunks_postgres_diagnostic(query, **kwargs)
+        fallback_kwargs = {key: value for key, value in kwargs.items() if key != "rerank_deadline"}
+        return database.search_corpus_chunks_postgres_diagnostic(query, **fallback_kwargs)
 
 
 def _search_evidence_with_configured_engine(query: str, **kwargs: Any) -> list[dict[str, Any]] | None:
