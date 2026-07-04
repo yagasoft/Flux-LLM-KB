@@ -408,6 +408,69 @@ def test_paddleocr_vl_loader_configures_onnxruntime_before_importing_paddlex(mon
     assert events[:2] == ["configure-ort", "import-paddlex"]
 
 
+def test_paddleocr_loader_sets_paddle_runtime_device_before_constructor(monkeypatch):
+    events: list[tuple[str, str]] = []
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            events.append(("construct", str(kwargs["device"])))
+
+    def set_device(device):
+        events.append(("set_device", str(device)))
+
+    monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=FakePaddleOCR))
+    monkeypatch.setitem(
+        sys.modules,
+        "paddle",
+        SimpleNamespace(
+            device=SimpleNamespace(
+                is_compiled_with_cuda=lambda: True,
+                cuda=SimpleNamespace(device_count=lambda: 1),
+                set_device=set_device,
+            )
+        ),
+    )
+    model_runner._PADDLE_OCR_MODELS.clear()
+    model_runner._PADDLE_OCR_FACTORY_IDS.clear()
+
+    model_runner._load_paddleocr("PP-OCRv5")
+
+    assert events[:2] == [("set_device", "gpu:0"), ("construct", "gpu:0")]
+
+
+def test_paddleocr_vl_loader_sets_paddle_runtime_device_before_create_pipeline(monkeypatch):
+    events: list[tuple[str, str]] = []
+
+    class FakePipeline:
+        pass
+
+    def fake_create_pipeline(**kwargs):
+        events.append(("create_pipeline", str(kwargs["device"])))
+        return FakePipeline()
+
+    def set_device(device):
+        events.append(("set_device", str(device)))
+
+    monkeypatch.setitem(sys.modules, "paddlex", SimpleNamespace(create_pipeline=fake_create_pipeline))
+    monkeypatch.setitem(
+        sys.modules,
+        "paddle",
+        SimpleNamespace(
+            device=SimpleNamespace(
+                is_compiled_with_cuda=lambda: True,
+                cuda=SimpleNamespace(device_count=lambda: 1),
+                set_device=set_device,
+            )
+        ),
+    )
+    model_runner._PADDLE_OCR_VL_MODELS.clear()
+    model_runner._PADDLE_OCR_VL_FACTORY_IDS.clear()
+
+    model_runner._load_paddleocr_vl("PaddleOCR-VL")
+
+    assert events[:2] == [("set_device", "gpu:0"), ("create_pipeline", "gpu:0")]
+
+
 def test_paddleocr_vl_document_uses_gpu_when_paddle_cuda_is_available(monkeypatch):
     created: list[dict[str, object]] = []
 
@@ -1170,6 +1233,68 @@ def test_model_runner_busy_response_is_structured_and_retryable(monkeypatch):
     assert response.json()["detail"]["code"] == "gpu.scheduler_busy"
     assert response.json()["detail"]["retryable"] is True
     assert response.json()["detail"]["retry_after_seconds"] == 3.0
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "target_name"),
+    [
+        ("/v1/embeddings", {"input": "hello", "dimensions": 2}, "_embed_with_sentence_transformers"),
+        (
+            "/v1/rerank",
+            {"query": "hello", "passages": ["world"], "quantization": model_runner.DEFAULT_RERANKER_QUANTIZATION},
+            "_rerank_with_transformers",
+        ),
+        ("/v1/ocr/image", {"path": "/tmp/private-image.png", "model": "PP-OCRv5"}, "_ocr_image_with_paddle"),
+        ("/v1/ocr/document", {"path": "/tmp/private-document.png", "model": "PaddleOCR-VL"}, "_ocr_document_with_paddle"),
+    ],
+)
+def test_model_runner_gpu_lease_rejection_responses_are_retryable(monkeypatch, endpoint, payload, target_name):
+    from fastapi.testclient import TestClient
+
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    def rejected(*_args, **_kwargs):
+        raise GpuLeaseRejected("vram_budget_exceeded")
+
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(model_runner, target_name, rejected)
+
+    response = TestClient(model_runner.create_app(), raise_server_exceptions=False).post(endpoint, json=payload)
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == {
+        "code": "gpu.scheduler_busy",
+        "message": "vram_budget_exceeded",
+        "retryable": True,
+        "retry_after_seconds": 1.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        ("/v1/ocr/image", {"path": "/tmp/private-image.png", "model": "PP-OCRv5"}),
+        ("/v1/ocr/document", {"path": "/tmp/private-document.png", "model": "PaddleOCR-VL"}),
+    ],
+)
+def test_model_runner_proxied_ocr_busy_responses_are_structured(monkeypatch, endpoint, payload):
+    from fastapi.testclient import TestClient
+
+    def busy_proxy(*_args, **_kwargs):
+        raise model_runner.ModelRunnerBusy("vram_budget_exceeded", retry_after_seconds=4.0)
+
+    monkeypatch.setenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", "http://paddle-runner:8791")
+    monkeypatch.setattr(model_runner, "_proxy_paddle_request", busy_proxy)
+
+    response = TestClient(model_runner.create_app(), raise_server_exceptions=False).post(endpoint, json=payload)
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == {
+        "code": "gpu.scheduler_busy",
+        "message": "vram_budget_exceeded",
+        "retryable": True,
+        "retry_after_seconds": 4.0,
+    }
 
 
 def test_gpu_unload_endpoint_removes_exact_embedding_model_and_preserves_unrelated(monkeypatch):

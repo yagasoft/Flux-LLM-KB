@@ -722,13 +722,15 @@ def _load_paddleocr(model: str) -> Any:
         factory_id = id(PaddleOCR)
         if model in _PADDLE_OCR_MODELS and _PADDLE_OCR_FACTORY_IDS.get(model) == factory_id:
             return _PADDLE_OCR_MODELS[model]
+        paddle_device = _paddle_device()
+        _set_paddle_runtime_device(paddle_device)
         kwargs: dict[str, Any] = {
             "lang": "en",
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
             "use_textline_orientation": False,
             "enable_mkldnn": False,
-            "device": _paddle_device(),
+            "device": paddle_device,
         }
         if model:
             kwargs["ocr_version"] = model
@@ -755,6 +757,16 @@ def _paddle_device() -> str:
     return "gpu:0" if cuda_available else "cpu"
 
 
+def _set_paddle_runtime_device(device: str) -> None:
+    try:
+        import paddle
+    except Exception:
+        return
+    setter = getattr(getattr(paddle, "device", None), "set_device", None) or getattr(paddle, "set_device", None)
+    if callable(setter):
+        setter(device)
+
+
 def _configure_optional_onnxruntime_logging() -> None:
     try:
         configure_onnxruntime_logging()
@@ -773,9 +785,11 @@ def _load_paddleocr_vl(model: str) -> Any:
         factory_id = id(create_pipeline)
         if model in _PADDLE_OCR_VL_MODELS and _PADDLE_OCR_VL_FACTORY_IDS.get(model) == factory_id:
             return _PADDLE_OCR_VL_MODELS[model]
+        paddle_device = _paddle_device()
+        _set_paddle_runtime_device(paddle_device)
         _PADDLE_OCR_VL_MODELS[model] = create_pipeline(
             pipeline=model,
-            device=_paddle_device(),
+            device=paddle_device,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
         )
@@ -1084,10 +1098,8 @@ def create_app():
             }
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except GpuLeaseTimeout as exc:
+        except (GpuLeaseRejected, GpuLeaseTimeout) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
-        except GpuLeaseRejected as exc:
-            raise HTTPException(status_code=503, detail={"code": "gpu.scheduler_rejected", "message": str(exc), "retryable": False}) from exc
 
     @app.post("/v1/rerank")
     def rerank(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1104,10 +1116,8 @@ def create_app():
                 quantization=quantization,
                 awq_model=profile.awq_model,
             )
-        except GpuLeaseTimeout as exc:
+        except (GpuLeaseRejected, GpuLeaseTimeout) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
-        except GpuLeaseRejected as exc:
-            raise HTTPException(status_code=503, detail={"code": "gpu.scheduler_rejected", "message": str(exc), "retryable": False}) from exc
         return {
             "ok": True,
             "model": profile.model,
@@ -1128,22 +1138,22 @@ def create_app():
     def ocr_image(payload: dict[str, Any]) -> dict[str, Any]:
         path = str(payload.get("path") or "")
         model = str(payload.get("model") or DEFAULT_OCR_SIMPLE_MODEL)
-        if _paddle_runner_base_url():
-            return _proxy_paddle_request("/v1/ocr/image", {**payload, "model": model})
         try:
+            if _paddle_runner_base_url():
+                return _proxy_paddle_request("/v1/ocr/image", {**payload, "model": model})
             return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_image_with_paddle(str(input_path or path), model=model))}
-        except GpuLeaseTimeout as exc:
+        except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
     @app.post("/v1/ocr/document")
     def ocr_document(payload: dict[str, Any]) -> dict[str, Any]:
         path = str(payload.get("path") or "")
         model = str(payload.get("model") or DEFAULT_OCR_DOCUMENT_MODEL)
-        if _paddle_runner_base_url():
-            return _proxy_paddle_request("/v1/ocr/document", {**payload, "model": model})
         try:
+            if _paddle_runner_base_url():
+                return _proxy_paddle_request("/v1/ocr/document", {**payload, "model": model})
             return {"ok": True, "model": model, "text": _with_ocr_input_path(payload, lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model))}
-        except GpuLeaseTimeout as exc:
+        except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
     return app
@@ -1167,12 +1177,12 @@ def _embedding_texts_from_payload(payload: dict[str, Any]) -> list[str]:
     raise ValueError("embedding request requires texts or input")
 
 
-def _gpu_busy_detail(exc: GpuLeaseTimeout) -> dict[str, Any]:
+def _gpu_busy_detail(exc: GpuLeaseRejected | GpuLeaseTimeout | ModelRunnerBusy) -> dict[str, Any]:
     return {
         "code": "gpu.scheduler_busy",
         "message": str(exc),
         "retryable": True,
-        "retry_after_seconds": float(exc.retry_after_seconds),
+        "retry_after_seconds": float(getattr(exc, "retry_after_seconds", 1.0) or 1.0),
     }
 
 

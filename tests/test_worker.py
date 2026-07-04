@@ -781,6 +781,26 @@ def test_search_index_sync_gpu_lease_timeout_is_retryable(monkeypatch):
     }
 
 
+def test_search_index_sync_gpu_lease_rejection_is_retryable(monkeypatch):
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    monkeypatch.setattr(
+        database,
+        "sync_search_index",
+        lambda **_kwargs: (_ for _ in ()).throw(GpuLeaseRejected("vram_budget_exceeded")),
+    )
+
+    result = worker.process_search_index_sync_job({"payload": {"owner_class": "all", "limit": 10}})
+
+    assert result.status == "retrying_gpu_busy"
+    assert result.message == "vram_budget_exceeded"
+    assert result.telemetry == {
+        "error_type": "GpuLeaseRejected",
+        "retry_after_seconds": 1.0,
+        "gpu_scheduler_status": "busy",
+    }
+
+
 def test_search_index_sync_worker_enqueues_continuation_after_success(monkeypatch):
     continuation_calls: list[dict] = []
 
@@ -853,6 +873,7 @@ def test_backfill_retries_gpu_busy_result_without_terminal_failure(monkeypatch):
     monkeypatch.setattr(database, "recover_stale_running_corpus_jobs", lambda **_kwargs: {"recovered": 0})
     monkeypatch.setattr(database, "purge_unseen_corpus_assets", lambda **_kwargs: {"assets_purged": 0}, raising=False)
     monkeypatch.setattr(database, "cancel_duplicate_corpus_jobs", lambda **_kwargs: {"cancelled": 0})
+    monkeypatch.setattr(service_module, "_configured_failure_max_attempts", lambda: 1, raising=False)
     monkeypatch.setattr(
         database,
         "claim_corpus_jobs",
@@ -863,7 +884,7 @@ def test_backfill_retries_gpu_busy_result_without_terminal_failure(monkeypatch):
                 "job_family": "embedding",
                 "resource_class": "gpu",
                 "payload": {"owner_class": "all", "limit": 10},
-                "attempts": 1,
+                "attempts": 99,
             }
         ],
     )
@@ -3514,6 +3535,35 @@ def test_process_corpus_job_returns_failed_for_unexpected_extractor_error(monkey
     assert result.status == "failed"
     assert "extractor crashed" in result.message
     assert result.telemetry == {"error_type": "RuntimeError"}
+
+
+def test_process_corpus_job_gpu_lease_rejection_is_retryable(monkeypatch, tmp_path):
+    from flux_llm_kb import worker
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    (root / "scan.png").write_bytes(b"image")
+    monkeypatch.setattr(database, "get_monitored_root", lambda _name: {
+        "name": "docs",
+        "root_path": str(root),
+        "recursive": True,
+        "include_globs": [],
+        "exclude_globs": [],
+        "max_inline_bytes": 1024,
+        "heavy_threshold_bytes": 2048,
+    })
+    monkeypatch.setattr(worker, "extract_file", lambda *_args: (_ for _ in ()).throw(GpuLeaseRejected("vram_budget_exceeded")))
+
+    result = worker.process_corpus_job({"payload": {"root_name": "docs", "path": "scan.png"}})
+
+    assert result.status == "retrying_gpu_busy"
+    assert result.message == "vram_budget_exceeded"
+    assert result.telemetry == {
+        "error_type": "GpuLeaseRejected",
+        "retry_after_seconds": 1.0,
+        "gpu_scheduler_status": "busy",
+    }
 
 
 def test_docker_corpus_worker_processes_due_imap_mail_profiles(monkeypatch):

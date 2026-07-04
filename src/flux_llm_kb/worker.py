@@ -311,7 +311,7 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
 
 
 def _is_gpu_busy_exception(exc: Exception) -> bool:
-    return exc.__class__.__name__ in {"GpuLeaseTimeout", "ModelRunnerBusy"}
+    return exc.__class__.__name__ in {"GpuLeaseRejected", "GpuLeaseTimeout", "ModelRunnerBusy"}
 
 
 def _gpu_busy_result(exc: Exception) -> JobProcessResult:
