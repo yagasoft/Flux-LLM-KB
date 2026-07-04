@@ -378,6 +378,54 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus"
 
+  search-index-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-search-index-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.search_index"
+
+  mail-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-mail-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap"
+
+  outlook-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-outlook-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook"
+
+  automation-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-automation-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.automation"
+
+  governance-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-governance-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.governance"
+
+  runtime-control-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-runtime-control-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
+
   event-scheduler:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-scheduler
@@ -1576,9 +1624,9 @@ try {
     $composeServices = @("postgres", "rabbitmq", "vespa")
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
     Invoke-FluxVespaApplicationDeploy -AppRoot $appRoot -TimeoutSeconds 300
-    $composeServices = @("paddle-runner", "model-runner", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay")
+    $composeServices = @("paddle-runner", "model-runner", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "event-scheduler", "callback-worker", "outbox-relay")
     if ($gpuEnabled) {
-        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay")
+        $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "event-scheduler", "callback-worker", "outbox-relay")
     }
     docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
 } finally {

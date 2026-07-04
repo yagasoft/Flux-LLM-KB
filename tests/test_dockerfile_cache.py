@@ -190,6 +190,8 @@ def test_docker_compose_defines_corpus_worker_service() -> None:
 
     assert "  worker:" in compose
     assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus" in compose
+    assert "  outlook-worker:" in compose
+    assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook" in compose
     assert "  rabbitmq:" in compose
     assert "image: rabbitmq:4.3-management" in compose
     assert "  outbox-relay:" in compose
@@ -208,6 +210,6 @@ def test_dashboard_dev_scripts_manage_worker_service() -> None:
     status_script = Path("scripts/status-dashboard-dev.ps1").read_text(encoding="utf-8")
     stop_script = Path("scripts/stop-dashboard-dev.ps1").read_text(encoding="utf-8")
 
-    assert "docker compose up -d --build postgres rabbitmq api outbox-relay event-scheduler worker" in start_script
-    assert "docker compose ps api worker search-index-worker mail-worker automation-worker governance-worker runtime-control-worker callback-worker event-scheduler outbox-relay rabbitmq postgres" in status_script
-    assert "docker compose stop api worker search-index-worker mail-worker automation-worker governance-worker runtime-control-worker callback-worker event-scheduler outbox-relay" in stop_script
+    assert "docker compose up -d --build postgres rabbitmq api outbox-relay event-scheduler worker search-index-worker mail-worker outlook-worker automation-worker governance-worker runtime-control-worker callback-worker" in start_script
+    assert "docker compose ps api worker search-index-worker mail-worker outlook-worker automation-worker governance-worker runtime-control-worker callback-worker event-scheduler outbox-relay rabbitmq postgres" in status_script
+    assert "docker compose stop api worker search-index-worker mail-worker outlook-worker automation-worker governance-worker runtime-control-worker callback-worker event-scheduler outbox-relay" in stop_script

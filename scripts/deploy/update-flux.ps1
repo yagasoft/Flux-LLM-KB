@@ -385,6 +385,54 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus"
 
+  search-index-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-search-index-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.search_index"
+
+  mail-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-mail-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap"
+
+  outlook-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-outlook-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook"
+
+  automation-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-automation-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.automation"
+
+  governance-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-governance-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.governance"
+
+  runtime-control-worker:
+    extends:
+      service: worker
+    container_name: flux-llm-kb-runtime-control-worker
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
+
   event-scheduler:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-scheduler
@@ -1613,18 +1661,20 @@ function Invoke-FluxDockerComposeUp {
         -RecoverableContainers @("flux-llm-kb-rabbitmq", "flux-vespa") `
         -TimeoutSeconds $TimeoutSeconds
     Invoke-FluxVespaApplicationDeploy -AppRoot $AppRoot -TimeoutSeconds 300
-    $services = @("paddle-runner", "model-runner", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay")
-    $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api", "flux-llm-kb-worker", "flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
-    $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api", "flux-llm-kb-worker", "flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
+    $commandWorkerServices = @("worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker")
+    $commandWorkerContainers = @("flux-llm-kb-worker", "flux-llm-kb-search-index-worker", "flux-llm-kb-mail-worker", "flux-llm-kb-outlook-worker", "flux-llm-kb-automation-worker", "flux-llm-kb-governance-worker", "flux-llm-kb-runtime-control-worker")
+    $services = @("paddle-runner", "model-runner", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker", "outbox-relay")
+    $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
+    $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
     if ($GpuEnabled) {
-        $services = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay")
-        $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker", "flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
-        $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api", "flux-llm-kb-worker", "flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
+        $services = @("paddle-runner", "model-runner", "ollama", "asr", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker", "outbox-relay")
+        $containers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
+        $recoverableContainers = @("flux-llm-kb-paddle-runner", "flux-llm-kb-model-runner", "flux-ollama", "flux-llm-kb-asr", "flux-llm-kb-api") + $commandWorkerContainers + @("flux-llm-kb-event-scheduler", "flux-llm-kb-callback-worker", "flux-llm-kb-outbox-relay")
     }
     if ($SkipWorkerStart) {
-        $services = @($services | Where-Object { $_ -ne "worker" })
-        $containers = @($containers | Where-Object { $_ -ne "flux-llm-kb-worker" })
-        $recoverableContainers = @($recoverableContainers | Where-Object { $_ -ne "flux-llm-kb-worker" })
+        $services = @($services | Where-Object { $commandWorkerServices -notcontains $_ })
+        $containers = @($containers | Where-Object { $commandWorkerContainers -notcontains $_ })
+        $recoverableContainers = @($recoverableContainers | Where-Object { $commandWorkerContainers -notcontains $_ })
     }
     Invoke-FluxDockerComposeServicesUp `
         -AppRoot $AppRoot `

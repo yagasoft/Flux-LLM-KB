@@ -79,6 +79,25 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap"
 
+  outlook-worker:
+    build:
+      context: .
+    container_name: flux-llm-kb-outlook-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      FLUX_KB_DATABASE_URL: postgresql://flux:flux@postgres:5432/flux_llm_kb
+      FLUX_KB_RABBITMQ_URL: amqp://flux:flux@rabbitmq:5672/flux
+      FLUX_KB_RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+    volumes:
+      - ./private:/app/private
+    command: >
+      sh -c "python -m flux_llm_kb.cli migrate &&
+             python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook"
+
   automation-worker:
     build:
       context: .

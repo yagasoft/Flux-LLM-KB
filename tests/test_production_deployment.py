@@ -98,7 +98,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "flux-llm-kb-api:" in update
     assert '"up", "-d", "--no-build"' in update
     assert '"postgres", "rabbitmq", "vespa"' in update
-    assert '"paddle-runner", "model-runner", "api", "worker", "event-scheduler", "callback-worker", "outbox-relay"' in update
+    assert '"worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker"' in update
     assert "FLUX_KB_IMAGE_TAG" in update
     assert "FLUX_KB_CALLBACK_SIGNING_SECRET=$callbackSecret" in update
     assert "private\\flux.env" in update
@@ -548,6 +548,12 @@ def test_worker_compose_commands_use_settings_driven_parallelism_defaults():
 
     for compose in (dev_compose, install_compose, update_compose):
         assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus" in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.search_index" in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap" in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook" in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.automation" in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.governance" in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control" in compose
         assert "python -m flux_llm_kb.cli event outbox relay --interval 1 --limit 100" in compose
         assert "python -m flux_llm_kb.cli event scheduler run --interval 30 --limit 25" in compose
         assert "python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch" in compose
@@ -647,8 +653,8 @@ def test_production_update_can_keep_worker_paused_during_model_cutover():
     assert "Stop-FluxWorkerContainer" in update
     assert 'docker ps --filter "name=^/flux-llm-kb-worker$"' in update
     assert 'docker stop -t 45 flux-llm-kb-worker' in update
-    assert 'Where-Object { $_ -ne "worker" }' in update
-    assert 'Where-Object { $_ -ne "flux-llm-kb-worker" }' in update
+    assert '$commandWorkerServices -notcontains $_' in update
+    assert '$commandWorkerContainers -notcontains $_' in update
     assert "Invoke-FluxDockerComposeUp" in update
     assert "-SkipWorkerStart ([bool]$SkipWorkerStart)" in update
     assert "if ($SkipWorkerStart) {" in update
