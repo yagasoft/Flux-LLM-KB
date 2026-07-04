@@ -5225,6 +5225,59 @@ def test_recover_stale_running_corpus_jobs_uses_progress_heartbeat_and_worker_li
     assert "status = 'pending'" in sql
 
 
+def test_recover_stale_model_activity_events_marks_only_stale_running_rows(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            return (3,)
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setenv(database.MODEL_ACTIVITY_TEST_WRITE_OPT_IN_ENV, "1")
+    monkeypatch.setenv(database.MODEL_ACTIVITY_TEST_DATABASE_URL_ENV, "postgresql://activity-test")
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.recover_stale_model_activity_events(stale_after_seconds=360, url="postgresql://activity-test")
+
+    sql = "\n".join(statement for statement, _params in executed)
+    params = executed[0][1]
+    assert result == {"recovered": 3}
+    assert "status = 'stale_running'" in sql
+    assert "completed_at = COALESCE(completed_at, now())" in sql
+    assert "duration_ms = COALESCE(" in sql
+    assert "error_class = COALESCE(error_class, 'ModelActivityStale')" in sql
+    assert "stale_running_recovered" in sql
+    assert "WHERE status = 'running'" in sql
+    assert "completed_at IS NULL" in sql
+    assert "started_at < now() - (%s * interval '1 second')" in sql
+    assert params[-1] == 360
+    assert database._sanitize_model_activity_metadata(
+        {"stale_running_recovered": True, "unsafe_path": "E:/Private/file.txt"}
+    ) == {"stale_running_recovered": True}
+
+
 def test_persist_crawl_plan_reports_progress_in_dry_run(tmp_path):
     events = []
     plan = CrawlPlan(root_path=tmp_path, assets=[], deferred_jobs=[], errors=[])

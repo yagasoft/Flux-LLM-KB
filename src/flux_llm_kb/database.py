@@ -15969,6 +15969,7 @@ _MODEL_ACTIVITY_METADATA_KEYS = {
     "quantization",
     "resident",
     "route",
+    "stale_running_recovered",
     "task_type",
 }
 MODEL_ACTIVITY_TEST_DATABASE_URL_ENV = "FLUX_KB_TEST_DATABASE_URL"
@@ -16164,6 +16165,44 @@ def count_model_activity_events(
             )
             row = cur.fetchone()
             return int(row[0] or 0) if row else 0
+
+
+def recover_stale_model_activity_events(*, stale_after_seconds: int | float, url: str | None = None) -> dict[str, int]:
+    safe_stale_after = max(1, int(float(stale_after_seconds or 0)))
+    target_url = _model_activity_write_url(url)
+    _guard_model_activity_test_write(target_url)
+    psycopg = _load_psycopg()
+    message = _model_activity_text(
+        "Model activity exceeded the stale threshold without a finish update.",
+        max_length=300,
+    )
+    with psycopg.connect(target_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH recovered AS (
+                    UPDATE model_activity_events
+                       SET status = 'stale_running',
+                           completed_at = COALESCE(completed_at, now()),
+                           duration_ms = COALESCE(
+                               duration_ms,
+                               GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (now() - started_at)) * 1000))::integer
+                           ),
+                           error_class = COALESCE(error_class, 'ModelActivityStale'),
+                           error_message = COALESCE(error_message, %s),
+                           metadata = COALESCE(metadata, '{}'::jsonb)
+                               || jsonb_build_object('stale_running_recovered', true)
+                     WHERE status = 'running'
+                       AND completed_at IS NULL
+                       AND started_at < now() - (%s * interval '1 second')
+                     RETURNING 1
+                )
+                SELECT count(*) FROM recovered
+                """,
+                (message, safe_stale_after),
+            )
+            row = cur.fetchone()
+    return {"recovered": int(row[0] or 0) if row else 0}
 
 
 def prune_model_activity_events(*, retention_hours: int = 24, url: str | None = None) -> None:

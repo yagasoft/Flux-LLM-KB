@@ -3170,7 +3170,7 @@ function ModelActivityPanel({
   ] as [string, string, string]);
   const eventRows = visibleEvents.slice(0, 8).map((event) => [
     event.endpoint ?? event.action ?? "model activity",
-    `${event.service ?? "service"} / ${humanizeIdentifier(event.status ?? "observed")}`,
+    `${event.service ?? "service"} / ${statusLabel(event.status ?? "observed")}`,
     modelActivityEventDetail(event),
     modelActivityEventTiming(event)
   ] as [string, string, string, string]);
@@ -6558,7 +6558,8 @@ const STATUS_LABELS: Record<string, string> = {
   blocked_by_policy: "Blocked by policy",
   blocked_invalid_source: "Invalid source",
   blocked_missing_dependency: "Missing dependency",
-  obsolete: "Obsolete"
+  obsolete: "Obsolete",
+  stale_running: "Stale"
 };
 
 function statusLabel(value: string) {

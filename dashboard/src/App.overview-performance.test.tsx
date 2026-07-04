@@ -203,6 +203,48 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).queryByText("worker failure")).not.toBeInTheDocument();
   });
 
+  test("performance labels stale model activity without active work", async () => {
+    const user = userEvent.setup();
+    state.modelActivityPayload = {
+      ...state.modelActivityPayload,
+      recent_count: 1,
+      active_count: 0,
+      service_breakdown: [
+        { service: "model-runner", count: 1, active: 0, failures: 0 }
+      ],
+      class_breakdown: [
+        { activity_class: "retrieval", count: 1 }
+      ],
+      events: [
+        {
+          id: "event-stale-rerank",
+          service: "model-runner",
+          endpoint: "/v1/rerank",
+          action: "rerank",
+          activity_class: "retrieval",
+          caller_surface: "mcp",
+          model: "Qwen/Qwen3-Reranker-4B",
+          status: "stale_running",
+          started_at: "2026-07-03T01:00:00+00:00",
+          completed_at: "2026-07-03T01:30:00+00:00",
+          duration_ms: 1800000,
+          error_class: "ModelActivityStale",
+          error_message: "Model activity exceeded the stale threshold without a finish update."
+        }
+      ]
+    };
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Performance" }));
+
+    const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("1 recent / 0 active")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("model-runner / Stale")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).queryByText("model-runner / Stale Running")).not.toBeInTheDocument();
+  });
+
   test("performance hides control-plane health events from model activity", async () => {
     const user = userEvent.setup();
     state.modelActivityPayload = {

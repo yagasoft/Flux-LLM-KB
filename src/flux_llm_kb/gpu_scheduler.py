@@ -1206,10 +1206,8 @@ def task_profile(
         "ollama_vision": "gpu.scheduler.ollama_vision_vram_mb",
     }.get(normalized)
     estimate = int(values.get(estimate_key or "", values["gpu.scheduler.vram_budget_mb"]) or 0)
-    if exclusive is None:
-        exclusive = normalized != "embedding"
-    if share_group is None:
-        share_group = normalized if not exclusive else ""
+    exclusive = True
+    share_group = ""
     return GpuTaskProfile(
         task_type=normalized,
         model_id=model_id,

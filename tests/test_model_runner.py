@@ -1201,7 +1201,7 @@ def test_cached_embedding_refreshes_residency_before_requesting_lease(monkeypatc
             events.append(("resident", (residency.task_type, residency.model_id, residency.resident)))
 
         def acquire(self, profile):
-            events.append(("acquire", profile.model_id))
+            events.append(("acquire", (profile.model_id, profile.exclusive, profile.share_group)))
             return FakeLease()
 
     model_runner._EMBEDDING_MODELS.clear()
@@ -1213,7 +1213,7 @@ def test_cached_embedding_refreshes_residency_before_requesting_lease(monkeypatc
     assert vectors == [[1.0, 2.0]]
     assert events[:2] == [
         ("resident", ("embedding", "Snowflake/cached", True)),
-        ("acquire", "Snowflake/cached"),
+        ("acquire", ("Snowflake/cached", True, "")),
     ]
 
 

@@ -531,7 +531,7 @@ def _embed_with_sentence_transformers(texts: list[str], *, model: str, dimension
         return []
     if model in _EMBEDDING_MODELS:
         _record_model_residency_state("embedding", model, resident=True)
-    profile = task_profile("embedding", model_id=model, component=_scheduler_component(), exclusive=False, share_group="embedding")
+    profile = task_profile("embedding", model_id=model, component=_scheduler_component())
     with get_gpu_scheduler().acquire(profile):
         encoder = _load_embedding_model(model)
         with _named_lock(_EMBEDDING_ENCODE_LOCKS, model):

@@ -36,7 +36,8 @@ MAX_WINDOW_MINUTES = 360
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 RETENTION_HOURS = 24
-STALE_RUNNING_AFTER_MINUTES = 60
+MODEL_ACTIVITY_STALE_FLOOR_SECONDS = 5 * 60
+DEFAULT_GPU_SCHEDULER_STALE_AFTER_SECONDS = 180.0
 
 _CALLER_SURFACE: ContextVar[str] = ContextVar("flux_model_activity_caller_surface", default="")
 _PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|/)[^\s,;]+")
@@ -103,8 +104,13 @@ def collect_model_activity_payload(
     safe_window = bounded_window_minutes(window_minutes)
     safe_limit = bounded_limit(limit)
     safe_offset = bounded_offset(offset)
+    stale_after_seconds = _model_activity_stale_after_seconds()
     try:
         database.prune_model_activity_events(retention_hours=RETENTION_HOURS)
+    except Exception:
+        pass
+    try:
+        database.recover_stale_model_activity_events(stale_after_seconds=stale_after_seconds)
     except Exception:
         pass
     try:
@@ -126,7 +132,11 @@ def collect_model_activity_payload(
     except Exception:
         total_count = safe_offset + len(rows)
     now = _utc_now()
-    events = sorted([_event_payload(row, now=now) for row in rows], key=_event_sort_key, reverse=True)
+    events = sorted(
+        [_event_payload(row, now=now, stale_after_seconds=stale_after_seconds) for row in rows],
+        key=_event_sort_key,
+        reverse=True,
+    )
     if not include_control_plane:
         events = [
             item
@@ -233,11 +243,11 @@ def _safe_finish_event(
         pass
 
 
-def _event_payload(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+def _event_payload(row: dict[str, Any], *, now: datetime, stale_after_seconds: int) -> dict[str, Any]:
     started = _coerce_datetime(row.get("started_at"))
     completed = _coerce_datetime(row.get("completed_at"))
     status = _safe_status(row.get("status"))
-    if status == "running" and started and started < now - timedelta(minutes=STALE_RUNNING_AFTER_MINUTES):
+    if status == "running" and started and (now - started).total_seconds() > stale_after_seconds:
         status = "stale_running"
     return {
         "id": str(row.get("id") or ""),
@@ -255,6 +265,18 @@ def _event_payload(row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         "error_message": _sanitize_error_message(row.get("error_message")) if row.get("error_message") else None,
         "metadata": sanitize_metadata(row.get("metadata") if isinstance(row.get("metadata"), dict) else {}),
     }
+
+
+def _model_activity_stale_after_seconds() -> int:
+    scheduler_stale = DEFAULT_GPU_SCHEDULER_STALE_AFTER_SECONDS
+    try:
+        scheduler = get_gpu_scheduler()
+        config = getattr(scheduler, "config", None)
+        if config is not None:
+            scheduler_stale = float(getattr(config, "stale_after_seconds", scheduler_stale) or scheduler_stale)
+    except Exception:
+        pass
+    return int(max(MODEL_ACTIVITY_STALE_FLOOR_SECONDS, scheduler_stale * 2))
 
 
 def _event_sort_key(event: dict[str, Any]) -> tuple[str, str, str]:

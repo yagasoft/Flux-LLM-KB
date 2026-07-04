@@ -293,7 +293,7 @@ def test_collect_model_activity_payload_summarizes_events_and_scheduler(monkeypa
             "caller_surface": "mcp",
             "model": "Qwen/Qwen3-Reranker-4B",
             "status": "running",
-            "started_at": now - timedelta(minutes=10),
+            "started_at": now - timedelta(minutes=1),
             "completed_at": None,
             "duration_ms": None,
             "error_class": None,
@@ -383,6 +383,66 @@ def test_collect_model_activity_payload_summarizes_events_and_scheduler(monkeypa
         }
     ]
     assert payload["scheduler"]["live_gpu_memory"] == {"available": True, "used_mb": 8120, "total_mb": 16380}
+
+
+def test_collect_model_activity_payload_recovers_stale_running_before_listing(monkeypatch):
+    now = datetime(2026, 7, 3, 1, 30, tzinfo=UTC)
+    calls: list[tuple[str, object | None]] = []
+
+    class FakeScheduler:
+        config = SimpleNamespace(stale_after_seconds=180)
+
+        def status(self):
+            return {"enabled": True, "mode": "postgres"}
+
+    def fake_recover(**kwargs):
+        calls.append(("recover", kwargs["stale_after_seconds"]))
+        return {"recovered": 1}
+
+    def fake_list(**kwargs):
+        calls.append(("list", kwargs))
+        return []
+
+    monkeypatch.setattr(model_activity, "_utc_now", lambda: now)
+    monkeypatch.setattr(model_activity, "get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: calls.append(("prune", None)), raising=False)
+    monkeypatch.setattr(model_activity.database, "recover_stale_model_activity_events", fake_recover, raising=False)
+    monkeypatch.setattr(model_activity.database, "list_model_activity_events", fake_list, raising=False)
+    monkeypatch.setattr(model_activity.database, "count_model_activity_events", lambda **_kwargs: 0, raising=False)
+
+    payload = model_activity.collect_model_activity_payload(window_minutes=60, limit=50)
+
+    assert payload["active_count"] == 0
+    assert calls[:3] == [
+        ("prune", None),
+        ("recover", 360),
+        ("list", {"window_minutes": 60, "limit": 50, "offset": 0, "include_control_plane": False}),
+    ]
+
+
+def test_collect_model_activity_payload_stale_recovery_uses_five_minute_floor(monkeypatch):
+    calls: list[int] = []
+
+    class FakeScheduler:
+        config = SimpleNamespace(stale_after_seconds=60)
+
+        def status(self):
+            return {"enabled": True, "mode": "in_process"}
+
+    monkeypatch.setattr(model_activity, "get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(
+        model_activity.database,
+        "recover_stale_model_activity_events",
+        lambda **kwargs: calls.append(kwargs["stale_after_seconds"]) or {"recovered": 0},
+        raising=False,
+    )
+    monkeypatch.setattr(model_activity.database, "list_model_activity_events", lambda **_kwargs: [], raising=False)
+    monkeypatch.setattr(model_activity.database, "count_model_activity_events", lambda **_kwargs: 0, raising=False)
+
+    model_activity.collect_model_activity_payload()
+
+    assert calls == [300]
 
 
 def test_collect_model_activity_payload_hides_control_plane_by_default(monkeypatch):
@@ -502,6 +562,12 @@ def test_collect_model_activity_payload_classifies_stale_running_events(monkeypa
     now = datetime(2026, 7, 3, 1, 30, tzinfo=UTC)
     monkeypatch.setattr(model_activity, "_utc_now", lambda: now)
     monkeypatch.setattr(model_activity.database, "prune_model_activity_events", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(
+        model_activity.database,
+        "recover_stale_model_activity_events",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("recovery unavailable")),
+        raising=False,
+    )
     monkeypatch.setattr(
         model_activity.database,
         "list_model_activity_events",

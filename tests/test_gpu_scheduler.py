@@ -18,6 +18,7 @@ from flux_llm_kb.gpu_scheduler import (
     PostgresGpuScheduler,
     plan_gpu_admission,
     select_gpu_eviction_candidates,
+    task_profile,
 )
 
 
@@ -127,6 +128,13 @@ def test_admission_allows_same_share_group_within_budget():
 
     assert decision.granted is True
     assert decision.reason == "granted"
+
+
+def test_task_profile_makes_embedding_exclusive_by_default():
+    profile = task_profile("embedding", model_id="snowflake")
+
+    assert profile.exclusive is True
+    assert profile.share_group == ""
 
 
 def test_admission_rejects_when_profile_exceeds_available_vram():
@@ -545,6 +553,16 @@ def test_in_process_scheduler_times_out_waiting_for_exclusive_work():
             scheduler.acquire(waiting)
 
     assert exc_info.value.retry_after_seconds > 0
+
+
+def test_in_process_scheduler_serializes_default_embedding_work():
+    scheduler = InProcessGpuScheduler(_config(default_timeout_seconds=0.02))
+    held = task_profile("embedding", model_id="snowflake", timeout_seconds=0.02)
+    waiting = task_profile("embedding", model_id="snowflake", timeout_seconds=0.02)
+
+    with scheduler.acquire(held):
+        with pytest.raises(GpuLeaseTimeout):
+            scheduler.acquire(waiting)
 
 
 def test_in_process_scheduler_grants_waiting_work_after_release():
