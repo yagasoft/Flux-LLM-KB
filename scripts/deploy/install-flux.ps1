@@ -557,6 +557,8 @@ services:
     restart: unless-stopped
     mem_limit: "5gb"
     memswap_limit: "5gb"
+    environment:
+      VESPA_CONFIGSERVER_JVMARGS: "-Xms128m -Xmx512m"
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

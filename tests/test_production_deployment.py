@@ -246,6 +246,19 @@ def test_production_compose_sets_hard_container_memory_budget():
         assert total_gb == 40
 
 
+def test_production_compose_sets_vespa_configserver_jvm_budget():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        compose = _embedded_compose_template(_script(script_name))
+        vespa_block = _compose_service_blocks(compose)["vespa"]
+
+        assert 'VESPA_CONFIGSERVER_JVMARGS: "-Xms128m -Xmx512m"' in vespa_block
+        assert "VESPA_CONFIGPROXY_JVMARGS" not in vespa_block
+        assert "JAVA_TOOL_OPTIONS" not in vespa_block
+        assert "VESPA_CONTAINER_JVMARGS" not in vespa_block
+        assert "-Xms1024m" not in vespa_block
+        assert "-Xmx1024m" not in vespa_block
+
+
 def test_production_status_reports_all_container_memory_limits():
     status = _script("status-flux.ps1")
 

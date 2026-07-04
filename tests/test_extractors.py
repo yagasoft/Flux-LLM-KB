@@ -42,6 +42,11 @@ ONE_PIXEL_PNG_BYTES = base64.b64decode(
 )
 
 
+def _disable_configured_model_runner(monkeypatch):
+    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr("flux_llm_kb.model_runner.configured_model_runner_base_url", lambda: "")
+
+
 def _zip_payload(entries: dict[str, str | bytes]) -> bytes:
     buffer = BytesIO()
     with ZipFile(buffer, "w") as archive:
@@ -1142,7 +1147,7 @@ def test_run_paddleocr_image_configures_onnxruntime_before_importing_paddleocr(m
                 return FakePaddleOCR
             raise AttributeError(name)
 
-    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    _disable_configured_model_runner(monkeypatch)
     monkeypatch.setattr(extractors, "configure_onnxruntime_logging", lambda: events.append("configure-ort"), raising=False)
     monkeypatch.setitem(sys.modules, "paddleocr", FakePaddleOCRModule("paddleocr"))
 
@@ -1187,7 +1192,7 @@ def test_direct_worker_paddleocr_image_records_safe_activity(monkeypatch, tmp_pa
         def predict(self, _path):
             return [{"text": "worker OCR text"}]
 
-    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    _disable_configured_model_runner(monkeypatch)
     monkeypatch.setattr(extractors, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
     monkeypatch.setattr("flux_llm_kb.gpu_scheduler.get_gpu_scheduler", lambda: FakeScheduler())
     monkeypatch.setitem(sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=FakePaddleOCR))
@@ -1224,7 +1229,7 @@ def test_direct_worker_paddleocr_vl_document_records_safe_activity(monkeypatch, 
         def __exit__(self, *_args):
             return False
 
-    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    _disable_configured_model_runner(monkeypatch)
     monkeypatch.setattr("flux_llm_kb.model_runner._ocr_document_with_paddle", lambda _path, **_kwargs: "document OCR text")
     monkeypatch.setattr(extractors, "record_model_activity", lambda **kwargs: FakeRecorder(**kwargs), raising=False)
 
@@ -1314,7 +1319,7 @@ def test_pdf_ocr_pages_routes_paddleocr_vl_through_document_pipeline(monkeypatch
     path = tmp_path / "scan.pdf"
     path.write_bytes(b"%PDF scanned")
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
-    monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
+    _disable_configured_model_runner(monkeypatch)
     monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
     monkeypatch.setattr(
         "flux_llm_kb.extractors.shutil.which",
