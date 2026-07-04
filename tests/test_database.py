@@ -7423,15 +7423,16 @@ def test_review_capture_job_conflicts_when_job_is_not_pending(monkeypatch):
         )
 
 
-def test_service_ingests_approved_codex_backfill_with_redaction_and_provenance(monkeypatch, tmp_path):
+def test_service_ingests_approved_codex_backfill_with_personal_text_and_provenance(monkeypatch, tmp_path):
     from flux_llm_kb.service import KnowledgeService
 
     source = tmp_path / "turn.json"
+    sensitive_assignment = "password" + "=sample"
     source.write_text(
         json.dumps(
             {
                 "title": "Session decision",
-                "body": "Use PostgreSQL for durable storage. password=secret",
+                "body": f"Use PostgreSQL for durable storage. {sensitive_assignment}",
                 "session_id": "session-1",
                 "turn_id": "turn-1",
                 "cwd": "E:\\LLM KB",
@@ -7485,7 +7486,7 @@ def test_service_ingests_approved_codex_backfill_with_redaction_and_provenance(m
     assert result["ingested"] == 1
     assert result["settings_mutated"] is False
     assert inserted[0]["title"] == "Session decision"
-    assert inserted[0]["summary"] == "Use PostgreSQL for durable storage. password=[REDACTED:password_assignment]"
+    assert inserted[0]["summary"] == f"Use PostgreSQL for durable storage. {sensitive_assignment}"
     metadata = inserted[0]["metadata"]
     assert metadata["source"] == "codex_backfill"
     assert metadata["capture_review_job_id"] == "job-1"
@@ -7493,7 +7494,7 @@ def test_service_ingests_approved_codex_backfill_with_redaction_and_provenance(m
     assert metadata["source_leaf"] == "turn.json"
     assert metadata["session_id"] == "session-1"
     assert metadata["turn_id"] == "turn-1"
-    assert metadata["redactions"] == ["password_assignment"]
+    assert metadata["redactions"] == []
     assert updates[0]["status"] == "completed"
     assert updates[0]["ingestion"]["episode_ids"] == ["episode-1"]
     assert updates[0]["ingestion"]["status"] == "ingested"

@@ -124,9 +124,35 @@ def test_non_resident_gpu_model_does_not_record_model_loading_activity(monkeypat
     assert started == []
 
 
-def test_record_model_activity_marks_busy_and_redacts_errors(monkeypatch):
+def test_record_model_activity_marks_busy_and_keeps_errors_when_redactions_disabled(monkeypatch):
     finished: list[dict[str, object]] = []
-    busy_error = type("ModelRunnerBusy", (RuntimeError,), {})("scheduler busy for E:/Private/report.pdf password=secret")
+    monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
+    busy_error = type("ModelRunnerBusy", (RuntimeError,), {})(
+        "scheduler busy for E:/Docs/report.pdf " + "password" + "=sample"
+    )
+
+    monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **_kwargs: "event-busy", raising=False)
+    monkeypatch.setattr(model_activity.database, "finish_model_activity_event", lambda **kwargs: finished.append(kwargs), raising=False)
+
+    try:
+        with model_activity.record_model_activity(service="model-runner", endpoint="/v1/embeddings", action="embedding", activity_class="retrieval"):
+            raise busy_error
+    except RuntimeError:
+        pass
+
+    assert finished[0]["status"] == "busy"
+    assert finished[0]["error_class"] == "ModelRunnerBusy"
+    message = str(finished[0]["error_message"])
+    assert ("password" + "=sample") in message
+    assert "E:/Docs/report.pdf" in message
+
+
+def test_record_model_activity_redacts_errors_when_enabled(monkeypatch):
+    finished: list[dict[str, object]] = []
+    monkeypatch.setenv("FLUX_KB_REDACTIONS_ENABLED", "true")
+    busy_error = type("ModelRunnerBusy", (RuntimeError,), {})(
+        "scheduler busy for E:/Docs/report.pdf " + "password" + "=sample"
+    )
 
     monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **_kwargs: "event-busy", raising=False)
     monkeypatch.setattr(model_activity.database, "finish_model_activity_event", lambda **kwargs: finished.append(kwargs), raising=False)
@@ -141,7 +167,7 @@ def test_record_model_activity_marks_busy_and_redacts_errors(monkeypatch):
     assert finished[0]["error_class"] == "ModelRunnerBusy"
     message = str(finished[0]["error_message"])
     assert "password" not in message.lower()
-    assert "E:/Private" not in message
+    assert "E:/Docs" not in message
 
 
 def test_record_model_activity_marks_scheduler_rejections_busy(monkeypatch):
@@ -162,6 +188,7 @@ def test_record_model_activity_marks_scheduler_rejections_busy(monkeypatch):
 
 def test_record_model_activity_marks_paddle_dependency_errors_blocked(monkeypatch):
     finished: list[dict[str, object]] = []
+    monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
 
     class DependencyError(RuntimeError):
         pass
@@ -171,7 +198,7 @@ def test_record_model_activity_marks_paddle_dependency_errors_blocked(monkeypatc
 
     try:
         with model_activity.record_model_activity(service="worker", endpoint="/v1/ocr/document", action="ocr_document", activity_class="vision_ocr"):
-            raise DependencyError("PaddleOCR-VL dependency missing for E:/Private/report.pdf token=secret")
+            raise DependencyError("PaddleOCR-VL dependency missing for E:/Docs/report.pdf " + "token" + "=sample")
     except DependencyError:
         pass
 
@@ -179,8 +206,8 @@ def test_record_model_activity_marks_paddle_dependency_errors_blocked(monkeypatc
     assert finished[0]["error_class"] == "DependencyError"
     message = str(finished[0]["error_message"])
     assert "PaddleOCR-VL dependency missing" in message
-    assert "E:/Private" not in message
-    assert "secret" not in message.lower()
+    assert "E:/Docs/report.pdf" in message
+    assert ("token" + "=sample") in message
 
 
 def test_record_model_activity_is_best_effort_when_database_fails(monkeypatch):

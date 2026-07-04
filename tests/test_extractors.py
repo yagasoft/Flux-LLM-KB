@@ -42,6 +42,10 @@ ONE_PIXEL_PNG_BYTES = base64.b64decode(
 )
 
 
+def _synthetic_api_key() -> str:
+    return "sk-" + ("b" * 24)
+
+
 def _disable_configured_model_runner(monkeypatch):
     monkeypatch.delenv("FLUX_KB_MODEL_RUNNER_BASE_URL", raising=False)
     monkeypatch.setattr("flux_llm_kb.model_runner.configured_model_runner_base_url", lambda: "")
@@ -752,7 +756,7 @@ def test_extract_media_runs_local_asr_and_reuses_redacted_cache(monkeypatch, tmp
                     SimpleNamespace(
                         start=0.0,
                         end=1.25,
-                        text="Project recap mentions sk-12345678901234567890",
+                        text=f"Project recap mentions {_synthetic_api_key()}",
                     )
                 ],
                 SimpleNamespace(language="en"),
@@ -765,7 +769,7 @@ def test_extract_media_runs_local_asr_and_reuses_redacted_cache(monkeypatch, tmp
 
     assert first.status == "indexed"
     assert first.chunks[0].modality == "transcript"
-    assert first.chunks[0].body == "Project recap mentions [REDACTED:openai_api_key]"
+    assert first.chunks[0].body == f"Project recap mentions {_synthetic_api_key()}"
     assert first.metadata["asr"]["status"] == "completed"
     assert first.metadata["asr"]["engine"] == "faster_whisper"
     assert first.metadata["asr"]["cache_hits"] == 0
@@ -842,7 +846,11 @@ def test_extract_media_uses_openai_compatible_asr_provider(monkeypatch, tmp_path
 
     class FakeResponse:
         def read(self, _limit=-1):
-            return b'{"text":"Meeting mentions sk-12345678901234567890","segments":[{"start":0.0,"end":1.0,"text":"Meeting"}]}'
+            return (
+                '{"text":"Meeting mentions '
+                + _synthetic_api_key()
+                + '","segments":[{"start":0.0,"end":1.0,"text":"Meeting"}]}'
+            ).encode("utf-8")
 
     def fake_urlopen(request, **_kwargs):
         calls["http"] += 1
@@ -861,7 +869,7 @@ def test_extract_media_uses_openai_compatible_asr_provider(monkeypatch, tmp_path
 
     assert result.status == "indexed"
     assert result.chunks[0].modality == "transcript"
-    assert result.chunks[0].body == "Meeting mentions [REDACTED:openai_api_key]"
+    assert result.chunks[0].body == f"Meeting mentions {_synthetic_api_key()}"
     assert result.metadata["asr"]["engine"] == "openai_compatible_asr"
     assert result.metadata["asr"]["provider"] == "openai_compatible"
     assert result.metadata["asr"]["model"] == "large-v3-turbo"
@@ -1113,7 +1121,7 @@ def test_extract_paddleocr_vl_dependency_error_blocks_missing_dependency(monkeyp
         "flux_llm_kb.extractors._run_paddleocr_document",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             DependencyError(
-                "`PaddleOCR-VL` requires additional dependencies for E:/Private/report.pdf. "
+                "`PaddleOCR-VL` requires additional dependencies for E:/Docs/report.pdf. "
                 'Run pip install "paddlex[ocr]".'
             )
         ),
@@ -1125,7 +1133,7 @@ def test_extract_paddleocr_vl_dependency_error_blocks_missing_dependency(monkeyp
     assert result.metadata["status"] == "blocked_missing_dependency"
     assert result.metadata["model"] == "PaddleOCR-VL"
     assert "PaddleOCR-VL" in str(result.message)
-    assert "E:/Private" not in str(result.message)
+    assert "E:/Docs/report.pdf" in str(result.message)
 
 
 def test_run_paddleocr_image_configures_onnxruntime_before_importing_paddleocr(monkeypatch, tmp_path):
@@ -1606,7 +1614,7 @@ def test_extract_image_uses_local_vision_when_ocr_is_missing_and_reuses_cache(mo
 
     class FakeResponse:
         def read(self, _limit=-1):
-            return b'{"response":"Diagram mentions sk-12345678901234567890 and system context"}'
+            return ('{"response":"Diagram mentions ' + _synthetic_api_key() + ' and system context"}').encode("utf-8")
 
     def fake_urlopen(request, **_kwargs):
         calls["vision"] += 1
@@ -1621,7 +1629,7 @@ def test_extract_image_uses_local_vision_when_ocr_is_missing_and_reuses_cache(mo
 
     assert first.status == "indexed"
     assert first.chunks[0].modality == "vision"
-    assert first.chunks[0].body == "Diagram mentions [REDACTED:openai_api_key] and system context"
+    assert first.chunks[0].body == f"Diagram mentions {_synthetic_api_key()} and system context"
     assert first.metadata["ocr"]["status"] == "blocked_missing_dependency"
     assert first.metadata["vision"]["status"] == "completed"
     assert first.metadata["vision"]["cache_hits"] == 0
@@ -2055,6 +2063,26 @@ def test_extract_image_blocks_paddleocr_timeout_without_retryable_failure(monkey
     assert "timed out" in result.message
     assert result.metadata["ocr"]["status"] == "blocked_timeout"
     assert result.metadata["ocr"]["engine"] == "paddleocr"
+
+
+def test_paddle_ocr_missing_dependency_message_keeps_path_when_redactions_disabled(monkeypatch):
+    monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
+    path = "E:/Docs/scan.png"
+
+    message = extractors._paddle_ocr_missing_dependency_message(ImportError(f"paddlex[ocr] failed for {path}"))
+
+    assert path in message
+    assert "[REDACTED:path]" not in message
+
+
+def test_paddle_ocr_missing_dependency_message_redacts_path_when_enabled(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_REDACTIONS_ENABLED", "true")
+    path = "E:/Docs/scan.png"
+
+    message = extractors._paddle_ocr_missing_dependency_message(ImportError(f"paddlex[ocr] failed for {path}"))
+
+    assert path not in message
+    assert "[REDACTED:path]" in message
 
 
 def test_extract_image_writes_and_reuses_redacted_ocr_cache(monkeypatch, tmp_path):

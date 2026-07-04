@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import re
 from typing import Pattern
 
@@ -30,6 +31,9 @@ _RULES = [
 
 def redact_text(text: str) -> tuple[str, list[RedactionFinding]]:
     """Redact common secrets before persistence."""
+    if not redactions_enabled():
+        return text, []
+
     findings: list[RedactionFinding] = []
     redacted = text
 
@@ -37,6 +41,22 @@ def redact_text(text: str) -> tuple[str, list[RedactionFinding]]:
         redacted = _apply_rule(redacted, rule, findings)
 
     return redacted, findings
+
+
+def redactions_enabled() -> bool:
+    env_value = os.environ.get("FLUX_KB_REDACTIONS_ENABLED")
+    if env_value is not None:
+        return _bool_from_text(env_value)
+    try:
+        from .settings import SettingsService
+
+        return bool(SettingsService().resolve("privacy.redactions.enabled").raw_value)
+    except Exception:
+        return False
+
+
+def _bool_from_text(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _apply_rule(text: str, rule: _Rule, findings: list[RedactionFinding]) -> str:

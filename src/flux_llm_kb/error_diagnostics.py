@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from .redaction import redactions_enabled
+
 
 Severity = str
 
@@ -125,10 +127,14 @@ def validation_error_envelope(errors: list[dict[str, Any]]) -> dict[str, Any]:
 def redact_secrets(value: str | None) -> str | None:
     if value is None:
         return None
+    if not redactions_enabled():
+        return str(value)
     return _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}***", str(value))
 
 
 def redact_secret_values(value: dict[str, Any]) -> dict[str, Any]:
+    if not redactions_enabled():
+        return dict(value)
     cleaned: dict[str, Any] = {}
     for key, item in value.items():
         key_text = str(key)

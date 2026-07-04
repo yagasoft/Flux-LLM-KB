@@ -1,6 +1,8 @@
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from flux_llm_kb import database, health
 from flux_llm_kb.health import (
     build_dashboard_html,
@@ -120,7 +122,30 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["acceleration"]["worker_families"][0]["ocr_cache_misses"] == 2
 
 
-def test_collect_dashboard_payload_blocks_when_required_host_database_path_fails(monkeypatch):
+@pytest.mark.parametrize(
+    ("redactions_enabled", "expected_target", "expected_probe", "raw_visible"),
+    [
+        (
+            False,
+            "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb",
+            "postgresql://flux:flux@host.docker.internal:5432/flux_llm_kb",
+            True,
+        ),
+        (
+            True,
+            "postgresql://flux:***@127.0.0.1:5432/flux_llm_kb",
+            "postgresql://flux:***@host.docker.internal:5432/flux_llm_kb",
+            False,
+        ),
+    ],
+)
+def test_collect_dashboard_payload_blocks_when_required_host_database_path_fails(
+    monkeypatch, redactions_enabled, expected_target, expected_probe, raw_visible
+):
+    if redactions_enabled:
+        monkeypatch.setenv("FLUX_KB_REDACTIONS_ENABLED", "true")
+    else:
+        monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
     monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "/app")
     monkeypatch.setenv("FLUX_KB_DATABASE_URL", "postgresql://flux:flux@postgres:5432/flux_llm_kb")
     monkeypatch.setenv("FLUX_KB_HOST_DATABASE_URL", "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb")
@@ -174,10 +199,10 @@ def test_collect_dashboard_payload_blocks_when_required_host_database_path_fails
     assert payload["database"]["ok"] is False
     assert payload["database"]["checks"]["service"]["ok"] is True
     assert payload["database"]["checks"]["host_published"]["ok"] is False
-    assert payload["database"]["checks"]["host_published"]["target"] == "postgresql://flux:***@127.0.0.1:5432/flux_llm_kb"
-    assert payload["database"]["checks"]["host_published"]["probe_target"] == "postgresql://flux:***@host.docker.internal:5432/flux_llm_kb"
-    assert "flux:flux" not in str(payload["database"])
-    assert "password flux" not in str(payload["database"])
+    assert payload["database"]["checks"]["host_published"]["target"] == expected_target
+    assert payload["database"]["checks"]["host_published"]["probe_target"] == expected_probe
+    assert ("flux:flux" in str(payload["database"])) is raw_visible
+    assert ("password flux" in str(payload["database"])) is raw_visible
     assert "postgresql://flux:flux@host.docker.internal:5432/flux_llm_kb" in checked_urls
     assert any(item["code"] == "database.host_published_unreachable" for item in payload["recent_error_details"])
 

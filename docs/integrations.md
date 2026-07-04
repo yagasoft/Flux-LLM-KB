@@ -19,8 +19,8 @@ Tools:
 | `kb.search` | Search Flux memory and corpus evidence, optionally scoped and filtered by workspace/root, evidence kind, lifecycle, or current-state policy, with optional confidence/deprioritization explanation metadata. |
 | `kb.explain` | Search with query-aware snippets, ranking signals, confidence bands, deprioritization signals, filters, suppression metadata, and brief-packing rationale. |
 | `kb.brief` | Build a compact task brief for non-trivial work. |
-| `kb.remember` | Store a concise redacted durable atomic save with optional workspace provenance. |
-| `kb.finalize_turn` | Store a redacted end-of-turn summary for meaningful agent work. |
+| `kb.remember` | Store a concise durable atomic save with optional workspace provenance; text masking follows `privacy.redactions.enabled`. |
+| `kb.finalize_turn` | Store an end-of-turn summary for meaningful agent work; text masking follows `privacy.redactions.enabled`. |
 | `kb.claim_upsert` | Create or update an atomic claim. |
 | `kb.claim_transition` | Move a claim through lifecycle states with audit-visible rationale. |
 | `kb.graph_traverse` | Traverse typed knowledge graph relations from an entity. |
@@ -225,8 +225,9 @@ Memory writes accept optional `cwd` and `root_name` as workspace provenance.
 Pass the active workspace `cwd` when calling `kb.remember`,
 `kb.finalize_turn`, `/api/remember`, or `flux-kb remember`; the CLI defaults
 manual remembers to its current directory. Use `kb.remember` for concise
-redacted durable atomic saves when a verified decision, fix, reusable
-procedure, command, or project fact should be retrievable before the turn ends.
+durable atomic saves when a verified decision, fix, reusable procedure, command,
+or project fact should be retrievable before the turn ends; runtime text masking
+follows `privacy.redactions.enabled`.
 Use `kb.finalize_turn` at the end of meaningful work for the turn summary, and
 avoid duplicating every prior `kb.remember` item. Explicit repair of older
 unscoped episodes is available through `flux-kb episodes scope-backfill --cwd
@@ -611,9 +612,10 @@ Codex has three Flux integration surfaces:
   `kb.brief` for compact workspace-scoped context and `kb.search` with
   `scope_mode=workspace_boosted` for expanded discovery; skip KB retrieval when
   local files, the prompt, or current tool output already answer the question.
-  Use `kb.remember` for concise redacted durable atomic saves during work, with
-  active `cwd` or `root_name` provenance, and use `kb.finalize_turn` for the
-  end-of-turn summary without repeating every mid-turn save.
+  Use `kb.remember` for concise durable atomic saves during work, with active
+  `cwd` or `root_name` provenance, and use `kb.finalize_turn` for the
+  end-of-turn summary without repeating every mid-turn save. Runtime masking is
+  controlled by `privacy.redactions.enabled`.
 - REST remains the fallback surface for tools that can call the local API
   directly, for example `GET /api/brief?query=...`.
 
@@ -654,9 +656,11 @@ For an end-to-end Codex smoke test, verify that at least the status, brief, and
 finalize tools are callable through either naming form. A successful test should
 call `kb.status`/`mcp__flux_llm_kb.kb_status`, call
 `kb.brief`/`mcp__flux_llm_kb.kb_brief` with a harmless smoke-test task, and
-store only a redacted outcome through
+store only a concise outcome through
 `kb.finalize_turn`/`mcp__flux_llm_kb.kb_finalize_turn`, passing the active
-workspace `cwd` so the saved memory remains locally retrievable.
+workspace `cwd` so the saved memory remains locally retrievable. Enable
+`privacy.redactions.enabled` before smoke tests for public/shared release
+hardening.
 
 Codex hooks run a configurable local policy by default:
 

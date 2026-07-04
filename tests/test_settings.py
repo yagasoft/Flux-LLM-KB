@@ -127,6 +127,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "embedding.model" not in keys
     assert "embedding.dimensions" not in keys
     assert "operator.automation.auto_run_governance_shadow" in keys
+    assert "privacy.redactions.enabled" in keys
     assert "worker.default_workers" in keys
 
 
@@ -402,6 +403,17 @@ def test_vision_model_setting_description_is_provider_neutral():
     assert "ollama" not in description
 
 
+def test_redaction_setting_defaults_disabled_and_env_override_enables(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("privacy.redactions.enabled").raw_value is False
+
+    monkeypatch.setenv("FLUX_KB_REDACTIONS_ENABLED", "true")
+
+    assert service.resolve("privacy.redactions.enabled").raw_value is True
+
+
 def test_local_inference_base_url_accepts_docker_host_gateway():
     definitions = {definition.key: definition for definition in SETTING_REGISTRY}
     base_url = definitions["acceleration.local_inference.base_url"]
@@ -444,23 +456,36 @@ def test_container_cap_settings_defaults_and_env_overrides(monkeypatch):
     assert service.resolve("crawler.container_max_member_bytes").raw_value == 512
 
 
-def test_settings_service_uses_env_over_database_and_masks_secret(monkeypatch):
+def test_settings_service_uses_env_over_database_and_exposes_secret_when_redactions_disabled(monkeypatch):
     stored = {
         "retrieval.token_budget": {"value": 800, "updated_at": "db-time"},
         "mail.imap.oauth_refresh_token": {"value": "stored-token", "updated_at": "db-time"},
     }
+    monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
     monkeypatch.setenv("FLUX_KB_TOKEN_BUDGET", "1600")
     monkeypatch.setattr(database, "get_runtime_setting", lambda key: stored.get(key))
 
     service = SettingsService()
     token_budget = service.resolve("retrieval.token_budget")
-    secret = service.resolve("mail.imap.oauth_refresh_token")
+    sensitive_setting = service.resolve("mail.imap.oauth_refresh_token")
 
     assert token_budget.value == 1600
     assert token_budget.source == "env"
-    assert secret.value == "***"
-    assert secret.raw_value == "stored-token"
-    assert secret.sensitive is True
+    assert sensitive_setting.value == "stored-token"
+    assert sensitive_setting.raw_value == "stored-token"
+    assert sensitive_setting.sensitive is True
+
+
+def test_settings_service_masks_secret_when_redactions_enabled(monkeypatch):
+    stored = {"mail.imap.oauth_refresh_token": {"value": "stored-token", "updated_at": "db-time"}}
+    monkeypatch.setenv("FLUX_KB_REDACTIONS_ENABLED", "true")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda key: stored.get(key))
+
+    sensitive_setting = SettingsService().resolve("mail.imap.oauth_refresh_token")
+
+    assert sensitive_setting.value == "***"
+    assert sensitive_setting.raw_value == "stored-token"
+    assert sensitive_setting.sensitive is True
 
 
 def test_setting_update_requires_confirmation_for_reindex(monkeypatch):

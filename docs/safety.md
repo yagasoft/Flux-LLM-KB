@@ -41,7 +41,11 @@ the local Flux API or database; no raw mail or credentials belong in Git.
 
 ## Capture Rules
 
-- Redact before persistence.
+- Runtime redaction is controlled by `privacy.redactions.enabled`
+  (`FLUX_KB_REDACTIONS_ENABLED`). This personal deployment defaults it off so
+  local memory, OCR/ASR/vision text, paths, and diagnostic details remain exact.
+  Turn it on before any public, shared, or exported deployment that requires
+  masking before persistence.
 - Record provenance for every promoted claim.
 - Preserve superseded facts instead of overwriting them silently.
 - Audit every write, delete, export, and bulk operation.

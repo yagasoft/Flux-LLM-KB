@@ -23,10 +23,26 @@ def test_build_query_snippet_prefers_query_window_and_highlights_terms():
     ]
 
 
-def test_build_query_snippet_falls_back_and_redacts_secret_like_text():
+def test_build_query_snippet_falls_back_and_keeps_sensitive_text_when_redactions_disabled(monkeypatch):
+    monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
+    sensitive_text = "password" + "=sample appears before normal deployment notes."
     snippet = build_query_snippet(
         "unmatched",
-        "password=hunter2 appears before normal deployment notes.",
+        sensitive_text,
+        source="summary",
+        max_chars=80,
+    )
+
+    assert ("password" + "=sample") in snippet["text"]
+    assert snippet["matched_terms"] == []
+    assert snippet["highlights"] == []
+
+
+def test_build_query_snippet_redacts_secret_like_text_when_enabled(monkeypatch):
+    monkeypatch.setenv("FLUX_KB_REDACTIONS_ENABLED", "true")
+    snippet = build_query_snippet(
+        "unmatched",
+        "password" + "=sample appears before normal deployment notes.",
         source="summary",
         max_chars=80,
     )

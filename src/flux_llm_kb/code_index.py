@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from .redaction import redact_text
+from .redaction import redact_text, redactions_enabled
 from .text_safety import read_text_with_bom
 
 
@@ -1187,7 +1187,8 @@ def _chunk(
     extra: dict[str, Any] | None = None,
 ) -> CodeChunk:
     redacted, _ = redact_text(text)
-    redacted = EMAIL_RE.sub("[REDACTED:email]", redacted)
+    if redactions_enabled():
+        redacted = EMAIL_RE.sub("[REDACTED:email]", redacted)
     metadata: dict[str, Any] = {
         "code": {
             "language": language,

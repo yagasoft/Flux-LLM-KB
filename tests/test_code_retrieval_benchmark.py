@@ -6,7 +6,8 @@ from flux_llm_kb.crawler import CorpusPolicy, scan_path
 from flux_llm_kb.service import KnowledgeService
 
 
-def test_code_heavy_benchmark_fixture_covers_code_indexing_paths(tmp_path):
+def test_code_heavy_benchmark_fixture_covers_code_indexing_paths(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
     root = tmp_path / "code-heavy"
     service_module._write_benchmark_fixture(root, "code-heavy", 25)
 
@@ -73,8 +74,8 @@ def test_code_heavy_benchmark_fixture_covers_code_indexing_paths(tmp_path):
 
     broken = assets["src/broken.py"]
     assert broken.metadata["code"]["parser_status"] == "fallback"
-    assert "ops@example.com" not in broken.chunks[0].body
-    assert "[REDACTED:email]" in broken.chunks[0].body
+    assert "ops@example.com" in broken.chunks[0].body
+    assert "[REDACTED:email]" not in broken.chunks[0].body
 
     unsupported = assets["src/unsupported.go"]
     assert unsupported.metadata["code"]["language"] == "go"

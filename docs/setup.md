@@ -230,7 +230,7 @@ From the permanent checkout or production environment:
 ```powershell
 flux-kb lint
 flux-kb status
-flux-kb remember "Decision title" "Redacted durable summary."
+flux-kb remember "Decision title" "Concise durable summary."
 flux-kb search "decision title"
 flux-kb audit --limit 20
 flux-kb forget <memory-id> --reason user_request
@@ -286,6 +286,8 @@ flux-kb governance policy
 flux-kb crawl doctor
 flux-kb settings list
 flux-kb settings set retrieval.token_budget 1600
+# Before public/shared release hardening:
+flux-kb settings set privacy.redactions.enabled true
 flux-kb mail profile add-imap --name gmail-capture --account me@gmail.com --folder FluxCapture --spool private\mail-spool\gmail-capture
 flux-kb mail oauth gmail start --profile gmail-capture --client-config private\google-oauth-client.json
 flux-kb mail oauth status --profile gmail-capture
@@ -350,8 +352,9 @@ Media ASR is controlled by `acceleration.asr.enabled`,
 `acceleration.asr.base_url`, `acceleration.asr.model_path`, and
 `acceleration.asr.max_duration_seconds`, which now bounds one staged ASR segment
 rather than the total media duration.
-Redacted ASR cache entries live under the configured ASR cache directory and
-worker-family telemetry reports ASR cache hits, misses, and segment counts.
+ASR cache text follows `privacy.redactions.enabled`; entries live under the
+configured ASR cache directory and worker-family telemetry reports ASR cache
+hits, misses, and segment counts.
 Recursive archive/container extraction is controlled by
 `crawler.container_max_depth`, `crawler.container_max_members`,
 `crawler.container_max_total_bytes`, and `crawler.container_max_member_bytes`.

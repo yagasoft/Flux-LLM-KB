@@ -28,6 +28,7 @@ from .embeddings import (
 )
 from . import acceleration, mail_content_store
 from .migrations import load_migrations
+from .redaction import redactions_enabled
 from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciprocal_rank_fusion
 from .text_safety import sanitize_postgres_text_value, strip_postgres_nul
 
@@ -188,6 +189,8 @@ def host_database_url() -> str | None:
 def redact_database_url(url: str | None) -> str | None:
     if not url:
         return None
+    if not redactions_enabled():
+        return url
     try:
         parts = urlsplit(url)
     except Exception:
@@ -325,6 +328,8 @@ def _check_database_for_report(url: str | None) -> DatabaseStatus:
 
 def _sanitize_database_message(message: str, *urls: str | None) -> str:
     sanitized = str(message)
+    if not redactions_enabled():
+        return sanitized
     for url in urls:
         if not url:
             continue

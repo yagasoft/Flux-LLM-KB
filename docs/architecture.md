@@ -221,14 +221,18 @@ approved `codex_backfill` review jobs in bounded batches, with dry-run,
 single-job, and limit-based modes. Inputs are bounded before parsing and may be
 `.json`, `.jsonl`, `.md`, or `.txt`; each parsed record normalizes to a title,
 body, source leaf, stable source hash, optional session/turn/workspace metadata,
-and truncation flags. Flux redacts before persistence, skips empty or noisy
-records, skips duplicate source hashes, and marks missing or unreadable sources
-as `blocked_missing_dependency`.
+and truncation flags. Flux applies the `privacy.redactions.enabled` policy
+before persistence, skips empty or noisy records, skips duplicate source hashes,
+and marks missing or unreadable sources as `blocked_missing_dependency`.
+Personal local deployments default this policy off; public/shared release
+hardening should enable it through `FLUX_KB_REDACTIONS_ENABLED=true` or the
+runtime setting.
 
 Successful approved ingestions write durable episodes through
 `KnowledgeService.remember` with provenance metadata for `source=codex_backfill`,
 the review job id, review audit id when present, source hash, source leaf,
-workspace/cwd/root hints, and redaction/truncation counts. Ingestion outcomes are
+workspace/cwd/root hints, and redaction/truncation counts. Redaction counts are
+empty when `privacy.redactions.enabled` is off. Ingestion outcomes are
 stored under `capture_jobs.payload.ingestion` and surfaced as sanitized status,
 skip reasons, created memory ids, and recent audit events. Raw backfill text is
 never exposed in review, dashboard, REST, CLI, or MCP status responses.
@@ -295,7 +299,8 @@ symbols/routes/callers, C# namespaces/controllers/routes/tests/calls, frontend
 markup components/events/form actions/selectors, stylesheet selectors/custom
 properties/keyframes/media queries, notebook cells, generated-code markers, and
 common configuration/manifests. Parser failures and unsupported code-like files
-still index as redacted fallback chunks with sanitized parser status metadata.
+still index as fallback chunks with sanitized parser status metadata. Fallback
+body masking follows `privacy.redactions.enabled`.
 
 Large structured files use sample-first indexing before any full-file backfill.
 For CSV, TSV, PSV, SSV, JSON, JSONL, NDJSON, JSON-LD, and
@@ -354,11 +359,12 @@ local faster-whisper path or the local ASR HTTP service. Production GPU mode
 serves `large-v3-turbo` from the `flux_llm_kb_asr_models` Docker volume at the
 loopback-published ASR port; only the explicit deploy download command fetches
 model files. Transcription paths pass `local_files_only=True` when loading
-faster-whisper and never download models implicitly. Redacted ASR cache entries
-live under the ASR cache directory and expose cache hit/miss plus segment
-telemetry.
-Redacted vision cache entries live under the vision cache directory, and sampled
-frame images live under the thumbnail cache directory.
+faster-whisper and never download models implicitly. ASR cache text follows
+`privacy.redactions.enabled`; cache entries live under the ASR cache directory
+and expose cache hit/miss plus segment telemetry.
+Vision cache text follows `privacy.redactions.enabled`; cache entries live under
+the vision cache directory, and sampled frame images live under the thumbnail
+cache directory.
 Cloud transcription remains off by default. Semantic media embeddings are a
 separate backfill phase so large media files do not slow normal crawl/watch
 loops.
@@ -686,8 +692,9 @@ detail, target metadata, links, and status code. Dashboard health keeps legacy
 `recent_errors` strings and adds structured `recent_error_details`; the UI
 renders those as actionable alerts with expandable detail, copyable JSON, and
 navigation to the relevant profile, root, or job when available. Diagnostics
-redact secrets only, so local paths, profile names, root names, and job ids can
-remain visible on the local PC.
+apply `privacy.redactions.enabled`; with the personal default off, local paths,
+profile names, root names, job ids, and exact diagnostic values remain visible
+on the local PC.
 
 ## Runtime Configuration
 

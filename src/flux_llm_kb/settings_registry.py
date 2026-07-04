@@ -1186,6 +1186,16 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         affected_components=("worker", "api", "cli", "mcp", "dashboard"),
     ),
     SettingDefinition(
+        key="privacy.redactions.enabled",
+        category="privacy",
+        default=False,
+        value_type="bool",
+        description="Enable masking of secret-like text, local paths, and diagnostic values before persistence or display.",
+        env_var="FLUX_KB_REDACTIONS_ENABLED",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("api", "cli", "mcp", "worker", "hooks", "dashboard"),
+    ),
+    SettingDefinition(
         key="acceleration.worker_cap.text",
         category="acceleration",
         default=8,

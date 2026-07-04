@@ -50,8 +50,9 @@ invalid package/source files use `blocked_invalid_source`.
   staged `corpus_extract_pdf_ocr_pages` jobs for scanned pages that need OCR.
   Those page batches render with `pdftoppm` and run PaddleOCR or
   PaddleOCR-VL until all planned pages have been attempted. Missing OCR tools
-  report `blocked_missing_dependency`, and redacted OCR cache entries stay under
-  the private OCR cache root with hit/miss and per-page telemetry exposed
+  report `blocked_missing_dependency`, and OCR cache text follows
+  `privacy.redactions.enabled` while staying under the private OCR cache root
+  with hit/miss and per-page telemetry exposed
   through worker-family status.
 - ASR is local and cache-backed when available. Deferred audio/video jobs prefer
   transcript sidecars, then use `ffprobe` to plan sequential
@@ -62,8 +63,9 @@ invalid package/source files use `blocked_invalid_source`.
   `large-v3-turbo` from the persistent `flux_llm_kb_asr_models` Docker volume;
   model download is an explicit deploy command, not part of extraction. Missing
   ASR tools, service readiness, service URLs, or model paths report
-  `blocked_missing_dependency`; redacted ASR cache entries stay under the
-  private ASR cache root with hit/miss and segment telemetry exposed through
+  `blocked_missing_dependency`; ASR cache text follows
+  `privacy.redactions.enabled` while staying under the private ASR cache root
+  with hit/miss and segment telemetry exposed through
   worker-family status. Embedded media sidecar transcripts inside archives are
   used before probing or ASR tools.
 - Optional local vision is cache-backed and uses configured local loopback or Docker
@@ -74,9 +76,9 @@ invalid package/source files use `blocked_invalid_source`.
   `qwen3-vl:8b` with a short keepalive. The first implemented runtime path uses
   an Ollama-compatible API; Gemma-class local vision models can be selected
   through `acceleration.vision.model` when installed in the configured runtime.
-  Redacted captions stay under the private vision cache, sampled frames stay
-  under the private thumbnail cache, and decorative-image spacers are skipped
-  before OCR or vision.
+  Caption text follows `privacy.redactions.enabled` and stays under the private
+  vision cache, sampled frames stay under the private thumbnail cache, and
+  decorative-image spacers are skipped before OCR or vision.
 - Video frame sampling is enabled by default for video jobs. Direct extraction
   can still use local `ffmpeg` scene detection with
   `acceleration.video.scene_threshold`, sample up to
@@ -135,8 +137,9 @@ invalid package/source files use `blocked_invalid_source`.
   `svelte`, `astro`, `razor`), stylesheets (`css`, `scss`, `sass`, `less`),
   notebooks, generated-code markers, and common config/manifests use
   conservative local pattern parsing. Parser failures and unsupported code-like
-  files fall back to redacted text chunks with sanitized `parser_status`
-  metadata; they do not block crawl/watch loops.
+  files fall back to text chunks with sanitized `parser_status` metadata; body
+  masking follows `privacy.redactions.enabled`. They do not block crawl/watch
+  loops.
 - Oversized structured files use sample-first indexing where local parsing is
   reliable. CSV, TSV, PSV, SSV, JSON, JSONL, NDJSON, JSON-LD, and
   OpenPyXL-supported workbooks store a bounded schema/profile/sample chunk with
@@ -164,9 +167,10 @@ invalid package/source files use `blocked_invalid_source`.
   PaddleOCR in deferred image jobs after decorative-image skip checks;
   scanned and mixed PDFs use staged `pdftoppm` page-batch rendering plus
   PaddleOCR/PaddleOCR-VL until all pages needing OCR are processed. OCR output
-  is redacted before chunking and before cache writes. Cache hit/miss counts are
-  stored as sanitized job telemetry; raw OCR text is not written to public docs
-  or dashboard metadata.
+  follows `privacy.redactions.enabled` before chunking and cache writes; this
+  personal deployment defaults masking off. Cache hit/miss counts are stored as
+  sanitized job telemetry; raw OCR text is not written to public docs or
+  dashboard metadata.
 - Audio/video ASR uses local tools only. Sidecar transcripts remain preferred;
   otherwise parent media jobs probe once, queue sequential audio chunks, append
   transcript chunks by stable segment locators, and then queue video frame vision
@@ -175,9 +179,9 @@ invalid package/source files use `blocked_invalid_source`.
   The production provider calls the loopback OpenAI-compatible ASR service with
   `acceleration.asr.model` set to `large-v3-turbo`; the fallback provider loads
   faster-whisper from `acceleration.asr.model_path`.
-  ASR output is redacted before chunking and before ASR cache writes. Cloud
-  transcription stays off by default, and raw transcript text is not written to
-  public docs or dashboard metadata.
+  ASR output follows `privacy.redactions.enabled` before chunking and ASR cache
+  writes. Cloud transcription stays off by default, and raw transcript text is
+  not written to public docs or dashboard metadata.
 - Practical exchange/export formats use small local parsers before heavier
   tooling. Subtitle files (`srt`, `vtt`, `ass`, `ssa`, `ttml`, `dfxp`, `sbv`)
   are cleaned into transcript chunks without cue IDs or timestamps. `eml` and
@@ -223,7 +227,8 @@ invalid package/source files use `blocked_invalid_source`.
   depth, parent-member, parser status, skipped, parser count summaries, and
   blocked-dependency details.
 - Secret-bearing formats should never have raw content indexed by default.
-  They may produce redacted metadata and audit entries only.
+  They may produce metadata-only and audit entries only; if future extractors add
+  content for these formats, masking must honour `privacy.redactions.enabled`.
 - Extractor availability surfaces optional local capability keys for practical
   coverage planning, including `readpst`, `msgconvert`, `duckdb`, `pyarrow`,
   `ogrinfo`, `gdalinfo`, `ifcopenshell`, `assimp`, `blender`, `exiftool`, and

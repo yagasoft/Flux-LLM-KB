@@ -77,7 +77,26 @@ def test_parse_python_code_emits_semantic_chunks_symbols_and_references(tmp_path
     assert any(reference.relationship_kind == "call" and reference.target == "OrderService" for reference in result.references)
 
 
-def test_parse_malformed_python_falls_back_to_redacted_text_chunk(tmp_path):
+def test_parse_malformed_python_fallback_keeps_email_when_redactions_disabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
+    root = tmp_path / "repo"
+    root.mkdir()
+    path = root / "broken.py"
+    path.write_text("def broken(:\n    return 'secret@example.com'\n", encoding="utf-8")
+
+    result = parse_code_file(path, root=root)
+
+    assert result.metadata["language"] == "python"
+    assert result.metadata["parser_status"] == "fallback"
+    assert result.metadata["parser_diagnostics"]["error_type"] == "SyntaxError"
+    assert len(result.chunks) == 1
+    assert result.chunks[0].title == "broken.py::fallback"
+    assert result.chunks[0].metadata["parser_status"] == "fallback"
+    assert "secret@example.com" in result.chunks[0].body
+
+
+def test_parse_malformed_python_fallback_redacts_email_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUX_KB_REDACTIONS_ENABLED", "true")
     root = tmp_path / "repo"
     root.mkdir()
     path = root / "broken.py"

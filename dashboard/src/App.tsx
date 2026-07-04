@@ -4320,7 +4320,7 @@ function SettingsTab({
         <SettingsPreview rows={restartRows} />
       </Panel>
       <Panel title="Runtime Settings" action={<button className="small-primary" type="button" disabled={Boolean(applyPending)} onClick={() => onApply()}>{applyPending ?? "Apply pending"}</button>}>
-        <p className="panel-note">Settings are catalog-backed and cross-platform. Environment values override database values, and sensitive values stay masked.</p>
+        <p className="panel-note">Settings are catalog-backed and cross-platform. Environment values override database values, and sensitive values follow the redaction policy.</p>
         <div className="settings-table-wrap">
           <table className="settings-table" aria-label="Runtime settings">
             <thead>

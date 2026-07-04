@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from . import database
+from .redaction import redactions_enabled
 from .settings_registry import (
     APPLY_REINDEX_REQUIRED,
     APPLY_RESTART_COMPONENT,
@@ -81,7 +82,7 @@ class SettingsService:
         validated = definition.validate(raw_value)
         if source == "db" and definition.key == "crawler.global_exclude_globs":
             validated = _append_missing_defaults(validated, DEFAULT_CRAWLER_GLOBAL_EXCLUDE_GLOBS)
-        public_value = "***" if definition.sensitive and validated not in {None, ""} else validated
+        public_value = "***" if definition.sensitive and validated not in {None, ""} and redactions_enabled() else validated
         return _resolved(definition, value=public_value, raw_value=validated, source=source)
 
     def set(

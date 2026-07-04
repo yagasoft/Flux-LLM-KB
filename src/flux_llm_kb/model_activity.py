@@ -9,6 +9,7 @@ from typing import Any, Iterator
 
 from . import database
 from .error_diagnostics import redact_secrets
+from .redaction import redactions_enabled
 from .gpu_scheduler import get_gpu_scheduler
 
 
@@ -417,6 +418,8 @@ def _duration_ms(started: float) -> int:
 
 
 def _sanitize_error_message(value: Any) -> str:
+    if not redactions_enabled():
+        return str(value or "")[:300]
     redacted = redact_secrets(str(value or "")) or ""
     redacted = _PATH_RE.sub("[REDACTED:path]", redacted)
     redacted = re.sub(r"(?i)\b(password|secret|token|credential|authorization)\b", "[REDACTED]", redacted)

@@ -68,7 +68,7 @@ from .error_diagnostics import redact_secrets
 from .onnxruntime_logging import configure_onnxruntime_logging
 from .model_activity import record_model_activity
 from .processes import run_no_window
-from .redaction import redact_text
+from .redaction import redact_text, redactions_enabled
 from .text_safety import decode_text_bytes, read_text_with_bom
 
 
@@ -6458,6 +6458,8 @@ def _paddle_ocr_missing_dependency_message(exc: Exception) -> str:
         missing = getattr(exc, "name", None) or str(exc) or "paddleocr"
         return f"{missing} module not installed"
     message = _safe_external_error_detail(str(exc), max_length=300) or "PaddleOCR dependency missing"
+    if not redactions_enabled():
+        return message
     return LOCAL_PATH_RE.sub("[REDACTED:path]", message)
 
 
