@@ -8,6 +8,7 @@ param(
     [switch]$KeepWorktree,
     [int]$StepTimeoutSeconds = 600,
     [int]$DeployStepTimeoutSeconds = 1800,
+    [string]$PytestWorkers = "auto",
     [switch]$SkipWorkerStart,
     [string]$PostDeployReclaimOutlookProfile = ""
 )
@@ -103,6 +104,23 @@ function Write-SummaryAndExit {
     exit $ExitCode
 }
 
+function Complete-FeatureStepRecord {
+    param(
+        [System.Collections.IDictionary]$Record,
+        [DateTime]$StartedAt
+    )
+    if ($Record["finished_at"]) {
+        return
+    }
+    $Record["finished_at"] = [DateTime]::UtcNow.ToString("o")
+    $finishedAt = [DateTime]::Parse(
+        $Record["finished_at"],
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind
+    )
+    $Record["duration_seconds"] = [Math]::Round(($finishedAt - $StartedAt).TotalSeconds, 3)
+}
+
 function Invoke-FeatureStep {
     param(
         [string]$Name,
@@ -111,10 +129,14 @@ function Invoke-FeatureStep {
         [int]$TimeoutSeconds = 0
     )
     $logPath = New-StepLogPath -Name $Name
+    $startedAt = [DateTime]::UtcNow
     $record = [ordered]@{
         name = $Name
         cwd = $Cwd
         command = $Command
+        started_at = $startedAt.ToString("o")
+        finished_at = $null
+        duration_seconds = $null
         exit_code = 0
         log_path = $logPath
         skipped = [bool]$DryRun
@@ -122,6 +144,7 @@ function Invoke-FeatureStep {
     $script:Steps += $record
     if ($DryRun) {
         "DRY RUN: $Command" | Out-File -FilePath $logPath -Encoding UTF8
+        Complete-FeatureStepRecord -Record $record -StartedAt $startedAt
         return
     }
     $stdoutText = ""
@@ -156,6 +179,7 @@ function Invoke-FeatureStep {
             $stderrText = Get-FeatureTaskResult -Task $stderrTask
             Write-FeatureStepOutput -LogPath $logPath -Stdout $stdoutText -Stderr $stderrText
             "Step '$Name' timed out after $effectiveTimeoutSeconds seconds; process tree was stopped." | Out-File -FilePath $logPath -Append -Encoding UTF8
+            Complete-FeatureStepRecord -Record $record -StartedAt $startedAt
             throw "Step '$Name' timed out after $effectiveTimeoutSeconds seconds. See $logPath"
         }
         $process.WaitForExit()
@@ -163,6 +187,7 @@ function Invoke-FeatureStep {
         $stderrText = Get-FeatureTaskResult -Task $stderrTask
         Write-FeatureStepOutput -LogPath $logPath -Stdout $stdoutText -Stderr $stderrText
         $record.exit_code = $process.ExitCode
+        Complete-FeatureStepRecord -Record $record -StartedAt $startedAt
         if ($process.ExitCode -ne 0) {
             throw "Step '$Name' failed with exit code $($process.ExitCode). See $logPath"
         }
@@ -171,6 +196,7 @@ function Invoke-FeatureStep {
         $stderrText = Get-FeatureTaskResult -Task $stderrTask
         Write-FeatureStepOutput -LogPath $logPath -Stdout $stdoutText -Stderr $stderrText
         if ($record.exit_code -eq 0) { $record.exit_code = 1 }
+        Complete-FeatureStepRecord -Record $record -StartedAt $startedAt
         $script:FailedStep = $Name
         $_ | Out-File -FilePath $logPath -Append -Encoding UTF8
         throw
@@ -329,10 +355,17 @@ New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 $script:Steps = @()
 $script:FailedStep = $null
 Set-Location $MainRoot
+$pytestCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
+if ([string]::IsNullOrWhiteSpace($PytestWorkers) -or $PytestWorkers -eq "0") {
+    $pytestCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
+} else {
+    $safePytestWorkers = $PytestWorkers.Replace("'", "''")
+    $pytestCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); $PytestWorkers = ''' + $safePytestWorkers + '''; python -m pytest -n $PytestWorkers --dist loadfile'
+}
 
 try {
     Invoke-FeatureStep -Name "verify-main-clean" -Cwd $MainRoot -Command 'if ((git status --porcelain) -ne $null) { git status --short; exit 1 }'
-    Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
+    Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand
     Invoke-FeatureStep -Name "compileall" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m compileall -q src tests'
     Invoke-FeatureStep -Name "flux-lint" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli lint'
     if ($NoPackageInstall) {

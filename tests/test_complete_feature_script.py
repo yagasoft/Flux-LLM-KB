@@ -85,6 +85,34 @@ def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
     assert script.index(install_step) < script.index(test_step) < script.index(build_step)
 
 
+def test_complete_feature_script_runs_pytest_with_xdist_by_default_and_serial_escape_hatch():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert '[string]$PytestWorkers = "auto"' in script
+    assert "$pytestCommand = " in script
+    assert 'python -m pytest -n $PytestWorkers --dist loadfile' in script
+    assert "if ([string]::IsNullOrWhiteSpace($PytestWorkers) -or $PytestWorkers -eq \"0\")" in script
+    assert "python -m pytest'" in script
+    assert 'Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand' in script
+
+
+def test_complete_feature_script_records_step_timings_in_json_summary():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "started_at" in script
+    assert "finished_at" in script
+    assert "duration_seconds" in script
+    assert "Complete-FeatureStepRecord" in script
+    assert "[DateTime]::UtcNow.ToString(\"o\")" in script
+    assert "[Math]::Round(" in script
+
+
+def test_dev_dependencies_include_pytest_xdist_for_parallel_closeout():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert '"pytest-xdist>=3.6"' in pyproject
+
+
 def test_complete_feature_script_repairs_shared_editable_install_before_worktree_cleanup():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 

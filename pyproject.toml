@@ -67,6 +67,7 @@ gpu = [
 ]
 dev = [
   "pytest>=8.3",
+  "pytest-xdist>=3.6",
 ]
 
 [project.scripts]
