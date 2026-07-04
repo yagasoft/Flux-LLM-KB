@@ -726,7 +726,9 @@ def test_service_brief_uses_configured_token_budget(monkeypatch):
 
 
 def test_service_brief_prefers_current_lifecycle_evidence(monkeypatch):
-    def fake_search(_self, _query, limit=10, **_kwargs):
+    def fake_search_raw(_self, _query, *, limit=5, rerank_limit=None, **_kwargs):
+        assert limit == 5
+        assert rerank_limit == 3
         return [
             {
                 "kind": "episode",
@@ -746,7 +748,7 @@ def test_service_brief_prefers_current_lifecycle_evidence(monkeypatch):
             },
         ]
 
-    monkeypatch.setattr(KnowledgeService, "search", fake_search)
+    monkeypatch.setattr(KnowledgeService, "_search_raw", fake_search_raw)
 
     brief = KnowledgeService().brief("decision", token_budget=100)
 

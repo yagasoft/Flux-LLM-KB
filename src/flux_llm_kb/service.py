@@ -305,32 +305,32 @@ class KnowledgeService:
         scope_mode: str = "local_first",
         filters: dict[str, Any] | None = None,
     ) -> str:
-        if filters is not None:
-            normalize_retrieval_filters(filters)
+        normalized_filters = normalize_retrieval_filters(filters) if filters is not None else None
+        effective_filters = _effective_retrieval_filters(normalized_filters)
         if token_budget is None:
             token_budget = _configured_token_budget()
-        search_kwargs: dict[str, Any] = {
-            "limit": 10,
-            "cwd": cwd,
-            "root_name": root_name,
-            "scope_mode": scope_mode,
-        }
-        if filters is not None:
-            search_kwargs["filters"] = filters
-        search_results = self.search(query, **search_kwargs)
-        current_results = [item for item in search_results if _is_current_evidence(item)]
-        if current_results:
-            search_results = current_results
-        candidates = [
-            ContextCandidate(
-                id=item["id"],
-                title=item["title"],
-                body=item["summary"],
-                score=item["score"],
-            )
-            for item in search_results
-        ]
-        return pack_context(candidates, token_budget=token_budget)
+        search_results = self._search_raw(
+            query,
+            limit=_configured_brief_search_limit(),
+            rerank_limit=_configured_brief_rerank_limit(),
+            cwd=cwd,
+            root_name=root_name,
+            scope_mode=scope_mode,
+            filters=effective_filters,
+        )
+        filtered_results, _excluded = _apply_retrieval_filters(search_results, effective_filters)
+        enriched_results = _enrich_search_results(query, filtered_results, retrieval_filters=normalized_filters)
+        return self.brief_from_results(query, enriched_results, token_budget=token_budget)
+
+    def brief_from_results(
+        self,
+        query: str,
+        search_results: list[dict[str, Any]],
+        token_budget: int | None = None,
+    ) -> str:
+        if token_budget is None:
+            token_budget = _configured_token_budget()
+        return _pack_brief_from_search_results(search_results, token_budget=token_budget)
 
     def explain(
         self,
@@ -5181,6 +5181,21 @@ def _brief_selection_trace(search_results: list[dict[str, Any]], *, token_budget
     }
 
 
+def _pack_brief_from_search_results(search_results: list[dict[str, Any]], *, token_budget: int) -> str:
+    current_results = [item for item in search_results if _is_current_evidence(item)]
+    packing_results = current_results if current_results else search_results
+    candidates = [
+        ContextCandidate(
+            id=str(item.get("id") or ""),
+            title=str(item.get("title") or item.get("id") or "Untitled"),
+            body=str(item.get("summary") or ""),
+            score=float(item.get("score") or 0.0),
+        )
+        for item in packing_results
+    ]
+    return pack_context(candidates, token_budget=token_budget)
+
+
 def _brief_excluded_item(item: dict[str, Any], *, reason: str) -> dict[str, Any]:
     lifecycle = item.get("lifecycle") if isinstance(item.get("lifecycle"), dict) else {}
     return {
@@ -5553,6 +5568,20 @@ def _configured_token_budget() -> int:
         return int(SettingsService().resolve("retrieval.token_budget").raw_value)
     except Exception:
         return 1200
+
+
+def _configured_brief_search_limit() -> int:
+    try:
+        return max(1, min(int(SettingsService().resolve("retrieval.brief_search_limit").raw_value), 50))
+    except Exception:
+        return 5
+
+
+def _configured_brief_rerank_limit() -> int:
+    try:
+        return max(1, min(int(SettingsService().resolve("retrieval.brief_rerank_limit").raw_value), 50))
+    except Exception:
+        return 3
 
 
 def _configured_retrieval_search_engine() -> str:

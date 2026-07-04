@@ -414,8 +414,8 @@ def test_unmonitored_git_workspace_uses_workspace_key_for_local_episode_search(m
 def test_brief_keeps_current_evidence_filtering_with_scoped_search(monkeypatch):
     monkeypatch.setattr(
         KnowledgeService,
-        "search",
-        lambda self, query, limit=5, cwd=None, root_name=None, scope_mode="local_first": [
+        "_search_raw",
+        lambda self, query, limit=5, rerank_limit=None, cwd=None, root_name=None, scope_mode="local_first", **_kwargs: [
             {
                 "id": "retired",
                 "title": "Retired",

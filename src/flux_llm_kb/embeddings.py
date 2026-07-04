@@ -48,6 +48,7 @@ class SnowflakeEmbeddingProvider:
         model: str = DEFAULT_EMBEDDING_MODEL,
         dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
         model_runner: Any | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         if model_runner is None:
             from .model_runner import ModelRunnerClient
@@ -56,6 +57,7 @@ class SnowflakeEmbeddingProvider:
         self.model = model
         self.dimensions = int(dimensions or DEFAULT_EMBEDDING_DIMENSIONS)
         self.model_runner = model_runner
+        self.timeout_seconds = float(timeout_seconds) if timeout_seconds is not None else None
 
     def embed_batch(self, inputs: list[EmbeddingInput] | tuple[EmbeddingInput, ...]) -> list[EmbeddingResult]:
         items = list(inputs)
@@ -64,7 +66,10 @@ class SnowflakeEmbeddingProvider:
         texts = [item.text for item in items]
         model = items[0].model or self.model
         dimensions = int(items[0].dimensions or self.dimensions)
-        vectors = self.model_runner.embed(texts, model=model, dimensions=dimensions)
+        embed_kwargs: dict[str, Any] = {"model": model, "dimensions": dimensions}
+        if self.timeout_seconds is not None:
+            embed_kwargs["timeout_seconds"] = self.timeout_seconds
+        vectors = self.model_runner.embed(texts, **embed_kwargs)
         if len(vectors) != len(items):
             raise ValueError("model-runner returned a different number of embeddings than requested")
         results: list[EmbeddingResult] = []

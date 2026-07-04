@@ -98,14 +98,7 @@ def handle_user_prompt_submit(payload: dict[str, Any]) -> dict[str, Any]:
             )
             return {"continue": True}
 
-        brief_kwargs: dict[str, Any] = {
-            "token_budget": settings.token_budget,
-            "cwd": common["cwd"],
-            "scope_mode": scope_mode,
-        }
-        if brief_filters is not None:
-            brief_kwargs["filters"] = brief_filters
-        brief = service.brief(prompt, **brief_kwargs).strip()
+        brief = service.brief_from_results(prompt, results, token_budget=settings.token_budget).strip()
         if not brief:
             if settings.capture_guidance_enabled:
                 _audit(

@@ -130,8 +130,22 @@ def test_admission_allows_same_share_group_within_budget():
     assert decision.reason == "granted"
 
 
-def test_task_profile_makes_embedding_exclusive_by_default():
+def test_task_profile_makes_embedding_shareable_by_default():
     profile = task_profile("embedding", model_id="snowflake")
+
+    assert profile.exclusive is False
+    assert profile.share_group == "embedding"
+
+
+def test_task_profile_keeps_heavy_work_exclusive_by_default():
+    profile = task_profile("rerank", model_id="qwen")
+
+    assert profile.exclusive is True
+    assert profile.share_group == ""
+
+
+def test_task_profile_honours_explicit_exclusive_override():
+    profile = task_profile("embedding", model_id="snowflake", exclusive=True, share_group="")
 
     assert profile.exclusive is True
     assert profile.share_group == ""
@@ -555,14 +569,16 @@ def test_in_process_scheduler_times_out_waiting_for_exclusive_work():
     assert exc_info.value.retry_after_seconds > 0
 
 
-def test_in_process_scheduler_serializes_default_embedding_work():
+def test_in_process_scheduler_allows_default_embedding_work_to_share_gpu():
     scheduler = InProcessGpuScheduler(_config(default_timeout_seconds=0.02))
     held = task_profile("embedding", model_id="snowflake", timeout_seconds=0.02)
     waiting = task_profile("embedding", model_id="snowflake", timeout_seconds=0.02)
 
     with scheduler.acquire(held):
-        with pytest.raises(GpuLeaseTimeout):
-            scheduler.acquire(waiting)
+        with scheduler.acquire(waiting):
+            status = scheduler.status()
+
+    assert status["counts"]["running"] == 2
 
 
 def test_in_process_scheduler_grants_waiting_work_after_release():

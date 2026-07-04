@@ -16,6 +16,7 @@ from .model_runner import (
 DEFAULT_RERANK_TOP_N = 80
 DEFAULT_MAX_RERANK_PASSAGE_TOKENS = 1536
 DEFAULT_RERANK_MICROBATCH_SIZE = 2
+DEFAULT_RERANK_WAIT_TIMEOUT_SECONDS = 5
 
 
 class QwenReranker:
@@ -29,6 +30,7 @@ class QwenReranker:
         top_n: int = DEFAULT_RERANK_TOP_N,
         microbatch_size: int | None = None,
         max_passage_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         self.scorer = scorer or ModelRunnerRerankScorer()
         resolved_model = str(
@@ -76,6 +78,16 @@ class QwenReranker:
             else microbatch_size
         )
         self.microbatch_size = max(1, min(int(resolved_microbatch_size or DEFAULT_RERANK_MICROBATCH_SIZE), 32))
+        resolved_timeout_seconds = (
+            _runtime_setting(
+                "retrieval.rerank_wait_timeout_seconds",
+                DEFAULT_RERANK_WAIT_TIMEOUT_SECONDS,
+                "FLUX_KB_RETRIEVAL_RERANK_WAIT_TIMEOUT_SECONDS",
+            )
+            if timeout_seconds is None
+            else timeout_seconds
+        )
+        self.timeout_seconds = max(1.0, float(resolved_timeout_seconds or DEFAULT_RERANK_WAIT_TIMEOUT_SECONDS))
         resolved_max_passage_tokens = (
             _runtime_setting(
                 "retrieval.max_rerank_passage_tokens",
@@ -99,6 +111,7 @@ class QwenReranker:
                 model=self.model,
                 quantization=self.quantization,
                 awq_model=self.awq_model,
+                timeout_seconds=self.timeout_seconds,
             )
             for offset, (candidate, score) in enumerate(zip(batch, scores)):
                 enriched = {

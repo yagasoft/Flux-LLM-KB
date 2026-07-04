@@ -20,14 +20,15 @@ from flux_llm_kb.search_index import (
     VespaSearchAdapter,
     build_vespa_document,
 )
+from flux_llm_kb.model_runner import ModelRunnerBusy
 
 
 class FakeModelRunner:
     def __init__(self):
         self.embedding_requests = []
 
-    def embed(self, texts, *, model, dimensions):
-        self.embedding_requests.append({"texts": list(texts), "model": model, "dimensions": dimensions})
+    def embed(self, texts, *, model, dimensions, timeout_seconds=None):
+        self.embedding_requests.append({"texts": list(texts), "model": model, "dimensions": dimensions, "timeout_seconds": timeout_seconds})
         return [[1.0] + [0.0] * (dimensions - 1) for _ in texts]
 
 
@@ -52,6 +53,7 @@ def test_snowflake_embedding_provider_uses_model_runner_contract():
             "texts": ["local retrieval evidence"],
             "model": SNOWFLAKE_EMBEDDING_MODEL,
             "dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "timeout_seconds": None,
         }
     ]
     assert result.model == SNOWFLAKE_EMBEDDING_MODEL
@@ -60,6 +62,22 @@ def test_snowflake_embedding_provider_uses_model_runner_contract():
     assert result.metadata["provider"] == "model_runner"
     assert result.metadata["source_hash"]
     assert "local retrieval evidence" not in json.dumps(result.metadata)
+
+
+def test_snowflake_embedding_provider_forwards_interactive_timeout():
+    runner = FakeModelRunner()
+    provider = SnowflakeEmbeddingProvider(model_runner=runner, timeout_seconds=5)
+
+    provider.embed_batch([EmbeddingInput(owner_table="query", owner_id="query", text="interactive query")])
+
+    assert runner.embedding_requests == [
+        {
+            "texts": ["interactive query"],
+            "model": SNOWFLAKE_EMBEDDING_MODEL,
+            "dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            "timeout_seconds": 5.0,
+        }
+    ]
 
 
 def test_vespa_document_builder_preserves_search_metadata_and_vector_shape():
@@ -390,7 +408,7 @@ class FakeQwenScorer:
     def __init__(self):
         self.calls = []
 
-    def score(self, query, passages, *, model, quantization, awq_model=None):
+    def score(self, query, passages, *, model, quantization, awq_model=None, timeout_seconds=None):
         self.calls.append(
             {
                 "query": query,
@@ -398,6 +416,7 @@ class FakeQwenScorer:
                 "model": model,
                 "quantization": quantization,
                 "awq_model": awq_model,
+                "timeout_seconds": timeout_seconds,
             }
         )
         return [float(len(passage.split())) for passage in passages]
@@ -477,6 +496,21 @@ def test_qwen_reranker_uses_runtime_max_passage_tokens(monkeypatch):
 
     assert reranker.max_passage_tokens == 3
     assert scorer.calls[0]["passages"] == ["A\none two three"]
+
+
+def test_qwen_reranker_uses_runtime_wait_timeout(monkeypatch):
+    monkeypatch.setattr(
+        reranking,
+        "_runtime_setting",
+        lambda key, default, _env_var=None: 7 if key == "retrieval.rerank_wait_timeout_seconds" else default,
+    )
+    scorer = FakeQwenScorer()
+    reranker = QwenReranker(scorer=scorer, top_n=1)
+
+    reranker.rerank("rank", [{"id": "a", "summary": "candidate"}])
+
+    assert reranker.timeout_seconds == 7.0
+    assert scorer.calls[0]["timeout_seconds"] == 7.0
 
 
 def test_qwen_reranker_resolves_runtime_quantization_aliases(monkeypatch):
@@ -983,6 +1017,49 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
     assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
 
 
+def test_vespa_query_embedding_cache_reuses_same_query_vector(monkeypatch):
+    embed_calls: list[dict[str, object]] = []
+
+    class FakeProvider:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def embed_batch(self, inputs):
+            embed_calls.append({"texts": [item.text for item in inputs], "timeout_seconds": self.kwargs.get("timeout_seconds")})
+            return [
+                EmbeddingResult(
+                    owner_table="query",
+                    owner_id="query",
+                    model=SNOWFLAKE_EMBEDDING_MODEL,
+                    dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+                    vector=[1.0] + [0.0] * (SNOWFLAKE_EMBEDDING_DIMENSIONS - 1),
+                    metadata={"source_hash": "query-hash"},
+                )
+            ]
+
+    class FakeAdapter:
+        def __init__(self, base_url):
+            self.base_url = base_url
+
+        def query(self, *_args, **_kwargs):
+            return []
+
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    database._clear_query_embedding_cache_for_tests()
+
+    first_diagnostics: dict[str, object] = {}
+    second_diagnostics: dict[str, object] = {}
+
+    database.search_evidence_vespa("cache me", limit=1, root_name="docs", filters={}, diagnostics=first_diagnostics)
+    database.search_evidence_vespa("cache me", limit=1, root_name="docs", filters={}, diagnostics=second_diagnostics)
+
+    assert embed_calls == [{"texts": ["cache me"], "timeout_seconds": 5.0}]
+    assert first_diagnostics["vespa"]["embedding_cache_hit"] is False
+    assert second_diagnostics["vespa"]["embedding_cache_hit"] is True
+
+
 def test_search_once_passes_user_limit_as_rerank_limit(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -1017,6 +1094,40 @@ def test_explain_passes_result_limit_as_rerank_limit(monkeypatch):
     assert payload["results"] == []
     assert captured["limit"] == 40
     assert captured["rerank_limit"] == 1
+
+
+def test_brief_uses_configured_small_search_and_rerank_limits(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeSetting:
+        def __init__(self, raw_value):
+            self.raw_value = raw_value
+
+    class FakeSettingsService:
+        def resolve(self, key):
+            return FakeSetting(
+                {
+                    "retrieval.token_budget": 1200,
+                    "retrieval.brief_search_limit": 5,
+                    "retrieval.brief_rerank_limit": 3,
+                }[key]
+            )
+
+    def fake_search_raw(self, query, **kwargs):
+        captured["query"] = query
+        captured.update(kwargs)
+        return [{"id": "item-1", "title": "Brief item", "summary": "Packed evidence.", "score": 1.0}]
+
+    monkeypatch.setattr(service_module, "SettingsService", FakeSettingsService)
+    monkeypatch.setattr(service_module.KnowledgeService, "_search_raw", fake_search_raw)
+
+    brief = service_module.KnowledgeService().brief("quality", cwd="E:/Repo", scope_mode="workspace_boosted")
+
+    assert "Packed evidence." in brief
+    assert captured["limit"] == 5
+    assert captured["rerank_limit"] == 3
+    assert captured["cwd"] == "E:/Repo"
+    assert captured["scope_mode"] == "workspace_boosted"
 
 
 def _install_vespa_rerank_pool_fakes(monkeypatch, *, candidate_count: int, runtime_top_n: int | None = None):
@@ -1129,6 +1240,43 @@ def test_vespa_corpus_search_bounds_limit_one_rerank_pool(monkeypatch):
     assert diagnostics["reranker"]["input_count"] == 12
     assert diagnostics["reranker"]["microbatch_count"] == 2
     assert diagnostics["reranker"]["passage_chars"]["max"] > 0
+
+
+def _install_busy_reranker(monkeypatch):
+    class BusyReranker:
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "awq_int4"
+        requested_quantization = "awq_int4"
+        quantization_backend = "compressed_tensors_awq"
+        load_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        awq_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        max_passage_tokens = 1536
+        microbatch_size = 2
+
+        def __init__(self, **kwargs):
+            self.top_n = kwargs["top_n"]
+
+        def rerank(self, _query, _candidates):
+            raise ModelRunnerBusy("GPU scheduler busy")
+
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", BusyReranker)
+    return BusyReranker
+
+
+def test_vespa_corpus_search_returns_vespa_ranked_results_when_reranker_busy(monkeypatch):
+    _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=3)
+    _install_busy_reranker(monkeypatch)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_corpus_chunks_vespa("quality", limit=2, root_name="docs", vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert [result["id"] for result in results] == ["chunk-0", "chunk-1"]
+    assert diagnostics["reranker"]["skipped"] is True
+    assert diagnostics["reranker"]["reason"] == "model_runner_busy"
+    assert diagnostics["reranker"]["fallback"] == "vespa_ranked"
+    assert diagnostics["reranker"]["input_count"] == 3
+    assert diagnostics["reranker"]["returned_count"] == 2
+    assert diagnostics["vespa"]["returned_count"] == 2
 
 
 def test_vespa_evidence_search_hydrates_asset_episode_and_claim_results(monkeypatch):
@@ -1271,6 +1419,22 @@ def test_vespa_evidence_search_bounds_limit_one_rerank_pool(monkeypatch):
     assert diagnostics["reranker"]["input_count"] == 12
     assert diagnostics["reranker"]["microbatch_count"] == 2
     assert diagnostics["reranker"]["passage_words"]["max"] > 0
+
+
+def test_vespa_evidence_search_returns_vespa_ranked_results_when_reranker_busy(monkeypatch):
+    _install_vespa_rerank_pool_fakes(monkeypatch, candidate_count=3)
+    _install_busy_reranker(monkeypatch)
+    diagnostics: dict[str, object] = {}
+
+    results = database.search_evidence_vespa("quality", limit=2, root_name="docs", filters={}, vespa_base_url="http://vespa:8080", diagnostics=diagnostics)
+
+    assert [result["id"] for result in results] == ["chunk-0", "chunk-1"]
+    assert diagnostics["reranker"]["skipped"] is True
+    assert diagnostics["reranker"]["reason"] == "model_runner_busy"
+    assert diagnostics["reranker"]["fallback"] == "vespa_ranked"
+    assert diagnostics["reranker"]["input_count"] == 3
+    assert diagnostics["reranker"]["returned_count"] == 2
+    assert diagnostics["vespa"]["returned_count"] == 2
 
 
 def test_vespa_evidence_search_rerank_pool_respects_runtime_ceiling(monkeypatch):

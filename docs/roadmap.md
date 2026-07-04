@@ -11,6 +11,37 @@ Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
 
+## 2026-07-04 Retrieval Tail-Latency Closeout Update
+
+Affected `Progress %` entries remain conservative because production deployment
+and live validation are part of this closeout, not pre-existing evidence:
+
+- `V2.8 Indexer Acceleration And Local Inference Optimization`: remains `99%`.
+  Interactive retrieval now has code-level GPU policy fixes: Snowflake query
+  embeddings are shareable, Qwen/vision/OCR/ASR work remains exclusive,
+  retrieval embed/rerank waits are bounded, query embeddings have a short
+  process-local cache, and Qwen busy/timeout paths return Vespa-ranked fallback
+  results with explicit diagnostics.
+- `V2.7 Mail And Retrieval Production Hardening`: remains `99%`. Codex
+  preflight and Brief now avoid duplicate retrieval by packing from already
+  selected search results, and Brief uses a smaller configured search/rerank
+  budget.
+- `Storage and retrieval core`: remains `92%`. The remaining work entry is now
+  sharpened around live validation of bounded interactive latency, Vespa-ranked
+  fallback quality, and search-index repair/backfill on real roots.
+- `Embedding and vectorization throughput`: remains `97%`. Background
+  search-index embedding remains outside the new interactive timeout policy;
+  remaining work is to validate live search-index repair/backfill and GPU
+  pressure behaviour after deployment.
+- `Observability and benchmarks`: remains `99%`. Retrieval explain/model
+  activity now needs post-deploy validation for `embedding_cache_hit`,
+  skipped-reranker fallback diagnostics, and before/after live latency evidence.
+
+Remaining Work for this closeout: deploy through the required feature closeout
+script, validate live KB Search/Brief latency and diagnostics under the running
+Docker services, inspect search-index failed/pending state, and record any
+remaining operational gaps without mutating settings automatically.
+
 Live operational state belongs in the local dashboard and production status
 scripts:
 

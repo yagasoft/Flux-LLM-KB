@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -71,6 +72,10 @@ _CODE_IMPLEMENTATION_RELATIONSHIPS = {"definition", "route", "config", "migratio
 _DEFAULT_RERANK_POOL_TOP_N = 80
 _MIN_RERANK_POOL_SIZE = 12
 _RERANK_POOL_LIMIT_MULTIPLIER = 4
+_DEFAULT_QUERY_EMBEDDING_CACHE_TTL_SECONDS = 120
+_DEFAULT_QUERY_EMBEDDING_CACHE_MAX_ENTRIES = 256
+_DEFAULT_EMBEDDING_WAIT_TIMEOUT_SECONDS = 5
+_QUERY_EMBEDDING_CACHE: OrderedDict[tuple[str, int, str], tuple[float, EmbeddingResult]] = OrderedDict()
 _CODE_NON_IMPLEMENTATION_INTENT_TERMS = {
     "call",
     "called",
@@ -1191,7 +1196,6 @@ def search_corpus_chunks_vespa(
     rerank_limit: int | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    from .embeddings import EmbeddingInput, SnowflakeEmbeddingProvider
     from .reranking import QwenReranker
     from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, VespaSearchAdapter
 
@@ -1199,22 +1203,11 @@ def search_corpus_chunks_vespa(
     file_kinds = list(filters.get("file_kinds") or []) if isinstance(filters, dict) else []
     languages = list(filters.get("languages") or []) if isinstance(filters, dict) else []
     started = time.perf_counter()
-    embedding_started = time.perf_counter()
-    embedding_result = SnowflakeEmbeddingProvider(
+    embedding_result, embedding_elapsed_ms, embedding_cache_hit = _embed_query_for_retrieval(
+        query,
         model=SNOWFLAKE_EMBEDDING_MODEL,
         dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-    ).embed_batch(
-        [
-            EmbeddingInput(
-                owner_table="query",
-                owner_id="query",
-                text=query,
-                model=SNOWFLAKE_EMBEDDING_MODEL,
-                dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-            )
-        ]
-    )[0]
-    embedding_elapsed_ms = max(0, int((time.perf_counter() - embedding_started) * 1000))
+    )
     rank_profile = _VESPA_RRF_RANK_PROFILE
     candidate_limit = min(max(limit * 8, 80), 200)
     query_started = time.perf_counter()
@@ -1260,6 +1253,7 @@ def search_corpus_chunks_vespa(
             "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
             "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
             "embedding_latency_ms": embedding_elapsed_ms,
+            "embedding_cache_hit": embedding_cache_hit,
             "query_latency_ms": query_elapsed_ms,
             "match_feature_keys": match_feature_keys,
         }
@@ -1301,23 +1295,33 @@ def search_corpus_chunks_vespa(
     ]
     reranker = QwenReranker(top_n=rerank_pool_limit)
     rerank_started = time.perf_counter()
-    reranked = reranker.rerank(query, hydrated)
+    try:
+        reranked = reranker.rerank(query, hydrated)
+    except Exception as exc:
+        reason = _rerank_fallback_reason(exc)
+        if reason is None:
+            raise
+        rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
+        fallback = hydrated[:limit]
+        _record_skipped_reranker_diagnostics(
+            diagnostics,
+            reranker=reranker,
+            candidates=hydrated,
+            returned_count=len(fallback),
+            latency_ms=rerank_elapsed_ms,
+            reason=reason,
+        )
+        if diagnostics is not None:
+            diagnostics["vespa"]["returned_count"] = len(fallback)
+        return fallback
     rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
     if diagnostics is not None:
-        diagnostics["reranker"] = {
-            "model": reranker.model,
-            "quantization": reranker.quantization,
-            "requested_quantization": getattr(reranker, "requested_quantization", reranker.quantization),
-            "quantization_backend": getattr(reranker, "quantization_backend", ""),
-            "load_model": getattr(reranker, "load_model", reranker.model),
-            "awq_model": getattr(reranker, "awq_model", ""),
-            "input_count": len(hydrated),
-            "returned_count": min(limit, len(reranked)),
-            "latency_ms": rerank_elapsed_ms,
-            "top_n": reranker.top_n,
-            "max_passage_tokens": reranker.max_passage_tokens,
-            **_rerank_input_diagnostics(hydrated, reranker=reranker),
-        }
+        diagnostics["reranker"] = _reranker_base_diagnostics(
+            reranker,
+            hydrated,
+            returned_count=min(limit, len(reranked)),
+            latency_ms=rerank_elapsed_ms,
+        )
         diagnostics["vespa"]["returned_count"] = min(limit, len(reranked))
     return reranked[:limit]
 
@@ -1332,7 +1336,6 @@ def search_evidence_vespa(
     rerank_limit: int | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    from .embeddings import SnowflakeEmbeddingProvider
     from .reranking import QwenReranker
     from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, VespaSearchAdapter
 
@@ -1340,22 +1343,11 @@ def search_evidence_vespa(
     file_kinds = list(filters.get("file_kinds") or []) if isinstance(filters, dict) else []
     languages = list(filters.get("languages") or []) if isinstance(filters, dict) else []
     started = time.perf_counter()
-    embedding_started = time.perf_counter()
-    embedding_result = SnowflakeEmbeddingProvider(
+    embedding_result, embedding_elapsed_ms, embedding_cache_hit = _embed_query_for_retrieval(
+        query,
         model=SNOWFLAKE_EMBEDDING_MODEL,
         dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-    ).embed_batch(
-        [
-            EmbeddingInput(
-                owner_table="query",
-                owner_id="query",
-                text=query,
-                model=SNOWFLAKE_EMBEDDING_MODEL,
-                dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-            )
-        ]
-    )[0]
-    embedding_elapsed_ms = max(0, int((time.perf_counter() - embedding_started) * 1000))
+    )
     rank_profile = _VESPA_RRF_RANK_PROFILE
     candidate_limit = min(max(limit * 8, 80), 200)
     query_started = time.perf_counter()
@@ -1405,6 +1397,7 @@ def search_evidence_vespa(
             "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
             "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
             "embedding_latency_ms": embedding_elapsed_ms,
+            "embedding_cache_hit": embedding_cache_hit,
             "query_latency_ms": query_elapsed_ms,
             "match_feature_keys": match_feature_keys,
         }
@@ -1487,23 +1480,33 @@ def search_evidence_vespa(
     rerank_candidates = results[:rerank_pool_limit]
     reranker = QwenReranker(top_n=rerank_pool_limit)
     rerank_started = time.perf_counter()
-    reranked = _sort_code_adjusted_reranked_results(reranker.rerank(query, rerank_candidates))
+    try:
+        reranked = _sort_code_adjusted_reranked_results(reranker.rerank(query, rerank_candidates))
+    except Exception as exc:
+        reason = _rerank_fallback_reason(exc)
+        if reason is None:
+            raise
+        rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
+        fallback = rerank_candidates[:limit]
+        _record_skipped_reranker_diagnostics(
+            diagnostics,
+            reranker=reranker,
+            candidates=rerank_candidates,
+            returned_count=len(fallback),
+            latency_ms=rerank_elapsed_ms,
+            reason=reason,
+        )
+        if diagnostics is not None:
+            diagnostics["vespa"]["returned_count"] = len(fallback)
+        return fallback
     rerank_elapsed_ms = max(0, int((time.perf_counter() - rerank_started) * 1000))
     if diagnostics is not None:
-        diagnostics["reranker"] = {
-            "model": reranker.model,
-            "quantization": reranker.quantization,
-            "requested_quantization": getattr(reranker, "requested_quantization", reranker.quantization),
-            "quantization_backend": getattr(reranker, "quantization_backend", ""),
-            "load_model": getattr(reranker, "load_model", reranker.model),
-            "awq_model": getattr(reranker, "awq_model", ""),
-            "input_count": len(rerank_candidates),
-            "returned_count": min(limit, len(reranked)),
-            "latency_ms": rerank_elapsed_ms,
-            "top_n": reranker.top_n,
-            "max_passage_tokens": reranker.max_passage_tokens,
-            **_rerank_input_diagnostics(rerank_candidates, reranker=reranker),
-        }
+        diagnostics["reranker"] = _reranker_base_diagnostics(
+            reranker,
+            rerank_candidates,
+            returned_count=min(limit, len(reranked)),
+            latency_ms=rerank_elapsed_ms,
+        )
         diagnostics["vespa"]["returned_count"] = min(limit, len(reranked))
     return reranked[:limit]
 
@@ -1531,6 +1534,171 @@ def _configured_rerank_top_n() -> int:
         return max(1, min(int(value or _DEFAULT_RERANK_POOL_TOP_N), 200))
     except (TypeError, ValueError):
         return _DEFAULT_RERANK_POOL_TOP_N
+
+
+def _clear_query_embedding_cache_for_tests() -> None:
+    _QUERY_EMBEDDING_CACHE.clear()
+
+
+def _retrieval_int_setting(key: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        from .settings import SettingsService
+
+        value = SettingsService().resolve(key).raw_value
+    except Exception:
+        value = default
+    try:
+        return max(minimum, min(int(value), maximum))
+    except (TypeError, ValueError):
+        return default
+
+
+def _configured_embedding_wait_timeout_seconds() -> float:
+    return float(
+        _retrieval_int_setting(
+            "retrieval.embedding_wait_timeout_seconds",
+            _DEFAULT_EMBEDDING_WAIT_TIMEOUT_SECONDS,
+            minimum=1,
+            maximum=600,
+        )
+    )
+
+
+def _query_embedding_cache_limits() -> tuple[int, int]:
+    ttl_seconds = _retrieval_int_setting(
+        "retrieval.query_embedding_cache_ttl_seconds",
+        _DEFAULT_QUERY_EMBEDDING_CACHE_TTL_SECONDS,
+        minimum=0,
+        maximum=3600,
+    )
+    max_entries = _retrieval_int_setting(
+        "retrieval.query_embedding_cache_max_entries",
+        _DEFAULT_QUERY_EMBEDDING_CACHE_MAX_ENTRIES,
+        minimum=0,
+        maximum=4096,
+    )
+    return ttl_seconds, max_entries
+
+
+def _query_embedding_cache_key(*, query: str, model: str, dimensions: int) -> tuple[str, int, str]:
+    query_hash = hashlib.sha256(str(query or "").encode("utf-8")).hexdigest()
+    return (str(model), int(dimensions), query_hash)
+
+
+def _clone_embedding_result(result: EmbeddingResult) -> EmbeddingResult:
+    return EmbeddingResult(
+        owner_table=result.owner_table,
+        owner_id=result.owner_id,
+        model=result.model,
+        dimensions=result.dimensions,
+        vector=[float(value) for value in result.vector],
+        metadata=dict(result.metadata),
+    )
+
+
+def _embed_query_for_retrieval(query: str, *, model: str, dimensions: int) -> tuple[EmbeddingResult, int, bool]:
+    from .embeddings import EmbeddingInput, SnowflakeEmbeddingProvider
+
+    started = time.perf_counter()
+    ttl_seconds, max_entries = _query_embedding_cache_limits()
+    cache_key = _query_embedding_cache_key(query=query, model=model, dimensions=dimensions)
+    now = time.monotonic()
+    if ttl_seconds > 0 and max_entries > 0:
+        cached = _QUERY_EMBEDDING_CACHE.get(cache_key)
+        if cached is not None:
+            cached_at, cached_result = cached
+            if now - cached_at <= ttl_seconds:
+                _QUERY_EMBEDDING_CACHE.move_to_end(cache_key)
+                elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+                return _clone_embedding_result(cached_result), elapsed_ms, True
+            _QUERY_EMBEDDING_CACHE.pop(cache_key, None)
+
+    embedding_result = SnowflakeEmbeddingProvider(
+        model=model,
+        dimensions=dimensions,
+        timeout_seconds=_configured_embedding_wait_timeout_seconds(),
+    ).embed_batch(
+        [
+            EmbeddingInput(
+                owner_table="query",
+                owner_id="query",
+                text=query,
+                model=model,
+                dimensions=dimensions,
+            )
+        ]
+    )[0]
+    if ttl_seconds > 0 and max_entries > 0:
+        _QUERY_EMBEDDING_CACHE[cache_key] = (now, _clone_embedding_result(embedding_result))
+        while len(_QUERY_EMBEDDING_CACHE) > max_entries:
+            _QUERY_EMBEDDING_CACHE.popitem(last=False)
+    elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+    return embedding_result, elapsed_ms, False
+
+
+def _reranker_base_diagnostics(
+    reranker: Any,
+    candidates: list[dict[str, Any]],
+    *,
+    returned_count: int,
+    latency_ms: int,
+) -> dict[str, Any]:
+    return {
+        "model": reranker.model,
+        "quantization": reranker.quantization,
+        "requested_quantization": getattr(reranker, "requested_quantization", reranker.quantization),
+        "quantization_backend": getattr(reranker, "quantization_backend", ""),
+        "load_model": getattr(reranker, "load_model", reranker.model),
+        "awq_model": getattr(reranker, "awq_model", ""),
+        "input_count": len(candidates),
+        "returned_count": returned_count,
+        "latency_ms": latency_ms,
+        "top_n": reranker.top_n,
+        "max_passage_tokens": reranker.max_passage_tokens,
+        "wait_timeout_seconds": getattr(reranker, "timeout_seconds", None),
+        **_rerank_input_diagnostics(candidates, reranker=reranker),
+    }
+
+
+def _rerank_fallback_reason(exc: Exception) -> str | None:
+    try:
+        from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout
+        from .model_runner import ModelRunnerBusy, ModelRunnerError
+    except Exception:
+        GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
+    if isinstance(exc, ModelRunnerBusy):
+        return "model_runner_busy"
+    if isinstance(exc, GpuLeaseTimeout):
+        return "gpu_lease_timeout"
+    if isinstance(exc, GpuLeaseRejected):
+        return "gpu_lease_rejected"
+    if isinstance(exc, ModelRunnerError):
+        message = str(exc).lower()
+        if "503" in message or "429" in message or "scheduler" in message or "busy" in message or "timeout" in message:
+            return "model_runner_error"
+    return None
+
+
+def _record_skipped_reranker_diagnostics(
+    diagnostics: dict[str, Any] | None,
+    *,
+    reranker: Any,
+    candidates: list[dict[str, Any]],
+    returned_count: int,
+    latency_ms: int,
+    reason: str,
+) -> None:
+    if diagnostics is None:
+        return
+    payload = _reranker_base_diagnostics(reranker, candidates, returned_count=returned_count, latency_ms=latency_ms)
+    payload.update(
+        {
+            "skipped": True,
+            "reason": reason,
+            "fallback": "vespa_ranked",
+        }
+    )
+    diagnostics["reranker"] = payload
 
 
 def _rerank_input_diagnostics(candidates: list[dict[str, Any]], *, reranker: Any) -> dict[str, Any]:

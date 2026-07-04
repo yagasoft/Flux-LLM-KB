@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 import threading
 import sys
 from types import ModuleType, SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -16,6 +18,24 @@ def test_model_runner_client_timeout_allows_cold_model_start(monkeypatch):
 
     monkeypatch.setenv("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS", "900")
     assert model_runner.ModelRunnerClient().timeout_seconds == 900
+
+
+def test_model_runner_http_503_string_detail_is_retryable_busy(monkeypatch):
+    def fake_urlopen(*_args, **_kwargs):
+        raise HTTPError(
+            url="http://model-runner:8790/v1/rerank",
+            code=503,
+            msg="Service Unavailable",
+            hdrs={},
+            fp=BytesIO(b'{"detail":"HTTP Error 503: Service Unavailable"}'),
+        )
+
+    monkeypatch.setattr(model_runner, "urlopen", fake_urlopen)
+
+    with pytest.raises(model_runner.ModelRunnerBusy) as exc_info:
+        model_runner._post_json_to_base_url("http://model-runner:8790", "/v1/rerank", {"passages": []}, 1)
+
+    assert exc_info.value.retry_after_seconds == 1.0
 
 
 def test_model_runner_client_uses_catalog_base_url_when_env_is_absent(monkeypatch):
@@ -704,6 +724,50 @@ def test_model_runner_client_forwards_awq_model_for_reranking():
     assert payload["awq_model"] == "example/Qwen3-Reranker-4B-AWQ"
 
 
+def test_model_runner_client_forwards_embedding_scheduler_timeout():
+    calls: list[dict[str, object]] = []
+
+    class FakeClient(model_runner.ModelRunnerClient):
+        def _post_json(self, path, payload):
+            calls.append({"path": path, "payload": payload})
+            return {"ok": True, "vectors": [[0.1, 0.2]]}
+
+    client = FakeClient(base_url="http://model-runner:8790")
+
+    vectors = client.embed(["query"], model="Snowflake/test", dimensions=2, timeout_seconds=5)
+
+    assert vectors == [[0.1, 0.2]]
+    assert calls == [
+        {
+            "path": "/v1/embeddings",
+            "payload": {"model": "Snowflake/test", "dimensions": 2, "texts": ["query"], "timeout_seconds": 5.0},
+        }
+    ]
+
+
+def test_model_runner_client_forwards_rerank_scheduler_timeout():
+    calls: list[dict[str, object]] = []
+
+    class FakeClient(model_runner.ModelRunnerClient):
+        def _post_json(self, path, payload):
+            calls.append({"path": path, "payload": payload})
+            return {"ok": True, "scores": [0.9]}
+
+    client = FakeClient(base_url="http://model-runner:8790")
+
+    scores = client.rerank(
+        "hybrid retrieval",
+        ["Vespa combines BM25 and dense search."],
+        model=model_runner.DEFAULT_RERANKER_MODEL,
+        quantization="awq_int4",
+        awq_model="example/Qwen3-Reranker-4B-AWQ",
+        timeout_seconds=5,
+    )
+
+    assert scores == [0.9]
+    assert calls[0]["payload"]["timeout_seconds"] == 5.0
+
+
 def test_model_runner_client_records_safe_embedding_activity(monkeypatch):
     records: list[dict[str, object]] = []
 
@@ -1109,7 +1173,8 @@ def test_embeddings_endpoint_accepts_openai_input_and_rejects_invalid_payload(mo
 
     calls: list[list[str]] = []
 
-    def fake_embed(texts, *, model, dimensions):
+    def fake_embed(texts, *, model, dimensions, timeout_seconds=None):
+        assert timeout_seconds is None
         calls.append(list(texts))
         return [[0.1, 0.2] for _text in texts]
 
@@ -1128,6 +1193,65 @@ def test_embeddings_endpoint_accepts_openai_input_and_rejects_invalid_payload(mo
     assert invalid_response.status_code == 400
     assert missing_response.status_code == 400
     assert calls == [["hello"], ["one", "two"]]
+
+
+def test_embeddings_endpoint_forwards_scheduler_timeout(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    calls: list[dict[str, object]] = []
+
+    def fake_embed(texts, *, model, dimensions, timeout_seconds=None):
+        calls.append(
+            {
+                "texts": list(texts),
+                "model": model,
+                "dimensions": dimensions,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        return [[0.1, 0.2]]
+
+    monkeypatch.setattr(model_runner, "_embed_with_sentence_transformers", fake_embed)
+
+    response = TestClient(model_runner.create_app()).post(
+        "/v1/embeddings",
+        json={"input": "hello", "dimensions": 2, "timeout_seconds": 5},
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "texts": ["hello"],
+            "model": model_runner.DEFAULT_EMBEDDING_MODEL,
+            "dimensions": 2,
+            "timeout_seconds": 5.0,
+        }
+    ]
+
+
+def test_rerank_endpoint_forwards_scheduler_timeout(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    calls: list[dict[str, object]] = []
+
+    def fake_rerank(*_args, **kwargs):
+        calls.append(kwargs)
+        return [0.25]
+
+    monkeypatch.setattr(model_runner, "_rerank_with_transformers", fake_rerank)
+
+    response = TestClient(model_runner.create_app()).post(
+        "/v1/rerank",
+        json={
+            "query": "hello",
+            "passages": ["world"],
+            "quantization": model_runner.DEFAULT_RERANKER_QUANTIZATION,
+            "timeout_seconds": 5,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls[0]["timeout_seconds"] == 5.0
 
 
 def test_embedding_encode_is_serialised_inside_model_runner(monkeypatch):
@@ -1213,7 +1337,7 @@ def test_cached_embedding_refreshes_residency_before_requesting_lease(monkeypatc
     assert vectors == [[1.0, 2.0]]
     assert events[:2] == [
         ("resident", ("embedding", "Snowflake/cached", True)),
-        ("acquire", ("Snowflake/cached", True, "")),
+        ("acquire", ("Snowflake/cached", False, "embedding")),
     ]
 
 

@@ -74,15 +74,16 @@ def test_user_prompt_hook_injects_real_brief_for_relevant_non_trivial_prompt(mon
                 }
             ]
 
-        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
-            observed["brief"] = {
+        def brief_from_results(self, query, search_results, token_budget=None):
+            observed["brief_from_results"] = {
                 "query": query,
+                "search_results": search_results,
                 "token_budget": token_budget,
-                "cwd": cwd,
-                "root_name": root_name,
-                "scope_mode": scope_mode,
             }
             return "### Prior RFP plan\nUse the established RFP workflow."
+
+        def brief(self, *_args, **_kwargs):
+            raise AssertionError("hook preflight should reuse search results instead of running brief retrieval")
 
     monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
     monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
@@ -107,9 +108,8 @@ def test_user_prompt_hook_injects_real_brief_for_relevant_non_trivial_prompt(mon
     assert observed["search"]["limit"] == 5
     assert observed["search"]["cwd"] == "E:/Repo"
     assert observed["search"]["scope_mode"] == "local_first"
-    assert observed["brief"]["token_budget"] == 900
-    assert observed["brief"]["cwd"] == "E:/Repo"
-    assert observed["brief"]["scope_mode"] == "local_first"
+    assert observed["brief_from_results"]["token_budget"] == 900
+    assert observed["brief_from_results"]["search_results"][0]["title"] == "Prior RFP plan"
     assert audits[-1]["event_type"] == "codex_hook.preflight_injected"
     assert audits[-1]["details"]["session_id"] == "session-1"
     assert audits[-1]["details"]["turn_id"] == "turn-1"
@@ -155,11 +155,12 @@ def test_user_prompt_hook_reruns_non_code_filters_for_code_heavy_prompt(monkeypa
                 },
             ]
 
-        def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first", filters=None):
-            calls.append(("brief", filters))
-            if filters and filters.get("file_kinds") == ["text", "document", "image"]:
-                return "### AGENTS.md\nIf closeout fails, report failed_step and log_path."
-            return "### hooks.py\nfailed_step = result.failed_step"
+        def brief_from_results(self, query, search_results, token_budget=None):
+            calls.append(("brief_from_results", [item["title"] for item in search_results], token_budget))
+            return f"### {search_results[0]['title']}\n{search_results[0]['summary']}"
+
+        def brief(self, *_args, **_kwargs):
+            raise AssertionError("hook preflight should reuse filtered search results instead of running brief retrieval")
 
     monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())
     monkeypatch.setattr(hook_policy.database, "record_audit_event", lambda **kwargs: audits.append(kwargs))
@@ -183,7 +184,7 @@ def test_user_prompt_hook_reruns_non_code_filters_for_code_heavy_prompt(monkeypa
         "file_kinds": ["text", "document", "image"],
     }
     assert ("search", expected_filters) in calls
-    assert ("brief", expected_filters) in calls
+    assert ("brief_from_results", ["AGENTS.md"], 900) in calls
     assert "AGENTS.md" in context
     assert "hooks.py" not in context
     assert audits[-1]["event_type"] == "codex_hook.preflight_injected"
@@ -208,6 +209,9 @@ def test_user_prompt_hook_labels_global_fallback_memory(monkeypatch):
             ]
 
         def brief(self, query, token_budget=None, cwd=None, root_name=None, scope_mode="local_first"):
+            raise AssertionError("hook preflight should reuse search results instead of running brief retrieval")
+
+        def brief_from_results(self, query, search_results, token_budget=None):
             return "### Prior global plan\nUse fallback workflow."
 
     monkeypatch.setattr(hook_policy, "KnowledgeService", lambda: FakeService())

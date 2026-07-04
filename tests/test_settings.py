@@ -33,6 +33,12 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.rerank_top_n" in keys
     assert "retrieval.rerank_microbatch_size" in keys
     assert "retrieval.max_rerank_passage_tokens" in keys
+    assert "retrieval.embedding_wait_timeout_seconds" in keys
+    assert "retrieval.rerank_wait_timeout_seconds" in keys
+    assert "retrieval.query_embedding_cache_ttl_seconds" in keys
+    assert "retrieval.query_embedding_cache_max_entries" in keys
+    assert "retrieval.brief_search_limit" in keys
+    assert "retrieval.brief_rerank_limit" in keys
     assert "retrieval.gpu_vram_budget_mb" in keys
     assert "gpu.scheduler.enabled" in keys
     assert "gpu.scheduler.mode" in keys
@@ -194,6 +200,32 @@ def test_reranker_quantization_settings_canonicalize_legacy_aliases(monkeypatch)
 
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANKER_QUANTIZATION", "int4_awq")
     assert service.resolve("retrieval.reranker_quantization").raw_value == "awq_int4"
+
+
+def test_retrieval_interactive_latency_settings_defaults_and_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+
+    assert service.resolve("retrieval.embedding_wait_timeout_seconds").raw_value == 5
+    assert service.resolve("retrieval.rerank_wait_timeout_seconds").raw_value == 5
+    assert service.resolve("retrieval.query_embedding_cache_ttl_seconds").raw_value == 120
+    assert service.resolve("retrieval.query_embedding_cache_max_entries").raw_value == 256
+    assert service.resolve("retrieval.brief_search_limit").raw_value == 5
+    assert service.resolve("retrieval.brief_rerank_limit").raw_value == 3
+
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_EMBEDDING_WAIT_TIMEOUT_SECONDS", "7")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANK_WAIT_TIMEOUT_SECONDS", "9")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_QUERY_EMBEDDING_CACHE_TTL_SECONDS", "30")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_QUERY_EMBEDDING_CACHE_MAX_ENTRIES", "32")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_BRIEF_SEARCH_LIMIT", "4")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_BRIEF_RERANK_LIMIT", "2")
+
+    assert service.resolve("retrieval.embedding_wait_timeout_seconds").raw_value == 7
+    assert service.resolve("retrieval.rerank_wait_timeout_seconds").raw_value == 9
+    assert service.resolve("retrieval.query_embedding_cache_ttl_seconds").raw_value == 30
+    assert service.resolve("retrieval.query_embedding_cache_max_entries").raw_value == 32
+    assert service.resolve("retrieval.brief_search_limit").raw_value == 4
+    assert service.resolve("retrieval.brief_rerank_limit").raw_value == 2
 
 
 def test_crawler_global_excludes_skip_dedicated_worktrees(monkeypatch):

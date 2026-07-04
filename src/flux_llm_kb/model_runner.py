@@ -136,11 +136,18 @@ class ModelRunnerClient:
             resolved_timeout = int(os.environ.get("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS") or DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS)
         self.timeout_seconds = max(1, int(resolved_timeout))
 
-    def embed(self, texts: Iterable[str], *, model: str, dimensions: int) -> list[list[float]]:
-        payload = self._post_json(
-            "/v1/embeddings",
-            {"model": model, "dimensions": int(dimensions), "texts": list(texts)},
-        )
+    def embed(
+        self,
+        texts: Iterable[str],
+        *,
+        model: str,
+        dimensions: int,
+        timeout_seconds: float | None = None,
+    ) -> list[list[float]]:
+        request_payload: dict[str, Any] = {"model": model, "dimensions": int(dimensions), "texts": list(texts)}
+        if timeout_seconds is not None:
+            request_payload["timeout_seconds"] = float(timeout_seconds)
+        payload = self._post_json("/v1/embeddings", request_payload)
         vectors = payload.get("vectors")
         if not isinstance(vectors, list):
             raise ModelRunnerError("model-runner embedding response did not include vectors")
@@ -154,6 +161,7 @@ class ModelRunnerClient:
         model: str,
         quantization: str,
         awq_model: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> list[float]:
         request_payload = {
             "model": model,
@@ -163,6 +171,8 @@ class ModelRunnerClient:
         }
         if awq_model:
             request_payload["awq_model"] = awq_model
+        if timeout_seconds is not None:
+            request_payload["timeout_seconds"] = float(timeout_seconds)
         payload = self._post_json("/v1/rerank", request_payload)
         scores = payload.get("scores")
         if not isinstance(scores, list):
@@ -247,8 +257,16 @@ class ModelRunnerRerankScorer:
         model: str,
         quantization: str,
         awq_model: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> list[float]:
-        return self.client.rerank(query, passages, model=model, quantization=quantization, awq_model=awq_model)
+        return self.client.rerank(
+            query,
+            passages,
+            model=model,
+            quantization=quantization,
+            awq_model=awq_model,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], timeout_seconds: int) -> dict[str, Any]:
@@ -294,9 +312,20 @@ def _raise_model_runner_http_error(exc: HTTPError) -> None:
                 retry_after_seconds=float(detail.get("retry_after_seconds") or 1.0),
             ) from exc
         if isinstance(detail, str):
+            if _http_error_is_retryable_gpu_busy(exc, detail):
+                raise ModelRunnerBusy(detail, retry_after_seconds=1.0) from exc
             raise ModelRunnerError(detail) from exc
         _raise_model_runner_payload_error(payload)
+    if _http_error_is_retryable_gpu_busy(exc, str(exc)):
+        raise ModelRunnerBusy(str(exc), retry_after_seconds=1.0) from exc
     raise ModelRunnerError(str(exc)) from exc
+
+
+def _http_error_is_retryable_gpu_busy(exc: HTTPError, detail: str) -> bool:
+    message = str(detail or "").lower()
+    return int(getattr(exc, "code", 0) or 0) in {429, 503} or any(
+        marker in message for marker in ("gpu.scheduler_busy", "scheduler", "busy", "timed out", "timeout")
+    )
 
 
 def _raise_model_runner_payload_error(payload: dict[str, Any]) -> None:
@@ -526,12 +555,18 @@ def _load_embedding_model(model: str) -> Any:
     return _EMBEDDING_MODELS[model]
 
 
-def _embed_with_sentence_transformers(texts: list[str], *, model: str, dimensions: int) -> list[list[float]]:
+def _embed_with_sentence_transformers(
+    texts: list[str],
+    *,
+    model: str,
+    dimensions: int,
+    timeout_seconds: float | None = None,
+) -> list[list[float]]:
     if not texts:
         return []
     if model in _EMBEDDING_MODELS:
         _record_model_residency_state("embedding", model, resident=True)
-    profile = task_profile("embedding", model_id=model, component=_scheduler_component())
+    profile = task_profile("embedding", model_id=model, component=_scheduler_component(), timeout_seconds=timeout_seconds)
     with get_gpu_scheduler().acquire(profile):
         encoder = _load_embedding_model(model)
         with _named_lock(_EMBEDDING_ENCODE_LOCKS, model):
@@ -696,11 +731,17 @@ def _rerank_with_transformers(
     model: str,
     quantization: str,
     awq_model: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> list[float]:
     if not passages:
         return []
     resolved_profile = resolve_reranker_quantization(quantization, model=model, awq_model=awq_model)
-    lease_profile = task_profile("rerank", model_id=resolved_profile.load_model, component=_scheduler_component())
+    lease_profile = task_profile(
+        "rerank",
+        model_id=resolved_profile.load_model,
+        component=_scheduler_component(),
+        timeout_seconds=timeout_seconds,
+    )
     cache_key = (resolved_profile.model, resolved_profile.quantization, resolved_profile.load_model)
     if cache_key in _RERANKER_MODELS:
         _record_model_residency_state("rerank", resolved_profile.load_model, resident=True)
@@ -1087,7 +1128,12 @@ def create_app():
             model = str(payload.get("model") or DEFAULT_EMBEDDING_MODEL)
             dimensions = int(payload.get("dimensions") or 1024)
             texts = _embedding_texts_from_payload(payload)
-            vectors = _embed_with_sentence_transformers(texts, model=model, dimensions=dimensions)
+            vectors = _embed_with_sentence_transformers(
+                texts,
+                model=model,
+                dimensions=dimensions,
+                timeout_seconds=_optional_timeout_seconds_from_payload(payload),
+            )
             return {
                 "ok": True,
                 "model": model,
@@ -1115,6 +1161,7 @@ def create_app():
                 model=model,
                 quantization=quantization,
                 awq_model=profile.awq_model,
+                timeout_seconds=_optional_timeout_seconds_from_payload(payload),
             )
         except (GpuLeaseRejected, GpuLeaseTimeout) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
@@ -1175,6 +1222,15 @@ def _embedding_texts_from_payload(payload: dict[str, Any]) -> list[str]:
             return list(value)
         raise ValueError("embedding input must be a string or list of strings")
     raise ValueError("embedding request requires texts or input")
+
+
+def _optional_timeout_seconds_from_payload(payload: dict[str, Any]) -> float | None:
+    if "timeout_seconds" not in payload or payload.get("timeout_seconds") in {None, ""}:
+        return None
+    timeout_seconds = float(payload.get("timeout_seconds"))
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    return timeout_seconds
 
 
 def _gpu_busy_detail(exc: GpuLeaseRejected | GpuLeaseTimeout | ModelRunnerBusy) -> dict[str, Any]:
