@@ -23,6 +23,9 @@ def test_load_migrations_returns_ordered_sql_files():
     assert any("CREATE TABLE IF NOT EXISTS watcher_state" in item.sql for item in migrations)
     assert any("ALTER TABLE crawl_runs" in item.sql and "reason" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS runtime_settings" in item.sql for item in migrations)
+    runtime_settings_mail = next(item for item in migrations if item.name == "0004_runtime_settings_mail")
+    assert "CREATE TABLE IF NOT EXISTS runtime_control_requests" in runtime_settings_mail.sql
+    assert "updated_at timestamptz NOT NULL DEFAULT now()" in runtime_settings_mail.sql
     assert any("CREATE TABLE IF NOT EXISTS mail_profiles" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS mail_messages" in item.sql for item in migrations)
     assert any("CREATE TABLE IF NOT EXISTS mail_oauth_states" in item.sql for item in migrations)
@@ -35,6 +38,9 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "CREATE TABLE IF NOT EXISTS callback_deliveries" in event_messaging.sql
     assert "ADD COLUMN IF NOT EXISTS broker_message_id" in event_messaging.sql
     assert "idx_message_outbox_pending" in event_messaging.sql
+    runtime_control_updated_at = next(item for item in migrations if item.name == "0042_runtime_control_updated_at")
+    assert "ALTER TABLE runtime_control_requests" in runtime_control_updated_at.sql
+    assert "ADD COLUMN IF NOT EXISTS updated_at" in runtime_control_updated_at.sql
     assert any("sync_interval_seconds" in item.sql for item in migrations)
     graph_migration = next(item for item in migrations if item.name == "0010_graph_lifecycle")
     assert "CREATE TABLE IF NOT EXISTS claim_lifecycle_events" in graph_migration.sql

@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS runtime_control_requests (
     actor text NOT NULL DEFAULT 'system',
     requested_at timestamptz NOT NULL DEFAULT now(),
     acknowledged_at timestamptz,
-    metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS mail_profiles (
