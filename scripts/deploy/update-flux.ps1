@@ -989,6 +989,10 @@ import traceback
 from pathlib import Path
 
 os.environ["FLUX_KB_DATABASE_URL"] = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
+os.environ["FLUX_KB_RABBITMQ_URL"] = "amqp://flux:flux@127.0.0.1:5672/flux"
+os.environ["FLUX_KB_RABBITMQ_MANAGEMENT_URL"] = "http://127.0.0.1:15672"
+os.environ["FLUX_KB_RABBITMQ_USERNAME"] = "flux"
+os.environ["FLUX_KB_RABBITMQ_PASSWORD"] = "flux"
 os.environ["FLUX_KB_INSTALL_ROOT"] = r"$InstallRoot"
 os.environ["FLUX_KB_APP_ROOT"] = r"$AppRoot"
 os.environ["FLUX_KB_PRIVATE_DIR"] = r"$InstallRoot\private"

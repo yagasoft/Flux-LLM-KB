@@ -406,8 +406,9 @@ through `retrying_locked` with `next_attempt_at` cooldown and then
 Host-agent roots use a separate command route, `corpus.host_agent.process`, and
 durable queue, `flux.commands.corpus_host_agent`, so Docker workers do not steal
 jobs for paths only the Windows host can read. The host-agent REST and
-background loops enqueue work; the host-side RabbitMQ worker consumes the
-host-agent queue and processes the exact job id.
+background loops enqueue work; `flux-kb host-agent run` starts the host-side
+RabbitMQ worker by default, consumes the host-agent queue, and processes the
+exact job id.
 If a Windows host-agent local file is locked and `host_agent.vss_enabled` is
 true, the worker first retries that extraction through a short-lived VSS
 snapshot. VSS create/read/delete failures move through `retrying_vss_failed`
@@ -695,7 +696,6 @@ flux-kb code feedback summary --root app
 flux-kb diagnostics all --root docs --status blocked_by_policy --family office --include-details
 flux-kb diagnostics remediate retry_corpus_job --target-type job --target-id <job-id> --root docs --family office --reason "dependency fixed"
 flux-kb crawl backfill --root docs --family office --limit 20
-flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id host-agent
 ```
 
 The dashboard is the single UI surface for overview status, guarded automation,

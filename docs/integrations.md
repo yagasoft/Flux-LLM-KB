@@ -273,7 +273,6 @@ flux-kb automation run --mode guarded --limit 25
 flux-kb automation actions --status all --limit 25
 flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb crawl backfill --root docs --family office --limit 20 --callback-url http://127.0.0.1:8765/callback
-flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id host-agent
 flux-kb retrieval benchmark run --suite standard --label after-change --compare-label baseline
 flux-kb retrieval benchmark run --suite governance-shadow --label before-automation
 flux-kb retrieval benchmark history --suite standard --label after-change --limit 10
@@ -496,7 +495,11 @@ flux-kb host-agent run
 ```
 
 The agent exposes local-only status, path validation, native folder browse, and
-host-side crawl sync endpoints. It stores no private content in Git.
+host-side crawl sync endpoints. `flux-kb host-agent run` also starts the
+host-side RabbitMQ consumer for `flux.commands.corpus_host_agent` by default; use
+`flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id
+host-agent` only when manually supervising separate fallback processes. It stores
+no private content in Git.
 
 ## Mail Capture
 

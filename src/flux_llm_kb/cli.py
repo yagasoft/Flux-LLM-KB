@@ -629,6 +629,11 @@ def main(argv: list[str] | None = None) -> int:
     host_agent_run = host_agent_subparsers.add_parser("run", help="Run the local host-agent REST bridge")
     host_agent_run.add_argument("--host", default="127.0.0.1")
     host_agent_run.add_argument("--port", type=int, default=8799)
+    host_agent_run.add_argument(
+        "--no-broker-worker",
+        action="store_true",
+        help="Disable the host-side RabbitMQ consumer for host-agent corpus jobs",
+    )
     host_agent_subparsers.add_parser("status", help="Show local host-agent status")
     host_agent_subparsers.add_parser("browse", help="Open a native folder picker")
 
@@ -1602,7 +1607,7 @@ def _host_agent(args: argparse.Namespace) -> int:
     from . import host_agent
 
     if args.host_agent_command == "run":
-        payload = host_agent.run_server(host=args.host, port=args.port)
+        payload = host_agent.run_server(host=args.host, port=args.port, start_broker_consumer=not args.no_broker_worker)
     elif args.host_agent_command == "status":
         payload = host_agent.status_payload()
     elif args.host_agent_command == "browse":

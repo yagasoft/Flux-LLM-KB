@@ -290,6 +290,11 @@ def test_production_host_agent_uses_host_loopback_to_docker_ollama():
         assert "[int]$OllamaHostPort = 11435" in script
         assert "[int]$AsrHostPort = 8788" in script
         assert "param([string]$AppRoot, [string]$InstallRoot, [int]$HostAgentPort, [int]$PostgresPort, [bool]$GpuEnabled, [int]$OllamaHostPort, [int]$AsrHostPort)" in script
+        assert 'os.environ["FLUX_KB_RABBITMQ_URL"] = "amqp://flux:flux@127.0.0.1:5672/flux"' in script
+        assert 'os.environ["FLUX_KB_RABBITMQ_MANAGEMENT_URL"] = "http://127.0.0.1:15672"' in script
+        assert 'os.environ["FLUX_KB_RABBITMQ_USERNAME"] = "flux"' in script
+        assert 'os.environ["FLUX_KB_RABBITMQ_PASSWORD"] = "flux"' in script
+        assert 'os.environ["FLUX_KB_RABBITMQ_URL"] = "amqp://flux:flux@rabbitmq:5672/flux"' not in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_ENABLED"] = "true"' in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://127.0.0.1:${OllamaHostPort}"' in script
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE"] = "2m"' in script

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -197,15 +198,76 @@ def test_host_agent_startup_runs_watcher_and_worker_loops(monkeypatch):
         def stop(self):
             events.append("worker-stop")
 
+    class FakeBrokerConsumerLoop:
+        def start(self):
+            events.append("broker-start")
+
+        def stop(self):
+            events.append("broker-stop")
+
     monkeypatch.setattr(host_agent, "HostAgentWatcherLoop", lambda: FakeWatcherLoop())
     monkeypatch.setattr(host_agent, "HostAgentWorkerLoop", lambda: FakeWorkerLoop(), raising=False)
+    monkeypatch.setattr(host_agent, "HostAgentBrokerConsumerLoop", lambda: FakeBrokerConsumerLoop(), raising=False)
 
-    with TestClient(host_agent.create_app(start_watcher=True)):
+    with TestClient(host_agent.create_app(start_watcher=True, start_broker_consumer=True)):
         assert "watcher-start" in events
         assert "worker-start" in events
+        assert "broker-start" in events
 
     assert "watcher-stop" in events
     assert "worker-stop" in events
+    assert "broker-stop" in events
+
+
+def test_host_agent_broker_consumer_uses_host_agent_queue(monkeypatch):
+    from flux_llm_kb import event_worker, messaging
+
+    calls = []
+    heartbeats = []
+
+    monkeypatch.setattr(event_worker, "run_worker", lambda **kwargs: calls.append(kwargs) or {"status": "stopped"})
+    monkeypatch.setattr(host_agent, "_safe_record_runtime_component_heartbeat", lambda **kwargs: heartbeats.append(kwargs))
+
+    payload = host_agent.HostAgentBrokerConsumerLoop(worker_id="host-1").run_once()
+
+    assert payload["status"] == "stopped"
+    assert calls == [{"queue_name": messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE, "worker_id": "host-1"}]
+    assert heartbeats[-1]["name"] == "corpus-worker:host-agent-broker"
+    assert heartbeats[-1]["metadata"]["queue"] == messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE
+
+
+def test_cli_host_agent_run_starts_broker_consumer_by_default(monkeypatch, capsys):
+    from flux_llm_kb import cli
+
+    calls = []
+    monkeypatch.setattr(
+        host_agent,
+        "run_server",
+        lambda **kwargs: calls.append(kwargs) or {"status": "stopped", **kwargs},
+    )
+
+    assert cli.main(["host-agent", "run", "--host", "127.0.0.1", "--port", "8799"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["start_broker_consumer"] is True
+    assert calls == [{"host": "127.0.0.1", "port": 8799, "start_broker_consumer": True}]
+
+
+def test_cli_host_agent_run_can_disable_broker_consumer(monkeypatch, capsys):
+    from flux_llm_kb import cli
+
+    calls = []
+    monkeypatch.setattr(
+        host_agent,
+        "run_server",
+        lambda **kwargs: calls.append(kwargs) or {"status": "stopped", **kwargs},
+    )
+
+    assert cli.main(["host-agent", "run", "--no-broker-worker"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["start_broker_consumer"] is False
+    assert calls == [{"host": "127.0.0.1", "port": 8799, "start_broker_consumer": False}]
 
 
 def test_host_agent_worker_loop_enqueues_host_agent_backfills(monkeypatch):

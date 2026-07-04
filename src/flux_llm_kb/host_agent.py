@@ -430,6 +430,64 @@ class HostAgentWorkerLoop:
                 return
 
 
+class HostAgentBrokerConsumerLoop:
+    def __init__(
+        self,
+        *,
+        queue_name: str | None = None,
+        worker_id: str | None = None,
+        retry_delay_seconds: float = 5.0,
+    ) -> None:
+        from . import messaging
+
+        self.queue_name = queue_name or messaging.COMMAND_CORPUS_HOST_AGENT_QUEUE
+        self.worker_id = worker_id or f"host-agent:{platform.node() or 'local'}:{os.getpid()}"
+        self.retry_delay_seconds = retry_delay_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="flux-host-agent-broker-consumer", daemon=True)
+        self._thread.start()
+
+    def stop(self, *, timeout: float = 5.0) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+    def run_once(self) -> dict[str, Any]:
+        from . import event_worker
+
+        metadata = {"queue": self.queue_name, "worker_id": self.worker_id, "last_error": None}
+        _safe_record_runtime_component_heartbeat(
+            name="corpus-worker:host-agent-broker",
+            status="running",
+            metadata=metadata,
+        )
+        return event_worker.run_worker(queue_name=self.queue_name, worker_id=self.worker_id)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                result = self.run_once()
+                _safe_record_runtime_component_heartbeat(
+                    name="corpus-worker:host-agent-broker",
+                    status="stopped",
+                    metadata={"queue": self.queue_name, "worker_id": self.worker_id, "last_result": result},
+                )
+            except Exception as exc:  # pragma: no cover - defensive long-running loop
+                _safe_record_runtime_component_heartbeat(
+                    name="corpus-worker:host-agent-broker",
+                    status="error",
+                    metadata={"queue": self.queue_name, "worker_id": self.worker_id, "last_error": str(exc)},
+                )
+            if self._stop.wait(self.retry_delay_seconds):
+                return
+
+
 def _record_watcher_loop_error(root_name: str | None, error: str) -> None:
     try:
         roots = _load_host_watch_roots(root_name)
@@ -462,7 +520,7 @@ def _safe_record_runtime_component_heartbeat(
         pass
 
 
-def create_app(*, start_watcher: bool = False):
+def create_app(*, start_watcher: bool = False, start_broker_consumer: bool = False):
     try:
         from fastapi import Body, FastAPI
         from fastapi.responses import JSONResponse
@@ -471,17 +529,22 @@ def create_app(*, start_watcher: bool = False):
 
     watcher_loop = HostAgentWatcherLoop() if start_watcher else None
     worker_loop = HostAgentWorkerLoop() if start_watcher else None
+    broker_consumer_loop = HostAgentBrokerConsumerLoop() if start_broker_consumer else None
 
-    if watcher_loop is not None or worker_loop is not None:
+    if watcher_loop is not None or worker_loop is not None or broker_consumer_loop is not None:
         @asynccontextmanager
         async def lifespan(_app):
             if watcher_loop is not None:
                 watcher_loop.start()
             if worker_loop is not None:
                 worker_loop.start()
+            if broker_consumer_loop is not None:
+                broker_consumer_loop.start()
             try:
                 yield
             finally:
+                if broker_consumer_loop is not None:
+                    broker_consumer_loop.stop()
                 if worker_loop is not None:
                     worker_loop.stop()
                 if watcher_loop is not None:
@@ -562,7 +625,12 @@ def create_app(*, start_watcher: bool = False):
     return app
 
 
-def run_server(*, host: str = "127.0.0.1", port: int = DEFAULT_HOST_AGENT_PORT) -> dict[str, Any]:
+def run_server(
+    *,
+    host: str = "127.0.0.1",
+    port: int = DEFAULT_HOST_AGENT_PORT,
+    start_broker_consumer: bool = True,
+) -> dict[str, Any]:
     agent_url = f"http://{host}:{port}"
     existing = remote_status(agent_url=agent_url)
     if existing.get("status") == "running":
@@ -577,7 +645,7 @@ def run_server(*, host: str = "127.0.0.1", port: int = DEFAULT_HOST_AGENT_PORT) 
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install host agent REST support with `pip install -e .[api]`") from exc
 
-    app = create_app(start_watcher=True)
+    app = create_app(start_watcher=True, start_broker_consumer=start_broker_consumer)
     uvicorn.run(app, host=host, port=port, log_level="info")
     return {"status": "stopped", "host": host, "port": port}
 

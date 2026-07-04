@@ -245,7 +245,6 @@ flux-kb crawl watch probe --timeout 2
 flux-kb crawl watch run
 flux-kb host-agent status
 flux-kb host-agent run
-flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id host-agent
 flux-kb crawl backfill --kind all --limit 20
 flux-kb crawl backfill --root docs --family office --limit 20
 flux-kb search-index status --root projects
@@ -536,6 +535,9 @@ for host-owned watched roots. If the PC, Docker, or the host agent was offline,
 the next startup scan compares files against persisted `source_assets` state and
 indexes new files, re-indexes changed files, and marks deleted files as removed
 from retrieval without requiring a manual backfill. Empty folders are a no-op.
+By default, `flux-kb host-agent run` also starts the host-side RabbitMQ consumer
+for `flux.commands.corpus_host_agent`, so host-only corpus jobs are processed on
+the Windows host and ACKed through RabbitMQ after durable state updates.
 
 ## Mail Capture
 
@@ -586,16 +588,16 @@ process:
 
 ```powershell
 flux-kb outlook-host run
-flux-kb event worker run --queue flux.commands.corpus_host_agent --worker-id host-agent
 ```
 
 The dashboard and Docker-hosted API create sync requests and broker commands.
 The Windows host consumes exact Outlook request ids from `flux.commands.outlook`,
 exports messages through classic Outlook COM, reports heartbeat/status, and
 indexes the ready spool. Host-agent file roots enqueue to
-`flux.commands.corpus_host_agent`, which should be consumed by a host-side event
-worker so Docker workers do not pick work for host-only paths. If the host is not
-running, the dashboard shows `host_offline` and the command above. The old
+`flux.commands.corpus_host_agent`; `flux-kb host-agent run` starts that
+host-side consumer by default so Docker workers do not pick work for host-only
+paths. If the host is not running, the dashboard shows `host_offline` and the
+commands above. The old
 Outlook DB-claim loop is development-only behind `--legacy-db-loop` and
 `FLUX_KB_ALLOW_INLINE_WORKERS=1`.
 
