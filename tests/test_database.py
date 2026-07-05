@@ -3801,11 +3801,17 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert "last_error = NULL" in sql
     assert "locked_at = NULL" in sql
     assert "jsonb_build_object('remediation_reason', %s::text)" in sql
+    assert "- 'gpu_busy_first_seen_at'" in sql
+    assert "- 'gpu_busy_retry_count'" in sql
+    assert "- 'gpu_busy_next_cooldown_seconds'" in sql
+    assert "- 'gpu_busy_block_after_seconds'" in sql
+    assert "- 'gpu_busy_blocked_at'" in sql
     assert "status = 'failed'" in sql
     assert "status LIKE 'blocked_%%'" in sql
     assert "status = 'retrying_locked'" in sql
     assert "status = 'retrying_vss_failed'" in sql
     assert "status LIKE 'cancelled_%%'" in sql
+    assert "AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')" in sql
     assert "delete_requested_at IS NULL" in sql
     assert "delete_requested_at = NULL" not in sql
     assert "delete_requested_by = NULL" not in sql

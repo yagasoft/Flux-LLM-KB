@@ -3943,11 +3943,21 @@ class KnowledgeService:
             )
             return {**outcome, "status": "retrying_vss_failed", "category": "retried", "retryable": True}
         if process_result.status == "retrying_gpu_busy":
-            retry_after = int(float((process_result.telemetry or {}).get("retry_after_seconds") or 1))
+            retry_plan = _gpu_busy_retry_plan(job=job, process_telemetry=process_result.telemetry or {})
+            telemetry.update(retry_plan["telemetry"])
+            if retry_plan["blocked"]:
+                database.block_corpus_job(
+                    job_id=job["id"],
+                    error=process_result.message or "blocked_gpu_busy",
+                    status="blocked_gpu_busy",
+                    duration_ms=duration_ms,
+                    telemetry=telemetry,
+                )
+                return {**outcome, "status": "blocked_gpu_busy", "category": "blocked"}
             database.retry_corpus_job(
                 job_id=job["id"],
                 error=process_result.message or "retrying_gpu_busy",
-                cooldown_seconds=max(1, retry_after),
+                cooldown_seconds=int(retry_plan["cooldown_seconds"]),
                 status="retrying_gpu_busy",
                 duration_ms=duration_ms,
                 telemetry=telemetry,
@@ -6100,6 +6110,84 @@ def _configured_failure_max_attempts() -> int:
         return int(SettingsService().resolve("worker.failure_max_attempts").raw_value)
     except Exception:
         return 3
+
+
+def _configured_gpu_busy_retry_base_cooldown_seconds() -> int:
+    try:
+        return int(SettingsService().resolve("worker.gpu_busy_retry_base_cooldown_seconds").raw_value)
+    except Exception:
+        return 60
+
+
+def _configured_gpu_busy_retry_max_cooldown_seconds() -> int:
+    try:
+        return int(SettingsService().resolve("worker.gpu_busy_retry_max_cooldown_seconds").raw_value)
+    except Exception:
+        return 900
+
+
+def _configured_gpu_busy_retry_block_after_seconds() -> int:
+    try:
+        return int(SettingsService().resolve("worker.gpu_busy_retry_block_after_seconds").raw_value)
+    except Exception:
+        return 86400
+
+
+def _gpu_busy_retry_plan(*, job: dict[str, Any], process_telemetry: dict[str, Any]) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    job_telemetry = job.get("telemetry") if isinstance(job.get("telemetry"), dict) else {}
+    first_seen = _parse_telemetry_datetime(
+        job_telemetry.get("gpu_busy_first_seen_at") or process_telemetry.get("gpu_busy_first_seen_at")
+    )
+    if first_seen is None:
+        first_seen = now
+    if first_seen > now:
+        first_seen = now
+
+    retry_count = _positive_retry_int(
+        job_telemetry.get("gpu_busy_retry_count") or process_telemetry.get("gpu_busy_retry_count"),
+        default=0,
+    ) + 1
+    base_cooldown = max(1, _configured_gpu_busy_retry_base_cooldown_seconds())
+    max_cooldown = max(base_cooldown, _configured_gpu_busy_retry_max_cooldown_seconds())
+    block_after = max(1, _configured_gpu_busy_retry_block_after_seconds())
+    requested_retry_after = _positive_retry_int(process_telemetry.get("retry_after_seconds"), default=base_cooldown)
+    exponential_cooldown = base_cooldown * (2 ** min(max(0, retry_count - 1), 16))
+    cooldown_seconds = min(max_cooldown, max(base_cooldown, requested_retry_after, exponential_cooldown))
+
+    telemetry = {
+        "gpu_busy_first_seen_at": first_seen.isoformat(),
+        "gpu_busy_retry_count": retry_count,
+        "gpu_busy_next_cooldown_seconds": int(cooldown_seconds),
+        "gpu_busy_block_after_seconds": int(block_after),
+    }
+    blocked = (now - first_seen).total_seconds() >= block_after
+    if blocked:
+        telemetry["gpu_busy_blocked_at"] = now.isoformat()
+    return {"blocked": blocked, "cooldown_seconds": int(cooldown_seconds), "telemetry": telemetry}
+
+
+def _parse_telemetry_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _positive_retry_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+    return max(0, parsed)
 
 
 def _configured_container_limits() -> dict[str, int]:

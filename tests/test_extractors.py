@@ -1844,6 +1844,82 @@ def test_ollama_vision_records_http_error_body_without_payload_leak(monkeypatch,
     assert "private-image.png" not in str(finished)
 
 
+def test_ollama_vision_gpu_lease_rejection_is_retryable(monkeypatch, tmp_path):
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    image = tmp_path / "vision.png"
+    image.write_bytes(PNG_BYTES)
+
+    class FakeScheduler:
+        def acquire(self, _profile):
+            raise GpuLeaseRejected("vram_budget_exceeded")
+
+    monkeypatch.setattr(extractors, "_vision_request_image_bytes", lambda _path: (b"image-bytes", {"submitted_bytes": 10}))
+    monkeypatch.setattr("flux_llm_kb.gpu_scheduler.get_gpu_scheduler", lambda: FakeScheduler())
+
+    with pytest.raises(GpuLeaseRejected, match="vram_budget_exceeded"):
+        extractors._vision_with_ollama_compatible(
+            image,
+            source_label="private-image.png",
+            provider="ollama",
+            base_url="http://ollama:11434",
+            model="qwen3-vl:8b",
+            keep_alive="2m",
+            timeout_seconds=1,
+            metadata={"provider": "ollama", "model": "qwen3-vl:8b"},
+        )
+
+
+def test_ollama_vision_http_503_is_retryable_gpu_busy(monkeypatch, tmp_path):
+    from flux_llm_kb.model_runner import ModelRunnerBusy
+
+    image = tmp_path / "vision.png"
+    image.write_bytes(PNG_BYTES)
+
+    class FakeLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeScheduler:
+        def acquire(self, _profile):
+            return FakeLease()
+
+        def record_model_residency(self, _residency):
+            return None
+
+    body = b'{"detail":{"code":"gpu.scheduler_busy","message":"GPU scheduler busy","retry_after_seconds":7}}'
+
+    def fake_urlopen(_request, **_kwargs):
+        raise HTTPError(
+            url="http://ollama:11434/api/generate",
+            code=503,
+            msg="Service Unavailable",
+            hdrs={},
+            fp=BytesIO(body),
+        )
+
+    monkeypatch.setattr(extractors, "_vision_request_image_bytes", lambda _path: (b"image-bytes", {"submitted_bytes": 10}))
+    monkeypatch.setattr(extractors, "urlopen", fake_urlopen, raising=False)
+    monkeypatch.setattr("flux_llm_kb.gpu_scheduler.get_gpu_scheduler", lambda: FakeScheduler())
+
+    with pytest.raises(ModelRunnerBusy, match="GPU scheduler busy") as exc_info:
+        extractors._vision_with_ollama_compatible(
+            image,
+            source_label="private-image.png",
+            provider="ollama",
+            base_url="http://ollama:11434",
+            model="qwen3-vl:8b",
+            keep_alive="2m",
+            timeout_seconds=1,
+            metadata={"provider": "ollama", "model": "qwen3-vl:8b"},
+        )
+
+    assert exc_info.value.retry_after_seconds == 7.0
+
+
 def test_extract_image_resizes_large_payload_for_local_vision(monkeypatch, tmp_path):
     from PIL import Image
 

@@ -959,7 +959,83 @@ def test_backfill_retries_gpu_busy_result_without_terminal_failure(monkeypatch):
     assert calls["blocked"] == []
     assert calls["retried"][0]["job_id"] == "job-search"
     assert calls["retried"][0]["status"] == "retrying_gpu_busy"
-    assert calls["retried"][0]["cooldown_seconds"] == 5
+    assert calls["retried"][0]["cooldown_seconds"] == 60
+    assert calls["retried"][0]["telemetry"]["gpu_busy_retry_count"] == 1
+
+
+def test_finalize_gpu_busy_result_uses_bounded_cooldown(monkeypatch):
+    calls = {"retried": [], "blocked": []}
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(service_module, "_configured_failure_max_attempts", lambda: 1)
+    monkeypatch.setattr(service_module, "_configured_gpu_busy_retry_base_cooldown_seconds", lambda: 60, raising=False)
+    monkeypatch.setattr(service_module, "_configured_gpu_busy_retry_max_cooldown_seconds", lambda: 120, raising=False)
+    monkeypatch.setattr(service_module, "_configured_gpu_busy_retry_block_after_seconds", lambda: 86400, raising=False)
+
+    outcome = KnowledgeService()._finalize_corpus_job_process_result(
+        {
+            "id": "job-gpu",
+            "job_type": "corpus_extract_image",
+            "job_family": "image",
+            "resource_class": "gpu",
+            "attempts": 99,
+            "telemetry": {},
+        },
+        duration_ms=25,
+        process_result=worker.JobProcessResult(
+            status="retrying_gpu_busy",
+            message="vram_budget_exceeded",
+            telemetry={"retry_after_seconds": 9999.0},
+        ),
+    )
+
+    assert outcome["status"] == "retrying_gpu_busy"
+    assert outcome["retryable"] is True
+    assert calls["blocked"] == []
+    assert calls["retried"][0]["status"] == "retrying_gpu_busy"
+    assert calls["retried"][0]["cooldown_seconds"] == 120
+    telemetry = calls["retried"][0]["telemetry"]
+    assert telemetry["gpu_busy_retry_count"] == 1
+    assert telemetry["gpu_busy_next_cooldown_seconds"] == 120
+    assert telemetry["gpu_busy_block_after_seconds"] == 86400
+    assert isinstance(telemetry["gpu_busy_first_seen_at"], str)
+
+
+def test_finalize_gpu_busy_result_blocks_after_retry_age(monkeypatch):
+    calls = {"retried": [], "blocked": []}
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+    monkeypatch.setattr(service_module, "_configured_gpu_busy_retry_base_cooldown_seconds", lambda: 60, raising=False)
+    monkeypatch.setattr(service_module, "_configured_gpu_busy_retry_max_cooldown_seconds", lambda: 900, raising=False)
+    monkeypatch.setattr(service_module, "_configured_gpu_busy_retry_block_after_seconds", lambda: 60, raising=False)
+
+    outcome = KnowledgeService()._finalize_corpus_job_process_result(
+        {
+            "id": "job-gpu-old",
+            "job_type": "corpus_extract_image",
+            "job_family": "image",
+            "resource_class": "gpu",
+            "attempts": 99,
+            "telemetry": {
+                "gpu_busy_first_seen_at": "2000-01-01T00:00:00+00:00",
+                "gpu_busy_retry_count": 12,
+            },
+        },
+        duration_ms=25,
+        process_result=worker.JobProcessResult(
+            status="retrying_gpu_busy",
+            message="vram_budget_exceeded",
+            telemetry={"retry_after_seconds": 1.0},
+        ),
+    )
+
+    assert outcome["status"] == "blocked_gpu_busy"
+    assert outcome["category"] == "blocked"
+    assert outcome["retryable"] is False
+    assert calls["retried"] == []
+    assert calls["blocked"][0]["status"] == "blocked_gpu_busy"
+    assert calls["blocked"][0]["telemetry"]["gpu_busy_retry_count"] == 13
+    assert isinstance(calls["blocked"][0]["telemetry"]["gpu_busy_blocked_at"], str)
 
 
 def test_backfill_cancels_orphaned_root_jobs_without_retrying(monkeypatch):

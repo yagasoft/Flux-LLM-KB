@@ -90,6 +90,9 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "watcher.reconcile_on_start" in keys
     assert "watcher.reconcile_interval_seconds" in keys
     assert "worker.failure_max_attempts" in keys
+    assert "worker.gpu_busy_retry_base_cooldown_seconds" in keys
+    assert "worker.gpu_busy_retry_max_cooldown_seconds" in keys
+    assert "worker.gpu_busy_retry_block_after_seconds" in keys
     assert "worker.lock_retry_cooldown_seconds" in keys
     assert "worker.lock_max_attempts" in keys
     assert "host_agent.vss_enabled" in keys
@@ -400,11 +403,27 @@ def test_lock_tolerant_indexing_settings_defaults(monkeypatch):
     assert service.resolve("watcher.stability_quiet_seconds").raw_value == 2.0
     assert service.resolve("watcher.large_file_stability_quiet_seconds").raw_value == 30.0
     assert service.resolve("worker.failure_max_attempts").raw_value == 3
+    assert service.resolve("worker.gpu_busy_retry_base_cooldown_seconds").raw_value == 60
+    assert service.resolve("worker.gpu_busy_retry_max_cooldown_seconds").raw_value == 900
+    assert service.resolve("worker.gpu_busy_retry_block_after_seconds").raw_value == 86400
     assert service.resolve("worker.lock_retry_cooldown_seconds").raw_value == 300
     assert service.resolve("worker.lock_max_attempts").raw_value == 3
     assert service.resolve("host_agent.vss_enabled").raw_value is True
     assert service.resolve("host_agent.vss_max_file_bytes").raw_value == 512 * 1024 * 1024
     assert service.resolve("host_agent.vss_timeout_seconds").raw_value == 30
+
+
+def test_gpu_busy_retry_settings_env_overrides(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setenv("FLUX_KB_WORKER_GPU_BUSY_RETRY_BASE_COOLDOWN_SECONDS", "45")
+    monkeypatch.setenv("FLUX_KB_WORKER_GPU_BUSY_RETRY_MAX_COOLDOWN_SECONDS", "600")
+    monkeypatch.setenv("FLUX_KB_WORKER_GPU_BUSY_RETRY_BLOCK_AFTER_SECONDS", "7200")
+
+    service = SettingsService()
+
+    assert service.resolve("worker.gpu_busy_retry_base_cooldown_seconds").raw_value == 45
+    assert service.resolve("worker.gpu_busy_retry_max_cooldown_seconds").raw_value == 600
+    assert service.resolve("worker.gpu_busy_retry_block_after_seconds").raw_value == 7200
 
 
 def test_asr_settings_defaults_and_env_overrides(monkeypatch, tmp_path):

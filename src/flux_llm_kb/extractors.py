@@ -5103,6 +5103,73 @@ def _ollama_http_error_message(exc: HTTPError) -> str:
     return message
 
 
+def _ollama_http_error_exception(exc: HTTPError) -> Exception:
+    detail, payload = _read_http_error_detail_payload(exc)
+    busy_exc = _ollama_http_error_busy_exception(exc, detail=detail, payload=payload)
+    if busy_exc is not None:
+        return busy_exc
+    detail = _safe_external_error_detail(detail)
+    message = f"Ollama vision request failed with HTTP {exc.code}"
+    if detail:
+        return RuntimeError(f"{message}: {detail}")
+    return RuntimeError(message)
+
+
+def _read_http_error_detail_payload(exc: HTTPError) -> tuple[str, Any]:
+    try:
+        raw = exc.read(1024 * 1024)
+    except Exception:
+        return "", None
+    text = raw.decode("utf-8", errors="replace").strip()
+    if not text:
+        return "", None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return text, None
+    if isinstance(payload, dict):
+        detail = _http_error_payload_detail(payload)
+        if detail:
+            return detail, payload
+    return text, payload
+
+
+def _ollama_http_error_busy_exception(exc: HTTPError, *, detail: str, payload: Any) -> Exception | None:
+    from .model_runner import ModelRunnerBusy
+
+    detail_payload = payload.get("detail") if isinstance(payload, dict) else None
+    if isinstance(detail_payload, dict) and detail_payload.get("code") == "gpu.scheduler_busy":
+        retry_after = _positive_float(detail_payload.get("retry_after_seconds"), default=1.0)
+        message = str(detail_payload.get("message") or detail or "Ollama vision GPU scheduler is busy")
+        return ModelRunnerBusy(message, retry_after_seconds=retry_after)
+    status_code = int(getattr(exc, "code", 0) or 0)
+    message = str(detail or "").lower()
+    busy_markers = (
+        "gpu.scheduler_busy",
+        "gpu scheduler",
+        "scheduler busy",
+        "model-runner busy",
+        "model runner busy",
+        "vram_budget_exceeded",
+        "too many requests",
+        "temporarily unavailable",
+        "service unavailable",
+    )
+    if status_code in {429, 503} or any(marker in message for marker in busy_markers):
+        return ModelRunnerBusy(detail or f"Ollama vision request failed with HTTP {status_code}", retry_after_seconds=1.0)
+    return None
+
+
+def _positive_float(value: Any, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
 def _asr_metadata(
     *,
     status: str,
@@ -5806,6 +5873,9 @@ def _vision_with_ollama_compatible(
     metadata: dict[str, Any],
     cache_path: Path | None = None,
 ) -> VisionResult:
+    from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
+    from .model_runner import ModelRunnerBusy
+
     request_attempted = False
     try:
         image_bytes, submission_metadata = _vision_request_image_bytes(path)
@@ -5831,8 +5901,6 @@ def _vision_with_ollama_compatible(
             method="POST",
         )
         request_attempted = True
-        from .gpu_scheduler import GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
-
         profile = task_profile("ollama_vision", model_id=model, component="worker")
         scheduler = get_gpu_scheduler()
         with record_model_activity(
@@ -5848,7 +5916,7 @@ def _vision_with_ollama_compatible(
                 try:
                     response = urlopen(request, timeout=max(1, timeout_seconds, VISION_TIMEOUT_SECONDS))
                 except HTTPError as exc:
-                    raise RuntimeError(_ollama_http_error_message(exc)) from exc
+                    raise _ollama_http_error_exception(exc) from exc
                 raw = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
         decoded = json.loads(raw or "{}")
         try:
@@ -5885,7 +5953,7 @@ def _vision_with_ollama_compatible(
                 "source_label": source_label,
             },
         )
-    except GpuLeaseTimeout:
+    except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy):
         raise
     except Exception as exc:
         message = str(exc)

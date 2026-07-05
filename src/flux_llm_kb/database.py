@@ -6711,10 +6711,17 @@ def requeue_corpus_job(
                     next_attempt_at = now(),
                     locked_at = NULL,
                     locked_by = NULL,
-                    telemetry = telemetry || jsonb_build_object('remediation_reason', %s::text),
+                    telemetry = (
+                        COALESCE(telemetry, '{}'::jsonb)
+                        - 'gpu_busy_first_seen_at'
+                        - 'gpu_busy_retry_count'
+                        - 'gpu_busy_next_cooldown_seconds'
+                        - 'gpu_busy_block_after_seconds'
+                        - 'gpu_busy_blocked_at'
+                    ) || jsonb_build_object('remediation_reason', %s::text),
                     updated_at = now()
                 WHERE id = %s
-                  AND job_type LIKE 'corpus_%%'
+                  AND (job_type LIKE 'corpus_%%' OR job_type = 'search_index_sync')
                   AND delete_requested_at IS NULL
                   AND (
                       status = 'failed'

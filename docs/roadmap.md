@@ -11,6 +11,23 @@ Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
 
+## 2026-07-05 GPU Busy Corpus Retry Update
+
+Affected `Progress %` entries remain conservative until deployment and live GPU
+contention validation are complete:
+
+- `V2.8 Indexer Acceleration And Local Inference Optimization`: remains `99%`.
+  Corpus image vision now treats explicit GPU/model-capacity failures as
+  transient `retrying_gpu_busy` work instead of generic extraction failure, uses
+  bounded configurable backoff, parks over-age retries as `blocked_gpu_busy` for
+  manual retry, and clears GPU-busy retry-window telemetry when an operator
+  requeues a blocked corpus job.
+
+Remaining Work: deploy through the required feature closeout path, validate a
+live image extraction under model-runner/Ollama GPU contention, confirm the job
+stays retryable while the GPU is busy, and confirm manual Retry from
+`blocked_gpu_busy` starts a fresh retry window.
+
 ## 2026-07-05 Flux MCP Transport Resilience Update
 
 Affected `Progress %` entries remain conservative until deployment and live
