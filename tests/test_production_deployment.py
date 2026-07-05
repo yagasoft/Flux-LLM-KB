@@ -677,11 +677,15 @@ def test_production_update_can_keep_worker_paused_during_model_cutover():
     assert "$deployCommand += ' -SkipWorkerStart'" in complete_feature
 
 
-def test_complete_feature_seeds_missing_docker_wheels_during_deploy():
+def test_complete_feature_deploys_offline_by_default_with_pip_specific_escape_hatch():
     complete_feature = _dev_script("complete-feature.ps1")
 
-    assert "[bool]$DeployPipOffline = $false" in complete_feature
+    assert "[switch]$AllowPipDownloads" in complete_feature
+    assert "[switch]$RefreshPipDependencies" in complete_feature
+    assert "$pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)" in complete_feature
+    assert "$deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }" in complete_feature
     assert "-PipOffline:$deployPipOfflineValue" in complete_feature
+    assert "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only." in complete_feature
 
 
 def test_production_deploy_defaults_match_prefilled_wheel_cache_args():

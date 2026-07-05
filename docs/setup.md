@@ -118,6 +118,20 @@ that wheelhouse. If a required wheel is missing, the build stops instead of
 downloading a replacement; seed the wheelhouse first, or pass `-PipOffline
 $false` deliberately when a networked dependency refresh is intended.
 
+Feature closeout through `scripts/dev/complete-feature.ps1` is also
+offline-first by default. It verifies the cached dashboard tools under
+`dashboard/node_modules` and passes `-PipOffline:$true` into production deploy.
+If dashboard tools are missing, seed npm dependencies once with:
+
+```powershell
+npm --prefix dashboard ci --include=dev
+```
+
+Use `-AllowNpmInstall` or `-RefreshNpmDependencies` only when intentionally
+refreshing dashboard npm dependencies during closeout. Use `-AllowPipDownloads`
+or `-RefreshPipDependencies` only when intentionally permitting online pip
+during deploy. The npm and pip flags are independent.
+
 Each production build records source provenance as OCI labels on the Flux image
 and generated Flux containers. The short image tag is kept for local operations,
 but `org.opencontainers.image.revision` is the authoritative full Git commit.

@@ -58,13 +58,11 @@ def test_complete_feature_script_has_optional_post_deploy_outlook_spool_reclaim(
     assert '$env:PYTHONPATH = (Join-Path (Get-Location) "src")' not in reclaim_block
 
 
-def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
+def test_complete_feature_script_verifies_cached_dashboard_dependencies_before_tests_by_default():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
-    install_step = (
-        'Invoke-FeatureStep -Name "dashboard-install" '
-        "-Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci --include=dev'"
-    )
+    cached_step = 'Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardCacheCheckCommand'
+    online_step = 'Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardNpmInstallCommand'
     test_step = (
         'Invoke-FeatureStep -Name "dashboard-test" '
         "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/dist/cli.js run } finally { Pop-Location }'"
@@ -74,15 +72,32 @@ def test_complete_feature_script_installs_dashboard_dependencies_before_tests():
         "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'"
     )
 
-    assert install_step in script
+    assert "[switch]$AllowNpmInstall" in script
+    assert "[switch]$RefreshNpmDependencies" in script
+    assert "if (-not ($AllowNpmInstall -or $RefreshNpmDependencies))" in script
+    assert cached_step in script
+    assert online_step in script
+    assert script.index(cached_step) < script.index(test_step) < script.index(build_step)
+    assert script.index(cached_step) < script.index(online_step)
     assert test_step in script
     assert build_step in script
-    assert "[switch]$NoPackageInstall" in script
-    assert 'if ($NoPackageInstall)' in script
+    assert "npm --prefix dashboard ci --include=dev" in script
     assert "Skipped dashboard package install; existing dashboard node_modules verified." in script
-    assert "Dashboard vitest dependency missing" in script
-    assert "Dashboard vite dependency missing" in script
-    assert script.index(install_step) < script.index(test_step) < script.index(build_step)
+    assert "Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev" in script
+    assert "Dashboard dependency cache is incomplete" in script
+
+
+def test_complete_feature_script_package_download_flags_are_independent():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "[switch]$AllowNpmInstall" in script
+    assert "[switch]$RefreshNpmDependencies" in script
+    assert "[switch]$AllowPipDownloads" in script
+    assert "[switch]$RefreshPipDependencies" in script
+    assert "$pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)" in script
+    assert "$deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }" in script
+    assert "if (-not ($AllowNpmInstall -or $RefreshNpmDependencies))" in script
+    assert "$AllowNpmInstall -or $RefreshNpmDependencies -or $AllowPipDownloads -or $RefreshPipDependencies" not in script
 
 
 def test_complete_feature_script_runs_pytest_with_xdist_by_default_and_serial_escape_hatch():
@@ -121,9 +136,9 @@ def test_complete_feature_script_repairs_shared_editable_install_before_worktree
     assert "Editable project location:" in script
     assert "Test-Path -LiteralPath $editableLocation" in script
     assert "Test-UnderPath -Path $editableLocation -Root $FeatureWorktree" in script
-    assert "Python editable install repair requires package installation but -NoPackageInstall was set." in script
-    assert "$env:FLUX_KB_NO_PACKAGE_INSTALL = if ($NoPackageInstall)" in script
-    assert "$previousNoPackageInstall = $env:FLUX_KB_NO_PACKAGE_INSTALL" in script
+    assert "Python editable install repair is offline-first; seed the shared environment or rerun with -AllowPipDownloads." in script
+    assert "$env:FLUX_KB_ALLOW_PIP_DOWNLOADS = if ($AllowPipDownloads -or $RefreshPipDependencies)" in script
+    assert "$previousAllowPipDownloads = $env:FLUX_KB_ALLOW_PIP_DOWNLOADS" in script
     assert 'python -m pip install -e "$MainRoot[dev]"' in script
 
 
@@ -169,9 +184,12 @@ def test_complete_feature_script_propagates_nested_native_exit_codes():
 def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
-    assert "[bool]$DeployPipOffline = $false" in script
-    assert "$deployPipOfflineValue = if ($DeployPipOffline) { '$true' } else { '$false' }" in script
+    assert "[switch]$AllowPipDownloads" in script
+    assert "[switch]$RefreshPipDependencies" in script
+    assert "$pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)" in script
+    assert "$deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }" in script
     assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue\"" in script
+    assert "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only." in script
     assert "Invoke-FeatureStep -Name \"deploy-production\" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds" in script
 
 
@@ -226,3 +244,14 @@ def test_setup_docs_describe_worktree_safe_flux_cli_wrapper():
     assert "worktree-safe" in setup
     assert "Do not run `python -m pip install -e .` inside temporary worktrees" in setup
     assert "D:\\FluxLLMKB\\app\\.venv" in setup
+
+
+def test_setup_docs_describe_offline_first_feature_closeout_package_flags():
+    setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
+
+    assert "Feature closeout through `scripts/dev/complete-feature.ps1` is also" in setup
+    assert "npm --prefix dashboard ci --include=dev" in setup
+    assert "`-AllowNpmInstall` or `-RefreshNpmDependencies`" in setup
+    assert "`-AllowPipDownloads`" in setup
+    assert "`-RefreshPipDependencies`" in setup
+    assert "The npm and pip flags are independent." in setup

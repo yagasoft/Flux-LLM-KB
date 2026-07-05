@@ -4,13 +4,15 @@ param(
     [string]$CommitMessage = "Complete feature",
     [switch]$DryRun,
     [switch]$SkipDeploy,
-    [switch]$NoPackageInstall,
+    [switch]$AllowNpmInstall,
+    [switch]$RefreshNpmDependencies,
     [switch]$KeepWorktree,
     [int]$StepTimeoutSeconds = 600,
     [int]$DeployStepTimeoutSeconds = 1800,
     [string]$PytestWorkers = "auto",
     [switch]$SkipWorkerStart,
-    [bool]$DeployPipOffline = $false,
+    [switch]$AllowPipDownloads,
+    [switch]$RefreshPipDependencies,
     [string]$PostDeployReclaimOutlookProfile = ""
 )
 
@@ -127,7 +129,8 @@ function Invoke-FeatureStep {
         [string]$Name,
         [string]$Command,
         [string]$Cwd,
-        [int]$TimeoutSeconds = 0
+        [int]$TimeoutSeconds = 0,
+        [string]$FailureHint = ""
     )
     $logPath = New-StepLogPath -Name $Name
     $startedAt = [DateTime]::UtcNow
@@ -199,7 +202,12 @@ function Invoke-FeatureStep {
         if ($record.exit_code -eq 0) { $record.exit_code = 1 }
         Complete-FeatureStepRecord -Record $record -StartedAt $startedAt
         $script:FailedStep = $Name
-        $_ | Out-File -FilePath $logPath -Append -Encoding UTF8
+        $errorText = $_.ToString()
+        $errorText | Out-File -FilePath $logPath -Append -Encoding UTF8
+        if ($FailureHint) {
+            $FailureHint | Out-File -FilePath $logPath -Append -Encoding UTF8
+            throw "$errorText`n$FailureHint"
+        }
         throw
     }
 }
@@ -261,8 +269,8 @@ if (-not $editableLocation) {
 }
 
 if ($needsRepair) {
-    if ($env:FLUX_KB_NO_PACKAGE_INSTALL -eq "1") {
-        throw "Python editable install repair requires package installation but -NoPackageInstall was set."
+    if ($env:FLUX_KB_ALLOW_PIP_DOWNLOADS -ne "1") {
+        throw "Python editable install repair is offline-first; seed the shared environment or rerun with -AllowPipDownloads."
     }
     python -m pip install -e "$MainRoot[dev]"
 }
@@ -341,6 +349,26 @@ if ($blocked.Count -gt 0) {
 }
 '@
 
+$DashboardNpmInstallCommand = 'npm --prefix dashboard ci --include=dev'
+$DashboardCacheCheckCommand = @'
+$requiredTools = @(
+    @{ Name = "vitest CLI"; Path = Join-Path (Get-Location) "dashboard\node_modules\vitest\dist\cli.js" },
+    @{ Name = "vite CLI"; Path = Join-Path (Get-Location) "dashboard\node_modules\vite\bin\vite.js" }
+)
+$missing = @()
+foreach ($tool in $requiredTools) {
+    if (-not (Test-Path -LiteralPath $tool.Path)) {
+        $missing += "$($tool.Name): $($tool.Path)"
+    }
+}
+if ($missing.Count -gt 0) {
+    throw "Dashboard dependency cache is incomplete. Missing $($missing -join '; '). Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev. Rerun closeout without npm flags after seeding, or rerun with -AllowNpmInstall only when intentionally refreshing npm dependencies."
+}
+"Skipped dashboard package install; existing dashboard node_modules verified."
+'@
+
+$PipOfflineFailureHint = "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only."
+
 $FeatureWorktree = (Resolve-Path $FeatureWorktree).Path
 if (-not $MainRoot) {
     $MainRoot = Get-MainWorktreePath -Worktree $FeatureWorktree
@@ -369,10 +397,10 @@ try {
     Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand
     Invoke-FeatureStep -Name "compileall" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m compileall -q src tests'
     Invoke-FeatureStep -Name "flux-lint" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli lint'
-    if ($NoPackageInstall) {
-        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command '$vitest = Join-Path (Get-Location) "dashboard\node_modules\vitest\dist\cli.js"; $vite = Join-Path (Get-Location) "dashboard\node_modules\vite\bin\vite.js"; if (-not (Test-Path -LiteralPath $vitest)) { throw "Dashboard vitest dependency missing; rerun without -NoPackageInstall or provide existing dashboard\node_modules." }; if (-not (Test-Path -LiteralPath $vite)) { throw "Dashboard vite dependency missing; rerun without -NoPackageInstall or provide existing dashboard\node_modules." }; "Skipped dashboard package install; existing dashboard node_modules verified."'
+    if (-not ($AllowNpmInstall -or $RefreshNpmDependencies)) {
+        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardCacheCheckCommand
     } else {
-        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command 'npm --prefix dashboard ci --include=dev'
+        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardNpmInstallCommand
     }
     Invoke-FeatureStep -Name "dashboard-test" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/dist/cli.js run } finally { Pop-Location }'
     Invoke-FeatureStep -Name "dashboard-build" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'
@@ -383,12 +411,14 @@ try {
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
     if (-not $SkipDeploy) {
-        $deployPipOfflineValue = if ($DeployPipOffline) { '$true' } else { '$false' }
+        $pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)
+        $deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }
         $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue"
         if ($SkipWorkerStart) {
             $deployCommand += ' -SkipWorkerStart'
         }
-        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds
+        $deployFailureHint = if ($pipOffline) { $PipOfflineFailureHint } else { "" }
+        Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds -FailureHint $deployFailureHint
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         # Probe http://127.0.0.1:8765/api/dashboard/health and fail if required DB paths are blocked.
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command $DashboardHealthProbeCommand
@@ -400,19 +430,19 @@ try {
     }
     $previousRepairMainRoot = $env:FLUX_KB_REPAIR_MAIN_ROOT
     $previousRepairFeatureWorktree = $env:FLUX_KB_REPAIR_FEATURE_WORKTREE
-    $previousNoPackageInstall = $env:FLUX_KB_NO_PACKAGE_INSTALL
+    $previousAllowPipDownloads = $env:FLUX_KB_ALLOW_PIP_DOWNLOADS
     try {
         $env:FLUX_KB_REPAIR_MAIN_ROOT = $MainRoot
         $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $FeatureWorktree
-        $env:FLUX_KB_NO_PACKAGE_INSTALL = if ($NoPackageInstall) { "1" } else { "0" }
+        $env:FLUX_KB_ALLOW_PIP_DOWNLOADS = if ($AllowPipDownloads -or $RefreshPipDependencies) { "1" } else { "0" }
         Invoke-FeatureStep -Name "repair-python-editable-install" -Cwd $MainRoot -Command $RepairEditableInstallCommand
     } finally {
         $env:FLUX_KB_REPAIR_MAIN_ROOT = $previousRepairMainRoot
         $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $previousRepairFeatureWorktree
-        if ($null -eq $previousNoPackageInstall) {
-            Remove-Item Env:\FLUX_KB_NO_PACKAGE_INSTALL -ErrorAction SilentlyContinue
+        if ($null -eq $previousAllowPipDownloads) {
+            Remove-Item Env:\FLUX_KB_ALLOW_PIP_DOWNLOADS -ErrorAction SilentlyContinue
         } else {
-            $env:FLUX_KB_NO_PACKAGE_INSTALL = $previousNoPackageInstall
+            $env:FLUX_KB_ALLOW_PIP_DOWNLOADS = $previousAllowPipDownloads
         }
     }
     if (-not $KeepWorktree) {
