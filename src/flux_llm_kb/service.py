@@ -4268,6 +4268,15 @@ class KnowledgeService:
             if normalized_target_type != "job" or not target_id:
                 raise ValueError("retry_corpus_job requires target_type=job and target_id")
             result = database.requeue_corpus_job(job_id=target_id, reason=clean_reason)
+            command = database.enqueue_capture_job_command_by_id(job_id=target_id, force_new_message=True)
+            result = {
+                **result,
+                "command": command,
+                "queued": bool(command.get("queued")),
+                "message_id": command.get("message_id"),
+                "routing_key": command.get("routing_key"),
+                "deduped": bool(command.get("deduped")),
+            }
         elif normalized_action == "run_backfill":
             effective_family = family or (target_id if normalized_target_type == "family" else None)
             if not root_name or not effective_family:

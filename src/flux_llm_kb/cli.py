@@ -469,6 +469,17 @@ def main(argv: list[str] | None = None) -> int:
     event_repair_storm.add_argument("--apply", action="store_true")
     event_repair_storm.add_argument("--confirm")
     event_repair_storm.add_argument("--purge-rabbitmq", action="store_true")
+    event_repair_stranded = event_subparsers.add_parser(
+        "repair-stranded-capture-commands",
+        help="Repair due active capture jobs whose broker command marker is stale",
+    )
+    event_repair_stranded.add_argument("--apply", action="store_true")
+    event_repair_stranded.add_argument("--confirm")
+    event_repair_stranded.add_argument("--job-id")
+    event_repair_stranded.add_argument("--root", dest="root_name")
+    event_repair_stranded.add_argument("--family")
+    event_repair_stranded.add_argument("--min-age-seconds", type=int, default=300)
+    event_repair_stranded.add_argument("--limit", type=int, default=1000)
 
     acceleration_parser = subparsers.add_parser("acceleration", help="Inspect V2.8 acceleration capability and queue status")
     acceleration_subparsers = acceleration_parser.add_subparsers(dest="acceleration_command", required=True)
@@ -1191,6 +1202,18 @@ def _event_command(args: argparse.Namespace) -> int:
             apply=args.apply,
             confirm=args.confirm,
             purge_rabbitmq=args.purge_rabbitmq,
+        )
+    elif args.event_command == "repair-stranded-capture-commands":
+        from .event_repair import repair_stranded_capture_commands
+
+        payload = repair_stranded_capture_commands(
+            apply=args.apply,
+            confirm=args.confirm,
+            job_id=args.job_id,
+            root_name=args.root_name,
+            family=args.family,
+            min_age_seconds=args.min_age_seconds,
+            limit=args.limit,
         )
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.event_command)

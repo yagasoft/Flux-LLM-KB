@@ -22,11 +22,23 @@ contention validation are complete:
   bounded configurable backoff, parks over-age retries as `blocked_gpu_busy` for
   manual retry, and clears GPU-busy retry-window telemetry when an operator
   requeues a blocked corpus job.
+- `V2 Review And Visualization`: remains `99%`. Dashboard/diagnostics Retry now
+  turns an operator corpus retry into a fresh broker command and returns command
+  metadata to the caller, instead of only resetting the database row.
+- `V2.5 Autonomous Corpus Expansion`: remains `98%`. Corpus/search-index retry
+  requeueing now clears stale broker delivery markers, preserves host-agent
+  routing when publishing a fresh command, keeps normal worker redelivery
+  semantics unchanged, and adds a confirmation-gated stranded-command repair
+  path with dry-run default behaviour.
 
 Remaining Work: deploy through the required feature closeout path, validate a
 live image extraction under model-runner/Ollama GPU contention, confirm the job
 stays retryable while the GPU is busy, and confirm manual Retry from
-`blocked_gpu_busy` starts a fresh retry window.
+`blocked_gpu_busy` starts a fresh retry window. After deployment, run the
+stranded-command repair in dry-run mode, apply it only with the explicit
+confirmation gate for affected active corpus/search-index jobs, and confirm the
+repaired jobs publish fresh commands, leave old `pending` state, and drain the
+relevant RabbitMQ queues.
 
 ## 2026-07-05 Flux MCP Transport Resilience Update
 

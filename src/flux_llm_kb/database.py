@@ -6283,6 +6283,62 @@ def enqueue_pending_corpus_job_commands(
     }
 
 
+def enqueue_capture_job_command_by_id(
+    *,
+    job_id: str,
+    force_new_message: bool = False,
+    url: str | None = None,
+) -> dict[str, Any]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT capture_jobs.id::text,
+                       capture_jobs.job_type,
+                       capture_jobs.payload,
+                       capture_jobs.job_family,
+                       capture_jobs.resource_class,
+                       capture_jobs.status,
+                       EXISTS (
+                           SELECT 1
+                           FROM monitored_roots r
+                           WHERE r.name = capture_jobs.payload->>'root_name'
+                             AND r.metadata->>'host_access' = 'host_agent'
+                       ) AS host_agent_route
+                FROM capture_jobs
+                WHERE capture_jobs.id = %s
+                  AND (capture_jobs.job_type LIKE 'corpus_%%' OR capture_jobs.job_type = 'search_index_sync')
+                  AND capture_jobs.status IN ('pending', 'retrying_locked', 'retrying_vss_failed', 'retrying_gpu_busy')
+                  AND capture_jobs.delete_requested_at IS NULL
+                  AND capture_jobs.next_attempt_at <= now()
+                FOR UPDATE
+                """,
+                (job_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise LookupError(f"claimable corpus job not found: {job_id}")
+            outbox = _enqueue_capture_job_command_with_cursor(
+                cur,
+                job_id=row[0],
+                job_type=row[1],
+                payload=row[2] or {},
+                job_family=row[3],
+                resource_class=row[4],
+                host_agent_route=bool(row[6]),
+                force_new_message=force_new_message,
+            )
+            return {
+                "job_id": row[0],
+                "status": row[5],
+                "message_id": (outbox or {}).get("message_id"),
+                "routing_key": (outbox or {}).get("routing_key"),
+                "queued": bool(outbox and not outbox.get("deduped")),
+                "deduped": bool(outbox and outbox.get("deduped")),
+            }
+
+
 def get_capture_job(*, job_id: str, url: str | None = None) -> dict[str, Any] | None:
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -6711,6 +6767,12 @@ def requeue_corpus_job(
                     next_attempt_at = now(),
                     locked_at = NULL,
                     locked_by = NULL,
+                    broker_message_id = NULL,
+                    routing_key = NULL,
+                    correlation_id = NULL,
+                    causation_id = NULL,
+                    queued_at = NULL,
+                    broker_delivery_count = 0,
                     telemetry = (
                         COALESCE(telemetry, '{}'::jsonb)
                         - 'gpu_busy_first_seen_at'
@@ -11819,6 +11881,39 @@ def heartbeat_corpus_job(
 
 
 _ACTIVE_CAPTURE_JOB_STATUSES = ("pending", "running", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy")
+_ACTIVE_COMMAND_OUTBOX_STATUSES = ("pending", "publishing", "failed")
+
+
+def _capture_job_has_active_command_outbox_with_cursor(
+    cur: Any,
+    *,
+    job_id: str,
+    message_id: str,
+    routing_key: str,
+) -> bool:
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM message_outbox active_outbox
+            WHERE active_outbox.aggregate_type = 'capture_jobs'
+              AND active_outbox.aggregate_id = %s
+              AND active_outbox.exchange = %s
+              AND active_outbox.routing_key = %s
+              AND active_outbox.message_id = %s
+              AND active_outbox.status = ANY(%s)
+        )
+        """,
+        (
+            str(job_id),
+            messaging.COMMANDS_EXCHANGE,
+            str(routing_key),
+            str(message_id),
+            list(_ACTIVE_COMMAND_OUTBOX_STATUSES),
+        ),
+    )
+    row = cur.fetchone()
+    return bool(row and row[0])
 
 
 def _enqueue_unique_capture_job_with_cursor(
@@ -12009,6 +12104,7 @@ def _enqueue_capture_job_command_with_cursor(
     job_family: str,
     resource_class: str,
     host_agent_route: bool | None = None,
+    force_new_message: bool = False,
 ) -> dict[str, Any] | None:
     effective_host_agent_route = (
         _capture_job_payload_targets_host_agent_root(cur, payload=payload)
@@ -12032,7 +12128,18 @@ def _enqueue_capture_job_command_with_cursor(
         existing_status = str(existing[1] or "")
         existing_message_id = str(existing[2] or "").strip() if len(existing) > 2 else ""
         existing_routing_key = str(existing[3] or "").strip() if len(existing) > 3 else ""
-        if existing_status in _ACTIVE_CAPTURE_JOB_STATUSES and existing_message_id and existing_routing_key == routing_key:
+        if (
+            not force_new_message
+            and existing_status in _ACTIVE_CAPTURE_JOB_STATUSES
+            and existing_message_id
+            and existing_routing_key == routing_key
+            and _capture_job_has_active_command_outbox_with_cursor(
+                cur,
+                job_id=str(job_id),
+                message_id=existing_message_id,
+                routing_key=routing_key,
+            )
+        ):
             return {
                 "id": None,
                 "message_id": existing_message_id,
@@ -12064,7 +12171,7 @@ def _enqueue_capture_job_command_with_cursor(
         """
         UPDATE capture_jobs
         SET routing_key = %s,
-            queued_at = COALESCE(queued_at, now()),
+            queued_at = now(),
             correlation_id = COALESCE(correlation_id, %s),
             broker_message_id = %s,
             updated_at = now()
@@ -12193,6 +12300,179 @@ def repair_capture_command_storm(
             result["enqueued"] = enqueued
             result["jobs"] = repaired_jobs
             return result
+
+
+def repair_stranded_capture_commands(
+    *,
+    apply: bool = False,
+    confirm: str | None = None,
+    job_id: str | None = None,
+    root_name: str | None = None,
+    family: str | None = None,
+    min_age_seconds: int = 300,
+    limit: int = 1000,
+    url: str | None = None,
+) -> dict[str, Any]:
+    if apply and confirm != "stranded-capture-commands":
+        raise ValueError("applying this repair requires --confirm stranded-capture-commands")
+    capped_limit = max(1, min(int(limit or 1000), 10000))
+    bounded_min_age = max(0, int(min_age_seconds or 0))
+    command_routes = [
+        messaging.CORPUS_PROCESS_ROUTING_KEY,
+        messaging.CORPUS_HOST_AGENT_PROCESS_ROUTING_KEY,
+        messaging.SEARCH_INDEX_PROCESS_ROUTING_KEY,
+    ]
+    repair_statuses = ["pending", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"]
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            jobs = _stranded_capture_command_jobs_with_cursor(
+                cur,
+                command_routes=command_routes,
+                repair_statuses=repair_statuses,
+                min_age_seconds=bounded_min_age,
+                limit=capped_limit,
+                job_id=job_id,
+                root_name=root_name,
+                family=family,
+            )
+            result: dict[str, Any] = {
+                "applied": bool(apply),
+                "affected_jobs": len(jobs),
+                "reset_jobs": 0,
+                "enqueued": 0,
+                "jobs": jobs,
+            }
+            if not apply or not jobs:
+                return result
+            job_ids = [job["job_id"] for job in jobs]
+            cur.execute(
+                """
+                UPDATE capture_jobs
+                SET broker_message_id = NULL,
+                    correlation_id = NULL,
+                    causation_id = NULL,
+                    routing_key = NULL,
+                    queued_at = NULL,
+                    broker_delivery_count = 0,
+                    updated_at = now()
+                WHERE id::text = ANY(%s)
+                  AND status = ANY(%s)
+                """,
+                (job_ids, repair_statuses),
+            )
+            result["reset_jobs"] = int(cur.rowcount or 0)
+            enqueued = 0
+            repaired_jobs: list[dict[str, Any]] = []
+            for job in jobs:
+                outbox = _enqueue_capture_job_command_with_cursor(
+                    cur,
+                    job_id=job["job_id"],
+                    job_type=job["job_type"],
+                    payload=job["payload"],
+                    job_family=job["job_family"],
+                    resource_class=job["resource_class"],
+                    host_agent_route=bool(job["host_agent_route"]),
+                    force_new_message=True,
+                )
+                if outbox and not outbox.get("deduped"):
+                    enqueued += 1
+                repaired_jobs.append(
+                    {
+                        **job,
+                        "message_id": (outbox or {}).get("message_id"),
+                        "deduped": bool(outbox and outbox.get("deduped")),
+                    }
+                )
+            result["enqueued"] = enqueued
+            result["jobs"] = repaired_jobs
+            return result
+
+
+def _stranded_capture_command_jobs_with_cursor(
+    cur: Any,
+    *,
+    command_routes: list[str],
+    repair_statuses: list[str],
+    min_age_seconds: int,
+    limit: int,
+    job_id: str | None = None,
+    root_name: str | None = None,
+    family: str | None = None,
+) -> list[dict[str, Any]]:
+    filters = ""
+    params: list[Any] = [
+        repair_statuses,
+        command_routes,
+        messaging.COMMANDS_EXCHANGE,
+        list(_ACTIVE_COMMAND_OUTBOX_STATUSES),
+        max(0, int(min_age_seconds or 0)),
+    ]
+    if job_id:
+        filters += " AND j.id::text = %s"
+        params.append(str(job_id))
+    if root_name:
+        filters += " AND j.payload->>'root_name' = %s"
+        params.append(str(root_name))
+    if family:
+        filters += " AND j.job_family = %s"
+        params.append(str(family))
+    params.append(max(1, min(int(limit or 1000), 10000)))
+    cur.execute(
+        f"""
+        SELECT j.id::text,
+               j.job_type,
+               j.payload,
+               j.job_family,
+               j.resource_class,
+               j.status,
+               EXISTS (
+                   SELECT 1
+                   FROM monitored_roots r
+                   WHERE r.name = j.payload->>'root_name'
+                     AND r.metadata->>'host_access' = 'host_agent'
+               ) AS host_agent_route,
+               j.broker_message_id,
+               j.routing_key
+        FROM capture_jobs j
+        WHERE (j.job_type LIKE 'corpus_%%' OR j.job_type = 'search_index_sync')
+          AND j.status = ANY(%s)
+          AND j.delete_requested_at IS NULL
+          AND j.next_attempt_at <= now()
+          AND j.broker_message_id IS NOT NULL
+          AND j.routing_key = ANY(%s)
+          AND NOT EXISTS (
+              SELECT 1
+              FROM message_outbox active_outbox
+              WHERE active_outbox.aggregate_type = 'capture_jobs'
+                AND active_outbox.aggregate_id = j.id::text
+                AND active_outbox.exchange = %s
+                AND active_outbox.routing_key = j.routing_key
+                AND active_outbox.message_id = j.broker_message_id
+                AND active_outbox.status = ANY(%s)
+          )
+          AND j.updated_at <= now() - make_interval(secs => %s)
+          {filters}
+        ORDER BY j.priority DESC, j.updated_at
+        LIMIT %s
+        FOR UPDATE OF j
+        """,
+        tuple(params),
+    )
+    return [
+        {
+            "job_id": row[0],
+            "job_type": row[1],
+            "payload": row[2] or {},
+            "job_family": row[3],
+            "resource_class": row[4],
+            "status": row[5],
+            "host_agent_route": bool(row[6]),
+            "broker_message_id": row[7],
+            "routing_key": row[8],
+        }
+        for row in cur.fetchall()
+    ]
 
 
 def _capture_command_storm_jobs_with_cursor(

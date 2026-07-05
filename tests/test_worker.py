@@ -2379,6 +2379,19 @@ def test_backfill_accepts_exact_worker_family(monkeypatch):
 def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
     calls = []
     monkeypatch.setattr(database, "requeue_corpus_job", lambda **kwargs: calls.append(("retry", kwargs)) or {"job_id": kwargs["job_id"], "status": "pending"})
+    monkeypatch.setattr(
+        database,
+        "enqueue_capture_job_command_by_id",
+        lambda **kwargs: calls.append(("enqueue", kwargs))
+        or {
+            "job_id": kwargs["job_id"],
+            "status": "pending",
+            "message_id": "message-1",
+            "routing_key": "corpus.process",
+            "queued": True,
+            "deduped": False,
+        },
+    )
     monkeypatch.setattr(database, "record_audit_event", lambda **kwargs: calls.append(("audit", kwargs)) or {"id": "audit-1"})
 
     retry = KnowledgeService().remediate_diagnostic(
@@ -2393,16 +2406,35 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
 
     assert retry["settings_mutated"] is False
     assert retry["action"] == "retry_corpus_job"
-    assert retry["result"] == {"job_id": "job-1", "status": "pending"}
+    assert retry["result"] == {
+        "job_id": "job-1",
+        "status": "pending",
+        "command": {
+            "job_id": "job-1",
+            "status": "pending",
+            "message_id": "message-1",
+            "routing_key": "corpus.process",
+            "queued": True,
+            "deduped": False,
+        },
+        "queued": True,
+        "message_id": "message-1",
+        "routing_key": "corpus.process",
+        "deduped": False,
+    }
     assert calls[0] == (
         "retry",
         {"job_id": "job-1", "reason": "operator retry"},
     )
-    assert calls[1][0] == "audit"
-    assert calls[1][1]["event_type"] == "diagnostics.remediation"
-    assert calls[1][1]["target_id"] is None
-    assert calls[1][1]["details"]["action"] == "retry_corpus_job"
-    assert calls[1][1]["details"]["target_id"] == "job-1"
+    assert calls[1] == (
+        "enqueue",
+        {"job_id": "job-1", "force_new_message": True},
+    )
+    assert calls[2][0] == "audit"
+    assert calls[2][1]["event_type"] == "diagnostics.remediation"
+    assert calls[2][1]["target_id"] is None
+    assert calls[2][1]["details"]["action"] == "retry_corpus_job"
+    assert calls[2][1]["details"]["target_id"] == "job-1"
 
     monkeypatch.setattr(KnowledgeService, "enqueue_corpus_backfill", lambda self, **kwargs: {"accepted": True, "backfill": kwargs})
     backfill = KnowledgeService().remediate_diagnostic(
@@ -2415,9 +2447,9 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
     )
 
     assert backfill["result"] == {"accepted": True, "backfill": {"kind": "office", "limit": 10, "workers": 1, "root_name": "docs"}}
-    assert calls[2][0] == "audit"
-    assert calls[2][1]["target_id"] is None
-    assert calls[2][1]["details"]["target_id"] == "office"
+    assert calls[3][0] == "audit"
+    assert calls[3][1]["target_id"] is None
+    assert calls[3][1]["details"]["target_id"] == "office"
 
 
 def test_service_remediate_diagnostic_preserves_obsolete_retry_conflict(monkeypatch):

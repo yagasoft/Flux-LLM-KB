@@ -1215,6 +1215,62 @@ def test_cli_event_repair_capture_command_storm_defaults_to_dry_run(monkeypatch,
     assert calls[-1] == {"apply": True, "confirm": "broker-claim-storm", "purge_rabbitmq": True}
 
 
+def test_cli_event_repair_stranded_capture_commands_defaults_to_dry_run(monkeypatch, capsys):
+    calls = []
+
+    fake_module = SimpleNamespace(
+        repair_stranded_capture_commands=lambda **kwargs: calls.append(kwargs) or {"applied": kwargs["apply"]}
+    )
+    monkeypatch.setitem(sys.modules, "flux_llm_kb.event_repair", fake_module)
+
+    assert cli.main(["event", "repair-stranded-capture-commands", "--job-id", "job-1"]) == 0
+    dry_run_payload = json.loads(capsys.readouterr().out)
+    assert dry_run_payload == {"applied": False}
+    assert calls == [
+        {
+            "apply": False,
+            "confirm": None,
+            "job_id": "job-1",
+            "root_name": None,
+            "family": None,
+            "min_age_seconds": 300,
+            "limit": 1000,
+        }
+    ]
+
+    assert (
+        cli.main(
+            [
+                "event",
+                "repair-stranded-capture-commands",
+                "--apply",
+                "--confirm",
+                "stranded-capture-commands",
+                "--root",
+                "docs",
+                "--family",
+                "image",
+                "--min-age-seconds",
+                "30",
+                "--limit",
+                "25",
+            ]
+        )
+        == 0
+    )
+    apply_payload = json.loads(capsys.readouterr().out)
+    assert apply_payload == {"applied": True}
+    assert calls[-1] == {
+        "apply": True,
+        "confirm": "stranded-capture-commands",
+        "job_id": None,
+        "root_name": "docs",
+        "family": "image",
+        "min_age_seconds": 30,
+        "limit": 25,
+    }
+
+
 def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 

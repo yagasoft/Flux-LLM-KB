@@ -40,6 +40,27 @@ def repair_capture_command_storm(
     return {**result, "rabbitmq_purge": rabbitmq_result}
 
 
+def repair_stranded_capture_commands(
+    *,
+    apply: bool = False,
+    confirm: str | None = None,
+    job_id: str | None = None,
+    root_name: str | None = None,
+    family: str | None = None,
+    min_age_seconds: int = 300,
+    limit: int = 1000,
+) -> dict[str, Any]:
+    return database.repair_stranded_capture_commands(
+        apply=apply,
+        confirm=confirm,
+        job_id=job_id,
+        root_name=root_name,
+        family=family,
+        min_age_seconds=min_age_seconds,
+        limit=limit,
+    )
+
+
 async def _purge_matching_rabbitmq_messages(
     *,
     job_ids: list[str],

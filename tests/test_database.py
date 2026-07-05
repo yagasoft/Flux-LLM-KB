@@ -3800,6 +3800,12 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert "next_attempt_at = now()" in sql
     assert "last_error = NULL" in sql
     assert "locked_at = NULL" in sql
+    assert "broker_message_id = NULL" in sql
+    assert "routing_key = NULL" in sql
+    assert "correlation_id = NULL" in sql
+    assert "causation_id = NULL" in sql
+    assert "queued_at = NULL" in sql
+    assert "broker_delivery_count = 0" in sql
     assert "jsonb_build_object('remediation_reason', %s::text)" in sql
     assert "- 'gpu_busy_first_seen_at'" in sql
     assert "- 'gpu_busy_retry_count'" in sql
@@ -3817,6 +3823,109 @@ def test_requeue_corpus_job_resets_terminal_state_for_operator_retry(monkeypatch
     assert "delete_requested_by = NULL" not in sql
     assert "delete_reason = NULL" not in sql
     assert executed[0][1] == ("operator retry", "job-1")
+
+
+def test_enqueue_capture_job_command_by_id_routes_host_agent_job(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT capture_jobs.id::text" in sql:
+                return (
+                    "job-host",
+                    "corpus_extract_image",
+                    {"root_name": "host-docs", "path": "logo.png"},
+                    "image",
+                    "gpu",
+                    "pending",
+                    True,
+                )
+            if "SELECT id::text, status, broker_message_id, routing_key" in sql:
+                return ("job-host", "pending", None, None)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-1", "message-1", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_capture_job_command_by_id(job_id="job-host", force_new_message=True)
+
+    outbox_params = next(params for statement, params in executed if "INSERT INTO message_outbox" in statement)
+    payload = json.loads(outbox_params[9])
+    assert result == {
+        "job_id": "job-host",
+        "status": "pending",
+        "message_id": "message-1",
+        "routing_key": "corpus.host_agent.process",
+        "queued": True,
+        "deduped": False,
+    }
+    assert outbox_params[1] == "flux.commands"
+    assert outbox_params[2] == "corpus.host_agent.process"
+    assert outbox_params[3] == "flux.corpus.host_agent.process"
+    assert payload["payload"]["job_id"] == "job-host"
+    assert payload["payload"]["resource_class"] == "gpu"
+
+
+def test_enqueue_capture_job_command_ignores_stale_broker_marker_without_active_outbox():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status, broker_message_id, routing_key" in sql:
+                return ("job-host", "pending", "message-stale", "corpus.host_agent.process")
+            if "SELECT EXISTS" in sql and "FROM message_outbox" in sql:
+                return (False,)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-new", "message-new", "pending")
+            return None
+
+    outbox = database._enqueue_capture_job_command_with_cursor(
+        FakeCursor(),
+        job_id="job-host",
+        job_type="corpus_extract_text",
+        payload={"root_name": "host-docs", "path": "safe.md"},
+        job_family="text",
+        resource_class="cpu",
+        host_agent_route=True,
+    )
+
+    assert outbox == {
+        "id": "outbox-new",
+        "message_id": "message-new",
+        "status": "pending",
+        "deduped": False,
+        "routing_key": "corpus.host_agent.process",
+    }
+    assert any("INSERT INTO message_outbox" in statement for statement, _params in executed)
 
 
 def test_retry_corpus_job_ignores_marked_jobs(monkeypatch):
@@ -5010,6 +5119,8 @@ def test_enqueue_capture_job_command_reuses_active_broker_message_without_duplic
             sql = executed[-1][0]
             if "SELECT id::text, status, broker_message_id, routing_key" in sql:
                 return ("job-host", "pending", "message-existing", "corpus.host_agent.process")
+            if "SELECT EXISTS" in sql and "FROM message_outbox" in sql:
+                return (True,)
             if "INSERT INTO message_outbox" in sql:
                 return ("outbox-new", "message-new", "pending")
             return None
@@ -5286,6 +5397,142 @@ def test_repair_capture_command_storm_apply_resets_and_reenqueues_one_command(mo
 def test_repair_capture_command_storm_apply_requires_exact_confirmation():
     with pytest.raises(ValueError, match="--confirm broker-claim-storm"):
         database.repair_capture_command_storm(apply=True, confirm="wrong")
+
+
+def test_repair_stranded_capture_commands_dry_run_reports_without_mutating(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return [
+                (
+                    "job-stranded",
+                    "corpus_extract_image",
+                    {"root_name": "host-docs", "path": "logo.png"},
+                    "image",
+                    "gpu",
+                    "pending",
+                    True,
+                    "message-stale",
+                    "corpus.host_agent.process",
+                )
+            ]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.repair_stranded_capture_commands(job_id="job-stranded", root_name="host-docs", family="image")
+
+    assert result["applied"] is False
+    assert result["affected_jobs"] == 1
+    assert result["reset_jobs"] == 0
+    assert result["enqueued"] == 0
+    assert result["jobs"][0]["job_id"] == "job-stranded"
+    select_sql, select_params = executed[0]
+    assert "NOT EXISTS" in select_sql
+    assert "FROM message_outbox active_outbox" in select_sql
+    assert "job-stranded" in select_params
+    assert "host-docs" in select_params
+    assert "image" in select_params
+    assert not any("UPDATE capture_jobs" in statement for statement, _params in executed)
+    assert not any("INSERT INTO message_outbox" in statement for statement, _params in executed)
+
+
+def test_repair_stranded_capture_commands_apply_resets_and_enqueues(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+            if "UPDATE capture_jobs" in sql and "broker_message_id = NULL" in sql:
+                self.rowcount = 1
+            else:
+                self.rowcount = 0
+
+        def fetchall(self):
+            return [
+                (
+                    "job-stranded",
+                    "corpus_extract_image",
+                    {"root_name": "host-docs", "path": "logo.png"},
+                    "image",
+                    "gpu",
+                    "pending",
+                    True,
+                    "message-stale",
+                    "corpus.host_agent.process",
+                )
+            ]
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status, broker_message_id, routing_key" in sql:
+                return ("job-stranded", "pending", None, None)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-1", "message-1", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.repair_stranded_capture_commands(apply=True, confirm="stranded-capture-commands")
+
+    assert result["applied"] is True
+    assert result["affected_jobs"] == 1
+    assert result["reset_jobs"] == 1
+    assert result["enqueued"] == 1
+    assert result["jobs"][0]["message_id"] == "message-1"
+    reset_sql = next(statement for statement, _params in executed if "UPDATE capture_jobs" in statement and "broker_message_id = NULL" in statement)
+    assert "routing_key = NULL" in reset_sql
+    assert "broker_delivery_count = 0" in reset_sql
+
+
+def test_repair_stranded_capture_commands_apply_requires_exact_confirmation():
+    with pytest.raises(ValueError, match="--confirm stranded-capture-commands"):
+        database.repair_stranded_capture_commands(apply=True, confirm="wrong")
 
 
 def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(monkeypatch):
