@@ -114,6 +114,91 @@ def test_management_queue_status_reports_missing_required_event_queues(monkeypat
     assert "flux.events.dashboard" in status["topology"]["missing_event_subscribers"]
 
 
+def test_rabbitmq_consumer_reopens_queue_when_iterator_exits():
+    message = messaging.build_message(
+        message_type="flux.search_index.process",
+        routing_key=messaging.SEARCH_INDEX_PROCESS_ROUTING_KEY,
+        job_id="job-1",
+        payload={"job_id": "job-1"},
+    )
+
+    class FakeIncoming:
+        def __init__(self):
+            self.body = json.dumps(message.to_broker_payload()).encode("utf-8")
+
+        async def ack(self):  # pragma: no cover - handler cancels before ack
+            raise AssertionError("message should not be acked in this test")
+
+        async def reject(self, *, requeue=False):  # pragma: no cover - handler cancels before reject
+            raise AssertionError(f"message should not be rejected in this test: {requeue}")
+
+    class FakeIterator:
+        def __init__(self, items):
+            self._items = list(items)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc_info):
+            return False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._items:
+                raise StopAsyncIteration
+            return self._items.pop(0)
+
+    class FakeQueue:
+        def __init__(self):
+            self.iterators = [FakeIterator([]), FakeIterator([FakeIncoming()])]
+
+        def iterator(self):
+            return self.iterators.pop(0)
+
+    class FakeChannel:
+        def __init__(self):
+            self.queue = FakeQueue()
+            self.get_queue_calls = 0
+
+        async def get_queue(self, queue_name, *, ensure=True):
+            assert queue_name == messaging.COMMAND_SEARCH_INDEX_QUEUE
+            assert ensure is True
+            self.get_queue_calls += 1
+            return self.queue
+
+    class FakeConsumer(messaging.RabbitMqConsumer):
+        def __init__(self):
+            super().__init__()
+            self.fake_channel = FakeChannel()
+            self.connect_calls = 0
+
+        async def connect(self):
+            self.connect_calls += 1
+            self._channel = self.fake_channel
+
+    handled: list[str] = []
+    consumer = FakeConsumer()
+
+    async def run():
+        def handler(received):
+            handled.append(received.message_id)
+            raise asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await consumer.consume(
+                queue_name=messaging.COMMAND_SEARCH_INDEX_QUEUE,
+                handler=handler,
+                reconnect_delay_seconds=0,
+            )
+
+    asyncio.run(run())
+
+    assert handled == [message.message_id]
+    assert consumer.fake_channel.get_queue_calls == 2
+
+
 def test_event_subscriber_records_journal_before_ack():
     events: list[tuple[str, dict]] = []
 

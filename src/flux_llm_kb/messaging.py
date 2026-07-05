@@ -444,29 +444,44 @@ class RabbitMqConsumer:
         *,
         queue_name: str,
         handler: Callable[[FluxMessage], Awaitable[None] | None],
+        reconnect_delay_seconds: float = 1.0,
     ) -> None:
-        if self._channel is None:
-            await self.connect()
-        queue = await self._channel.get_queue(queue_name, ensure=True)
+        reconnect_delay = max(0.0, float(reconnect_delay_seconds))
+        while True:
+            try:
+                if self._channel is None:
+                    await self.connect()
+                queue = await self._channel.get_queue(queue_name, ensure=True)
 
-        async with queue.iterator() as iterator:
-            async for incoming in iterator:
-                try:
-                    payload = json.loads(incoming.body.decode("utf-8"))
-                    message = FluxMessage.model_validate(payload)
-                    result = handler(message)
-                    if asyncio.iscoroutine(result):
-                        await result
-                except RetryableMessageError:
-                    if await self._dead_letter_if_delivery_limit_reached(incoming, queue_name=queue_name):
-                        continue
-                    await incoming.reject(requeue=False)
-                except Exception:
-                    if await self._dead_letter_if_delivery_limit_reached(incoming, queue_name=queue_name):
-                        continue
-                    await incoming.reject(requeue=False)
-                else:
-                    await incoming.ack()
+                async with queue.iterator() as iterator:
+                    async for incoming in iterator:
+                        try:
+                            payload = json.loads(incoming.body.decode("utf-8"))
+                            message = FluxMessage.model_validate(payload)
+                            result = handler(message)
+                            if asyncio.iscoroutine(result):
+                                await result
+                        except RetryableMessageError:
+                            if await self._dead_letter_if_delivery_limit_reached(incoming, queue_name=queue_name):
+                                continue
+                            await incoming.reject(requeue=False)
+                        except Exception:
+                            if await self._dead_letter_if_delivery_limit_reached(incoming, queue_name=queue_name):
+                                continue
+                            await incoming.reject(requeue=False)
+                        else:
+                            await incoming.ack()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                await self.close()
+                if reconnect_delay:
+                    await asyncio.sleep(reconnect_delay)
+                continue
+
+            await self.close()
+            if reconnect_delay:
+                await asyncio.sleep(reconnect_delay)
 
     async def _dead_letter_if_delivery_limit_reached(self, incoming: Any, *, queue_name: str) -> bool:
         if _x_death_count(incoming) < self.config.delivery_limit:
