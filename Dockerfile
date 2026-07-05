@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 ARG FLUX_KB_DOCKER_BASE_IMAGE=python:3.12-slim
+FROM scratch AS flux-wheelhouse
+
 FROM ${FLUX_KB_DOCKER_BASE_IMAGE} AS runtime-deps
 
 ARG FLUX_KB_SKIP_SYSTEM_PACKAGES=false
@@ -85,13 +87,15 @@ write_requirements("/tmp/requirements-docker.txt", ("api", "corpus", "mcp", "pro
 write_requirements("/tmp/requirements-paddle.txt", ("api", "ocr_paddle"))
 PY
 
-RUN --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse,sharing=locked \
+RUN --mount=type=bind,from=flux-wheelhouse,target=/opt/flux-durable-wheelhouse,readonly \
+    --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse,sharing=locked \
     set -eu; \
     export PIP_CACHE_DIR=/opt/flux-wheelhouse/.pip-cache; \
     python -m pip --version; \
     python -m venv /opt/flux-paddle; \
     /opt/flux-paddle/bin/python -m pip --version; \
     mkdir -p /opt/flux-wheelhouse "$PIP_CACHE_DIR"; \
+    wheelhouse_find_links="--find-links /opt/flux-durable-wheelhouse --find-links /opt/flux-wheelhouse"; \
     pip_extra_index_args=""; \
     if [ -n "$PADDLE_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PADDLE_GPU_INDEX_URL"; fi; \
     if [ -n "$PYTORCH_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PYTORCH_GPU_INDEX_URL"; fi; \
@@ -104,19 +108,19 @@ RUN --mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse
         python_bin="$1"; \
         requirements="$2"; \
         constraint="$3"; \
-        if "$python_bin" -m pip download --only-binary=:all: --no-index --find-links /opt/flux-wheelhouse --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; then \
+        if "$python_bin" -m pip download --only-binary=:all: --no-index $wheelhouse_find_links --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; then \
             return 0; \
         fi; \
         if [ "$PIP_OFFLINE" = "true" ]; then \
-            echo "Required Docker wheels are missing from /opt/flux-wheelhouse and PIP_OFFLINE=true; seed the BuildKit wheelhouse before rebuilding." >&2; \
+            echo "Required Docker wheels are missing from the durable wheelhouse and PIP_OFFLINE=true; seed FLUX_KB_PIP_WHEELHOUSE_PATH before rebuilding." >&2; \
             return 1; \
         fi; \
-        "$python_bin" -m pip download --only-binary=:all: --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --find-links /opt/flux-wheelhouse $pip_index_args $pip_extra_index_args --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; \
+        "$python_bin" -m pip download --only-binary=:all: --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" $wheelhouse_find_links $pip_index_args $pip_extra_index_args --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; \
     }; \
     download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock; \
-    python -m pip install --no-index --find-links /opt/flux-wheelhouse --constraint /tmp/requirements-docker.lock -r /tmp/requirements-docker.txt; \
+    python -m pip install --no-index $wheelhouse_find_links --constraint /tmp/requirements-docker.lock -r /tmp/requirements-docker.txt; \
     download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock; \
-    /opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse --constraint /tmp/requirements-paddle.lock -r /tmp/requirements-paddle.txt
+    /opt/flux-paddle/bin/python -m pip install --no-index $wheelhouse_find_links --constraint /tmp/requirements-paddle.lock -r /tmp/requirements-paddle.txt
 
 FROM runtime-deps AS runtime
 

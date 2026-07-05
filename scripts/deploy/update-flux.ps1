@@ -23,6 +23,7 @@ param(
     [int]$PipTimeoutSeconds = 180,
     [int]$PipRetries = 20,
     [bool]$PipOffline = $true,
+    [string]$PipWheelhousePath = $env:FLUX_KB_PIP_WHEELHOUSE_PATH,
     [string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL,
     [string]$PaddleGpuIndexUrl = $(if ($env:FLUX_KB_PADDLE_GPU_INDEX_URL) { $env:FLUX_KB_PADDLE_GPU_INDEX_URL } else { "https://www.paddlepaddle.org.cn/packages/stable/cu126/" }),
     [string]$PytorchGpuIndexUrl = $(if ($env:FLUX_KB_PYTORCH_GPU_INDEX_URL) { $env:FLUX_KB_PYTORCH_GPU_INDEX_URL } else { "https://download.pytorch.org/whl/cu126" }),
@@ -1667,6 +1668,98 @@ function Resolve-FluxDockerBuildBase {
     return [pscustomobject]@{ Image = $pythonBase; SkipSystemPackages = $false }
 }
 
+function Resolve-FluxPipWheelhousePath {
+    param(
+        [string]$RequestedPath,
+        [string]$InstallRoot
+    )
+    if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
+        return [System.IO.Path]::GetFullPath($RequestedPath)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $InstallRoot "package-cache\wheelhouse"))
+}
+
+function Get-FluxWheelhouseFileCount {
+    param([string]$WheelhousePath)
+    if (-not (Test-Path -LiteralPath $WheelhousePath)) {
+        return 0
+    }
+    return @(
+        Get-ChildItem -LiteralPath $WheelhousePath -File -Filter "*.whl" -ErrorAction SilentlyContinue
+    ).Count
+}
+
+function Invoke-FluxSeedDockerWheelhouse {
+    param(
+        [string]$SourceRoot,
+        [string]$WheelhousePath,
+        [string]$SeederImage,
+        [string]$PipIndexUrl,
+        [string]$PaddleGpuIndexUrl,
+        [string]$PytorchGpuIndexUrl,
+        [int]$PipTimeoutSeconds,
+        [int]$PipRetries,
+        [int]$TimeoutSeconds
+    )
+
+    $seedScript = @'
+set -eu
+cd /tmp
+cp /src/pyproject.toml ./pyproject.toml
+cp /src/docker/requirements-docker.lock /tmp/requirements-docker.lock
+cp /src/docker/requirements-paddle.lock /tmp/requirements-paddle.lock
+python - <<'PY'
+import tomllib
+from pathlib import Path
+
+config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+optional = config["project"].get("optional-dependencies", {})
+
+def write_requirements(path: str, extras: tuple[str, ...]) -> None:
+    requirements = list(config["project"]["dependencies"])
+    for extra in extras:
+        requirements.extend(optional.get(extra, []))
+    Path(path).write_text("\n".join(requirements) + "\n", encoding="utf-8")
+
+write_requirements("/tmp/requirements-docker.txt", ("api", "corpus", "mcp", "processors", "asr_gpu"))
+write_requirements("/tmp/requirements-paddle.txt", ("api", "ocr_paddle"))
+PY
+python -m venv /tmp/flux-paddle
+export PIP_CACHE_DIR=/wheelhouse/.pip-cache
+mkdir -p /wheelhouse "$PIP_CACHE_DIR"
+pip_extra_index_args=""
+if [ -n "$PADDLE_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PADDLE_GPU_INDEX_URL"; fi
+if [ -n "$PYTORCH_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PYTORCH_GPU_INDEX_URL"; fi
+if [ -n "$PIP_INDEX_URL" ]; then
+    pip_index_args="--index-url $PIP_INDEX_URL"
+else
+    pip_index_args=""
+fi
+download_requirements() {
+    python_bin="$1"
+    requirements="$2"
+    constraint="$3"
+    "$python_bin" -m pip download --only-binary=:all: --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" --find-links /wheelhouse $pip_index_args $pip_extra_index_args --constraint "$constraint" --dest /wheelhouse -r "$requirements"
+}
+download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock
+download_requirements /tmp/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock
+'@
+
+    Invoke-FluxNativeCommand -FilePath "docker" -Arguments @(
+        "run", "--rm",
+        "--network", "default",
+        "-e", "PIP_INDEX_URL=$PipIndexUrl",
+        "-e", "PADDLE_GPU_INDEX_URL=$PaddleGpuIndexUrl",
+        "-e", "PYTORCH_GPU_INDEX_URL=$PytorchGpuIndexUrl",
+        "-e", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
+        "-e", "PIP_RETRIES=$PipRetries",
+        "-v", "${SourceRoot}:/src:ro",
+        "-v", "${WheelhousePath}:/wheelhouse",
+        $SeederImage,
+        "sh", "-lc", $seedScript
+    ) -WorkingDirectory $SourceRoot -TimeoutSeconds $TimeoutSeconds -StepName "seed durable pip wheelhouse"
+}
+
 function Invoke-FluxDashboardBuild {
     param([string]$DashboardRoot)
     $viteCmd = Join-Path $DashboardRoot "node_modules\.bin\vite.cmd"
@@ -1838,21 +1931,37 @@ if (-not $SkipDashboardBuild) {
 $resolvedPython = Resolve-FluxPythonExe -InstallRoot $InstallRoot -RequestedPython $PythonExe
 
 $dockerBase = Resolve-FluxDockerBuildBase -DockerBaseMode $DockerBaseMode -DockerBaseImage $DockerBaseImage
+$resolvedPipWheelhousePath = Resolve-FluxPipWheelhousePath -RequestedPath $PipWheelhousePath -InstallRoot $InstallRoot
+New-Item -ItemType Directory -Force -Path $resolvedPipWheelhousePath | Out-Null
+if (-not $PipOffline) {
+    Invoke-FluxSeedDockerWheelhouse `
+        -SourceRoot $SourceRoot `
+        -WheelhousePath $resolvedPipWheelhousePath `
+        -SeederImage $dockerBase.Image `
+        -PipIndexUrl $PipIndexUrl `
+        -PaddleGpuIndexUrl $PaddleGpuIndexUrl `
+        -PytorchGpuIndexUrl $PytorchGpuIndexUrl `
+        -PipTimeoutSeconds $PipTimeoutSeconds `
+        -PipRetries $PipRetries `
+        -TimeoutSeconds $DockerBuildTimeoutSeconds
+} elseif ((Get-FluxWheelhouseFileCount -WheelhousePath $resolvedPipWheelhousePath) -eq 0) {
+    throw "Durable pip wheelhouse is empty at $resolvedPipWheelhousePath. Seed it explicitly with -PipOffline:`$false before running offline builds."
+}
 $skipSystemPackages = if ($dockerBase.SkipSystemPackages) { "true" } else { "false" }
-$pipOfflineValue = if ($PipOffline) { "true" } else { "false" }
-$dockerBuildNetwork = if ($PipOffline -and $dockerBase.SkipSystemPackages) { "none" } else { "default" }
+$dockerBuildNetwork = if ($dockerBase.SkipSystemPackages) { "none" } else { "default" }
 $dockerBuildArgs = @(
     "build",
     "--progress=plain",
     "--pull=false",
     "--network", $dockerBuildNetwork,
+    "--build-context", "flux-wheelhouse=$resolvedPipWheelhousePath",
     "--build-arg", "FLUX_KB_IMAGE_REVISION=$($buildMetadata.Revision)",
     "--build-arg", "FLUX_KB_IMAGE_SOURCE=$($buildMetadata.Source)",
     "--build-arg", "FLUX_KB_IMAGE_CREATED=$($buildMetadata.Created)",
     "--build-arg", "FLUX_KB_IMAGE_VERSION=$($buildMetadata.Version)",
     "--build-arg", "FLUX_KB_DOCKER_BASE_IMAGE=$($dockerBase.Image)",
     "--build-arg", "FLUX_KB_SKIP_SYSTEM_PACKAGES=$skipSystemPackages",
-    "--build-arg", "PIP_OFFLINE=$pipOfflineValue",
+    "--build-arg", "PIP_OFFLINE=true",
     "--build-arg", "PIP_DEFAULT_TIMEOUT=$PipTimeoutSeconds",
     "--build-arg", "PIP_RETRIES=$PipRetries",
     "--build-arg", "PADDLE_GPU_INDEX_URL=$PaddleGpuIndexUrl",
