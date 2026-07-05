@@ -194,9 +194,11 @@ def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
 
     assert "[switch]$AllowPipDownloads" in script
     assert "[switch]$RefreshPipDependencies" in script
+    assert '[ValidateSet("auto", "local", "python")]' in script
+    assert '[string]$DockerBaseMode = "auto"' in script
     assert "$pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)" in script
     assert "$deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }" in script
-    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue\"" in script
+    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue -DockerBaseMode $DockerBaseMode\"" in script
     assert "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only." in script
     assert "Invoke-FeatureStep -Name \"deploy-production\" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds" in script
 
@@ -262,4 +264,6 @@ def test_setup_docs_describe_offline_first_feature_closeout_package_flags():
     assert "`-AllowNpmInstall` or `-RefreshNpmDependencies`" in setup
     assert "`-AllowPipDownloads`" in setup
     assert "`-RefreshPipDependencies`" in setup
+    assert "`-DockerBaseMode python`" in setup
+    assert "mount options is too" in setup
     assert "The npm and pip flags are independent." in setup

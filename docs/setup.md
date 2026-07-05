@@ -137,7 +137,10 @@ npm --prefix dashboard ci --include=dev --cache "D:\FluxLLMKB\package-cache\npm"
 Use `-AllowNpmInstall` or `-RefreshNpmDependencies` only when intentionally
 refreshing dashboard npm dependencies during closeout. Use `-AllowPipDownloads`
 or `-RefreshPipDependencies` only when intentionally permitting online pip
-during deploy. The npm and pip flags are independent.
+during deploy. Use `-DockerBaseMode python` on a closeout rerun when Docker
+Desktop reports a local build-base layer failure such as `mount options is too
+long`; that rebuilds system packages from `python:3.12-slim` instead of reusing
+`flux-llm-kb-api:local`. The npm and pip flags are independent.
 
 Each production build records source provenance as OCI labels on the Flux image
 and generated Flux containers. The short image tag is kept for local operations,

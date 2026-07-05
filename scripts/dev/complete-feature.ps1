@@ -12,6 +12,8 @@ param(
     [int]$DeployStepTimeoutSeconds = 1800,
     [string]$PytestWorkers = "auto",
     [switch]$SkipWorkerStart,
+    [ValidateSet("auto", "local", "python")]
+    [string]$DockerBaseMode = "auto",
     [switch]$AllowPipDownloads,
     [switch]$RefreshPipDependencies,
     [string]$NpmCachePath = $(if ($env:FLUX_KB_NPM_CACHE_PATH) { $env:FLUX_KB_NPM_CACHE_PATH } else { "D:\FluxLLMKB\package-cache\npm" }),
@@ -423,7 +425,7 @@ try {
     if (-not $SkipDeploy) {
         $pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)
         $deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }
-        $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue"
+        $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue -DockerBaseMode $DockerBaseMode"
         if ($SkipWorkerStart) {
             $deployCommand += ' -SkipWorkerStart'
         }
