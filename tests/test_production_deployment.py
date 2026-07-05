@@ -13,7 +13,7 @@ def _dev_script(name: str) -> str:
     return (ROOT / "scripts" / "dev" / name).read_text(encoding="utf-8")
 
 
-MAX_COMPOSE_MEMORY_MB = 30 * 1024
+MAX_COMPOSE_MEMORY_MB = 31 * 1024
 
 DEV_MEMORY_LIMITS = {
     "api": "1gb",
@@ -41,11 +41,11 @@ PRODUCTION_MEMORY_LIMITS = {
     "model-runner": "5gb",
     "paddle-runner": "5gb",
     "ollama": "4gb",
-    "vespa": "3gb",
+    "vespa": "4gb",
 }
 
 DEV_MEMORY_EXPECTED_MB = 9728
-PRODUCTION_MEMORY_EXPECTED_MB = 30208
+PRODUCTION_MEMORY_EXPECTED_MB = 31232
 
 PRODUCTION_CONTAINER_NAMES = {
     "api": "flux-llm-kb-api",

@@ -772,8 +772,8 @@ services:
     image: vespaengine/vespa:8
     container_name: flux-vespa
     restart: unless-stopped
-    mem_limit: "3gb"
-    memswap_limit: "3gb"
+    mem_limit: "4gb"
+    memswap_limit: "4gb"
     environment:
       VESPA_CONFIGSERVER_JVMARGS: "-Xms128m -Xmx512m"
     ports:
