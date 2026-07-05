@@ -385,7 +385,9 @@ try {
             if ($stderrText) { Write-Output $stderrText }
             exit 0
         }
-        $transient = $lastOutput -match '"status"\s*:\s*"transport_closed"' -or $lastOutput -match '"status"\s*:\s*"temporary_unavailable"'
+        $jsonTransient = $lastOutput -match '"status"\s*:\s*"transport_closed"' -or $lastOutput -match '"status"\s*:\s*"temporary_unavailable"'
+        $unstructuredFailureIsTransient = [string]::IsNullOrWhiteSpace($stdoutText) -and -not [string]::IsNullOrWhiteSpace($stderrText)
+        $transient = $jsonTransient -or $unstructuredFailureIsTransient
         if (-not $transient -or $attempt -ge $McpReadinessProbeAttempts) {
             $lastOutput
             exit $lastExitCode

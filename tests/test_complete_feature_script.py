@@ -52,6 +52,9 @@ def test_complete_feature_script_retries_transient_mcp_transport_closure():
     assert "2>&1" not in script
     assert "transport_closed" in script
     assert "temporary_unavailable" in script
+    assert "$jsonTransient" in script
+    assert "$unstructuredFailureIsTransient = [string]::IsNullOrWhiteSpace($stdoutText) -and -not [string]::IsNullOrWhiteSpace($stderrText)" in script
+    assert "$transient = $jsonTransient -or $unstructuredFailureIsTransient" in script
     assert "Start-Sleep -Seconds 5" in script
     assert "MCP readiness failed with transient status" in script
 
