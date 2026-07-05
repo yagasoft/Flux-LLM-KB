@@ -358,24 +358,42 @@ $env:PYTHONPATH = (Join-Path (Get-Location) "src")
 $McpReadinessProbeAttempts = 3
 $lastOutput = ""
 $lastExitCode = 1
-for ($attempt = 1; $attempt -le $McpReadinessProbeAttempts; $attempt++) {
-    $output = python -m flux_llm_kb.cli codex mcp-readiness --json 2>&1
-    $lastExitCode = $LASTEXITCODE
-    $lastOutput = ($output | Out-String)
-    if ($lastExitCode -eq 0) {
-        $lastOutput
-        exit 0
+$stdoutPath = [System.IO.Path]::GetTempFileName()
+$stderrPath = [System.IO.Path]::GetTempFileName()
+try {
+    for ($attempt = 1; $attempt -le $McpReadinessProbeAttempts; $attempt++) {
+        $stdoutText = ""
+        $stderrText = ""
+        & python -m flux_llm_kb.cli codex mcp-readiness --json 1> $stdoutPath 2> $stderrPath
+        $lastExitCode = $LASTEXITCODE
+        if (Test-Path -LiteralPath $stdoutPath) {
+            $stdoutText = Get-Content -Raw -LiteralPath $stdoutPath
+        }
+        if (Test-Path -LiteralPath $stderrPath) {
+            $stderrText = Get-Content -Raw -LiteralPath $stderrPath
+        }
+        $lastOutput = $stdoutText
+        if ($stderrText) {
+            $lastOutput = "$lastOutput`n$stderrText"
+        }
+        if ($lastExitCode -eq 0) {
+            if ($stdoutText) { $stdoutText }
+            if ($stderrText) { Write-Output $stderrText }
+            exit 0
+        }
+        $transient = $lastOutput -match '"status"\s*:\s*"transport_closed"' -or $lastOutput -match '"status"\s*:\s*"temporary_unavailable"'
+        if (-not $transient -or $attempt -ge $McpReadinessProbeAttempts) {
+            $lastOutput
+            exit $lastExitCode
+        }
+        Write-Host "MCP readiness failed with transient status; retrying attempt $($attempt + 1) of $McpReadinessProbeAttempts."
+        Start-Sleep -Seconds 5
     }
-    $transient = $lastOutput -match '"status"\s*:\s*"transport_closed"' -or $lastOutput -match '"status"\s*:\s*"temporary_unavailable"'
-    if (-not $transient -or $attempt -ge $McpReadinessProbeAttempts) {
-        $lastOutput
-        exit $lastExitCode
-    }
-    Write-Host "MCP readiness failed with transient status; retrying attempt $($attempt + 1) of $McpReadinessProbeAttempts."
-    Start-Sleep -Seconds 5
+    $lastOutput
+    exit $lastExitCode
+} finally {
+    Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 }
-$lastOutput
-exit $lastExitCode
 '@
 
 $DashboardNpmInstallCommand = @'

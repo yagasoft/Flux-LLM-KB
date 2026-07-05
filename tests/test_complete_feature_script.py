@@ -44,6 +44,12 @@ def test_complete_feature_script_retries_transient_mcp_transport_closure():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
     assert "$McpReadinessProbeAttempts = 3" in script
+    assert "[System.IO.Path]::GetTempFileName()" in script
+    assert "1> $stdoutPath 2> $stderrPath" in script
+    assert "Get-Content -Raw -LiteralPath $stdoutPath" in script
+    assert "Get-Content -Raw -LiteralPath $stderrPath" in script
+    assert "Remove-Item -LiteralPath $stdoutPath, $stderrPath" in script
+    assert "2>&1" not in script
     assert "transport_closed" in script
     assert "temporary_unavailable" in script
     assert "Start-Sleep -Seconds 5" in script
