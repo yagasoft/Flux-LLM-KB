@@ -4,8 +4,6 @@ param(
     [string]$CommitMessage = "Complete feature",
     [switch]$DryRun,
     [switch]$SkipDeploy,
-    [switch]$AllowNpmInstall,
-    [switch]$RefreshNpmDependencies,
     [switch]$KeepWorktree,
     [int]$StepTimeoutSeconds = 600,
     [int]$PytestStepTimeoutSeconds = 1200,
@@ -14,9 +12,8 @@ param(
     [switch]$SkipWorkerStart,
     [ValidateSet("auto", "local", "python")]
     [string]$DockerBaseMode = "auto",
-    [switch]$AllowPipDownloads,
-    [switch]$RefreshPipDependencies,
     [string]$NpmCachePath = $(if ($env:FLUX_KB_NPM_CACHE_PATH) { $env:FLUX_KB_NPM_CACHE_PATH } else { "D:\FluxLLMKB\package-cache\npm" }),
+    [string]$PipWheelhousePath = $(if ($env:FLUX_KB_PIP_WHEELHOUSE_PATH) { $env:FLUX_KB_PIP_WHEELHOUSE_PATH } else { "D:\FluxLLMKB\package-cache\wheelhouse" }),
     [string]$PostDeployReclaimOutlookProfile = ""
 )
 
@@ -273,10 +270,17 @@ if (-not $editableLocation) {
 }
 
 if ($needsRepair) {
-    if ($env:FLUX_KB_ALLOW_PIP_DOWNLOADS -ne "1") {
-        throw "Python editable install repair is offline-first; seed the shared environment or rerun with -AllowPipDownloads."
+    $PipWheelhousePath = $env:FLUX_KB_REPAIR_PIP_WHEELHOUSE_PATH
+    if (-not $PipWheelhousePath -or -not (Test-Path -LiteralPath $PipWheelhousePath)) {
+        throw "Python editable install repair requires the persistent pip wheelhouse at $PipWheelhousePath."
     }
-    python -m pip install -e "$MainRoot[dev]"
+    $wheelCount = @(Get-ChildItem -LiteralPath $PipWheelhousePath -File -Filter "*.whl" -ErrorAction SilentlyContinue).Count
+    if ($wheelCount -eq 0) {
+        throw "Python editable install repair requires the persistent pip wheelhouse at $PipWheelhousePath."
+    }
+    $PipCachePath = Join-Path $PipWheelhousePath ".pip-cache"
+    New-Item -ItemType Directory -Force -Path $PipCachePath | Out-Null
+    python -m pip install --no-index --find-links "$PipWheelhousePath" --cache-dir "$PipCachePath" -e "$MainRoot[dev]"
 }
 '@
 
@@ -401,31 +405,13 @@ $NpmCachePath = $env:FLUX_KB_NPM_CACHE_PATH
 New-Item -ItemType Directory -Force -Path "$NpmCachePath" | Out-Null
 npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --prefer-offline
 '@
-$DashboardCacheCheckCommand = @'
-$NpmCachePath = $env:FLUX_KB_NPM_CACHE_PATH
-$requiredTools = @(
-    @{ Name = "vitest CLI"; Path = Join-Path (Get-Location) "dashboard\node_modules\vitest\dist\cli.js" },
-    @{ Name = "vite CLI"; Path = Join-Path (Get-Location) "dashboard\node_modules\vite\bin\vite.js" }
-)
-$missing = @()
-foreach ($tool in $requiredTools) {
-    if (-not (Test-Path -LiteralPath $tool.Path)) {
-        $missing += "$($tool.Name): $($tool.Path)"
-    }
-}
-if ($missing.Count -gt 0) {
-    throw "Dashboard dependency cache is incomplete. Missing $($missing -join '; '). Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev --cache `"$NpmCachePath`" --prefer-offline. Rerun closeout without npm flags after seeding, or rerun with -AllowNpmInstall only when intentionally refreshing npm dependencies."
-}
-"Skipped dashboard package install; existing dashboard node_modules verified."
-'@
-
-$PipOfflineFailureHint = "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only."
 
 $FeatureWorktree = (Resolve-Path $FeatureWorktree).Path
 if (-not $MainRoot) {
     $MainRoot = Get-MainWorktreePath -Worktree $FeatureWorktree
 }
 $MainRoot = (Resolve-Path $MainRoot).Path
+$PipWheelhousePath = [System.IO.Path]::GetFullPath($PipWheelhousePath)
 $Branch = (git -C $FeatureWorktree branch --show-current).Trim()
 if (-not $Branch.StartsWith("codex/")) {
     throw "Refusing to complete non-codex branch '$Branch'."
@@ -450,11 +436,7 @@ try {
     Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand -TimeoutSeconds $PytestStepTimeoutSeconds
     Invoke-FeatureStep -Name "compileall" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m compileall -q src tests'
     Invoke-FeatureStep -Name "flux-lint" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli lint'
-    if (-not ($AllowNpmInstall -or $RefreshNpmDependencies)) {
-        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardCacheCheckCommand
-    } else {
-        Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardNpmInstallCommand
-    }
+    Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardNpmInstallCommand
     Invoke-FeatureStep -Name "dashboard-test" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vitest/dist/cli.js run } finally { Pop-Location }'
     Invoke-FeatureStep -Name "dashboard-build" -Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'
     Invoke-FeatureStep -Name "feature-commit" -Cwd $FeatureWorktree -Command "git add -A; if ((git status --porcelain) -ne `$null) { git commit -m '$CommitMessage' }"
@@ -464,13 +446,11 @@ try {
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
     if (-not $SkipDeploy) {
-        $pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)
-        $deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }
-        $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue -DockerBaseMode $DockerBaseMode"
+        $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode"
         if ($SkipWorkerStart) {
             $deployCommand += ' -SkipWorkerStart'
         }
-        $deployFailureHint = if ($pipOffline) { $PipOfflineFailureHint } else { "" }
+        $deployFailureHint = "Closeout runs pip offline only. Prefetch missing packages into the persistent wheelhouse before rerunning closeout."
         Invoke-FeatureStep -Name "deploy-production" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds -FailureHint $deployFailureHint
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         # Probe http://127.0.0.1:8765/api/dashboard/health and fail if required DB paths are blocked.
@@ -484,19 +464,19 @@ try {
     }
     $previousRepairMainRoot = $env:FLUX_KB_REPAIR_MAIN_ROOT
     $previousRepairFeatureWorktree = $env:FLUX_KB_REPAIR_FEATURE_WORKTREE
-    $previousAllowPipDownloads = $env:FLUX_KB_ALLOW_PIP_DOWNLOADS
+    $previousRepairPipWheelhousePath = $env:FLUX_KB_REPAIR_PIP_WHEELHOUSE_PATH
     try {
         $env:FLUX_KB_REPAIR_MAIN_ROOT = $MainRoot
         $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $FeatureWorktree
-        $env:FLUX_KB_ALLOW_PIP_DOWNLOADS = if ($AllowPipDownloads -or $RefreshPipDependencies) { "1" } else { "0" }
+        $env:FLUX_KB_REPAIR_PIP_WHEELHOUSE_PATH = $PipWheelhousePath
         Invoke-FeatureStep -Name "repair-python-editable-install" -Cwd $MainRoot -Command $RepairEditableInstallCommand
     } finally {
         $env:FLUX_KB_REPAIR_MAIN_ROOT = $previousRepairMainRoot
         $env:FLUX_KB_REPAIR_FEATURE_WORKTREE = $previousRepairFeatureWorktree
-        if ($null -eq $previousAllowPipDownloads) {
-            Remove-Item Env:\FLUX_KB_ALLOW_PIP_DOWNLOADS -ErrorAction SilentlyContinue
+        if ($null -eq $previousRepairPipWheelhousePath) {
+            Remove-Item Env:\FLUX_KB_REPAIR_PIP_WHEELHOUSE_PATH -ErrorAction SilentlyContinue
         } else {
-            $env:FLUX_KB_ALLOW_PIP_DOWNLOADS = $previousAllowPipDownloads
+            $env:FLUX_KB_REPAIR_PIP_WHEELHOUSE_PATH = $previousRepairPipWheelhousePath
         }
     }
     if (-not $KeepWorktree) {

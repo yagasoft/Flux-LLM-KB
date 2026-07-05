@@ -79,10 +79,9 @@ def test_complete_feature_script_has_optional_post_deploy_outlook_spool_reclaim(
     assert '$env:PYTHONPATH = (Join-Path (Get-Location) "src")' not in reclaim_block
 
 
-def test_complete_feature_script_verifies_cached_dashboard_dependencies_before_tests_by_default():
+def test_complete_feature_script_runs_npm_install_before_tests_by_default():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
-    cached_step = 'Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardCacheCheckCommand'
     online_step = 'Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardNpmInstallCommand'
     test_step = (
         'Invoke-FeatureStep -Name "dashboard-test" '
@@ -93,34 +92,31 @@ def test_complete_feature_script_verifies_cached_dashboard_dependencies_before_t
         "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'"
     )
 
-    assert "[switch]$AllowNpmInstall" in script
-    assert "[switch]$RefreshNpmDependencies" in script
+    assert "[switch]$AllowNpmInstall" not in script
+    assert "[switch]$RefreshNpmDependencies" not in script
     assert "[string]$NpmCachePath" in script
-    assert "if (-not ($AllowNpmInstall -or $RefreshNpmDependencies))" in script
-    assert cached_step in script
+    assert "$DashboardCacheCheckCommand" not in script
     assert online_step in script
-    assert script.index(cached_step) < script.index(test_step) < script.index(build_step)
-    assert script.index(cached_step) < script.index(online_step)
+    assert script.index(online_step) < script.index(test_step) < script.index(build_step)
     assert test_step in script
     assert build_step in script
     assert 'npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --prefer-offline' in script
-    assert "Skipped dashboard package install; existing dashboard node_modules verified." in script
-    assert 'Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev --cache `"$NpmCachePath`" --prefer-offline' in script
-    assert "Dashboard dependency cache is incomplete" in script
 
 
-def test_complete_feature_script_package_download_flags_are_independent():
+def test_complete_feature_script_removes_pip_online_mode_and_deploys_pip_offline():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
-    assert "[switch]$AllowNpmInstall" in script
-    assert "[switch]$RefreshNpmDependencies" in script
-    assert "[switch]$AllowPipDownloads" in script
-    assert "[switch]$RefreshPipDependencies" in script
+    assert "[switch]$AllowPipDownloads" not in script
+    assert "[switch]$RefreshPipDependencies" not in script
+    assert "AllowPipDownloads" not in script
+    assert "RefreshPipDependencies" not in script
+    assert "FLUX_KB_ALLOW_PIP_DOWNLOADS" not in script
+    assert "PipOffline:$false" not in script
     assert "--cache \"$NpmCachePath\"" in script
-    assert "$pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)" in script
-    assert "$deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }" in script
-    assert "if (-not ($AllowNpmInstall -or $RefreshNpmDependencies))" in script
-    assert "$AllowNpmInstall -or $RefreshNpmDependencies -or $AllowPipDownloads -or $RefreshPipDependencies" not in script
+    assert "$pipOffline" not in script
+    assert "$deployPipOfflineValue" not in script
+    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode\"" in script
+    assert "Closeout runs pip offline only." in script
 
 
 def test_complete_feature_script_runs_pytest_with_xdist_by_default_and_serial_escape_hatch():
@@ -160,10 +156,11 @@ def test_complete_feature_script_repairs_shared_editable_install_before_worktree
     assert "Editable project location:" in script
     assert "Test-Path -LiteralPath $editableLocation" in script
     assert "Test-UnderPath -Path $editableLocation -Root $FeatureWorktree" in script
-    assert "Python editable install repair is offline-first; seed the shared environment or rerun with -AllowPipDownloads." in script
-    assert "$env:FLUX_KB_ALLOW_PIP_DOWNLOADS = if ($AllowPipDownloads -or $RefreshPipDependencies)" in script
-    assert "$previousAllowPipDownloads = $env:FLUX_KB_ALLOW_PIP_DOWNLOADS" in script
-    assert 'python -m pip install -e "$MainRoot[dev]"' in script
+    assert "Python editable install repair requires the persistent pip wheelhouse" in script
+    assert "$env:FLUX_KB_REPAIR_PIP_WHEELHOUSE_PATH" in script
+    assert "--no-index" in script
+    assert "--find-links" in script
+    assert 'python -m pip install --no-index --find-links "$PipWheelhousePath" --cache-dir "$PipCachePath" -e "$MainRoot[dev]"' in script
 
 
 def test_complete_feature_script_is_safe_to_rerun_after_empty_squash_merge():
@@ -208,14 +205,10 @@ def test_complete_feature_script_propagates_nested_native_exit_codes():
 def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
-    assert "[switch]$AllowPipDownloads" in script
-    assert "[switch]$RefreshPipDependencies" in script
     assert '[ValidateSet("auto", "local", "python")]' in script
     assert '[string]$DockerBaseMode = "auto"' in script
-    assert "$pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)" in script
-    assert "$deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }" in script
-    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:$deployPipOfflineValue -DockerBaseMode $DockerBaseMode\"" in script
-    assert "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only." in script
+    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode\"" in script
+    assert "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only." not in script
     assert "Invoke-FeatureStep -Name \"deploy-production\" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds" in script
 
 
@@ -272,14 +265,16 @@ def test_setup_docs_describe_worktree_safe_flux_cli_wrapper():
     assert "D:\\FluxLLMKB\\app\\.venv" in setup
 
 
-def test_setup_docs_describe_offline_first_feature_closeout_package_flags():
+def test_setup_docs_describe_npm_online_and_pip_offline_feature_closeout():
     setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
+    setup_words = " ".join(setup.split())
 
-    assert "Feature closeout through `scripts/dev/complete-feature.ps1` is also" in setup
+    assert "Feature closeout through `scripts/dev/complete-feature.ps1` runs npm install by default" in setup_words
     assert "npm --prefix dashboard ci --include=dev --cache" in setup
-    assert "`-AllowNpmInstall` or `-RefreshNpmDependencies`" in setup
-    assert "`-AllowPipDownloads`" in setup
-    assert "`-RefreshPipDependencies`" in setup
+    assert "`-AllowNpmInstall`" not in setup
+    assert "`-RefreshNpmDependencies`" not in setup
+    assert "`-AllowPipDownloads`" not in setup
+    assert "`-RefreshPipDependencies`" not in setup
+    assert "closeout script never enables pip downloads" in setup_words
     assert "`-DockerBaseMode python`" in setup
     assert "mount options is too" in setup
-    assert "The npm and pip flags are independent." in setup

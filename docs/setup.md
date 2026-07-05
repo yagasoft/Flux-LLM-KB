@@ -125,22 +125,20 @@ with `.\scripts\deploy\update-flux.ps1 -PipOffline:$false`, which writes wheels
 to the host cache and rebuilds the local wheelhouse image before building from
 the cache.
 
-Feature closeout through `scripts/dev/complete-feature.ps1` is also
-offline-first by default. It verifies the cached dashboard tools under
-`dashboard/node_modules` and passes `-PipOffline:$true` into production deploy.
-If dashboard tools are missing, seed npm dependencies once with:
+Feature closeout through `scripts/dev/complete-feature.ps1` runs npm install by
+default with the persistent npm cache, then passes `-PipOffline:$true` into
+production deploy. The closeout script never enables pip downloads. If a Python
+package is missing, prefetch it explicitly into the persistent wheelhouse before
+rerunning closeout.
 
 ```powershell
 npm --prefix dashboard ci --include=dev --cache "D:\FluxLLMKB\package-cache\npm" --prefer-offline
 ```
 
-Use `-AllowNpmInstall` or `-RefreshNpmDependencies` only when intentionally
-refreshing dashboard npm dependencies during closeout. Use `-AllowPipDownloads`
-or `-RefreshPipDependencies` only when intentionally permitting online pip
-during deploy. Use `-DockerBaseMode python` on a closeout rerun when Docker
-Desktop reports a local build-base layer failure such as `mount options is too
-long`; that rebuilds system packages from `python:3.12-slim` instead of reusing
-`flux-llm-kb-api:local`. The npm and pip flags are independent.
+Use `-DockerBaseMode python` on a closeout rerun when Docker Desktop reports a
+local build-base layer failure such as `mount options is too long`; that
+rebuilds system packages from `python:3.12-slim` instead of reusing
+`flux-llm-kb-api:local`.
 
 Each production build records source provenance as OCI labels on the Flux image
 and generated Flux containers. The short image tag is kept for local operations,
