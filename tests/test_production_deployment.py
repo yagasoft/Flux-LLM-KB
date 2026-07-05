@@ -401,7 +401,11 @@ def test_production_deploy_scripts_surface_docker_ollama_model_steps():
         assert "Invoke-FluxVespaApplicationDeploy" in script
         assert '("exec", "-u", "root", "flux-vespa", "sh", "-lc", "rm -rf /tmp/flux-vespa-app")' in script
         assert script.index("rm -rf /tmp/flux-vespa-app") < script.index('"cp", $vespaApp, "flux-vespa:/tmp/flux-vespa-app"')
-        assert "vespa deploy --wait 300 /tmp/flux-vespa-app" in script
+        assert "$deployWaitSeconds = [Math]::Max($TimeoutSeconds, 900)" in script
+        assert "$deployTimeoutSeconds = $deployWaitSeconds + 60" in script
+        assert "vespa deploy --wait $deployWaitSeconds /tmp/flux-vespa-app" in script
+        assert '-TimeoutSeconds $deployTimeoutSeconds -StepName "deploy Vespa application package"' in script
+        assert "vespa deploy --wait 300 /tmp/flux-vespa-app" not in script
         assert "Copy-FluxVespaApplication -SourceRoot $SourceRoot -AppRoot $appRoot" in script
         assert "qwen3-vl:32b" not in script
 
