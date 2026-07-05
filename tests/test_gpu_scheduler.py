@@ -9,6 +9,7 @@ from flux_llm_kb import gpu_scheduler
 from flux_llm_kb.gpu_scheduler import (
     GpuAdmissionDecision,
     GpuEvictionCandidate,
+    GpuEvictionVerificationResult,
     GpuLeaseRecord,
     GpuLeaseTimeout,
     GpuLease,
@@ -86,6 +87,62 @@ def _resident(
         last_used_at=last_used_at,
         metadata=metadata,
     )
+
+
+def _brokered_eviction_request(*, broker_delivery_count: int = 1) -> dict[str, object]:
+    return {
+        "id": "eviction-1",
+        "eviction_id": "eviction-1",
+        "lease_id": "lease-1",
+        "task_type": "embedding",
+        "model_id": "snowflake",
+        "component": "model-runner",
+        "status": "running",
+        "estimated_freed_vram_mb": 2_500,
+        "error": "",
+        "routing_key": "gpu.eviction.requested",
+        "correlation_id": "corr-1",
+        "causation_id": "cause-1",
+        "broker_delivery_count": broker_delivery_count,
+        "metadata": {
+            "request_profile": {
+                "task_type": "rerank",
+                "model_id": "qwen-reranker",
+                "estimated_vram_mb": 7_000,
+                "priority": 0,
+                "exclusive": True,
+                "share_group": "",
+                "component": "worker",
+                "request_id": "job-1",
+                "metadata": {},
+            },
+            "candidate": {
+                "task_type": "embedding",
+                "model_id": "snowflake",
+                "estimated_vram_mb": 2_500,
+                "component": "model-runner",
+                "metadata": {},
+            },
+        },
+    }
+
+
+class FakeGpuEvictionDb:
+    def __init__(self, request: dict[str, object]) -> None:
+        self.request = request
+        self.completed: list[dict[str, object]] = []
+        self.retried: list[dict[str, object]] = []
+
+    def claim_gpu_eviction_request(self, **_kwargs: object) -> dict[str, object]:
+        return dict(self.request)
+
+    def complete_gpu_eviction_request(self, **kwargs: object) -> dict[str, object]:
+        self.completed.append(kwargs)
+        return dict(kwargs)
+
+    def retry_gpu_eviction_request(self, **kwargs: object) -> dict[str, object]:
+        self.retried.append(kwargs)
+        return dict(kwargs)
 
 
 def test_admission_blocks_exclusive_work_behind_active_lease():
@@ -564,6 +621,81 @@ def test_postgres_scheduler_queues_eviction_and_returns_retryable_busy_instead_o
     assert exc.value.retry_after_seconds == 5.0
     assert events[1] == ("enqueue", events[0][1], [candidate])
     assert events[2] == ("terminal", events[0][1], "timed_out")
+
+
+def test_brokered_gpu_eviction_noop_becomes_terminal_without_retry(monkeypatch):
+    db = FakeGpuEvictionDb(_brokered_eviction_request(broker_delivery_count=3))
+
+    def fake_evict_once(self, profile, candidate, *, attempt):  # noqa: ANN001
+        return GpuEvictionVerificationResult(
+            verified=False,
+            payload={"unloaded": False},
+            error=(
+                "VRAM did not recover after eviction "
+                "(before_free_vram_mb=7556, after_free_vram_mb=7554, "
+                "freed_vram_mb=0, required_vram_mb=7000, available_vram_mb=6530)"
+            ),
+            metadata={
+                "attempt": attempt,
+                "before_free_vram_mb": 7556,
+                "after_free_vram_mb": 7554,
+                "freed_vram_mb": 0,
+                "required_vram_mb": 7000,
+                "available_vram_mb": 6530,
+                "candidate_estimated_vram_mb": 2500,
+            },
+        )
+
+    monkeypatch.setattr(gpu_scheduler, "scheduler_config_from_settings", lambda: _config(mode="postgres", eviction_enabled=True))
+    monkeypatch.setattr(gpu_scheduler, "_gpu_eviction_delivery_limit", lambda: 8)
+    monkeypatch.setattr(PostgresGpuScheduler, "_evict_candidate_once", fake_evict_once)
+    monkeypatch.setattr(
+        PostgresGpuScheduler,
+        "_mark_residency_evicted",
+        lambda *_args, **_kwargs: pytest.fail("residency must not be marked evicted for a no-op unload"),
+    )
+
+    result = gpu_scheduler.process_gpu_eviction_request(
+        eviction_id="eviction-1",
+        worker_id="worker-1",
+        broker_message_id="message-1",
+        database_module=db,
+    )
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is False
+    assert db.retried == []
+    assert len(db.completed) == 1
+    assert db.completed[0]["status"] == "failed"
+    assert db.completed[0]["metadata"]["terminal_reason"] == "eviction_did_not_free_vram"
+
+
+def test_brokered_gpu_eviction_transient_failure_still_retries(monkeypatch):
+    db = FakeGpuEvictionDb(_brokered_eviction_request(broker_delivery_count=1))
+
+    def fake_evict_once(self, profile, candidate, *, attempt):  # noqa: ANN001
+        return GpuEvictionVerificationResult(
+            verified=False,
+            error="HTTP 503 while unloading model",
+            metadata={"attempt": attempt, "error_type": "HTTPError"},
+        )
+
+    monkeypatch.setattr(gpu_scheduler, "scheduler_config_from_settings", lambda: _config(mode="postgres", eviction_enabled=True))
+    monkeypatch.setattr(gpu_scheduler, "_gpu_eviction_delivery_limit", lambda: 8)
+    monkeypatch.setattr(PostgresGpuScheduler, "_evict_candidate_once", fake_evict_once)
+
+    result = gpu_scheduler.process_gpu_eviction_request(
+        eviction_id="eviction-1",
+        worker_id="worker-1",
+        broker_message_id="message-1",
+        database_module=db,
+    )
+
+    assert result["status"] == "retrying"
+    assert result["retryable"] is True
+    assert db.completed == []
+    assert len(db.retried) == 1
+    assert db.retried[0]["error"] == "HTTP 503 while unloading model"
 
 
 def test_worker_task_profile_uses_background_timeout_setting(monkeypatch):

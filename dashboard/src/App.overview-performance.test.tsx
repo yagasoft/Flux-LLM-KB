@@ -1,8 +1,15 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import App from "./App";
 import { crawl, dashboardTestState as state, deferredResponse, errorJson, health, json, mail, outlook, setupDashboardTest } from "./test/appHarness";
+
+async function flushAsyncUi() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
 
 describe("Flux dashboard", () => {
   setupDashboardTest();
@@ -526,7 +533,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Job job-1 is blocked.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry corpus job" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Apply diagnostic filters" }));
-    expect(fetch).toHaveBeenCalledWith("/api/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).toContain("/api/diagnostics/all?root_name=docs&status=blocked_missing_dependency&family=office&include_details=true");
     vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     await user.click(screen.getByRole("button", { name: "Retry corpus job" }));
     expect(state.diagnosticsActionPayload).toEqual({
@@ -569,17 +576,79 @@ describe("Flux dashboard", () => {
     expect(screen.getAllByText("docs").length).toBeGreaterThan(0);
   });
 
-  test("auto-refreshes from backend polling without a manual page refresh", async () => {
+  test("auto-refresh polling refreshes only cheap overview data by default", async () => {
+    vi.useFakeTimers();
     render(<App />);
 
-    await screen.findByRole("heading", { name: "Operations" });
-    expect(fetch).toHaveBeenCalledWith("/api/dashboard/health");
+    await flushAsyncUi();
+    expect(screen.getByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    vi.mocked(fetch).mockClear();
 
-    await waitFor(() => {
-      const healthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
-      expect(healthCalls.length).toBeGreaterThanOrEqual(2);
-    }, { timeout: 2500 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    const urls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(urls).toContain("/api/dashboard/health");
+    expect(urls).toContain("/api/dashboard/crawl");
+    expect(urls.some((url) => url.startsWith("/api/dashboard/jobs"))).toBe(true);
+    expect(urls).not.toContain("/api/dashboard/retrieval-stats");
+    expect(urls.some((url) => url.startsWith("/api/dashboard/model-activity"))).toBe(false);
+    expect(urls).not.toContain("/api/mail/status");
+    expect(urls).not.toContain("/api/outlook-host/status");
+    expect(urls).not.toContain("/api/settings");
     expect(screen.getByText(/Last updated/i)).toBeInTheDocument();
+  });
+
+  test("auto-refresh polling pauses while the browser tab is hidden", async () => {
+    vi.useFakeTimers();
+    const hiddenSpy = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+    render(<App />);
+
+    await flushAsyncUi();
+    expect(screen.getByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    vi.mocked(fetch).mockClear();
+    hiddenSpy.mockReturnValue(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    expect(fetch).not.toHaveBeenCalled();
+    hiddenSpy.mockRestore();
+  });
+
+  test("auto-refresh polling skips overlapping refreshes", async () => {
+    vi.useFakeTimers();
+    render(<App />);
+
+    await flushAsyncUi();
+    expect(screen.getByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    const pending = deferredResponse();
+    state.pendingFetchResponses["/api/dashboard/health"] = pending;
+    vi.mocked(fetch).mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const healthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
+    expect(healthCalls).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const blockedHealthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
+    expect(blockedHealthCalls).toHaveLength(1);
+
+    delete state.pendingFetchResponses["/api/dashboard/health"];
+    pending.resolve(json(state.healthPayload));
+    await flushAsyncUi();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    const resumedHealthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
+    expect(resumedHealthCalls).toHaveLength(2);
   });
 
   test("manual Outlook sync creates a host request", async () => {

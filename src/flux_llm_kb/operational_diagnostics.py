@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath, PureWindowsPath
+import time
 from typing import Any
 
 
@@ -29,6 +30,7 @@ def summarize_operational_diagnostics(
         "retrieval_explains": len(sections["retrieval"].get("recent_explains", []) or []),
         "watcher_events": len(sections["watcher"].get("events", []) or []),
         "worker_families": len(sections["workers"].get("families", []) or []),
+        "retrying_gpu_evictions": len(_retrying_gpu_evictions(sections["workers"].get("gpu_evictions", {}))),
         "jobs": len(sections["jobs"].get("jobs", []) or []),
         "blocked_jobs": sum(1 for item in sections["jobs"].get("jobs", []) or [] if "blocked" in str(item.get("status") or "")),
         "mail_sync_runs": len(sections["mail"].get("sync_runs", []) or []),
@@ -91,6 +93,16 @@ def _diagnostic_items(sections: dict[str, Any], *, filters: dict[str, Any]) -> l
                 severity=severity,
             )
         )
+    for eviction in _retrying_gpu_evictions(sections["workers"].get("gpu_evictions", {})):
+        rows.append(
+            _item(
+                "workers",
+                _gpu_eviction_diagnostic_row(eviction),
+                status="gpu_eviction_retrying",
+                family="gpu_eviction",
+                severity="warning",
+            )
+        )
     for job in sections["jobs"].get("jobs", []) or []:
         if not isinstance(job, dict):
             continue
@@ -110,7 +122,7 @@ def _filter_sections(sections: dict[str, Any], *, filters: dict[str, Any]) -> di
     result = {
         "retrieval": sections.get("retrieval", {}),
         "watcher": {"events": []},
-        "workers": {"families": []},
+        "workers": {"families": [], "gpu_evictions": sections.get("workers", {}).get("gpu_evictions", {})},
         "jobs": {"jobs": []},
         "mail": sections.get("mail", {}),
     }
@@ -147,7 +159,22 @@ def _item(
     evidence = {
         key: value
         for key, value in row.items()
-        if key in {"pending", "running", "blocked", "failed", "retrying_locked", "blocked_locked", "action", "status", "duration_ms"}
+        if key in {
+            "pending",
+            "running",
+            "blocked",
+            "failed",
+            "retrying_locked",
+            "blocked_locked",
+            "action",
+            "status",
+            "duration_ms",
+            "age_seconds",
+            "broker_delivery_count",
+            "last_error",
+            "model_id",
+            "component",
+        }
     }
     return {
         "section": section,
@@ -173,6 +200,9 @@ def _item(
 def _summary(*, section: str, status: str, row: dict[str, Any]) -> str:
     if section == "jobs":
         return f"Job {row.get('id') or ''} is {status}.".strip()
+    if section == "workers" and status == "gpu_eviction_retrying":
+        delivery_count = row.get("broker_delivery_count") or 0
+        return f"GPU eviction {row.get('id') or 'request'} is retrying after {delivery_count} deliveries."
     if section == "workers":
         return f"Worker family {row.get('family') or 'unknown'} reports {status}."
     if section == "watcher":
@@ -183,6 +213,8 @@ def _summary(*, section: str, status: str, row: dict[str, Any]) -> str:
 
 
 def _user_action(*, section: str, status: str) -> str:
+    if section == "workers" and status == "gpu_eviction_retrying":
+        return "Review the retry age, delivery count, and last error; no-op evictions should become terminal under the brokered handler."
     if section == "jobs" and status == "blocked_by_policy":
         return "Review include/exclude globs, strict indexing rules, and size limits before retrying or excluding the file."
     if section == "jobs" and status == "blocked_invalid_source":
@@ -197,6 +229,8 @@ def _user_action(*, section: str, status: str) -> str:
 
 
 def _follow_up_command(section: str, row: dict[str, Any]) -> str:
+    if section == "workers" and row.get("family") == "gpu_eviction":
+        return "flux-kb diagnostics workers --family gpu_eviction"
     if section == "jobs":
         family = row.get("job_family") or "all"
         return f"flux-kb crawl worker status --family {family}"
@@ -208,6 +242,39 @@ def _follow_up_command(section: str, row: dict[str, Any]) -> str:
     if section == "mail":
         return "flux-kb mail status"
     return "flux-kb diagnostics all"
+
+
+def _retrying_gpu_evictions(evictions: Any) -> list[dict[str, Any]]:
+    if not isinstance(evictions, dict):
+        return []
+    recent = evictions.get("recent") if isinstance(evictions.get("recent"), list) else []
+    return [
+        item
+        for item in recent
+        if isinstance(item, dict) and str(item.get("status") or "") == "retrying"
+    ]
+
+
+def _gpu_eviction_diagnostic_row(eviction: dict[str, Any]) -> dict[str, Any]:
+    created_at = _float_or_none(eviction.get("created_at"))
+    age_seconds = max(0, int(time.time() - created_at)) if created_at is not None else None
+    return {
+        "id": eviction.get("id"),
+        "family": "gpu_eviction",
+        "status": "gpu_eviction_retrying",
+        "age_seconds": age_seconds,
+        "broker_delivery_count": eviction.get("broker_delivery_count"),
+        "last_error": eviction.get("error"),
+        "model_id": eviction.get("model_id"),
+        "component": eviction.get("component"),
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _remediation_actions(

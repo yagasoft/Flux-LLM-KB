@@ -2732,7 +2732,18 @@ class KnowledgeService:
         capped = max(1, min(int(limit or 25), 100))
         retrieval = {"recent_explains": database.recent_retrieval_explain_diagnostics(limit=capped)} if normalized in {"all", "retrieval"} else {}
         watcher = {"events": database.list_watch_events(limit=capped)} if normalized in {"all", "watcher"} else {}
-        workers = {"families": database.worker_family_stats()} if normalized in {"all", "workers"} else {}
+        if normalized in {"all", "workers"}:
+            workers = {"families": database.worker_family_stats()}
+            try:
+                from .gpu_scheduler import get_gpu_scheduler
+
+                scheduler_status = get_gpu_scheduler().status()
+                evictions = scheduler_status.get("evictions") if isinstance(scheduler_status.get("evictions"), dict) else {}
+                workers["gpu_evictions"] = evictions
+            except Exception:
+                workers["gpu_evictions"] = {"retrying": 0, "recent": []}
+        else:
+            workers = {}
         jobs = {"jobs": database.list_capture_jobs(limit=capped)} if normalized in {"all", "jobs"} else {}
         mail = (
             {

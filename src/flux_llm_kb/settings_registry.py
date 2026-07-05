@@ -1833,7 +1833,7 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
     SettingDefinition(
         key="dashboard.poll_interval_seconds",
         category="dashboard",
-        default=10,
+        default=30,
         value_type="int",
         description="Dashboard JSON refresh interval.",
         env_var="FLUX_KB_DASHBOARD_POLL_INTERVAL_SECONDS",

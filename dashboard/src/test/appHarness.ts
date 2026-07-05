@@ -897,8 +897,16 @@ export function setupDashboardTest(): void {
     state.fileActionPayload = { state: "opened", asset_id: "asset-1", action: "open" };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/dashboard/health") return json(state.healthPayload);
-      if (url === "/api/dashboard/crawl") return json(state.crawlPayload);
+      if (url === "/api/dashboard/health") {
+        const pending = state.pendingFetchResponses[url];
+        if (pending) return pending.promise;
+        return json(state.healthPayload);
+      }
+      if (url === "/api/dashboard/crawl") {
+        const pending = state.pendingFetchResponses[url];
+        if (pending) return pending.promise;
+        return json(state.crawlPayload);
+      }
       if (url.startsWith("/api/dashboard/model-activity")) {
         state.modelActivityRequestUrls.push(url);
         return json(state.modelActivityPayload);

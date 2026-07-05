@@ -1245,9 +1245,10 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
 ];
 
 const DASHBOARD_STATE_KEY = "flux-dashboard-state";
-const DEFAULT_POLL_SECONDS = 10;
+const DEFAULT_POLL_SECONDS = 30;
 const JOB_PAGE_LIMIT = 50;
 const MODEL_ACTIVITY_PAGE_LIMIT = 50;
+type DashboardLoadScope = "full" | "poll";
 type JobHistoryFilters = {
   status: string[];
   root_name: string[];
@@ -1363,35 +1364,80 @@ export default function App() {
   const [reviewLoading, setReviewLoading] = useState(false);
   const [showControlPlaneActivity, setShowControlPlaneActivity] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
+  const activeTabRef = useRef<TabId>(activeTab);
+  const pollInFlightRef = useRef(false);
+  const pollAbortRef = useRef<AbortController | null>(null);
 
-  async function load(options: { showLoading?: boolean; jobFilters?: JobHistoryFilters; jobOffset?: number; jobSort?: JobSortState; modelActivityOffset?: number; showControlPlaneActivity?: boolean } = {}) {
+  async function load(options: {
+    showLoading?: boolean;
+    jobFilters?: JobHistoryFilters;
+    jobOffset?: number;
+    jobSort?: JobSortState;
+    modelActivityOffset?: number;
+    showControlPlaneActivity?: boolean;
+    scope?: DashboardLoadScope;
+    activeTab?: TabId;
+    signal?: AbortSignal;
+  } = {}) {
     if (options.showLoading ?? false) {
       setLoading(true);
     }
-    const effectiveJobFilters = options.jobFilters ?? jobFilters;
-    const effectiveJobOffset = options.jobOffset ?? jobOffset;
-    const effectiveJobSort = options.jobSort ?? jobSort;
-    const effectiveModelActivityOffset = options.modelActivityOffset ?? modelActivityOffset;
-    const effectiveShowControlPlaneActivity = options.showControlPlaneActivity ?? showControlPlaneActivity;
-    const modelActivityUrl = modelActivityHistoryUrl(effectiveShowControlPlaneActivity, effectiveModelActivityOffset);
-    const [health, crawl, jobs, retrieval, modelActivity, mail, outlook, settings] = await Promise.all([
-      getJson<HealthPayload>("/api/dashboard/health", {}),
-      getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }),
-      getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset, effectiveJobSort), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }),
-      getJson<RetrievalPayload>("/api/dashboard/retrieval-stats", {}),
-      getJson<ModelActivityPayload>(modelActivityUrl, { events: [], service_breakdown: [], class_breakdown: [], scheduler: {} }),
-      getJson<MailStatus>("/api/mail/status", { profiles: [] }),
-      getJson<OutlookStatus>("/api/outlook-host/status", { profiles: [], pending_requests: [] }),
-      getJson<SettingRow[]>("/api/settings", [])
-    ]);
-    setState({ health, crawl, jobs, retrieval, modelActivity, mail, outlook, settings });
-    setLastUpdated(new Date());
-    setLoading(false);
+    try {
+      const scope = options.scope ?? "full";
+      const effectiveActiveTab = options.activeTab ?? activeTabRef.current;
+      const effectiveJobFilters = options.jobFilters ?? jobFilters;
+      const effectiveJobOffset = options.jobOffset ?? jobOffset;
+      const effectiveJobSort = options.jobSort ?? jobSort;
+      const effectiveModelActivityOffset = options.modelActivityOffset ?? modelActivityOffset;
+      const effectiveShowControlPlaneActivity = options.showControlPlaneActivity ?? showControlPlaneActivity;
+      const sections = dashboardSectionsForLoad(scope, effectiveActiveTab);
+      const modelActivityUrl = modelActivityHistoryUrl(effectiveShowControlPlaneActivity, effectiveModelActivityOffset);
+      const [
+        health,
+        crawl,
+        jobs,
+        retrieval,
+        modelActivity,
+        mail,
+        outlook,
+        settings
+      ] = await Promise.all([
+        getJson<HealthPayload>("/api/dashboard/health", {}, options.signal),
+        getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }, options.signal),
+        getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset, effectiveJobSort), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }, options.signal),
+        sections.retrieval ? getJson<RetrievalPayload>("/api/dashboard/retrieval-stats", {}, options.signal) : Promise.resolve<RetrievalPayload | undefined>(undefined),
+        sections.modelActivity ? getJson<ModelActivityPayload>(modelActivityUrl, { events: [], service_breakdown: [], class_breakdown: [], scheduler: {} }, options.signal) : Promise.resolve<ModelActivityPayload | undefined>(undefined),
+        sections.mail ? getJson<MailStatus>("/api/mail/status", { profiles: [] }, options.signal) : Promise.resolve<MailStatus | undefined>(undefined),
+        sections.mail ? getJson<OutlookStatus>("/api/outlook-host/status", { profiles: [], pending_requests: [] }, options.signal) : Promise.resolve<OutlookStatus | undefined>(undefined),
+        sections.settings ? getJson<SettingRow[]>("/api/settings", [], options.signal) : Promise.resolve<SettingRow[] | undefined>(undefined)
+      ]);
+      if (options.signal?.aborted) {
+        return;
+      }
+      setState((current) => ({
+        ...current,
+        health,
+        crawl,
+        jobs,
+        ...(retrieval ? { retrieval } : {}),
+        ...(modelActivity ? { modelActivity } : {}),
+        ...(mail ? { mail } : {}),
+        ...(outlook ? { outlook } : {}),
+        ...(settings ? { settings } : {})
+      }));
+      setLastUpdated(new Date());
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
     void load({ showLoading: true });
   }, []);
+
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
 
   function updateControlPlaneActivity(next: boolean) {
     setShowControlPlaneActivity(next);
@@ -1455,17 +1501,47 @@ export default function App() {
     void loadClaimGraph(selectedClaim.subject_entity_id);
   }, [activeTab, selectedClaim?.subject_entity_id]);
 
-  const pollSeconds = dashboardPollSeconds(state.settings);
+  const pollSeconds = dashboardEffectivePollSeconds(state, dashboardPollSeconds(state.settings));
 
   useEffect(() => {
     writeDashboardState({ activeTab, selectedName, selectedRootName, jobFilters, jobSort });
   }, [activeTab, selectedName, selectedRootName, jobFilters, jobSort]);
 
+  async function pollDashboard() {
+    if (typeof document !== "undefined" && document.hidden) {
+      return;
+    }
+    if (pollInFlightRef.current) {
+      return;
+    }
+    const controller = new AbortController();
+    pollInFlightRef.current = true;
+    pollAbortRef.current = controller;
+    try {
+      await load({
+        showLoading: false,
+        scope: "poll",
+        activeTab: activeTabRef.current,
+        signal: controller.signal
+      });
+    } finally {
+      if (pollAbortRef.current === controller) {
+        pollAbortRef.current = null;
+      }
+      pollInFlightRef.current = false;
+    }
+  }
+
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void load({ showLoading: false });
+      void pollDashboard();
     }, pollSeconds * 1000);
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      pollAbortRef.current?.abort();
+      pollAbortRef.current = null;
+      pollInFlightRef.current = false;
+    };
   }, [pollSeconds, jobFilters, jobOffset, jobSort, modelActivityOffset, showControlPlaneActivity]);
 
   async function requestProfileSync(profile = selectedProfile) {
@@ -7527,6 +7603,43 @@ function normalizeTabId(value: unknown): TabId | undefined {
   return navItems.some((item) => item.id === normalized) ? normalized as TabId : undefined;
 }
 
+function dashboardSectionsForLoad(scope: DashboardLoadScope, activeTab: TabId) {
+  if (scope === "full") {
+    return { retrieval: true, modelActivity: true, mail: true, settings: true };
+  }
+  return {
+    retrieval: activeTab === "retrieval",
+    modelActivity: activeTab === "performance",
+    mail: activeTab === "mail",
+    settings: activeTab === "settings"
+  };
+}
+
+function dashboardEffectivePollSeconds(state: LoadState, configuredSeconds: number) {
+  if (dashboardHasActiveWork(state)) {
+    return configuredSeconds;
+  }
+  return Math.max(configuredSeconds, DEFAULT_POLL_SECONDS);
+}
+
+function dashboardHasActiveWork(state: LoadState) {
+  const pendingHealthJobs = numberFromUnknown(state.health.jobs?.pending);
+  if ((pendingHealthJobs ?? 0) > 0) return true;
+  const jobRows = state.jobs.jobs ?? [];
+  if (jobRows.some((job) => dashboardJobStatusIsActive(stringFromUnknown(job.status)))) return true;
+  const mailCounts = state.mail.scheduler?.counts ?? {};
+  if ((["due", "queued", "claimed", "running"] as Array<keyof MailSchedulerCounts>).some((key) => (numberFromUnknown(mailCounts[key]) ?? 0) > 0)) return true;
+  const outlookPending = state.outlook.pending_requests ?? [];
+  if (outlookPending.some((request) => ["pending", "claimed", "running"].includes(stringFromUnknown(request.status) || "pending"))) return true;
+  const scheduler = state.modelActivity.scheduler ?? {};
+  if ((scheduler.running_count ?? 0) > 0 || (scheduler.waiting_count ?? 0) > 0) return true;
+  return false;
+}
+
+function dashboardJobStatusIsActive(status: string) {
+  return ["pending", "queued", "claimed", "running", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"].includes(status);
+}
+
 function dashboardPollSeconds(settings: SettingRow[]) {
   const row = settings.find((setting) => setting.key === "dashboard.poll_interval_seconds");
   const value = Number(row?.value ?? DEFAULT_POLL_SECONDS);
@@ -7534,9 +7647,9 @@ function dashboardPollSeconds(settings: SettingRow[]) {
   return Math.max(1, Math.round(value));
 }
 
-async function getJson<T>(url: string, fallback: T): Promise<T> {
+async function getJson<T>(url: string, fallback: T, signal?: AbortSignal): Promise<T> {
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, signal ? { signal } : undefined);
     if (!response.ok) return fallback;
     return await response.json();
   } catch {

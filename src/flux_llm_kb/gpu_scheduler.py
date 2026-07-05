@@ -1278,6 +1278,23 @@ def process_gpu_eviction_request(
             "result": completed or {},
         }
     error = result.error or "GPU eviction verification failed"
+    terminal_outcome = _terminal_gpu_eviction_outcome(result, attempt=attempt)
+    if terminal_outcome is not None:
+        terminal_status, terminal_reason = terminal_outcome
+        failed = db.complete_gpu_eviction_request(
+            eviction_id=eviction_id,
+            status=terminal_status,
+            error=error,
+            metadata={**metadata, "terminal_reason": terminal_reason},
+            correlation_id=correlation_id,
+            causation_id=causation_id or broker_message_id,
+        )
+        return {
+            "eviction_id": eviction_id,
+            "status": terminal_status,
+            "retryable": False,
+            "result": failed or {},
+        }
     if attempt >= _gpu_eviction_delivery_limit():
         failed = db.complete_gpu_eviction_request(
             eviction_id=eviction_id,
@@ -1442,6 +1459,47 @@ def _gpu_eviction_delivery_limit() -> int:
         return max(1, int(messaging.RabbitMqConfig.from_env().delivery_limit or 1))
     except Exception:
         return 8
+
+
+def _terminal_gpu_eviction_outcome(
+    result: GpuEvictionVerificationResult,
+    *,
+    attempt: int,
+) -> tuple[str, str] | None:
+    payload = result.payload if isinstance(result.payload, dict) else {}
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    error = str(result.error or "").lower()
+    unloaded = _optional_bool(payload.get("unloaded"))
+    resident = _optional_bool(payload.get("resident"))
+    freed_vram_mb = _optional_int(metadata.get("freed_vram_mb"))
+    after_retry = max(1, int(attempt or 1)) > 1
+
+    if resident is False or "model not resident" in error or "not resident" in error or "not loaded" in error:
+        return ("skipped", "model_not_resident")
+    if after_retry and freed_vram_mb is not None and freed_vram_mb <= 0 and "vram did not recover" in error:
+        return ("failed", "eviction_did_not_free_vram")
+    if after_retry and unloaded is False:
+        return ("failed", "eviction_unload_declined")
+    return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    return None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _optional_float(value: Any) -> float | None:

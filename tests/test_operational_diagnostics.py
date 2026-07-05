@@ -127,6 +127,37 @@ def test_operational_diagnostics_items_include_safe_remediation_actions():
     assert "budget.xls" in serialized
 
 
+def test_operational_diagnostics_surfaces_retrying_gpu_evictions():
+    report = summarize_operational_diagnostics(
+        workers={
+            "families": [],
+            "gpu_evictions": {
+                "retrying": 1,
+                "recent": [
+                    {
+                        "id": "eviction-1",
+                        "status": "retrying",
+                        "model_id": "snowflake",
+                        "component": "model-runner",
+                        "error": "VRAM did not recover after eviction",
+                        "created_at": 1000,
+                        "broker_delivery_count": 3,
+                    }
+                ],
+            },
+        },
+    )
+
+    assert report["counts"]["retrying_gpu_evictions"] == 1
+    item = report["items"][0]
+    assert item["status"] == "gpu_eviction_retrying"
+    assert item["severity"] == "warning"
+    assert item["family"] == "gpu_eviction"
+    assert item["target"] == {"type": "worker", "id": "eviction-1"}
+    assert item["evidence"]["broker_delivery_count"] == 3
+    assert item["evidence"]["last_error"] == "VRAM did not recover after eviction"
+
+
 def test_operational_diagnostics_distinguishes_blocked_status_guidance():
     report = summarize_operational_diagnostics(
         jobs={

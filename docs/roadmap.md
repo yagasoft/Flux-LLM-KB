@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-07-04
+Last reviewed: 2026-07-05
 
 This file is the canonical public roadmap and implementation-status tracker for
 Flux-LLM-KB. It is intentionally separate from live runtime state. Do not add
@@ -10,6 +10,31 @@ content, local deployment-only details, or private memory exports here.
 Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
+
+## 2026-07-05 Idle Control-Plane Wave Reduction Update
+
+Affected `Progress %` entries remain conservative until deployment and live
+idle validation are complete:
+
+- `V2 Review And Visualization`: remains `99%`. Dashboard auto-refresh now has
+  a core polling path, active-tab detail polling, hidden-tab pause behaviour,
+  an overlap guard, and abortable fetches. The configured default polling
+  interval is now 30 seconds, with faster polling retained only while active
+  jobs, mail runs, Outlook requests, or GPU scheduler work are visible.
+- `V2.8 Indexer Acceleration And Local Inference Optimization`: remains `99%`.
+  Brokered GPU eviction requests now stop retrying when a post-retry result
+  proves the unload is a no-op or cannot free VRAM, while transient HTTP and
+  runner failures still use RabbitMQ retry delivery.
+- `Observability and benchmarks`: remains `99%`. Operational diagnostics now
+  surface retrying GPU evictions with age, broker delivery count, component,
+  model, and last error so stale validation residue can be distinguished from
+  useful work.
+
+Remaining Work for this closeout: deploy through the required feature closeout
+script, verify idle dashboard traffic no longer reloads the full endpoint bundle
+every 10 seconds, confirm RabbitMQ retry queues and `gpu_evictions` retrying
+rows drain to zero, and run one bounded GPU contention check that settles back
+to zero running or waiting leases.
 
 ## 2026-07-04 Bounded Qwen Reranking Policy Update
 
