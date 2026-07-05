@@ -2141,6 +2141,32 @@ def test_extract_image_blocks_paddleocr_timeout_without_retryable_failure(monkey
     assert result.metadata["ocr"]["engine"] == "paddleocr"
 
 
+def test_extract_image_blocks_invalid_ocr_input_as_invalid_source(monkeypatch, tmp_path):
+    from flux_llm_kb import model_runner
+
+    path = tmp_path / "scan.png"
+    path.write_bytes(PNG_BYTES)
+    monkeypatch.setenv("FLUX_KB_VISION_ENABLED", "false")
+    monkeypatch.setattr(
+        "flux_llm_kb.extractors._run_paddleocr_image",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            model_runner.OcrInvalidInputError(
+                "OCR image payload is not a readable image",
+                metadata={"suffix": ".png", "byte_count": 16},
+            )
+        ),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_invalid_source"
+    assert result.message == "OCR image payload is not a readable image"
+    assert result.metadata["ocr"]["status"] == "blocked_invalid_source"
+    assert result.metadata["ocr"]["error_code"] == "ocr.invalid_image_input"
+    assert result.metadata["ocr"]["error"] == "OCR image payload is not a readable image"
+    assert result.metadata["ocr"]["engine"] == "paddleocr"
+
+
 def test_paddle_ocr_missing_dependency_message_keeps_path_when_redactions_disabled(monkeypatch):
     monkeypatch.delenv("FLUX_KB_REDACTIONS_ENABLED", raising=False)
     path = "E:/Docs/scan.png"

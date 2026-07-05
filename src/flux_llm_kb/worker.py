@@ -585,6 +585,12 @@ def _telemetry_from_extraction_result(result: object) -> dict[str, Any]:
             telemetry["parser_cache_misses"] = int(parser_cache.get("misses") or 0)
     ocr = metadata.get("ocr")
     if isinstance(ocr, dict):
+        if "status" in ocr:
+            telemetry["ocr_status"] = str(ocr.get("status") or "")[:80]
+        if "error_code" in ocr:
+            telemetry["ocr_error_code"] = str(ocr.get("error_code") or "")[:120]
+        if "error" in ocr:
+            telemetry["ocr_error"] = str(ocr.get("error") or "")[:240]
         if "cache_hits" in ocr:
             telemetry["ocr_cache_hits"] = int(ocr.get("cache_hits") or 0)
         if "cache_misses" in ocr:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from binascii import Error as BinasciiError
 from contextlib import nullcontext
 import gc
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ DEFAULT_OCR_SIMPLE_MODEL = "PP-OCRv5"
 DEFAULT_OCR_DOCUMENT_MODEL = "PaddleOCR-VL"
 DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS = 600
 DEFAULT_PADDLEX_CACHE_HOME = "/root/.paddleocr/paddlex"
+OCR_INVALID_IMAGE_INPUT_CODE = "ocr.invalid_image_input"
 os.environ.setdefault("PADDLE_PDX_CACHE_HOME", DEFAULT_PADDLEX_CACHE_HOME)
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", "bos")
@@ -56,6 +58,16 @@ class ModelRunnerBusy(ModelRunnerError):
     def __init__(self, message: str, *, retry_after_seconds: float = 1.0) -> None:
         super().__init__(message)
         self.retry_after_seconds = max(0.1, float(retry_after_seconds))
+
+
+class OcrInvalidInputError(ModelRunnerError):
+    retryable = False
+
+    def __init__(self, message: str, *, metadata: dict[str, Any] | None = None) -> None:
+        self.code = OCR_INVALID_IMAGE_INPUT_CODE
+        self.message = str(message or "OCR image input is invalid")
+        self.metadata = _safe_ocr_input_metadata(metadata or {})
+        super().__init__(f"{self.code}: {self.message}")
 
 
 @dataclass(frozen=True)
@@ -331,6 +343,8 @@ def _raise_model_runner_http_error(exc: HTTPError) -> None:
                 str(detail.get("message") or "model-runner GPU scheduler is busy"),
                 retry_after_seconds=float(detail.get("retry_after_seconds") or 1.0),
             ) from exc
+        if isinstance(detail, dict) and detail.get("code") == OCR_INVALID_IMAGE_INPUT_CODE:
+            raise _ocr_invalid_input_error_from_detail(detail) from exc
         if isinstance(detail, str):
             if _http_error_is_retryable_gpu_busy(exc, detail):
                 raise ModelRunnerBusy(detail, retry_after_seconds=1.0) from exc
@@ -355,6 +369,16 @@ def _raise_model_runner_payload_error(payload: dict[str, Any]) -> None:
             str(detail.get("message") or "model-runner GPU scheduler is busy"),
             retry_after_seconds=float(detail.get("retry_after_seconds") or 1.0),
         )
+    if isinstance(detail, dict) and detail.get("code") == OCR_INVALID_IMAGE_INPUT_CODE:
+        raise _ocr_invalid_input_error_from_detail(detail)
+
+
+def _ocr_invalid_input_error_from_detail(detail: dict[str, Any]) -> OcrInvalidInputError:
+    metadata = detail.get("metadata") if isinstance(detail.get("metadata"), dict) else {}
+    return OcrInvalidInputError(
+        str(detail.get("message") or "OCR image input is invalid"),
+        metadata=metadata,
+    )
 
 
 def _paddle_runner_base_url() -> str:
@@ -985,16 +1009,18 @@ def _ocr_document_with_paddle_direct(path: str, *, model: str, timeout_seconds: 
         return _paddleocr_text(list(pipeline.predict(str(path))))
 
 
-def _with_ocr_input_path(payload: dict[str, Any], consumer: Any) -> str:
-    content_b64 = payload.get("content_b64")
-    if isinstance(content_b64, str) and content_b64.strip():
+def _with_ocr_input_path(payload: dict[str, Any], consumer: Any, *, validate_image: bool = False) -> str:
+    if "content_b64" in payload:
         filename = str(payload.get("filename") or "ocr-input.bin")
-        suffix = Path(filename).suffix or ".bin"
+        decoded = _decode_inline_ocr_content(payload.get("content_b64"), filename=filename)
+        suffix = _ocr_input_suffix(filename)
         fd, temp_name = tempfile.mkstemp(prefix="flux-kb-ocr-", suffix=suffix)
         os.close(fd)
         temp_path = Path(temp_name)
         try:
-            temp_path.write_bytes(base64.b64decode(content_b64))
+            temp_path.write_bytes(decoded)
+            if validate_image:
+                _validate_ocr_image_path(temp_path, filename=filename, byte_count=len(decoded))
             return str(consumer(temp_path))
         finally:
             try:
@@ -1003,6 +1029,74 @@ def _with_ocr_input_path(payload: dict[str, Any], consumer: Any) -> str:
                 pass
     path = str(payload.get("path") or "")
     return str(consumer(Path(path)))
+
+
+def _decode_inline_ocr_content(content_b64: Any, *, filename: str) -> bytes:
+    metadata = {"suffix": _ocr_input_suffix(filename), "byte_count": 0}
+    if not isinstance(content_b64, str) or not content_b64.strip():
+        raise OcrInvalidInputError("OCR image payload content_b64 is empty", metadata=metadata)
+    compact = "".join(content_b64.split())
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except (BinasciiError, ValueError) as exc:
+        raise OcrInvalidInputError("OCR image payload content_b64 is not valid base64", metadata=metadata) from exc
+    if not decoded:
+        raise OcrInvalidInputError("OCR image payload is empty", metadata=metadata)
+    return decoded
+
+
+def _validate_ocr_image_path(path: Path, *, filename: str, byte_count: int | None = None) -> dict[str, Any]:
+    metadata = {"suffix": _ocr_input_suffix(filename)}
+    try:
+        resolved_byte_count = int(byte_count if byte_count is not None else path.stat().st_size)
+    except OSError as exc:
+        raise OcrInvalidInputError("OCR image input is not readable", metadata={**metadata, "byte_count": 0}) from exc
+    metadata["byte_count"] = resolved_byte_count
+    if resolved_byte_count <= 0:
+        raise OcrInvalidInputError("OCR image payload is empty", metadata=metadata)
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise ModelRunnerError("Pillow is required to validate OCR image input") from exc
+    try:
+        with Image.open(path) as image:
+            image_format = str(image.format or "").lower()
+            width, height = image.size
+            image.verify()
+    except Exception as exc:
+        raise OcrInvalidInputError("OCR image payload is not a readable image", metadata=metadata) from exc
+    return _safe_ocr_input_metadata(
+        {
+            **metadata,
+            "image_format": image_format,
+            "width": width,
+            "height": height,
+        }
+    )
+
+
+def _ocr_input_suffix(filename: str) -> str:
+    suffix = Path(str(filename or "")).suffix.lower()
+    if not suffix or len(suffix) > 16:
+        return ".bin"
+    return suffix
+
+
+def _safe_ocr_input_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    suffix = str(metadata.get("suffix") or "").strip().lower()
+    if suffix:
+        safe["suffix"] = suffix[:16] if suffix.startswith(".") else f".{suffix[:15]}"
+    for key in ("byte_count", "width", "height"):
+        if key in metadata:
+            try:
+                safe[key] = max(0, int(metadata.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+    image_format = str(metadata.get("image_format") or "").strip().lower()
+    if image_format:
+        safe["image_format"] = image_format[:32]
+    return safe
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -1218,14 +1312,30 @@ def create_app():
             timeout_seconds = _optional_timeout_seconds_from_payload(payload)
             if _paddle_runner_base_url():
                 return _proxy_paddle_request("/v1/ocr/image", {**payload, "model": model})
+            activity_kwargs = _direct_ocr_activity_kwargs(
+                service=_scheduler_component(),
+                endpoint="/v1/ocr/image",
+                model=model,
+                document=False,
+            )
+            with record_model_activity(**activity_kwargs):
+                text = _with_ocr_input_path(
+                    payload,
+                    lambda input_path: _ocr_image_with_paddle(
+                        str(input_path or path),
+                        model=model,
+                        record_activity=False,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    validate_image=True,
+                )
             return {
                 "ok": True,
                 "model": model,
-                "text": _with_ocr_input_path(
-                    payload,
-                    lambda input_path: _ocr_image_with_paddle(str(input_path or path), model=model, timeout_seconds=timeout_seconds),
-                ),
+                "text": text,
             }
+        except OcrInvalidInputError as exc:
+            raise HTTPException(status_code=400, detail=_ocr_invalid_input_detail(exc)) from exc
         except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
@@ -1245,6 +1355,8 @@ def create_app():
                     lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model, timeout_seconds=timeout_seconds),
                 ),
             }
+        except OcrInvalidInputError as exc:
+            raise HTTPException(status_code=400, detail=_ocr_invalid_input_detail(exc)) from exc
         except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
@@ -1284,6 +1396,15 @@ def _gpu_busy_detail(exc: GpuLeaseRejected | GpuLeaseTimeout | ModelRunnerBusy) 
         "message": str(exc),
         "retryable": True,
         "retry_after_seconds": float(getattr(exc, "retry_after_seconds", 1.0) or 1.0),
+    }
+
+
+def _ocr_invalid_input_detail(exc: OcrInvalidInputError) -> dict[str, Any]:
+    return {
+        "code": exc.code,
+        "message": exc.message,
+        "retryable": False,
+        "metadata": dict(exc.metadata),
     }
 
 

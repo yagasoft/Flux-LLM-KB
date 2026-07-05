@@ -1624,6 +1624,28 @@ def test_worker_telemetry_includes_practical_corpus_parser_counts():
     assert telemetry["sensitive_metadata"] is True
 
 
+def test_worker_telemetry_includes_ocr_status_and_error():
+    telemetry = worker._telemetry_from_extraction_result(
+        SimpleNamespace(
+            metadata={
+                "ocr": {
+                    "status": "blocked_invalid_source",
+                    "error_code": "ocr.invalid_image_input",
+                    "error": "OCR image payload is not a readable image",
+                    "cache_hits": 0,
+                    "cache_misses": 1,
+                }
+            }
+        )
+    )
+
+    assert telemetry["ocr_status"] == "blocked_invalid_source"
+    assert telemetry["ocr_error_code"] == "ocr.invalid_image_input"
+    assert telemetry["ocr_error"] == "OCR image payload is not a readable image"
+    assert telemetry["ocr_cache_hits"] == 0
+    assert telemetry["ocr_cache_misses"] == 1
+
+
 def test_process_corpus_job_merges_visual_enrichment_telemetry(monkeypatch, tmp_path):
     from flux_llm_kb import worker
 

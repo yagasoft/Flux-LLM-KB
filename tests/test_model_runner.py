@@ -38,6 +38,33 @@ def test_model_runner_http_503_string_detail_is_retryable_busy(monkeypatch):
     assert exc_info.value.retry_after_seconds == 1.0
 
 
+def test_model_runner_http_400_structured_ocr_input_error_is_terminal(monkeypatch):
+    body = (
+        b'{"detail":{"code":"ocr.invalid_image_input",'
+        b'"message":"OCR image payload is not a readable image",'
+        b'"retryable":false,'
+        b'"metadata":{"suffix":".png","byte_count":10}}}'
+    )
+
+    def fake_urlopen(*_args, **_kwargs):
+        raise HTTPError(
+            url="http://model-runner:8790/v1/ocr/image",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=BytesIO(body),
+        )
+
+    monkeypatch.setattr(model_runner, "urlopen", fake_urlopen)
+
+    with pytest.raises(model_runner.ModelRunnerError) as exc_info:
+        model_runner._post_json_to_base_url("http://model-runner:8790", "/v1/ocr/image", {}, 1)
+
+    assert exc_info.value.__class__.__name__ == "OcrInvalidInputError"
+    assert "ocr.invalid_image_input" in str(exc_info.value)
+    assert getattr(exc_info.value, "retryable", True) is False
+
+
 def test_model_runner_client_rerank_uses_request_timeout_for_http_wait(monkeypatch):
     captured = {}
 
@@ -708,6 +735,88 @@ def test_ocr_endpoint_accepts_inline_file_content(tmp_path):
     input_path = captured["path"]
     assert input_path.name.endswith(".png")
     assert not input_path.exists()
+
+
+@pytest.mark.parametrize("content_b64", ["", "not-valid-base64!!"])
+def test_ocr_image_endpoint_rejects_empty_or_malformed_inline_content(monkeypatch, content_b64):
+    from fastapi.testclient import TestClient
+
+    def fail_ocr(*_args, **_kwargs):
+        raise AssertionError("invalid inline image content must not reach PaddleOCR")
+
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(model_runner, "_ocr_image_with_paddle", fail_ocr)
+
+    response = TestClient(model_runner.create_app(), raise_server_exceptions=False).post(
+        "/v1/ocr/image",
+        json={"filename": "page.png", "content_b64": content_b64, "model": "PP-OCRv5"},
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "ocr.invalid_image_input"
+    assert detail["retryable"] is False
+    assert detail["metadata"]["suffix"] == ".png"
+
+
+def test_ocr_image_endpoint_rejects_fake_png_bytes_before_paddle(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    def fail_ocr(*_args, **_kwargs):
+        raise AssertionError("undecodable image bytes must not reach PaddleOCR")
+
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(model_runner, "_ocr_image_with_paddle", fail_ocr)
+
+    response = TestClient(model_runner.create_app(), raise_server_exceptions=False).post(
+        "/v1/ocr/image",
+        json={
+            "filename": "page.png",
+            "content_b64": base64.b64encode(b"not really a png").decode("ascii"),
+            "model": "PP-OCRv5",
+        },
+    )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "ocr.invalid_image_input"
+    assert detail["message"] == "OCR image payload is not a readable image"
+    assert detail["metadata"] == {"suffix": ".png", "byte_count": 16}
+
+
+def test_ocr_image_endpoint_allows_valid_inline_png_to_reach_paddle(monkeypatch):
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1, 1), "white").save(buffer, format="PNG")
+    png_bytes = buffer.getvalue()
+    calls: list[str] = []
+
+    def fake_ocr(path, **kwargs):
+        input_path = Path(path)
+        assert input_path.exists()
+        assert input_path.suffix == ".png"
+        calls.append(str(kwargs["model"]))
+        return "OCR text"
+
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(model_runner, "_ocr_image_with_paddle", fake_ocr)
+
+    response = TestClient(model_runner.create_app()).post(
+        "/v1/ocr/image",
+        json={
+            "filename": "page.png",
+            "content_b64": base64.b64encode(png_bytes).decode("ascii"),
+            "model": "PP-OCRv5",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "OCR text"
+    assert calls == ["PP-OCRv5"]
 
 
 def test_model_runner_client_can_send_ocr_file_bytes(tmp_path, monkeypatch):

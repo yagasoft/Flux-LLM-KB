@@ -3772,6 +3772,8 @@ def _image_ocr_vision_result(path: Path, *, metadata: dict[str, Any], ocr: OcrRe
         return ExtractionResult(status="indexed", chunks=chunks, metadata=metadata)
     if ocr.status == "failed":
         return ExtractionResult(status="failed", metadata=metadata, message=ocr.message)
+    if ocr.status == "blocked_invalid_source":
+        return ExtractionResult(status="blocked_invalid_source", metadata=metadata, message=ocr.message)
     if ocr.status == "blocked_missing_dependency":
         if vision.status == "failed" and _is_tiny_raster_metadata_probe(metadata):
             metadata["vision_escalation"] = "unavailable"
@@ -6337,6 +6339,24 @@ def _ocr_image_with_paddleocr(
             message=str(exc),
         )
     except Exception as exc:
+        if _is_paddle_ocr_invalid_input(exc):
+            message = _paddle_ocr_invalid_input_message(exc)
+            return OcrResult(
+                status="blocked_invalid_source",
+                metadata={
+                    "engine": OCR_ENGINE,
+                    "model": model,
+                    "route": resolved_route,
+                    "route_reason": resolved_reason,
+                    "status": "blocked_invalid_source",
+                    "error_code": "ocr.invalid_image_input",
+                    "error": message[:240],
+                    "cache_hits": 0,
+                    "cache_misses": 1,
+                    "preprocess": preprocess,
+                },
+                message=message,
+            )
         if _is_paddle_ocr_missing_dependency(exc):
             return OcrResult(
                 status="blocked_missing_dependency",
@@ -6519,6 +6539,23 @@ def _is_paddle_ocr_missing_dependency(exc: Exception) -> bool:
     ):
         return True
     return "paddlex[ocr]" in lower or "paddleocr module not installed" in lower
+
+
+def _is_paddle_ocr_invalid_input(exc: Exception) -> bool:
+    if getattr(exc, "code", "") == "ocr.invalid_image_input":
+        return True
+    if exc.__class__.__name__ == "OcrInvalidInputError":
+        return True
+    return "ocr.invalid_image_input" in str(exc)
+
+
+def _paddle_ocr_invalid_input_message(exc: Exception) -> str:
+    message = str(getattr(exc, "message", "") or "").strip()
+    if not message:
+        message = str(exc or "").strip()
+    if message.startswith("ocr.invalid_image_input:"):
+        message = message.split(":", 1)[1].strip()
+    return _safe_external_error_detail(message, max_length=300) or "OCR image input is invalid"
 
 
 def _paddle_ocr_missing_dependency_message(exc: Exception) -> str:
