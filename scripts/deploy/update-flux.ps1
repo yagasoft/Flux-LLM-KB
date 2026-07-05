@@ -225,7 +225,7 @@ services:
       org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
       org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
       org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
-    org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-api
     restart: unless-stopped
     mem_limit: "1gb"
@@ -313,7 +313,7 @@ services:
       org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
       org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
       org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
-    org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
+      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-worker
     restart: unless-stopped
     mem_limit: "1gb"
