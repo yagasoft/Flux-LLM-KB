@@ -833,6 +833,7 @@ def test_production_deploy_scripts_pass_authoritative_image_metadata_to_docker_b
 
     for script in (install, update):
         compose = _embedded_compose_template(script)
+        service_blocks = _compose_service_blocks(compose)
         assert "function Get-FluxBuildMetadata" in script
         assert "git -C $Root rev-parse HEAD" in script
         assert "git -C $Root rev-parse --short HEAD" in script
@@ -857,6 +858,11 @@ def test_production_deploy_scripts_pass_authoritative_image_metadata_to_docker_b
             ("org.opencontainers.image.version", "FLUX_KB_IMAGE_VERSION"),
         ):
             assert compose.count(f"{label}: `${{{env_name}}}") == 6
+
+        for service in ("api", "worker", "asr", "model-runner", "paddle-runner", "ollama"):
+            block = service_blocks[service]
+            assert "\n      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}" in block
+            assert "\n    org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}" not in block
 
 
 def test_verify_image_traceability_script_checks_image_and_container_labels():
