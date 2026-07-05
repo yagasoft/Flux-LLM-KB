@@ -45,7 +45,11 @@ def test_complete_feature_script_retries_transient_mcp_transport_closure():
 
     assert "$McpReadinessProbeAttempts = 3" in script
     assert "[System.IO.Path]::GetTempFileName()" in script
-    assert "1> $stdoutPath 2> $stderrPath" in script
+    assert "$previousErrorActionPreference = $ErrorActionPreference" in script
+    assert "$ErrorActionPreference = \"Continue\"" in script
+    assert "& python -m flux_llm_kb.cli codex mcp-readiness --json 1> $stdoutPath 2> $stderrPath" in script
+    assert "$ErrorActionPreference = $previousErrorActionPreference" in script
+    assert "$lastExitCode = $LASTEXITCODE" in script
     assert "Get-Content -Raw -LiteralPath $stdoutPath" in script
     assert "Get-Content -Raw -LiteralPath $stderrPath" in script
     assert "Remove-Item -LiteralPath $stdoutPath, $stderrPath" in script

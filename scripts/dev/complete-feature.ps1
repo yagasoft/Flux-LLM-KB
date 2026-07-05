@@ -368,8 +368,14 @@ try {
     for ($attempt = 1; $attempt -le $McpReadinessProbeAttempts; $attempt++) {
         $stdoutText = ""
         $stderrText = ""
-        & python -m flux_llm_kb.cli codex mcp-readiness --json 1> $stdoutPath 2> $stderrPath
-        $lastExitCode = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & python -m flux_llm_kb.cli codex mcp-readiness --json 1> $stdoutPath 2> $stderrPath
+            $lastExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if (Test-Path -LiteralPath $stdoutPath) {
             $stdoutText = Get-Content -Raw -LiteralPath $stdoutPath
         }
