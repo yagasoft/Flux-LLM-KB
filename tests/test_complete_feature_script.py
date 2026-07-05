@@ -275,6 +275,7 @@ def test_setup_docs_describe_npm_online_and_pip_offline_feature_closeout():
     assert "`-RefreshNpmDependencies`" not in setup
     assert "`-AllowPipDownloads`" not in setup
     assert "`-RefreshPipDependencies`" not in setup
+    assert "PipOffline:$false" not in setup
     assert "closeout script never enables pip downloads" in setup_words
     assert "`-DockerBaseMode python`" in setup
     assert "mount options is too" in setup

@@ -97,7 +97,7 @@ RUN --mount=type=bind,from=flux-wheelhouse,target=/opt/flux-durable-wheelhouse,r
         if "$python_bin" -m pip download --only-binary=:all: --no-index $wheelhouse_find_links --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; then \
             return 0; \
         fi; \
-        echo 'Required Docker wheels are missing from the persistent wheelhouse image. Refresh it with .\scripts\deploy\update-flux.ps1 -PipOffline:$false before rebuilding.' >&2; \
+        echo 'Required Docker wheels are missing from the persistent wheelhouse image. Prefetch the missing wheels into the persistent cache, rebuild flux-llm-kb-wheelhouse:local, then rerun closeout.' >&2; \
         return 1; \
     }; \
     download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock; \

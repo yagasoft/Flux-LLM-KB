@@ -47,6 +47,7 @@ def test_dockerfile_uses_locked_wheelhouse_constraints() -> None:
     assert "--no-index $wheelhouse_find_links --constraint \"$constraint\"" in dockerfile
     assert "download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock" in dockerfile
     assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock" in dockerfile
+    assert "setuptools==81.0.0" in runtime_lock
     assert "aio-pika==9.6.2" in runtime_lock
     assert "aiormq==6.9.4" in runtime_lock
     assert "pamqp==3.3.0" in runtime_lock
@@ -54,11 +55,16 @@ def test_dockerfile_uses_locked_wheelhouse_constraints() -> None:
     assert "multidict==6.7.1" in runtime_lock
     assert "propcache==0.5.2" in runtime_lock
     assert "compressed-tensors==0.17.1" in runtime_lock
+    assert "huggingface-hub==0.36.2" in runtime_lock
     assert "loguru==0.7.3" in runtime_lock
+    assert "psycopg==3.3.4" in runtime_lock
+    assert "psycopg-binary==3.3.4" in runtime_lock
     assert "nvidia-cuda-runtime-cu12==12.6.77" in runtime_lock
     assert "nvidia-cublas-cu12==12.6.4.1" in runtime_lock
     assert "nvidia-cudnn-cu12==9.10.2.21" in runtime_lock
     assert "nvidia-cuda-runtime-cu12==12.6.77" in paddle_lock
+    assert "setuptools==81.0.0" in paddle_lock
+    assert "huggingface-hub==0.36.2" in paddle_lock
     assert "nvidia-cuda-nvrtc-cu12==12.6.77" in paddle_lock
     assert "nvidia-cuda-cupti-cu12==12.6.80" in paddle_lock
     assert "nvidia-cublas-cu12==12.6.4.1" in paddle_lock
@@ -76,6 +82,7 @@ def test_dockerfile_dependency_downloads_are_offline_only() -> None:
     assert "pip_extra_index_args" not in dockerfile
     assert "--extra-index-url" not in dockerfile
     assert "--index-url" not in dockerfile
+    assert "PipOffline:$false" not in dockerfile
     assert "Required Docker wheels are missing from the persistent wheelhouse image" in dockerfile
 
 

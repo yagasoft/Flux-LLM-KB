@@ -1,8 +1,12 @@
 # Paddle image dependency pins chosen from the existing BuildKit wheelhouse.
 # Keep this file exact-version only. Paddle 3.3.1 requires cuDNN 9.5.1.17,
 # while the main runtime uses a newer cached cuDNN wheel.
+setuptools==81.0.0
+huggingface-hub==0.36.2
 nvidia-cuda-runtime-cu12==12.6.77
 nvidia-cuda-nvrtc-cu12==12.6.77
 nvidia-cuda-cupti-cu12==12.6.80
 nvidia-cublas-cu12==12.6.4.1
 nvidia-cudnn-cu12==9.5.1.17
+psycopg==3.3.4
+psycopg-binary==3.3.4

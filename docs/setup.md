@@ -120,10 +120,9 @@ ordinary builds reference `docker-image://flux-llm-kb-wheelhouse:local` instead
 of sending that host directory as a BuildKit client context. Runtime and Paddle
 dependency locks under `docker/` pin large GPU and AWQ-support packages to
 versions expected in the wheelhouse. If a required wheel is missing, the build
-stops instead of downloading a replacement; refresh pip dependencies explicitly
-with `.\scripts\deploy\update-flux.ps1 -PipOffline:$false`, which writes wheels
-to the host cache and rebuilds the local wheelhouse image before building from
-the cache.
+stops instead of downloading a replacement. Prefetch missing Python wheels only
+as an explicit operator action, then rebuild `flux-llm-kb-wheelhouse:local`
+from the persistent host cache before building from the cache.
 
 Feature closeout through `scripts/dev/complete-feature.ps1` runs npm install by
 default with the persistent npm cache, then passes `-PipOffline:$true` into
