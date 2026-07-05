@@ -52,6 +52,22 @@ def test_cli_removes_legacy_embeddings_command():
     assert 'subparsers.add_parser("search-index"' in source
 
 
+def test_cli_codex_mcp_readiness_reports_failure_status(monkeypatch, capsys):
+    from flux_llm_kb import codex_integration
+
+    monkeypatch.setattr(
+        codex_integration,
+        "codex_mcp_readiness",
+        lambda: {"ok": False, "status": "container_backed", "transport_alive": False},
+    )
+
+    assert cli.main(["codex", "mcp-readiness", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["status"] == "container_backed"
+    assert payload["transport_alive"] is False
+
+
 def test_cli_search_uses_service_search(monkeypatch, capsys):
     from flux_llm_kb import service
 

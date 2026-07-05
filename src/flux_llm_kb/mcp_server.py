@@ -1,16 +1,185 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+import errno
+import time
+from typing import Any
+from urllib.error import URLError
+
+from .error_diagnostics import error_envelope
 from .service import KnowledgeService
 from .model_activity import caller_surface
 
 
-def create_server():
+_READ_RETRY_ATTEMPTS = 3
+_READ_RETRY_BACKOFF_SECONDS = (0.2, 0.8)
+_TRANSIENT_ERRNOS = {
+    errno.ECONNABORTED,
+    errno.ECONNREFUSED,
+    errno.ECONNRESET,
+    errno.EPIPE,
+    errno.ETIMEDOUT,
+}
+_TRANSIENT_MESSAGE_MARKERS = (
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "broken pipe",
+    "timed out",
+    "timeout",
+    "temporarily unavailable",
+    "temporary unavailable",
+    "cannot connect",
+    "connection failure",
+    "failed to establish",
+    "server closed the connection",
+    "terminating connection",
+)
+
+
+class _ServiceProxy:
+    def __init__(self, runtime: "_McpToolRuntime") -> None:
+        self._runtime = runtime
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._runtime.service, name)
+
+
+class _McpToolRuntime:
+    def __init__(
+        self,
+        service_factory: Callable[[], KnowledgeService],
+        retry_sleep: Callable[[float], None],
+    ) -> None:
+        self._service_factory = service_factory
+        self._retry_sleep = retry_sleep
+        self._service: KnowledgeService | None = None
+
+    @property
+    def service(self) -> KnowledgeService:
+        if self._service is None:
+            self._service = self._service_factory()
+        return self._service
+
+    def refresh_service(self) -> None:
+        self._service = self._service_factory()
+
+    def drop_service(self) -> None:
+        self._service = None
+
+    def call(self, tool_name: str, operation: Callable[[], Any], *, readonly: bool) -> Any:
+        attempts = _READ_RETRY_ATTEMPTS if readonly else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                return operation()
+            except Exception as exc:
+                if _is_transient_backend_failure(exc):
+                    if attempt < attempts:
+                        self.refresh_service()
+                        self._retry_sleep(_READ_RETRY_BACKOFF_SECONDS[min(attempt - 1, len(_READ_RETRY_BACKOFF_SECONDS) - 1)])
+                        continue
+                    self.drop_service()
+                    return _temporary_unavailable_payload(tool_name, exc)
+                return _tool_error_payload(tool_name, exc)
+        raise RuntimeError(f"invalid MCP retry state for {tool_name}")
+
+
+def _temporary_unavailable_payload(tool_name: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "temporary_unavailable",
+        "settings_mutated": False,
+        "error": error_envelope(
+            code="mcp.temporary_unavailable",
+            message=f"Flux memory backend is temporarily unavailable while running {tool_name}.",
+            component="mcp",
+            stage=tool_name,
+            retryable=True,
+            user_action="Retry after the Flux API, database, or search service finishes restarting.",
+            technical_detail=str(exc),
+            status_code=503,
+        ),
+    }
+
+
+def _tool_error_payload(tool_name: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "tool_error",
+        "settings_mutated": False,
+        "error": error_envelope(
+            code="mcp.tool_error",
+            message=f"Flux memory tool failed while running {tool_name}.",
+            component="mcp",
+            stage=tool_name,
+            retryable=False,
+            user_action="Inspect the tool error and retry after fixing the underlying issue.",
+            technical_detail=str(exc),
+            status_code=500,
+        ),
+    }
+
+
+def _is_transient_backend_failure(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionRefusedError, ConnectionResetError, TimeoutError, BrokenPipeError, URLError)):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in _TRANSIENT_ERRNOS:
+        return True
+    if _is_psycopg_transient(exc):
+        return True
+    if exc.__class__.__name__ == "SearchIndexError" and _has_transient_message(str(exc)):
+        return True
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, BaseException) and _is_transient_backend_failure(reason):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    if cause and cause is not exc:
+        return _is_transient_backend_failure(cause)
+    return _has_transient_message(str(exc)) and exc.__class__.__name__ in {"SearchIndexError", "URLError"}
+
+
+def _is_psycopg_transient(exc: BaseException) -> bool:
+    try:
+        import psycopg
+    except Exception:  # pragma: no cover - optional dependency
+        return False
+
+    classes: list[type[BaseException]] = []
+    for name in ("OperationalError", "InterfaceError"):
+        candidate = getattr(psycopg, name, None)
+        if isinstance(candidate, type):
+            classes.append(candidate)
+    errors = getattr(psycopg, "errors", None)
+    for name in (
+        "AdminShutdown",
+        "CannotConnectNow",
+        "ConnectionDoesNotExist",
+        "ConnectionException",
+        "ConnectionFailure",
+        "SqlclientUnableToEstablishSqlconnection",
+    ):
+        candidate = getattr(errors, name, None) if errors else None
+        if isinstance(candidate, type):
+            classes.append(candidate)
+    return bool(classes) and isinstance(exc, tuple(classes))
+
+
+def _has_transient_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _TRANSIENT_MESSAGE_MARKERS)
+
+
+def create_server(
+    service_factory: Callable[[], KnowledgeService] = KnowledgeService,
+    retry_sleep: Callable[[float], None] = time.sleep,
+):
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Install MCP support with `pip install -e .[mcp]`") from exc
 
-    service = KnowledgeService()
+    runtime = _McpToolRuntime(service_factory, retry_sleep)
+    service = _ServiceProxy(runtime)
     mcp = FastMCP(
         "Flux-LLM-KB",
         instructions=(
@@ -41,40 +210,52 @@ def create_server():
     @mcp.tool(name="kb.search")
     def search(query: str, limit: int = 5, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Search Flux memory with balanced broad relevance. Broad lookup excludes code results by default; pass filters={"file_kinds":["code"]} alone or use kb.code_search for code."""
-        with caller_surface("mcp"):
-            return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
+        def operation():
+            with caller_surface("mcp"):
+                return service.search(query, limit=limit, cwd=cwd, root_name=root_name, scope_mode=scope_mode, filters=filters)
+
+        return runtime.call("kb.search", operation, readonly=True)
 
     @mcp.tool(name="kb.explain")
     def explain(query: str, limit: int = 5, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Search Flux memory with explanations. Broad explain excludes code results by default; pass filters={"file_kinds":["code"]} alone for code."""
-        with caller_surface("mcp"):
-            return service.explain(
-                query,
-                limit=limit,
-                token_budget=token_budget,
-                cwd=cwd,
-                root_name=root_name,
-                scope_mode=scope_mode,
-                filters=filters,
-            )
+        def operation():
+            with caller_surface("mcp"):
+                return service.explain(
+                    query,
+                    limit=limit,
+                    token_budget=token_budget,
+                    cwd=cwd,
+                    root_name=root_name,
+                    scope_mode=scope_mode,
+                    filters=filters,
+                )
+
+        return runtime.call("kb.explain", operation, readonly=True)
 
     @mcp.tool(name="kb.brief")
     def brief(query: str, token_budget: int = 1200, cwd: str | None = None, root_name: str | None = None, scope_mode: str = "local_first", filters: dict | None = None):
         """Build a compact brief from balanced search. Broad briefs exclude code results by default; pass filters={"file_kinds":["code"]} alone for code-specific briefs."""
-        with caller_surface("mcp"):
-            return service.brief(
-                query,
-                token_budget=token_budget,
-                cwd=cwd,
-                root_name=root_name,
-                scope_mode=scope_mode,
-                filters=filters,
-            )
+        def operation():
+            with caller_surface("mcp"):
+                return service.brief(
+                    query,
+                    token_budget=token_budget,
+                    cwd=cwd,
+                    root_name=root_name,
+                    scope_mode=scope_mode,
+                    filters=filters,
+                )
+
+        return runtime.call("kb.brief", operation, readonly=True)
 
     @mcp.tool(name="kb.remember")
     def remember(title: str, body: str, cwd: str | None = None, root_name: str | None = None):
         """Use kb.remember for concise durable atomic saves during work; pass cwd or root_name and store only redacted knowledge."""
-        return service.remember(title, body, cwd=cwd, root_name=root_name).__dict__
+        def operation():
+            return service.remember(title, body, cwd=cwd, root_name=root_name).__dict__
+
+        return runtime.call("kb.remember", operation, readonly=False)
 
     @mcp.tool(name="kb.claim_upsert")
     def claim_upsert(
@@ -310,34 +491,43 @@ def create_server():
     @mcp.tool(name="kb.code_status")
     def code_status(root_name: str | None = None, cwd: str | None = None):
         """Use kb.code_status for privacy-safe code index coverage, parser status, and fallback summaries; pass cwd to resolve the exact root_name."""
-        return service.code_status(root_name=root_name, cwd=cwd)
+        def operation():
+            return service.code_status(root_name=root_name, cwd=cwd)
+
+        return runtime.call("kb.code_status", operation, readonly=True)
 
     @mcp.tool(name="kb.code_search")
     def code_search(query: str, root_name: str | None = None, cwd: str | None = None, mode: str = "literal_symbol", language: str | None = None, symbol_kind: str | None = None, relationship: str | None = None, path_glob: str | None = None, include_generated: bool = False, limit: int = 20):
         """Use kb.code_search in literal_symbol mode for symbols/paths or full_text mode for indexed code chunks; pass cwd rather than guessing root_name."""
-        return service.code_search(
-            query=query,
-            root_name=root_name,
-            cwd=cwd,
-            mode=mode,
-            language=language,
-            symbol_kind=symbol_kind,
-            relationship=relationship,
-            path_glob=path_glob,
-            include_generated=include_generated,
-            limit=limit,
-        )
+        def operation():
+            return service.code_search(
+                query=query,
+                root_name=root_name,
+                cwd=cwd,
+                mode=mode,
+                language=language,
+                symbol_kind=symbol_kind,
+                relationship=relationship,
+                path_glob=path_glob,
+                include_generated=include_generated,
+                limit=limit,
+            )
+
+        return runtime.call("kb.code_search", operation, readonly=True)
 
     @mcp.tool(name="kb.code_symbol_lookup")
     def code_symbol_lookup(symbol: str, root_name: str | None = None, language: str | None = None, include_references: bool = True, limit: int = 20):
         """Use kb.code_symbol_lookup to look up a code symbol and optional references with sanitized metadata."""
-        return service.code_symbol_lookup(
-            symbol=symbol,
-            root_name=root_name,
-            language=language,
-            include_references=include_references,
-            limit=limit,
-        )
+        def operation():
+            return service.code_symbol_lookup(
+                symbol=symbol,
+                root_name=root_name,
+                language=language,
+                include_references=include_references,
+                limit=limit,
+            )
+
+        return runtime.call("kb.code_symbol_lookup", operation, readonly=True)
 
     @mcp.tool(name="kb.code_feedback_record")
     def code_feedback_record(query: str, root_name: str | None = None, result_count: int = 0, surface: str = "mcp", miss_category: str = "other", expected_symbol: str | None = None, path: str | None = None):
@@ -361,15 +551,18 @@ def create_server():
     @mcp.tool(name="kb.operational_diagnostics")
     def operational_diagnostics(section: str = "all", limit: int = 25, root_name: str | None = None, status: str | None = None, family: str | None = None, since_hours: int | None = None, include_details: bool = False):
         """Return read-only operational diagnostics for retrieval, watcher, workers, jobs, and mail."""
-        return service.operational_diagnostics(
-            section=section,
-            limit=limit,
-            root_name=root_name,
-            status=status,
-            family=family,
-            since_hours=since_hours,
-            include_details=include_details,
-        )
+        def operation():
+            return service.operational_diagnostics(
+                section=section,
+                limit=limit,
+                root_name=root_name,
+                status=status,
+                family=family,
+                since_hours=since_hours,
+                include_details=include_details,
+            )
+
+        return runtime.call("kb.operational_diagnostics", operation, readonly=True)
 
     @mcp.tool(name="kb.diagnostics_remediate")
     def diagnostics_remediate(action: str, target_type: str, target_id: str | None = None, root_name: str | None = None, family: str | None = None, reason: str = "operator diagnostic remediation"):
@@ -453,7 +646,10 @@ def create_server():
     @mcp.tool(name="kb.finalize_turn")
     def finalize_turn(title: str, summary: str, cwd: str | None = None, root_name: str | None = None):
         """Finalize the current agent turn by storing a redacted durable summary. Finalize with kb.finalize_turn at turn end; avoid duplicating every prior kb.remember item."""
-        return service.remember(title, summary, metadata={"source": "finalize_turn"}, cwd=cwd, root_name=root_name).__dict__
+        def operation():
+            return service.remember(title, summary, metadata={"source": "finalize_turn"}, cwd=cwd, root_name=root_name).__dict__
+
+        return runtime.call("kb.finalize_turn", operation, readonly=False)
 
     @mcp.tool(name="kb.audit")
     def audit(limit: int = 50):
@@ -468,9 +664,12 @@ def create_server():
     @mcp.tool(name="kb.status")
     def status():
         """Return Flux health, settings, extractor, and runtime status."""
-        from .health import doctor_payload
+        def operation():
+            from .health import doctor_payload
 
-        return doctor_payload()
+            return doctor_payload()
+
+        return runtime.call("kb.status", operation, readonly=True)
 
     @mcp.tool(name="kb.crawl_status")
     def crawl_status():

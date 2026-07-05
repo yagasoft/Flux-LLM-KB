@@ -238,8 +238,6 @@ def _write_flux_mcp_server_config(config_path: Path, app_root: Path) -> None:
 
 
 def _resolve_mcp_command(app_root: Path) -> tuple[str, list[str]]:
-    if _is_production_app_root(app_root):
-        return "docker", ["exec", "-i", "flux-llm-kb-api", "python", "-m", "flux_llm_kb.mcp_server"]
     return _resolve_mcp_python(app_root), ["-m", "flux_llm_kb.mcp_server"]
 
 
@@ -357,9 +355,196 @@ def _flux_mcp_status(config: str) -> dict[str, Any]:
 
 
 def _configured_mcp_dependency_available(command: str, cwd: str, args: Any) -> bool:
-    if command == "docker" and isinstance(args, list) and args[:3] == ["exec", "-i", "flux-llm-kb-api"]:
-        return _docker_mcp_available()
+    if _is_container_backed_mcp_config(command, args):
+        return False
     return _mcp_dependency_available(command, cwd)
+
+
+def codex_mcp_readiness() -> dict[str, Any]:
+    codex_home = Path.home() / ".codex"
+    config_path = codex_home / "config.toml"
+    base: dict[str, Any] = {
+        "configured": False,
+        "config_path": str(config_path),
+        "command": None,
+        "args": None,
+        "cwd": None,
+        "transport_alive": False,
+        "tools": [],
+    }
+    if not config_path.exists():
+        return {
+            **base,
+            "ok": False,
+            "status": "not_configured",
+            "message": "Codex config.toml was not found; run flux-kb codex install-plugin.",
+        }
+    config = config_path.read_text(encoding="utf-8", errors="ignore")
+    block = _read_toml_table_block(config, f"mcp_servers.{MCP_SERVER_NAME}")
+    if block is None:
+        return {
+            **base,
+            "ok": False,
+            "status": "not_configured",
+            "message": "Flux MCP server is not configured; run flux-kb codex install-plugin.",
+        }
+    values = _parse_simple_toml_table(block)
+    command = _optional_str(values.get("command"))
+    cwd = _optional_str(values.get("cwd"))
+    args = values.get("args")
+    enabled = bool(values.get("enabled", True))
+    timeout_seconds = int(values.get("tool_timeout_sec") or 60)
+    base.update({"configured": True, "command": command, "args": args, "cwd": cwd, "enabled": enabled})
+    if not enabled:
+        return {
+            **base,
+            "ok": False,
+            "status": "disabled",
+            "message": "Flux MCP server is configured but disabled.",
+        }
+    if not command or not cwd or not isinstance(args, list):
+        return {
+            **base,
+            "ok": False,
+            "status": "misconfigured",
+            "message": "Flux MCP server config is incomplete.",
+        }
+    if _is_container_backed_mcp_config(command, args):
+        return {
+            **base,
+            "ok": False,
+            "status": "container_backed",
+            "transport_alive": False,
+            "message": "Flux MCP server uses docker exec; reinstall the Codex plugin so the MCP process runs from the host production venv.",
+        }
+
+    try:
+        probe = _run_mcp_readiness_tools(command, args, cwd, timeout_seconds)
+    except Exception as exc:
+        return {
+            **base,
+            "ok": False,
+            "status": "transport_closed",
+            "transport_alive": False,
+            "tools": [],
+            "message": f"Flux MCP readiness probe failed before tool checks completed: {exc}",
+        }
+
+    tools = list(probe.get("tools") or [])
+    transport_alive = bool(probe.get("transport_alive"))
+    temporary = [tool for tool in tools if tool.get("status") == "temporary_unavailable" or tool.get("temporary_unavailable")]
+    failed = [tool for tool in tools if not tool.get("ok")]
+    if not transport_alive:
+        status = "transport_closed"
+        ok = False
+        message = probe.get("message") or "Flux MCP readiness probe transport closed."
+    elif temporary:
+        status = "temporary_unavailable"
+        ok = False
+        message = "Flux MCP server is alive but the backend is temporarily unavailable."
+    elif failed:
+        status = "tool_error"
+        ok = False
+        message = "Flux MCP server is alive but one or more readiness tools failed."
+    else:
+        status = "ready"
+        ok = True
+        message = "ready"
+    return {
+        **base,
+        **probe,
+        "ok": ok,
+        "status": status,
+        "transport_alive": transport_alive,
+        "tools": tools,
+        "message": message,
+    }
+
+
+def _is_container_backed_mcp_config(command: str | None, args: Any) -> bool:
+    return command == "docker" and isinstance(args, list) and args[:3] == ["exec", "-i", "flux-llm-kb-api"]
+
+
+def _run_mcp_readiness_tools(command: str, args: list[Any], cwd: str, timeout_seconds: int) -> dict[str, Any]:
+    import anyio
+
+    return anyio.run(_run_mcp_readiness_tools_async, command, [str(arg) for arg in args], cwd, timeout_seconds)
+
+
+async def _run_mcp_readiness_tools_async(
+    command: str,
+    args: list[str],
+    cwd: str,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    import anyio
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(command=command, args=args, cwd=cwd, env=os.environ.copy())
+    checks = [
+        ("kb.status", {}),
+        ("kb.search", {"query": "Flux MCP readiness", "limit": 1}),
+        ("kb.brief", {"query": "Flux MCP readiness", "token_budget": 200}),
+    ]
+    tools: list[dict[str, Any]] = []
+    try:
+        with anyio.fail_after(timeout_seconds):
+            async with stdio_client(params) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    for name, arguments in checks:
+                        result = await session.call_tool(name, arguments)
+                        tools.append(_mcp_readiness_tool_result(name, result))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "transport_alive": False,
+            "tools": tools,
+            "message": f"Flux MCP transport closed or failed during readiness probe: {exc}",
+        }
+    return {
+        "ok": all(tool.get("ok") for tool in tools),
+        "transport_alive": True,
+        "tools": tools,
+    }
+
+
+def _mcp_readiness_tool_result(name: str, result: Any) -> dict[str, Any]:
+    is_error = bool(getattr(result, "isError", False))
+    payload = _mcp_result_payload(result)
+    status = None
+    temporary = False
+    payload_failed = False
+    message = None
+    if isinstance(payload, dict):
+        status = _optional_str(payload.get("status"))
+        temporary = status == "temporary_unavailable"
+        payload_failed = payload.get("ok") is False or status in {"temporary_unavailable", "tool_error"}
+        error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+        message = _optional_str(error.get("message")) or _optional_str(payload.get("message"))
+    ok = not is_error and not payload_failed
+    return {
+        "name": name,
+        "ok": ok,
+        "is_error": is_error,
+        "status": status or ("tool_error" if is_error else "ok"),
+        "temporary_unavailable": temporary,
+        "message": message,
+    }
+
+
+def _mcp_result_payload(result: Any) -> Any:
+    content = getattr(result, "content", None)
+    if not content:
+        return None
+    text = getattr(content[0], "text", None)
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
 
 
 def _read_toml_table_block(config: str, table_name: str) -> str | None:

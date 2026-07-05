@@ -417,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     codex_subparsers.add_parser("install-plugin", help="Install/link the local Flux Codex plugin")
     codex_status_parser = codex_subparsers.add_parser("status", help="Show Codex plugin status")
     codex_status_parser.add_argument("--json", action="store_true", dest="json_output")
+    codex_readiness_parser = codex_subparsers.add_parser("mcp-readiness", help="Probe configured Flux MCP stdio readiness")
+    codex_readiness_parser.add_argument("--json", action="store_true", dest="json_output")
 
     settings_parser = subparsers.add_parser("settings", help="Manage runtime settings")
     settings_subparsers = settings_parser.add_subparsers(dest="settings_command", required=True)
@@ -1477,15 +1479,19 @@ def _gpu(args: argparse.Namespace) -> int:
 
 
 def _codex(args: argparse.Namespace) -> int:
-    from .codex_integration import codex_status, install_plugin
+    from .codex_integration import codex_mcp_readiness, codex_status, install_plugin
 
     if args.codex_command == "install-plugin":
         payload = install_plugin()
     elif args.codex_command == "status":
         payload = codex_status()
+    elif args.codex_command == "mcp-readiness":
+        payload = codex_mcp_readiness()
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.codex_command)
     print(json.dumps(payload, indent=2, sort_keys=True))
+    if args.codex_command == "mcp-readiness" and not payload.get("ok"):
+        return 1
     return 0
 
 

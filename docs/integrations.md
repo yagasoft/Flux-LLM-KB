@@ -645,9 +645,50 @@ tool_timeout_sec = 60
 ```
 
 The command prefers `FLUX_KB_PYTHON`, then the production app virtual
-environment when available, then the active Python. `flux-kb codex status` and
-dashboard health report whether this MCP block is configured, enabled, and able
-to import the optional MCP dependency.
+environment when available, then the active Python. Production installs must run
+the MCP server from the host Python environment, not through `docker exec`,
+because container-backed MCP processes can be killed by deployment restarts and
+surface to Codex as a closed transport. `flux-kb codex status` reports whether
+this MCP block is configured, enabled, and able to import the optional MCP
+dependency.
+
+Use the MCP readiness probe after install or deployment:
+
+```powershell
+flux-kb codex mcp-readiness --json
+```
+
+The probe spawns the configured stdio MCP server and calls `kb.status`,
+`kb.search`, and `kb.brief`. It fails if the MCP command is container-backed, if
+the stdio transport closes, or if a tool reports `temporary_unavailable`.
+Deployment validation runs this check separately from dashboard HTTP health.
+
+When the Flux API, PostgreSQL, or search backend is temporarily unavailable,
+core read-only MCP tools such as `kb.status`, `kb.search`, `kb.explain`,
+`kb.brief`, code lookup, and operational diagnostics retry with bounded backoff
+and a refreshed service client. Persistent outages return an explicit typed
+payload instead of an empty success:
+
+```json
+{
+  "ok": false,
+  "status": "temporary_unavailable",
+  "settings_mutated": false,
+  "error": {
+    "code": "mcp.temporary_unavailable",
+    "component": "mcp",
+    "stage": "kb.brief",
+    "retryable": true,
+    "status_code": 503
+  }
+}
+```
+
+Mutating MCP tools such as `kb.remember` and `kb.finalize_turn` do not replay a
+failed write automatically when the backend connection drops, because the commit
+state may be unknown. They return the same typed temporary-unavailable payload
+with `settings_mutated: false`; callers should retry deliberately after the
+backend recovers.
 
 When `FLUX_KB_APP_ROOT` is not set, `flux-kb codex install-plugin` preserves an
 existing valid Flux local marketplace source before falling back to the imported
@@ -664,9 +705,10 @@ safely invalidates stale Flux-owned cache directories and leaves unrelated
 plugin caches untouched; restart Codex Desktop afterward so it rebuilds the
 cache from the current plugin source.
 
-For an end-to-end Codex smoke test, verify that at least the status, brief, and
-finalize tools are callable through either naming form. A successful test should
-call `kb.status`/`mcp__flux_llm_kb.kb_status`, call
+For an end-to-end Codex smoke test, run `flux-kb codex mcp-readiness --json`,
+then verify that at least the status, brief, and finalize tools are callable
+through either naming form. A successful manual test should call
+`kb.status`/`mcp__flux_llm_kb.kb_status`, call
 `kb.brief`/`mcp__flux_llm_kb.kb_brief` with a harmless smoke-test task, and
 store only a concise outcome through
 `kb.finalize_turn`/`mcp__flux_llm_kb.kb_finalize_turn`, passing the active

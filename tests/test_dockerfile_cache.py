@@ -41,8 +41,9 @@ def test_dockerfile_uses_locked_wheelhouse_constraints() -> None:
     assert "COPY docker/requirements-paddle.lock /tmp/requirements-paddle.lock" in dockerfile
     assert "--constraint /tmp/requirements-docker.lock" in dockerfile
     assert "--constraint /tmp/requirements-paddle.lock" in dockerfile
-    assert "--no-index --find-links /opt/flux-wheelhouse --constraint \"$constraint\"" in dockerfile
-    assert "--find-links /opt/flux-wheelhouse $pip_index_args $pip_extra_index_args --constraint \"$constraint\"" in dockerfile
+    assert "wheelhouse_find_links=\"--find-links /opt/flux-durable-wheelhouse --find-links /opt/flux-wheelhouse\"" in dockerfile
+    assert "--no-index $wheelhouse_find_links --constraint \"$constraint\"" in dockerfile
+    assert "$wheelhouse_find_links $pip_index_args $pip_extra_index_args --constraint \"$constraint\"" in dockerfile
     assert "download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock" in dockerfile
     assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock" in dockerfile
     assert "aio-pika==9.6.2" in runtime_lock
@@ -71,16 +72,16 @@ def test_dockerfile_materializes_persistent_wheelhouse_before_install() -> None:
         "--mount=type=cache,id=flux-llm-kb-pip-wheelhouse,target=/opt/flux-wheelhouse"
     )
     download = dockerfile.index("download_requirements python /tmp/requirements-docker.txt")
-    install = dockerfile.index("python -m pip install --no-index --find-links /opt/flux-wheelhouse")
+    install = dockerfile.index("python -m pip install --no-index $wheelhouse_find_links")
     runtime_stage = dockerfile.index("FROM runtime-deps AS runtime")
 
     assert dependency_stage < wheelhouse
     assert wheelhouse < download
     assert download < install
     assert install < runtime_stage
-    assert "--find-links /opt/flux-wheelhouse" in dockerfile
+    assert "--find-links /opt/flux-durable-wheelhouse --find-links /opt/flux-wheelhouse" in dockerfile
     assert "pip install --dry-run" not in dockerfile
-    assert "--no-index --find-links /opt/flux-wheelhouse --constraint \"$constraint\" --dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
+    assert "--no-index $wheelhouse_find_links --constraint \"$constraint\" --dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
     assert "--dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
     assert 'ARG PIP_OFFLINE=true' in dockerfile
     assert 'if [ "$PIP_OFFLINE" = "true" ]' in dockerfile
@@ -95,8 +96,8 @@ def test_dockerfile_builds_isolated_paddle_runtime_from_same_wheelhouse() -> Non
     assert 'write_requirements("/tmp/requirements-paddle.txt", ("api", "ocr_paddle"))' in dockerfile
     assert "python -m venv /opt/flux-paddle" in dockerfile
     assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock" in dockerfile
-    assert "/opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse" in dockerfile
-    assert "/opt/flux-paddle/bin/python -m pip install --no-index --find-links /opt/flux-wheelhouse --constraint /tmp/requirements-paddle.lock" in dockerfile
+    assert "/opt/flux-paddle/bin/python -m pip install --no-index $wheelhouse_find_links" in dockerfile
+    assert "/opt/flux-paddle/bin/python -m pip install --no-index $wheelhouse_find_links --constraint /tmp/requirements-paddle.lock" in dockerfile
     assert "FLUX_KB_PADDLE_PYTHON=/opt/flux-paddle/bin/python" in dockerfile
 
 

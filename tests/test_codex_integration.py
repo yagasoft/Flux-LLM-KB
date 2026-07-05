@@ -126,7 +126,7 @@ def test_codex_install_plugin_preserves_unrelated_config_and_replaces_stale_mcp_
     assert f"cwd = {json.dumps(str(repo_root))}" in config
 
 
-def test_codex_install_plugin_uses_container_mcp_for_production_app_root(tmp_path, monkeypatch):
+def test_codex_install_plugin_uses_host_python_for_production_app_root(tmp_path, monkeypatch):
     codex_home = tmp_path / ".codex"
     codex_home.mkdir()
     app_root = tmp_path / "FluxLLMKB" / "app"
@@ -140,16 +140,26 @@ def test_codex_install_plugin_uses_container_mcp_for_production_app_root(tmp_pat
     (plugin / "hooks" / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
     (app_root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     (app_root / "VERSION").write_text("abc123\n", encoding="utf-8")
+    venv_python = app_root / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv("FLUX_KB_APP_ROOT", str(app_root))
-    monkeypatch.setattr(codex_integration, "_docker_mcp_available", lambda: False, raising=False)
+    monkeypatch.setattr(
+        codex_integration,
+        "_mcp_python_usable",
+        lambda command, cwd: str(command) == str(venv_python),
+        raising=False,
+    )
 
     install_plugin(repo_root=app_root)
 
     config = (codex_home / "config.toml").read_text(encoding="utf-8")
-    assert 'command = "docker"' in config
-    assert 'args = ["exec", "-i", "flux-llm-kb-api", "python", "-m", "flux_llm_kb.mcp_server"]' in config
+    assert f"command = {json.dumps(str(venv_python))}" in config
+    assert 'args = ["-m", "flux_llm_kb.mcp_server"]' in config
+    assert 'command = "docker"' not in config
+    assert '"exec", "-i", "flux-llm-kb-api"' not in config
     assert f"cwd = {json.dumps(str(app_root))}" in config
 
 
@@ -268,6 +278,108 @@ def test_codex_status_reports_missing_and_dependency_missing_mcp_states(tmp_path
     assert dependency_missing["mcp"]["configured"] is True
     assert dependency_missing["mcp"]["dependency_available"] is False
     assert "MCP optional dependency is not available" in dependency_missing["mcp"]["message"]
+
+
+def test_codex_mcp_readiness_rejects_container_backed_config(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            [
+                "[mcp_servers.flux_llm_kb]",
+                'command = "docker"',
+                'args = ["exec", "-i", "flux-llm-kb-api", "python", "-m", "flux_llm_kb.mcp_server"]',
+                f"cwd = {json.dumps(str(tmp_path))}",
+                "enabled = true",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        codex_integration,
+        "_run_mcp_readiness_tools",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("container config must not be spawned")),
+        raising=False,
+    )
+
+    result = codex_integration.codex_mcp_readiness()
+
+    assert result["ok"] is False
+    assert result["status"] == "container_backed"
+    assert result["configured"] is True
+    assert result["transport_alive"] is False
+    assert "docker exec" in result["message"]
+
+
+def test_codex_mcp_readiness_reports_host_python_success(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    python_path = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("", encoding="utf-8")
+    (codex_home / "config.toml").write_text(
+        "\n".join(
+            [
+                "[mcp_servers.flux_llm_kb]",
+                f"command = {json.dumps(str(python_path))}",
+                'args = ["-m", "flux_llm_kb.mcp_server"]',
+                f"cwd = {json.dumps(str(tmp_path))}",
+                "enabled = true",
+                "tool_timeout_sec = 60",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_probe(command, args, cwd, timeout_seconds):
+        captured.update({"command": command, "args": args, "cwd": cwd, "timeout_seconds": timeout_seconds})
+        return {
+            "ok": True,
+            "transport_alive": True,
+            "tools": [
+                {"name": "kb.status", "ok": True},
+                {"name": "kb.search", "ok": True},
+                {"name": "kb.brief", "ok": True},
+            ],
+        }
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_integration, "_run_mcp_readiness_tools", fake_probe, raising=False)
+
+    result = codex_integration.codex_mcp_readiness()
+
+    assert result["ok"] is True
+    assert result["status"] == "ready"
+    assert result["transport_alive"] is True
+    assert captured == {
+        "command": str(python_path),
+        "args": ["-m", "flux_llm_kb.mcp_server"],
+        "cwd": str(tmp_path),
+        "timeout_seconds": 60,
+    }
+
+
+def test_mcp_readiness_tool_result_fails_typed_tool_errors():
+    class TextContent:
+        text = json.dumps(
+            {
+                "ok": False,
+                "status": "tool_error",
+                "error": {"message": "diagnostic failed"},
+            }
+        )
+
+    class Result:
+        isError = False
+        content = [TextContent()]
+
+    result = codex_integration._mcp_readiness_tool_result("kb.status", Result())
+
+    assert result["ok"] is False
+    assert result["status"] == "tool_error"
+    assert result["message"] == "diagnostic failed"
 
 
 def test_codex_install_plugin_replaces_stale_existing_install(tmp_path, monkeypatch):

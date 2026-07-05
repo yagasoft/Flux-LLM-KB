@@ -21,6 +21,8 @@ def test_complete_feature_script_is_fail_fast_and_structured():
     assert "scripts\\deploy\\update-flux.ps1" in script
     assert "http://127.0.0.1:8765/dashboard" in script
     assert "http://127.0.0.1:8765/api/dashboard/health" in script
+    assert "codex mcp-readiness --json" in script
+    assert 'Invoke-FeatureStep -Name "probe-mcp-readiness"' in script
     assert "Dashboard health reported blocked required checks" in script
     assert "database.checks" in script
 
@@ -30,11 +32,12 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
 
     deploy_index = script.index("scripts\\deploy\\update-flux.ps1")
     probe_index = script.index("http://127.0.0.1:8765/api/dashboard/health")
+    mcp_probe_index = script.index('Invoke-FeatureStep -Name "probe-mcp-readiness"')
     reclaim_index = script.index('Invoke-FeatureStep -Name "post-deploy-outlook-spool-reclaim"')
     repair_index = script.index('Invoke-FeatureStep -Name "repair-python-editable-install"')
     cleanup_index = script.index('Invoke-FeatureStep -Name "cleanup-worktree"')
 
-    assert deploy_index < probe_index < reclaim_index < repair_index < cleanup_index
+    assert deploy_index < probe_index < mcp_probe_index < reclaim_index < repair_index < cleanup_index
 
 
 def test_status_script_reports_blocked_required_dashboard_health():
@@ -43,6 +46,8 @@ def test_status_script_reports_blocked_required_dashboard_health():
     assert "Dashboard health reported blocked required checks" in script
     assert "database.checks" in script
     assert "required -ne $false" in script
+    assert "codex mcp-readiness --json" in script
+    assert "Flux MCP readiness failed" in script
 
 
 def test_complete_feature_script_has_optional_post_deploy_outlook_spool_reclaim():

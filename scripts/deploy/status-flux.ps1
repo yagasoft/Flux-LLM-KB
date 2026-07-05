@@ -133,3 +133,30 @@ if ($health) {
         exit 1
     }
 }
+
+Write-Host "Flux MCP readiness"
+$previousPythonPath = $env:PYTHONPATH
+try {
+    Push-Location $appRoot
+    try {
+        $env:PYTHONPATH = Join-Path $appRoot "src"
+        $mcpReadiness = python -m flux_llm_kb.cli codex mcp-readiness --json 2>&1
+        $mcpExit = $LASTEXITCODE
+        $mcpReadiness | ForEach-Object { Write-Host $_ }
+        if ($mcpExit -ne 0) {
+            Write-Host "Flux MCP readiness failed."
+            exit 1
+        }
+    } finally {
+        Pop-Location
+    }
+} catch {
+    Write-Host "Flux MCP readiness failed: $($_.Exception.Message)"
+    exit 1
+} finally {
+    if ($null -eq $previousPythonPath) {
+        Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONPATH = $previousPythonPath
+    }
+}

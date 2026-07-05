@@ -349,6 +349,8 @@ if ($blocked.Count -gt 0) {
 }
 '@
 
+$McpReadinessProbeCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli codex mcp-readiness --json'
+
 $DashboardNpmInstallCommand = 'npm --prefix dashboard ci --include=dev'
 $DashboardCacheCheckCommand = @'
 $requiredTools = @(
@@ -422,6 +424,7 @@ try {
         Invoke-FeatureStep -Name "probe-dashboard" -Cwd $MainRoot -Command 'Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8765/dashboard" -TimeoutSec 15 | Out-Null'
         # Probe http://127.0.0.1:8765/api/dashboard/health and fail if required DB paths are blocked.
         Invoke-FeatureStep -Name "probe-dashboard-health" -Cwd $MainRoot -Command $DashboardHealthProbeCommand
+        Invoke-FeatureStep -Name "probe-mcp-readiness" -Cwd $MainRoot -Command $McpReadinessProbeCommand
         if ($PostDeployReclaimOutlookProfile) {
             $safeReclaimProfile = $PostDeployReclaimOutlookProfile.Replace("'", "''")
             $reclaimCommand = 'docker exec flux-llm-kb-api python -m flux_llm_kb.cli mail spool-dedupe --profile ''' + $safeReclaimProfile + ''' --apply --purge --json'

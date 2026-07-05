@@ -1,5 +1,11 @@
 import ast
+import json
+import os
 from pathlib import Path
+import sys
+
+import anyio
+import pytest
 
 from flux_llm_kb import mcp_server
 
@@ -33,6 +39,165 @@ def _mcp_tool_names(source: str) -> list[str]:
                 if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
                     names.append(str(keyword.value.value))
     return sorted(names)
+
+
+def _call_tool(server, name: str, arguments: dict):
+    async def run():
+        return await server.call_tool(name, arguments)
+
+    return anyio.run(run)
+
+
+def _result_text(result) -> str:
+    content = result.content if hasattr(result, "content") else result
+    return content[0].text
+
+
+def _result_payload(result) -> dict:
+    return json.loads(_result_text(result))
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "method_name"),
+    [
+        ("kb.search", {"query": "restart", "limit": 2}, "search"),
+        ("kb.brief", {"query": "restart", "token_budget": 100}, "brief"),
+    ],
+)
+def test_read_only_mcp_tools_retry_transient_failures_and_refresh_service(tool_name, arguments, method_name):
+    attempts = {method_name: 0}
+    instances = []
+
+    class FlakyService:
+        def __init__(self):
+            instances.append(self)
+
+        def search(self, query, **kwargs):
+            attempts["search"] += 1
+            if attempts["search"] < 3:
+                raise ConnectionResetError("backend connection reset")
+            return [{"kind": "memory", "title": query, "limit": kwargs["limit"]}]
+
+        def brief(self, query, **kwargs):
+            attempts["brief"] += 1
+            if attempts["brief"] < 3:
+                raise TimeoutError("backend timed out")
+            return f"brief recovered: {query}"
+
+    server = mcp_server.create_server(service_factory=FlakyService, retry_sleep=lambda _seconds: None)
+
+    result = _call_tool(server, tool_name, arguments)
+
+    assert attempts[method_name] == 3
+    assert len(instances) == 3
+    if tool_name == "kb.search":
+        assert "restart" in _result_text(result)
+    else:
+        assert _result_text(result) == "brief recovered: restart"
+
+
+def test_brief_exhausts_transient_failures_as_temporary_unavailable_payload():
+    attempts = {"brief": 0}
+
+    class DownService:
+        def brief(self, query, **kwargs):
+            attempts["brief"] += 1
+            raise ConnectionRefusedError("backend refused connection")
+
+    server = mcp_server.create_server(service_factory=DownService, retry_sleep=lambda _seconds: None)
+
+    payload = _result_payload(_call_tool(server, "kb.brief", {"query": "restart"}))
+
+    assert attempts["brief"] == 3
+    assert payload["ok"] is False
+    assert payload["status"] == "temporary_unavailable"
+    assert payload["settings_mutated"] is False
+    assert payload["error"]["code"] == "mcp.temporary_unavailable"
+    assert payload["error"]["component"] == "mcp"
+    assert payload["error"]["stage"] == "kb.brief"
+    assert payload["error"]["retryable"] is True
+    assert payload["error"]["status_code"] == 503
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("kb.remember", {"title": "deploy note", "body": "backend reset"}),
+        ("kb.finalize_turn", {"title": "turn", "summary": "backend reset"}),
+    ],
+)
+def test_mutating_mcp_tools_do_not_replay_transient_failures(tool_name, arguments):
+    attempts = {"remember": 0}
+
+    class DownService:
+        def remember(self, *args, **kwargs):
+            attempts["remember"] += 1
+            raise ConnectionResetError("write status unknown")
+
+    server = mcp_server.create_server(service_factory=DownService, retry_sleep=lambda _seconds: None)
+
+    payload = _result_payload(_call_tool(server, tool_name, arguments))
+
+    assert attempts["remember"] == 1
+    assert payload["ok"] is False
+    assert payload["status"] == "temporary_unavailable"
+    assert payload["settings_mutated"] is False
+    assert payload["error"]["retryable"] is True
+
+
+def test_stdio_mcp_session_survives_backend_reset_during_brief(tmp_path):
+    pytest.importorskip("mcp.client.stdio")
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    repo_root = Path(__file__).resolve().parents[1]
+    server_script = tmp_path / "flaky_mcp_server.py"
+    server_script.write_text(
+        """
+from flux_llm_kb import mcp_server
+
+
+class FlakyService:
+    brief_calls = 0
+
+    def brief(self, query, **kwargs):
+        type(self).brief_calls += 1
+        if type(self).brief_calls <= 3:
+            raise ConnectionResetError("backend reset during deploy")
+        return f"recovered brief: {query}"
+
+
+def factory():
+    return FlakyService()
+
+
+if __name__ == "__main__":
+    mcp_server.create_server(service_factory=factory, retry_sleep=lambda _seconds: None).run()
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    env = dict(os.environ)
+    src_path = str(repo_root / "src")
+    env["PYTHONPATH"] = src_path + os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else src_path
+    params = StdioServerParameters(command=sys.executable, args=[str(server_script)], cwd=str(repo_root), env=env)
+
+    async def run_session():
+        async with stdio_client(params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                first = await session.call_tool("kb.brief", {"query": "restart"})
+                second = await session.call_tool("kb.brief", {"query": "recovered"})
+                return first, second
+
+    first, second = anyio.run(run_session)
+
+    assert first.isError is False
+    first_payload = _result_payload(first)
+    assert first_payload["status"] == "temporary_unavailable"
+    assert first_payload["error"]["code"] == "mcp.temporary_unavailable"
+    assert second.isError is False
+    assert _result_text(second) == "recovered brief: recovered"
 
 
 def test_mcp_exposes_claim_and_graph_tools():

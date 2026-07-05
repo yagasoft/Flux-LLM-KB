@@ -696,10 +696,14 @@ def test_production_deploy_defaults_match_prefilled_wheel_cache_args():
         assert "[int]$PipTimeoutSeconds = 180" in script
         assert "[int]$PipRetries = 20" in script
         assert '[bool]$PipOffline = $true' in script
-        assert '"--build-arg", "PIP_OFFLINE=$pipOfflineValue"' in script
-        assert '$dockerBuildNetwork = if ($PipOffline -and $dockerBase.SkipSystemPackages) { "none" } else { "default" }' in script
         assert '"--pull=false"' in script
         assert '"--network", $dockerBuildNetwork' in script
+    assert '"--build-arg", "PIP_OFFLINE=$pipOfflineValue"' in install
+    assert '$dockerBuildNetwork = if ($PipOffline -and $dockerBase.SkipSystemPackages) { "none" } else { "default" }' in install
+    assert '"--build-arg", "PIP_OFFLINE=true"' in update
+    assert '$dockerBuildNetwork = if ($dockerBase.SkipSystemPackages) { "none" } else { "default" }' in update
+    assert "Invoke-FluxSeedDockerWheelhouse" in update
+    assert "Durable pip wheelhouse is empty" in update
 
 
 def test_production_deploy_bounds_docker_build_and_pip_installs():
@@ -877,12 +881,15 @@ def test_docs_describe_production_runtime_boundary():
 
 
 def _embedded_compose_template(script: str) -> str:
-    for marker, terminator in (("@'", "'@"), ('@"', '"@')):
-        start = script.find(marker)
+    function_start = script.find("function Write-FluxCompose")
+    if function_start == -1:
+        return ""
+    for marker, terminator in (('@"', '"@'), ("@'", "'@")):
+        start = script.find(marker, function_start)
         if start == -1:
             continue
         end = script.find(terminator, start + len(marker))
-        return script[start:end]
+        return script[start + len(marker) : end]
     return ""
 
 
