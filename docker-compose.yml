@@ -7,6 +7,8 @@ services:
   api:
     build: *flux-build
     container_name: flux-llm-kb-api
+    mem_limit: "1gb"
+    memswap_limit: "1gb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,6 +31,8 @@ services:
   worker:
     build: *flux-build
     container_name: flux-llm-kb-worker
+    mem_limit: "1gb"
+    memswap_limit: "1gb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -47,6 +51,8 @@ services:
   search-index-worker:
     build: *flux-build
     container_name: flux-llm-kb-search-index-worker
+    mem_limit: "1gb"
+    memswap_limit: "1gb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,6 +71,8 @@ services:
   mail-worker:
     build: *flux-build
     container_name: flux-llm-kb-mail-worker
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,6 +91,8 @@ services:
   outlook-worker:
     build: *flux-build
     container_name: flux-llm-kb-outlook-worker
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,6 +111,8 @@ services:
   automation-worker:
     build: *flux-build
     container_name: flux-llm-kb-automation-worker
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,6 +131,8 @@ services:
   governance-worker:
     build: *flux-build
     container_name: flux-llm-kb-governance-worker
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -137,6 +151,8 @@ services:
   runtime-control-worker:
     build: *flux-build
     container_name: flux-llm-kb-runtime-control-worker
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -153,6 +169,8 @@ services:
   gpu-eviction-worker:
     build: *flux-build
     container_name: flux-llm-kb-gpu-eviction-worker
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -173,6 +191,8 @@ services:
   callback-worker:
     build: *flux-build
     container_name: flux-llm-kb-callback-worker
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -190,6 +210,8 @@ services:
   event-audit-worker:
     build: *flux-build
     container_name: flux-llm-kb-event-audit-worker
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -206,6 +228,8 @@ services:
   event-dashboard-worker:
     build: *flux-build
     container_name: flux-llm-kb-event-dashboard-worker
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -222,6 +246,8 @@ services:
   event-diagnostics-worker:
     build: *flux-build
     container_name: flux-llm-kb-event-diagnostics-worker
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -238,6 +264,8 @@ services:
   event-scheduler:
     build: *flux-build
     container_name: flux-llm-kb-event-scheduler
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -254,6 +282,8 @@ services:
   outbox-relay:
     build: *flux-build
     container_name: flux-llm-kb-outbox-relay
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -270,6 +300,8 @@ services:
   rabbitmq:
     image: rabbitmq:4.3-management
     container_name: flux-llm-kb-rabbitmq
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
     environment:
       RABBITMQ_DEFAULT_USER: flux
       RABBITMQ_DEFAULT_PASS: flux
@@ -288,6 +320,8 @@ services:
   postgres:
     image: postgres:16
     container_name: flux-llm-kb-postgres
+    mem_limit: "2gb"
+    memswap_limit: "2gb"
     shm_size: "1gb"
     command: >
       postgres

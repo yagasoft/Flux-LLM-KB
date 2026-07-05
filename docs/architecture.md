@@ -544,12 +544,15 @@ host-accessed watched roots. Host-agent and Outlook-host run as Windows
 Scheduled Tasks in the logged-in user session. Image builds use a BuildKit
 wheelhouse cache with exact runtime/Paddle constraints and offline dependency
 resolution by default, so package updates are explicit instead of accidental
-side effects of broad dependency ranges. Generated production Compose sets
-direct Docker memory ceilings for all Flux containers: API 2 GB, worker 2 GB,
-model-runner 10 GB, paddle-runner 8 GB, ASR 4 GB, Ollama 6 GB, Vespa 5 GB, and
-PostgreSQL 3 GB, for a 40 GB total Docker-managed budget. `memswap_limit`
-matches `mem_limit` on each production service so containers do not gain extra
-swap-backed memory. PostgreSQL uses a lean local profile
+side effects of broad dependency ranges. Every Compose surface sets direct
+Docker memory ceilings with `memswap_limit` matching `mem_limit`, so containers
+do not gain extra swap-backed memory. Generated production Compose sums to
+29.5 GB: model-runner 5 GB, paddle-runner 5 GB, Ollama 4 GB, ASR 3 GB, Vespa
+3 GB, PostgreSQL 2 GB, API/worker/search-index worker 1 GB each,
+RabbitMQ/mail/Outlook workers 512 MB each, automation/governance/callback/outbox
+workers 384 MB each, and runtime-control/GPU-eviction/event workers 256 MB each.
+Development Compose caps the shared non-production services below 10 GB.
+PostgreSQL uses a lean local profile
 (`shared_buffers=768MB`, `effective_cache_size=2GB`, `work_mem=16MB`,
 `maintenance_work_mem=256MB`, and `shm_size: "1gb"`) because Vespa and the model
 runners carry the heavy retrieval and inference paths while PostgreSQL handles

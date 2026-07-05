@@ -13,15 +13,63 @@ def _dev_script(name: str) -> str:
     return (ROOT / "scripts" / "dev" / name).read_text(encoding="utf-8")
 
 
-PRODUCTION_MEMORY_LIMITS_GB = {
-    "api": 2,
-    "worker": 2,
-    "model-runner": 10,
-    "paddle-runner": 8,
-    "asr": 4,
-    "ollama": 6,
-    "vespa": 5,
-    "postgres": 3,
+MAX_COMPOSE_MEMORY_MB = 30 * 1024
+
+DEV_MEMORY_LIMITS = {
+    "api": "1gb",
+    "worker": "1gb",
+    "search-index-worker": "1gb",
+    "mail-worker": "512mb",
+    "outlook-worker": "512mb",
+    "automation-worker": "384mb",
+    "governance-worker": "384mb",
+    "runtime-control-worker": "256mb",
+    "gpu-eviction-worker": "256mb",
+    "callback-worker": "384mb",
+    "event-audit-worker": "256mb",
+    "event-dashboard-worker": "256mb",
+    "event-diagnostics-worker": "256mb",
+    "event-scheduler": "256mb",
+    "outbox-relay": "384mb",
+    "rabbitmq": "512mb",
+    "postgres": "2gb",
+}
+
+PRODUCTION_MEMORY_LIMITS = {
+    **DEV_MEMORY_LIMITS,
+    "asr": "3gb",
+    "model-runner": "5gb",
+    "paddle-runner": "5gb",
+    "ollama": "4gb",
+    "vespa": "3gb",
+}
+
+DEV_MEMORY_EXPECTED_MB = 9728
+PRODUCTION_MEMORY_EXPECTED_MB = 30208
+
+PRODUCTION_CONTAINER_NAMES = {
+    "api": "flux-llm-kb-api",
+    "worker": "flux-llm-kb-worker",
+    "search-index-worker": "flux-llm-kb-search-index-worker",
+    "mail-worker": "flux-llm-kb-mail-worker",
+    "outlook-worker": "flux-llm-kb-outlook-worker",
+    "automation-worker": "flux-llm-kb-automation-worker",
+    "governance-worker": "flux-llm-kb-governance-worker",
+    "runtime-control-worker": "flux-llm-kb-runtime-control-worker",
+    "gpu-eviction-worker": "flux-llm-kb-gpu-eviction-worker",
+    "callback-worker": "flux-llm-kb-callback-worker",
+    "event-audit-worker": "flux-llm-kb-event-audit-worker",
+    "event-dashboard-worker": "flux-llm-kb-event-dashboard-worker",
+    "event-diagnostics-worker": "flux-llm-kb-event-diagnostics-worker",
+    "event-scheduler": "flux-llm-kb-event-scheduler",
+    "outbox-relay": "flux-llm-kb-outbox-relay",
+    "asr": "flux-llm-kb-asr",
+    "model-runner": "flux-llm-kb-model-runner",
+    "paddle-runner": "flux-llm-kb-paddle-runner",
+    "ollama": "flux-ollama",
+    "vespa": "flux-vespa",
+    "rabbitmq": "flux-llm-kb-rabbitmq",
+    "postgres": "flux-llm-kb-postgres",
 }
 
 
@@ -233,21 +281,26 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
 def test_production_compose_sets_hard_container_memory_budget():
     for script_name in ("install-flux.ps1", "update-flux.ps1"):
         compose = _embedded_compose_template(_script(script_name))
-        service_blocks = _compose_service_blocks(compose)
-        total_gb = 0
 
         assert "deploy:" not in compose
         assert "resources:" not in compose
-        for service, expected_gb in PRODUCTION_MEMORY_LIMITS_GB.items():
-            block = service_blocks[service]
-            memory = _service_compose_value(block, "mem_limit")
-            swap = _service_compose_value(block, "memswap_limit")
+        assert _assert_compose_memory_budget(
+            compose,
+            PRODUCTION_MEMORY_LIMITS,
+            PRODUCTION_MEMORY_EXPECTED_MB,
+        ) <= MAX_COMPOSE_MEMORY_MB
 
-            assert memory == f"{expected_gb}gb"
-            assert swap == memory
-            total_gb += _compose_gb(memory)
 
-        assert total_gb == 40
+def test_development_compose_sets_hard_container_memory_budget():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "deploy:" not in compose
+    assert "resources:" not in compose
+    assert _assert_compose_memory_budget(
+        compose,
+        DEV_MEMORY_LIMITS,
+        DEV_MEMORY_EXPECTED_MB,
+    ) <= MAX_COMPOSE_MEMORY_MB
 
 
 def test_production_compose_sets_vespa_configserver_jvm_budget():
@@ -270,16 +323,7 @@ def test_production_status_reports_all_container_memory_limits():
     assert ".HostConfig.Memory" in status
     assert ".HostConfig.MemorySwap" in status
     assert "unbounded" in status
-    for container in (
-        "flux-llm-kb-api",
-        "flux-llm-kb-worker",
-        "flux-llm-kb-model-runner",
-        "flux-llm-kb-paddle-runner",
-        "flux-llm-kb-asr",
-        "flux-ollama",
-        "flux-vespa",
-        "flux-llm-kb-postgres",
-    ):
+    for container in PRODUCTION_CONTAINER_NAMES.values():
         assert container in status
 
 
@@ -961,7 +1005,33 @@ def _service_compose_value(service_block: str, key: str) -> str:
     return match.group(1)
 
 
-def _compose_gb(value: str) -> int:
-    match = re.fullmatch(r"(\d+)gb", value)
+def _compose_memory_mb(value: str) -> int:
+    match = re.fullmatch(r"(\d+)(gb|mb)", value)
     assert match is not None
-    return int(match.group(1))
+    quantity = int(match.group(1))
+    unit = match.group(2)
+    if unit == "gb":
+        return quantity * 1024
+    return quantity
+
+
+def _assert_compose_memory_budget(
+    compose: str,
+    expected_limits: dict[str, str],
+    expected_total_mb: int,
+) -> int:
+    service_blocks = _compose_service_blocks(compose)
+    assert set(service_blocks) == set(expected_limits)
+
+    total_mb = 0
+    for service, expected_memory in expected_limits.items():
+        block = service_blocks[service]
+        memory = _service_compose_value(block, "mem_limit")
+        swap = _service_compose_value(block, "memswap_limit")
+
+        assert memory == expected_memory
+        assert swap == memory
+        total_mb += _compose_memory_mb(memory)
+
+    assert total_mb == expected_total_mb
+    return total_mb

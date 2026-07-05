@@ -9,11 +9,25 @@ $appEnvPath = Join-Path $appRoot ".env"
 $fluxContainers = @(
     "flux-llm-kb-api",
     "flux-llm-kb-worker",
+    "flux-llm-kb-search-index-worker",
+    "flux-llm-kb-mail-worker",
+    "flux-llm-kb-outlook-worker",
+    "flux-llm-kb-automation-worker",
+    "flux-llm-kb-governance-worker",
+    "flux-llm-kb-runtime-control-worker",
+    "flux-llm-kb-gpu-eviction-worker",
+    "flux-llm-kb-callback-worker",
+    "flux-llm-kb-event-audit-worker",
+    "flux-llm-kb-event-dashboard-worker",
+    "flux-llm-kb-event-diagnostics-worker",
+    "flux-llm-kb-event-scheduler",
+    "flux-llm-kb-outbox-relay",
     "flux-llm-kb-model-runner",
     "flux-llm-kb-paddle-runner",
     "flux-llm-kb-asr",
     "flux-ollama",
     "flux-vespa",
+    "flux-llm-kb-rabbitmq",
     "flux-llm-kb-postgres"
 )
 

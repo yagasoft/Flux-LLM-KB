@@ -49,12 +49,15 @@ private config, mail spool, and Windows-only watched roots. API access remains l
 `http://127.0.0.1:8765/dashboard`.
 
 The local Docker profile assumes a single-user workstation with direct container
-memory ceilings. Generated production Compose files set a 40 GB Docker-managed
-budget across API 2 GB, worker 2 GB, model-runner 10 GB, paddle-runner 8 GB,
-ASR 4 GB, Ollama 6 GB, Vespa 5 GB, PostgreSQL 3 GB, and 512 MB each for the
-outbox relay, event scheduler, and callback worker. Each production service
-sets `memswap_limit` equal to `mem_limit`, so Docker cannot add swap-backed
-headroom beyond the configured cap. PostgreSQL uses a leaner local profile
+memory ceilings. Every Compose surface sets direct hard limits with
+`memswap_limit` equal to `mem_limit`, so Docker cannot add swap-backed headroom
+beyond the configured cap. Generated production Compose sums to 29.5 GB:
+model-runner 5 GB, paddle-runner 5 GB, Ollama 4 GB, ASR 3 GB, Vespa 3 GB,
+PostgreSQL 2 GB, API/worker/search-index worker 1 GB each, RabbitMQ/mail/Outlook
+workers 512 MB each, automation/governance/callback/outbox workers 384 MB each,
+and runtime-control/GPU-eviction/event workers 256 MB each. Development Compose
+uses the same shared-service limits and stays below 10 GB. PostgreSQL uses a
+leaner local profile
 (`shared_buffers=768MB`, `effective_cache_size=2GB`, `work_mem=16MB`,
 `maintenance_work_mem=256MB`, and `shm_size: "1gb"`) because Vespa and the
 model runners own the heavy retrieval and inference workload. `status-flux.ps1`

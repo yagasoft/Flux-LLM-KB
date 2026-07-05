@@ -225,11 +225,11 @@ services:
       org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
       org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
       org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
-      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
+    org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-api
     restart: unless-stopped
-    mem_limit: "2gb"
-    memswap_limit: "2gb"
+    mem_limit: "1gb"
+    memswap_limit: "1gb"
     gpus: all
     depends_on:
       postgres:
@@ -313,11 +313,11 @@ services:
       org.opencontainers.image.revision: `${FLUX_KB_IMAGE_REVISION}
       org.opencontainers.image.source: `${FLUX_KB_IMAGE_SOURCE}
       org.opencontainers.image.created: `${FLUX_KB_IMAGE_CREATED}
-      org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
+    org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-worker
     restart: unless-stopped
-    mem_limit: "2gb"
-    memswap_limit: "2gb"
+    mem_limit: "1gb"
+    memswap_limit: "1gb"
     gpus: all
     depends_on:
       postgres:
@@ -395,6 +395,8 @@ services:
     extends:
       service: worker
     container_name: flux-llm-kb-search-index-worker
+    mem_limit: "1gb"
+    memswap_limit: "1gb"
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.search_index"
@@ -403,6 +405,8 @@ services:
     extends:
       service: worker
     container_name: flux-llm-kb-mail-worker
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap"
@@ -411,6 +415,8 @@ services:
     extends:
       service: worker
     container_name: flux-llm-kb-outlook-worker
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook"
@@ -419,6 +425,8 @@ services:
     extends:
       service: worker
     container_name: flux-llm-kb-automation-worker
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.automation"
@@ -427,6 +435,8 @@ services:
     extends:
       service: worker
     container_name: flux-llm-kb-governance-worker
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.governance"
@@ -435,6 +445,8 @@ services:
     extends:
       service: worker
     container_name: flux-llm-kb-runtime-control-worker
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
@@ -443,6 +455,8 @@ services:
     extends:
       service: worker
     container_name: flux-llm-kb-gpu-eviction-worker
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     command: >
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.gpu_eviction"
@@ -451,8 +465,8 @@ services:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-scheduler
     restart: unless-stopped
-    mem_limit: "512mb"
-    memswap_limit: "512mb"
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -472,8 +486,8 @@ services:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-callback-worker
     restart: unless-stopped
-    mem_limit: "512mb"
-    memswap_limit: "512mb"
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -493,8 +507,8 @@ services:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-audit-worker
     restart: unless-stopped
-    mem_limit: "512mb"
-    memswap_limit: "512mb"
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -514,8 +528,8 @@ services:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-dashboard-worker
     restart: unless-stopped
-    mem_limit: "512mb"
-    memswap_limit: "512mb"
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -535,8 +549,8 @@ services:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-event-diagnostics-worker
     restart: unless-stopped
-    mem_limit: "512mb"
-    memswap_limit: "512mb"
+    mem_limit: "256mb"
+    memswap_limit: "256mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -556,8 +570,8 @@ services:
     image: flux-llm-kb-worker:`${FLUX_KB_IMAGE_TAG}
     container_name: flux-llm-kb-outbox-relay
     restart: unless-stopped
-    mem_limit: "512mb"
-    memswap_limit: "512mb"
+    mem_limit: "384mb"
+    memswap_limit: "384mb"
     depends_on:
       postgres:
         condition: service_healthy
@@ -582,8 +596,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-asr
     restart: unless-stopped
-    mem_limit: "4gb"
-    memswap_limit: "4gb"
+    mem_limit: "3gb"
+    memswap_limit: "3gb"
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -629,8 +643,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-model-runner
     restart: unless-stopped
-    mem_limit: "10gb"
-    memswap_limit: "10gb"
+    mem_limit: "5gb"
+    memswap_limit: "5gb"
     gpus: all
     depends_on:
       paddle-runner:
@@ -690,8 +704,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-llm-kb-paddle-runner
     restart: unless-stopped
-    mem_limit: "8gb"
-    memswap_limit: "8gb"
+    mem_limit: "5gb"
+    memswap_limit: "5gb"
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -742,8 +756,8 @@ services:
       org.opencontainers.image.version: `${FLUX_KB_IMAGE_VERSION}
     container_name: flux-ollama
     restart: unless-stopped
-    mem_limit: "6gb"
-    memswap_limit: "6gb"
+    mem_limit: "4gb"
+    memswap_limit: "4gb"
     gpus: all
     environment:
       NVIDIA_VISIBLE_DEVICES: all
@@ -765,8 +779,8 @@ services:
     image: vespaengine/vespa:8
     container_name: flux-vespa
     restart: unless-stopped
-    mem_limit: "5gb"
-    memswap_limit: "5gb"
+    mem_limit: "3gb"
+    memswap_limit: "3gb"
     environment:
       VESPA_CONFIGSERVER_JVMARGS: "-Xms128m -Xmx512m"
     ports:
@@ -785,8 +799,8 @@ services:
     image: rabbitmq:4.3-management
     container_name: flux-llm-kb-rabbitmq
     restart: unless-stopped
-    mem_limit: "1gb"
-    memswap_limit: "1gb"
+    mem_limit: "512mb"
+    memswap_limit: "512mb"
     environment:
       RABBITMQ_DEFAULT_USER: flux
       RABBITMQ_DEFAULT_PASS: flux
@@ -806,8 +820,8 @@ services:
     image: postgres:16
     container_name: flux-llm-kb-postgres
     restart: unless-stopped
-    mem_limit: "3gb"
-    memswap_limit: "3gb"
+    mem_limit: "2gb"
+    memswap_limit: "2gb"
     shm_size: "1gb"
     command: >
       postgres
