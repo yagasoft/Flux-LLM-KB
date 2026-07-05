@@ -40,6 +40,16 @@ def test_complete_feature_script_orders_cleanup_after_deploy_probe():
     assert deploy_index < probe_index < mcp_probe_index < reclaim_index < repair_index < cleanup_index
 
 
+def test_complete_feature_script_retries_transient_mcp_transport_closure():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert "$McpReadinessProbeAttempts = 3" in script
+    assert "transport_closed" in script
+    assert "temporary_unavailable" in script
+    assert "Start-Sleep -Seconds 5" in script
+    assert "MCP readiness failed with transient status" in script
+
+
 def test_status_script_reports_blocked_required_dashboard_health():
     script = (ROOT / "scripts" / "deploy" / "status-flux.ps1").read_text(encoding="utf-8")
 
