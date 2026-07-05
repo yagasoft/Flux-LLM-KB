@@ -1196,6 +1196,25 @@ def test_cli_event_subscriber_run_invokes_event_subscriber(monkeypatch, capsys):
     assert calls == [{"queue_name": "flux.events.audit", "subscriber_name": "audit"}]
 
 
+def test_cli_event_repair_capture_command_storm_defaults_to_dry_run(monkeypatch, capsys):
+    calls = []
+
+    fake_module = SimpleNamespace(
+        repair_capture_command_storm=lambda **kwargs: calls.append(kwargs) or {"applied": kwargs["apply"]}
+    )
+    monkeypatch.setitem(sys.modules, "flux_llm_kb.event_repair", fake_module)
+
+    assert cli.main(["event", "repair-capture-command-storm"]) == 0
+    dry_run_payload = json.loads(capsys.readouterr().out)
+    assert dry_run_payload == {"applied": False}
+    assert calls == [{"apply": False, "confirm": None, "purge_rabbitmq": False}]
+
+    assert cli.main(["event", "repair-capture-command-storm", "--apply", "--confirm", "broker-claim-storm", "--purge-rabbitmq"]) == 0
+    apply_payload = json.loads(capsys.readouterr().out)
+    assert apply_payload == {"applied": True}
+    assert calls[-1] == {"apply": True, "confirm": "broker-claim-storm", "purge_rabbitmq": True}
+
+
 def test_cli_search_index_status_sync_and_rebuild_use_service(monkeypatch, capsys):
     from flux_llm_kb import service
 

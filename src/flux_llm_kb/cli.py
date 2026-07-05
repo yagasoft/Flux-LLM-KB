@@ -462,6 +462,13 @@ def main(argv: list[str] | None = None) -> int:
     event_scheduler_run.add_argument("--once", action="store_true")
     event_scheduler_run.add_argument("--interval", type=float, default=30.0)
     event_scheduler_run.add_argument("--limit", type=int, default=25)
+    event_repair_storm = event_subparsers.add_parser(
+        "repair-capture-command-storm",
+        help="Repair duplicate capture command rows from a broker claim storm",
+    )
+    event_repair_storm.add_argument("--apply", action="store_true")
+    event_repair_storm.add_argument("--confirm")
+    event_repair_storm.add_argument("--purge-rabbitmq", action="store_true")
 
     acceleration_parser = subparsers.add_parser("acceleration", help="Inspect V2.8 acceleration capability and queue status")
     acceleration_subparsers = acceleration_parser.add_subparsers(dest="acceleration_command", required=True)
@@ -1177,6 +1184,14 @@ def _event_command(args: argparse.Namespace) -> int:
         from .event_scheduler import run_scheduler
 
         payload = run_scheduler(once=args.once, interval_seconds=args.interval, limit=args.limit)
+    elif args.event_command == "repair-capture-command-storm":
+        from .event_repair import repair_capture_command_storm
+
+        payload = repair_capture_command_storm(
+            apply=args.apply,
+            confirm=args.confirm,
+            purge_rabbitmq=args.purge_rabbitmq,
+        )
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.event_command)
     print(json.dumps(payload, indent=2, sort_keys=True))

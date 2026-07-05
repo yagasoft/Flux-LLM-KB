@@ -541,7 +541,7 @@ def create_app(*, start_watcher: bool = False, start_broker_consumer: bool = Fal
         raise RuntimeError("Install host agent REST support with `pip install -e .[api]`") from exc
 
     watcher_loop = HostAgentWatcherLoop() if start_watcher else None
-    worker_loop = HostAgentWorkerLoop() if start_watcher else None
+    worker_loop = HostAgentWorkerLoop() if start_watcher and not start_broker_consumer else None
     broker_consumer_loop = HostAgentBrokerConsumerLoop() if start_broker_consumer else None
 
     if watcher_loop is not None or worker_loop is not None or broker_consumer_loop is not None:

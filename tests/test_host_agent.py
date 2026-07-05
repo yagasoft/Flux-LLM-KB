@@ -181,7 +181,7 @@ def test_host_agent_benchmark_endpoint_routes_to_service(monkeypatch):
 @pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
 )
-def test_host_agent_startup_runs_watcher_and_worker_loops(monkeypatch):
+def test_host_agent_startup_with_broker_consumer_skips_legacy_worker_loop(monkeypatch):
     from fastapi.testclient import TestClient
 
     events: list[str] = []
@@ -213,12 +213,55 @@ def test_host_agent_startup_runs_watcher_and_worker_loops(monkeypatch):
 
     with TestClient(host_agent.create_app(start_watcher=True, start_broker_consumer=True)):
         assert "watcher-start" in events
-        assert "worker-start" in events
+        assert "worker-start" not in events
         assert "broker-start" in events
 
     assert "watcher-stop" in events
-    assert "worker-stop" in events
+    assert "worker-stop" not in events
     assert "broker-stop" in events
+
+
+@pytest.mark.filterwarnings(
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning"
+)
+def test_host_agent_startup_without_broker_consumer_keeps_legacy_worker_fallback(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    events: list[str] = []
+
+    class FakeWatcherLoop:
+        def start(self):
+            events.append("watcher-start")
+
+        def stop(self):
+            events.append("watcher-stop")
+
+    class FakeWorkerLoop:
+        def start(self):
+            events.append("worker-start")
+
+        def stop(self):
+            events.append("worker-stop")
+
+    class FakeBrokerConsumerLoop:
+        def start(self):
+            events.append("broker-start")
+
+        def stop(self):
+            events.append("broker-stop")
+
+    monkeypatch.setattr(host_agent, "HostAgentWatcherLoop", lambda: FakeWatcherLoop())
+    monkeypatch.setattr(host_agent, "HostAgentWorkerLoop", lambda: FakeWorkerLoop(), raising=False)
+    monkeypatch.setattr(host_agent, "HostAgentBrokerConsumerLoop", lambda: FakeBrokerConsumerLoop(), raising=False)
+
+    with TestClient(host_agent.create_app(start_watcher=True, start_broker_consumer=False)):
+        assert "watcher-start" in events
+        assert "worker-start" in events
+        assert "broker-start" not in events
+
+    assert "watcher-stop" in events
+    assert "worker-stop" in events
+    assert "broker-stop" not in events
 
 
 def test_host_agent_broker_consumer_uses_host_agent_queue(monkeypatch):
