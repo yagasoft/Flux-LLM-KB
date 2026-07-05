@@ -42,8 +42,9 @@ def test_dockerfile_uses_locked_wheelhouse_constraints() -> None:
     assert "--constraint /tmp/requirements-docker.lock" in dockerfile
     assert "--constraint /tmp/requirements-paddle.lock" in dockerfile
     assert "wheelhouse_find_links=\"--find-links /opt/flux-durable-wheelhouse --find-links /opt/flux-wheelhouse\"" in dockerfile
+    assert 'build_requirements = list(config.get("build-system", {}).get("requires", []))' in dockerfile
+    assert 'requirements = build_requirements + list(config["project"]["dependencies"])' in dockerfile
     assert "--no-index $wheelhouse_find_links --constraint \"$constraint\"" in dockerfile
-    assert "$wheelhouse_find_links $pip_index_args $pip_extra_index_args --constraint \"$constraint\"" in dockerfile
     assert "download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock" in dockerfile
     assert "download_requirements /opt/flux-paddle/bin/python /tmp/requirements-paddle.txt /tmp/requirements-paddle.lock" in dockerfile
     assert "aio-pika==9.6.2" in runtime_lock
@@ -62,6 +63,20 @@ def test_dockerfile_uses_locked_wheelhouse_constraints() -> None:
     assert "nvidia-cuda-cupti-cu12==12.6.80" in paddle_lock
     assert "nvidia-cublas-cu12==12.6.4.1" in paddle_lock
     assert "nvidia-cudnn-cu12==9.5.1.17" in paddle_lock
+
+
+def test_dockerfile_dependency_downloads_are_offline_only() -> None:
+    dockerfile = Path("Dockerfile").read_text(encoding="utf-8")
+
+    assert 'ARG PIP_OFFLINE' not in dockerfile
+    assert 'ARG PIP_INDEX_URL=""' not in dockerfile
+    assert "PADDLE_GPU_INDEX_URL" not in dockerfile
+    assert "PYTORCH_GPU_INDEX_URL" not in dockerfile
+    assert "pip_index_args" not in dockerfile
+    assert "pip_extra_index_args" not in dockerfile
+    assert "--extra-index-url" not in dockerfile
+    assert "--index-url" not in dockerfile
+    assert "Required Docker wheels are missing from the persistent wheelhouse image" in dockerfile
 
 
 def test_dockerfile_materializes_persistent_wheelhouse_before_install() -> None:
@@ -83,8 +98,7 @@ def test_dockerfile_materializes_persistent_wheelhouse_before_install() -> None:
     assert "pip install --dry-run" not in dockerfile
     assert "--no-index $wheelhouse_find_links --constraint \"$constraint\" --dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
     assert "--dest /opt/flux-wheelhouse -r \"$requirements\"" in dockerfile
-    assert 'ARG PIP_OFFLINE=true' in dockerfile
-    assert 'if [ "$PIP_OFFLINE" = "true" ]' in dockerfile
+    assert "PIP_OFFLINE" not in dockerfile
 
 
 def test_dockerfile_builds_isolated_paddle_runtime_from_same_wheelhouse() -> None:
@@ -140,10 +154,6 @@ def test_dockerfile_installs_mcp_extra_for_containerized_codex_retrieval() -> No
     assert "nvidia/cublas/lib" in dockerfile
     assert "nvidia/cudnn/lib" in dockerfile
     assert "nvidia/nccl/lib" in dockerfile
-    assert 'ARG PADDLE_GPU_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu126/"' in dockerfile
-    assert 'ARG PYTORCH_GPU_INDEX_URL="https://download.pytorch.org/whl/cu126"' in dockerfile
-    assert 'pip_extra_index_args="$pip_extra_index_args --extra-index-url $PADDLE_GPU_INDEX_URL"' in dockerfile
-    assert 'pip_extra_index_args="$pip_extra_index_args --extra-index-url $PYTORCH_GPU_INDEX_URL"' in dockerfile
 
 
 def test_dockerfile_keeps_compiler_for_quantized_qwen_runtime() -> None:
@@ -167,11 +177,10 @@ def test_dockerfile_pip_build_args_do_not_invalidate_system_package_layer() -> N
 
     apt_install = dockerfile.index("apt-get install")
     apt_mirror_arg = dockerfile.index('ARG APT_DEBIAN_MIRROR_URL=""')
-    pip_index_arg = dockerfile.index('ARG PIP_INDEX_URL=""')
     pyproject_copy = dockerfile.index("COPY pyproject.toml ./")
 
     assert apt_mirror_arg < apt_install
-    assert apt_install < pip_index_arg < pyproject_copy
+    assert apt_install < pyproject_copy
 
 
 def test_dockerfile_can_reuse_existing_runtime_base_for_updates() -> None:
@@ -189,6 +198,9 @@ def test_dockerfile_can_reuse_existing_runtime_base_for_updates() -> None:
 def test_docker_compose_defines_corpus_worker_service() -> None:
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
+    assert "additional_contexts:" in compose
+    assert "flux-wheelhouse: docker-image://flux-llm-kb-wheelhouse:local" in compose
+    assert "flux-wheelhouse=." not in compose
     assert "  worker:" in compose
     assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus" in compose
     assert "  outlook-worker:" in compose

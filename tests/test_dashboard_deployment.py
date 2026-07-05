@@ -16,6 +16,8 @@ def test_docker_api_service_hosts_dashboard():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "api:" in compose
+    assert "additional_contexts:" in compose
+    assert "flux-wheelhouse: docker-image://flux-llm-kb-wheelhouse:local" in compose
     assert "8765:8765" in compose
     assert "FLUX_KB_DATABASE_URL" in compose
     assert "uvicorn" in dockerfile

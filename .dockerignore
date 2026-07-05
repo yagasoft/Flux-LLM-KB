@@ -6,6 +6,7 @@ node_modules
 private
 runtime
 data
+package-cache
 exports/private
 wiki/private
 transcripts

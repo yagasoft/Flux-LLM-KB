@@ -23,6 +23,7 @@ def test_record_model_activity_sanitizes_metadata_and_completes(monkeypatch):
     monkeypatch.setattr(model_activity.database, "start_model_activity_event", fake_start, raising=False)
     monkeypatch.setattr(model_activity.database, "finish_model_activity_event", fake_finish, raising=False)
     monkeypatch.setattr(model_activity, "_utc_now", lambda: datetime(2026, 7, 3, 1, 25, 58, tzinfo=UTC))
+    monkeypatch.setattr(model_activity.time, "monotonic", lambda: 100.0)
 
     with model_activity.caller_surface("mcp"):
         with model_activity.record_model_activity(
@@ -69,6 +70,7 @@ def test_resident_gpu_model_records_model_loading_activity(monkeypatch):
 
     monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **kwargs: started.append(kwargs) or "resident-event", raising=False)
     monkeypatch.setattr(model_activity.database, "finish_model_activity_event", lambda **kwargs: finished.append(kwargs), raising=False)
+    monkeypatch.setattr(model_activity.time, "monotonic", lambda: 100.0)
 
     scheduler = InProcessGpuScheduler(GpuSchedulerConfig(enabled=True, mode="in_process"))
 

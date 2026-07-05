@@ -8,11 +8,13 @@ param(
     [switch]$RefreshNpmDependencies,
     [switch]$KeepWorktree,
     [int]$StepTimeoutSeconds = 600,
+    [int]$PytestStepTimeoutSeconds = 1200,
     [int]$DeployStepTimeoutSeconds = 1800,
     [string]$PytestWorkers = "auto",
     [switch]$SkipWorkerStart,
     [switch]$AllowPipDownloads,
     [switch]$RefreshPipDependencies,
+    [string]$NpmCachePath = $(if ($env:FLUX_KB_NPM_CACHE_PATH) { $env:FLUX_KB_NPM_CACHE_PATH } else { "D:\FluxLLMKB\package-cache\npm" }),
     [string]$PostDeployReclaimOutlookProfile = ""
 )
 
@@ -351,8 +353,13 @@ if ($blocked.Count -gt 0) {
 
 $McpReadinessProbeCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli codex mcp-readiness --json'
 
-$DashboardNpmInstallCommand = 'npm --prefix dashboard ci --include=dev'
+$DashboardNpmInstallCommand = @'
+$NpmCachePath = $env:FLUX_KB_NPM_CACHE_PATH
+New-Item -ItemType Directory -Force -Path "$NpmCachePath" | Out-Null
+npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --prefer-offline
+'@
 $DashboardCacheCheckCommand = @'
+$NpmCachePath = $env:FLUX_KB_NPM_CACHE_PATH
 $requiredTools = @(
     @{ Name = "vitest CLI"; Path = Join-Path (Get-Location) "dashboard\node_modules\vitest\dist\cli.js" },
     @{ Name = "vite CLI"; Path = Join-Path (Get-Location) "dashboard\node_modules\vite\bin\vite.js" }
@@ -364,7 +371,7 @@ foreach ($tool in $requiredTools) {
     }
 }
 if ($missing.Count -gt 0) {
-    throw "Dashboard dependency cache is incomplete. Missing $($missing -join '; '). Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev. Rerun closeout without npm flags after seeding, or rerun with -AllowNpmInstall only when intentionally refreshing npm dependencies."
+    throw "Dashboard dependency cache is incomplete. Missing $($missing -join '; '). Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev --cache `"$NpmCachePath`" --prefer-offline. Rerun closeout without npm flags after seeding, or rerun with -AllowNpmInstall only when intentionally refreshing npm dependencies."
 }
 "Skipped dashboard package install; existing dashboard node_modules verified."
 '@
@@ -385,6 +392,7 @@ $script:LogRoot = Join-Path $MainRoot ".agents\run-logs"
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 $script:Steps = @()
 $script:FailedStep = $null
+$env:FLUX_KB_NPM_CACHE_PATH = [System.IO.Path]::GetFullPath($NpmCachePath)
 Set-Location $MainRoot
 $pytestCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
 if ([string]::IsNullOrWhiteSpace($PytestWorkers) -or $PytestWorkers -eq "0") {
@@ -396,7 +404,7 @@ if ([string]::IsNullOrWhiteSpace($PytestWorkers) -or $PytestWorkers -eq "0") {
 
 try {
     Invoke-FeatureStep -Name "verify-main-clean" -Cwd $MainRoot -Command 'if ((git status --porcelain) -ne $null) { git status --short; exit 1 }'
-    Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand
+    Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand -TimeoutSeconds $PytestStepTimeoutSeconds
     Invoke-FeatureStep -Name "compileall" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m compileall -q src tests'
     Invoke-FeatureStep -Name "flux-lint" -Cwd $FeatureWorktree -Command '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m flux_llm_kb.cli lint'
     if (-not ($AllowNpmInstall -or $RefreshNpmDependencies)) {

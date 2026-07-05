@@ -714,7 +714,7 @@ def test_service_brief_uses_configured_token_budget(monkeypatch):
             return FakeSetting()
 
     monkeypatch.setattr(service, "SettingsService", FakeSettingsService)
-    monkeypatch.setattr(KnowledgeService, "search", lambda self, query, limit=10, **_kwargs: [])
+    monkeypatch.setattr(KnowledgeService, "_search_raw", lambda self, query, limit, **_kwargs: [])
     monkeypatch.setattr(
         service,
         "pack_context",

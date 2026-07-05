@@ -79,6 +79,7 @@ def test_complete_feature_script_verifies_cached_dashboard_dependencies_before_t
 
     assert "[switch]$AllowNpmInstall" in script
     assert "[switch]$RefreshNpmDependencies" in script
+    assert "[string]$NpmCachePath" in script
     assert "if (-not ($AllowNpmInstall -or $RefreshNpmDependencies))" in script
     assert cached_step in script
     assert online_step in script
@@ -86,9 +87,9 @@ def test_complete_feature_script_verifies_cached_dashboard_dependencies_before_t
     assert script.index(cached_step) < script.index(online_step)
     assert test_step in script
     assert build_step in script
-    assert "npm --prefix dashboard ci --include=dev" in script
+    assert 'npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --prefer-offline' in script
     assert "Skipped dashboard package install; existing dashboard node_modules verified." in script
-    assert "Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev" in script
+    assert 'Seed dashboard dependencies once with: npm --prefix dashboard ci --include=dev --cache `"$NpmCachePath`" --prefer-offline' in script
     assert "Dashboard dependency cache is incomplete" in script
 
 
@@ -99,6 +100,7 @@ def test_complete_feature_script_package_download_flags_are_independent():
     assert "[switch]$RefreshNpmDependencies" in script
     assert "[switch]$AllowPipDownloads" in script
     assert "[switch]$RefreshPipDependencies" in script
+    assert "--cache \"$NpmCachePath\"" in script
     assert "$pipOffline = -not ($AllowPipDownloads -or $RefreshPipDependencies)" in script
     assert "$deployPipOfflineValue = if ($pipOffline) { '$true' } else { '$false' }" in script
     assert "if (-not ($AllowNpmInstall -or $RefreshNpmDependencies))" in script
@@ -109,11 +111,12 @@ def test_complete_feature_script_runs_pytest_with_xdist_by_default_and_serial_es
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
     assert '[string]$PytestWorkers = "auto"' in script
+    assert "[int]$PytestStepTimeoutSeconds = 1200" in script
     assert "$pytestCommand = " in script
     assert 'python -m pytest -n $PytestWorkers --dist loadfile' in script
     assert "if ([string]::IsNullOrWhiteSpace($PytestWorkers) -or $PytestWorkers -eq \"0\")" in script
     assert "python -m pytest'" in script
-    assert 'Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand' in script
+    assert 'Invoke-FeatureStep -Name "pytest" -Cwd $FeatureWorktree -Command $pytestCommand -TimeoutSeconds $PytestStepTimeoutSeconds' in script
 
 
 def test_complete_feature_script_records_step_timings_in_json_summary():
@@ -255,7 +258,7 @@ def test_setup_docs_describe_offline_first_feature_closeout_package_flags():
     setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
 
     assert "Feature closeout through `scripts/dev/complete-feature.ps1` is also" in setup
-    assert "npm --prefix dashboard ci --include=dev" in setup
+    assert "npm --prefix dashboard ci --include=dev --cache" in setup
     assert "`-AllowNpmInstall` or `-RefreshNpmDependencies`" in setup
     assert "`-AllowPipDownloads`" in setup
     assert "`-RefreshPipDependencies`" in setup

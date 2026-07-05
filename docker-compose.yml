@@ -1,7 +1,11 @@
+x-flux-build: &flux-build
+  context: .
+  additional_contexts:
+    flux-wheelhouse: docker-image://flux-llm-kb-wheelhouse:local
+
 services:
   api:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-api
     depends_on:
       postgres:
@@ -23,8 +27,7 @@ services:
              python -m uvicorn flux_llm_kb.rest_api:create_app --factory --host 0.0.0.0 --port 8765"
 
   worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-worker
     depends_on:
       postgres:
@@ -42,8 +45,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus"
 
   search-index-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-search-index-worker
     depends_on:
       postgres:
@@ -61,8 +63,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.search_index"
 
   mail-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-mail-worker
     depends_on:
       postgres:
@@ -80,8 +81,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap"
 
   outlook-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-outlook-worker
     depends_on:
       postgres:
@@ -99,8 +99,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook"
 
   automation-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-automation-worker
     depends_on:
       postgres:
@@ -118,8 +117,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.automation"
 
   governance-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-governance-worker
     depends_on:
       postgres:
@@ -137,8 +135,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.governance"
 
   runtime-control-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-runtime-control-worker
     depends_on:
       postgres:
@@ -154,8 +151,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control"
 
   gpu-eviction-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-gpu-eviction-worker
     depends_on:
       postgres:
@@ -175,8 +171,7 @@ services:
              python -m flux_llm_kb.cli event worker run --queue flux.commands.gpu_eviction"
 
   callback-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-callback-worker
     depends_on:
       postgres:
@@ -193,8 +188,7 @@ services:
              python -m flux_llm_kb.cli event callbacks dispatch --queue flux.callbacks.dispatch"
 
   event-audit-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-event-audit-worker
     depends_on:
       postgres:
@@ -210,8 +204,7 @@ services:
              python -m flux_llm_kb.cli event subscriber run --queue flux.events.audit --subscriber audit"
 
   event-dashboard-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-event-dashboard-worker
     depends_on:
       postgres:
@@ -227,8 +220,7 @@ services:
              python -m flux_llm_kb.cli event subscriber run --queue flux.events.dashboard --subscriber dashboard"
 
   event-diagnostics-worker:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-event-diagnostics-worker
     depends_on:
       postgres:
@@ -244,8 +236,7 @@ services:
              python -m flux_llm_kb.cli event subscriber run --queue flux.events.diagnostics --subscriber diagnostics"
 
   event-scheduler:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-event-scheduler
     depends_on:
       postgres:
@@ -261,8 +252,7 @@ services:
              python -m flux_llm_kb.cli event scheduler run --interval 30 --limit 25"
 
   outbox-relay:
-    build:
-      context: .
+    build: *flux-build
     container_name: flux-llm-kb-outbox-relay
     depends_on:
       postgres:

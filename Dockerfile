@@ -59,13 +59,6 @@ RUN --mount=type=cache,id=flux-llm-kb-apt-cache,target=/var/cache/apt,sharing=lo
             zstd; \
     fi
 
-ARG PIP_INDEX_URL=""
-ARG PADDLE_GPU_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu126/"
-ARG PYTORCH_GPU_INDEX_URL="https://download.pytorch.org/whl/cu126"
-ARG PIP_OFFLINE=true
-ARG PIP_DEFAULT_TIMEOUT=30
-ARG PIP_RETRIES=2
-
 COPY pyproject.toml ./
 COPY docker/requirements-docker.lock /tmp/requirements-docker.lock
 COPY docker/requirements-paddle.lock /tmp/requirements-paddle.lock
@@ -76,9 +69,10 @@ from pathlib import Path
 
 config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 optional = config["project"].get("optional-dependencies", {})
+build_requirements = list(config.get("build-system", {}).get("requires", []))
 
 def write_requirements(path: str, extras: tuple[str, ...]) -> None:
-    requirements = list(config["project"]["dependencies"])
+    requirements = build_requirements + list(config["project"]["dependencies"])
     for extra in extras:
         requirements.extend(optional.get(extra, []))
     Path(path).write_text("\n".join(requirements) + "\n", encoding="utf-8")
@@ -96,14 +90,6 @@ RUN --mount=type=bind,from=flux-wheelhouse,target=/opt/flux-durable-wheelhouse,r
     /opt/flux-paddle/bin/python -m pip --version; \
     mkdir -p /opt/flux-wheelhouse "$PIP_CACHE_DIR"; \
     wheelhouse_find_links="--find-links /opt/flux-durable-wheelhouse --find-links /opt/flux-wheelhouse"; \
-    pip_extra_index_args=""; \
-    if [ -n "$PADDLE_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PADDLE_GPU_INDEX_URL"; fi; \
-    if [ -n "$PYTORCH_GPU_INDEX_URL" ]; then pip_extra_index_args="$pip_extra_index_args --extra-index-url $PYTORCH_GPU_INDEX_URL"; fi; \
-    if [ -n "$PIP_INDEX_URL" ]; then \
-        pip_index_args="--index-url $PIP_INDEX_URL"; \
-    else \
-        pip_index_args=""; \
-    fi; \
     download_requirements() { \
         python_bin="$1"; \
         requirements="$2"; \
@@ -111,11 +97,8 @@ RUN --mount=type=bind,from=flux-wheelhouse,target=/opt/flux-durable-wheelhouse,r
         if "$python_bin" -m pip download --only-binary=:all: --no-index $wheelhouse_find_links --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; then \
             return 0; \
         fi; \
-        if [ "$PIP_OFFLINE" = "true" ]; then \
-            echo "Required Docker wheels are missing from the durable wheelhouse and PIP_OFFLINE=true; seed FLUX_KB_PIP_WHEELHOUSE_PATH before rebuilding." >&2; \
-            return 1; \
-        fi; \
-        "$python_bin" -m pip download --only-binary=:all: --timeout "$PIP_DEFAULT_TIMEOUT" --retries "$PIP_RETRIES" $wheelhouse_find_links $pip_index_args $pip_extra_index_args --constraint "$constraint" --dest /opt/flux-wheelhouse -r "$requirements"; \
+        echo 'Required Docker wheels are missing from the persistent wheelhouse image. Refresh it with .\scripts\deploy\update-flux.ps1 -PipOffline:$false before rebuilding.' >&2; \
+        return 1; \
     }; \
     download_requirements python /tmp/requirements-docker.txt /tmp/requirements-docker.lock; \
     python -m pip install --no-index $wheelhouse_find_links --constraint /tmp/requirements-docker.lock -r /tmp/requirements-docker.txt; \

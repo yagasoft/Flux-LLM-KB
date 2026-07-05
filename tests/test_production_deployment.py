@@ -61,7 +61,7 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
     assert "Invoke-FluxCodexPluginInstall" in install
     assert "-m flux_llm_kb.cli codex install-plugin" in install
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in install
-    assert '"--force-reinstall", "--no-deps", "--no-cache-dir", $SourceRoot' in install
+    assert '"--force-reinstall", "--no-deps", "--no-build-isolation", $SourceRoot' in install
     assert "pip install production package" in install
     assert "GpuMode" in install
     assert "Assert-FluxGpuAvailable" in install
@@ -113,7 +113,7 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "Invoke-FluxCodexPluginInstall" in update
     assert "-m flux_llm_kb.cli codex install-plugin" in update
     assert '"$SourceRoot[api,corpus,mail,mcp,processors]"' in update
-    assert '"--force-reinstall", "--no-deps", "--no-cache-dir", $SourceRoot' in update
+    assert '"--force-reinstall", "--no-deps", "--no-build-isolation", $SourceRoot' in update
     assert "pip install production package" in update
     assert "Register-FluxTask" in update
     assert "New-FluxHostTaskTriggers" in update
@@ -613,8 +613,8 @@ def test_dockerfile_installs_practical_extractor_pack():
         assert dependency in pyproject
     assert '"paddlepaddle-gpu==3.3.1; platform_system == \'Linux\'"' in pyproject
     assert "paddlepaddle>=3.0" not in pyproject
-    assert "PADDLE_GPU_INDEX_URL" in dockerfile
-    assert "PYTORCH_GPU_INDEX_URL" in dockerfile
+    assert "PADDLE_GPU_INDEX_URL" not in dockerfile
+    assert "PYTORCH_GPU_INDEX_URL" not in dockerfile
     assert "PaddleGpuIndexUrl" in install
     assert "PytorchGpuIndexUrl" in install
     assert "PaddleGpuIndexUrl" in update
@@ -696,14 +696,28 @@ def test_production_deploy_defaults_match_prefilled_wheel_cache_args():
         assert "[int]$PipTimeoutSeconds = 180" in script
         assert "[int]$PipRetries = 20" in script
         assert '[bool]$PipOffline = $true' in script
+        assert "[string]$PipWheelhousePath = $env:FLUX_KB_PIP_WHEELHOUSE_PATH" in script
+        assert "[string]$PipWheelhouseImage = $env:FLUX_KB_PIP_WHEELHOUSE_IMAGE" in script
         assert '"--pull=false"' in script
         assert '"--network", $dockerBuildNetwork' in script
-    assert '"--build-arg", "PIP_OFFLINE=$pipOfflineValue"' in install
-    assert '$dockerBuildNetwork = if ($PipOffline -and $dockerBase.SkipSystemPackages) { "none" } else { "default" }' in install
-    assert '"--build-arg", "PIP_OFFLINE=true"' in update
-    assert '$dockerBuildNetwork = if ($dockerBase.SkipSystemPackages) { "none" } else { "default" }' in update
-    assert "Invoke-FluxSeedDockerWheelhouse" in update
-    assert "Durable pip wheelhouse is empty" in update
+        assert "Resolve-FluxPipWheelhousePath" in script
+        assert "Resolve-FluxPipWheelhouseImage" in script
+        assert "Invoke-FluxSeedDockerWheelhouse" in script
+        assert "Invoke-FluxSeedHostPipWheelhouse" in script
+        assert "Invoke-FluxBuildWheelhouseImage" in script
+        assert "Assert-FluxWheelhouseCacheReady" in script
+        assert 'build_requirements = list(config.get("build-system", {}).get("requires", []))' in script
+        assert 'requirements = ["pip"]' in script
+        assert 'requirements.extend(config.get("build-system", {}).get("requires", []))' in script
+        assert '"--build-context", "flux-wheelhouse=docker-image://$resolvedPipWheelhouseImage"' in script
+        assert "flux-wheelhouse=$resolvedPipWheelhousePath" not in script
+        assert '"--build-arg", "PIP_OFFLINE' not in script
+        assert '$dockerBuildNetwork = if ($dockerBase.SkipSystemPackages) { "none" } else { "default" }' in script
+        assert "Durable pip wheelhouse is empty" in script
+        assert "Pip wheelhouse image $WheelhouseImage is missing" in script
+
+    assert ".\\scripts\\deploy\\install-flux.ps1 -PipOffline:`$false" in install
+    assert ".\\scripts\\deploy\\update-flux.ps1 -PipOffline:`$false" in update
 
 
 def test_production_deploy_bounds_docker_build_and_pip_installs():
@@ -722,6 +736,31 @@ def test_production_deploy_bounds_docker_build_and_pip_installs():
         assert "TimeoutSeconds $PipInstallTimeoutSeconds" in script
         assert '"--timeout", ([string]$PipTimeoutSeconds)' in script
         assert '"--retries", ([string]$PipRetries)' in script
+        assert '"--cache-dir", $resolvedPipCachePath' in script
+        assert '"--no-index", "--find-links", $resolvedPipWheelhousePath' in script
+
+
+def test_production_package_cache_paths_are_not_pruned_or_deleted_by_default_scripts():
+    scripts = {
+        "install": _script("install-flux.ps1"),
+        "update": _script("update-flux.ps1"),
+        "complete_feature": _dev_script("complete-feature.ps1"),
+    }
+
+    for script in scripts.values():
+        lowered = script.lower()
+        assert "docker builder prune" not in lowered
+        assert "docker buildx prune" not in lowered
+        assert "buildx prune" not in lowered
+        assert "builder prune" not in lowered
+        assert "docker system prune" not in lowered
+        assert "docker image prune" not in lowered
+        assert "docker volume prune" not in lowered
+        assert "remove-item -literalpath $resolvedpipwheelhousepath" not in lowered
+        assert "remove-item -literalpath $resolvedpipcachepath" not in lowered
+        assert "remove-item -literalpath $resolvednpmcachepath" not in lowered
+        assert "rm -rf /wheelhouse" not in lowered
+        assert "rm -rf /npm-cache" not in lowered
 
 
 def test_dockerfile_declares_oci_image_traceability_labels():
@@ -833,16 +872,12 @@ def test_production_docker_base_probe_handles_missing_local_image_without_stderr
 
 
 def test_production_deploy_supports_custom_pip_index_for_gpu_wheels():
-    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
 
-    assert "ARG PIP_INDEX_URL=\"\"" in dockerfile
-    assert 'pip_index_args="--index-url $PIP_INDEX_URL"' in dockerfile
-    assert "$pip_index_args $pip_extra_index_args" in dockerfile
     for script in (install, update):
         assert "[string]$PipIndexUrl = $env:FLUX_KB_PIP_INDEX_URL" in script
-        assert '"--build-arg", "PIP_INDEX_URL=$PipIndexUrl"' in script
+        assert '"PIP_INDEX_URL=$PipIndexUrl"' in script
         assert '"--index-url", $PipIndexUrl' in script
 
 

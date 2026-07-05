@@ -111,12 +111,16 @@ Update an existing deployment from the current checkout with:
 .\scripts\deploy\update-flux.ps1 -RestartHostTasks
 ```
 
-Production Docker builds use the persistent BuildKit wheelhouse and run with
-`PIP_OFFLINE=true` by default. Runtime and Paddle dependency locks under
-`docker/` pin large GPU and AWQ-support packages to versions already expected in
-that wheelhouse. If a required wheel is missing, the build stops instead of
-downloading a replacement; seed the wheelhouse first, or pass `-PipOffline
-$false` deliberately when a networked dependency refresh is intended.
+Production Docker builds use an image-backed offline wheelhouse by default.
+`D:\FluxLLMKB\package-cache\wheelhouse` remains the canonical host cache, and
+ordinary builds reference `docker-image://flux-llm-kb-wheelhouse:local` instead
+of sending that host directory as a BuildKit client context. Runtime and Paddle
+dependency locks under `docker/` pin large GPU and AWQ-support packages to
+versions expected in the wheelhouse. If a required wheel is missing, the build
+stops instead of downloading a replacement; refresh pip dependencies explicitly
+with `.\scripts\deploy\update-flux.ps1 -PipOffline:$false`, which writes wheels
+to the host cache and rebuilds the local wheelhouse image before building from
+the cache.
 
 Feature closeout through `scripts/dev/complete-feature.ps1` is also
 offline-first by default. It verifies the cached dashboard tools under
@@ -124,7 +128,7 @@ offline-first by default. It verifies the cached dashboard tools under
 If dashboard tools are missing, seed npm dependencies once with:
 
 ```powershell
-npm --prefix dashboard ci --include=dev
+npm --prefix dashboard ci --include=dev --cache "D:\FluxLLMKB\package-cache\npm" --prefer-offline
 ```
 
 Use `-AllowNpmInstall` or `-RefreshNpmDependencies` only when intentionally
