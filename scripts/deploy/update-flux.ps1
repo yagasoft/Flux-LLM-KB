@@ -1736,7 +1736,7 @@ function Assert-FluxWheelhouseCacheReady {
         throw "Durable pip wheelhouse is empty at $WheelhousePath. Seed it explicitly with: .\scripts\deploy\update-flux.ps1 -PipOffline:`$false"
     }
     if (-not (Test-FluxDockerImageExists -Image $WheelhouseImage)) {
-        throw "Pip wheelhouse image $WheelhouseImage is missing. Seed it explicitly with: .\scripts\deploy\update-flux.ps1 -PipOffline:`$false"
+        throw "Pip wheelhouse image $WheelhouseImage is missing after offline cache validation. Prefetch missing wheels into the persistent wheelhouse, then rebuild the wheelhouse image."
     }
 }
 
@@ -2090,6 +2090,13 @@ if (-not $PipOffline) {
         -PipTimeoutSeconds $PipTimeoutSeconds `
         -PipRetries $PipRetries `
         -TimeoutSeconds $PipInstallTimeoutSeconds
+    Invoke-FluxBuildWheelhouseImage `
+        -SourceRoot $SourceRoot `
+        -WheelhousePath $resolvedPipWheelhousePath `
+        -WheelhouseImage $resolvedPipWheelhouseImage `
+        -TimeoutSeconds $DockerBuildTimeoutSeconds
+}
+if ($PipOffline -and -not (Test-FluxDockerImageExists -Image $resolvedPipWheelhouseImage) -and ((Get-FluxWheelhouseFileCount -WheelhousePath $resolvedPipWheelhousePath) -gt 0)) {
     Invoke-FluxBuildWheelhouseImage `
         -SourceRoot $SourceRoot `
         -WheelhousePath $resolvedPipWheelhousePath `

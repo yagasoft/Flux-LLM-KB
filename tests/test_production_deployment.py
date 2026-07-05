@@ -771,6 +771,22 @@ def test_production_deploy_defaults_match_prefilled_wheel_cache_args():
     assert ".\\scripts\\deploy\\update-flux.ps1 -PipOffline:`$false" in update
 
 
+def test_production_deploy_rebuilds_missing_wheelhouse_image_from_offline_cache():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        offline_rebuild = (
+            'if ($PipOffline -and -not (Test-FluxDockerImageExists -Image $resolvedPipWheelhouseImage) '
+            '-and ((Get-FluxWheelhouseFileCount -WheelhousePath $resolvedPipWheelhousePath) -gt 0))'
+        )
+        offline_rebuild_index = script.index(offline_rebuild)
+        assert script.index("Invoke-FluxBuildWheelhouseImage", offline_rebuild_index) < script.index(
+            "Assert-FluxWheelhouseCacheReady", offline_rebuild_index
+        )
+        assert "Pip wheelhouse image $WheelhouseImage is missing. Seed it explicitly" not in script
+
+
 def test_production_deploy_bounds_docker_build_and_pip_installs():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
