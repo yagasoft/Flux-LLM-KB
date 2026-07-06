@@ -339,7 +339,22 @@ exit $LASTEXITCODE
 
 $DashboardHealthProbeCommand = @'
 $dashboardHealthUri = "http://127.0.0.1:8765" + "/api/dashboard/health"
-$health = Invoke-RestMethod -Uri $dashboardHealthUri -TimeoutSec 15
+$lastError = $null
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+        $health = Invoke-RestMethod -Uri $dashboardHealthUri -TimeoutSec 30
+        $lastError = $null
+        break
+    } catch {
+        $lastError = $_
+        if ($attempt -lt 3) {
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+if ($lastError) {
+    throw $lastError
+}
 $blocked = @()
 if (-not $health.database -or -not $health.database.checks) {
     $blocked += "database.checks missing"
