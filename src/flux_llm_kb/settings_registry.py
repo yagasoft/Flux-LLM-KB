@@ -643,6 +643,17 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         validator=_range_int(1, 600),
     ),
     SettingDefinition(
+        key="retrieval.search_index_embedding_timeout_seconds",
+        category="retrieval",
+        default=60,
+        value_type="int",
+        description="Bulk search-index embedding request timeout before retrying as model-runner backpressure.",
+        env_var="FLUX_KB_RETRIEVAL_SEARCH_INDEX_EMBEDDING_TIMEOUT_SECONDS",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("retrieval", "worker", "model-runner"),
+        validator=_range_int(30, 3600),
+    ),
+    SettingDefinition(
         key="retrieval.rerank_wait_timeout_seconds",
         category="retrieval",
         default=5,

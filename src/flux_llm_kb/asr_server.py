@@ -129,6 +129,10 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
     app = FastAPI(title="Flux local ASR service")
     _clear_startup_residency(scheduler)
 
+    @app.get("/livez")
+    def livez() -> dict[str, Any]:
+        return {"ok": True, "service": "asr"}
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         file_status = model_file_status(service_config.model_path)

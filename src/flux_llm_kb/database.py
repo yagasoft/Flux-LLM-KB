@@ -1572,6 +1572,17 @@ def _configured_embedding_wait_timeout_seconds() -> float:
     )
 
 
+def _configured_search_index_embedding_timeout_seconds() -> float:
+    return float(
+        _retrieval_int_setting(
+            "retrieval.search_index_embedding_timeout_seconds",
+            60,
+            minimum=30,
+            maximum=3600,
+        )
+    )
+
+
 def _query_embedding_cache_limits() -> tuple[int, int]:
     ttl_seconds = _retrieval_int_setting(
         "retrieval.query_embedding_cache_ttl_seconds",
@@ -1690,6 +1701,24 @@ def _rerank_fallback_reason(exc: Exception) -> str | None:
         if "503" in message or "429" in message or "scheduler" in message or "busy" in message or "timeout" in message:
             return "model_runner_error"
     return None
+
+
+def _raise_retryable_search_index_embedding_exception(exc: Exception) -> None:
+    try:
+        from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout
+        from .model_runner import ModelRunnerBusy, ModelRunnerError
+    except Exception:
+        GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
+    if isinstance(exc, TimeoutError):
+        raise ModelRunnerBusy(str(exc) or "search-index embedding request timed out", retry_after_seconds=1.0) from exc
+    if isinstance(exc, ModelRunnerBusy):
+        raise exc
+    if isinstance(exc, (GpuLeaseRejected, GpuLeaseTimeout)):
+        raise exc
+    if isinstance(exc, ModelRunnerError):
+        message = str(exc).lower()
+        if any(marker in message for marker in ("timed out", "timeout", "scheduler", "busy", "503", "429")):
+            raise ModelRunnerBusy(str(exc), retry_after_seconds=1.0) from exc
 
 
 def _rerank_fallback_results(
@@ -16916,6 +16945,7 @@ def sync_search_index(
     provider = embedding_provider or SnowflakeEmbeddingProvider(
         model=SNOWFLAKE_EMBEDDING_MODEL,
         dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        timeout_seconds=_configured_search_index_embedding_timeout_seconds(),
     )
     resolved_vespa_base_url = vespa_base_url or os.environ.get("FLUX_KB_RETRIEVAL_VESPA_BASE_URL") or "http://127.0.0.1:8080"
     vespa = adapter or VespaSearchAdapter(base_url=resolved_vespa_base_url)
@@ -16959,7 +16989,14 @@ def sync_search_index(
         return result
 
     psycopg = _load_psycopg()
-    with psycopg.connect(url or database_url()) as conn:
+    db_url = url or database_url()
+
+    def with_cursor(callback):
+        with psycopg.connect(db_url) as conn:
+            with conn.cursor() as cur:
+                return callback(cur)
+
+    with psycopg.connect(db_url) as conn:
         with conn.cursor() as cur:
             stale_records = _fetch_stale_search_index_records(
                 cur,
@@ -17016,77 +17053,91 @@ def sync_search_index(
             if not pending:
                 return finish_result()
 
-            batch_size = int(result["embedding_batch_size"])
-            for offset in range(0, len(pending), batch_size):
-                batch_rows = pending[offset : offset + batch_size]
-                result["embedding_batches"] += 1
-                inputs = [
-                    EmbeddingInput(
-                        owner_table=str(row["owner_table"]),
-                        owner_id=str(row["owner_id"]),
-                        text=str(row["index_text"]),
-                        model=SNOWFLAKE_EMBEDDING_MODEL,
-                        dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-                    )
-                    for row in batch_rows
-                ]
-                try:
-                    embeddings = provider.embed_batch(inputs)
-                    if len(embeddings) != len(batch_rows):
-                        raise ValueError("embedding provider returned a different number of embeddings than requested")
-                except Exception as exc:
-                    remaining_rows = pending[offset:]
-                    for row in remaining_rows:
-                        _upsert_search_index_record(
-                            cur,
-                            row=row,
-                            status="failed",
-                            last_error=str(exc),
-                            metadata={"failed_stage": "embedding"},
-                        )
-                    result["failed"] += len(remaining_rows)
-                    result["errors"].append(str(exc)[:300])
-                    return finish_result()
+    batch_size = int(result["embedding_batch_size"])
+    for offset in range(0, len(pending), batch_size):
+        batch_rows = pending[offset : offset + batch_size]
+        result["embedding_batches"] += 1
+        inputs = [
+            EmbeddingInput(
+                owner_table=str(row["owner_table"]),
+                owner_id=str(row["owner_id"]),
+                text=str(row["index_text"]),
+                model=SNOWFLAKE_EMBEDDING_MODEL,
+                dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+            )
+            for row in batch_rows
+        ]
+        try:
+            embeddings = provider.embed_batch(inputs)
+            if len(embeddings) != len(batch_rows):
+                raise ValueError("embedding provider returned a different number of embeddings than requested")
+        except Exception as exc:
+            _raise_retryable_search_index_embedding_exception(exc)
+            remaining_rows = pending[offset:]
 
-                for row, embedding in zip(batch_rows, embeddings):
-                    row = {
-                        **row,
-                        "embedding": embedding.vector,
-                        "embedding_model": embedding.model,
-                        "embedding_dimensions": embedding.dimensions,
-                        "source_hash": str(embedding.metadata.get("source_hash") or row["source_hash"]),
-                    }
-                    try:
-                        feed_started = time.perf_counter()
-                        vespa.feed(build_vespa_document(row))
-                    except Exception as exc:
-                        result["failed"] += 1
-                        result["errors"].append(str(exc)[:300])
-                        _upsert_search_index_record(
-                            cur,
-                            row=row,
-                            status="failed",
-                            last_error=str(exc),
-                            metadata={"failed_stage": "feed"},
-                        )
-                        continue
-                    latency_ms = (time.perf_counter() - feed_started) * 1000
-                    result["vespa_feed_count"] += 1
-                    result["vespa_feed_latency_ms_total"] = round(float(result["vespa_feed_latency_ms_total"]) + latency_ms, 3)
-                    result["vespa_feed_latency_ms_max"] = round(max(float(result["vespa_feed_latency_ms_max"]), latency_ms), 3)
+            def mark_embedding_failures(cur):
+                for row in remaining_rows:
                     _upsert_search_index_record(
                         cur,
                         row=row,
-                        status="indexed",
-                        last_error=None,
-                        metadata={
-                            "rank_profile": "hybrid",
-                            "source": "search_index_sync",
-                            "search_index_text_max_chars": _search_index_text_max_chars(),
-                            "body_truncated_chars": int(row.get("search_index_truncated_chars") or 0),
-                        },
+                        status="failed",
+                        last_error=str(exc),
+                        metadata={"failed_stage": "embedding"},
                     )
-                    result["indexed"] += 1
+
+            with_cursor(mark_embedding_failures)
+            result["failed"] += len(remaining_rows)
+            result["errors"].append(str(exc)[:300])
+            return finish_result()
+
+        for row, embedding in zip(batch_rows, embeddings):
+            row = {
+                **row,
+                "embedding": embedding.vector,
+                "embedding_model": embedding.model,
+                "embedding_dimensions": embedding.dimensions,
+                "source_hash": str(embedding.metadata.get("source_hash") or row["source_hash"]),
+            }
+            try:
+                feed_started = time.perf_counter()
+                vespa.feed(build_vespa_document(row))
+            except Exception as exc:
+                result["failed"] += 1
+                result["errors"].append(str(exc)[:300])
+                failed_row = row
+
+                def mark_feed_failure(cur):
+                    _upsert_search_index_record(
+                        cur,
+                        row=failed_row,
+                        status="failed",
+                        last_error=str(exc),
+                        metadata={"failed_stage": "feed"},
+                    )
+
+                with_cursor(mark_feed_failure)
+                continue
+            latency_ms = (time.perf_counter() - feed_started) * 1000
+            result["vespa_feed_count"] += 1
+            result["vespa_feed_latency_ms_total"] = round(float(result["vespa_feed_latency_ms_total"]) + latency_ms, 3)
+            result["vespa_feed_latency_ms_max"] = round(max(float(result["vespa_feed_latency_ms_max"]), latency_ms), 3)
+
+            def mark_indexed(cur):
+                _upsert_search_index_record(
+                    cur,
+                    row=row,
+                    status="indexed",
+                    last_error=None,
+                    metadata={
+                        "rank_profile": "hybrid",
+                        "source": "search_index_sync",
+                        "search_index_text_max_chars": _search_index_text_max_chars(),
+                        "body_truncated_chars": int(row.get("search_index_truncated_chars") or 0),
+                    },
+                )
+
+            with_cursor(mark_indexed)
+            result["indexed"] += 1
     return finish_result()
 
 

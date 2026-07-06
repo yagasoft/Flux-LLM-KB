@@ -38,6 +38,18 @@ def test_model_runner_http_503_string_detail_is_retryable_busy(monkeypatch):
     assert exc_info.value.retry_after_seconds == 1.0
 
 
+def test_model_runner_transport_timeout_is_retryable_busy(monkeypatch):
+    def fake_urlopen(*_args, **_kwargs):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(model_runner, "urlopen", fake_urlopen)
+
+    with pytest.raises(model_runner.ModelRunnerBusy) as exc_info:
+        model_runner._post_json_to_base_url("http://model-runner:8790", "/v1/embeddings", {"texts": ["hello"]}, 60)
+
+    assert exc_info.value.retry_after_seconds == 1.0
+
+
 def test_model_runner_http_400_structured_ocr_input_error_is_terminal(monkeypatch):
     body = (
         b'{"detail":{"code":"ocr.invalid_image_input",'
@@ -1265,6 +1277,34 @@ def test_model_runner_health_does_not_probe_paddle_runner(monkeypatch):
     assert payload["ok"] is True
     assert "paddle_runner" not in payload
     assert calls == []
+
+
+def test_model_runner_livez_does_not_run_deep_health_probes(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    class FakeScheduler:
+        def reset_component_residency(self, _component):
+            return None
+
+        def status(self):
+            raise AssertionError("/livez must not query GPU scheduler status")
+
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(
+        model_runner,
+        "_paddle_cuda_status",
+        lambda: (_ for _ in ()).throw(AssertionError("/livez must not import/probe Paddle")),
+    )
+    monkeypatch.setattr(
+        model_runner,
+        "_paddle_device",
+        lambda: (_ for _ in ()).throw(AssertionError("/livez must not resolve Paddle device")),
+    )
+
+    response = TestClient(model_runner.create_app()).get("/livez")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "service": "model-runner"}
 
 
 def test_model_runner_readiness_reports_paddle_runner_status(monkeypatch):

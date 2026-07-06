@@ -628,7 +628,7 @@ services:
     command: >
       python -m flux_llm_kb.asr_server serve --host 0.0.0.0 --port 8788
     healthcheck:
-      test: ["CMD", "python", "-m", "flux_llm_kb.asr_server", "health"]
+      test: ["CMD", "python", "-S", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8788/livez', timeout=2).read()"]
       interval: 10s
       timeout: 10s
       retries: 30
@@ -689,7 +689,7 @@ services:
     command: >
       python -m flux_llm_kb.model_runner serve --host 0.0.0.0 --port 8790
     healthcheck:
-      test: ["CMD", "python", "-m", "flux_llm_kb.model_runner", "health"]
+      test: ["CMD", "python", "-S", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8790/livez', timeout=2).read()"]
       interval: 10s
       timeout: 10s
       retries: 30
@@ -741,7 +741,7 @@ services:
     command: >
       /opt/flux-paddle/bin/python -m flux_llm_kb.model_runner serve-paddle --host 0.0.0.0 --port 8791
     healthcheck:
-      test: ["CMD", "/opt/flux-paddle/bin/python", "-m", "flux_llm_kb.model_runner", "health", "--role", "paddle-runner"]
+      test: ["CMD", "/opt/flux-paddle/bin/python", "-S", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8791/livez', timeout=2).read()"]
       interval: 10s
       timeout: 10s
       retries: 30
@@ -812,8 +812,10 @@ services:
       - flux_llm_kb_rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
-      interval: 5s
-      timeout: 5s
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      start_interval: 5s
       retries: 30
 
   postgres:

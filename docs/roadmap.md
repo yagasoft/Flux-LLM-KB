@@ -11,6 +11,33 @@ Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
 
+## 2026-07-06 CPU Spike Reduction Implementation Update
+
+Affected `Progress %` entries remain conservative until deployment and live CPU
+spike validation are complete:
+
+- `V2.8 Indexer Acceleration And Local Inference Optimization`: remains `99%`.
+  Model-runner, Paddle-runner, and ASR Docker healthchecks now use cheap
+  `/livez` probes instead of importing heavyweight runtime modules, and
+  RabbitMQ healthchecks keep fast startup probing while backing off to a
+  once-per-minute steady cadence.
+- `Resource-aware worker scheduling`: remains `97%`. RabbitMQ consumers now run
+  synchronous handlers in a worker thread so broker heartbeats are not blocked by
+  CPU-heavy handler bodies.
+- `Embedding and vectorization throughput`: remains `97%`. Bulk search-index
+  embeddings now use a dedicated 60-second timeout setting, run outside held
+  database connections, and keep timeout/scheduler-busy outcomes on the
+  retryable GPU-busy path instead of writing permanent failed records.
+- `Observability and benchmarks`: remains `99%`. The CPU-spike mitigation is
+  covered by focused regression tests and compose validation, but before/after
+  live idle and indexing evidence still needs to be captured.
+
+Remaining Work: deploy through the required feature closeout path, monitor idle
+and active indexing CPU after deployment, confirm Docker healthchecks no longer
+produce repeated Torch/Paddle/ASR import spikes, confirm RabbitMQ diagnostics do
+not stutter the PC at steady state, and validate that long bulk embedding
+requests retry cleanly without leaving rows permanently failed.
+
 ## 2026-07-06 Stranded Pending Corpus Job Repair Update
 
 Affected `Progress %` entries remain conservative until deployment and live

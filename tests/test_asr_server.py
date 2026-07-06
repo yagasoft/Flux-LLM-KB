@@ -65,6 +65,39 @@ def test_asr_app_start_clears_stale_component_residency(tmp_path):
     assert events == ["asr"]
 
 
+def test_asr_livez_does_not_run_scheduler_or_runtime_health(tmp_path):
+    model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
+
+    class FakeRuntime:
+        def health(self):
+            raise AssertionError("/livez must not run ASR runtime health")
+
+    class FakeScheduler:
+        def reset_component_residency(self, _component):
+            return None
+
+        def status(self):
+            raise AssertionError("/livez must not query GPU scheduler status")
+
+    client = TestClient(
+        create_app(
+            AsrServiceConfig(
+                model="large-v3-turbo",
+                model_path=model_path,
+                device="cuda",
+                compute_type="float16",
+            ),
+            runtime=FakeRuntime(),
+            gpu_scheduler=FakeScheduler(),
+        )
+    )
+
+    response = client.get("/livez")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "service": "asr"}
+
+
 def test_asr_transcription_endpoint_uses_runtime_without_downloading(tmp_path):
     model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
     calls = {"transcribe": 0}

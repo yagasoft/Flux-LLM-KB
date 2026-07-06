@@ -47,6 +47,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "retrieval.rerank_microbatch_size" in keys
     assert "retrieval.max_rerank_passage_tokens" in keys
     assert "retrieval.embedding_wait_timeout_seconds" in keys
+    assert "retrieval.search_index_embedding_timeout_seconds" in keys
     assert "retrieval.rerank_wait_timeout_seconds" in keys
     assert "retrieval.rerank_total_budget_seconds" in keys
     assert "retrieval.query_embedding_cache_ttl_seconds" in keys
@@ -251,6 +252,7 @@ def test_retrieval_interactive_latency_settings_defaults_and_env_overrides(monke
     service = SettingsService()
 
     assert service.resolve("retrieval.embedding_wait_timeout_seconds").raw_value == 5
+    assert service.resolve("retrieval.search_index_embedding_timeout_seconds").raw_value == 60
     assert service.resolve("retrieval.rerank_wait_timeout_seconds").raw_value == 5
     assert service.resolve("retrieval.rerank_total_budget_seconds").raw_value == 5
     assert service.resolve("retrieval.query_embedding_cache_ttl_seconds").raw_value == 120
@@ -259,6 +261,7 @@ def test_retrieval_interactive_latency_settings_defaults_and_env_overrides(monke
     assert service.resolve("retrieval.brief_rerank_limit").raw_value == 3
 
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_EMBEDDING_WAIT_TIMEOUT_SECONDS", "7")
+    monkeypatch.setenv("FLUX_KB_RETRIEVAL_SEARCH_INDEX_EMBEDDING_TIMEOUT_SECONDS", "90")
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANK_WAIT_TIMEOUT_SECONDS", "9")
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_RERANK_TOTAL_BUDGET_SECONDS", "4")
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_QUERY_EMBEDDING_CACHE_TTL_SECONDS", "30")
@@ -267,6 +270,7 @@ def test_retrieval_interactive_latency_settings_defaults_and_env_overrides(monke
     monkeypatch.setenv("FLUX_KB_RETRIEVAL_BRIEF_RERANK_LIMIT", "2")
 
     assert service.resolve("retrieval.embedding_wait_timeout_seconds").raw_value == 7
+    assert service.resolve("retrieval.search_index_embedding_timeout_seconds").raw_value == 90
     assert service.resolve("retrieval.rerank_wait_timeout_seconds").raw_value == 9
     assert service.resolve("retrieval.rerank_total_budget_seconds").raw_value == 4
     assert service.resolve("retrieval.query_embedding_cache_ttl_seconds").raw_value == 30

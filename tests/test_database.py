@@ -2685,6 +2685,219 @@ def test_sync_search_index_embeds_pending_rows_in_bounded_batches(monkeypatch):
     assert len(fed) == 5
 
 
+def test_sync_search_index_default_provider_uses_bulk_embedding_timeout(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeProvider:
+        name = "model_runner"
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def embed_batch(self, _inputs):  # pragma: no cover - no pending rows in this test
+            raise AssertionError("no rows should be embedded")
+
+    class FakeAdapter:
+        def feed(self, _document):  # pragma: no cover - no pending rows in this test
+            raise AssertionError("no documents should be fed")
+
+        def delete(self, _document_id):  # pragma: no cover - no stale rows in this test
+            raise AssertionError("no documents should be deleted")
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("flux_llm_kb.embeddings.SnowflakeEmbeddingProvider", FakeProvider)
+
+    result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=1, adapter=FakeAdapter())
+
+    assert result["failed"] == 0
+    assert captured["timeout_seconds"] == 60.0
+
+
+def test_sync_search_index_embeds_outside_database_connection(monkeypatch):
+    state = {"connection_open": False}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            state["connection_open"] = True
+            return self
+
+        def __exit__(self, *_args):
+            state["connection_open"] = False
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeProvider:
+        name = "model_runner"
+
+        def embed_batch(self, inputs):
+            assert state["connection_open"] is False
+            return [
+                EmbeddingResult(
+                    owner_table=item.owner_table,
+                    owner_id=item.owner_id,
+                    model="Snowflake/snowflake-arctic-embed-l-v2.0",
+                    dimensions=1024,
+                    vector=[1.0] + [0.0] * 1023,
+                    metadata={"source_hash": f"hash-{item.owner_id}"},
+                )
+                for item in inputs
+            ]
+
+    class FakeAdapter:
+        def feed(self, _document):
+            assert state["connection_open"] is False
+            return {"ok": True}
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
+    row = {
+        "vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-1",
+        "owner_table": "asset_chunks",
+        "owner_id": "chunk-1",
+        "asset_id": "asset-1",
+        "root_id": "33333333-3333-3333-3333-333333333333",
+        "root_name": "docs",
+        "title": "Chunk One",
+        "body": "body",
+        "source_path": "docs/chunk.md",
+        "symbols": [],
+        "language": "",
+        "file_kind": "text",
+        "lifecycle_state": "active",
+        "deleted": False,
+        "canonical": True,
+        "source_hash": "old-hash",
+        "index_text": "Chunk One\nbody",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+        "existing_source_hash": None,
+        "existing_index_status": None,
+        "existing_embedding_model": None,
+    }
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **_kwargs: None)
+
+    result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=1, embedding_provider=FakeProvider(), adapter=FakeAdapter())
+
+    assert result["indexed"] == 1
+
+
+def test_sync_search_index_reraises_retryable_embedding_timeout_without_failed_records(monkeypatch):
+    from flux_llm_kb.model_runner import ModelRunnerBusy
+
+    statuses: list[str] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class TimeoutProvider:
+        name = "model_runner"
+
+        def embed_batch(self, _inputs):
+            raise ModelRunnerBusy("model-runner embedding request timed out", retry_after_seconds=1.0)
+
+    class FakeAdapter:
+        def feed(self, _document):  # pragma: no cover - embedding fails before feed
+            raise AssertionError("feed should not run")
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
+    row = {
+        "vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-1",
+        "owner_table": "asset_chunks",
+        "owner_id": "chunk-1",
+        "asset_id": "asset-1",
+        "root_id": "33333333-3333-3333-3333-333333333333",
+        "root_name": "docs",
+        "title": "Chunk One",
+        "body": "body",
+        "source_path": "docs/chunk.md",
+        "symbols": [],
+        "language": "",
+        "file_kind": "text",
+        "lifecycle_state": "active",
+        "deleted": False,
+        "canonical": True,
+        "source_hash": "old-hash",
+        "index_text": "Chunk One\nbody",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+        "existing_source_hash": None,
+        "existing_index_status": None,
+        "existing_embedding_model": None,
+    }
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **kwargs: statuses.append(kwargs["status"]))
+
+    with pytest.raises(ModelRunnerBusy):
+        database.sync_search_index(owner_class="corpus", root_name="docs", limit=1, embedding_provider=TimeoutProvider(), adapter=FakeAdapter())
+
+    assert "syncing" in statuses
+    assert "failed" not in statuses
+
+
 def test_search_index_embedding_batch_size_defaults_to_memory_safe_value(monkeypatch):
     monkeypatch.delenv("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE", raising=False)
 

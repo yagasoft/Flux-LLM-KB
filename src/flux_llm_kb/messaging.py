@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import inspect
 import json
 import os
 from typing import Any, Awaitable, Callable
@@ -458,8 +459,11 @@ class RabbitMqConsumer:
                         try:
                             payload = json.loads(incoming.body.decode("utf-8"))
                             message = FluxMessage.model_validate(payload)
-                            result = handler(message)
-                            if asyncio.iscoroutine(result):
+                            if inspect.iscoroutinefunction(handler):
+                                result = handler(message)
+                            else:
+                                result = await asyncio.to_thread(handler, message)
+                            if inspect.isawaitable(result):
                                 await result
                         except RetryableMessageError:
                             if await self._dead_letter_if_delivery_limit_reached(incoming, queue_name=queue_name):

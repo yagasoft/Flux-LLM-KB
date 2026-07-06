@@ -212,11 +212,11 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "container_name: flux-llm-kb-model-runner" in compose
         assert '"127.0.0.1:8790:8790"' in compose
         assert "python -m flux_llm_kb.model_runner serve --host 0.0.0.0 --port 8790" in compose
-        assert 'test: ["CMD", "python", "-m", "flux_llm_kb.model_runner", "health"]' in compose
+        assert "urlopen('http://127.0.0.1:8790/livez', timeout=2).read()" in compose
         assert "  paddle-runner:" in compose
         assert "container_name: flux-llm-kb-paddle-runner" in compose
         assert "/opt/flux-paddle/bin/python -m flux_llm_kb.model_runner serve-paddle --host 0.0.0.0 --port 8791" in compose
-        assert 'test: ["CMD", "/opt/flux-paddle/bin/python", "-m", "flux_llm_kb.model_runner", "health", "--role", "paddle-runner"]' in compose
+        assert "urlopen('http://127.0.0.1:8791/livez', timeout=2).read()" in compose
         assert "FLUX_KB_PADDLE_RUNNER_BASE_URL: http://paddle-runner:8791" in compose
         assert "FLUX_KB_MODEL_RUNNER_BASE_URL: http://model-runner:8790" in compose
         assert "FLUX_KB_RETRIEVAL_SEARCH_ENGINE: vespa" in compose
@@ -259,7 +259,7 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert '"127.0.0.1:${AsrHostPort}:8788"' in compose
         assert "flux_llm_kb_asr_models:/models" in compose
         assert "python -m flux_llm_kb.asr_server serve --host 0.0.0.0 --port 8788" in compose
-        assert 'test: ["CMD", "python", "-m", "flux_llm_kb.asr_server", "health"]' in compose
+        assert "urlopen('http://127.0.0.1:8788/livez', timeout=2).read()" in compose
         assert "condition: service_healthy" in compose
         assert compose.count("FLUX_KB_ASR_PROVIDER: openai_compatible") == 3
         assert compose.count("FLUX_KB_ASR_MODEL: large-v3-turbo") == 3
@@ -270,6 +270,11 @@ def test_production_compose_enables_gpu_and_local_vision_for_api_and_worker():
         assert "FLUX_KB_LOCAL_INFERENCE_ENABLED: \"true\"" in compose
         assert "FLUX_KB_LOCAL_INFERENCE_BASE_URL: http://ollama:11434" in compose
         assert compose.count("FLUX_KB_LOCAL_INFERENCE_KEEP_ALIVE: 2m") >= 5
+        assert "rabbitmq-diagnostics -q ping" in compose
+        assert "start_interval: 5s" in compose
+        assert "start_period: 60s" in compose
+        assert "interval: 60s" in compose
+        assert "timeout: 10s" in compose
         assert "FLUX_KB_VISION_ENABLED: \"true\"" in compose
         assert "FLUX_KB_VISION_MODEL: qwen3-vl:8b" in compose
         assert "FLUX_KB_VISION_MAX_IMAGE_PIXELS: \"80000000\"" in compose

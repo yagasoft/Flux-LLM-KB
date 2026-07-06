@@ -314,9 +314,18 @@ def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], ti
             raw = response.read().decode("utf-8")
     except HTTPError as exc:  # pragma: no cover - network-specific
         _raise_model_runner_http_error(exc)
+    except TimeoutError as exc:  # pragma: no cover - network-specific
+        raise ModelRunnerBusy(
+            str(exc) or "model-runner request timed out",
+            retry_after_seconds=1.0,
+        ) from exc
     except URLError as exc:  # pragma: no cover - network-specific
+        if _transport_error_is_timeout(exc):
+            raise ModelRunnerBusy(str(exc), retry_after_seconds=1.0) from exc
         raise ModelRunnerError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover - network-specific
+        if _transport_error_is_timeout(exc):
+            raise ModelRunnerBusy(str(exc), retry_after_seconds=1.0) from exc
         raise ModelRunnerError(str(exc)) from exc
     try:
         response_payload = json.loads(raw)
@@ -328,6 +337,17 @@ def _post_json_to_base_url(base_url: str, path: str, payload: dict[str, Any], ti
         _raise_model_runner_payload_error(response_payload)
         raise ModelRunnerError(str(response_payload.get("message") or "model-runner request failed"))
     return response_payload
+
+
+def _transport_error_is_timeout(exc: BaseException) -> bool:
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, TimeoutError):
+        return True
+    message_parts = [str(exc)]
+    if reason is not None:
+        message_parts.append(str(reason))
+    message = " ".join(message_parts).lower()
+    return "timed out" in message or "timeout" in message
 
 
 def _raise_model_runner_http_error(exc: HTTPError) -> None:
@@ -1222,6 +1242,10 @@ def create_app():
 
     app = FastAPI(title="Flux model-runner")
     _clear_startup_residency()
+
+    @app.get("/livez")
+    def livez() -> dict[str, Any]:
+        return {"ok": True, "service": _scheduler_component()}
 
     @app.get("/health")
     def health() -> dict[str, Any]:
