@@ -7670,6 +7670,44 @@ def test_outlook_claim_query_recovers_stale_claims_from_dead_hosts():
     assert "claimed_by = NULL" in claim_function
 
 
+def test_dashboard_background_job_readers_cover_durable_sources():
+    source = Path(database.__file__).read_text(encoding="utf-8")
+
+    for function_name in [
+        "list_message_outbox_jobs",
+        "list_message_inbox_jobs",
+        "list_callback_delivery_jobs",
+        "list_runtime_control_requests",
+        "list_gpu_lease_jobs",
+        "list_gpu_eviction_jobs",
+    ]:
+        assert f"def {function_name}" in source
+
+    outbox_function = source.split("def list_message_outbox_jobs", 1)[1].split("def list_message_inbox_jobs", 1)[0]
+    assert "FROM message_outbox" in outbox_function
+    assert "status IN ('pending', 'publishing', 'failed')" in outbox_function
+
+    inbox_function = source.split("def list_message_inbox_jobs", 1)[1].split("def list_callback_delivery_jobs", 1)[0]
+    assert "FROM message_inbox" in inbox_function
+    assert "status IN ('processing', 'failed')" in inbox_function
+
+    callback_function = source.split("def list_callback_delivery_jobs", 1)[1].split("def add_monitored_root", 1)[0]
+    assert "FROM callback_deliveries" in callback_function
+    assert "status IN ('pending', 'running', 'retrying', 'failed', 'blocked', 'delivered')" in callback_function
+
+    runtime_function = source.split("def list_runtime_control_requests", 1)[1].split("def insert_mail_profile", 1)[0]
+    assert "FROM runtime_control_requests" in runtime_function
+    assert "broker_message_id" in runtime_function
+
+    gpu_lease_function = source.split("def list_gpu_lease_jobs", 1)[1].split("def list_gpu_eviction_jobs", 1)[0]
+    assert "FROM gpu_leases" in gpu_lease_function
+    assert "broker_message_id" in gpu_lease_function
+
+    gpu_eviction_function = source.split("def list_gpu_eviction_jobs", 1)[1].split("def _enqueue_gpu_eviction_event_with_cursor", 1)[0]
+    assert "FROM gpu_evictions" in gpu_eviction_function
+    assert "queued_at" in gpu_eviction_function
+
+
 def test_outlook_claim_query_recovers_stale_claims_from_stale_heartbeat_without_claim_age_gate():
     source = Path(database.__file__).read_text(encoding="utf-8")
     claim_function = source.split("def claim_outlook_sync_request", 1)[1].split("def cancel_outlook_sync_request", 1)[0]

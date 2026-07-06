@@ -223,7 +223,7 @@ describe("Flux dashboard", () => {
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
-    const table = await screen.findByRole("table", { name: "Extraction jobs" });
+    const table = await screen.findByRole("table", { name: "Background jobs" });
     expect(within(table).getByText("Retrying Locked")).toBeInTheDocument();
     expect(within(table).getByText("Extract PDF")).toBeInTheDocument();
     expect(within(table).getByText("docs/open.pdf")).toBeInTheDocument();
@@ -261,7 +261,8 @@ describe("Flux dashboard", () => {
       filter_options: {
         statuses: ["failed", "retrying_locked"],
         roots: ["docs", "mail"],
-        job_types: ["corpus_extract_pdf", "corpus_sync_root"]
+        job_types: ["corpus_extract_pdf", "corpus_sync_root"],
+        sources: ["capture_jobs", "mail_sync_runs"]
       }
     };
     const updatedFromIso = new Date("2026-06-25T00:00").toISOString();
@@ -270,7 +271,7 @@ describe("Flux dashboard", () => {
 
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Jobs" }));
-    await screen.findByRole("table", { name: "Extraction jobs" });
+    await screen.findByRole("table", { name: "Background jobs" });
 
     await user.click(screen.getByRole("button", { name: "Job status filter" }));
     const statusOptions = screen.getByRole("group", { name: "Job status options" });
@@ -284,6 +285,10 @@ describe("Flux dashboard", () => {
     const typeOptions = screen.getByRole("group", { name: "Job type options" });
     await user.click(within(typeOptions).getByRole("checkbox", { name: "Extract PDF" }));
     await user.click(within(typeOptions).getByRole("checkbox", { name: "Sync Root" }));
+    await user.click(screen.getByRole("button", { name: "Job source filter" }));
+    const sourceOptions = screen.getByRole("group", { name: "Job source options" });
+    await user.click(within(sourceOptions).getByRole("checkbox", { name: "Capture jobs" }));
+    await user.click(within(sourceOptions).getByRole("checkbox", { name: "Mail sync runs" }));
     await user.type(screen.getByLabelText("Updated from filter"), "2026-06-25T00:00");
     await user.type(screen.getByLabelText("Updated to filter"), "2026-06-26T23:59");
     await user.click(screen.getByRole("button", { name: "Apply job filters" }));
@@ -295,6 +300,7 @@ describe("Flux dashboard", () => {
       expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
       expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
       expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
+      expect(params.getAll("job_source")).toEqual(["capture_jobs", "mail_sync_runs"]);
       expect(params.get("updated_from")).toBe(updatedFromIso);
       expect(params.get("updated_to")).toBe(updatedToIso);
       expect(params.get("limit")).toBe("50");
@@ -329,6 +335,7 @@ describe("Flux dashboard", () => {
         status: ["failed", "retrying_locked"],
         root_name: ["docs", "mail"],
         job_type: ["corpus_extract_pdf", "corpus_sync_root"],
+        job_source: ["capture_jobs", "mail_sync_runs"],
         updated_from: "2026-06-25T00:00",
         updated_to: "2026-06-26T23:59"
       });
@@ -359,6 +366,7 @@ describe("Flux dashboard", () => {
       expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
       expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
       expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
+      expect(params.getAll("job_source")).toEqual(["capture_jobs", "mail_sync_runs"]);
     });
 
     await user.click(screen.getByRole("button", { name: "Next jobs page" }));
@@ -373,6 +381,7 @@ describe("Flux dashboard", () => {
       expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
       expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
       expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
+      expect(params.getAll("job_source")).toEqual(["capture_jobs", "mail_sync_runs"]);
     });
   });
 
@@ -537,7 +546,7 @@ describe("Flux dashboard", () => {
 
     render(<App />);
 
-    await screen.findByRole("table", { name: "Extraction jobs" });
+    await screen.findByRole("table", { name: "Background jobs" });
     expect(screen.getByRole("button", { name: "Job status filter" })).toHaveTextContent("2 statuses");
     expect(screen.getByRole("button", { name: "Job root filter" })).toHaveTextContent("2 roots");
     expect(screen.getByRole("button", { name: "Job type filter" })).toHaveTextContent("2 types");
@@ -863,7 +872,7 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
     expect(await screen.findByText("Completed Metadata Only")).toBeInTheDocument();
-    const table = await screen.findByRole("table", { name: "Extraction jobs" });
+    const table = await screen.findByRole("table", { name: "Background jobs" });
     expect(within(table).getByText("Metadata Only")).toBeInTheDocument();
     expect(within(table).queryByText("Queued")).not.toBeInTheDocument();
 
@@ -875,31 +884,46 @@ describe("Flux dashboard", () => {
 
   test("job queue shows Outlook COM requests and cancel feedback", async () => {
     const user = userEvent.setup();
-    outlook.pending_requests = [
-      {
-        id: "req-pending",
-        profile_name: "outlook-catchup",
-        status: "pending",
-        requested_by: "dashboard",
-        created_at: "2026-06-27T16:29:01+00:00",
-        updated_at: "2026-06-27T16:29:01+00:00"
-      },
-      {
-        id: "req-claimed",
-        profile_name: "outlook-catchup",
-        status: "claimed",
-        requested_by: "dashboard",
-        claimed_by: "host-1",
-        created_at: "2026-06-27T16:27:46+00:00",
-        updated_at: "2026-06-27T16:28:00+00:00"
-      }
-    ];
+    state.jobsPayload = {
+      jobs: [
+        {
+          id: "outlook_sync_requests:req-pending",
+          source_id: "req-pending",
+          job_source: "outlook_sync_requests",
+          job_type: "outlook_sync_request",
+          status: "pending",
+          target: "outlook-catchup",
+          root_name: "Outlook COM",
+          attempts: 0,
+          details: { profile_name: "outlook-catchup", requested_by: "dashboard" },
+          created_at: "2026-06-27T16:29:01+00:00",
+          updated_at: "2026-06-27T16:29:01+00:00"
+        },
+        {
+          id: "outlook_sync_requests:req-claimed",
+          source_id: "req-claimed",
+          job_source: "outlook_sync_requests",
+          job_type: "outlook_sync_request",
+          status: "claimed",
+          target: "outlook-catchup",
+          root_name: "Outlook COM",
+          attempts: 0,
+          details: { profile_name: "outlook-catchup", requested_by: "dashboard", claimed_by: "host-1" },
+          created_at: "2026-06-27T16:27:46+00:00",
+          updated_at: "2026-06-27T16:28:00+00:00"
+        }
+      ],
+      count: 2,
+      limit: 50,
+      offset: 0,
+      has_next: false
+    };
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
-    const table = await screen.findByRole("table", { name: "Operational jobs" });
+    const table = await screen.findByRole("table", { name: "Background jobs" });
     expect(within(table).getAllByText("Outlook Sync Request")).toHaveLength(2);
     expect(within(table).getAllByText("outlook-catchup")).toHaveLength(2);
     expect(within(table).getByText("Pending")).toBeInTheDocument();
@@ -913,6 +937,75 @@ describe("Flux dashboard", () => {
 
     await user.click(screen.getByRole("button", { name: "Cancel Outlook request req-claimed" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("cannot be cancelled mid-execution");
+  });
+
+  test("job queue shows non-corpus background work without corpus actions or console fetches", async () => {
+    const user = userEvent.setup();
+    state.jobsPayload = {
+      jobs: [
+        {
+          id: "mail_sync_runs:mail-1",
+          source_id: "mail-1",
+          job_source: "mail_sync_runs",
+          job_type: "mail_sync",
+          status: "running",
+          target: "gmail-capture",
+          root_name: "mail",
+          attempts: 2,
+          progress: "3 exported / 5 seen",
+          details: { profile_name: "gmail-capture", trigger: "scheduler", requested_by: "event-scheduler" },
+          updated_at: "2026-07-06T08:00:00+00:00"
+        },
+        {
+          id: "capture_jobs:cap-1",
+          source_id: "cap-1",
+          job_source: "capture_jobs",
+          job_type: "corpus_extract_pdf",
+          status: "failed",
+          target: "docs/failed.pdf",
+          root_name: "docs",
+          attempts: 1,
+          last_error: "extract failed",
+          details: { payload: { root_name: "docs", path: "docs/failed.pdf" } },
+          updated_at: "2026-07-06T07:59:00+00:00"
+        }
+      ],
+      count: 2,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        sources: ["mail_sync_runs", "capture_jobs"],
+        statuses: ["running", "failed"],
+        roots: ["mail", "docs"],
+        job_types: ["mail_sync", "corpus_extract_pdf"]
+      }
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    const table = await screen.findByRole("table", { name: "Background jobs" });
+    expect(within(table).getByText("Mail Sync")).toBeInTheDocument();
+    expect(within(table).getByText("gmail-capture")).toBeInTheDocument();
+    expect(within(table).getByText("3 exported / 5 seen")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel corpus job mail-1" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Force retry corpus job mail-1" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Force retry corpus job cap-1" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show details for job mail_sync_runs:mail-1" }));
+    expect(await screen.findByText("Mail sync runs")).toBeInTheDocument();
+    expect(screen.getByText("Source details")).toBeInTheDocument();
+    expect(screen.getByText(/event-scheduler/)).toBeInTheDocument();
+    expect(state.jobToolInvocationRequestUrls).toHaveLength(0);
+    expect(screen.queryByText("Console output")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show details for job capture_jobs:cap-1" }));
+    await waitFor(() => {
+      expect(state.jobToolInvocationRequestUrls).toContain("/api/dashboard/jobs/cap-1/tool-invocations?limit=100");
+    });
   });
 
   test("job queue shows corpus sync progress and cancel feedback", async () => {
@@ -957,7 +1050,7 @@ describe("Flux dashboard", () => {
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
-    const table = await screen.findByRole("table", { name: "Extraction jobs" });
+    const table = await screen.findByRole("table", { name: "Background jobs" });
     expect(within(table).getByText("Progress")).toBeInTheDocument();
     expect(within(table).getAllByText("Sync Root")).toHaveLength(2);
     expect(within(table).getAllByText("outlook-mohesr")).toHaveLength(2);
@@ -1046,7 +1139,7 @@ describe("Flux dashboard", () => {
 
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Jobs" }));
-    await screen.findByRole("table", { name: "Extraction jobs" });
+    await screen.findByRole("table", { name: "Background jobs" });
 
     const cancelButton = screen.getByRole("button", { name: "Cancel corpus job job-pending" });
     const retryButton = screen.getByRole("button", { name: "Force retry corpus job job-retry" });
@@ -1157,9 +1250,9 @@ describe("Flux dashboard", () => {
     await screen.findByRole("heading", { name: "Operations" });
     await user.click(screen.getByRole("button", { name: "Jobs" }));
 
-    expect(await screen.findByText("No queued extraction jobs.")).toBeInTheDocument();
+    expect(await screen.findByText("No background jobs found.")).toBeInTheDocument();
     expect(screen.getByText("No active crawl jobs. Recent model activity and GPU scheduler activity were detected. 1 running lease, 1 waiting request.")).toBeInTheDocument();
-    expect(screen.queryByRole("table", { name: "Extraction jobs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("table", { name: "Background jobs" })).not.toBeInTheDocument();
   });
 
   test("corpus dashboard surfaces unstable and locked indexing states", async () => {

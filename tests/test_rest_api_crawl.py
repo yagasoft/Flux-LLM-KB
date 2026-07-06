@@ -1055,12 +1055,12 @@ def test_dashboard_job_cancel_endpoint_reports_running_job_conflict(monkeypatch)
     assert calls == [{"job_id": "job-running", "actor": "dashboard"}]
 
 
-def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeypatch):
+def test_dashboard_jobs_endpoint_passes_filters_paging_source_and_updated_range(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 
     calls = []
 
-    def fake_collect_jobs_payload(**kwargs):
+    def fake_collect_dashboard_jobs_payload(**kwargs):
         calls.append(kwargs)
         return {
             "jobs": [],
@@ -1068,10 +1068,10 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
             "limit": kwargs["limit"],
             "offset": kwargs["offset"],
             "has_next": False,
-            "filter_options": {"statuses": [], "roots": [], "job_types": []},
+            "filter_options": {"statuses": [], "roots": [], "job_types": [], "sources": []},
         }
 
-    monkeypatch.setattr("flux_llm_kb.rest_api.collect_jobs_payload", fake_collect_jobs_payload)
+    monkeypatch.setattr("flux_llm_kb.rest_api.collect_dashboard_jobs_payload", fake_collect_dashboard_jobs_payload)
     monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
 
     client = fastapi_testclient.TestClient(create_app())
@@ -1083,6 +1083,8 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
             ("root_name", "docs"),
             ("root_name", "mail"),
             ("job_type", "corpus_extract_pdf"),
+            ("job_source", "capture_jobs"),
+            ("job_source", "mail_sync_runs"),
             ("updated_from", "2026-06-25T00:00:00+00:00"),
             ("updated_to", "2026-06-26T00:00:00+00:00"),
             ("sort_by", "target"),
@@ -1101,12 +1103,50 @@ def test_dashboard_jobs_endpoint_passes_filters_paging_and_updated_range(monkeyp
             "status": ["failed", "retrying_locked"],
             "root_name": ["docs", "mail"],
             "job_type": ["corpus_extract_pdf"],
+            "job_source": ["capture_jobs", "mail_sync_runs"],
             "updated_from": "2026-06-25T00:00:00+00:00",
             "updated_to": "2026-06-26T00:00:00+00:00",
             "sort_by": "target",
             "sort_dir": "asc",
         }
     ]
+
+
+def test_crawl_jobs_endpoint_stays_capture_scoped(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    dashboard_calls = []
+    crawl_calls = []
+
+    def fake_collect_dashboard_jobs_payload(**kwargs):
+        dashboard_calls.append(kwargs)
+        return {"jobs": [{"id": "message_outbox:queued"}], "count": 1, "limit": kwargs["limit"], "offset": kwargs["offset"], "has_next": False}
+
+    def fake_collect_jobs_payload(**kwargs):
+        crawl_calls.append(kwargs)
+        return {"jobs": [{"id": "cap-1"}], "count": 1, "limit": kwargs["limit"], "offset": kwargs["offset"], "has_next": False}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.collect_dashboard_jobs_payload", fake_collect_dashboard_jobs_payload)
+    monkeypatch.setattr("flux_llm_kb.rest_api.collect_jobs_payload", fake_collect_jobs_payload)
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: object())
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.get("/api/crawl/jobs", params={"limit": "5", "offset": "10"})
+
+    assert response.status_code == 200
+    assert response.json()["jobs"] == [{"id": "cap-1"}]
+    assert crawl_calls == [
+        {
+            "limit": 5,
+            "offset": 10,
+            "status": None,
+            "root_name": None,
+            "job_type": None,
+            "updated_from": None,
+            "updated_to": None,
+        }
+    ]
+    assert dashboard_calls == []
 
 
 def test_dashboard_job_tool_invocations_endpoint_returns_bounded_history(monkeypatch):

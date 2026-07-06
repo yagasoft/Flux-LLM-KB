@@ -11,6 +11,30 @@ Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
 
+## 2026-07-06 Dashboard Jobs Visibility And Reconciliation Update
+
+Affected `Progress %` entries remain conservative until deployment and live
+operator validation are complete:
+
+- `V2 Review And Visualization`: remains `99%`. The dashboard Jobs feed now has
+  a source-aware background-job projection over durable work records instead of
+  showing only capture jobs, while `/api/crawl/jobs` remains capture/corpus
+  scoped for crawl compatibility. The Jobs tab now uses the server feed directly,
+  has a Source filter, uses background-job copy, gates row actions by source, and
+  keeps capture-job console/tool invocation details capture-only.
+- `Observability and benchmarks`: remains `99%`. Existing persisted background
+  work is reconciled dynamically from durable sources including broker,
+  automation, governance, mail, Outlook, callback, GPU, and internal model
+  activity records. Synchronous external query model activity, including Codex
+  Flux query surfaces, is excluded from Jobs.
+
+Remaining Work: deploy through the required feature closeout path, validate the
+all-source Jobs feed against live queued/running/failed work and RabbitMQ depth,
+confirm Codex Flux query activity stays out of Jobs while internal worker model
+activity appears, reconcile any existing queued or failed broker commands that
+remain unmatched after projection, and update the dashboard manual only if
+explicitly requested.
+
 ## 2026-07-06 CPU Spike Reduction Implementation Update
 
 Affected `Progress %` entries remain conservative until deployment and live CPU

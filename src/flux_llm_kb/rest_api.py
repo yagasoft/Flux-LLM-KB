@@ -25,6 +25,7 @@ from .error_diagnostics import (
 from .health import (
     build_dashboard_html,
     collect_crawl_payload,
+    collect_dashboard_jobs_payload,
     collect_dashboard_payload,
     collect_jobs_payload,
     collect_retrieval_payload,
@@ -648,17 +649,19 @@ def create_app():
         status: list[str] | None = Query(None),
         root_name: list[str] | None = Query(None),
         job_type: list[str] | None = Query(None),
+        job_source: list[str] | None = Query(None),
         updated_from: str | None = None,
         updated_to: str | None = None,
         sort_by: str | None = "updated",
         sort_dir: str | None = "desc",
     ):
-        return collect_jobs_payload(
+        return collect_dashboard_jobs_payload(
             limit=limit,
             offset=offset,
             status=status,
             root_name=root_name,
             job_type=job_type,
+            job_source=job_source,
             updated_from=updated_from,
             updated_to=updated_to,
             sort_by=sort_by,

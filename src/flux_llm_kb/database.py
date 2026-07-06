@@ -3739,6 +3739,89 @@ def _gpu_eviction_request_from_row(row: Any) -> dict[str, Any]:
     }
 
 
+def list_gpu_lease_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, task_type, model_id, status, estimated_vram_mb, exclusive,
+                       share_group, priority, component, request_id, created_at,
+                       granted_at, heartbeat_at, expires_at, released_at, metadata,
+                       broker_message_id, routing_key, broker_delivery_count
+                FROM gpu_leases
+                ORDER BY COALESCE(released_at, heartbeat_at, granted_at, created_at) DESC
+                LIMIT %s
+                """,
+                (_dashboard_job_limit(limit),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "task_type": row[1],
+                    "model_id": row[2],
+                    "status": row[3],
+                    "estimated_vram_mb": int(row[4] or 0),
+                    "exclusive": bool(row[5]),
+                    "share_group": row[6],
+                    "priority": int(row[7] or 0),
+                    "component": row[8],
+                    "request_id": row[9],
+                    "created_at": _iso_or_none(row[10]),
+                    "granted_at": _iso_or_none(row[11]),
+                    "heartbeat_at": _iso_or_none(row[12]),
+                    "expires_at": _iso_or_none(row[13]),
+                    "released_at": _iso_or_none(row[14]),
+                    "metadata": row[15] or {},
+                    "broker_message_id": row[16],
+                    "routing_key": row[17],
+                    "broker_delivery_count": int(row[18] or 0),
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def list_gpu_eviction_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, lease_id, task_type, model_id, component, status,
+                       estimated_freed_vram_mb, error, created_at, completed_at,
+                       metadata, broker_message_id, routing_key, correlation_id,
+                       causation_id, queued_at, started_at, broker_delivery_count
+                FROM gpu_evictions
+                ORDER BY COALESCE(completed_at, started_at, queued_at, created_at) DESC
+                LIMIT %s
+                """,
+                (_dashboard_job_limit(limit),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "lease_id": row[1],
+                    "task_type": row[2],
+                    "model_id": row[3],
+                    "component": row[4],
+                    "status": row[5],
+                    "estimated_freed_vram_mb": int(row[6] or 0),
+                    "error": row[7] or "",
+                    "created_at": _iso_or_none(row[8]),
+                    "completed_at": _iso_or_none(row[9]),
+                    "metadata": row[10] or {},
+                    "broker_message_id": row[11],
+                    "routing_key": row[12],
+                    "correlation_id": row[13],
+                    "causation_id": row[14],
+                    "queued_at": _iso_or_none(row[15]),
+                    "started_at": _iso_or_none(row[16]),
+                    "broker_delivery_count": int(row[17] or 0),
+                }
+                for row in cur.fetchall()
+            ]
+
+
 def _enqueue_gpu_eviction_event_with_cursor(
     cur: Any,
     *,
@@ -4033,6 +4116,132 @@ def message_queue_status(*, url: str | None = None) -> dict[str, Any]:
                 },
                 "event_journal": event_journal,
             }
+
+
+def _dashboard_job_limit(limit: int | str | None, *, default: int = 50, maximum: int = 1000) -> int:
+    try:
+        numeric = int(limit if limit is not None else default)
+    except (TypeError, ValueError):
+        numeric = default
+    return max(1, min(numeric, maximum))
+
+
+def _iso_or_none(value: Any) -> str | None:
+    return value.isoformat() if value else None
+
+
+def list_message_outbox_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, message_id, exchange, routing_key, message_type,
+                       correlation_id, causation_id, aggregate_type, aggregate_id,
+                       payload, headers, status, attempts, next_attempt_at,
+                       locked_at, locked_by, published_at, broker_message_id,
+                       last_error, created_at, updated_at
+                FROM message_outbox
+                WHERE status IN ('pending', 'publishing', 'failed')
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                (_dashboard_job_limit(limit),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "message_id": row[1],
+                    "exchange": row[2],
+                    "routing_key": row[3],
+                    "message_type": row[4],
+                    "correlation_id": row[5],
+                    "causation_id": row[6],
+                    "aggregate_type": row[7],
+                    "aggregate_id": row[8],
+                    "payload": row[9] or {},
+                    "headers": row[10] or {},
+                    "status": row[11],
+                    "attempts": int(row[12] or 0),
+                    "next_attempt_at": _iso_or_none(row[13]),
+                    "locked_at": _iso_or_none(row[14]),
+                    "locked_by": row[15],
+                    "published_at": _iso_or_none(row[16]),
+                    "broker_message_id": row[17],
+                    "last_error": row[18],
+                    "created_at": _iso_or_none(row[19]),
+                    "updated_at": _iso_or_none(row[20]),
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def list_message_inbox_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT consumer_name, message_id, message_type, status, attempts,
+                       first_seen_at, last_seen_at, handled_at, last_error, metadata
+                FROM message_inbox
+                WHERE status IN ('processing', 'failed')
+                ORDER BY last_seen_at DESC, first_seen_at DESC
+                LIMIT %s
+                """,
+                (_dashboard_job_limit(limit),),
+            )
+            return [
+                {
+                    "consumer_name": row[0],
+                    "message_id": row[1],
+                    "message_type": row[2],
+                    "status": row[3],
+                    "attempts": int(row[4] or 0),
+                    "first_seen_at": _iso_or_none(row[5]),
+                    "last_seen_at": _iso_or_none(row[6]),
+                    "handled_at": _iso_or_none(row[7]),
+                    "last_error": row[8],
+                    "metadata": row[9] or {},
+                }
+                for row in cur.fetchall()
+            ]
+
+
+def list_callback_delivery_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, message_id, event_message_id, job_id::text,
+                       status, attempts, next_attempt_at, last_status_code,
+                       last_error, payload, created_at, updated_at, completed_at
+                FROM callback_deliveries
+                WHERE status IN ('pending', 'running', 'retrying', 'failed', 'blocked', 'delivered')
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT %s
+                """,
+                (_dashboard_job_limit(limit),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "message_id": row[1],
+                    "event_message_id": row[2],
+                    "job_id": row[3],
+                    "status": row[4],
+                    "attempts": int(row[5] or 0),
+                    "next_attempt_at": _iso_or_none(row[6]),
+                    "last_status_code": row[7],
+                    "last_error": row[8],
+                    "payload": row[9] or {},
+                    "created_at": _iso_or_none(row[10]),
+                    "updated_at": _iso_or_none(row[11]),
+                    "completed_at": _iso_or_none(row[12]),
+                }
+                for row in cur.fetchall()
+            ]
 
 
 def add_monitored_root(
@@ -5051,7 +5260,9 @@ def list_capture_jobs(
                        status, payload, attempts, last_error, created_at, updated_at,
                        started_at, completed_at, last_duration_ms, telemetry,
                        locked_at, locked_by, progress_heartbeat_at,
-                       delete_requested_at, delete_requested_by, delete_reason
+                       delete_requested_at, delete_requested_by, delete_reason,
+                       broker_message_id, correlation_id, causation_id, routing_key,
+                       queued_at, broker_delivery_count
                 FROM capture_jobs
                 WHERE {where_sql}
                 {order_sql}
@@ -5084,6 +5295,12 @@ def list_capture_jobs(
                     "delete_requested_at": row[19].isoformat() if row[19] else None,
                     "delete_requested_by": row[20],
                     "delete_reason": row[21],
+                    "broker_message_id": row[22] if len(row) > 22 else None,
+                    "correlation_id": row[23] if len(row) > 23 else None,
+                    "causation_id": row[24] if len(row) > 24 else None,
+                    "routing_key": row[25] if len(row) > 25 else None,
+                    "queued_at": row[26].isoformat() if len(row) > 26 and row[26] else None,
+                    "broker_delivery_count": int(row[27] or 0) if len(row) > 27 else 0,
                 }
                 for row in cur.fetchall()
             ]
@@ -9809,6 +10026,44 @@ def ack_runtime_control_requests(
             return {"acknowledged": len(cur.fetchall()), "component": component}
 
 
+def list_runtime_control_requests(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, setting_key, action, affected_components, status,
+                       actor, requested_at, acknowledged_at, metadata, updated_at,
+                       broker_message_id, correlation_id, routing_key, queued_at,
+                       broker_delivery_count
+                FROM runtime_control_requests
+                ORDER BY updated_at DESC, requested_at DESC
+                LIMIT %s
+                """,
+                (_dashboard_job_limit(limit),),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "setting_key": row[1],
+                    "action": row[2],
+                    "affected_components": list(row[3] or []),
+                    "status": row[4],
+                    "actor": row[5],
+                    "requested_at": _iso_or_none(row[6]),
+                    "acknowledged_at": _iso_or_none(row[7]),
+                    "metadata": row[8] or {},
+                    "updated_at": _iso_or_none(row[9]),
+                    "broker_message_id": row[10],
+                    "correlation_id": row[11],
+                    "routing_key": row[12],
+                    "queued_at": _iso_or_none(row[13]),
+                    "broker_delivery_count": int(row[14] or 0),
+                }
+                for row in cur.fetchall()
+            ]
+
+
 def insert_mail_profile(
     *,
     name: str,
@@ -11259,7 +11514,9 @@ def list_outlook_sync_requests(*, limit: int = 20, url: str | None = None) -> li
             cur.execute(
                 """
                 SELECT r.id::text, p.name, r.status, r.requested_by, r.claimed_by,
-                       r.error, r.result, r.created_at, r.updated_at
+                       r.error, r.result, r.created_at, r.updated_at,
+                       r.broker_message_id, r.correlation_id, r.routing_key,
+                       r.queued_at, r.broker_delivery_count
                 FROM outlook_sync_requests r
                 JOIN mail_profiles p ON p.id = r.profile_id
                 ORDER BY r.created_at DESC
@@ -11278,6 +11535,11 @@ def list_outlook_sync_requests(*, limit: int = 20, url: str | None = None) -> li
                     "result": row[6],
                     "created_at": row[7].isoformat(),
                     "updated_at": row[8].isoformat(),
+                    "broker_message_id": row[9],
+                    "correlation_id": row[10],
+                    "routing_key": row[11],
+                    "queued_at": row[12].isoformat() if row[12] else None,
+                    "broker_delivery_count": int(row[13] or 0),
                 }
                 for row in cur.fetchall()
             ]

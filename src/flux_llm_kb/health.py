@@ -8,7 +8,7 @@ import shutil
 import sys
 from typing import Any
 
-from . import database, messaging
+from . import background_jobs, database, messaging
 from .acceleration import collect_acceleration_status
 from .codex_integration import codex_status
 from .error_diagnostics import coerce_error_detail, error_envelope
@@ -142,6 +142,15 @@ def collect_dashboard_payload() -> dict[str, Any]:
         db_report=db_report,
     )
     acceleration = _safe(collect_acceleration_status, {"capabilities": {}, "cache": {}, "worker_families": []})
+    job_counts = _safe(
+        background_jobs.collect_dashboard_job_counts,
+        {
+            "pending": crawl["pending_jobs"],
+            "failed": crawl["failed_jobs"],
+            "blocked": crawl.get("blocked_jobs", 0),
+            "running": 0,
+        },
+    )
     return {
         "database": db_report,
         "runtime": runtime_checks,
@@ -153,9 +162,10 @@ def collect_dashboard_payload() -> dict[str, Any]:
             "stale_count": watcher_summary["stale_count"],
         },
         "jobs": {
-            "pending": crawl["pending_jobs"],
-            "failed": crawl["failed_jobs"],
-            "blocked": crawl.get("blocked_jobs", 0),
+            "pending": int(job_counts.get("pending") or 0),
+            "failed": int(job_counts.get("failed") or 0),
+            "blocked": int(job_counts.get("blocked") or 0),
+            "running": int(job_counts.get("running") or 0),
         },
         "retrieval": retrieval,
         "extractors": extractors,
@@ -239,6 +249,32 @@ def collect_jobs_payload(
         "has_next": safe_offset + len(jobs) < int(count or 0),
         "filter_options": filter_options,
     }
+
+
+def collect_dashboard_jobs_payload(
+    limit: int = 50,
+    offset: int = 0,
+    status: str | list[str] | None = None,
+    root_name: str | list[str] | None = None,
+    job_type: str | list[str] | None = None,
+    job_source: str | list[str] | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+    sort_by: str | None = "updated",
+    sort_dir: str | None = "desc",
+) -> dict[str, Any]:
+    return background_jobs.collect_dashboard_jobs_payload(
+        limit=limit,
+        offset=offset,
+        status=status,
+        root_name=root_name,
+        job_type=job_type,
+        job_source=job_source,
+        updated_from=updated_from,
+        updated_to=updated_to,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
 
 
 def collect_retrieval_payload() -> dict[str, Any]:

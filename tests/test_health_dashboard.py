@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from flux_llm_kb import database, health
+from flux_llm_kb import background_jobs, database, health
 from flux_llm_kb.health import (
     build_dashboard_html,
     collect_crawl_payload,
@@ -59,6 +59,11 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
             "callbacks": {"pending": 1, "failed": 0, "blocked": 0, "delivered": 3},
         },
         raising=False,
+    )
+    monkeypatch.setattr(
+        background_jobs,
+        "collect_dashboard_job_counts",
+        lambda: {"pending": 2, "failed": 1, "blocked": 0, "running": 0},
     )
     monkeypatch.setattr(
         health.messaging,
@@ -143,6 +148,62 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert "repo_coupled" in payload["deployment"]
     assert payload["acceleration"]["worker_families"][0]["ocr_cache_hits"] == 4
     assert payload["acceleration"]["worker_families"][0]["ocr_cache_misses"] == 2
+
+
+def test_collect_dashboard_payload_uses_reconciled_background_job_counts(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "database_health_report",
+        lambda: {"ok": True, "message": "ok", "checks": {"service": {"ok": True, "message": "ok", "required": True}}},
+    )
+    monkeypatch.setattr(database, "list_monitored_roots", lambda: [])
+    monkeypatch.setattr(
+        database,
+        "crawl_status",
+        lambda: {
+            "active_watch_roots": 0,
+            "disabled_watch_roots": 0,
+            "pending_jobs": 1,
+            "failed_jobs": 1,
+            "blocked_jobs": 1,
+            "recent_errors": [],
+            "watchers": [],
+        },
+    )
+    monkeypatch.setattr(database, "retrieval_stats", lambda: {"episodes": 0, "asset_chunks": 0, "search_index_records": 0})
+    monkeypatch.setattr(database, "list_runtime_components", lambda: [], raising=False)
+    monkeypatch.setattr(
+        database,
+        "message_queue_status",
+        lambda: {
+            "outbox": {"pending": 0, "publishing": 0, "failed": 0, "published": 0, "oldest_pending_age_seconds": 0},
+            "inbox": {"processing": 0, "handled": 0, "failed": 0},
+            "callbacks": {"pending": 0, "failed": 0, "blocked": 0, "delivered": 0},
+        },
+        raising=False,
+    )
+    monkeypatch.setattr(
+        health.messaging,
+        "management_queue_status",
+        lambda timeout_seconds=0.2: {"available": False, "totals": {"messages_ready": 0, "messages_unacknowledged": 0, "messages": 0, "consumers": 0}, "queues": []},
+        raising=False,
+    )
+    monkeypatch.setattr(health, "remote_status", lambda: {"status": "running"})
+    monkeypatch.setattr(health, "codex_status", lambda: {"status": "ready"})
+    monkeypatch.setattr(health, "codex_hook_policy_status", lambda: {"status": "active", "enabled": True, "preflight_enabled": True, "capture_enabled": True, "recent_events": []}, raising=False)
+    monkeypatch.setattr(health, "extractor_availability", lambda: {})
+    monkeypatch.setattr(health, "collect_acceleration_status", lambda: {"capabilities": {}, "cache": {}, "worker_families": []})
+    monkeypatch.setattr("flux_llm_kb.mail_ingestion.mail_status", lambda: {"enabled_profiles": 0, "profiles": []})
+    monkeypatch.setattr("flux_llm_kb.settings.SettingsService", lambda: type("Settings", (), {"public_list": lambda self: []})())
+    monkeypatch.setattr(
+        background_jobs,
+        "collect_dashboard_job_counts",
+        lambda: {"pending": 4, "running": 1, "failed": 2, "blocked": 3},
+    )
+
+    payload = collect_dashboard_payload()
+
+    assert payload["jobs"] == {"pending": 4, "failed": 2, "blocked": 3, "running": 1}
 
 
 @pytest.mark.parametrize(

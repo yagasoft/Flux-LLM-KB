@@ -667,6 +667,7 @@ type JobFilterOptions = {
   statuses?: string[];
   roots?: string[];
   job_types?: string[];
+  sources?: string[];
 };
 
 type JobsPayload = {
@@ -1253,6 +1254,7 @@ type JobHistoryFilters = {
   status: string[];
   root_name: string[];
   job_type: string[];
+  job_source: string[];
   updated_from: string;
   updated_to: string;
 };
@@ -1267,6 +1269,7 @@ const emptyJobHistoryFilters: JobHistoryFilters = {
   status: [],
   root_name: [],
   job_type: [],
+  job_source: [],
   updated_from: "",
   updated_to: ""
 };
@@ -2434,6 +2437,7 @@ export default function App() {
             state={state}
             jobFilters={jobFilters}
             jobSort={jobSort}
+            refreshKey={lastUpdated?.getTime() ?? 0}
             onRefresh={() => void load()}
             onApplyJobFilters={(filters) => void applyJobFilters(filters)}
             onClearJobFilters={() => void clearJobFilters()}
@@ -5782,6 +5786,7 @@ function JobsTab({
   state,
   jobFilters,
   jobSort,
+  refreshKey,
   pendingActions,
   onRefresh,
   onApplyJobFilters,
@@ -5798,6 +5803,7 @@ function JobsTab({
   state: LoadState;
   jobFilters: JobHistoryFilters;
   jobSort: JobSortState;
+  refreshKey: number;
   pendingActions: PendingActionState;
   onRefresh: () => void;
   onApplyJobFilters: (filters: JobHistoryFilters) => void;
@@ -5811,14 +5817,11 @@ function JobsTab({
   onRestoreCorpusJobDeletionRequest: (jobId: string) => void;
   onJobFileAction: (jobId: string, action: "open" | "reveal") => void;
 }) {
-  const outlookJobs = activeOutlookRequests(state.outlook.pending_requests).map(outlookRequestJob);
-  const corpusJobs = state.jobs.jobs ?? [];
-  const jobs = [...outlookJobs, ...corpusJobs];
-  const hasOutlookRequests = outlookJobs.length > 0;
+  const jobs = state.jobs.jobs ?? [];
   const jobLimit = numberFromUnknown(state.jobs.limit) ?? JOB_PAGE_LIMIT;
   const jobOffsetValue = numberFromUnknown(state.jobs.offset) ?? 0;
-  const jobCount = numberFromUnknown(state.jobs.count) ?? corpusJobs.length;
-  const hasNext = Boolean(state.jobs.has_next ?? (jobOffsetValue + corpusJobs.length < jobCount));
+  const jobCount = numberFromUnknown(state.jobs.count) ?? jobs.length;
+  const hasNext = Boolean(state.jobs.has_next ?? (jobOffsetValue + jobs.length < jobCount));
   const jobsEmptyHint = jobs.length === 0 ? jobsModelActivityHint(state.modelActivity) : "";
   const familyRows = (state.health.acceleration?.worker_families ?? []).slice(0, 8).map((family) => [
     family.family ?? "general",
@@ -5834,7 +5837,7 @@ function JobsTab({
           count={jobCount}
           limit={jobLimit}
           offset={jobOffsetValue}
-          visibleCount={corpusJobs.length}
+          visibleCount={jobs.length}
           hasNext={hasNext}
           onApply={onApplyJobFilters}
           onClear={onClearJobFilters}
@@ -5842,9 +5845,10 @@ function JobsTab({
         />
         <JobQueueTable
           jobs={jobs}
-          label={hasOutlookRequests ? "Operational jobs" : "Extraction jobs"}
-          empty={hasOutlookRequests ? "No operational jobs queued." : "No queued extraction jobs."}
+          label="Background jobs"
+          empty="No background jobs found."
           sort={jobSort}
+          refreshKey={refreshKey}
           onSortChange={onApplyJobSort}
           onCancelOutlookRequest={onCancelOutlookRequest}
           onCancelCorpusJob={onCancelCorpusJob}
@@ -5888,14 +5892,14 @@ function JobHistoryControls({
   onPage: (offset: number) => void;
 }) {
   const [draft, setDraft] = useState<JobHistoryFilters>(filters);
-  const [openFilterMenu, setOpenFilterMenu] = useState<"status" | "root_name" | "job_type" | null>(null);
+  const [openFilterMenu, setOpenFilterMenu] = useState<"status" | "root_name" | "job_type" | "job_source" | null>(null);
   useEffect(() => {
     setDraft(filters);
-  }, [filters.status, filters.root_name, filters.job_type, filters.updated_from, filters.updated_to]);
+  }, [filters.status, filters.root_name, filters.job_type, filters.job_source, filters.updated_from, filters.updated_to]);
   const updateDraftDate = (key: "updated_from" | "updated_to", value: string) => {
     setDraft((current) => ({ ...current, [key]: value }));
   };
-  const toggleDraftValue = (key: "status" | "root_name" | "job_type", value: string) => {
+  const toggleDraftValue = (key: "status" | "root_name" | "job_type" | "job_source", value: string) => {
     setDraft((current) => ({ ...current, [key]: toggleStringValue(current[key], value) }));
   };
   const pageStart = count > 0 ? offset + 1 : 0;
@@ -5908,6 +5912,19 @@ function JobHistoryControls({
   return (
     <div className="job-history-controls">
       <div className="job-filter-grid">
+        <JobFilterMultiSelect
+          label="Source"
+          buttonLabel="Job source filter"
+          optionsLabel="Job source options"
+          values={draft.job_source}
+          options={options.sources ?? []}
+          allLabel="All sources"
+          pluralLabel="sources"
+          optionLabel={jobSourceLabel}
+          open={openFilterMenu === "job_source"}
+          onOpenChange={(open) => setOpenFilterMenu(open ? "job_source" : null)}
+          onToggle={(value) => toggleDraftValue("job_source", value)}
+        />
         <JobFilterMultiSelect
           label="Status"
           buttonLabel="Job status filter"
@@ -5959,7 +5976,7 @@ function JobHistoryControls({
         </div>
       </div>
       <div className="job-pager" aria-label="Job history paging">
-        <span>{pageStart}-{pageEnd} of {count} corpus {jobWord}</span>
+        <span>{pageStart}-{pageEnd} of {count} background {jobWord}</span>
         <button className="ghost-action compact" type="button" aria-label="Previous jobs page" disabled={offset <= 0} onClick={() => onPage(Math.max(0, offset - safeLimit))}>
           <ChevronLeft size={15} /> Previous
         </button>
@@ -6096,6 +6113,7 @@ function JobQueueTable({
   label,
   empty,
   sort,
+  refreshKey,
   onSortChange,
   onCancelOutlookRequest,
   onCancelCorpusJob,
@@ -6109,6 +6127,7 @@ function JobQueueTable({
   label: string;
   empty: string;
   sort: JobSortState;
+  refreshKey: number;
   onSortChange: (sort: JobSortState) => void;
   onCancelOutlookRequest?: (requestId: string) => void;
   onCancelCorpusJob?: (jobId: string) => void;
@@ -6139,10 +6158,12 @@ function JobQueueTable({
     }
   }, []);
   useEffect(() => {
-    if (expandedJobId) {
-      void loadToolInvocations(expandedJobId);
+    if (!expandedJobId) return;
+    const expandedJob = jobs.find((job, index) => jobId(job, index) === expandedJobId);
+    if (expandedJob && isCaptureJob(expandedJob)) {
+      void loadToolInvocations(jobActionId(expandedJob, expandedJobId));
     }
-  }, [expandedJobId, jobs, loadToolInvocations]);
+  }, [expandedJobId, jobs, refreshKey, loadToolInvocations]);
   if (jobs.length === 0) return <p className="muted">{empty}</p>;
   const sortHeader = (key: JobSortKey, headerLabel: string) => {
     const active = sort.sort_by === key;
@@ -6185,7 +6206,9 @@ function JobQueueTable({
             const status = stringFromUnknown(job.status) ?? "unknown";
             const displayStatus = jobDisplayStatus(job, status);
             const expanded = expandedJobId === id;
-            const outlookRequest = stringFromUnknown(job.job_type) === "outlook_sync_request";
+            const actionId = jobActionId(job, id);
+            const captureJob = isCaptureJob(job);
+            const outlookRequest = isOutlookRequestJob(job);
             const cancellableCorpusJob = isCancelableCorpusJob(job, status);
             const retryableCorpusJob = isRetryableCorpusJob(job, status);
             const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
@@ -6196,11 +6219,11 @@ function JobQueueTable({
             const showDeletionMarker = deletionRequested && !obsoleteCorpusJob;
             const targetActionable = isActionableJobTarget(job, payload, target);
             const progress = jobProgressSummary(job);
-            const retryPending = pendingLabel(pendingActions, corpusJobActionKey("retry", id));
-            const cancelPending = pendingLabel(pendingActions, corpusJobActionKey("cancel", id));
-            const deleteRequestPending = pendingLabel(pendingActions, corpusJobActionKey("delete-request", id));
-            const restoreDeletePending = pendingLabel(pendingActions, corpusJobActionKey("restore-delete-request", id));
-            const outlookCancelPending = pendingLabel(pendingActions, `outlook-request:cancel:${id}`);
+            const retryPending = pendingLabel(pendingActions, corpusJobActionKey("retry", actionId));
+            const cancelPending = pendingLabel(pendingActions, corpusJobActionKey("cancel", actionId));
+            const deleteRequestPending = pendingLabel(pendingActions, corpusJobActionKey("delete-request", actionId));
+            const restoreDeletePending = pendingLabel(pendingActions, corpusJobActionKey("restore-delete-request", actionId));
+            const outlookCancelPending = pendingLabel(pendingActions, `outlook-request:cancel:${actionId}`);
             return (
               <Fragment key={id}>
                 <tr>
@@ -6216,7 +6239,7 @@ function JobQueueTable({
                             type="button"
                             title="Open file"
                             aria-label={`Open job target file ${target.path}`}
-                            onClick={() => onJobFileAction?.(id, "open")}
+                            onClick={() => onJobFileAction?.(actionId, "open")}
                           >
                             <ExternalLink size={15} />
                           </button>
@@ -6225,7 +6248,7 @@ function JobQueueTable({
                             type="button"
                             title="Open containing folder"
                             aria-label={`Open containing folder for job target ${target.path}`}
-                            onClick={() => onJobFileAction?.(id, "reveal")}
+                            onClick={() => onJobFileAction?.(actionId, "reveal")}
                           >
                             <FolderOpen size={15} />
                           </button>
@@ -6243,9 +6266,9 @@ function JobQueueTable({
                       <button
                         className="row-button"
                         type="button"
-                        aria-label={`Force retry corpus job ${id}`}
+                        aria-label={`Force retry corpus job ${actionId}`}
                         disabled={Boolean(retryPending)}
-                        onClick={() => onRetryCorpusJob?.(id)}
+                        onClick={() => onRetryCorpusJob?.(actionId)}
                       >
                         {retryPending ? <Clock3 size={15} /> : <RotateCcw size={15} />} {retryPending ?? "Retry"}
                       </button>
@@ -6254,9 +6277,9 @@ function JobQueueTable({
                       <button
                         className="row-button warning"
                         type="button"
-                        aria-label={`Cancel Outlook request ${id}`}
+                        aria-label={`Cancel Outlook request ${actionId}`}
                         disabled={Boolean(outlookCancelPending)}
-                        onClick={() => onCancelOutlookRequest?.(id)}
+                        onClick={() => onCancelOutlookRequest?.(actionId)}
                       >
                         {outlookCancelPending ? <Clock3 size={15} /> : <Trash2 size={15} />} {outlookCancelPending ?? "Cancel"}
                       </button>
@@ -6265,9 +6288,9 @@ function JobQueueTable({
                       <button
                         className="row-button warning"
                         type="button"
-                        aria-label={`Cancel corpus job ${id}`}
+                        aria-label={`Cancel corpus job ${actionId}`}
                         disabled={Boolean(cancelPending)}
-                        onClick={() => onCancelCorpusJob?.(id)}
+                        onClick={() => onCancelCorpusJob?.(actionId)}
                       >
                         {cancelPending ? <Clock3 size={15} /> : <Trash2 size={15} />} {cancelPending ?? "Cancel"}
                       </button>
@@ -6276,9 +6299,9 @@ function JobQueueTable({
                       <button
                         className="row-button warning"
                         type="button"
-                        aria-label={`Mark corpus job ${id} for deletion`}
+                        aria-label={`Mark corpus job ${actionId} for deletion`}
                         disabled={Boolean(deleteRequestPending)}
-                        onClick={() => onMarkCorpusJobForDeletion?.(id)}
+                        onClick={() => onMarkCorpusJobForDeletion?.(actionId)}
                       >
                         {deleteRequestPending ? <Clock3 size={15} /> : <Trash2 size={15} />} {deleteRequestPending ?? "Mark for deletion"}
                       </button>
@@ -6287,9 +6310,9 @@ function JobQueueTable({
                       <button
                         className="row-button"
                         type="button"
-                        aria-label={`Restore deletion mark for corpus job ${id}`}
+                        aria-label={`Restore deletion mark for corpus job ${actionId}`}
                         disabled={Boolean(restoreDeletePending)}
-                        onClick={() => onRestoreCorpusJobDeletionRequest?.(id)}
+                        onClick={() => onRestoreCorpusJobDeletionRequest?.(actionId)}
                       >
                         {restoreDeletePending ? <Clock3 size={15} /> : <RotateCcw size={15} />} {restoreDeletePending ?? "Restore"}
                       </button>
@@ -6307,7 +6330,17 @@ function JobQueueTable({
                     </button>
                   </td>
                 </tr>
-                {expanded ? <JobDetailRow job={job} payload={payload} target={target} id={id} status={displayStatus} toolInvocations={toolInvocationsByJob[id]} /> : null}
+                {expanded ? (
+                  <JobDetailRow
+                    job={job}
+                    payload={payload}
+                    target={target}
+                    id={id}
+                    status={displayStatus}
+                    showToolInvocations={captureJob}
+                    toolInvocations={toolInvocationsByJob[actionId]}
+                  />
+                ) : null}
               </Fragment>
             );
           })}
@@ -6323,6 +6356,7 @@ function JobDetailRow({
   target,
   id,
   status,
+  showToolInvocations,
   toolInvocations
 }: {
   job: Record<string, unknown>;
@@ -6330,12 +6364,16 @@ function JobDetailRow({
   target: { path: string; root: string };
   id: string;
   status: string;
+  showToolInvocations: boolean;
   toolInvocations?: JobToolInvocationState;
 }) {
   const telemetry = jobTelemetry(job);
   const progress = jobProgressSummary(job);
+  const detailsPayload = jobDetails(job);
   const details = [
     ["Job id", id],
+    ["Source", jobSourceLabel(jobSource(job))],
+    ["Source id", stringFromUnknown(job.source_id)],
     ["Status", statusLabel(status)],
     ["Result", statusLabel(stringFromUnknown(telemetry.result_status) ?? "")],
     ["Job type", jobTypeLabel(stringFromUnknown(job.job_type))],
@@ -6382,11 +6420,19 @@ function JobDetailRow({
               <p>{stringFromUnknown(job.last_error)}</p>
             </div>
           ) : null}
-          <details className="job-raw-payload">
-            <summary>Raw payload</summary>
-            <pre>{JSON.stringify(payload, null, 2)}</pre>
-          </details>
-          <JobConsoleOutput state={toolInvocations} />
+          {Object.keys(payload).length > 0 ? (
+            <details className="job-raw-payload">
+              <summary>Raw payload</summary>
+              <pre>{JSON.stringify(payload, null, 2)}</pre>
+            </details>
+          ) : null}
+          {!showToolInvocations && Object.keys(detailsPayload).length > 0 ? (
+            <details className="job-raw-payload">
+              <summary>Source details</summary>
+              <pre>{JSON.stringify(detailsPayload, null, 2)}</pre>
+            </details>
+          ) : null}
+          {showToolInvocations ? <JobConsoleOutput state={toolInvocations} /> : null}
         </div>
       </td>
     </tr>
@@ -6440,7 +6486,7 @@ function JobConsoleOutput({ state }: { state?: JobToolInvocationState }) {
 function JobStatusBadge({ status }: { status: string }) {
   const tone = ["completed", "indexed"].includes(status)
     ? "enabled"
-    : ["pending", "running", "processing", "processing_staged", "completed_staged", "retrying_locked", "staged"].includes(status)
+    : ["pending", "queued", "running", "processing", "publishing", "waiting", "retrying", "claimed", "processing_staged", "completed_staged", "retrying_locked", "staged"].includes(status)
       ? "info"
       : status === "failed"
         ? "error"
@@ -6454,12 +6500,64 @@ function jobId(job: Record<string, unknown>, index: number) {
   return stringFromUnknown(job.id) ?? `job-${index + 1}`;
 }
 
+function jobSource(job: Record<string, unknown>) {
+  return stringFromUnknown(job.job_source) ?? "";
+}
+
+function jobSourceLabel(value?: string) {
+  const source = value ?? "";
+  if (!source) return "Legacy";
+  if (source === "capture_jobs") return "Capture jobs";
+  if (source === "stranded_capture_commands") return "Stranded capture commands";
+  if (source === "mail_sync_runs") return "Mail sync runs";
+  if (source === "outlook_sync_requests") return "Outlook sync requests";
+  if (source === "runtime_control_requests") return "Runtime control requests";
+  if (source === "operator_automation_runs") return "Operator automation runs";
+  if (source === "memory_governance_runs") return "Memory governance runs";
+  if (source === "message_outbox") return "Message outbox";
+  if (source === "message_inbox") return "Message inbox";
+  if (source === "callback_deliveries") return "Callback deliveries";
+  if (source === "gpu_leases") return "GPU leases";
+  if (source === "gpu_evictions") return "GPU evictions";
+  if (source === "model_activity_events") return "Model activity";
+  return humanizeIdentifier(source);
+}
+
+function jobActionId(job: Record<string, unknown>, fallbackId: string) {
+  return stringFromUnknown(job.source_id) ?? fallbackId;
+}
+
+function isCaptureJob(job: Record<string, unknown>) {
+  const source = jobSource(job);
+  if (source) return source === "capture_jobs";
+  const type = stringFromUnknown(job.job_type) ?? "";
+  return isCorpusJobType(type);
+}
+
+function isOutlookRequestJob(job: Record<string, unknown>) {
+  const source = jobSource(job);
+  if (source) return source === "outlook_sync_requests";
+  return stringFromUnknown(job.job_type) === "outlook_sync_request";
+}
+
+function isCorpusJobType(type: string) {
+  return type.startsWith("corpus_") || type === "search_index_sync";
+}
+
+function jobDetails(job: Record<string, unknown>) {
+  return job.details && typeof job.details === "object" && !Array.isArray(job.details) ? job.details as Record<string, unknown> : {};
+}
+
 function jobPayload(job: Record<string, unknown>) {
-  return job.payload && typeof job.payload === "object" && !Array.isArray(job.payload) ? job.payload as Record<string, unknown> : {};
+  if (job.payload && typeof job.payload === "object" && !Array.isArray(job.payload)) return job.payload as Record<string, unknown>;
+  const details = jobDetails(job);
+  return details.payload && typeof details.payload === "object" && !Array.isArray(details.payload) ? details.payload as Record<string, unknown> : {};
 }
 
 function jobTelemetry(job: Record<string, unknown>) {
-  return job.telemetry && typeof job.telemetry === "object" && !Array.isArray(job.telemetry) ? job.telemetry as Record<string, unknown> : {};
+  if (job.telemetry && typeof job.telemetry === "object" && !Array.isArray(job.telemetry)) return job.telemetry as Record<string, unknown>;
+  const details = jobDetails(job);
+  return details.telemetry && typeof details.telemetry === "object" && !Array.isArray(details.telemetry) ? details.telemetry as Record<string, unknown> : {};
 }
 
 function jobDisplayStatus(job: Record<string, unknown>, status: string) {
@@ -6488,6 +6586,8 @@ function jobProgressSummary(job: Record<string, unknown>) {
     countProgressSummary(telemetry.files_done ?? telemetry.files_seen, telemetry.files_total, "files")
   ].filter(Boolean);
   if (parts.length > 0) return parts.join(", ");
+  const direct = stringFromUnknown(job.progress);
+  if (direct && direct !== "-") return direct;
   const percent = numberFromUnknown(telemetry.progress_percent);
   if (percent !== undefined) return `${percent}%`;
   const stage = stringFromUnknown(telemetry.stage);
@@ -6548,6 +6648,7 @@ function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown
     ?? stringFromUnknown(payload.canonical_path)
     ?? stringFromUnknown(payload.file_path)
     ?? stringFromUnknown(payload.profile_name)
+    ?? stringFromUnknown(job.target)
     ?? stringFromUnknown(job.path)
     ?? (syncRootJob ? "Root sync" : undefined)
     ?? "No path";
@@ -6557,7 +6658,7 @@ function jobTarget(job: Record<string, unknown>, payload: Record<string, unknown
 
 function isActionableJobTarget(job: Record<string, unknown>, payload: Record<string, unknown>, target: { path: string; root: string }) {
   const type = stringFromUnknown(job.job_type) ?? "";
-  return type.startsWith("corpus_") && Boolean(stringFromUnknown(payload.path)) && target.path !== "Root sync" && target.path !== "No path";
+  return isCaptureJob(job) && isCorpusJobType(type) && Boolean(stringFromUnknown(payload.path)) && target.path !== "Root sync" && target.path !== "No path";
 }
 
 function jobTypeLabel(value?: string) {
@@ -6566,14 +6667,14 @@ function jobTypeLabel(value?: string) {
 
 function isCancelableCorpusJob(job: Record<string, unknown>, status: string) {
   const type = stringFromUnknown(job.job_type) ?? "";
-  return type.startsWith("corpus_") && ["pending", "retrying_locked", "running"].includes(status);
+  return isCaptureJob(job) && isCorpusJobType(type) && ["pending", "retrying_locked", "running"].includes(status);
 }
 
 function isRetryableCorpusJob(job: Record<string, unknown>, status: string) {
   const type = stringFromUnknown(job.job_type) ?? "";
   const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
   if (deletionRequested || status === "obsolete") return false;
-  return type.startsWith("corpus_") && (
+  return isCaptureJob(job) && isCorpusJobType(type) && (
     status === "failed"
     || status === "retrying_locked"
     || status.startsWith("blocked_")
@@ -6585,7 +6686,7 @@ function isDeletionMarkableCorpusJob(job: Record<string, unknown>, status: strin
   const type = stringFromUnknown(job.job_type) ?? "";
   const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
   if (deletionRequested || status === "obsolete") return false;
-  return type.startsWith("corpus_") && (
+  return isCaptureJob(job) && isCorpusJobType(type) && (
     status === "failed"
     || status.startsWith("blocked_")
     || status.startsWith("cancelled_")
@@ -6595,7 +6696,7 @@ function isDeletionMarkableCorpusJob(job: Record<string, unknown>, status: strin
 function isDeletionRestorableCorpusJob(job: Record<string, unknown>, status: string) {
   const type = stringFromUnknown(job.job_type) ?? "";
   const deletionRequested = Boolean(stringFromUnknown(job.delete_requested_at));
-  return type.startsWith("corpus_") && status === "obsolete" && deletionRequested;
+  return isCaptureJob(job) && isCorpusJobType(type) && status === "obsolete" && deletionRequested;
 }
 
 function nextJobSort(current: JobSortState, key: JobSortKey): JobSortState {
@@ -6607,27 +6708,6 @@ function nextJobSort(current: JobSortState, key: JobSortKey): JobSortState {
 
 function activeOutlookRequests(requests?: OutlookSyncRequest[]) {
   return (requests ?? []).filter((request) => ["pending", "claimed", "running"].includes(request.status ?? "pending"));
-}
-
-function outlookRequestJob(request: OutlookSyncRequest): Record<string, unknown> {
-  const status = request.status ?? "pending";
-  return {
-    id: request.id,
-    job_type: "outlook_sync_request",
-    status,
-    path: request.profile_name ?? "Outlook request",
-    root_name: "Outlook COM",
-    attempts: 0,
-    last_error: request.error ?? null,
-    created_at: request.created_at,
-    updated_at: request.updated_at ?? request.created_at,
-    payload: {
-      profile_name: request.profile_name,
-      requested_by: request.requested_by,
-      claimed_by: request.claimed_by,
-      result: request.result
-    }
-  };
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -7523,6 +7603,7 @@ function jobHistoryUrl(filters: JobHistoryFilters, offset: number, sort: JobSort
   filters.status.forEach((status) => params.append("status", status));
   filters.root_name.forEach((root) => params.append("root_name", root));
   filters.job_type.forEach((type) => params.append("job_type", type));
+  filters.job_source.forEach((source) => params.append("job_source", source));
   const updatedFrom = datetimeLocalToIso(filters.updated_from);
   const updatedTo = datetimeLocalToIso(filters.updated_to);
   if (updatedFrom) params.set("updated_from", updatedFrom);
@@ -7539,7 +7620,7 @@ function modelActivityHistoryUrl(includeControlPlane: boolean, offset: number) {
 }
 
 function hasJobHistoryFilters(filters: JobHistoryFilters) {
-  return Boolean(filters.status.length || filters.root_name.length || filters.job_type.length || filters.updated_from || filters.updated_to);
+  return Boolean(filters.status.length || filters.root_name.length || filters.job_type.length || filters.job_source.length || filters.updated_from || filters.updated_to);
 }
 
 function hasJobSort(sort: JobSortState) {
@@ -7552,6 +7633,7 @@ function normalizeJobHistoryFilters(value: unknown): JobHistoryFilters {
     status: stringListFromUnknown(value.status),
     root_name: stringListFromUnknown(value.root_name),
     job_type: stringListFromUnknown(value.job_type),
+    job_source: stringListFromUnknown(value.job_source),
     updated_from: stringFromUnknown(value.updated_from) ?? "",
     updated_to: stringFromUnknown(value.updated_to) ?? ""
   };
@@ -7637,7 +7719,7 @@ function dashboardHasActiveWork(state: LoadState) {
 }
 
 function dashboardJobStatusIsActive(status: string) {
-  return ["pending", "queued", "claimed", "running", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"].includes(status);
+  return ["pending", "queued", "claimed", "running", "processing", "publishing", "retrying", "waiting", "due", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"].includes(status);
 }
 
 function dashboardPollSeconds(settings: SettingRow[]) {
