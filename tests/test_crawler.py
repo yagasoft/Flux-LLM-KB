@@ -569,6 +569,95 @@ def test_scan_path_reuses_manifest_hash_for_unchanged_file(monkeypatch, tmp_path
     assert plan.assets[0].metadata["manifest_skipped_unchanged"] is True
 
 
+def test_scan_path_skips_deferred_document_content_hash_by_default(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "brief.pdf"
+    target.write_bytes(b"%PDF-1.4\n" + b"x" * 1024)
+
+    monkeypatch.setattr(
+        crawler,
+        "_sha256_file",
+        lambda _path: (_ for _ in ()).throw(AssertionError("deferred documents should not be hashed during scan")),
+    )
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert [asset.relative_path for asset in plan.assets] == ["brief.pdf"]
+    assert plan.assets[0].extraction_tier == "deferred"
+    assert plan.assets[0].content_hash is None
+    assert plan.deferred_jobs == [
+        {
+            "job_type": "corpus_extract_document",
+            "relative_path": "brief.pdf",
+            "reason": "deferred_extractor",
+        }
+    ]
+
+
+def test_scan_path_skips_metadata_only_content_hash_by_default(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "library.dll"
+    target.write_bytes(b"MZ" + b"x" * 1024)
+
+    monkeypatch.setattr(
+        crawler,
+        "_sha256_file",
+        lambda _path: (_ for _ in ()).throw(AssertionError("metadata-only files should not be hashed during scan")),
+    )
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert [asset.relative_path for asset in plan.assets] == ["library.dll"]
+    assert plan.assets[0].extraction_tier == "metadata_only"
+    assert plan.assets[0].content_hash is None
+    assert plan.deferred_jobs == []
+
+
+def test_scan_path_hashes_inline_text_by_default(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "notes.md"
+    target.write_text("short project note", encoding="utf-8")
+    calls = []
+
+    def fake_hash(path):
+        calls.append(path.name)
+        return f"hash:{path.name}"
+
+    monkeypatch.setattr(crawler, "_sha256_file", fake_hash)
+
+    plan = scan_path(root, CorpusPolicy(root_path=root))
+
+    assert [asset.relative_path for asset in plan.assets] == ["notes.md"]
+    assert plan.assets[0].extraction_tier == "inline"
+    assert plan.assets[0].content_hash == "hash:notes.md"
+    assert plan.assets[0].chunks
+    assert calls == ["notes.md"]
+
+
+def test_scan_path_all_eligible_mode_hashes_deferred_files(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "brief.pdf"
+    target.write_bytes(b"%PDF-1.4\n" + b"x" * 1024)
+    calls = []
+
+    def fake_hash(path):
+        calls.append(path.name)
+        return f"hash:{path.name}"
+
+    monkeypatch.setattr(crawler, "_sha256_file", fake_hash)
+
+    plan = scan_path(root, CorpusPolicy(root_path=root, content_hash_mode="all_eligible"))
+
+    assert [asset.relative_path for asset in plan.assets] == ["brief.pdf"]
+    assert plan.assets[0].extraction_tier == "deferred"
+    assert plan.assets[0].content_hash == "hash:brief.pdf"
+    assert calls == ["brief.pdf"]
+
+
 def test_scan_path_repairs_unchanged_indexed_file_when_chunks_are_missing(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -622,7 +711,7 @@ def test_scan_path_repairs_unchanged_indexed_file_when_chunks_are_missing(monkey
 def test_scan_path_hashes_files_concurrently_without_reordering(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
-    for name in ("b.bin", "a.bin", "c.bin"):
+    for name in ("b.txt", "a.txt", "c.txt"):
         (root / name).write_bytes(f"payload-{name}".encode("utf-8"))
 
     active = 0
@@ -653,7 +742,7 @@ def test_scan_path_hashes_files_concurrently_without_reordering(monkeypatch, tmp
 
     plan = scan_path(root, CorpusPolicy(root_path=root, hash_parallelism=2))
 
-    assert [asset.relative_path for asset in plan.assets] == ["a.bin", "b.bin", "c.bin"]
-    assert [asset.content_hash for asset in plan.assets] == ["hash:a.bin", "hash:b.bin", "hash:c.bin"]
-    assert sorted(hashes) == ["hash:a.bin", "hash:b.bin", "hash:c.bin"]
+    assert [asset.relative_path for asset in plan.assets] == ["a.txt", "b.txt", "c.txt"]
+    assert [asset.content_hash for asset in plan.assets] == ["hash:a.txt", "hash:b.txt", "hash:c.txt"]
+    assert sorted(hashes) == ["hash:a.txt", "hash:b.txt", "hash:c.txt"]
     assert max_active >= 2

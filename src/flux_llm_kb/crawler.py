@@ -162,6 +162,9 @@ CONTAINER_EXTENSIONS = {
 ARCHIVE_COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz4")
 TRANSIENT_SUFFIXES = {".tmp", ".partial", ".crdownload", ".download", ".part"}
 MAIL_SPOOL_INTERNAL_FILES = {"body.html", "message.eml", "message.msg"}
+CONTENT_HASH_MODE_INLINE_ONLY = "inline_only"
+CONTENT_HASH_MODE_ALL_ELIGIBLE = "all_eligible"
+CONTENT_HASH_MODES = frozenset({CONTENT_HASH_MODE_INLINE_ONLY, CONTENT_HASH_MODE_ALL_ELIGIBLE})
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,7 @@ class CorpusPolicy:
     stability_quiet_seconds: float = 0.0
     large_file_stability_quiet_seconds: float = 0.0
     hash_parallelism: int = 1
+    content_hash_mode: str = CONTENT_HASH_MODE_INLINE_ONLY
     manifest_lookup: Callable[[str], dict[str, Any] | None] | None = None
     clock: Callable[[], float] | None = None
     mail_spool: bool = False
@@ -443,7 +447,7 @@ def discover_asset(
     elif content_hash_precomputed:
         content_hash = content_hash_override
     else:
-        content_hash = _sha256_file(resolved) if stat.st_size <= policy.hash_max_bytes else None
+        content_hash = _sha256_file(resolved) if _should_content_hash(classification, stat.st_size, policy) else None
     chunks: tuple[AssetChunk, ...] = ()
     if classification.file_kind == "image":
         from .extractors import image_metadata
@@ -538,7 +542,9 @@ def _precompute_content_hashes(paths: list[Path], root: Path, policy: CorpusPoli
             )
             if manifest_unchanged:
                 hashes[path] = str(manifest.get("content_hash") or "") or None
-            elif stat.st_size <= policy.hash_max_bytes:
+                continue
+            classification = classify_file(resolved, policy)
+            if _should_content_hash(classification, stat.st_size, policy):
                 targets.append(path)
             else:
                 hashes[path] = None
@@ -552,6 +558,21 @@ def _precompute_content_hashes(paths: list[Path], root: Path, policy: CorpusPoli
         for path, content_hash in zip(targets, executor.map(lambda item: _sha256_file(item.resolve()), targets)):
             hashes[path] = content_hash
     return hashes
+
+
+def _content_hash_mode(policy: CorpusPolicy) -> str:
+    mode = str(policy.content_hash_mode or CONTENT_HASH_MODE_INLINE_ONLY).strip().lower()
+    if mode not in CONTENT_HASH_MODES:
+        raise ValueError(f"content_hash_mode must be one of: {', '.join(sorted(CONTENT_HASH_MODES))}")
+    return mode
+
+
+def _should_content_hash(classification: FileClassification, size_bytes: int, policy: CorpusPolicy) -> bool:
+    if size_bytes > policy.hash_max_bytes:
+        return False
+    if _content_hash_mode(policy) == CONTENT_HASH_MODE_ALL_ELIGIBLE:
+        return True
+    return classification.extraction_tier == "inline"
 
 
 def _is_mail_spool_internal_artifact(relative_path: str) -> bool:

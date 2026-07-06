@@ -64,6 +64,7 @@ def process_corpus_job(job: dict) -> JobProcessResult:
         max_inline_bytes=root["max_inline_bytes"],
         heavy_threshold_bytes=root["heavy_threshold_bytes"],
         **_configured_container_limits(),
+        content_hash_mode=_configured_content_hash_mode(),
     )
     if not _is_included(str(relative_path), policy, []):
         return _cancelled_unseen_result(
@@ -740,6 +741,14 @@ def _configured_container_limits() -> dict[str, int]:
         except Exception:
             resolved[field_name] = int(getattr(defaults, field_name))
     return resolved
+
+
+def _configured_content_hash_mode() -> str:
+    defaults = CorpusPolicy(root_path=Path("."))
+    try:
+        return str(SettingsService().resolve("crawler.content_hash_mode").raw_value)
+    except Exception:
+        return defaults.content_hash_mode
 
 
 def _configured_host_vss_enabled() -> bool:

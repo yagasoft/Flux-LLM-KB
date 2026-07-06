@@ -2217,6 +2217,7 @@ class KnowledgeService:
         glob_policy: dict[str, Any] | None = None,
         container_limits: dict[str, int] | None = None,
         hash_parallelism: int | None = None,
+        content_hash_mode: str | None = None,
     ) -> dict[str, Any]:
         if glob_policy is None:
             glob_policy = _configured_glob_policy(root)
@@ -2226,6 +2227,8 @@ class KnowledgeService:
             container_limits = _configured_container_limits()
         if hash_parallelism is None:
             hash_parallelism = _configured_hash_parallelism()
+        if content_hash_mode is None:
+            content_hash_mode = _configured_content_hash_mode()
         policy = CorpusPolicy(
             root_path=Path(root["root_path"]),
             recursive=root["recursive"],
@@ -2236,6 +2239,7 @@ class KnowledgeService:
             heavy_threshold_bytes=root["heavy_threshold_bytes"],
             **container_limits,
             hash_parallelism=hash_parallelism,
+            content_hash_mode=content_hash_mode,
             manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
             stability_quiet_seconds=_configured_stability_quiet_seconds() if reason == "watch_event" else 0.0,
             large_file_stability_quiet_seconds=_configured_large_file_stability_quiet_seconds() if reason == "watch_event" else 0.0,
@@ -2940,6 +2944,7 @@ class KnowledgeService:
             _write_benchmark_fixture(root, fixture, files)
             manifest: dict[str, dict[str, Any]] = {}
             hash_parallelism = _configured_hash_parallelism()
+            content_hash_mode = _configured_content_hash_mode()
             for pass_index in range(1, passes + 1):
                 started = time.perf_counter()
                 plan = scan_path(
@@ -2947,6 +2952,7 @@ class KnowledgeService:
                     CorpusPolicy(
                         root_path=root,
                         hash_parallelism=hash_parallelism,
+                        content_hash_mode=content_hash_mode,
                         manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
                     ),
                 )
@@ -2968,6 +2974,7 @@ class KnowledgeService:
                     "path_scope": "temporary",
                     "watcher_backend": _configured_watcher_backend(),
                     "hash_parallelism": hash_parallelism,
+                    "content_hash_mode": content_hash_mode,
                     "scenario": scenario,
                 }
                 record_fields = _benchmark_record_fields(
@@ -3037,6 +3044,7 @@ class KnowledgeService:
         target_path = scope_descriptor.get("path")
         runs: list[dict[str, Any]] = []
         hash_parallelism = _configured_hash_parallelism()
+        content_hash_mode = _configured_content_hash_mode()
         manifest: dict[str, dict[str, Any]] = {}
         for pass_index in range(1, passes + 1):
             started = time.perf_counter()
@@ -3052,6 +3060,7 @@ class KnowledgeService:
                     heavy_threshold_bytes=root["heavy_threshold_bytes"],
                     **_configured_container_limits(),
                     hash_parallelism=hash_parallelism,
+                    content_hash_mode=content_hash_mode,
                     manifest_lookup=lambda relative_path, store=manifest: store.get(relative_path),
                     mail_spool=bool((root.get("metadata") or {}).get("mail_profile")) if isinstance(root.get("metadata"), dict) else False,
                 ),
@@ -3079,6 +3088,7 @@ class KnowledgeService:
                 "host_access": scope_descriptor.get("host_access"),
                 "watcher_backend": _configured_watcher_backend(),
                 "hash_parallelism": hash_parallelism,
+                "content_hash_mode": content_hash_mode,
                 "max_files": max_files,
                 "observed_files": len(plan.assets),
                 "errors": len(plan.errors),
@@ -6043,6 +6053,14 @@ def _configured_hash_parallelism() -> int:
         return int(SettingsService().resolve("crawler.hash_parallelism").raw_value)
     except Exception:
         return 1
+
+
+def _configured_content_hash_mode() -> str:
+    defaults = CorpusPolicy(root_path=Path("."))
+    try:
+        return str(SettingsService().resolve("crawler.content_hash_mode").raw_value)
+    except Exception:
+        return defaults.content_hash_mode
 
 
 def _configured_unseen_asset_purge_grace_seconds() -> int:

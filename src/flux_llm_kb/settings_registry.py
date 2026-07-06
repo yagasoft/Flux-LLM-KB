@@ -136,6 +136,14 @@ def _choice(*choices: str) -> Callable[[Any], Any]:
     return validate
 
 
+def _content_hash_mode(value: Any) -> str:
+    parsed = str(value).strip().lower()
+    choices = ("inline_only", "all_eligible")
+    if parsed not in choices:
+        raise ValueError(f"content_hash_mode must be one of: {', '.join(choices)}")
+    return parsed
+
+
 def _reranker_quantization(value: Any) -> str:
     return normalize_reranker_quantization(value)
 
@@ -1613,6 +1621,17 @@ SETTING_REGISTRY: tuple[SettingDefinition, ...] = (
         apply_mode=APPLY_RELOAD,
         affected_components=("crawler", "watcher"),
         validator=_min_int(1),
+    ),
+    SettingDefinition(
+        key="crawler.content_hash_mode",
+        category="crawler",
+        default="inline_only",
+        value_type="str",
+        description="Controls which files receive SHA-256 content hashes during crawl scans.",
+        env_var="FLUX_KB_CRAWLER_CONTENT_HASH_MODE",
+        apply_mode=APPLY_RELOAD,
+        affected_components=("crawler", "watcher", "worker"),
+        validator=_content_hash_mode,
     ),
     SettingDefinition(
         key="crawler.global_include_globs",

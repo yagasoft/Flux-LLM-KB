@@ -2275,6 +2275,90 @@ def test_sync_corpus_uses_container_cap_settings(monkeypatch, tmp_path):
     assert progress == [{"stage": "enumerated", "files_total": 1}, {"stage": "persisted", "files_total": 1}]
 
 
+def test_sync_corpus_uses_configured_content_hash_mode(monkeypatch, tmp_path):
+    from flux_llm_kb import service as service_module
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    captured = {}
+    monkeypatch.setattr(service_module, "_configured_content_hash_mode", lambda: "all_eligible")
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    monkeypatch.setattr(
+        database,
+        "list_monitored_roots",
+        lambda: [
+            {
+                "name": "docs",
+                "root_path": str(root),
+                "recursive": True,
+                "include_globs": [],
+                "exclude_globs": [],
+                "glob_mode": "extend",
+                "max_inline_bytes": 1024,
+                "heavy_threshold_bytes": 2048,
+            }
+        ],
+    )
+
+    def fake_scan(_root_path, policy, target_path=None, progress_callback=None):
+        captured["policy"] = policy
+        return SimpleNamespace(assets=[], deferred_jobs=[], errors=[], root_path=root)
+
+    monkeypatch.setattr(service_module, "scan_path", fake_scan)
+    monkeypatch.setattr(database, "load_scan_manifest", lambda **_kwargs: {}, raising=False)
+    monkeypatch.setattr(database, "persist_crawl_plan", lambda **kwargs: {"root_name": kwargs["root_name"]})
+
+    result = KnowledgeService().sync_corpus(root_name="docs")
+
+    assert result == {"root_name": "docs"}
+    assert captured["policy"].content_hash_mode == "all_eligible"
+
+
+def test_process_corpus_job_uses_configured_content_hash_mode(monkeypatch, tmp_path):
+    root = tmp_path / "docs"
+    root.mkdir()
+    target = root / "brief.docx"
+    target.write_bytes(b"PK\x03\x04")
+    captured = {}
+    monkeypatch.setattr(worker, "_configured_content_hash_mode", lambda: "all_eligible")
+    monkeypatch.setattr(database, "corpus_job_is_running", lambda _job_id: True)
+    monkeypatch.setattr(database, "apply_extraction_result_for_job", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        database,
+        "get_monitored_root",
+        lambda _root_name: {
+            "name": "docs",
+            "root_path": str(root),
+            "recursive": True,
+            "include_globs": [],
+            "exclude_globs": [],
+            "glob_mode": "extend",
+            "max_inline_bytes": 1024,
+            "heavy_threshold_bytes": 2048,
+            "metadata": {},
+        },
+    )
+
+    def fake_extract_file(path, policy):
+        captured["path"] = path
+        captured["policy"] = policy
+        return worker.ExtractionResult(status="metadata_only", metadata={"extractor": "fake"}, chunks=())
+
+    monkeypatch.setattr(worker, "extract_file", fake_extract_file)
+
+    result = worker.process_corpus_job(
+        {
+            "id": "job-1",
+            "job_type": "corpus_extract_document",
+            "payload": {"root_name": "docs", "path": "brief.docx"},
+        }
+    )
+
+    assert result.status == "metadata_only"
+    assert captured["path"] == target
+    assert captured["policy"].content_hash_mode == "all_eligible"
+
+
 def test_reconcile_unseen_assets_for_root_marks_paths_excluded_by_effective_policy(monkeypatch, tmp_path):
     root = tmp_path / "docs"
     root.mkdir()

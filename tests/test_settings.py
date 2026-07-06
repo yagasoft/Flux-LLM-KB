@@ -4,7 +4,7 @@ import pytest
 
 from flux_llm_kb import database
 from flux_llm_kb.settings import SettingsService
-from flux_llm_kb.settings_registry import APPLY_REINDEX_REQUIRED, SETTING_REGISTRY
+from flux_llm_kb.settings_registry import APPLY_REINDEX_REQUIRED, APPLY_RELOAD, SETTING_REGISTRY, get_definition
 
 
 EXPECTED_GENERATED_CACHE_EXCLUDES = [
@@ -79,6 +79,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "ocr.simple_model" in keys
     assert "ocr.document_model" in keys
     assert "crawler.max_inline_bytes" in keys
+    assert "crawler.content_hash_mode" in keys
     assert "crawler.container_max_depth" in keys
     assert "crawler.container_max_members" in keys
     assert "crawler.container_max_total_bytes" in keys
@@ -153,6 +154,20 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "operator.automation.auto_run_governance_shadow" in keys
     assert "privacy.redactions.enabled" in keys
     assert "worker.default_workers" in keys
+
+
+def test_crawler_content_hash_mode_setting_metadata():
+    definition = get_definition("crawler.content_hash_mode")
+
+    assert definition.default == "inline_only"
+    assert definition.value_type == "str"
+    assert definition.env_var == "FLUX_KB_CRAWLER_CONTENT_HASH_MODE"
+    assert definition.apply_mode == APPLY_RELOAD
+    assert definition.affected_components == ("crawler", "watcher", "worker")
+    assert definition.validate("inline_only") == "inline_only"
+    assert definition.validate("all_eligible") == "all_eligible"
+    with pytest.raises(ValueError, match="content_hash_mode"):
+        definition.validate("everything")
 
 
 def test_worker_default_workers_uses_environment_override(monkeypatch):
