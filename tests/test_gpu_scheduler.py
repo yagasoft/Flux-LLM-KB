@@ -921,7 +921,83 @@ def test_postgres_scheduler_recovers_running_leases_past_metadata_max_active_sec
     assert "expires_at < now()" in statement
     assert "metadata->>'max_active_seconds'" in statement
     assert "granted_at < now() -" in statement
-    assert params == ()
+    assert params == (60.0,)
+
+
+def test_postgres_scheduler_times_out_stale_waiting_leases():
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _execute(self, statement: str, params: tuple[object, ...]) -> None:
+            calls.append((statement, params))
+
+    scheduler = RecordingScheduler(_config(mode="postgres", stale_after_seconds=45.0), database_url="postgresql://example")
+
+    scheduler._recover_stale()
+
+    assert len(calls) == 1
+    statement, params = calls[0]
+    assert "status = 'waiting'" in statement
+    assert "SET status = 'timed_out'" in statement
+    assert "expires_at < now()" in statement
+    assert "created_at < now() - (%s * interval '1 second')" in statement
+    assert params == (45.0,)
+
+
+def test_postgres_scheduler_inserts_waiting_lease_with_deadline(monkeypatch):
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _execute(self, statement: str, params: tuple[object, ...]) -> None:
+            calls.append((statement, params))
+
+    monkeypatch.setattr(gpu_scheduler, "_jsonb_adapter", lambda: dict)
+    scheduler = RecordingScheduler(_config(mode="postgres"), database_url="postgresql://example")
+
+    scheduler._insert_waiting(
+        GpuTaskProfile(
+            task_type="ocr_image",
+            model_id="PP-OCRv5",
+            estimated_vram_mb=2_000,
+            timeout_seconds=7.5,
+        ),
+        "lease-waiting",
+    )
+
+    statement, params = calls[0]
+    assert "expires_at" in statement
+    assert "now() + (%s * interval '1 second')" in statement
+    assert params[9] == 7.5
+
+
+def test_in_process_scheduler_times_out_stale_waiting_lease_head():
+    scheduler = InProcessGpuScheduler(_config(default_timeout_seconds=1.0))
+    stale = GpuLeaseRecord(
+        id="stale-waiting",
+        task_type="ocr_image",
+        model_id="PP-OCRv5",
+        status="waiting",
+        estimated_vram_mb=2_000,
+        exclusive=True,
+        share_group="",
+        priority=0,
+        component="paddle-runner",
+        request_id="",
+        created_at=1.0,
+        granted_at=None,
+        heartbeat_at=None,
+        expires_at=2.0,
+        released_at=None,
+        metadata={},
+    )
+    scheduler._leases[stale.id] = stale
+
+    with scheduler.acquire(GpuTaskProfile(task_type="embedding", model_id="snowflake", estimated_vram_mb=2_000)):
+        status = scheduler.status()
+
+    assert status["counts"]["timed_out"] == 1
+    assert status["counts"]["running"] == 1
+    assert status["waiting"] == []
 
 
 def test_in_process_scheduler_times_out_waiting_for_exclusive_work():

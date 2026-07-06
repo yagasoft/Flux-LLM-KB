@@ -513,6 +513,11 @@ class InProcessGpuScheduler(BaseGpuScheduler):
         granted: bool,
     ) -> GpuLeaseRecord:
         now = time.time()
+        expires_at = None
+        if granted:
+            expires_at = now + _profile_ttl(profile, self.config)
+        elif status == "waiting":
+            expires_at = now + _profile_timeout(profile, self.config)
         return GpuLeaseRecord(
             id=lease_id or uuid4().hex,
             task_type=profile.task_type,
@@ -527,7 +532,7 @@ class InProcessGpuScheduler(BaseGpuScheduler):
             created_at=now,
             granted_at=now if granted else None,
             heartbeat_at=now if granted else None,
-            expires_at=(now + _profile_ttl(profile, self.config)) if granted else None,
+            expires_at=expires_at,
             released_at=None,
             metadata=dict(profile.metadata or {}),
         )
@@ -545,11 +550,18 @@ class InProcessGpuScheduler(BaseGpuScheduler):
         for record in list(self._leases.values()):
             if record.status == "running" and _lease_is_stale(record, now=now):
                 self._recover_locked(record.id, now=now)
+            elif record.status == "waiting" and _lease_is_stale(record, now=now):
+                self._timeout_waiting_locked(record.id, now=now)
 
     def _recover_locked(self, lease_id: str, *, now: float) -> None:
         record = self._leases.get(lease_id)
         if record is not None and record.status == "running":
             self._leases[lease_id] = _replace_record(record, status="recovered", released_at=now)
+
+    def _timeout_waiting_locked(self, lease_id: str, *, now: float) -> None:
+        record = self._leases.get(lease_id)
+        if record is not None and record.status == "waiting":
+            self._leases[lease_id] = _replace_record(record, status="timed_out", released_at=now)
 
     def _reconcile_runtime_residency(self) -> None:
         loaded_ollama_models = _ollama_loaded_model_names(self.config)
@@ -765,9 +777,9 @@ class PostgresGpuScheduler(BaseGpuScheduler):
             """
             INSERT INTO gpu_leases (
                 id, task_type, model_id, status, estimated_vram_mb, exclusive, share_group,
-                priority, component, request_id, created_at, metadata
+                priority, component, request_id, created_at, expires_at, metadata
             )
-            VALUES (%s, %s, %s, 'waiting', %s, %s, %s, %s, %s, %s, now(), %s)
+            VALUES (%s, %s, %s, 'waiting', %s, %s, %s, %s, %s, %s, now(), now() + (%s * interval '1 second'), %s)
             """,
             (
                 lease_id,
@@ -779,6 +791,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 int(profile.priority or 0),
                 profile.component,
                 profile.request_id,
+                float(_profile_timeout(profile, self.config)),
                 Jsonb(dict(profile.metadata or {})),
             ),
         )
@@ -1167,19 +1180,36 @@ class PostgresGpuScheduler(BaseGpuScheduler):
     def _recover_stale(self) -> None:
         self._execute(
             """
-            UPDATE gpu_leases
-               SET status = 'recovered', released_at = now()
-             WHERE status = 'running'
-               AND (
-                    expires_at < now()
-                 OR (
-                    granted_at IS NOT NULL
-                    AND metadata->>'max_active_seconds' ~ '^[0-9]+(\\.[0-9]+)?$'
-                    AND granted_at < now() - ((metadata->>'max_active_seconds')::double precision * interval '1 second')
-                 )
-               )
+            WITH timed_out_waiting AS (
+                UPDATE gpu_leases
+                   SET status = 'timed_out', released_at = now()
+                 WHERE status = 'waiting'
+                   AND (
+                        expires_at < now()
+                     OR (
+                        expires_at IS NULL
+                        AND created_at < now() - (%s * interval '1 second')
+                     )
+                   )
+                 RETURNING id
+            ),
+            recovered_running AS (
+                UPDATE gpu_leases
+                   SET status = 'recovered', released_at = now()
+                 WHERE status = 'running'
+                   AND (
+                        expires_at < now()
+                     OR (
+                        granted_at IS NOT NULL
+                        AND metadata->>'max_active_seconds' ~ '^[0-9]+(\\.[0-9]+)?$'
+                        AND granted_at < now() - ((metadata->>'max_active_seconds')::double precision * interval '1 second')
+                     )
+                   )
+                 RETURNING id
+            )
+            SELECT 1
             """,
-            (),
+            (float(self.config.stale_after_seconds),),
         )
 
     def _reconcile_runtime_residency(self) -> None:
