@@ -237,6 +237,58 @@ def test_outlook_host_reports_not_windows_without_crashing(monkeypatch):
     assert events[0]["status"] == "blocked_not_windows"
 
 
+def test_outlook_host_broker_request_on_non_windows_is_retryable(monkeypatch):
+    from flux_llm_kb import outlook_host
+
+    events = []
+    monkeypatch.setattr(outlook_host.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(database, "record_outlook_host_heartbeat", lambda **kwargs: events.append(kwargs) or kwargs)
+
+    payload = outlook_host.process_request_by_id(
+        request_id="req-1",
+        host_id="host-1",
+        broker_message_id="msg-1",
+    )
+
+    assert payload["status"] == "blocked_not_windows"
+    assert payload["retryable"] is True
+    assert events[0]["status"] == "blocked_not_windows"
+
+
+def test_outlook_host_broker_worker_keeps_heartbeat_after_recoverable_errors(monkeypatch, tmp_path):
+    from flux_llm_kb import event_worker, outlook_host
+
+    events = []
+    attempts = []
+    monkeypatch.setenv("FLUX_KB_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(database, "record_outlook_host_heartbeat", lambda **kwargs: events.append(kwargs) or kwargs)
+    monkeypatch.setattr(database, "requeue_stale_pending_outlook_sync_requests", lambda **_kwargs: {"requeued": 0, "requests": []})
+    monkeypatch.setattr(outlook_host.time, "sleep", lambda _seconds: None)
+
+    def fake_run_worker(**kwargs):
+        attempts.append(kwargs)
+        raise RuntimeError("rabbitmq unavailable")
+
+    monkeypatch.setattr(event_worker, "run_worker", fake_run_worker)
+
+    payload = outlook_host.run_broker_worker(
+        host_id="host-1",
+        max_attempts=2,
+        reconnect_delay_seconds=0,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    assert payload["status"] == "stopped"
+    assert payload["error_count"] == 2
+    assert attempts == [
+        {"queue_name": "flux.commands.outlook", "worker_id": "host-1"},
+        {"queue_name": "flux.commands.outlook", "worker_id": "host-1"},
+    ]
+    assert any(event["status"] == "running" and event["metadata"]["mode"] == "broker_worker" for event in events)
+    assert events[-1]["status"] == "host_error"
+    assert events[-1]["last_error"] == "rabbitmq unavailable"
+
+
 def test_outlook_host_loop_continues_after_internal_error(monkeypatch):
     from flux_llm_kb import outlook_host
 

@@ -11,6 +11,30 @@ Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
 
+## 2026-07-06 Outlook Host Broker Runtime Hardening Update
+
+Affected `Progress %` entries remain conservative until deployment and live
+Outlook host validation are complete:
+
+- `V2.6 Mail Capture And Runtime Configuration`: remains `99%`. The Outlook COM
+  command queue is now assigned to the Windows host process rather than a Docker
+  worker that cannot use desktop Outlook COM. The host broker loop keeps
+  loop-level heartbeats while waiting on the broker, retries recoverable worker
+  failures, and requeues stale pending Outlook requests whose original broker
+  command was lost before any host delivery.
+- `V2.7 Mail And Retrieval Production Hardening`: remains `99%`. Unsupported
+  non-Windows Outlook COM deliveries now return retryable broker outcomes instead
+  of being marked as handled, and the generic event-worker startup path defers
+  broker connection handling to the consumer retry loop so transient RabbitMQ
+  outages do not crash the worker before retry policy starts.
+
+Remaining Work: deploy through the required feature closeout path, validate that
+no deployed Docker service consumes the Outlook command queue, confirm the
+Windows Outlook host is the sole live Outlook queue consumer with fresh
+heartbeats, verify stale pending Outlook requests requeue and drain through the
+host, and validate catch-up completion on live rollout profiles before treating
+the runtime fix as shipped.
+
 ## 2026-07-06 Dashboard Jobs Visibility And Reconciliation Update
 
 Affected `Progress %` entries remain conservative until deployment and live

@@ -20,7 +20,6 @@ DEV_MEMORY_LIMITS = {
     "worker": "1gb",
     "search-index-worker": "1gb",
     "mail-worker": "512mb",
-    "outlook-worker": "512mb",
     "automation-worker": "384mb",
     "governance-worker": "384mb",
     "runtime-control-worker": "256mb",
@@ -44,15 +43,14 @@ PRODUCTION_MEMORY_LIMITS = {
     "vespa": "4gb",
 }
 
-DEV_MEMORY_EXPECTED_MB = 9728
-PRODUCTION_MEMORY_EXPECTED_MB = 31232
+DEV_MEMORY_EXPECTED_MB = 9216
+PRODUCTION_MEMORY_EXPECTED_MB = 30720
 
 PRODUCTION_CONTAINER_NAMES = {
     "api": "flux-llm-kb-api",
     "worker": "flux-llm-kb-worker",
     "search-index-worker": "flux-llm-kb-search-index-worker",
     "mail-worker": "flux-llm-kb-mail-worker",
-    "outlook-worker": "flux-llm-kb-outlook-worker",
     "automation-worker": "flux-llm-kb-automation-worker",
     "governance-worker": "flux-llm-kb-governance-worker",
     "runtime-control-worker": "flux-llm-kb-runtime-control-worker",
@@ -146,7 +144,8 @@ def test_production_update_uses_prebuilt_images_not_repo_context_compose_build()
     assert "flux-llm-kb-api:" in update
     assert '"up", "-d", "--no-build"' in update
     assert '"postgres", "rabbitmq", "vespa"' in update
-    assert '"worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker"' in update
+    assert '"worker", "search-index-worker", "mail-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker"' in update
+    assert "outlook-worker" not in update
     assert '"event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker"' in update
     assert "FLUX_KB_IMAGE_TAG" in update
     assert "FLUX_KB_CALLBACK_SIGNING_SECRET=$callbackSecret" in update
@@ -356,6 +355,18 @@ def test_production_host_agent_uses_host_loopback_to_docker_ollama():
         assert 'os.environ["FLUX_KB_LOCAL_INFERENCE_BASE_URL"] = "http://ollama:11434"' not in script
         assert 'svg_renderer = Path(os.environ["FLUX_KB_INSTALL_ROOT"]) / "tools" / "resvg" / "resvg.exe"' in script
         assert 'os.environ["FLUX_KB_SVG_RENDERER"] = str(svg_renderer)' in script
+
+
+def test_production_outlook_host_launcher_uses_host_rabbitmq():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+        outlook_block = script.split("$outlookHost = @\"", 1)[1].split("\"@", 1)[0]
+
+        assert 'os.environ["FLUX_KB_RABBITMQ_URL"] = "amqp://flux:flux@127.0.0.1:5672/flux"' in outlook_block
+        assert 'os.environ["FLUX_KB_RABBITMQ_MANAGEMENT_URL"] = "http://127.0.0.1:15672"' in outlook_block
+        assert 'os.environ["FLUX_KB_RABBITMQ_USERNAME"] = "flux"' in outlook_block
+        assert 'os.environ["FLUX_KB_RABBITMQ_PASSWORD"] = "flux"' in outlook_block
+        assert 'os.environ["FLUX_KB_RABBITMQ_URL"] = "amqp://flux:flux@rabbitmq:5672/flux"' not in outlook_block
 
 
 def test_production_deploy_persists_host_side_qwen_runtime_settings():
@@ -609,7 +620,8 @@ def test_worker_compose_commands_use_settings_driven_parallelism_defaults():
         assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.corpus" in compose
         assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.search_index" in compose
         assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap" in compose
-        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook" in compose
+        assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook" not in compose
+        assert "  outlook-worker:" not in compose
         assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.automation" in compose
         assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.governance" in compose
         assert "python -m flux_llm_kb.cli event worker run --queue flux.commands.runtime_control" in compose

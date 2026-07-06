@@ -16,7 +16,7 @@ try {
 
   $docker = Get-Command docker -ErrorAction SilentlyContinue
   if ($null -ne $docker) {
-    docker compose up -d --build postgres rabbitmq api outbox-relay event-scheduler worker search-index-worker mail-worker outlook-worker automation-worker governance-worker runtime-control-worker gpu-eviction-worker callback-worker event-audit-worker event-dashboard-worker event-diagnostics-worker
+    docker compose up -d --build postgres rabbitmq api outbox-relay event-scheduler worker search-index-worker mail-worker automation-worker governance-worker runtime-control-worker gpu-eviction-worker callback-worker event-audit-worker event-dashboard-worker event-diagnostics-worker
     if ($LASTEXITCODE -eq 0) {
       Write-Host "Dashboard deployment refreshed at $url"
       return

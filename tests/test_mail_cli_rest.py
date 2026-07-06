@@ -517,7 +517,18 @@ def test_cli_outlook_host_run_consumes_broker_queue(monkeypatch, capsys):
     from flux_llm_kb import outlook_host
 
     calls = []
-    monkeypatch.setattr(event_worker, "run_worker", lambda **kwargs: calls.append(kwargs) or {"status": "stopped", **kwargs})
+    monkeypatch.setattr(
+        event_worker,
+        "run_worker",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("outlook host must use its hardened broker runner")),
+    )
+    monkeypatch.setattr(
+        outlook_host,
+        "run_broker_worker",
+        lambda **kwargs: calls.append(kwargs)
+        or {"status": "stopped", "queue_name": "flux.commands.outlook", "worker_id": kwargs["host_id"], **kwargs},
+        raising=False,
+    )
     monkeypatch.setattr(
         outlook_host,
         "run_forever",
@@ -529,7 +540,7 @@ def test_cli_outlook_host_run_consumes_broker_queue(monkeypatch, capsys):
 
     assert payload["queue_name"] == "flux.commands.outlook"
     assert payload["worker_id"] == "host-1"
-    assert calls == [{"queue_name": "flux.commands.outlook", "worker_id": "host-1"}]
+    assert calls == [{"host_id": "host-1"}]
 
 
 def test_cli_outlook_host_run_legacy_db_loop_requires_dev_guard(monkeypatch):

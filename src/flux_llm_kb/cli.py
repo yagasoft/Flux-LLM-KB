@@ -1638,9 +1638,7 @@ def _outlook_host(args: argparse.Namespace) -> int:
                 )
             payload = outlook_host.run_forever(host_id=args.host_id, interval_seconds=args.interval_seconds)
         else:
-            from . import event_worker, messaging
-
-            payload = event_worker.run_worker(queue_name=messaging.COMMAND_OUTLOOK_QUEUE, worker_id=args.host_id)
+            payload = outlook_host.run_broker_worker(host_id=args.host_id)
     else:  # pragma: no cover - argparse prevents this
         raise ValueError(args.outlook_host_command)
     print(json.dumps(payload, indent=2, sort_keys=True))

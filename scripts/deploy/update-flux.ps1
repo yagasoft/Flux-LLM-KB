@@ -411,16 +411,6 @@ services:
       sh -c "python -m flux_llm_kb.cli migrate &&
              python -m flux_llm_kb.cli event worker run --queue flux.commands.mail_imap"
 
-  outlook-worker:
-    extends:
-      service: worker
-    container_name: flux-llm-kb-outlook-worker
-    mem_limit: "512mb"
-    memswap_limit: "512mb"
-    command: >
-      sh -c "python -m flux_llm_kb.cli migrate &&
-             python -m flux_llm_kb.cli event worker run --queue flux.commands.outlook"
-
   automation-worker:
     extends:
       service: worker
@@ -1048,6 +1038,10 @@ import traceback
 from pathlib import Path
 
 os.environ["FLUX_KB_DATABASE_URL"] = "postgresql://flux:flux@127.0.0.1:${PostgresPort}/flux_llm_kb"
+os.environ["FLUX_KB_RABBITMQ_URL"] = "amqp://flux:flux@127.0.0.1:5672/flux"
+os.environ["FLUX_KB_RABBITMQ_MANAGEMENT_URL"] = "http://127.0.0.1:15672"
+os.environ["FLUX_KB_RABBITMQ_USERNAME"] = "flux"
+os.environ["FLUX_KB_RABBITMQ_PASSWORD"] = "flux"
 os.environ["FLUX_KB_INSTALL_ROOT"] = r"$InstallRoot"
 os.environ["FLUX_KB_APP_ROOT"] = r"$AppRoot"
 os.environ["FLUX_KB_PRIVATE_DIR"] = r"$InstallRoot\private"
@@ -1971,8 +1965,8 @@ function Invoke-FluxDockerComposeUp {
         -RecoverableContainers @("flux-llm-kb-rabbitmq", "flux-vespa") `
         -TimeoutSeconds $TimeoutSeconds
     Invoke-FluxVespaApplicationDeploy -AppRoot $AppRoot -TimeoutSeconds 300
-    $commandWorkerServices = @("worker", "search-index-worker", "mail-worker", "outlook-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker")
-    $commandWorkerContainers = @("flux-llm-kb-worker", "flux-llm-kb-search-index-worker", "flux-llm-kb-mail-worker", "flux-llm-kb-outlook-worker", "flux-llm-kb-automation-worker", "flux-llm-kb-governance-worker", "flux-llm-kb-runtime-control-worker", "flux-llm-kb-gpu-eviction-worker")
+    $commandWorkerServices = @("worker", "search-index-worker", "mail-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker")
+    $commandWorkerContainers = @("flux-llm-kb-worker", "flux-llm-kb-search-index-worker", "flux-llm-kb-mail-worker", "flux-llm-kb-automation-worker", "flux-llm-kb-governance-worker", "flux-llm-kb-runtime-control-worker", "flux-llm-kb-gpu-eviction-worker")
     $eventSubscriberServices = @("event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker")
     $eventSubscriberContainers = @("flux-llm-kb-event-audit-worker", "flux-llm-kb-event-dashboard-worker", "flux-llm-kb-event-diagnostics-worker")
     $services = @("paddle-runner", "model-runner", "api") + $commandWorkerServices + @("event-scheduler", "callback-worker") + $eventSubscriberServices + @("outbox-relay")

@@ -7719,6 +7719,65 @@ def test_outlook_claim_query_recovers_stale_claims_from_stale_heartbeat_without_
     assert "claimed_by = NULL" in claim_function
 
 
+def test_requeue_stale_pending_outlook_requests_refreshes_broker_message(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            sql, _params = executed[-1]
+            if "FROM outlook_sync_requests r" in sql and "r.status = 'pending'" in sql:
+                return [("req-1", "outlook-catchup", "dashboard")]
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    enqueued = []
+
+    def fake_enqueue(cur, **kwargs):
+        enqueued.append(kwargs)
+        return {"message_id": "msg-new"}
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_enqueue_message_outbox_with_cursor", fake_enqueue)
+
+    result = database.requeue_stale_pending_outlook_sync_requests(
+        min_age_seconds=300,
+        limit=5,
+        requested_by="repair-test",
+    )
+
+    assert result == {
+        "requeued": 1,
+        "requests": [{"id": "req-1", "profile_name": "outlook-catchup", "message_id": "msg-new"}],
+    }
+    assert enqueued[0]["routing_key"] == "mail.outlook.sync"
+    assert enqueued[0]["payload"]["request_id"] == "req-1"
+    update_sql = "\n".join(sql for sql, _params in executed if "UPDATE outlook_sync_requests" in sql)
+    assert "broker_message_id = %s" in update_sql
+    assert "requeued_from_stale_pending" in update_sql
+
+
 def test_cancel_outlook_sync_request_blocks_claimed_mid_execution(monkeypatch):
     executed = []
 

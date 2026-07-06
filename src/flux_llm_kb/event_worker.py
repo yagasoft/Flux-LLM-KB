@@ -142,8 +142,12 @@ class EventWorker:
 async def run_worker_loop(*, queue_name: str = messaging.COMMAND_CORPUS_QUEUE, worker_id: str | None = None) -> dict[str, Any]:
     worker = EventWorker(worker_id=worker_id)
     consumer = messaging.RabbitMqConsumer()
-    async with consumer:
+    try:
         await consumer.consume(queue_name=queue_name, handler=lambda message: worker.handle(message))
+    finally:
+        close = getattr(consumer, "close", None)
+        if close is not None:
+            await close()
     return {"status": "stopped", "queue": queue_name}
 
 

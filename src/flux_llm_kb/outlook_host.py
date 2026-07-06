@@ -79,6 +79,81 @@ def run_forever(
         return {"status": "already_running", "host_id": host_id, "error": str(exc)}
 
 
+def run_broker_worker(
+    *,
+    host_id: str = DEFAULT_HOST_ID,
+    reconnect_delay_seconds: float = 5.0,
+    max_attempts: int | None = None,
+    heartbeat_interval_seconds: float = 30.0,
+) -> dict[str, Any]:
+    try:
+        with _outlook_host_lock(host_id):
+            return _run_broker_worker_locked(
+                host_id=host_id,
+                reconnect_delay_seconds=reconnect_delay_seconds,
+                max_attempts=max_attempts,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+            )
+    except OutlookHostAlreadyRunning as exc:
+        return {"status": "already_running", "host_id": host_id, "error": str(exc)}
+
+
+def _run_broker_worker_locked(
+    *,
+    host_id: str = DEFAULT_HOST_ID,
+    reconnect_delay_seconds: float = 5.0,
+    max_attempts: int | None = None,
+    heartbeat_interval_seconds: float = 30.0,
+) -> dict[str, Any]:
+    from . import event_worker, messaging
+
+    attempts = 0
+    error_count = 0
+    last_error: str | None = None
+    stop_heartbeat, heartbeat_thread = _start_loop_heartbeat(
+        host_id=host_id,
+        interval_seconds=heartbeat_interval_seconds,
+        mode="broker_worker",
+    )
+    try:
+        while max_attempts is None or attempts < max_attempts:
+            attempts += 1
+            try:
+                database.requeue_stale_pending_outlook_sync_requests(
+                    requested_by=f"outlook-host:{host_id}",
+                )
+                payload = event_worker.run_worker(queue_name=messaging.COMMAND_OUTLOOK_QUEUE, worker_id=host_id)
+                return {
+                    "host_id": host_id,
+                    "worker_id": host_id,
+                    "queue_name": messaging.COMMAND_OUTLOOK_QUEUE,
+                    **payload,
+                    "attempts": attempts,
+                    "error_count": error_count,
+                    "last_error": last_error,
+                }
+            except Exception as exc:
+                error_count += 1
+                last_error = str(exc)
+                traceback.print_exc()
+                _record_loop_error(host_id, exc)
+                if max_attempts is not None and attempts >= max_attempts:
+                    break
+                time.sleep(max(0.0, float(reconnect_delay_seconds or 0.0)))
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=1.0)
+    return {
+        "status": "stopped",
+        "host_id": host_id,
+        "worker_id": host_id,
+        "queue_name": messaging.COMMAND_OUTLOOK_QUEUE,
+        "attempts": attempts,
+        "error_count": error_count,
+        "last_error": last_error,
+    }
+
+
 def _run_forever_locked(
     *,
     host_id: str = DEFAULT_HOST_ID,
@@ -176,11 +251,11 @@ def process_request_by_id(
     heartbeat_interval_seconds: float = 30.0,
 ) -> dict[str, Any]:
     if platform.system() != "Windows":
-        return _blocked(host_id, "blocked_not_windows", "Outlook COM host requires Windows")
+        return _blocked(host_id, "blocked_not_windows", "Outlook COM host requires Windows") | {"retryable": True}
     try:
         import win32com.client  # noqa: F401 # type: ignore[import-not-found]
     except ImportError:
-        return _blocked(host_id, "blocked_missing_dependency", "pywin32 is required for Outlook COM")
+        return _blocked(host_id, "blocked_missing_dependency", "pywin32 is required for Outlook COM") | {"retryable": True}
 
     database.record_outlook_host_heartbeat(host_id=host_id, status="running", process_id=os.getpid(), metadata={})
     request = database.claim_outlook_sync_request_by_id(
@@ -259,24 +334,34 @@ def _run_with_active_heartbeat(
             thread.join(timeout=1.0)
 
 
-def _start_loop_heartbeat(*, host_id: str, interval_seconds: float) -> tuple[threading.Event, threading.Thread]:
+def _record_loop_running_heartbeat(*, host_id: str, mode: str) -> None:
+    try:
+        database.record_outlook_host_heartbeat(
+            host_id=host_id,
+            status="running",
+            process_id=os.getpid(),
+            metadata={"mode": mode},
+        )
+    except Exception:
+        traceback.print_exc()
+
+
+def _start_loop_heartbeat(
+    *,
+    host_id: str,
+    interval_seconds: float,
+    mode: str = "host_loop",
+) -> tuple[threading.Event, threading.Thread]:
     stop_heartbeat = threading.Event()
     interval = max(0.1, float(interval_seconds or 30.0))
 
     def heartbeat() -> None:
         while not stop_heartbeat.is_set():
             if not _active_request_heartbeat_running(host_id):
-                try:
-                    database.record_outlook_host_heartbeat(
-                        host_id=host_id,
-                        status="running",
-                        process_id=os.getpid(),
-                        metadata={"mode": "host_loop"},
-                    )
-                except Exception:
-                    traceback.print_exc()
+                _record_loop_running_heartbeat(host_id=host_id, mode=mode)
             stop_heartbeat.wait(interval)
 
+    _record_loop_running_heartbeat(host_id=host_id, mode=mode)
     thread = threading.Thread(target=heartbeat, name=f"outlook-host-loop-heartbeat:{host_id}", daemon=True)
     thread.start()
     return stop_heartbeat, thread

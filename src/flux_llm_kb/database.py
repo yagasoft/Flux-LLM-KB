@@ -11704,6 +11704,81 @@ def enqueue_due_outlook_sync_commands(
     return {"queued": len(requests), "requests": requests}
 
 
+def requeue_stale_pending_outlook_sync_requests(
+    *,
+    min_age_seconds: int = 300,
+    limit: int = 20,
+    requested_by: str = "outlook-host-repair",
+    url: str | None = None,
+) -> dict[str, Any]:
+    capped_limit = max(1, min(limit, 100))
+    min_age = max(1, int(min_age_seconds or 1))
+    psycopg = _load_psycopg()
+    requests: list[dict[str, Any]] = []
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id::text, p.name, r.requested_by
+                FROM outlook_sync_requests r
+                JOIN mail_profiles p ON p.id = r.profile_id
+                WHERE r.status = 'pending'
+                  AND p.enabled
+                  AND p.source_type = 'outlook_com'
+                  AND COALESCE(r.broker_delivery_count, 0) = 0
+                  AND COALESCE(r.queued_at, r.created_at) <= now() - make_interval(secs => %s)
+                ORDER BY COALESCE(r.queued_at, r.created_at), r.created_at
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+                """,
+                (min_age, capped_limit),
+            )
+            stale_rows = cur.fetchall()
+            for request_id, profile_name, original_requested_by in stale_rows:
+                outbox = _enqueue_message_outbox_with_cursor(
+                    cur,
+                    exchange=messaging.COMMANDS_EXCHANGE,
+                    routing_key=messaging.OUTLOOK_SYNC_ROUTING_KEY,
+                    message_type="flux.mail.outlook.sync",
+                    payload={
+                        "request_id": request_id,
+                        "profile_name": profile_name,
+                        "requested_by": requested_by,
+                        "requeued_from_stale_pending": True,
+                    },
+                    aggregate_type="outlook_sync_requests",
+                    aggregate_id=request_id,
+                )
+                message_id = outbox.get("message_id")
+                cur.execute(
+                    """
+                    UPDATE outlook_sync_requests
+                    SET broker_message_id = %s,
+                        correlation_id = %s,
+                        routing_key = %s,
+                        queued_at = now(),
+                        updated_at = now(),
+                        result = COALESCE(result, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'requeued_from_stale_pending', true,
+                                'previous_requested_by', %s::text,
+                                'requeued_by', %s::text
+                            )
+                    WHERE id = %s
+                    """,
+                    (
+                        message_id,
+                        message_id,
+                        messaging.OUTLOOK_SYNC_ROUTING_KEY,
+                        original_requested_by,
+                        requested_by,
+                        request_id,
+                    ),
+                )
+                requests.append({"id": request_id, "profile_name": profile_name, "message_id": message_id})
+    return {"requeued": len(requests), "requests": requests}
+
+
 def claim_outlook_sync_request_by_id(
     *,
     request_id: str,

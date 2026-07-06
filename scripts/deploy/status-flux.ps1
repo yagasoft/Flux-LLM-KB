@@ -11,7 +11,6 @@ $fluxContainers = @(
     "flux-llm-kb-worker",
     "flux-llm-kb-search-index-worker",
     "flux-llm-kb-mail-worker",
-    "flux-llm-kb-outlook-worker",
     "flux-llm-kb-automation-worker",
     "flux-llm-kb-governance-worker",
     "flux-llm-kb-runtime-control-worker",

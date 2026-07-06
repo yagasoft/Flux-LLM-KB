@@ -10,7 +10,7 @@ Push-Location $repoRoot
 try {
   $docker = Get-Command docker -ErrorAction SilentlyContinue
   if ($null -ne $docker) {
-    docker compose ps api worker search-index-worker mail-worker outlook-worker automation-worker governance-worker runtime-control-worker gpu-eviction-worker callback-worker event-audit-worker event-dashboard-worker event-diagnostics-worker event-scheduler outbox-relay rabbitmq postgres | Out-Host
+    docker compose ps api worker search-index-worker mail-worker automation-worker governance-worker runtime-control-worker gpu-eviction-worker callback-worker event-audit-worker event-dashboard-worker event-diagnostics-worker event-scheduler outbox-relay rabbitmq postgres | Out-Host
   } else {
     Write-Host "Docker command not found on PATH."
   }

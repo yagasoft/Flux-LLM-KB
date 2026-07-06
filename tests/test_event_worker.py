@@ -7,6 +7,27 @@ from flux_llm_kb.service import KnowledgeService
 from flux_llm_kb.worker import JobProcessResult
 
 
+def test_event_worker_run_loop_defers_initial_broker_connection_to_consume(monkeypatch):
+    events = []
+
+    class FakeConsumer:
+        async def __aenter__(self):  # pragma: no cover - should not be used
+            raise AssertionError("initial broker connection should be handled by consume retry loop")
+
+        async def __aexit__(self, *_exc_info):  # pragma: no cover - should not be used
+            return False
+
+        async def consume(self, *, queue_name, handler):
+            events.append(("consume", queue_name, callable(handler)))
+
+    monkeypatch.setattr(event_worker.messaging, "RabbitMqConsumer", FakeConsumer)
+
+    payload = event_worker.run_worker(queue_name=messaging.COMMAND_OUTLOOK_QUEUE, worker_id="host-1")
+
+    assert payload == {"status": "stopped", "queue": messaging.COMMAND_OUTLOOK_QUEUE}
+    assert events == [("consume", messaging.COMMAND_OUTLOOK_QUEUE, True)]
+
+
 def test_event_worker_marks_message_handled_after_success():
     events = []
 
