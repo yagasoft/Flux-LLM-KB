@@ -500,6 +500,10 @@ def test_event_scheduler_enqueues_due_state_as_outbox_commands(monkeypatch):
             events.append(("outlook", kwargs))
             return {"queued": 1}
 
+        def repair_stranded_capture_commands(self, **kwargs):
+            events.append(("repair_stranded", kwargs))
+            return {"applied": True, "affected_jobs": 1, "enqueued": 1}
+
         def enqueue_message_outbox(self, **kwargs):
             events.append(("outbox", kwargs))
             return {"message_id": kwargs["message_id"], "status": "pending"}
@@ -518,6 +522,8 @@ def test_event_scheduler_enqueues_due_state_as_outbox_commands(monkeypatch):
 
     assert result["imap"]["queued"] == 1
     assert result["outlook"]["queued"] == 1
+    assert result["stranded_capture_commands"] == {"applied": True, "affected_jobs": 1, "enqueued": 1}
+    assert ("repair_stranded", {"apply": True, "confirm": "stranded-capture-commands", "min_age_seconds": 60, "limit": 3}) in events
     automation = next(payload for name, payload in events if name == "outbox")
     assert automation["exchange"] == "flux.commands"
     assert automation["routing_key"] == "operator.automation.run"

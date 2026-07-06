@@ -11738,7 +11738,24 @@ def enqueue_corpus_sync_job(
                     ),
                 )
                 row = cur.fetchone() or pending
-                return {"job_id": row[0], "status": row[1], "root_name": root, "deduped": True, "reused": False}
+                outbox = _enqueue_capture_job_command_with_cursor(
+                    cur,
+                    job_id=row[0],
+                    job_type="corpus_sync_root",
+                    payload=update_payload,
+                    job_family=schedule["job_family"],
+                    resource_class=schedule["resource_class"],
+                )
+                return {
+                    "job_id": row[0],
+                    "status": row[1],
+                    "root_name": root,
+                    "deduped": True,
+                    "reused": False,
+                    "message_id": (outbox or {}).get("message_id"),
+                    "routing_key": (outbox or {}).get("routing_key"),
+                    "queued": bool(outbox and not outbox.get("deduped")),
+                }
             queued = _enqueue_unique_capture_job_with_cursor(
                 cur,
                 job_type="corpus_sync_root",
@@ -11995,6 +12012,12 @@ def _enqueue_unique_capture_job_with_cursor(
                 completed_at = NULL,
                 last_duration_ms = NULL,
                 progress_heartbeat_at = NULL,
+                broker_message_id = NULL,
+                routing_key = NULL,
+                correlation_id = NULL,
+                causation_id = NULL,
+                queued_at = NULL,
+                broker_delivery_count = 0,
                 delete_requested_at = NULL,
                 delete_requested_by = NULL,
                 delete_reason = NULL,
@@ -12023,6 +12046,24 @@ def _enqueue_unique_capture_job_with_cursor(
             ),
         )
         updated = cur.fetchone()
+        outbox = _enqueue_capture_job_command_with_cursor(
+            cur,
+            job_id=updated[0],
+            job_type=clean_job_type,
+            payload=clean_payload,
+            job_family=resolved_job_family,
+            resource_class=resolved_resource_class,
+            force_new_message=True,
+        )
+        reuse_details = {**details, "previous_status": existing_status, "status": updated[1]}
+        if outbox:
+            reuse_details.update(
+                {
+                    "message_id": outbox.get("message_id"),
+                    "routing_key": outbox.get("routing_key"),
+                    "command_deduped": bool(outbox.get("deduped")),
+                }
+            )
         cur.execute(
             """
             INSERT INTO audit_events (event_type, target_table, target_id, details)
@@ -12030,16 +12071,8 @@ def _enqueue_unique_capture_job_with_cursor(
             """,
             (
                 updated[0],
-                _json({**details, "previous_status": existing_status, "status": updated[1]}),
+                _json(reuse_details),
             ),
-        )
-        _enqueue_capture_job_command_with_cursor(
-            cur,
-            job_id=updated[0],
-            job_type=clean_job_type,
-            payload=clean_payload,
-            job_family=resolved_job_family,
-            resource_class=resolved_resource_class,
         )
         return {
             "job_id": updated[0],
@@ -12389,6 +12422,60 @@ def repair_stranded_capture_commands(
             return result
 
 
+def list_stranded_capture_commands(
+    *,
+    job_id: str | None = None,
+    root_name: str | None = None,
+    family: str | None = None,
+    min_age_seconds: int = 300,
+    limit: int = 1000,
+    url: str | None = None,
+) -> list[dict[str, Any]]:
+    capped_limit = max(1, min(int(limit or 1000), 10000))
+    bounded_min_age = max(0, int(min_age_seconds or 0))
+    command_routes = [
+        messaging.CORPUS_PROCESS_ROUTING_KEY,
+        messaging.CORPUS_HOST_AGENT_PROCESS_ROUTING_KEY,
+        messaging.SEARCH_INDEX_PROCESS_ROUTING_KEY,
+    ]
+    repair_statuses = ["pending", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"]
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            jobs = _stranded_capture_command_jobs_with_cursor(
+                cur,
+                command_routes=command_routes,
+                repair_statuses=repair_statuses,
+                min_age_seconds=bounded_min_age,
+                limit=capped_limit,
+                job_id=job_id,
+                root_name=root_name,
+                family=family,
+                for_update=False,
+            )
+    rows: list[dict[str, Any]] = []
+    for job in jobs:
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        paths = payload.get("paths") if isinstance(payload.get("paths"), list) else []
+        rows.append(
+            {
+                "id": job.get("job_id"),
+                "job_id": job.get("job_id"),
+                "job_type": job.get("job_type"),
+                "job_family": job.get("job_family"),
+                "resource_class": job.get("resource_class"),
+                "status": "stranded_command",
+                "job_status": job.get("status"),
+                "root_name": payload.get("root_name"),
+                "paths_count": len(paths),
+                "age_seconds": job.get("age_seconds"),
+                "broker_message_id": job.get("broker_message_id"),
+                "routing_key": job.get("routing_key"),
+            }
+        )
+    return rows
+
+
 def _stranded_capture_command_jobs_with_cursor(
     cur: Any,
     *,
@@ -12399,6 +12486,7 @@ def _stranded_capture_command_jobs_with_cursor(
     job_id: str | None = None,
     root_name: str | None = None,
     family: str | None = None,
+    for_update: bool = True,
 ) -> list[dict[str, Any]]:
     filters = ""
     params: list[Any] = [
@@ -12418,6 +12506,7 @@ def _stranded_capture_command_jobs_with_cursor(
         filters += " AND j.job_family = %s"
         params.append(str(family))
     params.append(max(1, min(int(limit or 1000), 10000)))
+    lock_clause = "FOR UPDATE OF j" if for_update else ""
     cur.execute(
         f"""
         SELECT j.id::text,
@@ -12433,7 +12522,8 @@ def _stranded_capture_command_jobs_with_cursor(
                      AND r.metadata->>'host_access' = 'host_agent'
                ) AS host_agent_route,
                j.broker_message_id,
-               j.routing_key
+               j.routing_key,
+               EXTRACT(EPOCH FROM (now() - j.updated_at))::integer AS age_seconds
         FROM capture_jobs j
         WHERE (j.job_type LIKE 'corpus_%%' OR j.job_type = 'search_index_sync')
           AND j.status = ANY(%s)
@@ -12455,7 +12545,7 @@ def _stranded_capture_command_jobs_with_cursor(
           {filters}
         ORDER BY j.priority DESC, j.updated_at
         LIMIT %s
-        FOR UPDATE OF j
+        {lock_clause}
         """,
         tuple(params),
     )
@@ -12470,6 +12560,7 @@ def _stranded_capture_command_jobs_with_cursor(
             "host_agent_route": bool(row[6]),
             "broker_message_id": row[7],
             "routing_key": row[8],
+            "age_seconds": int(row[9] or 0) if len(row) > 9 and row[9] is not None else None,
         }
         for row in cur.fetchall()
     ]

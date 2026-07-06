@@ -127,6 +127,72 @@ def test_operational_diagnostics_items_include_safe_remediation_actions():
     assert "budget.xls" in serialized
 
 
+def test_operational_diagnostics_surfaces_stranded_command_jobs():
+    report = summarize_operational_diagnostics(
+        jobs={
+            "jobs": [
+                {
+                    "id": "job-stranded",
+                    "job_family": "general",
+                    "status": "stranded_command",
+                    "root_name": "docs",
+                    "broker_message_id": "old-message",
+                    "routing_key": "corpus.process",
+                    "age_seconds": 900,
+                }
+            ]
+        },
+        root_name="docs",
+        status="stranded_command",
+        family="general",
+        include_details=True,
+    )
+
+    item = report["items"][0]
+    action_ids = {action["id"] for action in item["remediation_actions"]}
+
+    assert item["severity"] == "warning"
+    assert "fresh command" in item["user_action"]
+    assert item["evidence"]["broker_message_id"] == "old-message"
+    assert item["evidence"]["routing_key"] == "corpus.process"
+    assert "repair_stranded_capture_command" in action_ids
+    repair_action = next(action for action in item["remediation_actions"] if action["id"] == "repair_stranded_capture_command")
+    assert repair_action["payload"] == {
+        "action": "repair_stranded_capture_command",
+        "target_type": "job",
+        "target_id": "job-stranded",
+        "root_name": "docs",
+        "family": "general",
+        "reason": "operator diagnostic remediation",
+    }
+
+
+def test_service_operational_diagnostics_includes_stranded_capture_commands(monkeypatch):
+    monkeypatch.setattr(database, "list_capture_jobs", lambda **kwargs: [])
+    monkeypatch.setattr(
+        database,
+        "list_stranded_capture_commands",
+        lambda **kwargs: [
+            {
+                "id": "job-stranded",
+                "job_id": "job-stranded",
+                "job_family": "general",
+                "status": "stranded_command",
+                "root_name": "docs",
+                "broker_message_id": "old-message",
+                "routing_key": "corpus.process",
+                "age_seconds": 900,
+            }
+        ],
+        raising=False,
+    )
+
+    payload = KnowledgeService().operational_diagnostics(section="jobs", limit=10, root_name="docs", status="stranded_command")
+
+    assert payload["sections"]["jobs"]["jobs"][0]["id"] == "job-stranded"
+    assert payload["items"][0]["status"] == "stranded_command"
+
+
 def test_operational_diagnostics_surfaces_retrying_gpu_evictions():
     report = summarize_operational_diagnostics(
         workers={

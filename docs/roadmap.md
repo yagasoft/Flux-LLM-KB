@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-07-05
+Last reviewed: 2026-07-06
 
 This file is the canonical public roadmap and implementation-status tracker for
 Flux-LLM-KB. It is intentionally separate from live runtime state. Do not add
@@ -10,6 +10,24 @@ content, local deployment-only details, or private memory exports here.
 Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
+
+## 2026-07-06 Stranded Pending Corpus Job Repair Update
+
+Affected `Progress %` entries remain conservative until deployment and live
+worker-queue validation are complete:
+
+- `Resource-aware worker scheduling`: remains `97%`. Active corpus/search-index
+  jobs now keep SQL state and broker commands inseparable: terminal identity
+  reuse clears stale broker metadata before reactivation and forces a fresh
+  command, pending root-sync merges re-enqueue or dedupe the active command, the
+  event scheduler runs bounded stranded-command repair each pass, and
+  diagnostics expose `stranded_command` warning rows with a scoped single-job
+  repair action.
+
+Remaining Work: deploy through the required feature closeout path, validate the
+scheduler repair against live stranded pending jobs and RabbitMQ depth, apply any
+scoped repair only after explicit approval, and confirm repaired jobs publish
+fresh commands and drain through the intended worker family.
 
 ## 2026-07-05 GPU Busy Corpus Retry Update
 

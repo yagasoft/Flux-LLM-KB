@@ -5033,6 +5033,65 @@ def test_enqueue_unique_capture_job_writes_broker_command_to_outbox(monkeypatch)
     assert metadata_update[2] == "message-1"
 
 
+def test_reusing_terminal_capture_job_clears_stale_broker_state_and_forces_new_command():
+    executed = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "identity_key = capture_job_identity" in sql:
+                return ("job-old", "completed")
+            if "UPDATE capture_jobs" in sql and "RETURNING id::text, status" in sql:
+                return ("job-old", "pending")
+            if "SELECT EXISTS" in sql and "FROM monitored_roots" in sql:
+                return (False,)
+            if "SELECT id::text, status, broker_message_id, routing_key" in sql:
+                return ("job-old", "pending", "stale-message", "corpus.process")
+            if "FROM message_outbox active_outbox" in sql:
+                return (True,)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-new", "message-new", "pending")
+            return None
+
+    result = database._enqueue_unique_capture_job_with_cursor(
+        FakeCursor(),
+        job_type="corpus_extract_text",
+        payload={"root_name": "docs", "path": "safe.md", "reason": "watch_event"},
+        job_family="text",
+        resource_class="cpu",
+        telemetry={"stage": "queued"},
+        audit_details={"root_name": "docs", "reason": "watch_event"},
+    )
+
+    sql = "\n".join(statement for statement, _params in executed)
+    reset_sql = next(statement for statement, _params in executed if "UPDATE capture_jobs" in statement and "RETURNING id::text, status" in statement)
+    audit_params = next(params for statement, params in executed if "capture_job.identity_reused" in statement)
+
+    assert result == {
+        "job_id": "job-old",
+        "status": "pending",
+        "created": False,
+        "deduped": False,
+        "reused": True,
+    }
+    assert "broker_message_id = NULL" in reset_sql
+    assert "routing_key = NULL" in reset_sql
+    assert "correlation_id = NULL" in reset_sql
+    assert "causation_id = NULL" in reset_sql
+    assert "queued_at = NULL" in reset_sql
+    assert "broker_delivery_count = 0" in reset_sql
+    assert "FROM message_outbox active_outbox" not in sql
+    assert "INSERT INTO message_outbox" in sql
+    assert "SET routing_key = %s" in sql
+    audit_details = json.loads(audit_params[1])
+    assert audit_details["previous_status"] == "completed"
+    assert audit_details["message_id"] == "message-new"
+    assert audit_details["routing_key"] == "corpus.process"
+
+
 def test_enqueue_capture_job_command_routes_host_agent_jobs_to_host_queue():
     executed = []
 
@@ -5645,13 +5704,14 @@ def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
 
     sql = "\n".join(statement for statement, _params in executed)
     update_params = next(params for statement, params in executed if "UPDATE capture_jobs" in statement)
-    assert result == {
-        "job_id": "job-existing",
-        "status": "pending",
-        "root_name": "mail-outlook-mohesr",
-        "deduped": True,
-        "reused": False,
-    }
+    assert result["job_id"] == "job-existing"
+    assert result["status"] == "pending"
+    assert result["root_name"] == "mail-outlook-mohesr"
+    assert result["deduped"] is True
+    assert result["reused"] is False
+    assert result["message_id"]
+    assert result["routing_key"] == "corpus.process"
+    assert result["queued"] is True
     assert "priority = GREATEST(priority, %s)" in sql
     assert "time_budget_seconds = GREATEST(time_budget_seconds, %s)" in sql
     assert json.loads(update_params[0]) == {"root_name": "mail-outlook-mohesr", "reason": "manual_sync"}
@@ -5706,6 +5766,135 @@ def test_enqueue_corpus_sync_job_batches_pending_path_job_for_different_watch_pa
     assert result["deduped"] is True
     assert "(payload - 'path') || %s::jsonb" not in sql
     assert json.loads(update_params[0]) == {"root_name": "docs", "reason": "watch_event", "paths": ["a.md", "b.md"]}
+
+
+def test_enqueue_corpus_sync_job_reenqueues_command_after_pending_merge_without_active_outbox(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "status = 'running'" in sql:
+                return None
+            if "status IN ('pending', 'retrying_locked', 'retrying_vss_failed')" in sql:
+                return ("job-existing", "pending", {"root_name": "docs", "reason": "watch_event", "path": "a.md"})
+            if "UPDATE capture_jobs" in sql and "RETURNING id::text, status" in sql:
+                return ("job-existing", "pending")
+            if "SELECT EXISTS" in sql and "FROM monitored_roots" in sql:
+                return (True,)
+            if "SELECT id::text, status, broker_message_id, routing_key" in sql:
+                return ("job-existing", "pending", "old-message", "corpus.host_agent.process")
+            if "FROM message_outbox active_outbox" in sql:
+                return (False,)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-new", "message-new", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_corpus_sync_job(root_name="docs", path="b.md", reason="watch_event")
+
+    insert_params = next(params for statement, params in executed if "INSERT INTO message_outbox" in statement)
+    command_payload = json.loads(insert_params[9])
+
+    assert result == {
+        "job_id": "job-existing",
+        "status": "pending",
+        "root_name": "docs",
+        "deduped": True,
+        "reused": False,
+        "message_id": "message-new",
+        "routing_key": "corpus.host_agent.process",
+        "queued": True,
+    }
+    assert command_payload["payload"]["job_id"] == "job-existing"
+    assert command_payload["payload"]["paths_count"] == 2
+    assert command_payload["payload"]["reason"] == "watch_event"
+
+
+def test_enqueue_corpus_sync_job_keeps_existing_active_command_after_pending_merge(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "status = 'running'" in sql:
+                return None
+            if "status IN ('pending', 'retrying_locked', 'retrying_vss_failed')" in sql:
+                return ("job-existing", "pending", {"root_name": "docs", "reason": "watch_event", "path": "a.md"})
+            if "UPDATE capture_jobs" in sql and "RETURNING id::text, status" in sql:
+                return ("job-existing", "pending")
+            if "SELECT EXISTS" in sql and "FROM monitored_roots" in sql:
+                return (False,)
+            if "SELECT id::text, status, broker_message_id, routing_key" in sql:
+                return ("job-existing", "pending", "active-message", "corpus.process")
+            if "FROM message_outbox active_outbox" in sql:
+                return (True,)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-new", "message-new", "pending")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_corpus_sync_job(root_name="docs", path="b.md", reason="watch_event")
+
+    assert result == {
+        "job_id": "job-existing",
+        "status": "pending",
+        "root_name": "docs",
+        "deduped": True,
+        "reused": False,
+        "message_id": "active-message",
+        "routing_key": "corpus.process",
+        "queued": False,
+    }
+    assert not any("INSERT INTO message_outbox" in statement for statement, _params in executed)
 
 
 def test_enqueue_corpus_sync_job_creates_pending_followup_for_running_path_job(monkeypatch):

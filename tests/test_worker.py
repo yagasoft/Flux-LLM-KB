@@ -2473,6 +2473,39 @@ def test_service_remediate_diagnostic_dispatches_safe_actions(monkeypatch):
     assert calls[3][1]["target_id"] is None
     assert calls[3][1]["details"]["target_id"] == "office"
 
+    monkeypatch.setattr(
+        database,
+        "repair_stranded_capture_commands",
+        lambda **kwargs: calls.append(("repair_stranded", kwargs)) or {"applied": True, "affected_jobs": 1, "enqueued": 1},
+        raising=False,
+    )
+    repair = KnowledgeService().remediate_diagnostic(
+        action="repair_stranded_capture_command",
+        target_type="job",
+        target_id="11111111-1111-1111-1111-111111111111",
+        root_name="docs",
+        family="general",
+        reason="repair stranded command",
+        actor="cli",
+    )
+
+    assert repair["result"] == {"applied": True, "affected_jobs": 1, "enqueued": 1}
+    assert calls[4] == (
+        "repair_stranded",
+        {
+            "apply": True,
+            "confirm": "stranded-capture-commands",
+            "job_id": "11111111-1111-1111-1111-111111111111",
+            "root_name": "docs",
+            "family": "general",
+            "min_age_seconds": 0,
+            "limit": 1,
+        },
+    )
+    assert calls[5][0] == "audit"
+    assert calls[5][1]["target_id"] == "11111111-1111-1111-1111-111111111111"
+    assert calls[5][1]["details"]["action"] == "repair_stranded_capture_command"
+
 
 def test_service_remediate_diagnostic_preserves_obsolete_retry_conflict(monkeypatch):
     def fake_requeue(**_kwargs):

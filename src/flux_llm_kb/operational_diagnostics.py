@@ -107,7 +107,7 @@ def _diagnostic_items(sections: dict[str, Any], *, filters: dict[str, Any]) -> l
         if not isinstance(job, dict):
             continue
         job_status = str(job.get("status") or "unknown")
-        severity = "warning" if "blocked" in job_status or "failed" in job_status else "info"
+        severity = "warning" if job_status == "stranded_command" or "blocked" in job_status or "failed" in job_status else "info"
         rows.append(_item("jobs", job, status=job_status, family=str(job.get("job_family") or ""), severity=severity))
     for run in sections["mail"].get("sync_runs", []) or []:
         if not isinstance(run, dict):
@@ -171,6 +171,8 @@ def _item(
             "duration_ms",
             "age_seconds",
             "broker_delivery_count",
+            "broker_message_id",
+            "routing_key",
             "last_error",
             "model_id",
             "component",
@@ -225,6 +227,8 @@ def _user_action(*, section: str, status: str) -> str:
         return "Inspect the blocker details and retry only after the underlying condition is resolved."
     if section == "jobs" and status == "failed":
         return "Inspect the last error and retry after correcting the failed extraction condition."
+    if section == "jobs" and status == "stranded_command":
+        return "Repair the stranded capture command to publish a fresh command for the pending job."
     return "Review the diagnostic evidence and run only the scoped remediation actions that match the issue."
 
 
@@ -287,6 +291,17 @@ def _remediation_actions(
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = []
     normalized_family = family or None
+    if section == "jobs" and target_id and status == "stranded_command":
+        actions.append(
+            _action(
+                action_id="repair_stranded_capture_command",
+                label="Repair stranded command",
+                target_type="job",
+                target_id=target_id,
+                root_name=root_name,
+                family=normalized_family,
+            )
+        )
     if section == "jobs" and target_id and status in {
         "failed",
         "blocked_missing_dependency",

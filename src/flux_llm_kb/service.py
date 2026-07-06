@@ -2744,7 +2744,20 @@ class KnowledgeService:
                 workers["gpu_evictions"] = {"retrying": 0, "recent": []}
         else:
             workers = {}
-        jobs = {"jobs": database.list_capture_jobs(limit=capped)} if normalized in {"all", "jobs"} else {}
+        if normalized in {"all", "jobs"}:
+            job_rows = database.list_capture_jobs(limit=capped)
+            try:
+                stranded_rows = database.list_stranded_capture_commands(
+                    root_name=root_name,
+                    family=family,
+                    min_age_seconds=60,
+                    limit=capped,
+                )
+            except Exception:
+                stranded_rows = []
+            jobs = {"jobs": [*job_rows, *stranded_rows]}
+        else:
+            jobs = {}
         mail = (
             {
                 "sync_runs": database.list_mail_sync_runs(limit=capped),
@@ -4282,6 +4295,18 @@ class KnowledgeService:
             if not root_name or not effective_family:
                 raise ValueError("run_backfill requires root_name and exact worker family")
             result = self.enqueue_corpus_backfill(kind=effective_family, limit=10, workers=1, root_name=root_name)
+        elif normalized_action == "repair_stranded_capture_command":
+            if normalized_target_type != "job" or not target_id:
+                raise ValueError("repair_stranded_capture_command requires target_type=job and target_id")
+            result = database.repair_stranded_capture_commands(
+                apply=True,
+                confirm="stranded-capture-commands",
+                job_id=target_id,
+                root_name=root_name,
+                family=family,
+                min_age_seconds=0,
+                limit=1,
+            )
         elif normalized_action == "repair_asset_statuses":
             if not root_name:
                 raise ValueError("repair_asset_statuses requires root_name")
@@ -4294,8 +4319,8 @@ class KnowledgeService:
             result = database.recover_stale_running_corpus_jobs(root_name=root_name)
         else:
             raise ValueError(
-                "diagnostic remediation action must be retry_corpus_job, run_backfill, repair_asset_statuses, "
-                "clear_completed_errors, or recover_stale_running_jobs"
+                "diagnostic remediation action must be retry_corpus_job, run_backfill, repair_stranded_capture_command, "
+                "repair_asset_statuses, clear_completed_errors, or recover_stale_running_jobs"
             )
         audit_target_id = target_id if _is_uuid_like(target_id) else None
         audit_event = database.record_audit_event(
