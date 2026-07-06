@@ -391,6 +391,7 @@ class InProcessGpuScheduler(BaseGpuScheduler):
     def acquire(self, profile: GpuTaskProfile) -> GpuLease:
         if not self.config.enabled:
             return GpuLease(self, self._make_record(profile, status="running", granted=True))
+        self._reconcile_runtime_residency()
         lease_id = uuid4().hex
         deadline = time.monotonic() + _profile_timeout(profile, self.config)
         record = self._make_record(profile, lease_id=lease_id, status="waiting", granted=False)
@@ -483,6 +484,7 @@ class InProcessGpuScheduler(BaseGpuScheduler):
             self._condition.notify_all()
 
     def status(self) -> dict[str, Any]:
+        self._reconcile_runtime_residency()
         with self._condition:
             self._recover_stale_locked(time.time())
             records = list(self._leases.values())
@@ -548,6 +550,18 @@ class InProcessGpuScheduler(BaseGpuScheduler):
         record = self._leases.get(lease_id)
         if record is not None and record.status == "running":
             self._leases[lease_id] = _replace_record(record, status="recovered", released_at=now)
+
+    def _reconcile_runtime_residency(self) -> None:
+        loaded_ollama_models = _ollama_loaded_model_names(self.config)
+        if loaded_ollama_models is None:
+            return
+        with self._condition:
+            for key, residency in list(self._resident_models.items()):
+                if _resident_component(residency) != "ollama":
+                    continue
+                if not _ollama_model_is_loaded(residency.model_id, loaded_ollama_models):
+                    self._resident_models.pop(key, None)
+            self._condition.notify_all()
 
 
 class DisabledGpuScheduler(BaseGpuScheduler):
@@ -679,6 +693,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
 
     def status(self) -> dict[str, Any]:
         try:
+            self._reconcile_runtime_residency()
             self._recover_stale()
             with self._connection() as conn:
                 rows = _fetch_dicts(
@@ -770,6 +785,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
 
     def _try_grant(self, profile: GpuTaskProfile, lease_id: str) -> GpuLeaseRecord | GpuAdmissionDecision | str:
         self._recover_stale()
+        self._reconcile_runtime_residency()
         with self._connection() as conn:
             with conn.transaction():
                 rows = _fetch_dicts(
@@ -1154,9 +1170,61 @@ class PostgresGpuScheduler(BaseGpuScheduler):
             UPDATE gpu_leases
                SET status = 'recovered', released_at = now()
              WHERE status = 'running'
-               AND expires_at < now()
+               AND (
+                    expires_at < now()
+                 OR (
+                    granted_at IS NOT NULL
+                    AND metadata->>'max_active_seconds' ~ '^[0-9]+(\\.[0-9]+)?$'
+                    AND granted_at < now() - ((metadata->>'max_active_seconds')::double precision * interval '1 second')
+                 )
+               )
             """,
             (),
+        )
+
+    def _reconcile_runtime_residency(self) -> None:
+        loaded_ollama_models = _ollama_loaded_model_names(self.config)
+        if loaded_ollama_models is None:
+            return
+        for row in self._runtime_residency_rows("ollama"):
+            task_type = str(row.get("task_type") or "")
+            model_id = str(row.get("model_id") or "")
+            if not task_type or not model_id:
+                continue
+            if not _ollama_model_is_loaded(model_id, loaded_ollama_models):
+                self._clear_runtime_residency(task_type, model_id, "ollama", "ollama_not_loaded")
+
+    def _runtime_residency_rows(self, component: str) -> list[dict[str, Any]]:
+        task_types = _task_types_for_component(component)
+        with self._connection() as conn:
+            return _fetch_dicts(
+                conn,
+                """
+                SELECT task_type, model_id
+                  FROM gpu_model_residency
+                 WHERE resident = true
+                   AND (
+                        metadata->>'component' = %s
+                     OR metadata->>'owner' = %s
+                     OR task_type = ANY(%s::text[])
+                   )
+                """,
+                (component, component, task_types),
+            )
+
+    def _clear_runtime_residency(self, task_type: str, model_id: str, component: str, reason: str) -> None:
+        self._execute(
+            """
+            UPDATE gpu_model_residency
+               SET resident = false,
+                   last_used_at = now(),
+                   metadata = COALESCE(metadata, '{}'::jsonb)
+                       || jsonb_build_object('runtime_reconciled_by', %s::text, 'runtime_reconcile_reason', %s::text)
+             WHERE resident = true
+               AND task_type = %s
+               AND model_id = %s
+            """,
+            (component, reason, task_type, model_id),
         )
 
     def _mark_terminal(self, lease_id: str, status: str) -> None:
@@ -1630,11 +1698,25 @@ def _profile_ttl(profile: GpuTaskProfile, config: GpuSchedulerConfig) -> float:
 
 
 def _lease_is_stale(record: GpuLeaseRecord, *, now: float) -> bool:
-    if record.expires_at is not None:
-        return float(record.expires_at) < now
+    if record.expires_at is not None and float(record.expires_at) < now:
+        return True
+    max_active_seconds = _metadata_positive_float(record.metadata, "max_active_seconds")
+    if max_active_seconds is not None and record.granted_at is not None:
+        return float(record.granted_at) + max_active_seconds < now
     if record.heartbeat_at is None:
         return False
     return False
+
+
+def _metadata_positive_float(metadata: dict[str, Any] | None, key: str) -> float | None:
+    value = dict(metadata or {}).get(key)
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    return numeric
 
 
 def _replace_record(record: GpuLeaseRecord, **changes: Any) -> GpuLeaseRecord:
@@ -1754,6 +1836,65 @@ def _task_types_for_component(component: str) -> list[str]:
     if component == "ollama":
         return ["ollama_vision"]
     return []
+
+
+def _ollama_loaded_model_names(config: GpuSchedulerConfig) -> set[str] | None:
+    base_url = str(config.ollama_base_url or "").strip()
+    if not base_url:
+        return None
+    try:
+        payload = _get_json(
+            base_url,
+            "/api/ps",
+            timeout_seconds=min(2.0, max(0.1, float(config.eviction_request_timeout_seconds or 2.0))),
+        )
+    except Exception:
+        return None
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return set()
+    names: set[str] = set()
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        for key in ("model", "name"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                names.add(value)
+    return names
+
+
+def _ollama_model_is_loaded(model_id: str, loaded_models: set[str]) -> bool:
+    model = str(model_id or "").strip()
+    if not model:
+        return False
+    if model in loaded_models:
+        return True
+    if ":" not in model:
+        return any(item.split(":", 1)[0] == model for item in loaded_models)
+    return False
+
+
+def _get_json(base_url: str, path: str, *, timeout_seconds: float) -> dict[str, Any]:
+    request = Request(
+        urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/")),
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=max(0.1, float(timeout_seconds))) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:  # pragma: no cover - deployment-dependent
+        raw_error = exc.read().decode("utf-8", errors="replace")
+        raise GpuSchedulerError(f"GPU runtime endpoint returned HTTP {exc.code}: {raw_error[:300]}") from exc
+    except URLError as exc:  # pragma: no cover - deployment-dependent
+        raise GpuSchedulerError(str(exc)) from exc
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError as exc:
+        raise GpuSchedulerError("GPU runtime endpoint returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise GpuSchedulerError("GPU runtime endpoint returned a non-object payload")
+    return parsed
 
 
 def _post_json(base_url: str, path: str, payload: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:

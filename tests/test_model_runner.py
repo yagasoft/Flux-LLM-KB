@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 import threading
+import time
 import sys
 from types import ModuleType, SimpleNamespace
 from urllib.error import HTTPError
@@ -1484,9 +1485,21 @@ def test_embedding_encode_is_serialised_inside_model_runner(monkeypatch):
                     self.active -= 1
             return FakeVectors(len(texts))
 
+    class FakeLease:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeScheduler:
+        def acquire(self, _profile):
+            return FakeLease()
+
     barrier = threading.Barrier(2)
     encoder = FakeEncoder()
     monkeypatch.setattr(model_runner, "_load_embedding_model", lambda _model: encoder)
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
 
     def run_encode():
         return model_runner._embed_with_sentence_transformers(["a"], model="Snowflake/test", dimensions=2)
@@ -1498,7 +1511,91 @@ def test_embedding_encode_is_serialised_inside_model_runner(monkeypatch):
     first.join(timeout=2.0)
     second.join(timeout=2.0)
 
+    assert first.is_alive() is False
+    assert second.is_alive() is False
     assert encoder.max_active == 1
+
+
+def test_embedding_waiting_on_encode_lock_does_not_hold_gpu_lease(monkeypatch):
+    class FakeVectors:
+        def tolist(self):
+            return [[1.0, 2.0]]
+
+    class FakeEncoder:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def encode(self, _texts, **_kwargs):
+            with self.lock:
+                self.calls += 1
+                call_number = self.calls
+            if call_number == 1:
+                first_encode_entered.set()
+                release_first_encode.wait(timeout=2.0)
+            return FakeVectors()
+
+    class FakeLease:
+        def __enter__(self):
+            scheduler.active += 1
+            scheduler.max_active = max(scheduler.max_active, scheduler.active)
+            return self
+
+        def __exit__(self, *_args):
+            scheduler.active -= 1
+            return False
+
+    class FakeScheduler:
+        def __init__(self) -> None:
+            self.acquire_count = 0
+            self.active = 0
+            self.max_active = 0
+
+        def acquire(self, profile):
+            assert profile.metadata["input_count"] == 1
+            assert profile.metadata["dimensions"] == 2
+            assert profile.metadata["phase"] == "embedding_encode"
+            assert profile.metadata["max_active_seconds"] > 0
+            self.acquire_count += 1
+            return FakeLease()
+
+    first_encode_entered = threading.Event()
+    release_first_encode = threading.Event()
+    scheduler = FakeScheduler()
+    encoder = FakeEncoder()
+    model = "Snowflake/test-lease-scope"
+    model_runner._EMBEDDING_MODELS.pop(model, None)
+    model_runner._EMBEDDING_ENCODE_LOCKS.pop(model, None)
+    monkeypatch.setattr(model_runner, "_load_embedding_model", lambda _model: encoder)
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: scheduler)
+
+    def run_encode():
+        return model_runner._embed_with_sentence_transformers(["a"], model=model, dimensions=2)
+
+    first = threading.Thread(target=run_encode)
+    second = threading.Thread(target=run_encode)
+    second_started = False
+    try:
+        first.start()
+        assert first_encode_entered.wait(timeout=1.0)
+
+        second.start()
+        second_started = True
+        time.sleep(0.05)
+
+        assert scheduler.acquire_count == 1
+        assert scheduler.max_active == 1
+    finally:
+        release_first_encode.set()
+        first.join(timeout=2.0)
+        if second_started:
+            second.join(timeout=2.0)
+
+    assert first.is_alive() is False
+    assert second_started
+    assert second.is_alive() is False
+    assert scheduler.acquire_count == 2
+    assert scheduler.max_active == 1
 
 
 def test_cached_embedding_refreshes_residency_before_requesting_lease(monkeypatch):

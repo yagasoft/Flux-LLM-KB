@@ -49,6 +49,8 @@ def _lease(
     share_group: str = "",
     status: str = "running",
     expires_at: float = 100.0,
+    heartbeat_at: float = 2.0,
+    metadata: dict[str, object] | None = None,
 ) -> GpuLeaseRecord:
     return GpuLeaseRecord(
         id=lease_id,
@@ -63,10 +65,10 @@ def _lease(
         request_id="",
         created_at=1.0,
         granted_at=2.0,
-        heartbeat_at=2.0,
+        heartbeat_at=heartbeat_at,
         expires_at=expires_at,
         released_at=None,
-        metadata={},
+        metadata=dict(metadata or {}),
     )
 
 
@@ -396,6 +398,23 @@ def test_in_process_scheduler_clears_residency_for_one_component():
     assert ("ocr_document", "PaddleOCR-VL") in residents
 
 
+def test_in_process_scheduler_reconciles_stale_ollama_residency(monkeypatch):
+    monkeypatch.setattr(gpu_scheduler, "_ollama_loaded_model_names", lambda _config: {"llama3:latest"}, raising=False)
+
+    scheduler = InProcessGpuScheduler(_config(ollama_base_url="http://ollama:11434"))
+    scheduler.record_model_residency(
+        _resident("ollama_vision", "qwen3-vl:8b", estimated_vram_mb=9_000, last_used_at=1.0, component="ollama")
+    )
+    scheduler.record_model_residency(
+        _resident("embedding", "Snowflake/snowflake-arctic-embed-l-v2.0", estimated_vram_mb=2_500, last_used_at=2.0)
+    )
+
+    residents = {(item["task_type"], item["model_id"]) for item in scheduler.status()["model_residency"]}
+
+    assert ("ollama_vision", "qwen3-vl:8b") not in residents
+    assert ("embedding", "Snowflake/snowflake-arctic-embed-l-v2.0") in residents
+
+
 def test_postgres_scheduler_reset_component_residency_casts_sql_parameters():
     calls: list[tuple[str, tuple[object, ...]]] = []
 
@@ -417,6 +436,29 @@ def test_postgres_scheduler_reset_component_residency_casts_sql_parameters():
         "model-runner",
         ["embedding", "rerank"],
     )
+
+
+def test_postgres_scheduler_reconciles_stale_ollama_residency(monkeypatch):
+    cleared: list[tuple[str, str, str]] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _runtime_residency_rows(self, component: str) -> list[dict[str, object]]:
+            assert component == "ollama"
+            return [
+                {"task_type": "ollama_vision", "model_id": "qwen3-vl:8b"},
+                {"task_type": "ollama_vision", "model_id": "llama3:latest"},
+            ]
+
+        def _clear_runtime_residency(self, task_type: str, model_id: str, component: str, reason: str) -> None:
+            cleared.append((task_type, model_id, reason))
+            assert component == "ollama"
+
+    monkeypatch.setattr(gpu_scheduler, "_ollama_loaded_model_names", lambda _config: {"llama3:latest"}, raising=False)
+    scheduler = RecordingScheduler(_config(mode="postgres", ollama_base_url="http://ollama:11434"), database_url="postgresql://example")
+
+    scheduler._reconcile_runtime_residency()
+
+    assert cleared == [("ollama_vision", "qwen3-vl:8b", "ollama_not_loaded")]
 
 
 def test_postgres_eviction_keeps_residency_when_vram_does_not_recover(monkeypatch):
@@ -841,6 +883,45 @@ def test_admission_recovers_stale_running_leases_before_planning():
 
     assert decision.granted is True
     assert decision.recovered_lease_ids == ["stale-lease"]
+
+
+def test_admission_recovers_running_lease_past_metadata_max_active_seconds():
+    profile = GpuTaskProfile(task_type="embedding", model_id="snowflake", estimated_vram_mb=2_000)
+    overlong = _lease(
+        "overlong-lease",
+        expires_at=1000.0,
+        heartbeat_at=9.0,
+        metadata={"max_active_seconds": 5},
+    )
+
+    decision = plan_gpu_admission(
+        profile,
+        active_leases=[overlong],
+        config=_config(),
+        now=10.0,
+    )
+
+    assert decision.granted is True
+    assert decision.recovered_lease_ids == ["overlong-lease"]
+
+
+def test_postgres_scheduler_recovers_running_leases_past_metadata_max_active_seconds():
+    calls: list[tuple[str, tuple[object, ...]]] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _execute(self, statement: str, params: tuple[object, ...]) -> None:
+            calls.append((statement, params))
+
+    scheduler = RecordingScheduler(_config(mode="postgres"), database_url="postgresql://example")
+
+    scheduler._recover_stale()
+
+    assert len(calls) == 1
+    statement, params = calls[0]
+    assert "expires_at < now()" in statement
+    assert "metadata->>'max_active_seconds'" in statement
+    assert "granted_at < now() -" in statement
+    assert params == ()
 
 
 def test_in_process_scheduler_times_out_waiting_for_exclusive_work():

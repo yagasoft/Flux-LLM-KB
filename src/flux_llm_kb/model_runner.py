@@ -630,16 +630,35 @@ def _embed_with_sentence_transformers(
         return []
     if model in _EMBEDDING_MODELS:
         _record_model_residency_state("embedding", model, resident=True)
-    profile = task_profile("embedding", model_id=model, component=_scheduler_component(), timeout_seconds=timeout_seconds)
-    with get_gpu_scheduler().acquire(profile):
-        encoder = _load_embedding_model(model)
-        with _named_lock(_EMBEDDING_ENCODE_LOCKS, model):
+    profile = task_profile(
+        "embedding",
+        model_id=model,
+        component=_scheduler_component(),
+        timeout_seconds=timeout_seconds,
+        metadata={
+            "input_count": len(texts),
+            "dimensions": dimensions,
+            "phase": "embedding_encode",
+            "max_active_seconds": _embedding_lease_max_active_seconds(timeout_seconds),
+        },
+    )
+    with _named_lock(_EMBEDDING_ENCODE_LOCKS, model):
+        with get_gpu_scheduler().acquire(profile):
+            encoder = _load_embedding_model(model)
             vectors = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
     result = [[float(value) for value in vector] for vector in vectors.tolist()]
     for vector in result:
         if len(vector) != dimensions:
             raise ModelRunnerError(f"embedding dimension mismatch: expected {dimensions}, got {len(vector)}")
     return result
+
+
+def _embedding_lease_max_active_seconds(timeout_seconds: float | None) -> float:
+    if timeout_seconds is not None:
+        base = max(0.001, float(timeout_seconds))
+    else:
+        base = float(_env_positive_int("FLUX_KB_MODEL_RUNNER_TIMEOUT_SECONDS", DEFAULT_MODEL_RUNNER_TIMEOUT_SECONDS))
+    return base + 30.0
 
 
 def _load_reranker_model(model: str, quantization: str, *, awq_model: str | None = None) -> Any:

@@ -21,20 +21,30 @@ contention validation are complete:
   task/model/component across transient waiting leases, while terminal eviction
   rows remain eligible for future attempts. Confirmed no-op unload responses
   with `unloaded=false` and `resident=false` now skip immediately as
-  `model_not_resident` instead of waiting for VRAM recovery polling.
+  `model_not_resident` instead of waiting for VRAM recovery polling. Embedding
+  model-runner requests now acquire GPU leases only after entering the
+  per-model encode lock, so same-model Snowflake requests waiting inside the
+  service no longer hold extra running leases while one encode is active.
 - `Resource-aware worker scheduling`: remains `97%`. The brokered GPU eviction
   queue is protected against per-lease duplicate floods for the same candidate,
   and stale not-resident eviction work can complete without tying up retry or
-  verification time.
+  verification time. Scheduler recovery also treats an explicit
+  `max_active_seconds` lease metadata value as a hard active-age guard, so a
+  fresh heartbeat cannot keep an overlong GPU-critical section alive forever.
 - `Observability and benchmarks`: remains `99%`. Existing scheduler, RabbitMQ,
   GPU-memory, and model-activity diagnostics remain the validation surface; no
-  dashboard contract or manual asset update is included.
+  dashboard contract or manual asset update is included. Scheduler residency is
+  reconciled against Ollama `/api/ps` so qwen residents are cleared when Ollama
+  reports no loaded model.
 
 Remaining Work: deploy through the required feature closeout path only when
 requested, then validate that `flux.commands.gpu_eviction` depth drains under
 live contention, active `gpu_evictions` rows dedupe by candidate across waiting
 leases, not-resident no-op unload rows complete quickly, and the scheduler
-settles back to zero running/waiting after contention clears.
+settles back to zero running/waiting after contention clears. Also validate
+that concurrent Snowflake embeddings show at most one active model-runner lease
+per process, and that scheduler Ollama residency matches `ollama ps` after
+vision keepalive expiry.
 
 ## 2026-07-06 Outlook Host Broker Runtime Hardening Update
 
