@@ -670,6 +670,92 @@ def test_brokered_gpu_eviction_noop_becomes_terminal_without_retry(monkeypatch):
     assert db.completed[0]["metadata"]["terminal_reason"] == "eviction_did_not_free_vram"
 
 
+def test_brokered_noop_not_resident_unload_skips_without_vram_polling(monkeypatch):
+    calls: list[str] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, object]:
+            calls.append(f"unload:{candidate.model_id}")
+            return {"ok": True, "unloaded": False, "resident": False}
+
+    def live_free_vram() -> int:
+        calls.append("live-vram")
+        return 128
+
+    monkeypatch.setattr(gpu_scheduler, "_live_free_vram_mb", live_free_vram)
+    scheduler = RecordingScheduler(
+        _config(mode="postgres", eviction_request_timeout_seconds=10.0),
+        database_url="postgresql://example",
+    )
+    profile = GpuTaskProfile(task_type="embedding", model_id="snowflake", estimated_vram_mb=2_500)
+    candidate = GpuEvictionCandidate(
+        task_type="ocr_document",
+        model_id="PaddleOCR-VL",
+        estimated_vram_mb=8_000,
+        component="paddle-runner",
+    )
+
+    result = scheduler._evict_candidate_once(profile, candidate, attempt=1)
+
+    assert calls == ["live-vram", "unload:PaddleOCR-VL"]
+    assert result.verified is False
+    assert result.payload == {"ok": True, "unloaded": False, "resident": False}
+    assert result.error == "model not resident"
+    assert result.metadata["terminal_reason"] == "model_not_resident"
+
+
+def test_process_brokered_gpu_eviction_noop_not_resident_unload_completes_skipped(monkeypatch):
+    db = FakeGpuEvictionDb(_brokered_eviction_request())
+    calls: list[str] = []
+
+    def fake_evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, object]:  # noqa: ANN001
+        calls.append(f"unload:{candidate.model_id}")
+        return {"ok": True, "unloaded": False, "resident": False}
+
+    def live_free_vram() -> int:
+        calls.append("live-vram")
+        return 128
+
+    monkeypatch.setattr(
+        gpu_scheduler,
+        "scheduler_config_from_settings",
+        lambda: _config(mode="postgres", eviction_enabled=True, eviction_request_timeout_seconds=10.0),
+    )
+    monkeypatch.setattr(gpu_scheduler, "_live_free_vram_mb", live_free_vram)
+    monkeypatch.setattr(PostgresGpuScheduler, "_evict_candidate", fake_evict_candidate)
+    monkeypatch.setattr(
+        PostgresGpuScheduler,
+        "_verify_eviction_vram_recovered",
+        lambda *_args, **_kwargs: pytest.fail("not-resident no-op unload must not poll VRAM recovery"),
+    )
+    monkeypatch.setattr(
+        PostgresGpuScheduler,
+        "_mark_residency_evicted",
+        lambda *_args, **_kwargs: pytest.fail("not-resident no-op unload must not mark residency evicted"),
+    )
+
+    result = gpu_scheduler.process_gpu_eviction_request(
+        eviction_id="eviction-1",
+        worker_id="worker-1",
+        broker_message_id="message-1",
+        database_module=db,
+    )
+
+    assert calls == ["live-vram", "unload:snowflake"]
+    assert result["status"] == "skipped"
+    assert result["retryable"] is False
+    assert db.retried == []
+    assert len(db.completed) == 1
+    assert db.completed[0]["status"] == "skipped"
+    assert db.completed[0]["error"] == "model not resident"
+    assert db.completed[0]["metadata"]["terminal_reason"] == "model_not_resident"
+    assert db.completed[0]["metadata"]["response"] == {
+        "ok": True,
+        "unloaded": False,
+        "resident": False,
+    }
+
+
 def test_brokered_gpu_eviction_transient_failure_still_retries(monkeypatch):
     db = FakeGpuEvictionDb(_brokered_eviction_request(broker_delivery_count=1))
 

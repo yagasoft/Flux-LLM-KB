@@ -972,6 +972,20 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 metadata={"attempt": attempt, "before_free_vram_mb": None},
             )
         payload = self._evict_candidate(candidate)
+        if (
+            _optional_bool(payload.get("unloaded")) is False
+            and _optional_bool(payload.get("resident")) is False
+        ):
+            return GpuEvictionVerificationResult(
+                verified=False,
+                payload=payload,
+                error="model not resident",
+                metadata={
+                    "attempt": attempt,
+                    "before_free_vram_mb": before_free_vram_mb,
+                    "terminal_reason": "model_not_resident",
+                },
+            )
         return self._verify_eviction_vram_recovered(
             profile,
             candidate,

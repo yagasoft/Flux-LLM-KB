@@ -5873,6 +5873,72 @@ def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(monkeypatc
     assert "raw_content" not in json.dumps(payload)
 
 
+def test_enqueue_gpu_eviction_request_dedupes_active_candidate_across_leases(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status, broker_message_id" in sql:
+                return ("42", "queued", "message-existing")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def transaction(self):
+            return self
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.enqueue_gpu_eviction_request(
+        lease_id="lease-new",
+        request_profile={
+            "task_type": "ocr_image",
+            "model_id": "PP-OCRv5",
+            "estimated_vram_mb": 2_000,
+        },
+        candidate={
+            "task_type": "embedding",
+            "model_id": "snowflake",
+            "estimated_vram_mb": 2_500,
+            "component": "model-runner",
+        },
+    )
+
+    select_sql, select_params = executed[0]
+    assert "lease_id = %s" not in select_sql
+    assert select_params == ("embedding", "snowflake", "model-runner")
+    assert result == {
+        "id": "42",
+        "eviction_id": "42",
+        "status": "queued",
+        "message_id": "message-existing",
+        "deduped": True,
+    }
+    assert not any("INSERT INTO gpu_evictions" in statement for statement, _params in executed)
+
+
 def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
     executed = []
     schedule = database._job_schedule_metadata("corpus_sync_root")

@@ -11,6 +11,31 @@ Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
 
+## 2026-07-06 GPU Eviction Backlog Control Update
+
+Affected `Progress %` entries remain conservative until deployment and live GPU
+contention validation are complete:
+
+- `V2.8 Indexer Acceleration And Local Inference Optimization`: remains `99%`.
+  Brokered GPU eviction admission now dedupes active requests by candidate
+  task/model/component across transient waiting leases, while terminal eviction
+  rows remain eligible for future attempts. Confirmed no-op unload responses
+  with `unloaded=false` and `resident=false` now skip immediately as
+  `model_not_resident` instead of waiting for VRAM recovery polling.
+- `Resource-aware worker scheduling`: remains `97%`. The brokered GPU eviction
+  queue is protected against per-lease duplicate floods for the same candidate,
+  and stale not-resident eviction work can complete without tying up retry or
+  verification time.
+- `Observability and benchmarks`: remains `99%`. Existing scheduler, RabbitMQ,
+  GPU-memory, and model-activity diagnostics remain the validation surface; no
+  dashboard contract or manual asset update is included.
+
+Remaining Work: deploy through the required feature closeout path only when
+requested, then validate that `flux.commands.gpu_eviction` depth drains under
+live contention, active `gpu_evictions` rows dedupe by candidate across waiting
+leases, not-resident no-op unload rows complete quickly, and the scheduler
+settles back to zero running/waiting after contention clears.
+
 ## 2026-07-06 Outlook Host Broker Runtime Hardening Update
 
 Affected `Progress %` entries remain conservative until deployment and live

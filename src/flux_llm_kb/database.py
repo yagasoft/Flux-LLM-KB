@@ -3504,8 +3504,7 @@ def enqueue_gpu_eviction_request(
                     """
                     SELECT id::text, status, broker_message_id
                       FROM gpu_evictions
-                     WHERE lease_id = %s
-                       AND task_type = %s
+                     WHERE task_type = %s
                        AND model_id = %s
                        AND component = %s
                        AND status IN ('queued', 'running', 'retrying')
@@ -3513,7 +3512,7 @@ def enqueue_gpu_eviction_request(
                      LIMIT 1
                      FOR UPDATE
                     """,
-                    (clean_lease_id, task_type, model_id, component),
+                    (task_type, model_id, component),
                 )
                 existing = cur.fetchone()
                 if existing:
