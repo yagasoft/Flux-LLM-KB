@@ -16,6 +16,9 @@ PLUGIN_NAME = "flux-llm-kb"
 MARKETPLACE_NAME = "flux-llm-kb-local"
 PLUGIN_CONFIG_NAME = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
 MCP_SERVER_NAME = "flux_llm_kb"
+_MCP_READINESS_CHECKS = (
+    ("kb.status", {}),
+)
 DISCOVERY_CACHE_DIRS = (".codex-plugin", "skills", "hooks", "scripts")
 
 
@@ -482,18 +485,13 @@ async def _run_mcp_readiness_tools_async(
     from mcp.client.stdio import stdio_client
 
     params = StdioServerParameters(command=command, args=args, cwd=cwd, env=os.environ.copy())
-    checks = [
-        ("kb.status", {}),
-        ("kb.search", {"query": "Flux MCP readiness", "limit": 1}),
-        ("kb.brief", {"query": "Flux MCP readiness", "token_budget": 200}),
-    ]
     tools: list[dict[str, Any]] = []
     try:
         with anyio.fail_after(timeout_seconds):
             async with stdio_client(params) as (read_stream, write_stream):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
-                    for name, arguments in checks:
+                    for name, arguments in _MCP_READINESS_CHECKS:
                         result = await session.call_tool(name, arguments)
                         tools.append(_mcp_readiness_tool_result(name, result))
     except Exception as exc:

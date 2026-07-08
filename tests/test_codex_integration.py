@@ -361,6 +361,10 @@ def test_codex_mcp_readiness_reports_host_python_success(tmp_path, monkeypatch):
     }
 
 
+def test_codex_mcp_readiness_uses_fast_status_probe_only():
+    assert codex_integration._MCP_READINESS_CHECKS == (("kb.status", {}),)
+
+
 def test_mcp_readiness_tool_result_fails_typed_tool_errors():
     class TextContent:
         text = json.dumps(
