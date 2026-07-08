@@ -1,3 +1,4 @@
+import tomllib
 from pathlib import Path
 
 
@@ -22,6 +23,15 @@ def test_docker_api_service_hosts_dashboard():
     assert "FLUX_KB_DATABASE_URL" in compose
     assert "uvicorn" in dockerfile
     assert "flux_llm_kb.rest_api:create_app" in dockerfile
+
+
+def test_api_extra_installs_websocket_transport():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    api_extra = pyproject["project"]["optional-dependencies"]["api"]
+
+    assert "uvicorn>=0.30" in api_extra
+    assert "websockets>=12" in api_extra
 
 
 def test_dashboard_dev_scripts_refresh_build_and_runtime():
