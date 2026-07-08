@@ -709,7 +709,11 @@ bundled into the Python package and served by FastAPI at `/dashboard`. The
 frontend makes one initial `GET /api/dashboard/snapshot` call, then subscribes
 to `WS /api/dashboard/stream` for coalesced section updates across health,
 crawl, jobs, retrieval, model activity, mail, Outlook, and settings. Raw JSON
-payloads are diagnostic-only, not the primary monitoring surface.
+payloads are diagnostic-only, not the primary monitoring surface. Normal
+WebSocket cancellation, client disconnects, tab changes, and reconnects are
+quiet shutdowns; `dashboard.error` is reserved for real broker/subscription
+failures while a client is still connected and is rendered as stream status,
+not as a job/update feed item.
 Overview is read-only and friendly: system status, attention items, work Flux
 handled automatically, and the next recommended safe action. Automation shows
 Guarded Auto posture, eligible actions, manual-required work, last/next run, a
@@ -719,7 +723,13 @@ confirmation-gated remediation buttons where the service has a safe scoped
 recovery action. Performance owns operator evidence gates, acceleration
 capability, all-root reliability, benchmark history, cache readiness, and
 worker-family telemetry. State owns model/runtime state: model activity
-timelines, scheduler pressure, resident models, and job/update feed context.
+timelines, grouped pipeline lanes, scheduler pressure, resident models, compact
+stream status, and sanitized job/update feed context. Jobs projection gives
+terminal and blocked statuses precedence over stale telemetry stages; ASR media
+jobs blocked by `vram_budget_exceeded` are labelled as GPU/ASR capacity blockers
+and can be retried only through an operator-triggered guarded action that uses
+the existing corpus-job retry remediation path without mutating runtime
+settings.
 Retrieval owns code diagnostics with feedback capture,
 top code gaps, parser/fallback hotspots, generated-file counts, and direct code
 search/symbol lookup controls. Settings owns Codex hooks, deployment, runtime

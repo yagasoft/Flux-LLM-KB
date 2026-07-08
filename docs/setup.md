@@ -633,7 +633,12 @@ and live job updates, Retrieval owns code diagnostics, and Settings owns Codex
 hooks, deployment, runtime actions, restart, and reindex settings. Dashboard
 load uses one `GET /api/dashboard/snapshot` call; live updates arrive through
 `WS /api/dashboard/stream`, with manual **Refresh data** remaining a one-shot
-snapshot reload. Use the
+snapshot reload. Normal WebSocket tab changes, reconnects, and client
+disconnects do not mark the dashboard degraded; only real broker/subscription
+failures surface as stream-status errors. Dashboard job remediation includes a
+guarded operator retry for ASR/media jobs blocked by GPU capacity, routed
+through the existing corpus-job retry action without changing ASR or GPU
+settings. Use the
 helper script whenever dashboard code changes; it rebuilds assets and refreshes
 the running deployment:
 

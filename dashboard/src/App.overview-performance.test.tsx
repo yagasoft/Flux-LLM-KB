@@ -412,7 +412,8 @@ describe("Flux dashboard", () => {
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
     expect(within(panel as HTMLElement).queryByRole("table")).not.toBeInTheDocument();
-    expect(within(panel as HTMLElement).getByText("Model pipeline")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Pipeline lanes")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Runtime timeline")).toBeInTheDocument();
     expect(within(panel as HTMLElement).getByText("Resident models")).toBeInTheDocument();
     expect(within(panel as HTMLElement).getByText("Job update feed")).toBeInTheDocument();
   });
@@ -639,6 +640,103 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "State" }));
     expect(await screen.findByText("/v1/live")).toBeInTheDocument();
     expect(screen.getByText("1 recent / 1 active")).toBeInTheDocument();
+  });
+
+  test("websocket errors are shown as stream status and kept out of the job feed", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await flushAsyncUi();
+    expect(screen.getByRole("heading", { name: "Operations" })).toBeInTheDocument();
+
+    await act(async () => {
+      state.webSockets[0].emit({
+        type: "dashboard.error",
+        message: "Dashboard event stream is degraded; RabbitMQ updates are temporarily unavailable.",
+        code: "dashboard.rabbitmq_unavailable"
+      });
+    });
+
+    expect(screen.getByText(/Live updates Degraded/i)).toBeInTheDocument();
+
+    await act(async () => {
+      state.webSockets[0].emit({
+        type: "dashboard.connected",
+        stream: { status: "ok", rabbitmq: true }
+      });
+      state.webSockets[0].emit({
+        type: "dashboard.section",
+        section: "jobs",
+        payload: state.jobsPayload
+      });
+    });
+
+    expect(screen.getByText(/Live updates Connected/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "State" }));
+    const feed = screen.getByText("Job update feed").closest(".rail-card");
+    expect(feed).not.toBeNull();
+    expect(within(feed as HTMLElement).queryByText("Dashboard.error")).not.toBeInTheDocument();
+    expect(within(feed as HTMLElement).queryByText(/RabbitMQ updates are temporarily unavailable/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Stream status")).toBeInTheDocument();
+  });
+
+  test("state uses the timeline-first runtime layout", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "State" }));
+
+    const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).getByText("Runtime timeline")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Pipeline lanes")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Stream status")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  test("jobs show ASR GPU capacity blockers instead of stale queued progress", async () => {
+    const user = userEvent.setup();
+    state.jobsPayload = {
+      ...state.jobsPayload,
+      jobs: [
+        {
+          id: "job-asr",
+          job_type: "corpus_extract_media_segment",
+          status: "blocked_missing_dependency",
+          payload: { root_name: "media", path: "clips/interview.mp4" },
+          attempts: 1,
+          progress: "Queued",
+          last_error: "ASR service unavailable: vram_budget_exceeded",
+          updated_at: "2026-07-08T10:03:00+00:00",
+          details: {
+            telemetry: {
+              stage: "queued",
+              error_type: "ModelRunnerBusy",
+              result_status: "blocked_missing_dependency",
+              job_family: "media"
+            }
+          }
+        }
+      ],
+      count: 1,
+      filter_options: {
+        ...state.jobsPayload.filter_options,
+        statuses: ["blocked_missing_dependency"],
+        roots: ["media"],
+        job_types: ["corpus_extract_media_segment"]
+      }
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    expect(await screen.findByText("Blocked: ASR GPU capacity")).toBeInTheDocument();
+    expect(screen.queryByText("Queued")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry blocked ASR jobs" })).toBeInTheDocument();
   });
 
   test("manual refresh performs one snapshot reload", async () => {

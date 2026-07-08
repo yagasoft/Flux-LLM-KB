@@ -489,3 +489,28 @@ def test_dashboard_jobs_projection_excludes_external_query_model_activity(monkey
     payload = background_jobs.collect_dashboard_jobs_payload(limit=50, job_source=["model_activity_events"])
 
     assert [row["id"] for row in payload["jobs"]] == ["model_activity_events:worker-ocr"]
+
+
+def test_capture_job_projection_labels_asr_vram_blocker_before_stale_queue_stage():
+    rows = background_jobs._capture_job_rows(
+        [
+            {
+                "id": "job-asr",
+                "job_type": "corpus_extract_media_segment",
+                "status": "blocked_missing_dependency",
+                "payload": {"root_name": "media", "path": "clips/interview.mp4"},
+                "attempts": 1,
+                "last_error": "ASR service unavailable: vram_budget_exceeded",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "telemetry": {
+                    "stage": "queued",
+                    "error_type": "ModelRunnerBusy",
+                    "result_status": "blocked_missing_dependency",
+                    "job_family": "media",
+                },
+            }
+        ]
+    )
+
+    assert rows[0]["progress"] == "Blocked: ASR GPU capacity"

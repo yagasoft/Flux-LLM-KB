@@ -974,7 +974,7 @@ export function setupDashboardTest(): void {
         state.jobToolInvocationRequestUrls.push(url);
         return json(state.jobToolInvocationPayload);
       }
-      if (url.startsWith("/api/dashboard/jobs") && !url.endsWith("/cancel") && !url.endsWith("/retry") && !url.endsWith("/delete-request") && !url.endsWith("/file-actions")) {
+      if (url.startsWith("/api/dashboard/jobs") && url !== "/api/dashboard/jobs/retry-blocked-asr" && !url.endsWith("/cancel") && !url.endsWith("/retry") && !url.endsWith("/delete-request") && !url.endsWith("/file-actions")) {
         state.jobsRequestUrls.push(url);
         return json(state.jobsPayload);
       }
@@ -1487,6 +1487,10 @@ export function setupDashboardTest(): void {
           );
         }
         return json({ settings_mutated: false, action: "retry_corpus_job", result: { job_id: jobId, status: "pending" } });
+      }
+      if (url === "/api/dashboard/jobs/retry-blocked-asr") {
+        state.corpusRetryRequests.push(url);
+        return json({ retried: 1, eligible: 1, skipped: 0, errors: [], jobs: ["job-asr"], settings_mutated: false });
       }
       if (url.startsWith("/api/dashboard/jobs/") && url.endsWith("/delete-request")) {
         const jobId = decodeURIComponent(url.split("/").at(-2) ?? "");

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 
@@ -134,6 +136,15 @@ def test_dashboard_stream_reports_degraded_broker_without_polling_fallback(monke
 
         websocket.send_json({"type": "dashboard.subscribe", "sections": ["health"]})
         assert websocket.receive_json()["type"] == "dashboard.snapshot"
+
+
+def test_dashboard_stream_treats_broker_task_cancellation_as_quiet_shutdown():
+    from flux_llm_kb import dashboard_realtime
+
+    assert dashboard_realtime.is_quiet_stream_shutdown(asyncio.CancelledError())
+    assert dashboard_realtime.is_quiet_stream_shutdown(RuntimeError("RPC call <Queue.Declare object at 0x1> cancelled"))
+    assert dashboard_realtime.is_quiet_stream_shutdown(RuntimeError("RPC call <Queue.Bind object at 0x1> cancelled"))
+    assert not dashboard_realtime.is_quiet_stream_shutdown(RuntimeError("connection refused"))
 
 
 def test_dashboard_broker_event_mapping_and_event_payload_are_sanitized():

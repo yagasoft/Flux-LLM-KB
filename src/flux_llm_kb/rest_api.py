@@ -138,6 +138,10 @@ def create_app():
     class JobDeleteRequest(BaseModel):
         reason: str = "operator_cleanup"
 
+    class RetryBlockedAsrRequest(BaseModel):
+        limit: int = 25
+        root_name: str | None = None
+
     class JobFileActionRequest(BaseModel):
         model_config = ConfigDict(extra="forbid")
 
@@ -682,7 +686,9 @@ def create_app():
                     await send_json(outbound)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if dashboard_realtime.is_quiet_stream_shutdown(exc):
+                    return
                 with suppress(Exception):
                     await send_json(
                         dashboard_realtime.error_message(
@@ -813,6 +819,20 @@ def create_app():
             return payload
         except LookupError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/dashboard/jobs/retry-blocked-asr")
+    def dashboard_retry_blocked_asr(request: RetryBlockedAsrRequest | None = Body(None)):
+        clean_request = request or RetryBlockedAsrRequest()
+        try:
+            payload = service.retry_blocked_asr_jobs(
+                limit=clean_request.limit,
+                root_name=clean_request.root_name,
+                actor="dashboard",
+            )
+            dashboard_realtime.emit_dashboard_change(section="jobs", reason="job.retry_blocked_asr_requested", event=payload)
+            return payload
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

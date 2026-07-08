@@ -1225,6 +1225,35 @@ def test_dashboard_job_retry_endpoint_reports_ineligible_job_conflict(monkeypatc
     assert "retryable corpus job not found" in response.json()["detail"]
 
 
+def test_dashboard_retry_blocked_asr_endpoint_uses_guarded_service_action(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    calls = []
+    emitted = []
+
+    class FakeService:
+        def retry_blocked_asr_jobs(self, **kwargs):
+            calls.append(kwargs)
+            return {"retried": 2, "eligible": 2, "skipped": 1, "jobs": ["job-1", "job-2"], "settings_mutated": False}
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+    monkeypatch.setattr("flux_llm_kb.dashboard_realtime.emit_dashboard_change", lambda **kwargs: emitted.append(kwargs))
+
+    client = fastapi_testclient.TestClient(create_app())
+    response = client.post("/api/dashboard/jobs/retry-blocked-asr", json={"limit": 5, "root_name": "media"})
+
+    assert response.status_code == 200
+    assert response.json()["retried"] == 2
+    assert calls == [{"limit": 5, "root_name": "media", "actor": "dashboard"}]
+    assert emitted == [
+        {
+            "section": "jobs",
+            "reason": "job.retry_blocked_asr_requested",
+            "event": {"retried": 2, "eligible": 2, "skipped": 1, "jobs": ["job-1", "job-2"], "settings_mutated": False},
+        }
+    ]
+
+
 def test_dashboard_job_delete_request_endpoint_marks_terminal_job(monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

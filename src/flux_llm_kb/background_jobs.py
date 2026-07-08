@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any, Callable, Iterable
 
 from . import database
@@ -717,12 +718,41 @@ def _is_internal_background_model_activity(row: dict[str, Any]) -> bool:
 
 
 def _progress(row: dict[str, Any], telemetry: dict[str, Any]) -> str | None:
+    blocked = _blocked_progress(row, telemetry)
+    if blocked:
+        return blocked
     return _first_text(
         telemetry.get("progress_label"),
         row.get("progress"),
         telemetry.get("stage"),
         telemetry.get("progress_percent"),
     )
+
+
+def _blocked_progress(row: dict[str, Any], telemetry: dict[str, Any]) -> str | None:
+    status = _text(row.get("status"))
+    if not status.startswith("blocked_"):
+        return None
+    if _is_asr_gpu_capacity_block(row, telemetry):
+        return "Blocked: ASR GPU capacity"
+    if status == "blocked_missing_dependency":
+        return "Missing dependency"
+    return status.replace("_", " ").title()
+
+
+def _is_asr_gpu_capacity_block(row: dict[str, Any], telemetry: dict[str, Any]) -> bool:
+    if _text(row.get("job_type")) != "corpus_extract_media_segment":
+        return False
+    haystack = " ".join(
+        [
+            _text(row.get("last_error")),
+            _text(telemetry.get("error")),
+            _text(telemetry.get("error_type")),
+            _text(telemetry.get("result_status")),
+            json.dumps(telemetry, default=str),
+        ]
+    ).lower()
+    return "vram_budget_exceeded" in haystack or ("asr" in haystack and "vram" in haystack)
 
 
 def _mail_progress(row: dict[str, Any]) -> str | None:

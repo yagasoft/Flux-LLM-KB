@@ -962,6 +962,7 @@ type DashboardStreamMessage = {
   generated_at?: string;
   stream?: { status?: string; rabbitmq?: boolean; reason?: string };
   message?: string;
+  code?: string;
 };
 
 type ClaimReviewFilter = "all" | "needs_review" | "current";
@@ -1384,6 +1385,7 @@ export default function App() {
   const [reviewLoading, setReviewLoading] = useState(false);
   const [showControlPlaneActivity, setShowControlPlaneActivity] = useState(false);
   const [streamStatus, setStreamStatus] = useState<DashboardStreamStatus>("connecting");
+  const [dashboardStreamError, setDashboardStreamError] = useState<DashboardStreamMessage | null>(null);
   const [dashboardEvents, setDashboardEvents] = useState<DashboardStreamMessage[]>([]);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
   const activeTabRef = useRef<TabId>(activeTab);
@@ -1446,6 +1448,8 @@ export default function App() {
     }
     setState((current) => ({ ...current, [section]: payload }) as LoadState);
     setLastUpdated(new Date());
+    setStreamStatus("connected");
+    setDashboardStreamError(null);
   }
 
   function currentDashboardSubscription() {
@@ -1483,6 +1487,7 @@ export default function App() {
       socket.onopen = () => {
         if (disposed) return;
         setStreamStatus("connected");
+        setDashboardStreamError(null);
         sendDashboardSubscription(socket);
       };
       socket.onmessage = (event) => {
@@ -1490,10 +1495,15 @@ export default function App() {
         if (!message) return;
         if (message.type === "dashboard.connected") {
           setStreamStatus(message.stream?.status === "degraded" ? "degraded" : "connected");
+          if (message.stream?.status !== "degraded") {
+            setDashboardStreamError(null);
+          }
           return;
         }
         if (message.type === "dashboard.snapshot" && message.payload) {
           applyDashboardSnapshot(message.payload);
+          setStreamStatus("connected");
+          setDashboardStreamError(null);
           return;
         }
         if (message.type === "dashboard.section") {
@@ -1506,7 +1516,7 @@ export default function App() {
         }
         if (message.type === "dashboard.error") {
           setStreamStatus("degraded");
-          setDashboardEvents((current) => [message, ...current].slice(0, 20));
+          setDashboardStreamError(message);
         }
       };
       socket.onerror = () => {
@@ -1661,6 +1671,24 @@ export default function App() {
         await load();
       } catch (error) {
         setToast(`Corpus job retry failed: ${errorMessage(error)}`);
+      }
+    });
+  }
+
+  async function retryBlockedAsrJobs() {
+    await runPendingAction("jobs:retry-blocked-asr", "Retrying ASR...", async () => {
+      try {
+        const payload = await sendJson<{ retried?: number; eligible?: number; errors?: Array<Record<string, unknown>> }>(
+          "/api/dashboard/jobs/retry-blocked-asr",
+          "POST",
+          { limit: 25, root_name: jobFilters.root_name[0] ?? undefined }
+        );
+        const retried = numberFromUnknown(payload.retried) ?? 0;
+        const eligible = numberFromUnknown(payload.eligible) ?? retried;
+        const errors = Array.isArray(payload.errors) ? payload.errors.length : 0;
+        setToast(errors > 0 ? `Retried ${retried}/${eligible} ASR job(s); ${errors} need review.` : `Retried ${retried} blocked ASR job(s).`);
+      } catch (error) {
+        setToast(`Blocked ASR retry failed: ${errorMessage(error)}`);
       }
     });
   }
@@ -2395,6 +2423,8 @@ export default function App() {
           <StateTab
             state={state}
             events={dashboardEvents}
+            streamStatus={streamStatus}
+            streamError={dashboardStreamError}
             modelActivityOffset={modelActivityOffset}
             includeControlPlaneActivity={showControlPlaneActivity}
             onIncludeControlPlaneActivityChange={updateControlPlaneActivity}
@@ -2499,6 +2529,7 @@ export default function App() {
             onCancelOutlookRequest={(requestId) => void cancelOutlookRequest(requestId)}
             onCancelCorpusJob={(jobId) => void cancelCorpusJob(jobId)}
             onRetryCorpusJob={(jobId) => void retryCorpusJob(jobId)}
+            onRetryBlockedAsrJobs={() => void retryBlockedAsrJobs()}
             onMarkCorpusJobForDeletion={(jobId) => void markCorpusJobForDeletion(jobId)}
             onRestoreCorpusJobDeletionRequest={(jobId) => void restoreCorpusJobDeletionRequest(jobId)}
             onJobFileAction={(jobId, action) => void runJobFileAction(jobId, action)}
@@ -3019,6 +3050,8 @@ function PerformanceTab({
 function StateTab({
   state,
   events,
+  streamStatus,
+  streamError,
   modelActivityOffset,
   includeControlPlaneActivity,
   onIncludeControlPlaneActivityChange,
@@ -3026,6 +3059,8 @@ function StateTab({
 }: {
   state: LoadState;
   events: DashboardStreamMessage[];
+  streamStatus: DashboardStreamStatus;
+  streamError: DashboardStreamMessage | null;
   modelActivityOffset: number;
   includeControlPlaneActivity: boolean;
   onIncludeControlPlaneActivityChange: (include: boolean) => void;
@@ -3037,6 +3072,8 @@ function StateTab({
         activity={state.modelActivity}
         jobs={state.jobs}
         events={events}
+        streamStatus={streamStatus}
+        streamError={streamError}
         offset={modelActivityOffset}
         includeControlPlane={includeControlPlaneActivity}
         onIncludeControlPlaneChange={onIncludeControlPlaneActivityChange}
@@ -3282,6 +3319,8 @@ function ModelActivityPanel({
   activity,
   jobs,
   events: streamEvents,
+  streamStatus,
+  streamError,
   offset,
   includeControlPlane,
   onIncludeControlPlaneChange,
@@ -3290,6 +3329,8 @@ function ModelActivityPanel({
   activity: ModelActivityPayload;
   jobs: JobsPayload;
   events: DashboardStreamMessage[];
+  streamStatus: DashboardStreamStatus;
+  streamError: DashboardStreamMessage | null;
   offset: number;
   includeControlPlane: boolean;
   onIncludeControlPlaneChange: (include: boolean) => void;
@@ -3318,24 +3359,27 @@ function ModelActivityPanel({
   const classRows = modelActivityClassRows(visibleEvents).slice(0, 6);
   const residentRows = (scheduler.resident_models ?? []).slice(0, 5);
   const failures = visibleEvents.filter(isModelActivityIssue).slice(0, 4);
-  const feedItems = streamEvents.slice(0, 5);
+  const feedItems = streamEvents.filter((event) => event.type === "dashboard.event").slice(0, 5);
   const jobRows = (jobs.jobs ?? []).slice(0, 5);
   return (
     <Panel
       title="Model activity"
       action={(
-        <label className="inline-check">
-          <input
-            aria-label="Show control-plane diagnostics"
-            type="checkbox"
-            checked={includeControlPlane}
-            onChange={(event) => onIncludeControlPlaneChange(event.target.checked)}
-          />
-          Control plane
-        </label>
+        <div className="state-panel-actions">
+          <span className={`stream-pill ${streamStatus}`}>Live {statusLabel(streamStatus)}</span>
+          <label className="inline-check compact-check">
+            <input
+              aria-label="Show control-plane diagnostics"
+              type="checkbox"
+              checked={includeControlPlane}
+              onChange={(event) => onIncludeControlPlaneChange(event.target.checked)}
+            />
+            Control plane
+          </label>
+        </div>
       )}
     >
-      <div className="summary-cards">
+      <div className="state-status-strip">
         <Stat label="Activity" value={modelActivityCountText(visibleActivity)} />
         <Stat label="Last Event" value={formatDate(activity.last_event_at)} />
         <Stat label="Scheduler Mode" value={scheduler.mode ? humanizeIdentifier(scheduler.mode) : "Unknown"} />
@@ -3344,7 +3388,7 @@ function ModelActivityPanel({
       <div className="state-layout">
         <div className="state-main">
           <div className="state-section-head">
-            <strong>Model pipeline</strong>
+            <strong>Pipeline lanes</strong>
             <span>{pageStart}-{pageEnd} of {totalCount} model activity event{totalCount === 1 ? "" : "s"}</span>
           </div>
           {serviceRows.length > 0 ? (
@@ -3370,6 +3414,10 @@ function ModelActivityPanel({
               ))}
             </div>
           )}
+          <div className="state-section-head timeline-title">
+            <strong>Runtime timeline</strong>
+            <span>{visibleEvents.length} visible event{visibleEvents.length === 1 ? "" : "s"}</span>
+          </div>
           <div className="state-timeline" aria-label="Model activity timeline">
             {visibleEvents.slice(0, 8).map((event) => (
               <article className={`timeline-event ${event.status ?? "observed"}`} key={event.id ?? `${event.service}-${event.started_at}`}>
@@ -3426,6 +3474,11 @@ function ModelActivityPanel({
             <span>{formatSchedulerRejections(scheduler)}</span>
             <span>{formatSchedulerEvictions(scheduler)}</span>
             <em>{`${scheduler.recent_count ?? 0} recent`}</em>
+          </div>
+          <div className="rail-card stream-status-card">
+            <strong>Stream status</strong>
+            <span>{statusLabel(streamStatus)}</span>
+            {streamError ? <small>{streamError.message ?? streamError.code ?? "Realtime stream degraded"}</small> : <small>Realtime dashboard sections are connected.</small>}
           </div>
           <div className="rail-card">
             <strong>Resident models</strong>
@@ -5919,6 +5972,7 @@ function JobsTab({
   onCancelOutlookRequest,
   onCancelCorpusJob,
   onRetryCorpusJob,
+  onRetryBlockedAsrJobs,
   onMarkCorpusJobForDeletion,
   onRestoreCorpusJobDeletionRequest,
   onJobFileAction
@@ -5936,6 +5990,7 @@ function JobsTab({
   onCancelOutlookRequest: (requestId: string) => void;
   onCancelCorpusJob: (jobId: string) => void;
   onRetryCorpusJob: (jobId: string) => void;
+  onRetryBlockedAsrJobs: () => void;
   onMarkCorpusJobForDeletion: (jobId: string) => void;
   onRestoreCorpusJobDeletionRequest: (jobId: string) => void;
   onJobFileAction: (jobId: string, action: "open" | "reveal") => void;
@@ -5946,6 +6001,8 @@ function JobsTab({
   const jobCount = numberFromUnknown(state.jobs.count) ?? jobs.length;
   const hasNext = Boolean(state.jobs.has_next ?? (jobOffsetValue + jobs.length < jobCount));
   const jobsEmptyHint = jobs.length === 0 ? jobsModelActivityHint(state.modelActivity) : "";
+  const hasBlockedAsrJobs = jobs.some(isAsrGpuCapacityBlockedJob);
+  const retryBlockedAsrPending = pendingLabel(pendingActions, "jobs:retry-blocked-asr");
   const familyRows = (state.health.acceleration?.worker_families ?? []).slice(0, 8).map((family) => [
     family.family ?? "general",
     `${family.pending ?? 0} pending / ${family.running ?? 0} running`,
@@ -5953,7 +6010,16 @@ function JobsTab({
   ] as [string, string, string]);
   return (
     <section className="tab-grid">
-      <Panel title="Job Queue" action={<button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>}>
+      <Panel title="Job Queue" action={(
+        <div className="panel-action-row">
+          {hasBlockedAsrJobs ? (
+            <button className="ghost-action compact" type="button" disabled={Boolean(retryBlockedAsrPending)} onClick={onRetryBlockedAsrJobs}>
+              {retryBlockedAsrPending ? <Clock3 size={15} /> : <RotateCcw size={15} />} {retryBlockedAsrPending ?? "Retry blocked ASR jobs"}
+            </button>
+          ) : null}
+          <button className="small-primary" type="button" onClick={onRefresh}><RefreshCcw size={15} /> Refresh</button>
+        </div>
+      )}>
         <JobHistoryControls
           filters={jobFilters}
           options={state.jobs.filter_options ?? {}}
@@ -6700,6 +6766,8 @@ function toolInvocationCommand(command: unknown): string {
 
 function jobProgressSummary(job: Record<string, unknown>) {
   const telemetry = jobTelemetry(job);
+  const blocked = blockedJobProgressLabel(job, telemetry);
+  if (blocked) return blocked;
   const explicit = stringFromUnknown(telemetry.progress_label);
   if (explicit) return explicit;
   const terminal = terminalJobProgressLabel(job, telemetry);
@@ -6718,6 +6786,14 @@ function jobProgressSummary(job: Record<string, unknown>) {
   return stage ? humanizeIdentifier(stage) : "-";
 }
 
+function blockedJobProgressLabel(job: Record<string, unknown>, telemetry: Record<string, unknown>) {
+  const status = stringFromUnknown(job.status) ?? "";
+  if (!status.startsWith("blocked_")) return undefined;
+  if (isAsrGpuCapacityBlockedJob(job)) return "Blocked: ASR GPU capacity";
+  if (status === "blocked_missing_dependency") return "Missing dependency";
+  return statusLabel(status);
+}
+
 function terminalJobProgressLabel(job: Record<string, unknown>, telemetry: Record<string, unknown>) {
   const status = stringFromUnknown(job.status) ?? "";
   const resultStatus = stringFromUnknown(telemetry.result_status);
@@ -6728,6 +6804,21 @@ function terminalJobProgressLabel(job: Record<string, unknown>, telemetry: Recor
     return obsoleteJobReasonLabel(job) ?? "Obsolete";
   }
   return undefined;
+}
+
+function isAsrGpuCapacityBlockedJob(job: Record<string, unknown>) {
+  if ((stringFromUnknown(job.status) ?? "") !== "blocked_missing_dependency") return false;
+  if ((stringFromUnknown(job.job_type) ?? "") !== "corpus_extract_media_segment") return false;
+  const telemetry = jobTelemetry(job);
+  const text = [
+    stringFromUnknown(job.last_error),
+    stringFromUnknown(job.progress),
+    stringFromUnknown(telemetry.error),
+    stringFromUnknown(telemetry.error_type),
+    stringFromUnknown(telemetry.result_status),
+    JSON.stringify(telemetry)
+  ].filter(Boolean).join(" ").toLowerCase();
+  return text.includes("vram_budget_exceeded") || (text.includes("asr") && text.includes("vram"));
 }
 
 function obsoleteJobReasonLabel(job: Record<string, unknown>) {

@@ -920,8 +920,8 @@ describe("Flux dashboard", () => {
     expect(screen.queryByRole("button", { name: "Mark corpus job job-running for deletion" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Force retry corpus job job-marked" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Restore deletion mark for corpus job job-marked" })).toBeInTheDocument();
-    expect(screen.getByText("Blocked by policy")).toBeInTheDocument();
-    expect(screen.getByText("Invalid source")).toBeInTheDocument();
+    expect(screen.getAllByText("Blocked by policy").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Invalid source").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Obsolete").length).toBeGreaterThanOrEqual(1);
 
     await user.click(screen.getByRole("button", { name: "Mark corpus job job-failed for deletion" }));

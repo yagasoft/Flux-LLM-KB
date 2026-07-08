@@ -133,6 +133,15 @@ def stream_broker_status() -> dict[str, Any]:
         return {"status": "degraded", "rabbitmq": False, "reason": "rabbitmq unavailable"}
 
 
+def is_quiet_stream_shutdown(exc: BaseException) -> bool:
+    if isinstance(exc, asyncio.CancelledError):
+        return True
+    text = str(exc).lower()
+    if "cancelled" not in text:
+        return False
+    return "rpc call" in text and ("queue.declare" in text or "queue.bind" in text)
+
+
 def emit_dashboard_change(*, section: str, reason: str, event: dict[str, Any] | None = None) -> None:
     if section not in DASHBOARD_SECTIONS:
         return

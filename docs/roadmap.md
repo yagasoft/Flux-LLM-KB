@@ -11,6 +11,37 @@ Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
 
+## 2026-07-08 Realtime Dashboard Degradation And State Tab Correction Update
+
+Affected `Progress %` entries remain conservative until deployment and live
+browser/API validation are complete:
+
+- `V2 Review And Visualization`: remains `99%`. The dashboard stream now treats
+  client disconnects, tab changes, reconnects, and listener cancellation as
+  quiet shutdowns; `dashboard.error` is reserved for true broker/subscription
+  failures and is shown as stream status instead of a Job update feed item. The
+  State tab now uses the timeline-first runtime layout with a compact status
+  strip, grouped pipeline lanes, dominant runtime timeline, scheduler/resident
+  rail, compact stream status, and sanitized job updates while Performance
+  stays focused on acceleration/operator evidence.
+- `V2.5 Autonomous Corpus Expansion`: remains `98%`. Blocked ASR/media job
+  rows now give terminal and blocked state precedence over stale telemetry such
+  as `queued`, label `vram_budget_exceeded` media work as `Blocked: ASR GPU
+  capacity`, and expose an operator-triggered guarded retry that reuses the
+  existing `retry_corpus_job` remediation path without mutating GPU or ASR
+  runtime settings.
+- `Observability and benchmarks`: remains `99%`. Regression coverage now checks
+  quiet stream cancellation, real broker degradation, stream-error separation
+  from job events, State timeline structure, snapshot-only dashboard load, ASR
+  blocker projection, and the guarded ASR retry route.
+
+Remaining Work: deploy through the required feature closeout path, confirm the
+deployed dashboard reports `Live updates Connected` with RabbitMQ reachable,
+confirm `Dashboard.error` never appears in the Job update feed, validate the
+State tab against the revised timeline-first design, confirm blocked ASR/media
+jobs show the GPU-capacity blocker label, and exercise the guarded ASR retry on
+an eligible blocked row without changing runtime settings.
+
 ## 2026-07-08 ASR Retry And Jobs Status Clarity Update
 
 Affected `Progress %` entries remain conservative until deployment and live ASR

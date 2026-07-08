@@ -4358,6 +4358,59 @@ class KnowledgeService:
             "audit_event": audit_event,
         }
 
+    def retry_blocked_asr_jobs(
+        self,
+        *,
+        limit: int = 25,
+        root_name: str | None = None,
+        actor: str = "system",
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit or 25), 100))
+        rows = database.list_capture_jobs(
+            limit=safe_limit,
+            offset=0,
+            status="blocked_missing_dependency",
+            root_name=root_name,
+            job_type="corpus_extract_media_segment",
+        )
+        eligible = 0
+        retried = 0
+        skipped = 0
+        errors: list[dict[str, str]] = []
+        retried_jobs: list[str] = []
+        for row in rows:
+            job_id = str(row.get("id") or "")
+            if not job_id or not _is_asr_vram_blocked_corpus_job(row):
+                skipped += 1
+                continue
+            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+            job_root_name = root_name or str(payload.get("root_name") or "") or None
+            eligible += 1
+            try:
+                self.remediate_diagnostic(
+                    action="retry_corpus_job",
+                    target_type="job",
+                    target_id=job_id,
+                    root_name=job_root_name,
+                    family="media",
+                    reason="operator retry for ASR GPU capacity",
+                    actor=actor,
+                )
+                retried += 1
+                retried_jobs.append(job_id)
+            except Exception as exc:
+                errors.append({"job_id": job_id, "error": str(exc)[:300]})
+        return {
+            "settings_mutated": False,
+            "eligible": eligible,
+            "retried": retried,
+            "skipped": skipped,
+            "errors": errors,
+            "jobs": retried_jobs,
+            "limit": safe_limit,
+            "root_name": root_name,
+        }
+
     def run_corpus_worker(
         self,
         *,
@@ -4805,6 +4858,24 @@ def _corpus_terminal_category(status: str) -> str:
     if clean.startswith("cancelled"):
         return clean
     return "already_terminal"
+
+
+def _is_asr_vram_blocked_corpus_job(row: dict[str, Any]) -> bool:
+    if str(row.get("status") or "") != "blocked_missing_dependency":
+        return False
+    if str(row.get("job_type") or "") != "corpus_extract_media_segment":
+        return False
+    telemetry = row.get("telemetry") if isinstance(row.get("telemetry"), dict) else {}
+    text = " ".join(
+        [
+            str(row.get("last_error") or ""),
+            str(telemetry.get("error") or ""),
+            str(telemetry.get("error_type") or ""),
+            str(telemetry.get("result_status") or ""),
+            json.dumps(telemetry, default=str),
+        ]
+    ).lower()
+    return "vram_budget_exceeded" in text or ("asr" in text and "vram" in text)
 
 
 def _operator_automation_recurring_state(policy: dict[str, Any], last_run: dict[str, Any] | None) -> dict[str, Any]:
