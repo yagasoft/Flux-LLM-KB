@@ -1,4 +1,5 @@
 import {
+  Activity,
   AlertCircle,
   AlertTriangle,
   Archive,
@@ -947,6 +948,22 @@ type LoadState = {
   settings: SettingRow[];
 };
 
+type DashboardSnapshotPayload = LoadState & {
+  generated_at?: string;
+};
+
+type DashboardStreamStatus = "connecting" | "connected" | "degraded" | "disconnected";
+
+type DashboardStreamMessage = {
+  type?: string;
+  payload?: Partial<DashboardSnapshotPayload>;
+  section?: keyof LoadState | string;
+  reason?: string;
+  generated_at?: string;
+  stream?: { status?: string; rabbitmq?: boolean; reason?: string };
+  message?: string;
+};
+
 type ClaimReviewFilter = "all" | "needs_review" | "current";
 
 type ClaimReviewCounts = {
@@ -1113,7 +1130,7 @@ type CaptureDecisionState = {
   decision: "approve" | "reject";
 };
 
-type TabId = "overview" | "automation" | "diagnostics" | "performance" | "corpus" | "mail" | "settings" | "retrieval" | "review" | "jobs";
+type TabId = "overview" | "automation" | "diagnostics" | "performance" | "state" | "corpus" | "mail" | "settings" | "retrieval" | "review" | "jobs";
 
 type AutomationAction = {
   id?: string;
@@ -1237,6 +1254,7 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
   { id: "automation", label: "Automation", icon: <ShieldCheck size={20} /> },
   { id: "diagnostics", label: "Diagnostics", icon: <Wrench size={20} /> },
   { id: "performance", label: "Performance", icon: <Gauge size={20} /> },
+  { id: "state", label: "State", icon: <Activity size={20} /> },
   { id: "corpus", label: "Corpus", icon: <Folder size={20} /> },
   { id: "mail", label: "Mail", icon: <Mail size={20} /> },
   { id: "settings", label: "Settings", icon: <Settings size={20} /> },
@@ -1246,10 +1264,9 @@ const navItems: Array<{ id: TabId; label: string; icon: ReactNode }> = [
 ];
 
 const DASHBOARD_STATE_KEY = "flux-dashboard-state";
-const DEFAULT_POLL_SECONDS = 30;
 const JOB_PAGE_LIMIT = 50;
 const MODEL_ACTIVITY_PAGE_LIMIT = 50;
-type DashboardLoadScope = "full" | "poll";
+const DASHBOARD_STREAM_RECONNECT_MS = 5000;
 type JobHistoryFilters = {
   status: string[];
   root_name: string[];
@@ -1366,10 +1383,13 @@ export default function App() {
   const [claimGraph, setClaimGraph] = useState<GraphPayload>({ edges: [] });
   const [reviewLoading, setReviewLoading] = useState(false);
   const [showControlPlaneActivity, setShowControlPlaneActivity] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<DashboardStreamStatus>("connecting");
+  const [dashboardEvents, setDashboardEvents] = useState<DashboardStreamMessage[]>([]);
   const [theme, setTheme] = useState(() => localStorage.getItem("flux-dashboard-theme") ?? "light");
   const activeTabRef = useRef<TabId>(activeTab);
-  const pollInFlightRef = useRef(false);
-  const pollAbortRef = useRef<AbortController | null>(null);
+  const websocketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const subscriptionRef = useRef<Record<string, unknown>>({});
 
   async function load(options: {
     showLoading?: boolean;
@@ -1378,57 +1398,21 @@ export default function App() {
     jobSort?: JobSortState;
     modelActivityOffset?: number;
     showControlPlaneActivity?: boolean;
-    scope?: DashboardLoadScope;
-    activeTab?: TabId;
-    signal?: AbortSignal;
   } = {}) {
     if (options.showLoading ?? false) {
       setLoading(true);
     }
     try {
-      const scope = options.scope ?? "full";
-      const effectiveActiveTab = options.activeTab ?? activeTabRef.current;
       const effectiveJobFilters = options.jobFilters ?? jobFilters;
       const effectiveJobOffset = options.jobOffset ?? jobOffset;
       const effectiveJobSort = options.jobSort ?? jobSort;
       const effectiveModelActivityOffset = options.modelActivityOffset ?? modelActivityOffset;
       const effectiveShowControlPlaneActivity = options.showControlPlaneActivity ?? showControlPlaneActivity;
-      const sections = dashboardSectionsForLoad(scope, effectiveActiveTab);
-      const modelActivityUrl = modelActivityHistoryUrl(effectiveShowControlPlaneActivity, effectiveModelActivityOffset);
-      const [
-        health,
-        crawl,
-        jobs,
-        retrieval,
-        modelActivity,
-        mail,
-        outlook,
-        settings
-      ] = await Promise.all([
-        getJson<HealthPayload>("/api/dashboard/health", {}, options.signal),
-        getJson<CrawlPayload>("/api/dashboard/crawl", { roots: [] }, options.signal),
-        getJson<JobsPayload>(jobHistoryUrl(effectiveJobFilters, effectiveJobOffset, effectiveJobSort), { jobs: [], limit: JOB_PAGE_LIMIT, offset: effectiveJobOffset }, options.signal),
-        sections.retrieval ? getJson<RetrievalPayload>("/api/dashboard/retrieval-stats", {}, options.signal) : Promise.resolve<RetrievalPayload | undefined>(undefined),
-        sections.modelActivity ? getJson<ModelActivityPayload>(modelActivityUrl, { events: [], service_breakdown: [], class_breakdown: [], scheduler: {} }, options.signal) : Promise.resolve<ModelActivityPayload | undefined>(undefined),
-        sections.mail ? getJson<MailStatus>("/api/mail/status", { profiles: [] }, options.signal) : Promise.resolve<MailStatus | undefined>(undefined),
-        sections.mail ? getJson<OutlookStatus>("/api/outlook-host/status", { profiles: [], pending_requests: [] }, options.signal) : Promise.resolve<OutlookStatus | undefined>(undefined),
-        sections.settings ? getJson<SettingRow[]>("/api/settings", [], options.signal) : Promise.resolve<SettingRow[] | undefined>(undefined)
-      ]);
-      if (options.signal?.aborted) {
-        return;
-      }
-      setState((current) => ({
-        ...current,
-        health,
-        crawl,
-        jobs,
-        ...(retrieval ? { retrieval } : {}),
-        ...(modelActivity ? { modelActivity } : {}),
-        ...(mail ? { mail } : {}),
-        ...(outlook ? { outlook } : {}),
-        ...(settings ? { settings } : {})
-      }));
-      setLastUpdated(new Date());
+      const snapshot = await getJson<DashboardSnapshotPayload>(
+        dashboardSnapshotUrl(effectiveJobFilters, effectiveJobOffset, effectiveJobSort, effectiveShowControlPlaneActivity, effectiveModelActivityOffset),
+        { ...emptyState }
+      );
+      applyDashboardSnapshot(snapshot);
     } finally {
       setLoading(false);
     }
@@ -1442,16 +1426,121 @@ export default function App() {
     activeTabRef.current = activeTab;
   }, [activeTab]);
 
+  function applyDashboardSnapshot(snapshot: Partial<DashboardSnapshotPayload>) {
+    setState((current) => ({
+      health: snapshot.health ?? current.health,
+      crawl: snapshot.crawl ?? current.crawl,
+      jobs: snapshot.jobs ?? current.jobs,
+      retrieval: snapshot.retrieval ?? current.retrieval,
+      modelActivity: snapshot.modelActivity ?? current.modelActivity,
+      mail: snapshot.mail ?? current.mail,
+      outlook: snapshot.outlook ?? current.outlook,
+      settings: snapshot.settings ?? current.settings
+    }));
+    setLastUpdated(snapshot.generated_at ? new Date(snapshot.generated_at) : new Date());
+  }
+
+  function applyDashboardSection(section: string | undefined, payload: unknown) {
+    if (!section || !(section in emptyState)) {
+      return;
+    }
+    setState((current) => ({ ...current, [section]: payload }) as LoadState);
+    setLastUpdated(new Date());
+  }
+
+  function currentDashboardSubscription() {
+    return {
+      type: "dashboard.subscribe",
+      sections: ["health", "crawl", "jobs", "retrieval", "modelActivity", "mail", "outlook", "settings"],
+      activeTab,
+      jobs: dashboardJobsSubscription(jobFilters, jobOffset, jobSort),
+      modelActivity: {
+        limit: MODEL_ACTIVITY_PAGE_LIMIT,
+        offset: Math.max(0, modelActivityOffset),
+        includeControlPlane: showControlPlaneActivity
+      }
+    };
+  }
+
+  function sendDashboardSubscription(socket = websocketRef.current) {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    socket.send(JSON.stringify(subscriptionRef.current));
+  }
+
+  useEffect(() => {
+    subscriptionRef.current = currentDashboardSubscription();
+    sendDashboardSubscription();
+  }, [activeTab, jobFilters, jobOffset, jobSort, modelActivityOffset, showControlPlaneActivity]);
+
+  useEffect(() => {
+    let disposed = false;
+    const connect = () => {
+      setStreamStatus("connecting");
+      const socket = new WebSocket(dashboardStreamUrl());
+      websocketRef.current = socket;
+      socket.onopen = () => {
+        if (disposed) return;
+        setStreamStatus("connected");
+        sendDashboardSubscription(socket);
+      };
+      socket.onmessage = (event) => {
+        const message = parseDashboardStreamMessage(event.data);
+        if (!message) return;
+        if (message.type === "dashboard.connected") {
+          setStreamStatus(message.stream?.status === "degraded" ? "degraded" : "connected");
+          return;
+        }
+        if (message.type === "dashboard.snapshot" && message.payload) {
+          applyDashboardSnapshot(message.payload);
+          return;
+        }
+        if (message.type === "dashboard.section") {
+          applyDashboardSection(message.section, message.payload);
+          return;
+        }
+        if (message.type === "dashboard.event") {
+          setDashboardEvents((current) => [message, ...current].slice(0, 20));
+          return;
+        }
+        if (message.type === "dashboard.error") {
+          setStreamStatus("degraded");
+          setDashboardEvents((current) => [message, ...current].slice(0, 20));
+        }
+      };
+      socket.onerror = () => {
+        if (!disposed) setStreamStatus("degraded");
+      };
+      socket.onclose = () => {
+        if (websocketRef.current === socket) {
+          websocketRef.current = null;
+        }
+        if (disposed) return;
+        setStreamStatus("disconnected");
+        reconnectTimerRef.current = window.setTimeout(connect, DASHBOARD_STREAM_RECONNECT_MS);
+      };
+    };
+    connect();
+    return () => {
+      disposed = true;
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      websocketRef.current?.close();
+      websocketRef.current = null;
+    };
+  }, []);
+
   function updateControlPlaneActivity(next: boolean) {
     setShowControlPlaneActivity(next);
     setModelActivityOffset(0);
-    void load({ showControlPlaneActivity: next, modelActivityOffset: 0 });
   }
 
-  async function updateModelActivityPage(offset: number) {
+  function updateModelActivityPage(offset: number) {
     const nextOffset = Math.max(0, offset);
     setModelActivityOffset(nextOffset);
-    await load({ modelActivityOffset: nextOffset });
   }
 
   useEffect(() => {
@@ -1504,48 +1593,9 @@ export default function App() {
     void loadClaimGraph(selectedClaim.subject_entity_id);
   }, [activeTab, selectedClaim?.subject_entity_id]);
 
-  const pollSeconds = dashboardEffectivePollSeconds(state, dashboardPollSeconds(state.settings));
-
   useEffect(() => {
     writeDashboardState({ activeTab, selectedName, selectedRootName, jobFilters, jobSort });
   }, [activeTab, selectedName, selectedRootName, jobFilters, jobSort]);
-
-  async function pollDashboard() {
-    if (typeof document !== "undefined" && document.hidden) {
-      return;
-    }
-    if (pollInFlightRef.current) {
-      return;
-    }
-    const controller = new AbortController();
-    pollInFlightRef.current = true;
-    pollAbortRef.current = controller;
-    try {
-      await load({
-        showLoading: false,
-        scope: "poll",
-        activeTab: activeTabRef.current,
-        signal: controller.signal
-      });
-    } finally {
-      if (pollAbortRef.current === controller) {
-        pollAbortRef.current = null;
-      }
-      pollInFlightRef.current = false;
-    }
-  }
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void pollDashboard();
-    }, pollSeconds * 1000);
-    return () => {
-      window.clearInterval(timer);
-      pollAbortRef.current?.abort();
-      pollAbortRef.current = null;
-      pollInFlightRef.current = false;
-    };
-  }, [pollSeconds, jobFilters, jobOffset, jobSort, modelActivityOffset, showControlPlaneActivity]);
 
   async function requestProfileSync(profile = selectedProfile) {
     if (!profile) {
@@ -1639,28 +1689,24 @@ export default function App() {
     });
   }
 
-  async function applyJobFilters(filters: JobHistoryFilters) {
+  function applyJobFilters(filters: JobHistoryFilters) {
     setJobFilters(filters);
     setJobOffset(0);
-    await load({ jobFilters: filters, jobOffset: 0, jobSort });
   }
 
-  async function clearJobFilters() {
+  function clearJobFilters() {
     setJobFilters(emptyJobHistoryFilters);
     setJobOffset(0);
-    await load({ jobFilters: emptyJobHistoryFilters, jobOffset: 0, jobSort });
   }
 
-  async function applyJobSort(sort: JobSortState) {
+  function applyJobSort(sort: JobSortState) {
     setJobSort(sort);
     setJobOffset(0);
-    await load({ jobSort: sort, jobOffset: 0 });
   }
 
-  async function pageJobHistory(offset: number) {
+  function pageJobHistory(offset: number) {
     const nextOffset = Math.max(0, offset);
     setJobOffset(nextOffset);
-    await load({ jobOffset: nextOffset, jobSort });
   }
 
   async function saveProfile(form: ProfileForm) {
@@ -2245,7 +2291,7 @@ export default function App() {
             <p>Dashboard control plane for capture, indexing, retrieval, and Windows Outlook host coordination.</p>
             <div className="refresh-meta">
               <span>Last updated {lastUpdated ? formatDate(lastUpdated.toISOString()) : "-"}</span>
-              <span>Auto-refresh every {pollSeconds}s</span>
+              <span>Live updates {humanizeIdentifier(streamStatus)}</span>
             </div>
           </div>
           <div className="top-actions">
@@ -2342,10 +2388,17 @@ export default function App() {
           <PerformanceTab
             state={state}
             selectedRoot={selectedRoot}
+          />
+        )}
+
+        {activeTab === "state" && (
+          <StateTab
+            state={state}
+            events={dashboardEvents}
             modelActivityOffset={modelActivityOffset}
             includeControlPlaneActivity={showControlPlaneActivity}
             onIncludeControlPlaneActivityChange={updateControlPlaneActivity}
-            onModelActivityPage={(offset) => void updateModelActivityPage(offset)}
+            onModelActivityPage={updateModelActivityPage}
           />
         )}
 
@@ -2950,30 +3003,45 @@ function DiagnosticsTab({
 
 function PerformanceTab({
   state,
-  selectedRoot,
+  selectedRoot
+}: {
+  state: LoadState;
+  selectedRoot?: RootSummary | MonitoredRoot;
+}) {
+  return (
+    <section className="tab-grid">
+      <OperatorEvidencePanel />
+      <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
+    </section>
+  );
+}
+
+function StateTab({
+  state,
+  events,
   modelActivityOffset,
   includeControlPlaneActivity,
   onIncludeControlPlaneActivityChange,
   onModelActivityPage
 }: {
   state: LoadState;
-  selectedRoot?: RootSummary | MonitoredRoot;
+  events: DashboardStreamMessage[];
   modelActivityOffset: number;
   includeControlPlaneActivity: boolean;
   onIncludeControlPlaneActivityChange: (include: boolean) => void;
   onModelActivityPage: (offset: number) => void;
 }) {
   return (
-    <section className="tab-grid">
-      <OperatorEvidencePanel />
+    <section className="state-tab">
       <ModelActivityPanel
         activity={state.modelActivity}
+        jobs={state.jobs}
+        events={events}
         offset={modelActivityOffset}
         includeControlPlane={includeControlPlaneActivity}
         onIncludeControlPlaneChange={onIncludeControlPlaneActivityChange}
         onPage={onModelActivityPage}
       />
-      <AccelerationPanel acceleration={state.health.acceleration} selectedRoot={selectedRoot} />
     </section>
   );
 }
@@ -3212,12 +3280,16 @@ function OperatorEvidencePanel() {
 
 function ModelActivityPanel({
   activity,
+  jobs,
+  events: streamEvents,
   offset,
   includeControlPlane,
   onIncludeControlPlaneChange,
   onPage
 }: {
   activity: ModelActivityPayload;
+  jobs: JobsPayload;
+  events: DashboardStreamMessage[];
   offset: number;
   includeControlPlane: boolean;
   onIncludeControlPlaneChange: (include: boolean) => void;
@@ -3243,23 +3315,11 @@ function ModelActivityPanel({
     active_count: visibleEvents.filter((event) => event.status === "running").length
   };
   const serviceRows = modelActivityServiceRows(visibleEvents).slice(0, 6);
-  const classRows = modelActivityClassRows(visibleEvents).slice(0, 6).map((row) => [
-    modelActivityClassLabel(row.activity_class),
-    `${row.count} event${row.count === 1 ? "" : "s"}`,
-    "activity class"
-  ] as [string, string, string]);
-  const eventRows = visibleEvents.slice(0, 8).map((event) => [
-    event.endpoint ?? event.action ?? "model activity",
-    `${event.service ?? "service"} / ${statusLabel(event.status ?? "observed")}`,
-    modelActivityEventDetail(event),
-    modelActivityEventTiming(event)
-  ] as [string, string, string, string]);
-  const residentRows = (scheduler.resident_models ?? []).slice(0, 5).map((model) => [
-    `${model.service ?? "service"} resident`,
-    model.model ?? "resident model",
-    [model.task_type ? humanizeIdentifier(model.task_type) : null, model.last_used_at ? `last ${formatDate(model.last_used_at)}` : null].filter(Boolean).join("; ") || "resident"
-  ] as [string, string, string]);
+  const classRows = modelActivityClassRows(visibleEvents).slice(0, 6);
+  const residentRows = (scheduler.resident_models ?? []).slice(0, 5);
   const failures = visibleEvents.filter(isModelActivityIssue).slice(0, 4);
+  const feedItems = streamEvents.slice(0, 5);
+  const jobRows = (jobs.jobs ?? []).slice(0, 5);
   return (
     <Panel
       title="Model activity"
@@ -3281,60 +3341,123 @@ function ModelActivityPanel({
         <Stat label="Scheduler Mode" value={scheduler.mode ? humanizeIdentifier(scheduler.mode) : "Unknown"} />
         <Stat label="GPU Memory" value={formatGpuMemory(scheduler.live_gpu_memory)} />
       </div>
-      <div className="settings-list">
-        <div className="settings-row">
-          <strong>Scheduler</strong>
-          <span>{formatSchedulerLeaseCounts(scheduler)}</span>
-          <em>{`${scheduler.recent_count ?? 0} recent`}</em>
-        </div>
-        <div className="settings-row">
-          <strong>Scheduler pressure</strong>
-          <span>{formatSchedulerRejections(scheduler)}</span>
-          <em>{formatSchedulerEvictions(scheduler)}</em>
-        </div>
-      </div>
-      {serviceRows.length > 0 ? <MiniTable label="Model service activity" rows={serviceRows} /> : <p className="muted">No recent model service activity.</p>}
-      {classRows.length > 0 ? <MiniTable label="Model activity classes" rows={classRows} /> : null}
-      {residentRows.length > 0 ? <MiniTable label="Resident models" rows={residentRows} /> : null}
-      {eventRows.length > 0 ? <MiniTable label="Model activity events" rows={eventRows} /> : null}
-      <div className="job-pager model-activity-pager" aria-label="Model activity paging">
-        <span>{pageStart}-{pageEnd} of {totalCount} model activity event{totalCount === 1 ? "" : "s"}</span>
-        <button className="ghost-action compact" type="button" aria-label="Previous model activity page" disabled={safeOffset <= 0} onClick={() => onPage(Math.max(0, safeOffset - safeLimit))}>
-          <ChevronLeft size={15} /> Previous
-        </button>
-        {pageItems.length > 0 && (
-          <div className="job-page-numbers" aria-label="Model activity pages">
-            {pageItems.map((item) => {
-              if (typeof item !== "number") {
-                return <span className="job-page-ellipsis" aria-hidden="true" key={item}>...</span>;
-              }
-              const isCurrent = item === currentPage;
-              return (
-                <button
-                  className="job-page-button"
-                  type="button"
-                  key={item}
-                  aria-current={isCurrent ? "page" : undefined}
-                  aria-label={isCurrent ? `Current model activity page ${item}` : `Go to model activity page ${item}`}
-                  disabled={isCurrent}
-                  onClick={() => onPage((item - 1) * safeLimit)}
-                >
-                  {item}
-                </button>
-              );
-            })}
+      <div className="state-layout">
+        <div className="state-main">
+          <div className="state-section-head">
+            <strong>Model pipeline</strong>
+            <span>{pageStart}-{pageEnd} of {totalCount} model activity event{totalCount === 1 ? "" : "s"}</span>
           </div>
-        )}
-        <button className="ghost-action compact" type="button" aria-label="Next model activity page" disabled={!hasNext} onClick={() => onPage(safeOffset + safeLimit)}>
-          Next <ChevronRight size={15} />
-        </button>
+          {serviceRows.length > 0 ? (
+            <div className="state-pipeline-grid">
+              {serviceRows.map((row) => (
+                <div className="pipeline-card" key={row[0]}>
+                  <div>
+                    <strong>{row[0]}</strong>
+                    <span>{row[1]}</span>
+                  </div>
+                  <em>{row[2]}</em>
+                </div>
+              ))}
+            </div>
+          ) : <p className="muted">No recent model service activity.</p>}
+          {classRows.length > 0 && (
+            <div className="state-chip-row" aria-label="Model activity classes">
+              {classRows.map((row) => (
+                <span className="state-chip" key={row.activity_class}>
+                  {modelActivityClassLabel(row.activity_class)}
+                  <small>{row.count} event{row.count === 1 ? "" : "s"}</small>
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="state-timeline" aria-label="Model activity timeline">
+            {visibleEvents.slice(0, 8).map((event) => (
+              <article className={`timeline-event ${event.status ?? "observed"}`} key={event.id ?? `${event.service}-${event.started_at}`}>
+                <div className="timeline-marker" aria-hidden="true" />
+                <div>
+                  <div className="timeline-head">
+                    <strong>{event.endpoint ?? event.action ?? "model activity"}</strong>
+                    <span>{event.service ?? "service"} / {statusLabel(event.status ?? "observed")}</span>
+                  </div>
+                  <p>{modelActivityEventDetail(event)}</p>
+                  <small>{modelActivityEventTiming(event)}</small>
+                  {event.error_message && <p className="timeline-error">{event.error_message}</p>}
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="job-pager model-activity-pager" aria-label="Model activity paging">
+            <span>{pageStart}-{pageEnd} of {totalCount} model activity event{totalCount === 1 ? "" : "s"}</span>
+            <button className="ghost-action compact" type="button" aria-label="Previous model activity page" disabled={safeOffset <= 0} onClick={() => onPage(Math.max(0, safeOffset - safeLimit))}>
+              <ChevronLeft size={15} /> Previous
+            </button>
+            {pageItems.length > 0 && (
+              <div className="job-page-numbers" aria-label="Model activity pages">
+                {pageItems.map((item) => {
+                  if (typeof item !== "number") {
+                    return <span className="job-page-ellipsis" aria-hidden="true" key={item}>...</span>;
+                  }
+                  const isCurrent = item === currentPage;
+                  return (
+                    <button
+                      className="job-page-button"
+                      type="button"
+                      key={item}
+                      aria-current={isCurrent ? "page" : undefined}
+                      aria-label={isCurrent ? `Current model activity page ${item}` : `Go to model activity page ${item}`}
+                      disabled={isCurrent}
+                      onClick={() => onPage((item - 1) * safeLimit)}
+                    >
+                      {item}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            <button className="ghost-action compact" type="button" aria-label="Next model activity page" disabled={!hasNext} onClick={() => onPage(safeOffset + safeLimit)}>
+              Next <ChevronRight size={15} />
+            </button>
+          </div>
+        </div>
+        <aside className="state-rail">
+          <div className="rail-card">
+            <strong>Scheduler</strong>
+            <span>{formatSchedulerLeaseCounts(scheduler)}</span>
+            <span>{formatSchedulerRejections(scheduler)}</span>
+            <span>{formatSchedulerEvictions(scheduler)}</span>
+            <em>{`${scheduler.recent_count ?? 0} recent`}</em>
+          </div>
+          <div className="rail-card">
+            <strong>Resident models</strong>
+            {residentRows.length > 0 ? residentRows.map((model) => (
+              <div className="resident-row" key={`${model.service}-${model.model}-${model.task_type}`}>
+                <span>{model.model ?? "resident model"}</span>
+                <small>{[model.service ? `${model.service} resident` : null, model.task_type ? humanizeIdentifier(model.task_type) : null, model.last_used_at ? `last ${formatDate(model.last_used_at)}` : null].filter(Boolean).join("; ")}</small>
+              </div>
+            )) : <span>No resident model evidence.</span>}
+          </div>
+          <div className="rail-card">
+            <strong>Job update feed</strong>
+            {feedItems.length > 0 ? feedItems.map((item, index) => (
+              <div className="feed-row" key={`${item.type}-${item.section}-${index}`}>
+                <span>{humanizeIdentifier(String(item.reason ?? item.type ?? "dashboard event"))}</span>
+                <small>{item.message ?? item.section ?? formatDate(item.generated_at)}</small>
+              </div>
+            )) : jobRows.map((job) => (
+              <div className="feed-row" key={job.id ?? `${job.job_type}-${job.updated_at}`}>
+                <span>{job.id ?? job.job_type ?? "job"}</span>
+                <small>{[statusLabel(String(job.status ?? "observed")), job.updated_at ? formatDate(job.updated_at) : null].filter(Boolean).join(" / ")}</small>
+              </div>
+            ))}
+          </div>
+        </aside>
       </div>
       {failures.length > 0 ? (
-        <div className="settings-list">
+        <div className="state-issues">
           {failures.map((event) => (
-            <div className="settings-row" key={event.id ?? `${event.service}-${event.started_at}`}>
+            <div className="issue-row" key={event.id ?? `${event.service}-${event.started_at}`}>
               <strong>{event.error_class ?? humanizeIdentifier(event.status ?? "failure")}</strong>
-              <span>{event.error_message ?? "Failure recorded"}</span>
+              <span>{event.endpoint ?? event.action ?? "Model activity issue"}</span>
               <em>{modelActivityIssueLabel(event)}</em>
             </div>
           ))}
@@ -7592,34 +7715,48 @@ function writeDashboardState(value: SavedDashboardState) {
   }
 }
 
-function jobHistoryUrl(filters: JobHistoryFilters, offset: number, sort: JobSortState = defaultJobSort) {
-  const safeOffset = Math.max(0, offset);
-  const hasSort = hasJobSort(sort);
-  if (!hasJobHistoryFilters(filters) && safeOffset === 0 && !hasSort) return "/api/dashboard/jobs";
+function dashboardSnapshotUrl(filters: JobHistoryFilters, offset: number, sort: JobSortState, includeControlPlane: boolean, modelOffset: number) {
   const params = new URLSearchParams();
-  params.set("limit", String(JOB_PAGE_LIMIT));
-  params.set("offset", String(safeOffset));
-  if (hasSort) {
-    params.set("sort_by", sort.sort_by);
-    params.set("sort_dir", sort.sort_dir);
+  const safeJobOffset = Math.max(0, offset);
+  const hasSort = hasJobSort(sort);
+  if (hasJobHistoryFilters(filters) || safeJobOffset > 0 || hasSort) {
+    params.set("jobs_limit", String(JOB_PAGE_LIMIT));
+    params.set("jobs_offset", String(safeJobOffset));
   }
-  filters.status.forEach((status) => params.append("status", status));
-  filters.root_name.forEach((root) => params.append("root_name", root));
-  filters.job_type.forEach((type) => params.append("job_type", type));
-  filters.job_source.forEach((source) => params.append("job_source", source));
+  if (hasSort) {
+    params.set("jobs_sort_by", sort.sort_by);
+    params.set("jobs_sort_dir", sort.sort_dir);
+  }
+  filters.status.forEach((status) => params.append("jobs_status", status));
+  filters.root_name.forEach((root) => params.append("jobs_root_name", root));
+  filters.job_type.forEach((type) => params.append("jobs_job_type", type));
+  filters.job_source.forEach((source) => params.append("jobs_job_source", source));
   const updatedFrom = datetimeLocalToIso(filters.updated_from);
   const updatedTo = datetimeLocalToIso(filters.updated_to);
-  if (updatedFrom) params.set("updated_from", updatedFrom);
-  if (updatedTo) params.set("updated_to", updatedTo);
-  return `/api/dashboard/jobs?${params.toString()}`;
+  if (updatedFrom) params.set("jobs_updated_from", updatedFrom);
+  if (updatedTo) params.set("jobs_updated_to", updatedTo);
+  if (includeControlPlane || modelOffset > 0) {
+    params.set("model_limit", String(MODEL_ACTIVITY_PAGE_LIMIT));
+    params.set("model_offset", String(Math.max(0, modelOffset)));
+  }
+  if (includeControlPlane) params.set("model_include_control_plane", "true");
+  const query = params.toString();
+  return query ? `/api/dashboard/snapshot?${query}` : "/api/dashboard/snapshot";
 }
 
-function modelActivityHistoryUrl(includeControlPlane: boolean, offset: number) {
-  const params = new URLSearchParams();
-  params.set("limit", String(MODEL_ACTIVITY_PAGE_LIMIT));
-  params.set("offset", String(Math.max(0, offset)));
-  if (includeControlPlane) params.set("include_control_plane", "true");
-  return `/api/dashboard/model-activity?${params.toString()}`;
+function dashboardJobsSubscription(filters: JobHistoryFilters, offset: number, sort: JobSortState) {
+  return {
+    limit: JOB_PAGE_LIMIT,
+    offset: Math.max(0, offset),
+    status: filters.status,
+    root_name: filters.root_name,
+    job_type: filters.job_type,
+    job_source: filters.job_source,
+    updated_from: datetimeLocalToIso(filters.updated_from) || null,
+    updated_to: datetimeLocalToIso(filters.updated_to) || null,
+    sort_by: sort.sort_by,
+    sort_dir: sort.sort_dir
+  };
 }
 
 function hasJobHistoryFilters(filters: JobHistoryFilters) {
@@ -7698,48 +7835,19 @@ function normalizeTabId(value: unknown): TabId | undefined {
   return navItems.some((item) => item.id === normalized) ? normalized as TabId : undefined;
 }
 
-function dashboardSectionsForLoad(scope: DashboardLoadScope, activeTab: TabId) {
-  if (scope === "full") {
-    return { retrieval: true, modelActivity: true, mail: true, settings: true };
+function parseDashboardStreamMessage(data: unknown): DashboardStreamMessage | null {
+  try {
+    const parsed = typeof data === "string" ? JSON.parse(data) : data;
+    return isRecord(parsed) ? parsed as DashboardStreamMessage : null;
+  } catch {
+    return null;
   }
-  return {
-    retrieval: activeTab === "retrieval",
-    modelActivity: activeTab === "performance",
-    mail: activeTab === "mail",
-    settings: activeTab === "settings"
-  };
 }
 
-function dashboardEffectivePollSeconds(state: LoadState, configuredSeconds: number) {
-  if (dashboardHasActiveWork(state)) {
-    return configuredSeconds;
-  }
-  return Math.max(configuredSeconds, DEFAULT_POLL_SECONDS);
-}
-
-function dashboardHasActiveWork(state: LoadState) {
-  const pendingHealthJobs = numberFromUnknown(state.health.jobs?.pending);
-  if ((pendingHealthJobs ?? 0) > 0) return true;
-  const jobRows = state.jobs.jobs ?? [];
-  if (jobRows.some((job) => dashboardJobStatusIsActive(stringFromUnknown(job.status)))) return true;
-  const mailCounts = state.mail.scheduler?.counts ?? {};
-  if ((["due", "queued", "claimed", "running"] as Array<keyof MailSchedulerCounts>).some((key) => (numberFromUnknown(mailCounts[key]) ?? 0) > 0)) return true;
-  const outlookPending = state.outlook.pending_requests ?? [];
-  if (outlookPending.some((request) => ["pending", "claimed", "running"].includes(stringFromUnknown(request.status) || "pending"))) return true;
-  const scheduler = state.modelActivity.scheduler ?? {};
-  if ((scheduler.running_count ?? 0) > 0 || (scheduler.waiting_count ?? 0) > 0) return true;
-  return false;
-}
-
-function dashboardJobStatusIsActive(status: string) {
-  return ["pending", "queued", "claimed", "running", "processing", "publishing", "retrying", "waiting", "due", "retrying_locked", "retrying_vss_failed", "retrying_gpu_busy"].includes(status);
-}
-
-function dashboardPollSeconds(settings: SettingRow[]) {
-  const row = settings.find((setting) => setting.key === "dashboard.poll_interval_seconds");
-  const value = Number(row?.value ?? DEFAULT_POLL_SECONDS);
-  if (!Number.isFinite(value) || value <= 0) return DEFAULT_POLL_SECONDS;
-  return Math.max(1, Math.round(value));
+function dashboardStreamUrl() {
+  const url = new URL("/api/dashboard/stream", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
 }
 
 async function getJson<T>(url: string, fallback: T, signal?: AbortSignal): Promise<T> {

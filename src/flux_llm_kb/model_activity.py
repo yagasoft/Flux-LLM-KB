@@ -7,7 +7,7 @@ import re
 import time
 from typing import Any, Iterator
 
-from . import database
+from . import dashboard_realtime, database
 from .error_diagnostics import redact_secrets
 from .redaction import redactions_enabled
 from .gpu_scheduler import get_gpu_scheduler
@@ -64,6 +64,15 @@ def record_model_activity(
     metadata: dict[str, Any] | None = None,
 ) -> Iterator[str | None]:
     started = time.monotonic()
+    start_event = _dashboard_start_event(
+        service=service,
+        endpoint=endpoint,
+        action=action,
+        activity_class=activity_class,
+        caller_surface=caller_surface if caller_surface is not None else _CALLER_SURFACE.get(),
+        model=model or "",
+        metadata=metadata or {},
+    )
     event_id = _safe_start_event(
         service=service,
         endpoint=endpoint,
@@ -73,6 +82,11 @@ def record_model_activity(
         model=model or "",
         metadata=metadata or {},
     )
+    if event_id:
+        _safe_dashboard_event(
+            reason="model_activity.started",
+            event={**start_event, "id": event_id, "status": "running"},
+        )
     try:
         yield event_id
     except Exception as exc:
@@ -110,9 +124,14 @@ def collect_model_activity_payload(
     except Exception:
         pass
     try:
-        database.recover_stale_model_activity_events(stale_after_seconds=stale_after_seconds)
+        recovered = database.recover_stale_model_activity_events(stale_after_seconds=stale_after_seconds)
     except Exception:
-        pass
+        recovered = None
+    if isinstance(recovered, dict) and int(recovered.get("recovered") or 0) > 0:
+        _safe_dashboard_event(
+            reason="model_activity.stale_recovered",
+            event={"recovered": int(recovered.get("recovered") or 0), "status": "stale_running"},
+        )
     try:
         rows = database.list_model_activity_events(
             window_minutes=safe_window,
@@ -206,6 +225,25 @@ def sanitize_metadata(value: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def _dashboard_start_event(**kwargs: Any) -> dict[str, Any]:
+    return {
+        "service": _safe_label(kwargs.get("service"), max_length=80) or "unknown",
+        "endpoint": _safe_endpoint(kwargs.get("endpoint")),
+        "action": _safe_label(kwargs.get("action"), max_length=80),
+        "activity_class": _safe_activity_class(kwargs.get("activity_class")),
+        "caller_surface": _safe_label(kwargs.get("caller_surface"), max_length=40),
+        "model": _safe_label(kwargs.get("model"), max_length=200),
+        "metadata": sanitize_metadata(kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}),
+    }
+
+
+def _safe_dashboard_event(*, reason: str, event: dict[str, Any]) -> None:
+    try:
+        dashboard_realtime.emit_dashboard_change(section="modelActivity", reason=reason, event=event)
+    except Exception:
+        pass
+
+
 def _safe_start_event(**kwargs: Any) -> str | None:
     try:
         return database.start_model_activity_event(
@@ -241,6 +279,18 @@ def _safe_finish_event(
         )
     except Exception:
         pass
+    else:
+        safe_status = _safe_status(status)
+        reason = "model_activity.completed" if safe_status == "completed" else "model_activity.finished"
+        _safe_dashboard_event(
+            reason=reason,
+            event={
+                "id": event_id,
+                "status": safe_status,
+                "duration_ms": duration_ms,
+                "error_class": _safe_label(error_class, max_length=120) or None,
+            },
+        )
 
 
 def _event_payload(row: dict[str, Any], *, now: datetime, stale_after_seconds: int) -> dict[str, Any]:

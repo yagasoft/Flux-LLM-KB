@@ -705,7 +705,10 @@ The dashboard is the single UI surface for overview status, guarded automation,
 diagnostics, performance evidence, watcher status, crawler stats, backlog,
 errors, retrieval/index stats, runtime settings, mail ingestion status, and
 graph/review/governance workflows. The UI is a React/Vite operations console
-bundled into the Python package and served by FastAPI at `/dashboard`; raw JSON
+bundled into the Python package and served by FastAPI at `/dashboard`. The
+frontend makes one initial `GET /api/dashboard/snapshot` call, then subscribes
+to `WS /api/dashboard/stream` for coalesced section updates across health,
+crawl, jobs, retrieval, model activity, mail, Outlook, and settings. Raw JSON
 payloads are diagnostic-only, not the primary monitoring surface.
 Overview is read-only and friendly: system status, attention items, work Flux
 handled automatically, and the next recommended safe action. Automation shows
@@ -714,8 +717,10 @@ run-now control, and durable sanitized audit history. Diagnostics owns
 structured operational errors, filters, copy/detail/navigation actions, and
 confirmation-gated remediation buttons where the service has a safe scoped
 recovery action. Performance owns operator evidence gates, acceleration
-capability, all-root reliability, benchmark history, cache/model readiness, and
-worker-family telemetry. Retrieval owns code diagnostics with feedback capture,
+capability, all-root reliability, benchmark history, cache readiness, and
+worker-family telemetry. State owns model/runtime state: model activity
+timelines, scheduler pressure, resident models, and job/update feed context.
+Retrieval owns code diagnostics with feedback capture,
 top code gaps, parser/fallback hotspots, generated-file counts, and direct code
 search/symbol lookup controls. Settings owns Codex hooks, deployment, runtime
 actions, restart requests, and reindex-required settings.

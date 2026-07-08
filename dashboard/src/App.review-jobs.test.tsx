@@ -4,6 +4,14 @@ import { describe, expect, test, vi } from "vitest";
 import App from "./App";
 import { crawl, dashboardTestState as state, deferredResponse, errorJson, health, json, mail, outlook, setupDashboardTest } from "./test/appHarness";
 
+function dashboardSubscriptions() {
+  return state.webSockets[0]?.sent.map((payload) => JSON.parse(payload)).filter((payload) => payload.type === "dashboard.subscribe") ?? [];
+}
+
+function latestDashboardSubscription() {
+  return dashboardSubscriptions().at(-1);
+}
+
 describe("Flux dashboard", () => {
   setupDashboardTest();
 
@@ -240,7 +248,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Raw payload")).toBeInTheDocument();
   });
 
-  test("job queue filters and pages corpus history through the jobs API", async () => {
+  test("job queue filters and pages corpus history through the realtime subscription", async () => {
     const user = userEvent.setup();
     state.jobsPayload = {
       jobs: [
@@ -294,28 +302,31 @@ describe("Flux dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Apply job filters" }));
 
     await waitFor(() => {
-      const queryUrl = state.jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
-      expect(queryUrl).toBeTruthy();
-      const params = new URLSearchParams(queryUrl?.split("?")[1]);
-      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
-      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
-      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
-      expect(params.getAll("job_source")).toEqual(["capture_jobs", "mail_sync_runs"]);
-      expect(params.get("updated_from")).toBe(updatedFromIso);
-      expect(params.get("updated_to")).toBe(updatedToIso);
-      expect(params.get("limit")).toBe("50");
-      expect(params.get("offset")).toBe("0");
+      expect(latestDashboardSubscription()).toMatchObject({
+        jobs: {
+          status: ["failed", "retrying_locked"],
+          root_name: ["docs", "mail"],
+          job_type: ["corpus_extract_pdf", "corpus_sync_root"],
+          job_source: ["capture_jobs", "mail_sync_runs"],
+          updated_from: updatedFromIso,
+          updated_to: updatedToIso,
+          limit: 50,
+          offset: 0
+        }
+      });
     });
 
     await user.click(screen.getByRole("button", { name: "Sort jobs by Status" }));
 
     await waitFor(() => {
-      const latestUrl = state.jobsRequestUrls.at(-1) ?? "";
-      const params = new URLSearchParams(latestUrl.split("?")[1]);
-      expect(params.get("sort_by")).toBe("status");
-      expect(params.get("sort_dir")).toBe("asc");
-      expect(params.get("offset")).toBe("0");
-      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
+      expect(latestDashboardSubscription()).toMatchObject({
+        jobs: {
+          sort_by: "status",
+          sort_dir: "asc",
+          offset: 0,
+          status: ["failed", "retrying_locked"]
+        }
+      });
     });
     await waitFor(() => {
       const savedState = JSON.parse(localStorage.getItem("flux-dashboard-state") ?? "{}") as { jobSort?: Record<string, unknown> };
@@ -323,10 +334,9 @@ describe("Flux dashboard", () => {
     });
     await user.click(screen.getByRole("button", { name: "Sort jobs by Status" }));
     await waitFor(() => {
-      const latestUrl = state.jobsRequestUrls.at(-1) ?? "";
-      const params = new URLSearchParams(latestUrl.split("?")[1]);
-      expect(params.get("sort_by")).toBe("status");
-      expect(params.get("sort_dir")).toBe("desc");
+      expect(latestDashboardSubscription()).toMatchObject({
+        jobs: { sort_by: "status", sort_dir: "desc" }
+      });
     });
 
     await waitFor(() => {
@@ -350,38 +360,42 @@ describe("Flux dashboard", () => {
     ]);
     const currentPage = within(pager).getByRole("button", { name: "Current jobs page 1" });
     expect(currentPage).toHaveAttribute("aria-current", "page");
-    const requestCountBeforeCurrentClick = state.jobsRequestUrls.length;
+    const requestCountBeforeCurrentClick = dashboardSubscriptions().length;
     await user.click(currentPage);
-    expect(state.jobsRequestUrls).toHaveLength(requestCountBeforeCurrentClick);
+    expect(dashboardSubscriptions()).toHaveLength(requestCountBeforeCurrentClick);
 
     await user.click(within(pager).getByRole("button", { name: "Go to jobs page 2" }));
 
     await waitFor(() => {
-      const latestUrl = state.jobsRequestUrls.at(-1) ?? "";
-      const params = new URLSearchParams(latestUrl.split("?")[1]);
-      expect(params.get("offset")).toBe("50");
-      expect(params.get("limit")).toBe("50");
-      expect(params.get("sort_by")).toBe("status");
-      expect(params.get("sort_dir")).toBe("desc");
-      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
-      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
-      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
-      expect(params.getAll("job_source")).toEqual(["capture_jobs", "mail_sync_runs"]);
+      expect(latestDashboardSubscription()).toMatchObject({
+        jobs: {
+          offset: 50,
+          limit: 50,
+          sort_by: "status",
+          sort_dir: "desc",
+          status: ["failed", "retrying_locked"],
+          root_name: ["docs", "mail"],
+          job_type: ["corpus_extract_pdf", "corpus_sync_root"],
+          job_source: ["capture_jobs", "mail_sync_runs"]
+        }
+      });
     });
 
     await user.click(screen.getByRole("button", { name: "Next jobs page" }));
 
     await waitFor(() => {
-      const latestUrl = state.jobsRequestUrls.at(-1) ?? "";
-      const params = new URLSearchParams(latestUrl.split("?")[1]);
-      expect(params.get("offset")).toBe("50");
-      expect(params.get("limit")).toBe("50");
-      expect(params.get("sort_by")).toBe("status");
-      expect(params.get("sort_dir")).toBe("desc");
-      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
-      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
-      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
-      expect(params.getAll("job_source")).toEqual(["capture_jobs", "mail_sync_runs"]);
+      expect(latestDashboardSubscription()).toMatchObject({
+        jobs: {
+          offset: 50,
+          limit: 50,
+          sort_by: "status",
+          sort_dir: "desc",
+          status: ["failed", "retrying_locked"],
+          root_name: ["docs", "mail"],
+          job_type: ["corpus_extract_pdf", "corpus_sync_root"],
+          job_source: ["capture_jobs", "mail_sync_runs"]
+        }
+      });
     });
   });
 
@@ -694,18 +708,19 @@ describe("Flux dashboard", () => {
     expect(screen.getByLabelText("Updated from filter")).toHaveValue("2026-06-25T00:00");
     expect(screen.getByLabelText("Updated to filter")).toHaveValue("2026-06-26T23:59");
     await waitFor(() => {
-      const queryUrl = state.jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
-      expect(queryUrl).toBeTruthy();
-      const params = new URLSearchParams(queryUrl?.split("?")[1]);
-      expect(params.getAll("status")).toEqual(["failed", "retrying_locked"]);
-      expect(params.getAll("root_name")).toEqual(["docs", "mail"]);
-      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf", "corpus_sync_root"]);
-      expect(params.get("updated_from")).toBe(updatedFromIso);
-      expect(params.get("updated_to")).toBe(updatedToIso);
-      expect(params.get("sort_by")).toBe("target");
-      expect(params.get("sort_dir")).toBe("asc");
-      expect(params.get("limit")).toBe("50");
-      expect(params.get("offset")).toBe("0");
+      expect(latestDashboardSubscription()).toMatchObject({
+        jobs: {
+          status: ["failed", "retrying_locked"],
+          root_name: ["docs", "mail"],
+          job_type: ["corpus_extract_pdf", "corpus_sync_root"],
+          updated_from: updatedFromIso,
+          updated_to: updatedToIso,
+          sort_by: "target",
+          sort_dir: "asc",
+          limit: 50,
+          offset: 0
+        }
+      });
     });
   });
 
@@ -738,12 +753,13 @@ describe("Flux dashboard", () => {
     expect(screen.getByRole("button", { name: "Job root filter" })).toHaveTextContent("docs");
     expect(screen.getByRole("button", { name: "Job type filter" })).toHaveTextContent("Extract PDF");
     await waitFor(() => {
-      const queryUrl = state.jobsRequestUrls.find((url) => url.startsWith("/api/dashboard/jobs?"));
-      expect(queryUrl).toBeTruthy();
-      const params = new URLSearchParams(queryUrl?.split("?")[1]);
-      expect(params.getAll("status")).toEqual(["failed"]);
-      expect(params.getAll("root_name")).toEqual(["docs"]);
-      expect(params.getAll("job_type")).toEqual(["corpus_extract_pdf"]);
+      expect(latestDashboardSubscription()).toMatchObject({
+        jobs: {
+          status: ["failed"],
+          root_name: ["docs"],
+          job_type: ["corpus_extract_pdf"]
+        }
+      });
     });
   });
 
@@ -1312,7 +1328,7 @@ describe("Flux dashboard", () => {
     });
   });
 
-  test("expanded job details show live console output refreshed by polling", async () => {
+  test("expanded job details show live console output refreshed by job stream updates", async () => {
     const user = userEvent.setup();
     state.jobsPayload = {
       jobs: [
@@ -1376,6 +1392,16 @@ describe("Flux dashboard", () => {
         }
       ]
     };
+
+    state.jobsPayload = {
+      ...state.jobsPayload,
+      jobs: [{ ...state.jobsPayload.jobs[0], updated_at: "2026-06-27T16:32:30+00:00" }]
+    };
+    state.webSockets[0].emit({
+      type: "dashboard.section",
+      section: "jobs",
+      payload: state.jobsPayload
+    });
 
     await waitFor(() => {
       expect(state.jobToolInvocationRequestUrls.filter((url) => url.includes("job-video/tool-invocations")).length).toBeGreaterThanOrEqual(2);

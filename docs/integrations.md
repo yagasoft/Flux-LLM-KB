@@ -322,6 +322,17 @@ precision threshold. Responses expose action ids, guardrail status, telemetry,
 and before/after state, but never raw memory text, private paths, raw queries,
 snippets, embeddings, local model prompts, or local model outputs.
 
+The dashboard shell loads with `GET /api/dashboard/snapshot`, which returns
+`generated_at` plus the bounded dashboard sections `health`, `crawl`, `jobs`,
+`retrieval`, `modelActivity`, `mail`, `outlook`, and `settings`. After that the
+browser opens `WS /api/dashboard/stream` and sends `dashboard.subscribe` with
+the desired sections, active tab, Jobs filters/sort/page, and model activity
+options. The stream sends `dashboard.connected`, `dashboard.snapshot`,
+`dashboard.section`, `dashboard.event`, and recoverable `dashboard.error`
+messages. RabbitMQ-backed updates are non-competing with durable dashboard
+event workers; if RabbitMQ is unavailable, the stream reports a degraded state
+instead of re-enabling periodic REST polling.
+
 Lookup endpoints are read-only and return stable JSON payloads for asset and
 chunk inspection. The API binds to `127.0.0.1` by default; do not expose it to a
 network interface without an explicit local access-control policy.

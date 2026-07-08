@@ -64,6 +64,49 @@ def test_record_model_activity_sanitizes_metadata_and_completes(monkeypatch):
     ]
 
 
+def test_record_model_activity_emits_dashboard_state_events(monkeypatch):
+    emitted: list[dict[str, object]] = []
+
+    monkeypatch.setattr(model_activity.database, "start_model_activity_event", lambda **_kwargs: "event-1", raising=False)
+    monkeypatch.setattr(model_activity.database, "finish_model_activity_event", lambda **_kwargs: None, raising=False)
+    monkeypatch.setattr(model_activity.dashboard_realtime, "emit_dashboard_change", lambda **kwargs: emitted.append(kwargs), raising=False)
+    monkeypatch.setattr(model_activity.time, "monotonic", lambda: 100.0)
+
+    with model_activity.record_model_activity(
+        service="model-runner",
+        endpoint="/v1/rerank",
+        action="rerank",
+        activity_class="retrieval",
+        caller_surface="mcp",
+        model="Qwen/Qwen3-Reranker-4B",
+        metadata={"batch_size": 2, "path": "E:/Private/report.pdf"},
+    ):
+        pass
+
+    assert emitted == [
+        {
+            "section": "modelActivity",
+            "reason": "model_activity.started",
+            "event": {
+                "id": "event-1",
+                "service": "model-runner",
+                "endpoint": "/v1/rerank",
+                "action": "rerank",
+                "activity_class": "retrieval",
+                "caller_surface": "mcp",
+                "model": "Qwen/Qwen3-Reranker-4B",
+                "metadata": {"batch_size": 2},
+                "status": "running",
+            },
+        },
+        {
+            "section": "modelActivity",
+            "reason": "model_activity.completed",
+            "event": {"id": "event-1", "status": "completed", "duration_ms": 0, "error_class": None},
+        },
+    ]
+
+
 def test_resident_gpu_model_records_model_loading_activity(monkeypatch):
     started: list[dict[str, object]] = []
     finished: list[dict[str, object]] = []

@@ -1,9 +1,12 @@
+import asyncio
+from contextlib import suppress
 from html import escape
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
-from . import database
+from . import dashboard_realtime, database
+from .dashboard_realtime import collect_dashboard_snapshot
 from .host_agent import (
     path_requires_host_agent,
     remote_backfill,
@@ -93,7 +96,7 @@ def _service_retrieval_kwargs(**kwargs: Any) -> dict[str, Any]:
 
 def create_app():
     try:
-        from fastapi import Body, FastAPI, HTTPException, Query, Request
+        from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
         from fastapi.exceptions import RequestValidationError
         from fastapi.responses import HTMLResponse, JSONResponse
         from fastapi.staticfiles import StaticFiles
@@ -625,6 +628,114 @@ def create_app():
     def dashboard():
         return build_dashboard_html()
 
+    @app.get("/api/dashboard/snapshot")
+    def dashboard_snapshot(
+        jobs_limit: int = 50,
+        jobs_offset: int = 0,
+        jobs_status: list[str] | None = Query(None),
+        jobs_root_name: list[str] | None = Query(None),
+        jobs_job_type: list[str] | None = Query(None),
+        jobs_job_source: list[str] | None = Query(None),
+        jobs_updated_from: str | None = None,
+        jobs_updated_to: str | None = None,
+        jobs_sort_by: str | None = "updated",
+        jobs_sort_dir: str | None = "desc",
+        model_window_minutes: int = 60,
+        model_limit: int = 50,
+        model_offset: int = 0,
+        model_include_control_plane: bool = False,
+    ):
+        return collect_dashboard_snapshot(
+            jobs={
+                "limit": jobs_limit,
+                "offset": jobs_offset,
+                "status": jobs_status,
+                "root_name": jobs_root_name,
+                "job_type": jobs_job_type,
+                "job_source": jobs_job_source,
+                "updated_from": jobs_updated_from,
+                "updated_to": jobs_updated_to,
+                "sort_by": jobs_sort_by,
+                "sort_dir": jobs_sort_dir,
+            },
+            model_activity={
+                "window_minutes": bounded_window_minutes(model_window_minutes),
+                "limit": bounded_limit(model_limit),
+                "offset": bounded_offset(model_offset),
+                "include_control_plane": model_include_control_plane,
+            },
+        )
+
+    @app.websocket("/api/dashboard/stream")
+    async def dashboard_stream(websocket: WebSocket):
+        await websocket.accept()
+        send_lock = asyncio.Lock()
+        listener_task: asyncio.Task | None = None
+
+        async def send_json(payload: dict[str, Any]) -> None:
+            async with send_lock:
+                await websocket.send_json(payload)
+
+        async def forward_broker_events(subscription: dict[str, Any]) -> None:
+            try:
+                async for outbound in dashboard_realtime.rabbitmq_dashboard_messages(subscription):
+                    await send_json(outbound)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                with suppress(Exception):
+                    await send_json(
+                        dashboard_realtime.error_message(
+                            "Dashboard event stream is degraded; RabbitMQ updates are temporarily unavailable.",
+                            code="dashboard.rabbitmq_unavailable",
+                        )
+                    )
+
+        stream_status = dashboard_realtime.stream_broker_status()
+        await send_json(dashboard_realtime.connected_message(stream=stream_status))
+        try:
+            while True:
+                message = await websocket.receive_json()
+                if not isinstance(message, dict) or message.get("type") != "dashboard.subscribe":
+                    await send_json(dashboard_realtime.error_message("Unsupported dashboard stream message.", code="dashboard.unsupported_message"))
+                    continue
+                subscription = dashboard_realtime.subscription_from_client(message)
+                if listener_task is not None:
+                    listener_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await listener_task
+                    listener_task = None
+                snapshot = collect_dashboard_snapshot(
+                    jobs=subscription["jobs"],
+                    model_activity={
+                        "window_minutes": bounded_window_minutes(subscription["model_activity"].get("window_minutes")),
+                        "limit": bounded_limit(subscription["model_activity"].get("limit")),
+                        "offset": bounded_offset(subscription["model_activity"].get("offset")),
+                        "include_control_plane": bool(subscription["model_activity"].get("include_control_plane")),
+                    },
+                )
+                await send_json(dashboard_realtime.snapshot_message(snapshot))
+                for section in subscription["sections"]:
+                    if section in snapshot:
+                        await send_json(dashboard_realtime.section_message(section, snapshot[section], reason="subscribe"))
+                stream_status = dashboard_realtime.stream_broker_status()
+                if stream_status.get("rabbitmq"):
+                    listener_task = asyncio.create_task(forward_broker_events(subscription))
+                else:
+                    await send_json(
+                        dashboard_realtime.error_message(
+                            "Dashboard event stream is degraded; RabbitMQ updates are temporarily unavailable.",
+                            code="dashboard.rabbitmq_unavailable",
+                        )
+                    )
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if listener_task is not None:
+                listener_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await listener_task
+
     @app.get("/api/dashboard/health")
     def dashboard_health():
         return collect_dashboard_payload()
@@ -685,18 +796,21 @@ def create_app():
         if not payload.get("cancelled"):
             status_code = 404 if payload.get("status") == "not_found" else 409
             raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job cannot be cancelled.")
+        dashboard_realtime.emit_dashboard_change(section="jobs", reason="job.cancelled", event=payload)
         return payload
 
     @app.post("/api/dashboard/jobs/{job_id}/retry")
     def dashboard_job_retry(job_id: str):
         try:
-            return service.remediate_diagnostic(
+            payload = service.remediate_diagnostic(
                 action="retry_corpus_job",
                 target_type="job",
                 target_id=job_id,
                 reason="operator forced retry from dashboard",
                 actor="dashboard",
             )
+            dashboard_realtime.emit_dashboard_change(section="jobs", reason="job.retry_requested", event={"job_id": job_id, **payload})
+            return payload
         except LookupError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
@@ -712,6 +826,7 @@ def create_app():
         if not payload.get("delete_requested"):
             status_code = 404 if payload.get("status") == "not_found" else 409
             raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job cannot be marked for deletion.")
+        dashboard_realtime.emit_dashboard_change(section="jobs", reason="job.delete_requested", event=payload)
         return payload
 
     @app.delete("/api/dashboard/jobs/{job_id}/delete-request")
@@ -720,6 +835,7 @@ def create_app():
         if payload.get("error"):
             status_code = 404 if payload.get("status") == "not_found" else 409
             raise HTTPException(status_code=status_code, detail=payload.get("error") or "Corpus job deletion mark cannot be restored.")
+        dashboard_realtime.emit_dashboard_change(section="jobs", reason="job.delete_request_restored", event=payload)
         return payload
 
     @app.post("/api/dashboard/jobs/{job_id}/file-actions")
@@ -1548,25 +1664,31 @@ def create_app():
     def settings_put(key: str, request: SettingUpdateRequest = Body(...)):
         from .settings import SettingsService
 
-        return SettingsService().set(
+        payload = SettingsService().set(
             key,
             request.value,
             actor="dashboard",
             reason=request.reason,
             confirmed=request.confirmed,
         )
+        dashboard_realtime.emit_dashboard_change(section="settings", reason="setting.updated", event={"key": key, "status": payload.get("status")})
+        return payload
 
     @app.post("/api/settings/apply")
     def settings_apply(request: SettingsApplyRequest = Body(...)):
         from .settings import SettingsService
 
-        return JSONResponse(status_code=202, content=SettingsService().enqueue_apply(component=request.component, actor="dashboard"))
+        payload = SettingsService().enqueue_apply(component=request.component, actor="dashboard")
+        dashboard_realtime.emit_dashboard_change(section="settings", reason="settings.apply_requested", event={"component": request.component})
+        return JSONResponse(status_code=202, content=payload)
 
     @app.post("/api/settings/{key}/reset")
     def settings_reset(key: str):
         from .settings import SettingsService
 
-        return SettingsService().reset(key, actor="dashboard")
+        payload = SettingsService().reset(key, actor="dashboard")
+        dashboard_realtime.emit_dashboard_change(section="settings", reason="setting.reset", event={"key": key, "status": payload.get("status")})
+        return payload
 
     @app.get("/api/mail/status")
     def mail_status():
@@ -1670,7 +1792,9 @@ def create_app():
     def mail_sync(request: MailSyncRequest = Body(...)):
         from . import database
 
-        return JSONResponse(status_code=202, content=database.enqueue_imap_sync_command(profile_name=request.profile_name, requested_by="dashboard"))
+        payload = database.enqueue_imap_sync_command(profile_name=request.profile_name, requested_by="dashboard")
+        dashboard_realtime.emit_dashboard_change(section="mail", reason="mail.sync_requested", event={"profile_name": request.profile_name})
+        return JSONResponse(status_code=202, content=payload)
 
     @app.post("/api/mail/watch")
     def mail_watch(_: MailSyncRequest = Body(...)):
@@ -1724,7 +1848,9 @@ def create_app():
     def outlook_host_request_sync(request: OutlookHostSyncRequest = Body(...)):
         from .outlook_host import request_sync
 
-        return request_sync(request.profile_name, actor="dashboard")
+        payload = request_sync(request.profile_name, actor="dashboard")
+        dashboard_realtime.emit_dashboard_change(section="outlook", reason="outlook.sync_requested", event={"profile_name": request.profile_name})
+        return payload
 
     @app.post("/api/outlook-host/requests/{request_id}/cancel")
     def outlook_host_cancel_request(request_id: str):
@@ -1734,19 +1860,24 @@ def create_app():
         if not payload.get("cancelled"):
             status_code = 404 if payload.get("status") == "not_found" else 409
             raise HTTPException(status_code=status_code, detail=payload.get("error") or "Outlook sync request cannot be cancelled.")
+        dashboard_realtime.emit_dashboard_change(section="outlook", reason="outlook.sync_cancelled", event=payload)
         return payload
 
     @app.post("/api/outlook-host/profiles/{name}/enable")
     def outlook_host_profile_enable(name: str):
         from .outlook_host import set_profile_enabled
 
-        return set_profile_enabled(name, enabled=True)
+        payload = set_profile_enabled(name, enabled=True)
+        dashboard_realtime.emit_dashboard_change(section="outlook", reason="outlook.profile_enabled", event={"profile_name": name})
+        return payload
 
     @app.post("/api/outlook-host/profiles/{name}/disable")
     def outlook_host_profile_disable(name: str):
         from .outlook_host import set_profile_enabled
 
-        return set_profile_enabled(name, enabled=False)
+        payload = set_profile_enabled(name, enabled=False)
+        dashboard_realtime.emit_dashboard_change(section="outlook", reason="outlook.profile_disabled", event={"profile_name": name})
+        return payload
 
     return app
 

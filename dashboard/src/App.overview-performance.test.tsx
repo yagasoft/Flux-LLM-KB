@@ -2,7 +2,7 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, test, vi } from "vitest";
 import App from "./App";
-import { crawl, dashboardTestState as state, deferredResponse, errorJson, health, json, mail, outlook, setupDashboardTest } from "./test/appHarness";
+import { crawl, dashboardTestState as state, health, mail, outlook, setupDashboardTest } from "./test/appHarness";
 
 async function flushAsyncUi() {
   await act(async () => {
@@ -28,7 +28,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Host Agent")).toBeInTheDocument();
     expect(screen.getByText("Codex Integration")).toBeInTheDocument();
     expect(screen.getByText("Codex restart required")).toBeInTheDocument();
-    expect(screen.getByText(/Auto-refresh every 1s/i)).toBeInTheDocument();
+    expect(screen.getByText(/Live updates/i)).toBeInTheDocument();
     expect(screen.queryByRole("table", { name: "Mail profiles" })).not.toBeInTheDocument();
     expect(screen.queryByText(/"database"/)).not.toBeInTheDocument();
   });
@@ -144,12 +144,12 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("3 pending")).toBeInTheDocument();
   });
 
-  test("performance shows privacy-safe model activity and scheduler metrics", async () => {
+  test("state shows privacy-safe model activity and scheduler metrics", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
@@ -168,7 +168,7 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).getByText("redacted failure")).toBeInTheDocument();
   });
 
-  test("performance labels model activity dependency blockers without failure wording", async () => {
+  test("state labels model activity dependency blockers without failure wording", async () => {
     const user = userEvent.setup();
     state.modelActivityPayload = {
       ...state.modelActivityPayload,
@@ -201,7 +201,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
@@ -210,7 +210,7 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).queryByText("worker failure")).not.toBeInTheDocument();
   });
 
-  test("performance labels stale model activity without active work", async () => {
+  test("state labels stale model activity without active work", async () => {
     const user = userEvent.setup();
     state.modelActivityPayload = {
       ...state.modelActivityPayload,
@@ -243,7 +243,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
@@ -252,7 +252,7 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).queryByText("model-runner / Stale Running")).not.toBeInTheDocument();
   });
 
-  test("performance hides control-plane health events from model activity", async () => {
+  test("state hides control-plane health events from model activity", async () => {
     const user = userEvent.setup();
     state.modelActivityPayload = {
       ...state.modelActivityPayload,
@@ -302,7 +302,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
@@ -311,7 +311,7 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).queryByText("Control Plane")).not.toBeInTheDocument();
   });
 
-  test("performance shows Paddle OCR model activity by default", async () => {
+  test("state shows Paddle OCR model activity by default", async () => {
     const user = userEvent.setup();
     state.modelActivityPayload = {
       ...state.modelActivityPayload,
@@ -355,7 +355,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
@@ -364,7 +364,7 @@ describe("Flux dashboard", () => {
     expect(within(panel as HTMLElement).queryByText("/health")).not.toBeInTheDocument();
   });
 
-  test("performance paginates model activity with clickable page numbers", async () => {
+  test("state paginates model activity through the stream subscription", async () => {
     const user = userEvent.setup();
     state.modelActivityPayload = {
       ...state.modelActivityPayload,
@@ -379,7 +379,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     const pager = screen.getByLabelText("Model activity paging");
     expect(within(pager).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual([
@@ -394,27 +394,30 @@ describe("Flux dashboard", () => {
     await user.click(within(pager).getByRole("button", { name: "Go to model activity page 3" }));
 
     await waitFor(() => {
-      const latestUrl = state.modelActivityRequestUrls.at(-1) ?? "";
-      const params = new URLSearchParams(latestUrl.split("?")[1]);
-      expect(params.get("limit")).toBe("50");
-      expect(params.get("offset")).toBe("100");
+      const latestSubscription = state.webSockets[0].sent.map((payload) => JSON.parse(payload)).at(-1);
+      expect(latestSubscription).toMatchObject({
+        type: "dashboard.subscribe",
+        modelActivity: { limit: 50, offset: 100 }
+      });
     });
   });
 
-  test("performance model activity uses semantic tables outside the jobs tab", async () => {
+  test("state renders model activity without mini tables", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     const panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
-    expect(within(panel as HTMLElement).getByRole("table", { name: "Model service activity" })).toBeInTheDocument();
-    expect(within(panel as HTMLElement).getByRole("table", { name: "Model activity events" })).toBeInTheDocument();
+    expect(within(panel as HTMLElement).queryByRole("table")).not.toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Model pipeline")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Resident models")).toBeInTheDocument();
+    expect(within(panel as HTMLElement).getByText("Job update feed")).toBeInTheDocument();
   });
 
-  test("performance can opt into control-plane model activity diagnostics", async () => {
+  test("state can opt into control-plane model activity diagnostics", async () => {
     const user = userEvent.setup();
     state.modelActivityPayload = {
       ...state.modelActivityPayload,
@@ -464,7 +467,7 @@ describe("Flux dashboard", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "Operations" });
-    await user.click(screen.getByRole("button", { name: "Performance" }));
+    await user.click(screen.getByRole("button", { name: "State" }));
 
     let panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(panel).not.toBeNull();
@@ -473,12 +476,11 @@ describe("Flux dashboard", () => {
     await user.click(within(panel as HTMLElement).getByRole("checkbox", { name: "Show control-plane diagnostics" }));
 
     await waitFor(() => {
-      const latestUrl = state.modelActivityRequestUrls.at(-1) ?? "";
-      expect(latestUrl.startsWith("/api/dashboard/model-activity?")).toBe(true);
-      const params = new URLSearchParams(latestUrl.split("?")[1]);
-      expect(params.get("include_control_plane")).toBe("true");
-      expect(params.get("offset")).toBe("0");
-      expect(params.get("limit")).toBe("50");
+      const latestSubscription = state.webSockets[0].sent.map((payload) => JSON.parse(payload)).at(-1);
+      expect(latestSubscription).toMatchObject({
+        type: "dashboard.subscribe",
+        modelActivity: { includeControlPlane: true, offset: 0, limit: 50 }
+      });
     });
     panel = screen.getByRole("heading", { name: "Model activity" }).closest(".panel");
     expect(within(panel as HTMLElement).getByText("/health")).toBeInTheDocument();
@@ -576,7 +578,16 @@ describe("Flux dashboard", () => {
     expect(screen.getAllByText("docs").length).toBeGreaterThan(0);
   });
 
-  test("auto-refresh polling refreshes only cheap overview data by default", async () => {
+  test("initial dashboard render makes one snapshot request", async () => {
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    expect(state.snapshotRequestUrls).toHaveLength(1);
+    expect(state.snapshotRequestUrls[0]).toBe("/api/dashboard/snapshot");
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).not.toContain("/api/dashboard/health");
+  });
+
+  test("dashboard does not refresh data on a timer", async () => {
     vi.useFakeTimers();
     render(<App />);
 
@@ -585,70 +596,64 @@ describe("Flux dashboard", () => {
     vi.mocked(fetch).mockClear();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
+      await vi.advanceTimersByTimeAsync(60000);
     });
 
-    const urls = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
-    expect(urls).toContain("/api/dashboard/health");
-    expect(urls).toContain("/api/dashboard/crawl");
-    expect(urls.some((url) => url.startsWith("/api/dashboard/jobs"))).toBe(true);
-    expect(urls).not.toContain("/api/dashboard/retrieval-stats");
-    expect(urls.some((url) => url.startsWith("/api/dashboard/model-activity"))).toBe(false);
-    expect(urls).not.toContain("/api/mail/status");
-    expect(urls).not.toContain("/api/outlook-host/status");
-    expect(urls).not.toContain("/api/settings");
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringMatching(/\/api\/dashboard\/snapshot/), expect.anything());
+    expect(fetch).not.toHaveBeenCalledWith(expect.stringMatching(/\/api\/dashboard\/health/), expect.anything());
     expect(screen.getByText(/Last updated/i)).toBeInTheDocument();
   });
 
-  test("auto-refresh polling pauses while the browser tab is hidden", async () => {
-    vi.useFakeTimers();
-    const hiddenSpy = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  test("websocket section messages update jobs and model state", async () => {
+    const user = userEvent.setup();
     render(<App />);
 
     await flushAsyncUi();
     expect(screen.getByRole("heading", { name: "Operations" })).toBeInTheDocument();
-    vi.mocked(fetch).mockClear();
-    hiddenSpy.mockReturnValue(true);
+    expect(state.webSockets).toHaveLength(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
+      state.webSockets[0].emit({
+        type: "dashboard.section",
+        section: "jobs",
+        payload: {
+          ...state.jobsPayload,
+          jobs: [{ ...state.jobsPayload.jobs[0], id: "job-live", status: "running", payload: { ...state.jobsPayload.jobs[0].payload, path: "docs/live.pdf" }, updated_at: "2026-07-08T10:01:00+00:00" }],
+          count: 1
+        }
+      });
+      state.webSockets[0].emit({
+        type: "dashboard.section",
+        section: "modelActivity",
+        payload: {
+          ...state.modelActivityPayload,
+          active_count: 2,
+          events: [{ ...state.modelActivityPayload.events[0], id: "event-live", status: "running", endpoint: "/v1/live" }]
+        }
+      });
     });
 
-    expect(fetch).not.toHaveBeenCalled();
-    hiddenSpy.mockRestore();
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    expect(await screen.findByText("docs/live.pdf")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "State" }));
+    expect(await screen.findByText("/v1/live")).toBeInTheDocument();
+    expect(screen.getByText("1 recent / 1 active")).toBeInTheDocument();
   });
 
-  test("auto-refresh polling skips overlapping refreshes", async () => {
-    vi.useFakeTimers();
+  test("manual refresh performs one snapshot reload", async () => {
+    const user = userEvent.setup();
     render(<App />);
 
-    await flushAsyncUi();
-    expect(screen.getByRole("heading", { name: "Operations" })).toBeInTheDocument();
-    const pending = deferredResponse();
-    state.pendingFetchResponses["/api/dashboard/health"] = pending;
-    vi.mocked(fetch).mockClear();
+    expect(await screen.findByRole("heading", { name: "Operations" })).toBeInTheDocument();
+    expect(state.snapshotRequestUrls).toHaveLength(1);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
+    await user.click(screen.getByRole("button", { name: "More actions" }));
+    await user.click(screen.getByRole("menuitem", { name: "Refresh data" }));
+
+    await waitFor(() => {
+      expect(state.snapshotRequestUrls).toHaveLength(2);
     });
-    const healthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
-    expect(healthCalls).toHaveLength(1);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
-    const blockedHealthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
-    expect(blockedHealthCalls).toHaveLength(1);
-
-    delete state.pendingFetchResponses["/api/dashboard/health"];
-    pending.resolve(json(state.healthPayload));
-    await flushAsyncUi();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
-
-    const resumedHealthCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/dashboard/health");
-    expect(resumedHealthCalls).toHaveLength(2);
   });
 
   test("manual Outlook sync creates a host request", async () => {

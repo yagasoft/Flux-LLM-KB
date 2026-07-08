@@ -628,8 +628,12 @@ The dashboard is a React/Vite app under `dashboard/` and is served by FastAPI at
 `http://127.0.0.1:8765/dashboard`. Overview is a friendly read-only status page,
 Automation shows guarded run state and manual-required work, Diagnostics owns
 structured errors and safe remediation, Performance owns acceleration and
-reliability evidence, Retrieval owns code diagnostics, and Settings owns Codex
-hooks, deployment, runtime actions, restart, and reindex settings. Use the
+reliability evidence, State owns model activity, scheduler/resident model state,
+and live job updates, Retrieval owns code diagnostics, and Settings owns Codex
+hooks, deployment, runtime actions, restart, and reindex settings. Dashboard
+load uses one `GET /api/dashboard/snapshot` call; live updates arrive through
+`WS /api/dashboard/stream`, with manual **Refresh data** remaining a one-shot
+snapshot reload. Use the
 helper script whenever dashboard code changes; it rebuilds assets and refreshes
 the running deployment:
 

@@ -411,6 +411,8 @@ export type DashboardTestState = {
   corpusRestoreRequests: string[];
   corpusJobFileActionRequests: Array<{ url: string; body: unknown }>;
   corpusJobFileActionPayload: Record<string, any>;
+  snapshotRequestUrls: string[];
+  webSockets: MockDashboardWebSocket[];
   jobsRequestUrls: string[];
   modelActivityRequestUrls: string[];
   jobToolInvocationPayload: any;
@@ -421,8 +423,47 @@ export type DashboardTestState = {
 export const dashboardTestState = {} as DashboardTestState;
 const state = dashboardTestState;
 
+export class MockDashboardWebSocket {
+  static instances: MockDashboardWebSocket[] = [];
+  static CONNECTING = 0;
+  static OPEN = 1;
+  static CLOSING = 2;
+  static CLOSED = 3;
+
+  url: string;
+  readyState = 0;
+  sent: string[] = [];
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+
+  constructor(url: string) {
+    this.url = url;
+    MockDashboardWebSocket.instances.push(this);
+    queueMicrotask(() => {
+      this.readyState = 1;
+      this.onopen?.(new Event("open"));
+    });
+  }
+
+  send(payload: string) {
+    this.sent.push(payload);
+  }
+
+  close() {
+    this.readyState = 3;
+    this.onclose?.(new CloseEvent("close"));
+  }
+
+  emit(payload: unknown) {
+    this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
+  }
+}
+
 export function setupDashboardTest(): void {
   beforeEach(() => {
+    MockDashboardWebSocket.instances = [];
     outlook.pending_requests = [];
     state.healthPayload = health;
     state.crawlPayload = JSON.parse(JSON.stringify(crawl));
@@ -875,6 +916,8 @@ export function setupDashboardTest(): void {
     state.corpusRestoreRequests = [];
     state.corpusJobFileActionRequests = [];
     state.corpusJobFileActionPayload = { state: "opened", path: "E:/Flux Docs/docs/failed.pdf" };
+    state.snapshotRequestUrls = [];
+    state.webSockets = MockDashboardWebSocket.instances;
     state.jobsRequestUrls = [];
     state.modelActivityRequestUrls = [];
     state.jobToolInvocationRequestUrls = [];
@@ -897,6 +940,22 @@ export function setupDashboardTest(): void {
     state.fileActionPayload = { state: "opened", asset_id: "asset-1", action: "open" };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.startsWith("/api/dashboard/snapshot")) {
+        state.snapshotRequestUrls.push(url);
+        const pending = state.pendingFetchResponses[url] ?? state.pendingFetchResponses["/api/dashboard/snapshot"];
+        if (pending) return pending.promise;
+        return json({
+          generated_at: "2026-07-08T10:00:00+00:00",
+          health: state.healthPayload,
+          crawl: state.crawlPayload,
+          jobs: state.jobsPayload,
+          retrieval: { retrieval: health.retrieval, duplicate_assets: 0 },
+          modelActivity: state.modelActivityPayload,
+          mail: state.mailPayload,
+          outlook,
+          settings
+        });
+      }
       if (url === "/api/dashboard/health") {
         const pending = state.pendingFetchResponses[url];
         if (pending) return pending.promise;
@@ -1486,6 +1545,7 @@ export function setupDashboardTest(): void {
       if (url.endsWith("/enable") || url.endsWith("/disable")) return json({ status: "updated" });
       return json({});
     }));
+    vi.stubGlobal("WebSocket", MockDashboardWebSocket);
   });
 
   afterEach(() => {
