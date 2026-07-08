@@ -385,6 +385,147 @@ describe("Flux dashboard", () => {
     });
   });
 
+  test("job queue displays retryable message inbox rows as retrying GPU busy", async () => {
+    const user = userEvent.setup();
+    state.jobsPayload = {
+      jobs: [
+        {
+          id: "message_inbox:flux-kb-event-worker:msg-retryable",
+          source_id: "flux-kb-event-worker:msg-retryable",
+          job_source: "message_inbox",
+          job_type: "flux.search_index.process",
+          status: "retrying_gpu_busy",
+          root_name: "messaging",
+          path: "flux-kb-event-worker",
+          attempts: 5,
+          last_error: "retrying_gpu_busy",
+          updated_at: "2026-07-08T15:45:00+00:00",
+          details: {
+            inbox_status: "failed",
+            metadata: {
+              result: {
+                retryable: true,
+                status: "retrying_gpu_busy"
+              }
+            }
+          }
+        }
+      ],
+      count: 1,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["retrying_gpu_busy"],
+        roots: ["messaging"],
+        job_types: ["flux.search_index.process"],
+        sources: ["message_inbox"]
+      }
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    const table = await screen.findByRole("table", { name: "Background jobs" });
+    expect(within(table).getByText("Retrying GPU Busy")).toBeInTheDocument();
+    expect(within(table).queryByText("Failed")).not.toBeInTheDocument();
+  });
+
+  test("job filter dropdown keeps selected values missing from API options checked and removable", async () => {
+    const user = userEvent.setup();
+    state.jobsPayload = {
+      jobs: [],
+      count: 0,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["failed"],
+        roots: [],
+        job_types: [],
+        sources: []
+      }
+    };
+    localStorage.setItem(
+      "flux-dashboard-state",
+      JSON.stringify({
+        jobFilters: {
+          status: ["blocked_gpu_busy"],
+          root_name: [],
+          job_type: [],
+          job_source: [],
+          updated_from: "",
+          updated_to: ""
+        }
+      })
+    );
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+    await user.click(screen.getByRole("button", { name: "Job status filter" }));
+    const statusOptions = screen.getByRole("group", { name: "Job status options" });
+    const selected = within(statusOptions).getByRole("checkbox", { name: "Blocked GPU Busy" });
+    expect(selected).toBeChecked();
+
+    await user.click(selected);
+    await user.click(screen.getByRole("button", { name: "Apply job filters" }));
+
+    await waitFor(() => {
+      const latestUrl = state.jobsRequestUrls.at(-1) ?? "";
+      const params = new URLSearchParams(latestUrl.split("?")[1] ?? "");
+      expect(params.getAll("status")).toEqual([]);
+    });
+  });
+
+  test("job filter dropdown options come from API facet data", async () => {
+    const user = userEvent.setup();
+    state.jobsPayload = {
+      jobs: [
+        {
+          id: "job-failed",
+          job_type: "corpus_extract_pdf",
+          job_source: "capture_jobs",
+          status: "failed",
+          root_name: "docs",
+          path: "docs/failed.pdf",
+          attempts: 3,
+          last_error: "extract failed",
+          updated_at: "2026-06-26T09:30:00+00:00"
+        }
+      ],
+      count: 1,
+      limit: 50,
+      offset: 0,
+      has_next: false,
+      filter_options: {
+        statuses: ["failed", "retrying_gpu_busy", "blocked_gpu_busy"],
+        roots: ["docs", "messaging"],
+        job_types: ["corpus_extract_pdf", "flux.search_index.process"],
+        sources: ["capture_jobs", "message_inbox"]
+      }
+    };
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Operations" });
+    await user.click(screen.getByRole("button", { name: "Jobs" }));
+
+    await user.click(screen.getByRole("button", { name: "Job status filter" }));
+    const statusOptions = screen.getByRole("group", { name: "Job status options" });
+    expect(within(statusOptions).getByRole("checkbox", { name: "Failed" })).toBeInTheDocument();
+    expect(within(statusOptions).getByRole("checkbox", { name: "Retrying GPU Busy" })).toBeInTheDocument();
+    expect(within(statusOptions).getByRole("checkbox", { name: "Blocked GPU Busy" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Job source filter" }));
+    const sourceOptions = screen.getByRole("group", { name: "Job source options" });
+    expect(within(sourceOptions).getByRole("checkbox", { name: "Capture jobs" })).toBeInTheDocument();
+    expect(within(sourceOptions).getByRole("checkbox", { name: "Message inbox" })).toBeInTheDocument();
+  });
+
   test("job filter menus close on outside click and Escape", async () => {
     const user = userEvent.setup();
     state.jobsPayload = {

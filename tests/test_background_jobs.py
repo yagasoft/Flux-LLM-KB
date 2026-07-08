@@ -330,6 +330,113 @@ def test_dashboard_jobs_projection_filters_by_source_status_and_type(monkeypatch
     assert payload["jobs"][0]["status_group"] == "running"
 
 
+def test_dashboard_jobs_projection_shows_retryable_inbox_result_as_pending_retry(monkeypatch):
+    _install_projection_fixtures(monkeypatch)
+    monkeypatch.setattr(
+        background_jobs.database,
+        "list_message_inbox_jobs",
+        lambda **_kwargs: [
+            {
+                "consumer_name": "flux-kb-event-worker",
+                "message_id": "msg-retryable",
+                "message_type": "flux.search_index.process",
+                "status": "failed",
+                "attempts": 5,
+                "first_seen_at": "2026-07-06T07:41:00+00:00",
+                "last_seen_at": "2026-07-06T07:45:00+00:00",
+                "last_error": "retrying_gpu_busy",
+                "metadata": {
+                    "routing_key": "search_index.process",
+                    "result": {
+                        "job_id": "job-gpu",
+                        "status": "retrying_gpu_busy",
+                        "process_status": "failed",
+                        "retryable": True,
+                    },
+                },
+            }
+        ],
+        raising=False,
+    )
+
+    payload = background_jobs.collect_dashboard_jobs_payload(limit=50)
+
+    row = next(item for item in payload["jobs"] if item["id"] == "message_inbox:flux-kb-event-worker:msg-retryable")
+    assert row["status"] == "retrying_gpu_busy"
+    assert row["status_group"] == "pending"
+    assert row["last_error"] == "retrying_gpu_busy"
+    assert row["details"]["inbox_status"] == "failed"
+    assert row["details"]["metadata"]["result"]["retryable"] is True
+
+
+def test_dashboard_jobs_filter_options_ignore_own_facet_and_keep_selected_zero_result_values(monkeypatch):
+    rows = [
+        {
+            "id": "capture_jobs:failed-doc",
+            "job_source": "capture_jobs",
+            "status": "failed",
+            "job_type": "corpus_extract_pdf",
+            "root_name": "docs",
+            "updated_at": NOW,
+        },
+        {
+            "id": "capture_jobs:failed-mail",
+            "job_source": "capture_jobs",
+            "status": "failed",
+            "job_type": "corpus_extract_pdf",
+            "root_name": "mail",
+            "updated_at": NOW,
+        },
+        {
+            "id": "capture_jobs:completed-doc",
+            "job_source": "capture_jobs",
+            "status": "completed",
+            "job_type": "corpus_extract_pdf",
+            "root_name": "docs",
+            "updated_at": NOW,
+        },
+        {
+            "id": "capture_jobs:image-doc",
+            "job_source": "capture_jobs",
+            "status": "failed",
+            "job_type": "corpus_extract_image",
+            "root_name": "docs",
+            "updated_at": NOW,
+        },
+        {
+            "id": "message_inbox:worker:msg",
+            "job_source": "message_inbox",
+            "status": "failed",
+            "job_type": "corpus_extract_pdf",
+            "root_name": "docs",
+            "updated_at": NOW,
+        },
+        {
+            "id": "gpu_leases:lease",
+            "job_source": "gpu_leases",
+            "status": "completed",
+            "job_type": "gpu_lease",
+            "root_name": "gpu",
+            "updated_at": NOW,
+        },
+    ]
+    monkeypatch.setattr(background_jobs, "_collect_all_rows", lambda **_kwargs: rows)
+
+    payload = background_jobs.collect_dashboard_jobs_payload(
+        limit=10,
+        status=["failed", "blocked_gpu_busy"],
+        root_name=["docs"],
+        job_type=["corpus_extract_pdf"],
+        job_source=["capture_jobs"],
+    )
+
+    assert [row["id"] for row in payload["jobs"]] == ["capture_jobs:failed-doc"]
+    assert payload["filter_options"]["statuses"] == ["blocked_gpu_busy", "completed", "failed"]
+    assert payload["filter_options"]["roots"] == ["docs", "mail"]
+    assert payload["filter_options"]["job_types"] == ["corpus_extract_image", "corpus_extract_pdf"]
+    assert payload["filter_options"]["sources"] == ["capture_jobs", "message_inbox"]
+
+
 def test_dashboard_jobs_projection_excludes_external_query_model_activity(monkeypatch):
     _install_projection_fixtures(monkeypatch)
 

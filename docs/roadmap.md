@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-07-06
+Last reviewed: 2026-07-08
 
 This file is the canonical public roadmap and implementation-status tracker for
 Flux-LLM-KB. It is intentionally separate from live runtime state. Do not add
@@ -10,6 +10,32 @@ content, local deployment-only details, or private memory exports here.
 Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
+
+## 2026-07-08 ASR Retry And Jobs Status Clarity Update
+
+Affected `Progress %` entries remain conservative until deployment and live ASR
+GPU-contention validation are complete:
+
+- `V2 Review And Visualization`: remains `99%`. Jobs now project retryable
+  message-inbox deliveries as retrying work, such as `retrying_gpu_busy`, while
+  keeping the raw broker inbox status visible in details. Jobs filters now build
+  facet options against the projected row data, ignore each facet's own active
+  filter, and retain selected zero-result values so operators can remove them.
+- `V2.5 Autonomous Corpus Expansion`: remains `98%`. OpenAI-compatible ASR HTTP
+  `429` scheduler-busy responses now raise `ModelRunnerBusy` so corpus/media
+  workers can return `retrying_gpu_busy`; non-scheduler ASR `503` responses
+  remain missing-dependency blockers, and generic ASR HTTP errors remain failed.
+- `Observability and benchmarks`: remains `99%`. Regression coverage now checks
+  ASR busy classification, retryable inbox projection, pending status grouping,
+  facet option semantics, and dashboard retry labels.
+
+Remaining Work: deploy through the required feature closeout path, trigger or
+observe a live ASR scheduler-busy case, confirm the corpus job becomes
+`retrying_gpu_busy` rather than terminal `failed`, confirm retryable
+message-inbox rows display as retrying with `details.inbox_status`, confirm Jobs
+filter dropdowns retain selected zero-result values and use facet-correct
+options, and confirm the jobs log no longer presents retryable GPU-busy flood
+entries as terminal failures.
 
 ## 2026-07-06 GPU Eviction Backlog Control Update
 

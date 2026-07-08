@@ -5008,7 +5008,10 @@ def _post_openai_compatible_asr(audio_path: Path, *, base_url: str, model: str, 
         response = urlopen(request, timeout=timeout)
         raw = response.read(16 * 1024 * 1024)
     except HTTPError as exc:
-        detail = _read_http_error_detail(exc)
+        detail, payload = _read_http_error_detail_payload(exc)
+        busy_exc = _asr_http_error_busy_exception(exc, detail=detail, payload=payload)
+        if busy_exc is not None:
+            raise busy_exc from exc
         if exc.code == 503:
             raise _AsrServiceUnavailable(detail or "HTTP 503") from exc
         raise _AsrServiceError(detail or f"ASR service returned HTTP {exc.code}") from exc
@@ -5052,6 +5055,18 @@ def _asr_multipart_body(
         ]
     )
     return b"".join(chunks)
+
+
+def _asr_http_error_busy_exception(exc: HTTPError, *, detail: str, payload: Any) -> Exception | None:
+    from .model_runner import ModelRunnerBusy
+
+    status_code = int(getattr(exc, "code", 0) or 0)
+    detail_payload = payload.get("detail") if isinstance(payload, dict) else None
+    if status_code == 429 and isinstance(detail_payload, dict) and detail_payload.get("code") == "gpu.scheduler_busy":
+        retry_after = _positive_float(detail_payload.get("retry_after_seconds"), default=1.0)
+        message = str(detail_payload.get("message") or detail or "ASR GPU scheduler is busy")
+        return ModelRunnerBusy(message, retry_after_seconds=retry_after)
+    return None
 
 
 def _read_http_error_detail(exc: HTTPError) -> str:

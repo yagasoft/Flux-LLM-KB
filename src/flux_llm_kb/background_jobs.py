@@ -53,7 +53,15 @@ def collect_dashboard_jobs_payload(
     safe_offset = _bounded_offset(offset)
     source_limit = max(200, min(1000, safe_limit + safe_offset + 200))
     rows = _collect_all_rows(source_limit=source_limit)
-    filter_options = _filter_options(rows)
+    filter_options = _filter_options(
+        rows,
+        status=status,
+        root_name=root_name,
+        job_type=job_type,
+        job_source=job_source,
+        updated_from=updated_from,
+        updated_to=updated_to,
+    )
     filtered = [
         row
         for row in rows
@@ -427,12 +435,18 @@ def _inbox_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     output = []
     for row in rows:
         source_id = ":".join(item for item in [_text(row.get("consumer_name")), _text(row.get("message_id"))] if item)
+        raw_status = _text(row.get("status")) or "unknown"
+        metadata = _dict(row.get("metadata"))
+        projected_status = _inbox_projected_status(raw_status, metadata)
+        details = _compact_details(row, "consumer_name", "message_id", "message_type", "metadata")
+        if _inbox_result_is_retryable(metadata):
+            details["inbox_status"] = raw_status
         output.append(
             _job_row(
                 source="message_inbox",
                 source_id=source_id,
                 job_type=_text(row.get("message_type")) or "message_inbox",
-                status=_text(row.get("status")) or "unknown",
+                status=projected_status,
                 target=_first_text(row.get("consumer_name"), row.get("message_id")) or "message consumer",
                 root_name="messaging",
                 attempts=_int(row.get("attempts")),
@@ -440,7 +454,7 @@ def _inbox_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
                 created_at=_text(row.get("first_seen_at")),
                 updated_at=_first_text(row.get("last_seen_at"), row.get("handled_at"), row.get("first_seen_at")),
                 completed_at=_text(row.get("handled_at")),
-                details=_compact_details(row, "consumer_name", "message_id", "message_type", "metadata"),
+                details=details,
             )
         )
     return output
@@ -502,13 +516,112 @@ def _status_group(status: str | None) -> str:
     return "completed"
 
 
-def _filter_options(rows: list[dict[str, Any]]) -> dict[str, list[str]]:
+def _inbox_projected_status(raw_status: str, metadata: dict[str, Any]) -> str:
+    result = _inbox_metadata_result(metadata)
+    if result.get("retryable") is True:
+        return _first_text(result.get("status"), result.get("process_status")) or "retrying"
+    return raw_status
+
+
+def _inbox_result_is_retryable(metadata: dict[str, Any]) -> bool:
+    return _inbox_metadata_result(metadata).get("retryable") is True
+
+
+def _inbox_metadata_result(metadata: dict[str, Any]) -> dict[str, Any]:
+    result = metadata.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _filter_options(
+    rows: list[dict[str, Any]],
+    *,
+    status: str | list[str] | tuple[str, ...] | None = None,
+    root_name: str | list[str] | tuple[str, ...] | None = None,
+    job_type: str | list[str] | tuple[str, ...] | None = None,
+    job_source: str | list[str] | tuple[str, ...] | None = None,
+    updated_from: str | None = None,
+    updated_to: str | None = None,
+) -> dict[str, list[str]]:
     return {
-        "statuses": sorted({str(row.get("status")) for row in rows if row.get("status")}),
-        "roots": sorted({str(row.get("root_name")) for row in rows if row.get("root_name") and row.get("root_name") != "-"}),
-        "job_types": sorted({str(row.get("job_type")) for row in rows if row.get("job_type")}),
-        "sources": sorted({str(row.get("job_source")) for row in rows if row.get("job_source")}),
+        "statuses": _facet_values(
+            rows,
+            "status",
+            selected=status,
+            status=None,
+            root_name=root_name,
+            job_type=job_type,
+            job_source=job_source,
+            updated_from=updated_from,
+            updated_to=updated_to,
+        ),
+        "roots": _facet_values(
+            rows,
+            "root_name",
+            selected=root_name,
+            status=status,
+            root_name=None,
+            job_type=job_type,
+            job_source=job_source,
+            updated_from=updated_from,
+            updated_to=updated_to,
+            exclude_values={"-"},
+        ),
+        "job_types": _facet_values(
+            rows,
+            "job_type",
+            selected=job_type,
+            status=status,
+            root_name=root_name,
+            job_type=None,
+            job_source=job_source,
+            updated_from=updated_from,
+            updated_to=updated_to,
+        ),
+        "sources": _facet_values(
+            rows,
+            "job_source",
+            selected=job_source,
+            status=status,
+            root_name=root_name,
+            job_type=job_type,
+            job_source=None,
+            updated_from=updated_from,
+            updated_to=updated_to,
+        ),
     }
+
+
+def _facet_values(
+    rows: list[dict[str, Any]],
+    field: str,
+    *,
+    selected: str | list[str] | tuple[str, ...] | None,
+    status: str | list[str] | tuple[str, ...] | None,
+    root_name: str | list[str] | tuple[str, ...] | None,
+    job_type: str | list[str] | tuple[str, ...] | None,
+    job_source: str | list[str] | tuple[str, ...] | None,
+    updated_from: str | None,
+    updated_to: str | None,
+    exclude_values: set[str] | None = None,
+) -> list[str]:
+    excluded = exclude_values or set()
+    values = {
+        str(row.get(field))
+        for row in rows
+        if _matches_filters(
+            row,
+            status=status,
+            root_name=root_name,
+            job_type=job_type,
+            job_source=job_source,
+            updated_from=updated_from,
+            updated_to=updated_to,
+        )
+        and row.get(field)
+        and str(row.get(field)) not in excluded
+    }
+    values.update(value for value in _filter_values(selected) if value not in excluded)
+    return sorted(values)
 
 
 def _matches_filters(

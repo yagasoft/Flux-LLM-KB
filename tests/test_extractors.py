@@ -905,6 +905,73 @@ def test_extract_media_openai_compatible_asr_blocks_when_service_unavailable(mon
     assert result.metadata["asr"]["status"] == "blocked_missing_dependency"
 
 
+def test_extract_media_openai_compatible_asr_raises_model_runner_busy_for_scheduler_busy(monkeypatch, tmp_path):
+    from flux_llm_kb.model_runner import ModelRunnerBusy
+
+    path = tmp_path / "clip.mp3"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    _install_fake_openai_asr_media_commands(monkeypatch)
+
+    def fake_urlopen(_request, **_kwargs):
+        raise _http_error(
+            429,
+            {
+                "detail": {
+                    "code": "gpu.scheduler_busy",
+                    "message": "GPU scheduler busy",
+                    "retry_after_seconds": 7,
+                }
+            },
+        )
+
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    with pytest.raises(ModelRunnerBusy, match="GPU scheduler busy") as exc_info:
+        extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert exc_info.value.retry_after_seconds == 7
+
+
+def test_extract_media_openai_compatible_asr_503_without_scheduler_busy_blocks(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp3"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    _install_fake_openai_asr_media_commands(monkeypatch)
+
+    def fake_urlopen(_request, **_kwargs):
+        raise _http_error(503, {"detail": "ASR warming up"})
+
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "blocked_missing_dependency"
+    assert result.message == "ASR service unavailable: ASR warming up"
+    assert result.metadata["asr"]["status"] == "blocked_missing_dependency"
+
+
+def test_extract_media_openai_compatible_asr_generic_http_error_fails(monkeypatch, tmp_path):
+    path = tmp_path / "clip.mp3"
+    path.write_bytes(b"fake media")
+    _configure_asr_http(monkeypatch, tmp_path)
+    monkeypatch.setattr("flux_llm_kb.extractors.shutil.which", lambda command: f"C:/tools/{command}.exe")
+    _install_fake_openai_asr_media_commands(monkeypatch)
+
+    def fake_urlopen(_request, **_kwargs):
+        raise _http_error(500, {"detail": "decoder crashed"})
+
+    monkeypatch.setattr("flux_llm_kb.extractors.urlopen", fake_urlopen, raising=False)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "failed"
+    assert result.message == "decoder crashed"
+    assert result.metadata["asr"]["status"] == "failed"
+
+
 def test_extract_media_treats_video_without_audio_as_metadata_only(monkeypatch, tmp_path):
     path = tmp_path / "silent.mp4"
     path.write_bytes(b"fake media")
@@ -1038,6 +1105,23 @@ def _configure_asr_http(
     monkeypatch.setenv("FLUX_KB_ASR_DEVICE", device)
     monkeypatch.setenv("FLUX_KB_ASR_COMPUTE_TYPE", compute_type)
     monkeypatch.setenv("FLUX_KB_CACHE_ROOT", str(tmp_path / "cache"))
+
+
+def _install_fake_openai_asr_media_commands(monkeypatch, *, duration: float = 12.0) -> None:
+    def fake_run(command, **_kwargs):
+        if command[0].endswith("ffprobe.exe"):
+            return SimpleNamespace(returncode=0, stdout=_media_probe_json(duration=duration), stderr="")
+        if command[0].endswith("ffmpeg.exe"):
+            Path(command[-1]).write_bytes(b"wav")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr("flux_llm_kb.extractors.run_no_window", fake_run)
+
+
+def _http_error(status_code: int, payload: dict[str, object] | str) -> HTTPError:
+    raw = json.dumps(payload).encode("utf-8") if isinstance(payload, dict) else str(payload).encode("utf-8")
+    return HTTPError("http://127.0.0.1:8788/v1/audio/transcriptions", status_code, "error", {}, BytesIO(raw))
 
 
 def _configure_vision(

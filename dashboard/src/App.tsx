@@ -6079,6 +6079,7 @@ function JobFilterMultiSelect({
     };
   }, [open, onOpenChange]);
   const selected = new Set(values);
+  const renderedOptions = mergeFilterOptions(options, values);
   const summary = multiFilterSummary(values, allLabel, pluralLabel, optionLabel);
   return (
     <div className="job-filter-menu" ref={menuRef}>
@@ -6095,8 +6096,8 @@ function JobFilterMultiSelect({
       </button>
       {open ? (
         <div className="job-filter-menu-panel" role="group" aria-label={optionsLabel}>
-          {options.length === 0 ? <p className="muted">No options</p> : null}
-          {options.map((option) => (
+          {renderedOptions.length === 0 ? <p className="muted">No options</p> : null}
+          {renderedOptions.map((option) => (
             <label className="checkbox-label" key={option}>
               <input type="checkbox" checked={selected.has(option)} onChange={() => onToggle(option)} />
               {optionLabel(option)}
@@ -6711,10 +6712,12 @@ function activeOutlookRequests(requests?: OutlookSyncRequest[]) {
 }
 
 const STATUS_LABELS: Record<string, string> = {
+  blocked_gpu_busy: "Blocked GPU Busy",
   blocked_by_policy: "Blocked by policy",
   blocked_invalid_source: "Invalid source",
   blocked_missing_dependency: "Missing dependency",
   obsolete: "Obsolete",
+  retrying_gpu_busy: "Retrying GPU Busy",
   stale_running: "Stale"
 };
 
@@ -7665,6 +7668,16 @@ function stringListFromUnknown(value: unknown): string[] {
 
 function toggleStringValue(values: string[], value: string) {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+}
+
+function mergeFilterOptions(options: string[], values: string[]) {
+  const merged = [...options];
+  for (const value of values) {
+    if (value && !merged.includes(value)) {
+      merged.push(value);
+    }
+  }
+  return merged;
 }
 
 function multiFilterSummary(values: string[], allLabel: string, pluralLabel: string, optionLabel: (value: string) => string) {
