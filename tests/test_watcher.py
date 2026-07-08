@@ -181,6 +181,71 @@ def test_reloadable_watcher_skips_excluded_subtrees(tmp_path):
     assert [event.relative_path for event in watcher.drain_events()] == ["src/indexed.py"]
 
 
+def test_reloadable_watcher_skips_inaccessible_fingerprints_and_keeps_other_roots(monkeypatch, tmp_path):
+    root = tmp_path / "primary"
+    other_root = tmp_path / "secondary"
+    root.mkdir()
+    other_root.mkdir()
+    inaccessible = root / "aaa-inaccessible.bin"
+    valid = root / "valid.md"
+    other_valid = other_root / "other.md"
+    inaccessible.write_bytes(b"locked")
+    valid.write_text("old", encoding="utf-8")
+    other_valid.write_text("old", encoding="utf-8")
+    original_fingerprint = watcher_module._fingerprint
+
+    def flaky_fingerprint(path):
+        if path == inaccessible:
+            raise OSError("entry is temporarily inaccessible")
+        return original_fingerprint(path)
+
+    monkeypatch.setattr(watcher_module, "_fingerprint", flaky_fingerprint)
+    watcher = ReloadableCorpusWatcher(
+        lambda: [
+            WatchRoot(name="primary", root_path=root, watch_enabled=True),
+            WatchRoot(name="secondary", root_path=other_root, watch_enabled=True),
+        ],
+        debounce_seconds=0,
+    )
+
+    watcher.poll_once(seed=True)
+    valid.write_text("new content", encoding="utf-8")
+    other_valid.write_text("new content", encoding="utf-8")
+    events = watcher.poll_once()
+
+    assert [(event.root_name, event.relative_path) for event in events] == [
+        ("primary", "valid.md"),
+        ("secondary", "other.md"),
+    ]
+
+
+def test_reloadable_watcher_skips_inaccessible_child_type_checks(monkeypatch, tmp_path):
+    root = tmp_path / "watched"
+    root.mkdir()
+    inaccessible = root / "aaa-inaccessible.tmp"
+    valid = root / "valid.md"
+    inaccessible.write_text("locked", encoding="utf-8")
+    valid.write_text("old", encoding="utf-8")
+    original_is_dir = Path.is_dir
+
+    def flaky_is_dir(self):
+        if self == inaccessible:
+            raise OSError("entry type is temporarily inaccessible")
+        return original_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", flaky_is_dir)
+    watcher = ReloadableCorpusWatcher(
+        lambda: [WatchRoot(name="docs", root_path=root, watch_enabled=True)],
+        debounce_seconds=0,
+    )
+
+    watcher.poll_once(seed=True)
+    valid.write_text("new content", encoding="utf-8")
+    events = watcher.poll_once()
+
+    assert [event.relative_path for event in events] == ["valid.md"]
+
+
 def test_reloadable_watcher_debounces_and_bounds_events(tmp_path):
     root = tmp_path / "bounded"
     root.mkdir()

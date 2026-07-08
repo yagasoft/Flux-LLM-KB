@@ -264,6 +264,7 @@ class HostAgentWatcherLoop:
             debounce_seconds=_configured_watcher_debounce_seconds(),
             stability_quiet_seconds=_configured_stability_quiet_seconds(),
             max_queue_size=_configured_watcher_max_queue_size(),
+            backend_policy=_configured_watcher_backend(),
         )
         self._heartbeat = WatcherHeartbeatRunner(
             load_roots=lambda: _load_host_watch_roots(self.root_name),
@@ -289,8 +290,13 @@ class HostAgentWatcherLoop:
             return {"status": "no_enabled_host_roots", "roots": 0, "events": 0}
         started = time.perf_counter()
         self._heartbeat.update(stage="seed" if seed else "poll", busy=True)
-        self._heartbeat.beat_once()
-        self._watcher.poll_once(seed=seed)
+        self._beat_heartbeat_once()
+        poll_error: str | None = None
+        try:
+            self._watcher.poll_once(seed=seed)
+        except Exception as exc:
+            poll_error = str(exc)
+            _record_watcher_loop_error(self.root_name, poll_error)
         events = self._watcher.drain_events() if hasattr(self._watcher, "drain_events") else []
         for event in events:
             self._handle_event(event)
@@ -300,31 +306,42 @@ class HostAgentWatcherLoop:
             last_loop_duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
             last_event_count=len(events),
             queue_depth=_watcher_queue_depth(self._watcher),
+            last_poll_error=poll_error,
         )
-        return {"status": "running", "roots": len(roots), "events": len(events)}
+        self._beat_heartbeat_once()
+        result = {"status": "running", "roots": len(roots), "events": len(events)}
+        if poll_error is not None:
+            result["poll_error"] = poll_error
+        return result
 
     def _run(self) -> None:
         self._heartbeat.start()
         try:
-            try:
-                if _configured_reconcile_on_start():
+            if _configured_reconcile_on_start():
+                try:
                     self._heartbeat.update(stage="startup_reconcile", busy=True)
                     self.reconcile_once(reason="startup_reconcile")
                     self._last_reconcile_at = time.monotonic()
+                except Exception as exc:  # pragma: no cover - defensive long-running loop
+                    _record_watcher_loop_error(self.root_name, str(exc))
+                finally:
+                    self._heartbeat.update(stage="idle", busy=False)
+                    self._beat_heartbeat_once()
+            try:
                 self.run_once(seed=True)
             except Exception as exc:  # pragma: no cover - defensive long-running loop
                 _record_watcher_loop_error(self.root_name, str(exc))
             while not self._stop.wait(self.interval_seconds):
                 try:
                     self.run_once(seed=False)
-                    reconcile_interval = _configured_reconcile_interval_seconds()
-                    if reconcile_interval > 0 and time.monotonic() - self._last_reconcile_at >= reconcile_interval:
-                        self._heartbeat.update(stage="periodic_reconcile", busy=True)
-                        self.reconcile_once(reason="periodic_reconcile")
-                        self._last_reconcile_at = time.monotonic()
-                        self._heartbeat.update(stage="idle", busy=False)
                 except Exception as exc:  # pragma: no cover - defensive long-running loop
                     _record_watcher_loop_error(self.root_name, str(exc))
+                try:
+                    self._run_periodic_reconcile_if_due()
+                except Exception as exc:  # pragma: no cover - defensive long-running loop
+                    _record_watcher_loop_error(self.root_name, str(exc))
+                    self._heartbeat.update(stage="idle", busy=False, last_reconcile_error=str(exc))
+                    self._beat_heartbeat_once()
         finally:
             self._heartbeat.stop()
 
@@ -341,7 +358,15 @@ class HostAgentWatcherLoop:
             _safe_record_watch_error(root_name=event.root_name, error=str(exc))
 
     def _record_heartbeat(self, root_name: str, metadata: dict[str, Any]) -> None:
-        database.record_watcher_heartbeat(root_name=root_name, metadata={"host_agent": True, **metadata})
+        database.record_watcher_heartbeat(
+            root_name=root_name,
+            metadata={
+                "host_agent": True,
+                "watcher_backend": getattr(self._watcher, "backend_status", None),
+                "queue_depth": _watcher_queue_depth(self._watcher),
+                **metadata,
+            },
+        )
 
     def reconcile_once(self, *, reason: str) -> dict[str, Any]:
         service = self.service_factory() if self.service_factory else _service()
@@ -351,6 +376,24 @@ class HostAgentWatcherLoop:
             host_agent_roots=True,
             component_name="watch-reconciler:host-agent",
         )
+
+    def _run_periodic_reconcile_if_due(self) -> None:
+        reconcile_interval = _configured_reconcile_interval_seconds()
+        if reconcile_interval <= 0 or time.monotonic() - self._last_reconcile_at < reconcile_interval:
+            return
+        self._heartbeat.update(stage="periodic_reconcile", busy=True)
+        try:
+            self.reconcile_once(reason="periodic_reconcile")
+            self._last_reconcile_at = time.monotonic()
+        finally:
+            self._heartbeat.update(stage="idle", busy=False)
+            self._beat_heartbeat_once()
+
+    def _beat_heartbeat_once(self) -> None:
+        try:
+            self._heartbeat.beat_once()
+        except Exception as exc:
+            _record_watcher_loop_error(self.root_name, str(exc))
 
 
 class HostAgentWorkerLoop:
@@ -951,6 +994,15 @@ def _configured_watcher_max_queue_size() -> int:
         return int(SettingsService().resolve("watcher.max_queue_size").raw_value)
     except Exception:
         return 1000
+
+
+def _configured_watcher_backend() -> str:
+    try:
+        from .settings import SettingsService
+
+        return str(SettingsService().resolve("watcher.backend").raw_value)
+    except Exception:
+        return "auto"
 
 
 def _configured_stability_quiet_seconds() -> float:

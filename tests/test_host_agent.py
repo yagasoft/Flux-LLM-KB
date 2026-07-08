@@ -828,13 +828,193 @@ def test_host_agent_watcher_loop_records_heartbeat_and_queues_changed_file(monke
     result = loop.run_once(seed=False)
 
     assert result == {"status": "running", "roots": 1, "events": 1}
-    assert heartbeats == ["watch-test"]
+    assert heartbeats
+    assert set(heartbeats) == {"watch-test"}
     assert watch_events[0]["root_name"] == "watch-test"
     assert watch_events[0]["action"] == "changed"
     assert watch_events[0]["metadata"] == {"action": "changed"}
     assert len(watch_events[0]["path_hash"]) == 64
     assert queued == [{"root_name": "watch-test", "path": str(tmp_path / "changed.md"), "reason": "watch_event"}]
     assert synced == []
+
+
+def test_host_agent_watcher_loop_drains_events_after_poll_exception(monkeypatch, tmp_path):
+    watch_events: list[dict] = []
+    queued: list[dict] = []
+    errors: list[tuple[str | None, str]] = []
+
+    monkeypatch.setattr(
+        host_agent.database,
+        "list_monitored_roots",
+        lambda watch_enabled=None: [
+            {
+                "name": "watch-test",
+                "root_path": str(tmp_path),
+                "enabled": True,
+                "watch_enabled": True,
+                "recursive": True,
+                "metadata": {"host_access": "host_agent"},
+            }
+        ],
+    )
+    monkeypatch.setattr(host_agent.database, "record_watcher_heartbeat", lambda **_kwargs: None)
+    monkeypatch.setattr(host_agent.database, "record_watch_event", lambda **kwargs: watch_events.append(kwargs))
+    monkeypatch.setattr(
+        host_agent.database,
+        "enqueue_corpus_sync_job",
+        lambda **kwargs: queued.append(kwargs) or {"id": "job-1", "created": True},
+        raising=False,
+    )
+    monkeypatch.setattr(host_agent, "_record_watcher_loop_error", lambda root_name, error: errors.append((root_name, error)))
+
+    class FakeWatcher:
+        backend_status = {"policy": "polling", "selected_backend": "polling"}
+        _queue = []
+
+        def poll_once(self, *, seed=False):
+            raise RuntimeError("poll failed")
+
+        def drain_events(self):
+            return [
+                WatchEvent(
+                    root_name="watch-test",
+                    root_path=tmp_path,
+                    path=tmp_path / "changed.md",
+                    relative_path="changed.md",
+                    action="changed",
+                )
+            ]
+
+    loop = host_agent.HostAgentWatcherLoop(
+        watcher_factory=lambda *_args, **_kwargs: FakeWatcher(),
+    )
+
+    result = loop.run_once(seed=False)
+
+    assert result["status"] == "running"
+    assert result["events"] == 1
+    assert "poll failed" in result["poll_error"]
+    assert errors == [(None, "poll failed")]
+    assert watch_events[0]["root_name"] == "watch-test"
+    assert queued == [{"root_name": "watch-test", "path": str(tmp_path / "changed.md"), "reason": "watch_event"}]
+
+
+def test_host_agent_watcher_loop_reconciles_after_poll_exception(monkeypatch):
+    attempts: list[bool] = []
+    reconciles: list[str] = []
+
+    class FakeHeartbeat:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+        def update(self, **_kwargs):
+            pass
+
+        def beat_once(self):
+            pass
+
+    class FakeWatcher:
+        backend_status = {"policy": "polling", "selected_backend": "polling"}
+
+        def poll_once(self, *, seed=False):
+            pass
+
+        def drain_events(self):
+            return []
+
+    monkeypatch.setattr(host_agent, "WatcherHeartbeatRunner", FakeHeartbeat)
+    monkeypatch.setattr(host_agent, "_configured_reconcile_on_start", lambda: False)
+    monkeypatch.setattr(host_agent, "_configured_reconcile_interval_seconds", lambda: 1)
+    monkeypatch.setattr(host_agent, "_record_watcher_loop_error", lambda *_args, **_kwargs: None)
+
+    loop = host_agent.HostAgentWatcherLoop(
+        interval_seconds=0.01,
+        watcher_factory=lambda *_args, **_kwargs: FakeWatcher(),
+    )
+    loop._last_reconcile_at = -10_000.0
+
+    def fake_run_once(*, seed=False):
+        attempts.append(seed)
+        if seed:
+            return {"status": "seeded"}
+        if attempts.count(False) >= 2:
+            loop._stop.set()
+        raise RuntimeError("poll failed")
+
+    def fake_reconcile_once(*, reason):
+        reconciles.append(reason)
+        loop._stop.set()
+        return {"status": "reconciled", "reason": reason}
+
+    monkeypatch.setattr(loop, "run_once", fake_run_once)
+    monkeypatch.setattr(loop, "reconcile_once", fake_reconcile_once)
+
+    loop.start()
+    assert loop._thread is not None
+    loop._thread.join(timeout=1)
+
+    assert reconciles == ["periodic_reconcile"]
+    assert not loop._thread.is_alive()
+
+
+def test_host_agent_watcher_loop_honors_backend_policy_and_records_backend_metadata(monkeypatch, tmp_path):
+    factory_kwargs: dict = {}
+    heartbeat_metadata: list[dict] = []
+
+    monkeypatch.setattr(
+        host_agent.database,
+        "list_monitored_roots",
+        lambda watch_enabled=None: [
+            {
+                "name": "watch-test",
+                "root_path": str(tmp_path),
+                "enabled": True,
+                "watch_enabled": True,
+                "recursive": True,
+                "metadata": {"host_access": "host_agent"},
+            }
+        ],
+    )
+    monkeypatch.setattr(host_agent, "_configured_watcher_backend", lambda: "polling", raising=False)
+    monkeypatch.setattr(host_agent.database, "record_watcher_heartbeat", lambda *, root_name, metadata=None: heartbeat_metadata.append(metadata or {}))
+
+    class FakeWatcher:
+        backend_status = {
+            "policy": "polling",
+            "selected_backend": "polling",
+            "native": False,
+            "fallback_reason": "policy_polling",
+        }
+        _queue = []
+
+        def __init__(self, load_roots):
+            self.load_roots = load_roots
+
+        def poll_once(self, *, seed=False):
+            assert [root.name for root in self.load_roots()] == ["watch-test"]
+            return []
+
+        def drain_events(self):
+            return []
+
+    def fake_watcher_factory(load_roots, **kwargs):
+        factory_kwargs.update(kwargs)
+        return FakeWatcher(load_roots)
+
+    loop = host_agent.HostAgentWatcherLoop(watcher_factory=fake_watcher_factory)
+
+    result = loop.run_once(seed=False)
+
+    assert result == {"status": "running", "roots": 1, "events": 0}
+    assert factory_kwargs["backend_policy"] == "polling"
+    assert any(item.get("watcher_backend", {}).get("selected_backend") == "polling" for item in heartbeat_metadata)
+    assert any("last_event_count" in item and "queue_depth" in item and "last_loop_duration_ms" in item for item in heartbeat_metadata)
 
 
 def test_host_agent_watcher_loop_survives_db_failure_while_reporting_error(monkeypatch):

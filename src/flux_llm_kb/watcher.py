@@ -432,22 +432,39 @@ def _snapshot(root: WatchRoot) -> dict[str, tuple[int, int]]:
     root_path = root.root_path.expanduser().resolve()
     snapshot: dict[str, tuple[int, int]] = {}
 
+    def add_file(path: Path) -> None:
+        try:
+            relative_path = path.relative_to(root_path).as_posix()
+        except ValueError:
+            return
+        if not _is_watch_included(root, relative_path):
+            return
+        try:
+            snapshot[relative_path] = _fingerprint(path)
+        except OSError:
+            return
+
     def visit(path: Path) -> None:
         try:
             children = sorted(path.iterdir(), key=lambda item: item.name.lower())
         except OSError:
             return
         for child in children:
-            if child.is_dir():
+            try:
+                is_dir = child.is_dir()
+            except OSError:
+                continue
+            if is_dir:
                 if root.recursive and not _should_prune_watch_directory(root, root_path, child):
                     visit(child)
                 continue
-            if not child.is_file():
+            try:
+                is_file = child.is_file()
+            except OSError:
                 continue
-            relative_path = child.relative_to(root_path).as_posix()
-            if not _is_watch_included(root, relative_path):
+            if not is_file:
                 continue
-            snapshot[relative_path] = _fingerprint(child)
+            add_file(child)
 
     if root.recursive:
         visit(root_path)
@@ -457,12 +474,13 @@ def _snapshot(root: WatchRoot) -> dict[str, tuple[int, int]]:
         except OSError:
             children = []
         for path in children:
-            if not path.is_file():
+            try:
+                is_file = path.is_file()
+            except OSError:
                 continue
-            relative_path = path.relative_to(root_path).as_posix()
-            if not _is_watch_included(root, relative_path):
+            if not is_file:
                 continue
-            snapshot[relative_path] = _fingerprint(path)
+            add_file(path)
     return snapshot
 
 
