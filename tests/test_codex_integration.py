@@ -410,6 +410,25 @@ def test_codex_install_plugin_replaces_stale_existing_install(tmp_path, monkeypa
     assert (installed / ".codex-plugin" / "plugin.json").exists()
 
 
+def test_codex_plugin_hook_manifest_uses_current_command_schema():
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads(
+        (root / "plugins" / "flux-llm-kb" / "hooks" / "hooks.json").read_text(encoding="utf-8")
+    )
+    handlers = [
+        handler
+        for matcher_groups in manifest["hooks"].values()
+        for matcher_group in matcher_groups
+        for handler in matcher_group["hooks"]
+        if handler["type"] == "command"
+    ]
+
+    assert handlers
+    assert all(handler.get("command") for handler in handlers)
+    assert all(handler.get("commandWindows") for handler in handlers)
+    assert all("command_windows" not in handler for handler in handlers)
+
+
 def test_codex_plugin_prompts_ask_for_indexable_final_responses():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads((root / "plugins" / "flux-llm-kb" / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
