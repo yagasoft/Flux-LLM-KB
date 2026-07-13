@@ -895,6 +895,66 @@ def test_cli_crawl_requeue_svg_uses_svg_scoped_database_operation(monkeypatch, c
     assert calls == [{"root_name": "docs", "limit": 25}]
 
 
+def test_cli_crawl_requeue_metadata_only_forwards_scoped_filters(monkeypatch, capsys):
+    from flux_llm_kb import database
+
+    calls = []
+
+    def fake_requeue_metadata_only_source_assets(**kwargs):
+        calls.append(kwargs)
+        return {
+            "queued": 2,
+            "root_name": kwargs["root_name"],
+            "limit": kwargs["limit"],
+            "extensions": [".docx", ".zip"],
+            "paths": ["docs/pilot.docx", "docs/archive.zip"],
+            "container_members_excluded": True,
+        }
+
+    monkeypatch.setattr(database, "requeue_metadata_only_source_assets", fake_requeue_metadata_only_source_assets)
+
+    assert (
+        cli.main(
+            [
+                "crawl",
+                "requeue-metadata-only",
+                "--root",
+                "docs",
+                "--extension",
+                "docx",
+                "--extension",
+                ".zip",
+                "--path",
+                r".\docs\pilot.docx",
+                "--path",
+                "docs/archive.zip",
+                "--limit",
+                "25",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["container_members_excluded"] is True
+    assert calls == [
+        {
+            "root_name": "docs",
+            "extensions": ["docx", ".zip"],
+            "paths": [r".\docs\pilot.docx", "docs/archive.zip"],
+            "limit": 25,
+        }
+    ]
+
+
+def test_cli_crawl_requeue_metadata_only_requires_root_for_path(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["crawl", "requeue-metadata-only", "--path", "docs/pilot.docx"])
+
+    assert exc_info.value.code == 2
+    assert "--path requires --root" in capsys.readouterr().err
+
+
 def test_cli_episodes_scope_backfill_requires_explicit_ids(monkeypatch, capsys):
     from flux_llm_kb import service
 

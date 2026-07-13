@@ -346,8 +346,10 @@ def main(argv: list[str] | None = None) -> int:
     crawl_jobs = crawl_subparsers.add_parser("jobs", help="List corpus extraction jobs")
     crawl_jobs.add_argument("--limit", type=int, default=50)
 
-    crawl_requeue_metadata = crawl_subparsers.add_parser("requeue-metadata-only", help="Requeue active metadata-only source assets")
+    crawl_requeue_metadata = crawl_subparsers.add_parser("requeue-metadata-only", help="Requeue active standalone metadata-only source assets")
     crawl_requeue_metadata.add_argument("--root", dest="root_name")
+    crawl_requeue_metadata.add_argument("--extension", action="append", dest="extensions", metavar="EXTENSION")
+    crawl_requeue_metadata.add_argument("--path", action="append", dest="paths", metavar="ROOT_RELATIVE_PATH")
     crawl_requeue_metadata.add_argument("--limit", type=int, default=1000)
 
     crawl_requeue_svg = crawl_subparsers.add_parser("requeue-svg", help="Requeue active SVG source assets for renderer-backed extraction")
@@ -658,6 +660,13 @@ def main(argv: list[str] | None = None) -> int:
     host_agent_subparsers.add_parser("browse", help="Open a native folder picker")
 
     args = parser.parse_args(argv)
+    if (
+        args.command == "crawl"
+        and args.crawl_command == "requeue-metadata-only"
+        and args.paths
+        and not args.root_name
+    ):
+        parser.error("crawl requeue-metadata-only --path requires --root")
     handlers = {
         "doctor": _doctor,
         "init": _init,
@@ -1103,7 +1112,12 @@ def _crawl(args: argparse.Namespace) -> int:
     elif args.crawl_command == "jobs":
         payload = {"jobs": database.list_capture_jobs(limit=args.limit)}
     elif args.crawl_command == "requeue-metadata-only":
-        payload = database.requeue_metadata_only_source_assets(root_name=args.root_name, limit=args.limit)
+        payload = database.requeue_metadata_only_source_assets(
+            root_name=args.root_name,
+            extensions=args.extensions,
+            paths=args.paths,
+            limit=args.limit,
+        )
     elif args.crawl_command == "requeue-svg":
         payload = database.requeue_svg_source_assets(root_name=args.root_name, limit=args.limit)
     elif args.crawl_command == "backfill":

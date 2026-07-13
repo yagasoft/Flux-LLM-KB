@@ -6904,7 +6904,7 @@ def test_apply_staged_extraction_plan_persists_parent_chunks_before_child_jobs(m
     assert "corpus_extract_pdf_ocr_pages" in params_json
 
 
-def test_requeue_metadata_only_source_assets_creates_extract_jobs(monkeypatch):
+def test_requeue_metadata_only_source_assets_creates_scoped_standalone_extract_jobs(monkeypatch):
     executed = []
     rows = [
         ("asset-video", "media", "clip.mp4", "video"),
@@ -6951,16 +6951,36 @@ def test_requeue_metadata_only_source_assets_creates_extract_jobs(monkeypatch):
 
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
 
-    result = database.requeue_metadata_only_source_assets(root_name=None, limit=10)
+    result = database.requeue_metadata_only_source_assets(
+        root_name="docs",
+        extensions=["DOCX", "pdf", ".docx"],
+        paths=[r".\General\Pilot.docx", "General/Pilot.docx"],
+        limit=10,
+    )
 
     sql = "\n".join(statement for statement, _params in executed)
     params_json = "\n".join(str(params) for _statement, params in executed)
     assert result["queued"] == 2
+    assert result["root_name"] == "docs"
+    assert result["extensions"] == [".docx", ".pdf"]
+    assert result["paths"] == ["General/Pilot.docx"]
+    assert result["container_members_excluded"] is True
     assert "a.extraction_status = 'metadata_only'" in sql
     assert "a.deleted_at IS NULL" in sql
+    assert "NOT (a.metadata ? 'container_asset_id')" in sql
+    assert "lower(a.extension) = ANY(%s)" in sql
+    assert "a.path = ANY(%s)" in sql
+    assert ".docx" in params_json
+    assert "General/Pilot.docx" in params_json
     assert "INSERT INTO capture_jobs" in sql
     assert "corpus_extract_video" in params_json
     assert "corpus_extract_document" in params_json
+
+
+@pytest.mark.parametrize("path", ["../outside.docx", "/outside.docx", r"C:\outside.docx"])
+def test_requeue_metadata_only_source_assets_rejects_non_relative_paths(path):
+    with pytest.raises(ValueError, match="root-relative"):
+        database.requeue_metadata_only_source_assets(root_name="docs", paths=[path])
 
 
 def test_requeue_svg_source_assets_resets_svg_assets_and_creates_image_jobs(monkeypatch):

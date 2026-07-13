@@ -1774,6 +1774,30 @@ def _xml_local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
 
+def _iter_docx_body_text(document: Any) -> Iterable[str]:
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    seen_cell_paths: set[str] = set()
+
+    def walk(element: Any, parent: Any) -> Iterable[str]:
+        for child in element.iterchildren():
+            if child.tag == qn("w:p"):
+                yield Paragraph(child, parent).text
+            elif child.tag == qn("w:tbl"):
+                table = Table(child, parent)
+                for row in table.rows:
+                    for cell in row.cells:
+                        cell_path = cell._tc.getroottree().getpath(cell._tc)
+                        if cell_path in seen_cell_paths:
+                            continue
+                        seen_cell_paths.add(cell_path)
+                        yield from walk(cell._tc, cell)
+
+    yield from walk(document.element.body, document)
+
+
 def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
     try:
         from docx import Document
@@ -1793,7 +1817,7 @@ def _extract_docx(path: Path, *, extractor: str = "docx") -> ExtractionResult:
         if _is_invalid_package_error(exc):
             return _invalid_package_result(exc, extractor=extractor)
         raise
-    text = "\n".join(paragraph.text for paragraph in document.paragraphs).strip()
+    text = "\n".join(_iter_docx_body_text(document)).strip()
     chunks = _chunks_from_text(text, path.name)
     return ExtractionResult(status="indexed" if chunks else "metadata_only", chunks=chunks, metadata={"extractor": extractor})
 
@@ -1898,19 +1922,25 @@ def _extract_xlsx(path: Path, *, extractor: str = "xlsx") -> ExtractionResult:
         if _is_invalid_package_error(exc):
             return _invalid_package_result(exc, extractor=extractor)
         raise
-    parts: list[str] = []
-    for worksheet in workbook.worksheets[:10]:
-        parts.append(f"Sheet: {worksheet.title}")
-        for row in worksheet.iter_rows(max_row=200, max_col=30, values_only=True):
-            values = [str(value) for value in row if value is not None]
-            if values:
-                parts.append(" | ".join(values))
-    chunks = _chunks_from_text("\n".join(parts), path.name)
-    return ExtractionResult(
-        status="indexed" if chunks else "metadata_only",
-        chunks=chunks,
-        metadata={"extractor": extractor, "sheet_count": len(workbook.worksheets)},
-    )
+    try:
+        parts: list[str] = []
+        sheet_count = len(workbook.worksheets)
+        for worksheet in workbook.worksheets[:10]:
+            parts.append(f"Sheet: {worksheet.title}")
+            for row in worksheet.iter_rows(max_row=200, max_col=30, values_only=True):
+                values = [str(value) for value in row if value is not None]
+                if values:
+                    parts.append(" | ".join(values))
+        chunks = _chunks_from_text("\n".join(parts), path.name)
+        return ExtractionResult(
+            status="indexed" if chunks else "metadata_only",
+            chunks=chunks,
+            metadata={"extractor": extractor, "sheet_count": sheet_count},
+        )
+    finally:
+        close = getattr(workbook, "close", None)
+        if callable(close):
+            close()
 
 
 def _extract_converted_word_document(path: Path) -> ExtractionResult:

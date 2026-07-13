@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import time
 from typing import Any, Callable, Iterable
@@ -13011,18 +13011,78 @@ def enqueue_capture_job(
             return result["job_id"]
 
 
+def _normalize_metadata_only_requeue_extensions(extensions: Iterable[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for extension in extensions or ():
+        value = str(extension or "").strip().lower()
+        if not value:
+            raise ValueError("metadata-only requeue extensions must be non-empty")
+        if not value.startswith("."):
+            value = f".{value}"
+        if value == "." or "/" in value or "\\" in value:
+            raise ValueError(f"invalid metadata-only requeue extension: {extension}")
+        if value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
+
+
+def _normalize_metadata_only_requeue_paths(paths: Iterable[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for path in paths or ():
+        raw_path = str(path or "").strip()
+        normalized_path = raw_path.replace("\\", "/")
+        posix_path = PurePosixPath(normalized_path)
+        windows_path = PureWindowsPath(raw_path)
+        if (
+            not normalized_path
+            or posix_path.is_absolute()
+            or windows_path.is_absolute()
+            or windows_path.drive
+            or ".." in posix_path.parts
+        ):
+            raise ValueError(f"metadata-only requeue paths must be root-relative: {path}")
+        parts = [part for part in posix_path.parts if part not in {"", "."}]
+        if not parts:
+            raise ValueError(f"metadata-only requeue paths must be root-relative: {path}")
+        value = "/".join(parts)
+        if value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
+
+
 def requeue_metadata_only_source_assets(
     *,
     root_name: str | None = None,
+    extensions: Iterable[str] | None = None,
+    paths: Iterable[str] | None = None,
     limit: int = 1000,
     url: str | None = None,
 ) -> dict[str, Any]:
     row_limit = max(1, min(int(limit or 1000), 10000))
-    filters = ["a.deleted_at IS NULL", "a.extraction_status = 'metadata_only'"]
+    clean_root_name = str(root_name or "").strip() or None
+    normalized_extensions = _normalize_metadata_only_requeue_extensions(extensions)
+    normalized_paths = _normalize_metadata_only_requeue_paths(paths)
+    if normalized_paths and clean_root_name is None:
+        raise ValueError("root_name is required when filtering metadata-only requeue paths")
+    filters = [
+        "a.deleted_at IS NULL",
+        "a.extraction_status = 'metadata_only'",
+        "NOT (a.metadata ? 'container_asset_id')",
+    ]
     params: list[Any] = []
-    if root_name:
+    if clean_root_name:
         filters.append("r.name = %s")
-        params.append(root_name)
+        params.append(clean_root_name)
+    if normalized_extensions:
+        filters.append("lower(a.extension) = ANY(%s)")
+        params.append(normalized_extensions)
+    if normalized_paths:
+        filters.append("a.path = ANY(%s)")
+        params.append(normalized_paths)
     params.append(row_limit)
     psycopg = _load_psycopg()
     jobs: list[dict[str, Any]] = []
@@ -13075,7 +13135,15 @@ def requeue_metadata_only_source_assets(
                     ),
                 )
                 jobs.append({"job_id": job_id, "root_name": row_root_name, "path": path, "job_type": job_type, "deduped": queued["deduped"], "reused": queued["reused"]})
-    return {"queued": len(jobs), "jobs": jobs, "limit": row_limit, "root_name": root_name}
+    return {
+        "queued": len(jobs),
+        "jobs": jobs,
+        "limit": row_limit,
+        "root_name": clean_root_name,
+        "extensions": normalized_extensions,
+        "paths": normalized_paths,
+        "container_members_excluded": True,
+    }
 
 
 _REPROCESS_METADATA_DROP_KEYS = (

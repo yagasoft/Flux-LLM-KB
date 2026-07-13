@@ -2719,6 +2719,118 @@ def test_extract_docx_salvages_text_when_embedded_part_missing(monkeypatch, tmp_
     ]
 
 
+def test_extract_docx_preserves_top_level_paragraph_text(tmp_path):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paragraphs.docx"
+    document = docx.Document()
+    document.add_paragraph("Top-level paragraph text")
+    document.save(path)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert result.chunks[0].body == "Top-level paragraph text"
+
+
+def test_extract_docx_indexes_text_from_table_only_document(tmp_path):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "table-only.docx"
+    document = docx.Document()
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Accreditation evidence in a table cell"
+    document.save(path)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert "Accreditation evidence in a table cell" in result.chunks[0].body
+
+
+def test_extract_docx_preserves_body_order_across_paragraphs_and_tables(tmp_path):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "mixed-order.docx"
+    document = docx.Document()
+    document.add_paragraph("Before table")
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Within table"
+    document.add_paragraph("After table")
+    document.save(path)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+    body = result.chunks[0].body
+
+    assert result.status == "indexed"
+    assert body.index("Before table") < body.index("Within table") < body.index("After table")
+
+
+def test_extract_docx_indexes_nested_table_text_in_cell_order(tmp_path):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "nested-table.docx"
+    document = docx.Document()
+    outer_table = document.add_table(rows=1, cols=1)
+    cell = outer_table.cell(0, 0)
+    cell.text = "Outer text before nested table"
+    nested_table = cell.add_table(rows=1, cols=1)
+    nested_table.cell(0, 0).text = "Nested table text"
+    cell.add_paragraph("Outer text after nested table")
+    document.save(path)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+    body = result.chunks[0].body
+
+    assert result.status == "indexed"
+    assert body.index("Outer text before nested table") < body.index("Nested table text") < body.index("Outer text after nested table")
+
+
+def test_extract_docx_keeps_empty_tables_metadata_only(tmp_path):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "empty-table.docx"
+    document = docx.Document()
+    document.add_table(rows=1, cols=1)
+    document.save(path)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "metadata_only"
+    assert result.chunks == ()
+
+
+def test_extract_docx_does_not_duplicate_merged_table_cell_text(tmp_path):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "merged-table.docx"
+    document = docx.Document()
+    document.add_paragraph("Existing paragraph")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Merged table cell text"
+    table.cell(0, 0).merge(table.cell(0, 1))
+    document.save(path)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+    body = result.chunks[0].body
+
+    assert result.status == "indexed"
+    assert body.count("Merged table cell text") == 1
+
+
+def test_extract_docx_keeps_distinct_cells_when_vertical_merge_reuses_the_top_cell(tmp_path):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "vertical-merged-table.docx"
+    document = docx.Document()
+    table = document.add_table(rows=3, cols=2)
+    for row_index, row in enumerate(table.rows):
+        for column_index, cell in enumerate(row.cells):
+            cell.text = f"cell-{row_index}-{column_index}"
+    table.cell(0, 0).merge(table.cell(1, 0))
+    document.save(path)
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+    body = result.chunks[0].body
+
+    assert result.status == "indexed"
+    for value in ("cell-0-0", "cell-1-0", "cell-0-1", "cell-1-1", "cell-2-0", "cell-2-1"):
+        assert body.count(value) == 1
+
+
 def test_extract_image_only_pdf_uses_pdftoppm_and_paddleocr_vl(monkeypatch, tmp_path):
     path = tmp_path / "scan.pdf"
     path.write_bytes(b"%PDF scanned")
@@ -3096,6 +3208,29 @@ def test_extract_archive_parses_embedded_document_member(monkeypatch, tmp_path):
     assert result.child_assets[0].extraction_status == "indexed"
     assert result.child_assets[0].metadata["embedded_extractor"] == "docx"
     assert result.child_assets[0].chunks[0].body == "Embedded document body"
+
+
+def test_extract_archive_indexes_embedded_xlsx_member(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    member_bytes = BytesIO()
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Inventory"
+    worksheet.append(("Item", "Count"))
+    worksheet.append(("Evidence", 3))
+    workbook.save(member_bytes)
+    workbook.close()
+
+    path = tmp_path / "bundle.zip"
+    with ZipFile(path, "w") as archive:
+        archive.writestr("data/inventory.xlsx", member_bytes.getvalue())
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path, container_max_depth=2))
+    child = result.child_assets[0]
+
+    assert child.member_path == "data/inventory.xlsx"
+    assert child.extraction_status == "indexed"
+    assert "Item | Count" in child.chunks[0].body
 
 
 def test_extract_archive_parses_embedded_diagram_member(tmp_path):
@@ -3756,6 +3891,39 @@ def test_extract_invalid_xlsx_blocks_as_invalid_package(tmp_path):
     assert result.metadata["extractor"] == "xlsx"
     assert result.metadata["reason"] == "invalid_package"
     assert "File is not a zip file" in (result.message or "")
+
+
+def test_extract_xlsx_closes_workbook_after_reading(monkeypatch, tmp_path):
+    path = tmp_path / "budget.xlsx"
+    path.write_bytes(b"xlsx placeholder")
+
+    class FakeWorksheet:
+        title = "Budget"
+
+        def iter_rows(self, max_row, max_col, values_only):
+            assert (max_row, max_col, values_only) == (200, 30, True)
+            return iter([("Quarter", "Amount"), ("Q1", 1200)])
+
+    class FakeWorkbook:
+        def __init__(self):
+            self.worksheets = [FakeWorksheet()]
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    workbook = FakeWorkbook()
+    monkeypatch.setitem(
+        sys.modules,
+        "openpyxl",
+        SimpleNamespace(load_workbook=lambda _path, read_only, data_only: workbook),
+    )
+
+    result = extract_file(path, CorpusPolicy(root_path=tmp_path))
+
+    assert result.status == "indexed"
+    assert "Q1 | 1200" in result.chunks[0].body
+    assert workbook.close_calls == 1
 
 
 def test_extract_large_invalid_xlsx_sample_first_blocks_as_invalid_package(tmp_path):
