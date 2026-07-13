@@ -71,15 +71,18 @@ PRODUCTION_CONTAINER_NAMES = {
 }
 
 
-def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
+def test_production_deploy_scripts_default_to_j_drive_install_root():
     install = _script("install-flux.ps1")
     update = _script("update-flux.ps1")
     start = _script("start-flux.ps1")
     stop = _script("stop-flux.ps1")
     status = _script("status-flux.ps1")
+    migration = _script("migrate-postgres-to-docker-volume.ps1")
 
-    assert 'D:\\FluxLLMKB' in install
-    assert "D:\\FluxLLMKB" in update
+    for script in (install, update, start, stop, status, migration):
+        assert 'J:\\FluxLLMKB' in script
+        assert 'D:\\FluxLLMKB' not in script
+        assert "FLUX_KB_INSTALL_ROOT" in script
     assert "docker compose" in start
     assert "docker compose" in stop
     assert "FluxKB Host Agent" in install
@@ -135,6 +138,17 @@ def test_production_deploy_scripts_exist_and_use_d_drive_install_root():
         'Join-Path $dataRoot "postgres"',
     ):
         assert f"Remove-Item -LiteralPath {protected_path}" not in install
+
+
+def test_complete_feature_defaults_cache_and_deploy_root_to_j_drive():
+    script = _dev_script("complete-feature.ps1")
+
+    assert '[string]$InstallRoot = $(if ($env:FLUX_KB_INSTALL_ROOT) { $env:FLUX_KB_INSTALL_ROOT } else { "J:\\FluxLLMKB" })' in script
+    assert '$NpmCachePath = Join-Path $InstallRoot "package-cache\\npm"' in script
+    assert '$PipWheelhousePath = Join-Path $InstallRoot "package-cache\\wheelhouse"' in script
+    assert '$env:FLUX_KB_INSTALL_ROOT = $InstallRoot' in script
+    assert '$deployCommand = ".\\scripts\\deploy\\update-flux.ps1 -InstallRoot $escapedInstallRoot -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode"' in script
+    assert 'D:\\FluxLLMKB' not in script
 
 
 def test_production_update_uses_prebuilt_images_not_repo_context_compose_build():
@@ -1026,11 +1040,12 @@ def test_production_deploy_supports_custom_apt_mirrors_for_slow_system_packages(
         assert '"--build-arg", "APT_SECURITY_MIRROR_URL=$AptSecurityMirrorUrl"' in script
 
 
-def test_docs_describe_production_runtime_boundary():
+def test_docs_describe_j_drive_production_runtime_boundary():
     setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
     architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
 
-    assert "D:\\FluxLLMKB" in setup
+    assert "J:\\FluxLLMKB" in setup
+    assert "D:\\FluxLLMKB" not in setup
     assert "production" in setup.lower()
     assert "docker named volumes" in setup.lower()
     assert "postgresql bind-mounted data on the d drive" not in setup.lower()

@@ -533,7 +533,7 @@ roots keep the normal locked-file retry path. Snapshot content reflects the
 committed on-disk state, not unsaved application edits held only in memory.
 
 Production deployments are intentionally not repo-coupled. The default Windows
-PC install root is `D:\FluxLLMKB`, with deployed app files under `app`, private
+PC install root is `J:\FluxLLMKB`, with deployed app files under `app`, private
 runtime/config/spool data under `private`, host logs under `logs`, and backups
 under `backups`. Container-owned persistent state lives in Docker named volumes:
 PostgreSQL data, Vespa var/log state, model-runner Hugging Face/Paddle caches,

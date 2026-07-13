@@ -1,5 +1,5 @@
 param(
-    [string]$InstallRoot = "D:\FluxLLMKB"
+    [string]$InstallRoot = $(if ($env:FLUX_KB_INSTALL_ROOT) { $env:FLUX_KB_INSTALL_ROOT } else { "J:\FluxLLMKB" })
 )
 
 $ErrorActionPreference = "Stop"

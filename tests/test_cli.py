@@ -348,7 +348,7 @@ def test_cli_acceleration_status_uses_status_collector(monkeypatch, capsys):
         "collect_acceleration_status",
         lambda: {
             "capabilities": {"local_model": {"state": "disabled"}},
-            "cache": {"root": "D:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
+            "cache": {"root": "J:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
             "worker_families": [{"family": "media", "pending": 2, "ocr_cache_hits": 3, "ocr_cache_misses": 1}],
         },
     )
@@ -356,7 +356,7 @@ def test_cli_acceleration_status_uses_status_collector(monkeypatch, capsys):
     assert cli.main(["acceleration", "status"]) == 0
     payload = json.loads(capsys.readouterr().out)
 
-    assert payload["cache"]["root"] == "D:/FluxLLMKB/private/cache"
+    assert payload["cache"]["root"] == "J:/FluxLLMKB/private/cache"
     assert payload["worker_families"][0]["family"] == "media"
     assert payload["worker_families"][0]["ocr_cache_hits"] == 3
     assert payload["worker_families"][0]["ocr_cache_misses"] == 1

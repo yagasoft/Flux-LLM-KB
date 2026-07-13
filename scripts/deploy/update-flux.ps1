@@ -1,5 +1,5 @@
 param(
-    [string]$InstallRoot = $(if ($env:FLUX_KB_INSTALL_ROOT) { $env:FLUX_KB_INSTALL_ROOT } else { "D:\FluxLLMKB" }),
+    [string]$InstallRoot = $(if ($env:FLUX_KB_INSTALL_ROOT) { $env:FLUX_KB_INSTALL_ROOT } else { "J:\FluxLLMKB" }),
     [string]$SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [int]$ApiPort = 8765,
     [int]$HostAgentPort = 8799,

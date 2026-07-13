@@ -92,7 +92,7 @@ def test_resolve_host_spool_path_keeps_container_private_mount_when_env_is_conta
 
 
 def test_resolve_host_spool_path_ignores_windows_private_dir_outside_windows(monkeypatch):
-    monkeypatch.setenv("FLUX_KB_PRIVATE_DIR", r"D:\FluxLLMKB\private")
+    monkeypatch.setenv("FLUX_KB_PRIVATE_DIR", r"J:\FluxLLMKB\private")
 
     path = _resolve_host_spool_path("/app/private/mail-spool/outlook-catchup", platform_os_name="posix")
 

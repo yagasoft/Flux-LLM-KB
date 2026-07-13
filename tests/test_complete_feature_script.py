@@ -120,7 +120,7 @@ def test_complete_feature_requires_explicit_flags_for_package_and_image_refresh(
     assert "--cache \"$NpmCachePath\"" in script
     assert "$pipOffline" not in script
     assert "$deployPipOfflineValue" not in script
-    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode\"" in script
+    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -InstallRoot $escapedInstallRoot -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode\"" in script
     assert "$deployCommand += ' -AllowPackageRefresh'" in script
     assert "$deployCommand += ' -AllowImagePull'" in script
     assert "Closeout runs pip offline only." in script
@@ -214,7 +214,7 @@ def test_complete_feature_script_uses_longer_timeout_for_production_deploy():
 
     assert '[ValidateSet("auto", "local", "python")]' in script
     assert '[string]$DockerBaseMode = "auto"' in script
-    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode\"" in script
+    assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -InstallRoot $escapedInstallRoot -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode\"" in script
     assert "If deploy pip dependencies are missing from cache, rerun this closeout with -AllowPipDownloads only." not in script
     assert "Invoke-FeatureStep -Name \"deploy-production\" -Cwd $MainRoot -Command $deployCommand -TimeoutSeconds $DeployStepTimeoutSeconds" in script
 
@@ -269,7 +269,7 @@ def test_setup_docs_describe_worktree_safe_flux_cli_wrapper():
     assert ".\\scripts\\dev\\flux-kb.ps1 lint" in setup
     assert "worktree-safe" in setup
     assert "Do not run `python -m pip install -e .` inside temporary worktrees" in setup
-    assert "D:\\FluxLLMKB\\app\\.venv" in setup
+    assert "J:\\FluxLLMKB\\app\\.venv" in setup
 
 
 def test_setup_docs_describe_local_only_feature_closeout_and_explicit_refreshes():

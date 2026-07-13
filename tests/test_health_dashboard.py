@@ -13,7 +13,7 @@ from flux_llm_kb.health import (
 
 
 def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
-    monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "D:\\FluxLLMKB")
+    monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "J:\\FluxLLMKB")
     monkeypatch.setenv("FLUX_KB_IMAGE_TAG", "abc123")
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(
@@ -92,7 +92,7 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
             "mcp": {
                 "configured": True,
                 "command": "python",
-                "cwd": "D:/FluxLLMKB/app",
+                "cwd": "J:/FluxLLMKB/app",
                 "enabled": True,
                 "dependency_available": True,
                 "message": "ready",
@@ -117,7 +117,7 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
         "collect_acceleration_status",
         lambda: {
             "capabilities": {},
-            "cache": {"root": "D:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
+            "cache": {"root": "J:/FluxLLMKB/private/cache", "source": "install_root", "directories": {}},
             "worker_families": [{"family": "image", "pending": 1, "ocr_cache_hits": 4, "ocr_cache_misses": 2}],
         },
     )
@@ -143,7 +143,7 @@ def test_collect_dashboard_payload_uses_shared_health_sources(monkeypatch):
     assert payload["messaging"]["outbox"]["pending"] == 2
     assert payload["messaging"]["callbacks"]["delivered"] == 3
     assert payload["messaging"]["broker"]["totals"]["messages_ready"] == 4
-    assert payload["deployment"]["install_root"] == "D:\\FluxLLMKB"
+    assert payload["deployment"]["install_root"] == "J:\\FluxLLMKB"
     assert payload["deployment"]["image_tag"] == "abc123"
     assert "repo_coupled" in payload["deployment"]
     assert payload["acceleration"]["worker_families"][0]["ocr_cache_hits"] == 4
@@ -615,7 +615,7 @@ def test_doctor_summary_treats_gh_as_optional(monkeypatch):
 
 
 def test_doctor_summary_treats_host_owned_tools_as_ok_in_production(monkeypatch):
-    monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "D:\\FluxLLMKB")
+    monkeypatch.setenv("FLUX_KB_INSTALL_ROOT", "J:\\FluxLLMKB")
     monkeypatch.setattr(database, "check_database", lambda: database.DatabaseStatus(True, "ok"))
     monkeypatch.setattr(health.shutil, "which", lambda _command: None)
 

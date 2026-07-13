@@ -22,7 +22,7 @@ runs as a Windows host process outside Docker.
 ### Production Runtime
 
 For day-to-day use, deploy Flux into a permanent PC runtime root instead of
-running services from this repository. The default root is `D:\FluxLLMKB` and can
+running services from this repository. The default root is `J:\FluxLLMKB` and can
 be changed with `-InstallRoot`.
 
 ```powershell
@@ -32,15 +32,15 @@ be changed with `-InstallRoot`.
 
 The production layout is:
 
-- `D:\FluxLLMKB\app`: deployed compose files, app venv, host launchers, version metadata
-- `D:\FluxLLMKB\private`: local env, OAuth tokens, mail spool, and private config
+- `J:\FluxLLMKB\app`: deployed compose files, app venv, host launchers, version metadata
+- `J:\FluxLLMKB\private`: local env, OAuth tokens, mail spool, and private config
 - Docker named volumes: PostgreSQL data, RabbitMQ data, container
   cache/data/runtime/logs, and the Docker Ollama model cache
-- `D:\FluxLLMKB\data`: legacy PostgreSQL bind-mount rollback data after migration
-- `D:\FluxLLMKB\logs`: host-agent and Outlook-host logs
-- `D:\FluxLLMKB\models\ollama`: legacy Ollama model-cache rollback data after migration
-- `D:\FluxLLMKB\runtime`: host process heartbeat/status files
-- `D:\FluxLLMKB\backups`: local PostgreSQL dump/export target
+- `J:\FluxLLMKB\data`: legacy PostgreSQL bind-mount rollback data after migration
+- `J:\FluxLLMKB\logs`: host-agent and Outlook-host logs
+- `J:\FluxLLMKB\models\ollama`: legacy Ollama model-cache rollback data after migration
+- `J:\FluxLLMKB\runtime`: host process heartbeat/status files
+- `J:\FluxLLMKB\backups`: local PostgreSQL dump/export target
 
 The repository remains source code only. Production Docker Compose uses prebuilt
 local image tags, not `build.context: .`. Container-owned persistent state lives
@@ -115,7 +115,7 @@ Update an existing deployment from the current checkout with:
 ```
 
 Production Docker builds use an image-backed offline wheelhouse by default.
-`D:\FluxLLMKB\package-cache\wheelhouse` remains the canonical host cache, and
+`J:\FluxLLMKB\package-cache\wheelhouse` remains the canonical host cache, and
 ordinary builds reference `docker-image://flux-llm-kb-wheelhouse:local` instead
 of sending that host directory as a BuildKit client context. Runtime and Paddle
 dependency locks under `docker/` pin large GPU and AWQ-support packages to
@@ -133,7 +133,7 @@ starts and model-download runs use `--pull never`; the existing
 base tag is not local, preserving its revision and runtime-fingerprint labels.
 
 ```powershell
-npm --prefix dashboard ci --include=dev --cache "D:\FluxLLMKB\package-cache\npm" --offline
+npm --prefix dashboard ci --include=dev --cache "J:\FluxLLMKB\package-cache\npm" --offline
 ```
 
 Network refreshes require explicit operator intent. Use `-AllowImagePull` only
@@ -194,7 +194,7 @@ changing the shared Python editable install:
 ```
 
 The wrapper sets `PYTHONPATH` to the current checkout's `src` directory and then
-runs `python -m flux_llm_kb.cli`. It is only for repository development. Do not run `python -m pip install -e .` inside temporary worktrees when using the shared `D:\FluxLLMKB\python` runtime; that can leave the global `flux-kb` launcher pointing at a worktree that will later be deleted. Production deployment continues to use the permanent `D:\FluxLLMKB\app\.venv` runtime.
+runs `python -m flux_llm_kb.cli`. It is only for repository development. Do not run `python -m pip install -e .` inside temporary worktrees when using the shared `J:\FluxLLMKB\python` runtime; that can leave the global `flux-kb` launcher pointing at a worktree that will later be deleted. Production deployment continues to use the permanent `J:\FluxLLMKB\app\.venv` runtime.
 
 For a long-lived development checkout, install the package in editable mode:
 

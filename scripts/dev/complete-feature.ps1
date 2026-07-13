@@ -14,12 +14,23 @@ param(
     [switch]$AllowPackageRefresh,
     [ValidateSet("auto", "local", "python")]
     [string]$DockerBaseMode = "auto",
-    [string]$NpmCachePath = $(if ($env:FLUX_KB_NPM_CACHE_PATH) { $env:FLUX_KB_NPM_CACHE_PATH } else { "D:\FluxLLMKB\package-cache\npm" }),
-    [string]$PipWheelhousePath = $(if ($env:FLUX_KB_PIP_WHEELHOUSE_PATH) { $env:FLUX_KB_PIP_WHEELHOUSE_PATH } else { "D:\FluxLLMKB\package-cache\wheelhouse" }),
+    [string]$InstallRoot = $(if ($env:FLUX_KB_INSTALL_ROOT) { $env:FLUX_KB_INSTALL_ROOT } else { "J:\FluxLLMKB" }),
+    [string]$NpmCachePath = $env:FLUX_KB_NPM_CACHE_PATH,
+    [string]$PipWheelhousePath = $env:FLUX_KB_PIP_WHEELHOUSE_PATH,
     [string]$PostDeployReclaimOutlookProfile = ""
 )
 
 $ErrorActionPreference = "Stop"
+$InstallRoot = [System.IO.Path]::GetFullPath($InstallRoot)
+if ([string]::IsNullOrWhiteSpace($NpmCachePath)) {
+    $NpmCachePath = Join-Path $InstallRoot "package-cache\npm"
+}
+if ([string]::IsNullOrWhiteSpace($PipWheelhousePath)) {
+    $PipWheelhousePath = Join-Path $InstallRoot "package-cache\wheelhouse"
+}
+$NpmCachePath = [System.IO.Path]::GetFullPath($NpmCachePath)
+$PipWheelhousePath = [System.IO.Path]::GetFullPath($PipWheelhousePath)
+$env:FLUX_KB_INSTALL_ROOT = $InstallRoot
 
 function Get-MainWorktreePath {
     param([string]$Worktree)
@@ -441,7 +452,6 @@ if (-not $MainRoot) {
     $MainRoot = Get-MainWorktreePath -Worktree $FeatureWorktree
 }
 $MainRoot = (Resolve-Path $MainRoot).Path
-$PipWheelhousePath = [System.IO.Path]::GetFullPath($PipWheelhousePath)
 $Branch = (git -C $FeatureWorktree branch --show-current).Trim()
 if (-not $Branch.StartsWith("codex/")) {
     throw "Refusing to complete non-codex branch '$Branch'."
@@ -451,9 +461,10 @@ $script:LogRoot = Join-Path $MainRoot ".agents\run-logs"
 New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 $script:Steps = @()
 $script:FailedStep = $null
-$env:FLUX_KB_NPM_CACHE_PATH = [System.IO.Path]::GetFullPath($NpmCachePath)
+$env:FLUX_KB_NPM_CACHE_PATH = $NpmCachePath
 $env:FLUX_KB_CLOSEOUT_ALLOW_PACKAGE_REFRESH = if ($AllowPackageRefresh) { "1" } else { "0" }
 Set-Location $MainRoot
+$escapedInstallRoot = ConvertTo-FeatureCommandArgument $InstallRoot
 $pytestCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
 if ([string]::IsNullOrWhiteSpace($PytestWorkers) -or $PytestWorkers -eq "0") {
     $pytestCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
@@ -477,7 +488,7 @@ try {
     Invoke-FeatureStep -Name "push-main" -Cwd $MainRoot -Command 'git push origin main'
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
     if (-not $SkipDeploy) {
-        $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode"
+        $deployCommand = ".\scripts\deploy\update-flux.ps1 -InstallRoot $escapedInstallRoot -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode"
         if ($AllowPackageRefresh) {
             $deployCommand += ' -AllowPackageRefresh'
         }

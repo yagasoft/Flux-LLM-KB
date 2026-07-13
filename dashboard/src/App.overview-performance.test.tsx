@@ -91,7 +91,7 @@ describe("Flux dashboard", () => {
     expect(screen.getByText("Watcher Policy")).toBeInTheDocument();
     expect(screen.getAllByText("watchdog").length).toBeGreaterThan(0);
     expect(screen.getByText("auto")).toBeInTheDocument();
-    expect(screen.getByText("D:/FluxLLMKB/private/cache")).toBeInTheDocument();
+    expect(screen.getByText("J:/FluxLLMKB/private/cache")).toBeInTheDocument();
     expect(screen.getByText("Container resources")).toBeInTheDocument();
     expect(screen.getByText("2 running / 2 reported")).toBeInTheDocument();
     expect(screen.getByText("memory 1.25 GB / 5 GB")).toBeInTheDocument();

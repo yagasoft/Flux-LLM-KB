@@ -28,17 +28,17 @@ export const health: any = {
       memory: { ok: true, total_bytes: 34359738368 }
     },
     cache: {
-      root: "D:/FluxLLMKB/private/cache",
+      root: "J:/FluxLLMKB/private/cache",
       source: "install_root",
       directories: {
-        models: "D:/FluxLLMKB/private/cache/models",
-        ocr: "D:/FluxLLMKB/private/cache/ocr",
-        asr: "D:/FluxLLMKB/private/cache/asr",
-        vision: "D:/FluxLLMKB/private/cache/vision",
-        thumbnails: "D:/FluxLLMKB/private/cache/thumbnails",
-        parser: "D:/FluxLLMKB/private/cache/parser",
-        embeddings: "D:/FluxLLMKB/private/cache/embeddings",
-        temp: "D:/FluxLLMKB/private/cache/temp"
+        models: "J:/FluxLLMKB/private/cache/models",
+        ocr: "J:/FluxLLMKB/private/cache/ocr",
+        asr: "J:/FluxLLMKB/private/cache/asr",
+        vision: "J:/FluxLLMKB/private/cache/vision",
+        thumbnails: "J:/FluxLLMKB/private/cache/thumbnails",
+        parser: "J:/FluxLLMKB/private/cache/parser",
+        embeddings: "J:/FluxLLMKB/private/cache/embeddings",
+        temp: "J:/FluxLLMKB/private/cache/temp"
       }
     },
     worker_families: [
@@ -150,7 +150,7 @@ export const health: any = {
     mcp: {
       configured: true,
       command: "python",
-      cwd: "D:/FluxLLMKB/app",
+      cwd: "J:/FluxLLMKB/app",
       enabled: true,
       dependency_available: true,
       message: "ready"

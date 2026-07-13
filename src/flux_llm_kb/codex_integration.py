@@ -157,12 +157,14 @@ def _configured_marketplace_source_root() -> Path | None:
 
 
 def _install_plugin_path(source: Path, target: Path) -> None:
-    if target.exists():
+    if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
         try:
             if target.resolve() == source.resolve():
                 return
         except OSError:
             pass
+        _remove_existing_plugin_path(target)
+    elif target.exists():
         _remove_existing_plugin_path(target)
     try:
         target.symlink_to(source, target_is_directory=True)

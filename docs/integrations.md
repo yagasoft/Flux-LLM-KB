@@ -704,7 +704,7 @@ backend recovers.
 When `FLUX_KB_APP_ROOT` is not set, `flux-kb codex install-plugin` preserves an
 existing valid Flux local marketplace source before falling back to the imported
 package location. This keeps Codex pointed at a deployed app such as
-`D:\FluxLLMKB\app` even after developer editable installs are repaired back to
+`J:\FluxLLMKB\app` even after developer editable installs are repaired back to
 the repository checkout.
 
 `flux-kb codex status` also checks the Codex plugin discovery cache under

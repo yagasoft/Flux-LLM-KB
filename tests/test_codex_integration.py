@@ -414,6 +414,33 @@ def test_codex_install_plugin_replaces_stale_existing_install(tmp_path, monkeypa
     assert (installed / ".codex-plugin" / "plugin.json").exists()
 
 
+def test_codex_install_plugin_replaces_dangling_existing_link(tmp_path, monkeypatch):
+    codex_home = tmp_path / ".codex"
+    target = codex_home / "plugins" / "flux-llm-kb"
+    target.parent.mkdir(parents=True)
+    try:
+        target.symlink_to(tmp_path / "missing-production-plugin", target_is_directory=True)
+    except OSError:
+        pytest.skip("test environment cannot create a directory symlink")
+
+    repo_root = tmp_path / "repo"
+    plugin = repo_root / "plugins" / "flux-llm-kb"
+    (plugin / ".codex-plugin").mkdir(parents=True)
+    (plugin / ".codex-plugin" / "plugin.json").write_text(
+        '{"name":"flux-llm-kb","version":"0.1.0","interface":{"displayName":"Flux LLM-KB"}}',
+        encoding="utf-8",
+    )
+    (plugin / "hooks").mkdir()
+    (plugin / "hooks" / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    install_plugin(repo_root=repo_root)
+
+    assert (target / ".codex-plugin" / "plugin.json").exists()
+    assert not target.is_symlink() or target.resolve() == plugin.resolve()
+
+
 def test_codex_plugin_hook_manifest_uses_current_command_schema():
     root = Path(__file__).resolve().parents[1]
     manifest = json.loads(

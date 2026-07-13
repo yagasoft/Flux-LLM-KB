@@ -1,5 +1,5 @@
 param(
-    [string]$InstallRoot = "D:\FluxLLMKB",
+    [string]$InstallRoot = $(if ($env:FLUX_KB_INSTALL_ROOT) { $env:FLUX_KB_INSTALL_ROOT } else { "J:\FluxLLMKB" }),
     [int]$PostgresPort = 5432,
     [string]$PostgresVolumeName = "flux_llm_kb_postgres_data",
     [string]$BackupRoot = ""
