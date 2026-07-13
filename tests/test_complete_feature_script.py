@@ -86,7 +86,7 @@ def test_complete_feature_script_has_optional_post_deploy_outlook_spool_reclaim(
     assert '$env:PYTHONPATH = (Join-Path (Get-Location) "src")' not in reclaim_block
 
 
-def test_complete_feature_script_runs_npm_install_before_tests_by_default():
+def test_complete_feature_script_uses_local_npm_dependencies_before_tests_by_default():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
     online_step = 'Invoke-FeatureStep -Name "dashboard-install" -Cwd $FeatureWorktree -Command $DashboardNpmInstallCommand'
@@ -99,30 +99,30 @@ def test_complete_feature_script_runs_npm_install_before_tests_by_default():
         "-Cwd $FeatureWorktree -Command 'Push-Location dashboard; try { node node_modules/vite/bin/vite.js build } finally { Pop-Location }'"
     )
 
-    assert "[switch]$AllowNpmInstall" not in script
-    assert "[switch]$RefreshNpmDependencies" not in script
+    assert "[switch]$AllowPackageRefresh" in script
+    assert "[switch]$AllowImagePull" in script
     assert "[string]$NpmCachePath" in script
     assert "$DashboardCacheCheckCommand" not in script
     assert online_step in script
     assert script.index(online_step) < script.index(test_step) < script.index(build_step)
     assert test_step in script
     assert build_step in script
+    assert 'npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --offline' in script
     assert 'npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --prefer-offline' in script
+    assert "if ($AllowPackageRefresh)" in script
 
 
-def test_complete_feature_script_removes_pip_online_mode_and_deploys_pip_offline():
+def test_complete_feature_requires_explicit_flags_for_package_and_image_refresh():
     script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
 
-    assert "[switch]$AllowPipDownloads" not in script
-    assert "[switch]$RefreshPipDependencies" not in script
-    assert "AllowPipDownloads" not in script
-    assert "RefreshPipDependencies" not in script
-    assert "FLUX_KB_ALLOW_PIP_DOWNLOADS" not in script
-    assert "PipOffline:$false" not in script
+    assert "[switch]$AllowPackageRefresh" in script
+    assert "[switch]$AllowImagePull" in script
     assert "--cache \"$NpmCachePath\"" in script
     assert "$pipOffline" not in script
     assert "$deployPipOfflineValue" not in script
     assert "$deployCommand = \".\\scripts\\deploy\\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode\"" in script
+    assert "$deployCommand += ' -AllowPackageRefresh'" in script
+    assert "$deployCommand += ' -AllowImagePull'" in script
     assert "Closeout runs pip offline only." in script
 
 
@@ -272,17 +272,16 @@ def test_setup_docs_describe_worktree_safe_flux_cli_wrapper():
     assert "D:\\FluxLLMKB\\app\\.venv" in setup
 
 
-def test_setup_docs_describe_npm_online_and_pip_offline_feature_closeout():
+def test_setup_docs_describe_local_only_feature_closeout_and_explicit_refreshes():
     setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
     setup_words = " ".join(setup.split())
 
-    assert "Feature closeout through `scripts/dev/complete-feature.ps1` runs npm install by default" in setup_words
+    assert "Feature closeout through `scripts/dev/complete-feature.ps1` uses only local npm, pip, and Docker dependencies by default" in setup_words
     assert "npm --prefix dashboard ci --include=dev --cache" in setup
-    assert "`-AllowNpmInstall`" not in setup
-    assert "`-RefreshNpmDependencies`" not in setup
-    assert "`-AllowPipDownloads`" not in setup
-    assert "`-RefreshPipDependencies`" not in setup
-    assert "PipOffline:$false" not in setup
-    assert "closeout script never enables pip downloads" in setup_words
+    assert "--offline" in setup
+    assert "`-AllowImagePull`" in setup
+    assert "`-AllowPackageRefresh`" in setup
+    assert "`-PipOffline:$false`" in setup
+    assert "local-only" in setup_words
     assert "`-DockerBaseMode python`" in setup
     assert "mount options is too" in setup

@@ -455,6 +455,44 @@ def test_production_deploy_builds_derived_ollama_runtime_image():
         assert "image: flux-ollama:`${FLUX_KB_IMAGE_TAG}" not in compose
 
 
+def test_production_deploy_reuses_local_dependencies_unless_refresh_is_explicit():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+
+        assert "[switch]$AllowImagePull" in script
+        assert "[switch]$AllowPackageRefresh" in script
+        assert "Network package refresh requires -AllowPackageRefresh." in script
+        assert "Required Docker image is not available locally: $Image" in script
+        assert "Re-run explicitly with -AllowImagePull to download it." in script
+        assert 'Invoke-FluxDockerImageAvailable -Image "postgres:16" -WorkingDirectory $SourceRoot -TimeoutSeconds 300 -AllowImagePull:$AllowImagePull' in script
+        assert 'Invoke-FluxDockerImageAvailable -Image "rabbitmq:4.3-management" -WorkingDirectory $SourceRoot -TimeoutSeconds 300 -AllowImagePull:$AllowImagePull' in script
+        assert 'Invoke-FluxOllamaImageBuild -SourceRoot $SourceRoot -BuildMetadata $buildMetadata -ImageTag $imageTag -TimeoutSeconds $DockerBuildTimeoutSeconds -AllowImagePull:$AllowImagePull' in script
+        assert 'Resolve-FluxDockerBuildBase -DockerBaseMode $DockerBaseMode -DockerBaseImage $DockerBaseImage -AllowImagePull:$AllowImagePull' in script
+
+
+def test_production_deploy_prevents_compose_from_implicitly_pulling_images():
+    install = _script("install-flux.ps1")
+    update = _script("update-flux.ps1")
+
+    for script in (install, update):
+        assert '"run", "--pull", "never", "--rm", "--no-deps"' in script
+
+    assert 'up -d --no-build --pull never @composeServices' in install
+    assert '"up", "-d", "--no-build", "--pull", "never"' in update
+
+
+def test_production_deploy_discovers_derived_ollama_runtime_before_missing_base_tag():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+
+        assert '$localRuntimeImage = "flux-ollama:local"' in script
+        assert '$baseImage = "ollama/ollama:latest"' in script
+        assert 'Reusing discovered local Ollama runtime image $localRuntimeImage' in script
+        assert script.index("Reusing discovered local Ollama runtime image") < script.index(
+            "Get-FluxOllamaRuntimeFingerprint"
+        )
+
+
 def test_deploy_ollama_vision_smoke_script_checks_media_runtime_and_decode_path():
     script_path = ROOT / "scripts" / "deploy" / "test-ollama-vision.ps1"
     assert script_path.exists()

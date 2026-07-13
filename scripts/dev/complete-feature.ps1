@@ -10,6 +10,8 @@ param(
     [int]$DeployStepTimeoutSeconds = 1800,
     [string]$PytestWorkers = "auto",
     [switch]$SkipWorkerStart,
+    [switch]$AllowImagePull,
+    [switch]$AllowPackageRefresh,
     [ValidateSet("auto", "local", "python")]
     [string]$DockerBaseMode = "auto",
     [string]$NpmCachePath = $(if ($env:FLUX_KB_NPM_CACHE_PATH) { $env:FLUX_KB_NPM_CACHE_PATH } else { "D:\FluxLLMKB\package-cache\npm" }),
@@ -425,8 +427,13 @@ try {
 
 $DashboardNpmInstallCommand = @'
 $NpmCachePath = $env:FLUX_KB_NPM_CACHE_PATH
+$AllowPackageRefresh = $env:FLUX_KB_CLOSEOUT_ALLOW_PACKAGE_REFRESH -eq "1"
 New-Item -ItemType Directory -Force -Path "$NpmCachePath" | Out-Null
-npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --prefer-offline
+if ($AllowPackageRefresh) {
+    npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --prefer-offline
+} else {
+    npm --prefix dashboard ci --include=dev --cache "$NpmCachePath" --offline
+}
 '@
 
 $FeatureWorktree = (Resolve-Path $FeatureWorktree).Path
@@ -445,6 +452,7 @@ New-Item -ItemType Directory -Force -Path $script:LogRoot | Out-Null
 $script:Steps = @()
 $script:FailedStep = $null
 $env:FLUX_KB_NPM_CACHE_PATH = [System.IO.Path]::GetFullPath($NpmCachePath)
+$env:FLUX_KB_CLOSEOUT_ALLOW_PACKAGE_REFRESH = if ($AllowPackageRefresh) { "1" } else { "0" }
 Set-Location $MainRoot
 $pytestCommand = '$env:PYTHONPATH = (Join-Path (Get-Location) "src"); python -m pytest'
 if ([string]::IsNullOrWhiteSpace($PytestWorkers) -or $PytestWorkers -eq "0") {
@@ -470,6 +478,12 @@ try {
     Invoke-FeatureStep -Name "verify-origin-main" -Cwd $MainRoot -Command '$headSha = (git rev-parse HEAD).Trim(); git fetch origin main; $originSha = (git rev-parse origin/main).Trim(); if ($headSha -ne $originSha) { Write-Host "HEAD $headSha differs from origin/main $originSha"; exit 1 }'
     if (-not $SkipDeploy) {
         $deployCommand = ".\scripts\deploy\update-flux.ps1 -GpuMode on -SkipDashboardBuild -PipOffline:`$true -DockerBaseMode $DockerBaseMode"
+        if ($AllowPackageRefresh) {
+            $deployCommand += ' -AllowPackageRefresh'
+        }
+        if ($AllowImagePull) {
+            $deployCommand += ' -AllowImagePull'
+        }
         if ($SkipWorkerStart) {
             $deployCommand += ' -SkipWorkerStart'
         }

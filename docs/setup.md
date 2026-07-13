@@ -124,20 +124,35 @@ stops instead of downloading a replacement. Prefetch missing Python wheels only
 as an explicit operator action, then rebuild `flux-llm-kb-wheelhouse:local`
 from the persistent host cache before building from the cache.
 
-Feature closeout through `scripts/dev/complete-feature.ps1` runs npm install by
-default with the persistent npm cache, then passes `-PipOffline:$true` into
-production deploy. The closeout script never enables pip downloads. If a Python
-package is missing, prefetch it explicitly into the persistent wheelhouse before
-rerunning closeout.
+Feature closeout through `scripts/dev/complete-feature.ps1` uses only local npm,
+pip, and Docker dependencies by default. It runs npm in offline mode and passes
+`-PipOffline:$true` into production deploy. A missing package or image stops
+the operation instead of silently downloading a replacement. Docker Compose
+starts and model-download runs use `--pull never`; the existing
+`flux-ollama:local` runtime is discovered and reused when the upstream Ollama
+base tag is not local, preserving its revision and runtime-fingerprint labels.
 
 ```powershell
-npm --prefix dashboard ci --include=dev --cache "D:\FluxLLMKB\package-cache\npm" --prefer-offline
+npm --prefix dashboard ci --include=dev --cache "D:\FluxLLMKB\package-cache\npm" --offline
 ```
 
-Use `-DockerBaseMode python` on a closeout rerun when Docker Desktop reports a
-local build-base layer failure such as `mount options is too long`; that
-rebuilds system packages from `python:3.12-slim` instead of reusing
-`flux-llm-kb-api:local`.
+Network refreshes require explicit operator intent. Use `-AllowImagePull` only
+when an image must be downloaded, and use `-AllowPackageRefresh` before setting
+`-PipOffline:$false` or `-NpmOffline:$false` to permit a package refresh. The
+same flags are available on feature closeout; its normal path never enables
+either one.
+
+```powershell
+.\scripts\deploy\update-flux.ps1 -AllowImagePull
+.\scripts\deploy\update-flux.ps1 -AllowPackageRefresh -PipOffline:$false -NpmOffline:$false
+.\scripts\dev\complete-feature.ps1 -AllowImagePull
+.\scripts\dev\complete-feature.ps1 -AllowPackageRefresh
+```
+
+Use `-DockerBaseMode python` only when Docker Desktop reports a local build-base
+layer failure such as `mount options is too long`. If `python:3.12-slim` is not
+already local, pair it with the explicit `-AllowImagePull` flag; otherwise the
+deployment reuses `flux-llm-kb-api:local`.
 
 Each production build records source provenance as OCI labels on the Flux image
 and generated Flux containers. The short image tag is kept for local operations,

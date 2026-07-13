@@ -29,10 +29,16 @@ param(
     [string]$PaddleGpuIndexUrl = $(if ($env:FLUX_KB_PADDLE_GPU_INDEX_URL) { $env:FLUX_KB_PADDLE_GPU_INDEX_URL } else { "https://www.paddlepaddle.org.cn/packages/stable/cu126/" }),
     [string]$PytorchGpuIndexUrl = $(if ($env:FLUX_KB_PYTORCH_GPU_INDEX_URL) { $env:FLUX_KB_PYTORCH_GPU_INDEX_URL } else { "https://download.pytorch.org/whl/cu126" }),
     [string]$AptDebianMirrorUrl = $env:FLUX_KB_APT_DEBIAN_MIRROR_URL,
-    [string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL
+    [string]$AptSecurityMirrorUrl = $env:FLUX_KB_APT_SECURITY_MIRROR_URL,
+    [switch]$AllowImagePull,
+    [switch]$AllowPackageRefresh
 )
 
 $ErrorActionPreference = "Stop"
+
+if ((-not $PipOffline -or -not $NpmOffline) -and -not $AllowPackageRefresh) {
+    throw "Network package refresh requires -AllowPackageRefresh."
+}
 
 function New-FluxDirectory {
     param([string]$Path)
@@ -1333,9 +1339,13 @@ function Invoke-FluxDockerImageAvailable {
     param(
         [string]$Image,
         [string]$WorkingDirectory,
-        [int]$TimeoutSeconds = 300
+        [int]$TimeoutSeconds = 300,
+        [switch]$AllowImagePull
     )
     if (Test-FluxDockerImageExists -Image $Image) { return }
+    if (-not $AllowImagePull) {
+        throw "Required Docker image is not available locally: $Image. Re-run explicitly with -AllowImagePull to download it."
+    }
     Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("pull", $Image) -WorkingDirectory $WorkingDirectory -TimeoutSeconds $TimeoutSeconds -StepName "docker pull $Image"
 }
 
@@ -1344,9 +1354,18 @@ function Invoke-FluxOllamaImageBuild {
         [string]$SourceRoot,
         [pscustomobject]$BuildMetadata,
         [string]$ImageTag,
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+        [switch]$AllowImagePull
     )
-    Invoke-FluxDockerImageAvailable -Image "ollama/ollama:latest" -WorkingDirectory $SourceRoot -TimeoutSeconds 600
+    $baseImage = "ollama/ollama:latest"
+    $localRuntimeImage = "flux-ollama:local"
+    if ((-not (Test-FluxDockerImageExists -Image $baseImage)) -and -not $AllowImagePull -and (Test-FluxDockerImageExists -Image $localRuntimeImage)) {
+        $existingFingerprint = Get-FluxDockerImageLabel -Image $localRuntimeImage -Label "org.flux_llm_kb.ollama.runtime_fingerprint"
+        $existingRevision = Get-FluxDockerImageLabel -Image $localRuntimeImage -Label "org.opencontainers.image.revision"
+        Write-Host "Reusing discovered local Ollama runtime image $localRuntimeImage (revision $existingRevision, fingerprint $existingFingerprint); upstream base $baseImage is not available locally."
+        return
+    }
+    Invoke-FluxDockerImageAvailable -Image $baseImage -WorkingDirectory $SourceRoot -TimeoutSeconds 600 -AllowImagePull:$AllowImagePull
     $runtimeFingerprint = Get-FluxOllamaRuntimeFingerprint -SourceRoot $SourceRoot -BaseImage "ollama/ollama:latest"
     $existingFingerprint = Get-FluxDockerImageLabel -Image "flux-ollama:local" -Label "org.flux_llm_kb.ollama.runtime_fingerprint"
     if ($existingFingerprint -eq $runtimeFingerprint) {
@@ -1385,7 +1404,7 @@ function Invoke-FluxAsrModelDownload {
         "compose",
         "--env-file", $AppEnvPath,
         "-f", $ComposePath,
-        "run", "--rm", "--no-deps",
+        "run", "--pull", "never", "--rm", "--no-deps",
         "asr",
         "python", "-m", "flux_llm_kb.asr_server", "download-model", "--model", "large-v3-turbo", "--output-dir", "/models/faster-whisper-large-v3-turbo"
     ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download ASR model large-v3-turbo"
@@ -1405,7 +1424,7 @@ function Invoke-FluxModelRunnerModelDownload {
         "compose",
         "--env-file", $AppEnvPath,
         "-f", $ComposePath,
-        "run", "--rm", "--no-deps",
+        "run", "--pull", "never", "--rm", "--no-deps",
         "model-runner",
         "python", "-m", "flux_llm_kb.model_runner", "download-models", "--models-dir", "/models"
     ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download model-runner models"
@@ -1413,7 +1432,7 @@ function Invoke-FluxModelRunnerModelDownload {
         "compose",
         "--env-file", $AppEnvPath,
         "-f", $ComposePath,
-        "run", "--rm", "--no-deps",
+        "run", "--pull", "never", "--rm", "--no-deps",
         "paddle-runner",
         "/opt/flux-paddle/bin/python", "-m", "flux_llm_kb.model_runner", "download-paddle-models", "--models-dir", "/models"
     ) -WorkingDirectory $AppRoot -TimeoutSeconds $TimeoutSeconds -StepName "download PaddleOCR models"
@@ -1570,10 +1589,14 @@ function Resolve-FluxDockerBuildBase {
     param(
         [ValidateSet("auto", "local", "python")]
         [string]$DockerBaseMode,
-        [string]$DockerBaseImage
+        [string]$DockerBaseImage,
+        [switch]$AllowImagePull
     )
     $pythonBase = "python:3.12-slim"
     if ($DockerBaseMode -eq "python") {
+        if (-not $AllowImagePull -and -not (Test-FluxDockerImageExists -Image $pythonBase)) {
+            throw "Docker build base is not available locally: $pythonBase. Re-run explicitly with -AllowImagePull to download it."
+        }
         return [pscustomobject]@{ Image = $pythonBase; SkipSystemPackages = $false }
     }
 
@@ -1586,6 +1609,9 @@ function Resolve-FluxDockerBuildBase {
         $baseAlias = New-FluxLocalDockerBaseAlias -Image $candidateImage
         Write-Host "Reusing Docker base image $candidateImage as $baseAlias; Debian system packages will not be reinstalled."
         return [pscustomobject]@{ Image = $baseAlias; SkipSystemPackages = $true }
+    }
+    if (-not $AllowImagePull) {
+        throw "No local Docker build base is available: $candidateImage. Re-run explicitly with -AllowImagePull to permit the python base-image fallback."
     }
     if ($DockerBaseImage) {
         Write-Warning "Requested Docker base image $DockerBaseImage was not found; falling back to $pythonBase."
@@ -1844,7 +1870,7 @@ if (-not $SkipDashboardBuild) {
     Invoke-FluxDashboardBuild -DashboardRoot (Join-Path $SourceRoot "dashboard") -NpmOffline $NpmOffline -NpmCachePath $resolvedNpmCachePath
 }
 
-$dockerBase = Resolve-FluxDockerBuildBase -DockerBaseMode $DockerBaseMode -DockerBaseImage $DockerBaseImage
+$dockerBase = Resolve-FluxDockerBuildBase -DockerBaseMode $DockerBaseMode -DockerBaseImage $DockerBaseImage -AllowImagePull:$AllowImagePull
 if (-not $PipOffline) {
     Invoke-FluxSeedDockerWheelhouse `
         -SourceRoot $SourceRoot `
@@ -1903,9 +1929,9 @@ $dockerBuildArgs += @("-t", "flux-llm-kb-api:$imageTag", "-t", "flux-llm-kb-api:
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments $dockerBuildArgs -WorkingDirectory $SourceRoot -TimeoutSeconds $DockerBuildTimeoutSeconds -StepName "docker build"
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:$imageTag") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker version"
 Invoke-FluxNativeCommand -FilePath "docker" -Arguments @("tag", "flux-llm-kb-api:$imageTag", "flux-llm-kb-worker:local") -WorkingDirectory $SourceRoot -TimeoutSeconds 60 -StepName "docker tag worker local"
-Invoke-FluxOllamaImageBuild -SourceRoot $SourceRoot -BuildMetadata $buildMetadata -ImageTag $imageTag -TimeoutSeconds $DockerBuildTimeoutSeconds
-Invoke-FluxDockerImageAvailable -Image "postgres:16" -WorkingDirectory $SourceRoot -TimeoutSeconds 300
-Invoke-FluxDockerImageAvailable -Image "rabbitmq:4.3-management" -WorkingDirectory $SourceRoot -TimeoutSeconds 300
+Invoke-FluxOllamaImageBuild -SourceRoot $SourceRoot -BuildMetadata $buildMetadata -ImageTag $imageTag -TimeoutSeconds $DockerBuildTimeoutSeconds -AllowImagePull:$AllowImagePull
+Invoke-FluxDockerImageAvailable -Image "postgres:16" -WorkingDirectory $SourceRoot -TimeoutSeconds 300 -AllowImagePull:$AllowImagePull
+Invoke-FluxDockerImageAvailable -Image "rabbitmq:4.3-management" -WorkingDirectory $SourceRoot -TimeoutSeconds 300 -AllowImagePull:$AllowImagePull
 
 $gpuEnabled = Assert-FluxGpuAvailable -ImageTag $imageTag -GpuMode $GpuMode
 
@@ -1957,13 +1983,13 @@ if ($gpuEnabled) {
 Push-Location $appRoot
 try {
     $composeServices = @("postgres", "rabbitmq", "vespa")
-    docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
+    docker compose --env-file $appEnvPath -f $composePath up -d --no-build --pull never @composeServices
     Invoke-FluxVespaApplicationDeploy -AppRoot $appRoot -TimeoutSeconds 300
     $composeServices = @("paddle-runner", "model-runner", "api", "worker", "search-index-worker", "mail-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker", "outbox-relay")
     if ($gpuEnabled) {
         $composeServices = @("paddle-runner", "model-runner", "ollama", "asr", "api", "worker", "search-index-worker", "mail-worker", "automation-worker", "governance-worker", "runtime-control-worker", "gpu-eviction-worker", "event-scheduler", "callback-worker", "event-audit-worker", "event-dashboard-worker", "event-diagnostics-worker", "outbox-relay")
     }
-    docker compose --env-file $appEnvPath -f $composePath up -d --no-build @composeServices
+    docker compose --env-file $appEnvPath -f $composePath up -d --no-build --pull never @composeServices
 } finally {
     Pop-Location
 }

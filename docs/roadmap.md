@@ -252,16 +252,16 @@ Affected `Progress %` entries remain unchanged:
 
 - `Production deployment`: remains `100%`. Feature closeout and production
   deployment now treat the persistent package caches as the default path:
-  closeout runs `npm ci` with the persistent npm cache, host pip installs use
+  closeout runs `npm ci --offline` with the persistent npm cache, host pip installs use
   the persistent wheelhouse with `--no-index --find-links`, and Docker builds use
   `docker-image://flux-llm-kb-wheelhouse:local` instead of sending the host
-  wheelhouse as a client build context. Closeout no longer exposes a pip-online
-  mode; Python package refreshes must be explicit prefetch/update actions before
-  closeout.
+  wheelhouse as a client build context. Deployment reuses local Docker images by
+  default, including the discovered derived Ollama runtime when its upstream base
+  tag is absent. Package or image refreshes require explicit opt-in flags.
 
 Remaining Work: keep closeout/deploy scripts aligned with wheel-lock,
-wheelhouse-image, and npm cache expectations, and keep Python dependency
-refreshes outside closeout unless explicitly prefetching the persistent cache.
+wheelhouse-image, npm cache, and local image-discovery expectations; keep package
+and image refreshes outside normal closeout unless an operator explicitly opts in.
 
 ## 2026-07-05 Idle Control-Plane Wave Reduction Update
 
