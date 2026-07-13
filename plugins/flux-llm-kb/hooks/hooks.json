@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "python -m flux_llm_kb.cli hook user-prompt-submit",
-            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\scripts\\user_prompt_submit.ps1\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path $env:PLUGIN_ROOT 'scripts\\user_prompt_submit.ps1')\"",
             "statusMessage": "Retrieving Flux-LLM-KB brief"
           }
         ]
@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "python -m flux_llm_kb.cli hook pre-compact",
-            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\scripts\\pre_compact.ps1\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path $env:PLUGIN_ROOT 'scripts\\pre_compact.ps1')\"",
             "statusMessage": "Preparing Flux-LLM-KB capture"
           }
         ]
@@ -31,7 +31,7 @@
           {
             "type": "command",
             "command": "python -m flux_llm_kb.cli hook stop",
-            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%PLUGIN_ROOT%\\scripts\\stop.ps1\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& (Join-Path $env:PLUGIN_ROOT 'scripts\\stop.ps1')\"",
             "statusMessage": "Finalizing Flux-LLM-KB turn"
           }
         ]

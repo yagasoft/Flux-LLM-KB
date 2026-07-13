@@ -1,6 +1,10 @@
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
+import pytest
 import flux_llm_kb.codex_integration as codex_integration
 from flux_llm_kb.codex_integration import codex_status, install_plugin
 
@@ -427,6 +431,78 @@ def test_codex_plugin_hook_manifest_uses_current_command_schema():
     assert all(handler.get("command") for handler in handlers)
     assert all(handler.get("commandWindows") for handler in handlers)
     assert all("command_windows" not in handler for handler in handlers)
+    assert all("%PLUGIN_ROOT%" not in handler["commandWindows"] for handler in handlers)
+    assert all("Join-Path $env:PLUGIN_ROOT" in handler["commandWindows"] for handler in handlers)
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or shutil.which("powershell") is None,
+    reason="Flux Windows hook wrappers require Windows PowerShell",
+)
+def test_windows_pre_compact_hook_falls_back_from_invalid_python_override(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    plugin_root = root / "plugins" / "flux-llm-kb"
+    environment = os.environ.copy()
+    environment["PLUGIN_ROOT"] = str(plugin_root)
+    environment["FLUX_KB_PYTHON"] = str(tmp_path / "missing-python.exe")
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "& (Join-Path $env:PLUGIN_ROOT 'scripts\\pre_compact.ps1')",
+        ],
+        cwd=root,
+        env=environment,
+        input='{"trigger":"manual"}',
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"continue": True}
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or shutil.which("powershell") is None,
+    reason="Flux Windows hook wrappers require Windows PowerShell",
+)
+def test_windows_pre_compact_hook_reports_python_failure(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    plugin_root = root / "plugins" / "flux-llm-kb"
+    fake_python = tmp_path / "fake-python.cmd"
+    fake_python.write_text(
+        "@echo off\r\n"
+        'if "%~1"=="-c" exit /b 0\r\n'
+        "exit /b 23\r\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PLUGIN_ROOT"] = str(plugin_root)
+    environment["FLUX_KB_PYTHON"] = str(fake_python)
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "& (Join-Path $env:PLUGIN_ROOT 'scripts\\pre_compact.ps1')",
+        ],
+        cwd=root,
+        env=environment,
+        input='{"trigger":"manual"}',
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
 
 
 def test_codex_plugin_prompts_ask_for_indexable_final_responses():
