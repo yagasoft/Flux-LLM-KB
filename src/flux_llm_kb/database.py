@@ -4688,14 +4688,22 @@ def persist_crawl_plan(
                     manifest_skipped_unchanged += 1
                 cur.execute(
                     """
-                    SELECT id::text, quick_hash, extraction_status, extension
+                    SELECT id::text, quick_hash, content_hash, extraction_status, extension
                     FROM source_assets
                     WHERE root_id = %s AND path = %s
                     """,
                     (root_id, asset.relative_path),
                 )
                 previous = cur.fetchone()
-                changed_asset = previous is None or previous[1] != asset.quick_hash
+                content_hash_matches = bool(
+                    previous is not None
+                    and previous[2]
+                    and asset.content_hash
+                    and str(previous[2]) == str(asset.content_hash)
+                )
+                changed_asset = previous is None or (
+                    previous[1] != asset.quick_hash and not content_hash_matches
+                )
                 if changed_asset:
                     changed += 1
                 status = {
@@ -4710,7 +4718,7 @@ def persist_crawl_plan(
                 legacy_metadata_requeue = (
                     previous is not None
                     and not changed_asset
-                    and previous[2] == "metadata_only"
+                    and previous[3] == "metadata_only"
                     and asset.extension in REQUEUE_DOCUMENT_EXTENSIONS
                     and asset.extraction_tier == "deferred"
                     and canonical_id is None
@@ -4718,14 +4726,14 @@ def persist_crawl_plan(
                 recovered_indexed_asset = (
                     previous is not None
                     and not changed_asset
-                    and (previous[2] == "metadata_only" or str(previous[2]).startswith("blocked_"))
+                    and (previous[3] == "metadata_only" or str(previous[3]).startswith("blocked_"))
                     and status == "indexed"
                     and canonical_id is None
                 )
                 recovered_deferred_asset = (
                     previous is not None
                     and not changed_asset
-                    and (previous[2] == "metadata_only" or str(previous[2]).startswith("blocked_"))
+                    and (previous[3] == "metadata_only" or str(previous[3]).startswith("blocked_"))
                     and status == "queued"
                     and canonical_id is None
                 )
@@ -4773,6 +4781,10 @@ def persist_crawl_plan(
                                  AND EXCLUDED.metadata ? 'metadata_only_blocked'
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
+                                 AND NOT (
+                                     source_assets.content_hash IS NOT NULL
+                                     AND source_assets.content_hash = EXCLUDED.content_hash
+                                 )
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status = 'metadata_only'
                                  AND source_assets.extension = ANY(%s)
@@ -4791,6 +4803,10 @@ def persist_crawl_plan(
                         last_seen_at = now(),
                         indexed_at = CASE
                             WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
+                                 AND NOT (
+                                     source_assets.content_hash IS NOT NULL
+                                     AND source_assets.content_hash = EXCLUDED.content_hash
+                                 )
                                 THEN EXCLUDED.indexed_at
                             WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
                                  AND EXCLUDED.extraction_status = 'indexed'

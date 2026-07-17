@@ -595,6 +595,41 @@ def test_scan_path_skips_deferred_document_content_hash_by_default(monkeypatch, 
     ]
 
 
+def test_scan_path_rehashes_changed_deferred_document_when_manifest_has_content_hash(
+    monkeypatch,
+    tmp_path,
+):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "brief.pdf"
+    target.write_bytes(b"%PDF-1.4\n" + b"x" * 1024)
+    stat = target.stat()
+    calls = []
+
+    def fake_hash(path):
+        calls.append(path.name)
+        return f"hash:{path.name}"
+
+    monkeypatch.setattr(crawler, "_sha256_file", fake_hash)
+
+    plan = scan_path(
+        root,
+        CorpusPolicy(
+            root_path=root,
+            manifest_lookup=lambda relative_path: {
+                "path": relative_path,
+                "size_bytes": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns - 1,
+                "quick_hash": "previous-quick-hash",
+                "content_hash": "previous-content-hash",
+            },
+        ),
+    )
+
+    assert plan.assets[0].content_hash == "hash:brief.pdf"
+    assert calls == ["brief.pdf"]
+
+
 def test_scan_path_skips_metadata_only_content_hash_by_default(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     root.mkdir()

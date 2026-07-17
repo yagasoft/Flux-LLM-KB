@@ -447,7 +447,12 @@ def discover_asset(
     elif content_hash_precomputed:
         content_hash = content_hash_override
     else:
-        content_hash = _sha256_file(resolved) if _should_content_hash(classification, stat.st_size, policy) else None
+        should_hash = _should_content_hash(classification, stat.st_size, policy) or _manifest_has_refreshable_content_hash(
+            manifest,
+            size_bytes=stat.st_size,
+            policy=policy,
+        )
+        content_hash = _sha256_file(resolved) if should_hash else None
     chunks: tuple[AssetChunk, ...] = ()
     if classification.file_kind == "image":
         from .extractors import image_metadata
@@ -544,7 +549,11 @@ def _precompute_content_hashes(paths: list[Path], root: Path, policy: CorpusPoli
                 hashes[path] = str(manifest.get("content_hash") or "") or None
                 continue
             classification = classify_file(resolved, policy)
-            if _should_content_hash(classification, stat.st_size, policy):
+            if _should_content_hash(classification, stat.st_size, policy) or _manifest_has_refreshable_content_hash(
+                manifest,
+                size_bytes=stat.st_size,
+                policy=policy,
+            ):
                 targets.append(path)
             else:
                 hashes[path] = None
@@ -565,6 +574,19 @@ def _content_hash_mode(policy: CorpusPolicy) -> str:
     if mode not in CONTENT_HASH_MODES:
         raise ValueError(f"content_hash_mode must be one of: {', '.join(sorted(CONTENT_HASH_MODES))}")
     return mode
+
+
+def _manifest_has_refreshable_content_hash(
+    manifest: dict[str, object] | None,
+    *,
+    size_bytes: int,
+    policy: CorpusPolicy,
+) -> bool:
+    return bool(
+        manifest
+        and str(manifest.get("content_hash") or "").strip()
+        and size_bytes <= policy.hash_max_bytes
+    )
 
 
 def _should_content_hash(classification: FileClassification, size_bytes: int, policy: CorpusPolicy) -> bool:

@@ -7281,6 +7281,81 @@ def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
     assert "source_assets.extraction_status LIKE 'blocked_%%'" in source
 
 
+def test_persist_crawl_plan_does_not_requeue_completed_deferred_asset_when_content_hash_matches(
+    monkeypatch,
+    tmp_path,
+):
+    executed = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text FROM monitored_roots" in sql:
+                return ("root-1",)
+            if "INSERT INTO crawl_runs" in sql:
+                return ("run-1",)
+            if "SELECT id::text, quick_hash, content_hash, extraction_status, extension" in sql:
+                return ("asset-1", "quick-before", "sha256-same", "indexed", ".pdf")
+            if "SELECT id::text" in sql and "WHERE content_hash" in sql:
+                return None
+            if "INSERT INTO source_assets" in sql:
+                return ("asset-1",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    file_path = tmp_path / "report.pdf"
+    file_path.write_bytes(b"unchanged content")
+    plan = CrawlPlan(
+        root_path=tmp_path,
+        assets=[
+            DiscoveredAsset(
+                path=file_path,
+                relative_path="report.pdf",
+                file_kind="document",
+                mime_type="application/pdf",
+                extension=".pdf",
+                size_bytes=17,
+                mtime_ns=200,
+                quick_hash="quick-after-mtime-change",
+                content_hash="sha256-same",
+                extraction_tier="deferred",
+            )
+        ],
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+
+    result = database.persist_crawl_plan(root_name="docs", plan=plan)
+
+    sql = "\n".join(statement for statement, _params in executed)
+    assert result["files_changed"] == 0
+    assert result["jobs_queued"] == 0
+    assert "INSERT INTO capture_jobs" not in sql
+
+
 def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypatch, tmp_path):
     executed = []
 
@@ -7302,8 +7377,8 @@ def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypa
                 return ("root-1",)
             if "INSERT INTO crawl_runs" in sql:
                 return ("run-1",)
-            if "SELECT id::text, quick_hash, extraction_status, extension" in sql:
-                return ("asset-1", "quick", "blocked_missing_dependency", ".eml")
+            if "SELECT id::text, quick_hash, content_hash, extraction_status, extension" in sql:
+                return ("asset-1", "quick", "content", "blocked_missing_dependency", ".eml")
             if "SELECT id::text" in sql and "WHERE content_hash" in sql:
                 return None
             if "INSERT INTO source_assets" in sql:
@@ -7389,8 +7464,8 @@ def test_persist_crawl_plan_requeues_unchanged_blocked_deferred_asset(monkeypatc
                 return ("root-1",)
             if "INSERT INTO crawl_runs" in sql:
                 return ("run-1",)
-            if "SELECT id::text, quick_hash, extraction_status, extension" in sql:
-                return ("asset-1", "quick", "blocked_missing_dependency", ".eml")
+            if "SELECT id::text, quick_hash, content_hash, extraction_status, extension" in sql:
+                return ("asset-1", "quick", "content", "blocked_missing_dependency", ".eml")
             if "SELECT id::text" in sql and "WHERE content_hash" in sql:
                 return None
             if "INSERT INTO source_assets" in sql:
