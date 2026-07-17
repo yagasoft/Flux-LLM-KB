@@ -272,6 +272,14 @@ def test_setup_docs_describe_worktree_safe_flux_cli_wrapper():
     assert "J:\\FluxLLMKB\\app\\.venv" in setup
 
 
+def test_complete_feature_derives_j_drive_package_caches_from_install_root():
+    script = (ROOT / "scripts" / "dev" / "complete-feature.ps1").read_text(encoding="utf-8")
+
+    assert 'else { "J:\\FluxLLMKB" }' in script
+    assert '$NpmCachePath = Join-Path $InstallRoot "package-cache\\npm"' in script
+    assert '$PipWheelhousePath = Join-Path $InstallRoot "package-cache\\wheelhouse"' in script
+
+
 def test_setup_docs_describe_local_only_feature_closeout_and_explicit_refreshes():
     setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
     setup_words = " ".join(setup.split())

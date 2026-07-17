@@ -543,7 +543,7 @@ def test_production_compose_overrides_host_paths_inside_api_and_worker():
         assert compose.count("FLUX_KB_CACHE_ROOT: /app/cache") == 2
         assert compose.count("FLUX_KB_PRIVATE_DIR: /app/private") == 2
         assert compose.count("FLUX_KB_LOG_DIR: /app/logs") == 2
-        assert "FLUX_KB_PRIVATE_DIR: D:\\FluxLLMKB\\private" not in compose
+        assert "FLUX_KB_PRIVATE_DIR: J:\\FluxLLMKB\\private" not in compose
 
 
 def test_production_compose_uses_docker_volumes_for_container_owned_state():
@@ -1043,8 +1043,11 @@ def test_production_deploy_supports_custom_apt_mirrors_for_slow_system_packages(
 def test_docs_describe_j_drive_production_runtime_boundary():
     setup = (ROOT / "docs" / "setup.md").read_text(encoding="utf-8")
     architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    integrations = (ROOT / "docs" / "integrations.md").read_text(encoding="utf-8")
+    roadmap = (ROOT / "docs" / "roadmap.md").read_text(encoding="utf-8")
 
-    assert "J:\\FluxLLMKB" in setup
+    for document in (setup, architecture, integrations, roadmap):
+        assert "J:\\FluxLLMKB" in document
     assert "D:\\FluxLLMKB" not in setup
     assert "production" in setup.lower()
     assert "docker named volumes" in setup.lower()
@@ -1056,6 +1059,7 @@ def test_docs_describe_j_drive_production_runtime_boundary():
     assert "repository remains source code only" in setup.lower()
     assert ".\\scripts\\deploy\\verify-image-traceability.ps1" in setup
     assert "docker image inspect" in setup.lower()
+    assert "| shipped | 100%" in roadmap
 
 
 def _embedded_compose_template(script: str) -> str:
