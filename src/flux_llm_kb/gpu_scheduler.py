@@ -1209,7 +1209,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                     priority, component, request_id, created_at, expires_at, metadata,
                     priority_class, admission_key, shape_bucket, caller_attached
                 )
-                VALUES (%s, %s, %s, 'waiting', %s, %s, %s, %s, %s, %s, %s, now(), now() + (%s * interval '1 second'), %s, %s, %s, %s, true)
+                VALUES (%s, %s, %s, 'waiting', %s, %s, %s, %s, %s, %s, now(), now() + (%s * interval '1 second'), %s, %s, %s, %s, true)
                 ON CONFLICT (admission_key)
                     WHERE admission_key <> '' AND status IN ('waiting', 'running')
                 DO UPDATE SET

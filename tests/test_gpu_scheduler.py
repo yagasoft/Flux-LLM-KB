@@ -1150,6 +1150,24 @@ def test_postgres_admission_reattachment_is_atomic_for_concurrent_same_key(monke
     assert all("ON CONFLICT (admission_key)" in statement for statement, _params in statements)
 
 
+def test_postgres_keyed_admission_binds_each_sql_placeholder():
+    statements = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _execute_fetchone(self, statement, params):
+            statements.append((statement, params))
+            return ("lease-new",)
+
+    scheduler = RecordingScheduler(_config(mode="postgres"), database_url="postgresql://example")
+    profile = task_profile("embedding", model_id="snowflake", request_id="job-1", priority_class="interactive")
+
+    assert scheduler._insert_waiting(profile, "lease-new") == "lease-new"
+    assert len(statements) == 1
+    statement, params = statements[0]
+    assert "ON CONFLICT (admission_key)" in statement
+    assert statement.count("%s") == len(params)
+
+
 def test_concurrent_reattached_acquires_reuse_one_linked_eviction_and_publish_once(monkeypatch):
     """Two callers attached to one admission must coalesce the brokered eviction."""
     candidate = GpuEvictionCandidate("embedding", "snowflake", 2_500, "model-runner")
