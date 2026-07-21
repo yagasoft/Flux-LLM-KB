@@ -1928,6 +1928,81 @@ def test_gpu_unload_rejects_a_stale_activity_fence(monkeypatch):
     assert "Snowflake/fenced" in model_runner._EMBEDDING_MODELS
 
 
+def test_gpu_unload_does_not_release_shared_allocator_during_another_model_operation(monkeypatch):
+    target_model = "Snowflake/target"
+    active_model = "Snowflake/active"
+    release_calls: list[str] = []
+    monkeypatch.setattr(model_runner, "_EMBEDDING_MODELS", {target_model: object(), active_model: object()})
+    monkeypatch.setattr(model_runner, "_RUNTIME_TRACKERS", {})
+    monkeypatch.setattr(model_runner, "_SERVED_RUNTIME_MODEL_KEYS", set())
+    monkeypatch.setattr(model_runner, "_release_gpu_memory", lambda: release_calls.append("released"))
+
+    tracker = model_runner._runtime_tracker()
+    target_key = model_runner.RuntimeModelKey("embedding", target_model)
+    active_key = model_runner.RuntimeModelKey("embedding", active_model)
+    target = next(item for item in tracker.inventory(model_runner._loaded_runtime_model_keys())["models"] if item["model_id"] == target_model)
+    ticket = tracker.enqueue(active_key, priority_class="background")
+
+    with tracker.operation(ticket):
+        with pytest.raises(RuntimeError, match="process_in_flight"):
+            model_runner._unload_resident_model(
+                "embedding",
+                target_model,
+                expected_generation=target["process_generation"],
+                expected_activity_sequence=target["activity_sequence"],
+            )
+
+    assert target_key in model_runner._loaded_runtime_model_keys()
+    assert release_calls == []
+
+
+def test_gpu_trim_endpoint_releases_allocator_cache_without_unloading_model(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    class FakeScheduler:
+        def reset_component_residency(self, _component):
+            return None
+
+        def record_model_residency(self, _residency):
+            return None
+
+    release_calls: list[str] = []
+    monkeypatch.setattr(model_runner, "_EMBEDDING_MODELS", {"Snowflake/trim": object()})
+    monkeypatch.setattr(model_runner, "_RUNTIME_TRACKERS", {})
+    monkeypatch.setattr(model_runner, "_SERVED_RUNTIME_MODEL_KEYS", set())
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
+    monkeypatch.setattr(model_runner, "_release_gpu_memory", lambda: release_calls.append("trimmed"))
+
+    client = TestClient(model_runner.create_app())
+    target = next(item for item in client.get("/v1/gpu/residency").json()["models"] if item["model_id"] == "Snowflake/trim")
+    response = client.post(
+        "/v1/gpu/trim",
+        json={
+            "task_type": "embedding",
+            "model_id": "Snowflake/trim",
+            "expected_generation": target["process_generation"],
+            "expected_activity_sequence": target["activity_sequence"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["trim_confirmed"] is True
+    assert response.json()["unloaded"] is False
+    assert "Snowflake/trim" in model_runner._EMBEDDING_MODELS
+    assert release_calls == ["trimmed"]
+
+
+def test_gpu_residency_advertises_non_preemptive_runtime_capabilities(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(model_runner, "_RUNTIME_TRACKERS", {})
+    payload = TestClient(model_runner.create_app()).get("/v1/gpu/residency").json()
+
+    assert payload["preemption"]["mcp_only"] is True
+    assert payload["preemption"]["fallback"] == "priority_at_safe_boundary"
+    assert all(item["cancellation"] == "unsupported" for item in payload["preemption"]["tasks"])
+
+
 def test_model_runner_invalid_request_class_defaults_to_background(monkeypatch):
     from fastapi.testclient import TestClient
 
@@ -1960,12 +2035,18 @@ def test_embedding_scheduler_receives_local_ticket_yield_callback(monkeypatch):
             captured["yield_wait"] = yield_wait
             return nullcontext()
 
-    @contextmanager
-    def fake_operation(_ticket):
-        yield SimpleNamespace(in_flight=1)
+    class Tracker:
+        def enqueue(self, *_args, **_kwargs):
+            return Ticket()
 
-    monkeypatch.setattr(model_runner, "_runtime_tracker", lambda: SimpleNamespace(enqueue=lambda *_args, **_kwargs: Ticket()))
-    monkeypatch.setattr(model_runner, "_runtime_operation", fake_operation)
+        def ready_to_start(self, _ticket):
+            return True
+
+        @contextmanager
+        def operation(self, _ticket):
+            yield SimpleNamespace(in_flight=1)
+
+    monkeypatch.setattr(model_runner, "_runtime_tracker", lambda: Tracker())
     monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: Scheduler())
     monkeypatch.setattr(model_runner, "_load_embedding_model", lambda _model: SimpleNamespace(encode=lambda *_args, **_kwargs: SimpleNamespace(tolist=lambda: [[0.1]])))
     monkeypatch.setattr(model_runner, "_allocator_reservation_snapshot", lambda *_args: ("known_unmeasured", None))
@@ -1974,6 +2055,100 @@ def test_embedding_scheduler_receives_local_ticket_yield_callback(monkeypatch):
     assert model_runner._embed_with_sentence_transformers(["text"], model="Snowflake/test", dimensions=1) == [[0.1]]
     assert callable(captured["yield_wait"])
     assert captured["yield_wait"]() is True
+
+
+def test_embedding_does_not_mark_runtime_in_flight_while_waiting_for_gpu_admission(monkeypatch):
+    from flux_llm_kb.gpu_runtime import RuntimeResidencyTracker
+
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    scheduler_observations = []
+
+    class Scheduler:
+        def acquire(self, _profile, *, yield_wait=None):
+            scheduler_observations.append((tracker.process_in_flight(), bool(yield_wait and yield_wait())))
+            return nullcontext()
+
+    monkeypatch.setattr(model_runner, "_runtime_tracker", lambda: tracker)
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: Scheduler())
+    monkeypatch.setattr(
+        model_runner,
+        "_load_embedding_model",
+        lambda _model: SimpleNamespace(encode=lambda *_args, **_kwargs: SimpleNamespace(tolist=lambda: [[0.1]])),
+    )
+    monkeypatch.setattr(model_runner, "_allocator_reservation_snapshot", lambda *_args: ("known_unmeasured", None))
+    monkeypatch.setattr(model_runner, "_record_vram_measurement", lambda *_args: None)
+
+    assert model_runner._embed_with_sentence_transformers(["text"], model="Snowflake/test", dimensions=1) == [[0.1]]
+    assert scheduler_observations == [(0, False)]
+
+
+def test_runtime_queue_race_releases_global_lease_before_waiting_again(monkeypatch):
+    from flux_llm_kb.gpu_runtime import RuntimeOperationNotReady
+
+    events: list[str] = []
+
+    class Ticket:
+        priority_class = "background"
+
+    class Tracker:
+        def __init__(self):
+            self.attempts = 0
+
+        def ready_to_start(self, _ticket):
+            return True
+
+        @contextmanager
+        def operation(self, _ticket):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeOperationNotReady("runtime operation ticket is not at the queue head")
+            yield SimpleNamespace(in_flight=1)
+
+    class Scheduler:
+        @contextmanager
+        def acquire(self, _profile, *, yield_wait=None):
+            assert callable(yield_wait)
+            events.append("lease-enter")
+            try:
+                yield
+            finally:
+                events.append("lease-exit")
+
+    tracker = Tracker()
+    monkeypatch.setattr(model_runner, "_runtime_tracker", lambda: tracker)
+
+    with model_runner._runtime_gpu_operation(Scheduler(), SimpleNamespace(), Ticket(), tracker):
+        events.append("body")
+
+    assert events == ["lease-enter", "lease-exit", "lease-enter", "body", "lease-exit"]
+
+
+@pytest.mark.parametrize("error_type", ["deferred", "timeout", "rejected"])
+def test_failed_global_admission_discards_model_runner_local_ticket(error_type):
+    from flux_llm_kb.gpu_runtime import RuntimeModelKey, RuntimeResidencyTracker
+    from flux_llm_kb.gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout
+
+    errors = {
+        "deferred": GpuLeaseDeferred("deferred"),
+        "timeout": GpuLeaseTimeout("timed out"),
+        "rejected": GpuLeaseRejected("rejected"),
+    }
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    key = RuntimeModelKey("embedding", "Snowflake/test")
+    ticket = tracker.enqueue(key, priority_class="background")
+
+    class Scheduler:
+        def acquire(self, _profile, *, yield_wait=None):
+            assert callable(yield_wait)
+            raise errors[error_type]
+
+    with pytest.raises(type(errors[error_type])):
+        with model_runner._runtime_gpu_operation(Scheduler(), SimpleNamespace(), ticket, tracker):
+            pass
+
+    assert tracker.next_waiting_ticket_id(key) is None
+    replacement = tracker.enqueue(key, priority_class="background")
+    assert tracker.ready_to_start(replacement) is True
 
 
 @pytest.mark.parametrize(

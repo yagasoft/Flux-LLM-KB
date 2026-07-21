@@ -442,7 +442,7 @@ def persist_gpu_runtime_observation(
                     cur.execute(
                         """
                         UPDATE gpu_model_residency
-                           SET runtime_state = 'absent', runtime_observed_at = now(),
+                           SET runtime_state = 'absent', runtime_observed_at = to_timestamp(%s),
                                runtime_failure_reason = ''
                          WHERE owner_component = %s
                            AND (
@@ -451,7 +451,11 @@ def persist_gpu_runtime_observation(
                                 OR (runtime_generation <> %s AND runtime_observed_at < to_timestamp(%s))
                            )
                         """,
-                        (owner, generation, float(inventory.observed_at), generation, float(inventory.observed_at)),
+                        (
+                            float(inventory.observed_at), owner,
+                            generation, float(inventory.observed_at),
+                            generation, float(inventory.observed_at),
+                        ),
                     )
                     for model in inventory.models:
                         if not isinstance(model, dict):

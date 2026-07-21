@@ -13,6 +13,19 @@ from uuid import uuid4
 
 _PRIORITIES = {"background": 0, "interactive": 100}
 _MEBIBYTE = 1024 * 1024
+_PREEMPTION_REASONS = {
+    "embedding": "synchronous embedding inference has no cooperative cancellation acknowledgement",
+    "rerank": "synchronous reranking inference has no cooperative cancellation acknowledgement",
+    "ocr_image": "Paddle OCR inference has no cooperative cancellation acknowledgement",
+    "ocr_document": "Paddle document OCR inference has no cooperative cancellation acknowledgement",
+    "asr": "ASR transcription has no cooperative cancellation acknowledgement",
+    "ollama_vision": "the Ollama request path has no cooperative cancellation acknowledgement",
+    "video_extraction": "video extraction has no checkpointed cancellation acknowledgement",
+}
+
+
+class RuntimeOperationNotReady(RuntimeError):
+    """A local operation lost the safe-boundary race before CUDA work started."""
 
 
 @dataclass(frozen=True)
@@ -37,6 +50,7 @@ class RuntimeOperationTicket:
     id: str
     key: RuntimeModelKey
     priority_class: str
+    priority: int = 0
     request_id: str = ""
     is_active: bool = False
     is_head: bool = False
@@ -73,6 +87,37 @@ def normalise_priority_class(priority_class: str) -> str:
 def runtime_request_priority(priority_class: str) -> int:
     """Return the local ordering priority for a runtime request."""
     return _PRIORITIES[normalise_priority_class(priority_class)]
+
+
+def runtime_preemption_policy(owner_component: str, task_types: Iterable[str]) -> dict[str, Any]:
+    """Expose the verified cancellation contract for a runtime service.
+
+    MCP is the only caller class that may ever ask to cancel work.  Current
+    runtimes do not expose a cooperative cancellation acknowledgement, so this
+    policy deliberately reports every listed task as non-preemptive.  Callers
+    must then use the normal priority queue at a safe operation boundary.
+    """
+    owner = str(owner_component or "unknown").strip() or "unknown"
+    tasks = []
+    for task_type in sorted({str(item or "unknown").strip() or "unknown" for item in task_types}):
+        tasks.append(
+            {
+                "task_type": task_type,
+                "owner_component": owner,
+                "cancellation": "unsupported",
+                "cooperative_confirmation": False,
+                "reason": _PREEMPTION_REASONS.get(
+                    task_type,
+                    "runtime does not provide a cooperative cancellation acknowledgement",
+                ),
+            }
+        )
+    return {
+        "mcp_only": True,
+        "cancellation_request": "unavailable",
+        "fallback": "priority_at_safe_boundary",
+        "tasks": tasks,
+    }
 
 
 def _known_unmeasured(framework: str, reason: str, *, device: str = "") -> AllocatorSnapshot:
@@ -174,9 +219,15 @@ class RuntimeResidencyTracker:
         key: RuntimeModelKey,
         *,
         priority_class: str,
+        priority: int = 0,
         request_id: str = "",
     ) -> RuntimeOperationTicket:
         priority_class = normalise_priority_class(priority_class)
+        try:
+            resolved_priority = int(priority)
+        except (TypeError, ValueError):
+            resolved_priority = 0
+        resolved_priority = max(runtime_request_priority(priority_class), resolved_priority)
         with self._lock:
             self._mark_loaded(key)
             queue = self._queues.setdefault(key, [])
@@ -184,15 +235,38 @@ class RuntimeResidencyTracker:
                 id=uuid4().hex,
                 key=key,
                 priority_class=priority_class,
+                priority=resolved_priority,
                 request_id=request_id,
                 is_head=not queue,
                 _order=self._ticket_order,
             )
             self._ticket_order += 1
             queue.append(ticket)
-            queue.sort(key=lambda item: (-runtime_request_priority(item.priority_class), item._order))
+            queue.sort(key=lambda item: (-item.priority, item._order))
             self._refresh_queue_heads(key)
             return ticket
+
+    def ready_to_start(self, ticket: RuntimeOperationTicket) -> bool:
+        """Whether a ticket is next and can safely seek a global GPU lease."""
+        with self._lock:
+            queue = self._queues.get(ticket.key, [])
+            state = self._states.get(ticket.key)
+            return bool(state is not None and queue and queue[0] is ticket and state.active_ticket_id is None)
+
+    def should_yield(self, ticket: RuntimeOperationTicket) -> bool:
+        """Whether a higher-priority *waiting* local operation is ahead of a ticket.
+
+        A currently active operation is intentionally ignored: it has already
+        crossed the non-pre-emptive CUDA boundary and must finish naturally.
+        """
+        with self._lock:
+            for queued in self._queues.get(ticket.key, []):
+                if queued is ticket:
+                    return False
+                if queued.is_active:
+                    continue
+                return queued.priority > ticket.priority
+        return False
 
     @contextmanager
     def operation(self, ticket: RuntimeOperationTicket) -> Iterator[RuntimeOperationMeasurement]:
@@ -202,9 +276,9 @@ class RuntimeResidencyTracker:
             if state is None or ticket not in queue:
                 raise RuntimeError("runtime operation ticket is no longer queued")
             if state.active_ticket_id is not None:
-                raise RuntimeError("a runtime operation is already active for this model")
+                raise RuntimeOperationNotReady("a runtime operation is already active for this model")
             if queue[0] is not ticket:
-                raise RuntimeError("runtime operation ticket is not at the queue head")
+                raise RuntimeOperationNotReady("runtime operation ticket is not at the queue head")
             now = time()
             state.active_ticket_id = ticket.id
             state.in_flight += 1
@@ -269,6 +343,29 @@ class RuntimeResidencyTracker:
                     return ticket.id
         return None
 
+    def discard_waiting(self, ticket: RuntimeOperationTicket) -> bool:
+        """Remove an abandoned inactive ticket without interrupting live work.
+
+        A caller may fail global admission after enqueueing locally.  That
+        ticket has never crossed the runtime-operation boundary and must not
+        remain at the local queue head.  Active tickets are deliberately
+        protected: this method is cleanup, never cancellation.
+        """
+        with self._lock:
+            queue = self._queues.get(ticket.key, [])
+            state = self._states.get(ticket.key)
+            if ticket not in queue:
+                return False
+            if ticket.is_active or (state is not None and state.active_ticket_id == ticket.id):
+                return False
+            queue.remove(ticket)
+            ticket.is_head = False
+            if not queue:
+                self._queues.pop(ticket.key, None)
+            else:
+                self._refresh_queue_heads(ticket.key)
+            return True
+
     def process_in_flight(self) -> int:
         """Return active operations across every model in this service process."""
         with self._lock:
@@ -286,6 +383,7 @@ class RuntimeResidencyTracker:
         expected_generation: str,
         expected_activity_sequence: int,
         remove: Callable[[], bool],
+        release_allocator: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if expected_generation != self.process_generation:
@@ -297,6 +395,11 @@ class RuntimeResidencyTracker:
                 return {"unloaded": False, "reason": "activity_mismatch"}
             if state.in_flight:
                 return {"unloaded": False, "reason": "in_flight"}
+            # Removing one model may release a process-wide CUDA/Paddle cache.
+            # Do not touch that shared allocator while another model operation
+            # in this runtime process is live.
+            if any(item.in_flight for item in self._states.values()):
+                return {"unloaded": False, "reason": "process_in_flight"}
             if self._queues.get(key):
                 return {"unloaded": False, "reason": "queued"}
             if not state.is_loaded:
@@ -305,10 +408,42 @@ class RuntimeResidencyTracker:
             if removed:
                 state.is_loaded = False
                 state.last_activity_at = time()
+                # ``empty_cache``-style calls touch process-wide framework
+                # state, so execute them before releasing the tracker gate.
+                if release_allocator is not None:
+                    release_allocator()
             return {
                 "unloaded": bool(removed),
                 "reason": "unloaded" if removed else "remove_failed",
             }
+
+    def trim_allocator(
+        self,
+        key: RuntimeModelKey,
+        *,
+        expected_generation: str,
+        expected_activity_sequence: int,
+        trim: Callable[[], Any],
+    ) -> dict[str, Any]:
+        """Release framework cache only while this runtime is completely idle.
+
+        Cache trimming keeps the loaded model resident, but it still touches the
+        process-wide CUDA/Paddle allocators.  Hold the tracker gate around the
+        operation so no tracked CUDA call can start between the activity fence
+        check and the trim itself.
+        """
+        with self._lock:
+            if expected_generation != self.process_generation:
+                return {"trimmed": False, "reason": "generation_mismatch"}
+            state = self._states.get(key)
+            if state is None or not state.is_loaded:
+                return {"trimmed": False, "reason": "absent"}
+            if state.activity_sequence != expected_activity_sequence:
+                return {"trimmed": False, "reason": "activity_mismatch"}
+            if any(item.in_flight for item in self._states.values()):
+                return {"trimmed": False, "reason": "in_flight"}
+            trim()
+            return {"trimmed": True, "reason": "trimmed"}
 
     def _allocator_snapshots(self) -> list[AllocatorSnapshot]:
         snapshots = []

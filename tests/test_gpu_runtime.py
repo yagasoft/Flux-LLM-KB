@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 from types import SimpleNamespace
 import sys
+import threading
 
 import pytest
 
@@ -40,6 +41,56 @@ def test_interactive_ticket_moves_ahead_of_waiting_background_at_boundary() -> N
     with tracker.operation(interactive):
         assert interactive.is_active
     assert background.is_head
+
+
+def test_explicit_lane_priority_orders_internal_work_at_the_next_safe_boundary() -> None:
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    key = RuntimeModelKey("embedding", "snowflake")
+    active = tracker.enqueue(key, priority_class="background", priority=400)
+    with tracker.operation(active):
+        ocr = tracker.enqueue(key, priority_class="background", priority=300)
+        vision = tracker.enqueue(key, priority_class="background", priority=200)
+        video = tracker.enqueue(key, priority_class="background", priority=100)
+        document = tracker.enqueue(key, priority_class="background", priority=400)
+        assert tracker.next_waiting_ticket_id(key) == document.id
+
+    with tracker.operation(document):
+        assert document.is_active
+    with tracker.operation(ocr):
+        assert ocr.is_active
+    with tracker.operation(vision):
+        assert vision.is_active
+    with tracker.operation(video):
+        assert video.is_active
+
+
+def test_runtime_operation_uses_a_specific_exception_for_a_safe_boundary_queue_race() -> None:
+    from flux_llm_kb.gpu_runtime import RuntimeOperationNotReady
+
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    key = RuntimeModelKey("embedding", "snowflake")
+    active = tracker.enqueue(key, priority_class="background")
+    waiting = tracker.enqueue(key, priority_class="background")
+
+    with tracker.operation(active):
+        with pytest.raises(RuntimeOperationNotReady, match="already active"):
+            with tracker.operation(waiting):
+                pass
+
+
+def test_discard_waiting_ticket_removes_only_an_inactive_ticket() -> None:
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    key = RuntimeModelKey("embedding", "snowflake")
+    active = tracker.enqueue(key, priority_class="background")
+    waiting = tracker.enqueue(key, priority_class="background")
+
+    with tracker.operation(active):
+        assert tracker.discard_waiting(waiting) is True
+        assert tracker.next_waiting_ticket_id(key) is None
+        assert tracker.discard_waiting(active) is False
+
+    replacement = tracker.enqueue(key, priority_class="background")
+    assert tracker.ready_to_start(replacement) is True
 
 
 def test_completed_operations_increment_model_activity_sequence() -> None:
@@ -173,6 +224,110 @@ def test_unload_refuses_model_with_queued_operation_without_stranding_ticket() -
     assert not called
     with tracker.operation(ticket):
         assert ticket.is_active
+
+
+def test_unload_refuses_target_when_another_model_is_in_flight() -> None:
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    target = RuntimeModelKey("embedding", "snowflake")
+    active = RuntimeModelKey("rerank", "qwen")
+    tracker.inventory([target, active])
+    ticket = tracker.enqueue(active, priority_class="background")
+    remove_called = False
+
+    def remove() -> bool:
+        nonlocal remove_called
+        remove_called = True
+        return True
+
+    with tracker.operation(ticket):
+        result = tracker.unload(
+            target,
+            expected_generation=tracker.process_generation,
+            expected_activity_sequence=0,
+            remove=remove,
+        )
+
+    assert result == {"unloaded": False, "reason": "process_in_flight"}
+    assert not remove_called
+
+
+def test_unload_keeps_the_process_gate_through_allocator_release() -> None:
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    target = RuntimeModelKey("embedding", "snowflake")
+    other = RuntimeModelKey("rerank", "qwen")
+    tracker.inventory([target, other])
+    other_ticket = tracker.enqueue(other, priority_class="background")
+    started = threading.Event()
+    entered_operation = threading.Event()
+
+    def release_allocator() -> None:
+        def start_other_operation() -> None:
+            started.set()
+            with tracker.operation(other_ticket):
+                entered_operation.set()
+
+        thread = threading.Thread(target=start_other_operation)
+        thread.start()
+        assert started.wait(1)
+        assert not entered_operation.wait(0.05)
+        thread.join(timeout=0.01)
+        assert thread.is_alive()
+        release_allocator.thread = thread
+
+    result = tracker.unload(
+        target,
+        expected_generation=tracker.process_generation,
+        expected_activity_sequence=0,
+        remove=lambda: True,
+        release_allocator=release_allocator,
+    )
+
+    release_allocator.thread.join(timeout=1)
+    assert not release_allocator.thread.is_alive()
+    assert entered_operation.is_set()
+    assert result == {"unloaded": True, "reason": "unloaded"}
+
+
+def test_allocator_trim_is_fenced_and_never_runs_during_an_active_operation() -> None:
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+    key = RuntimeModelKey("embedding", "snowflake")
+    ticket = tracker.enqueue(key, priority_class="background")
+    calls = []
+
+    with tracker.operation(ticket):
+        blocked = tracker.trim_allocator(
+            key,
+            expected_generation=tracker.process_generation,
+            expected_activity_sequence=0,
+            trim=lambda: calls.append("trim"),
+        )
+
+    assert blocked == {"trimmed": False, "reason": "in_flight"}
+    assert calls == []
+    fence = tracker.inventory([key])["models"][0]
+    completed = tracker.trim_allocator(
+        key,
+        expected_generation=fence["process_generation"],
+        expected_activity_sequence=fence["activity_sequence"],
+        trim=lambda: calls.append("trim"),
+    )
+
+    assert completed == {"trimmed": True, "reason": "trimmed"}
+    assert calls == ["trim"]
+
+
+def test_mcp_preemption_policy_requires_runtime_confirmed_cooperative_cancellation() -> None:
+    from flux_llm_kb.gpu_runtime import runtime_preemption_policy
+
+    policy = runtime_preemption_policy(
+        "model-runner",
+        ("embedding", "rerank", "ocr_image", "ocr_document"),
+    )
+
+    assert policy["mcp_only"] is True
+    assert policy["fallback"] == "priority_at_safe_boundary"
+    assert all(item["cancellation"] == "unsupported" for item in policy["tasks"])
+    assert all(item["cooperative_confirmation"] is False for item in policy["tasks"])
 
 
 def test_unload_after_reload_refuses_stale_activity_fence() -> None:

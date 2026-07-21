@@ -78,13 +78,19 @@ class EventWorker:
             job_id = str(message.payload.get("job_id") or message.job_id or "").strip()
             if not job_id:
                 raise ValueError("corpus/search-index command requires job_id")
-            return self.service.process_corpus_job_by_id(
-                job_id=job_id,
-                worker_id=self.worker_id,
-                broker_message_id=message.message_id,
-                correlation_id=message.correlation_id,
-                causation_id=message.causation_id,
-            )
+            from .model_activity import caller_surface
+
+            # The CLI process is only a broker host. Each internal job must get
+            # its own background identity rather than inheriting the CLI's
+            # process-wide interactive request context.
+            with caller_surface("worker", request_id=job_id):
+                return self.service.process_corpus_job_by_id(
+                    job_id=job_id,
+                    worker_id=self.worker_id,
+                    broker_message_id=message.message_id,
+                    correlation_id=message.correlation_id,
+                    causation_id=message.causation_id,
+                )
         if message.routing_key == messaging.MAIL_IMAP_SYNC_ROUTING_KEY:
             from . import mail_ingestion
 

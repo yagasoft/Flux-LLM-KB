@@ -17,7 +17,7 @@ from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from pathlib import Path
 
-from .gpu_runtime import RuntimeModelKey, RuntimeResidencyTracker, normalise_priority_class
+from .gpu_runtime import RuntimeModelKey, RuntimeOperationNotReady, RuntimeResidencyTracker, normalise_priority_class, runtime_preemption_policy
 from .gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
 from .model_activity import current_model_request_context, record_model_activity
 from .onnxruntime_logging import configure_onnxruntime_logging
@@ -664,22 +664,22 @@ def _embed_with_sentence_transformers(
             "max_active_seconds": _embedding_lease_max_active_seconds(timeout_seconds),
         },
     )
-    ticket = _runtime_tracker().enqueue(
+    tracker = _runtime_tracker()
+    ticket = tracker.enqueue(
         RuntimeModelKey("embedding", model),
         priority_class=_runtime_request_class(request_class),
+        priority=profile.priority,
         request_id=request_id,
     )
-    tracker = _runtime_tracker()
     scheduler = get_gpu_scheduler()
-    with _runtime_operation(ticket) as measurement:
-        with _acquire_gpu_lease(scheduler, profile, ticket):
-            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            encoder = _load_embedding_model(model)
-            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            try:
-                vectors = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
-            finally:
-                _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
+    with _runtime_gpu_operation(scheduler, profile, ticket, tracker) as measurement:
+        pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        encoder = _load_embedding_model(model)
+        post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        try:
+            vectors = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+        finally:
+            _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
     result = [[float(value) for value in vector] for vector in vectors.tolist()]
     for vector in result:
         if len(vector) != dimensions:
@@ -870,22 +870,22 @@ def _rerank_with_transformers(
     cache_key = (resolved_profile.model, resolved_profile.quantization, resolved_profile.load_model)
     if cache_key in _RERANKER_MODELS:
         _record_model_residency_state("rerank", resolved_profile.load_model, resident=True)
-    ticket = _runtime_tracker().enqueue(
+    tracker = _runtime_tracker()
+    ticket = tracker.enqueue(
         RuntimeModelKey("rerank", resolved_profile.load_model),
         priority_class=_runtime_request_class(request_class),
+        priority=lease_profile.priority,
         request_id=request_id,
     )
-    tracker = _runtime_tracker()
     scheduler = get_gpu_scheduler()
-    with _runtime_operation(ticket) as measurement:
-        with _acquire_gpu_lease(scheduler, lease_profile, ticket):
-            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
-            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            try:
-                scores = reranker.predict([(query, passage) for passage in passages])
-            finally:
-                _record_vram_measurement(scheduler, lease_profile, tracker, measurement, pre_load, post_load)
+    with _runtime_gpu_operation(scheduler, lease_profile, ticket, tracker) as measurement:
+        pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
+        post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        try:
+            scores = reranker.predict([(query, passage) for passage in passages])
+        finally:
+            _record_vram_measurement(scheduler, lease_profile, tracker, measurement, pre_load, post_load)
     return [float(score) for score in scores]
 
 
@@ -1070,25 +1070,25 @@ def _ocr_image_with_paddle_direct(
         priority_class=_runtime_request_class(request_class), timeout_seconds=timeout_seconds,
         metadata={"workload_class": "unknown"},
     )
-    ticket = _runtime_tracker().enqueue(
+    tracker = _runtime_tracker()
+    ticket = tracker.enqueue(
         RuntimeModelKey("ocr_image", model),
         priority_class=_runtime_request_class(request_class),
+        priority=profile.priority,
         request_id=request_id,
     )
-    tracker = _runtime_tracker()
     scheduler = get_gpu_scheduler()
-    with _runtime_operation(ticket) as measurement:
-        with _acquire_gpu_lease(scheduler, profile, ticket):
-            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            ocr = _load_paddleocr(model)
-            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            try:
-                if hasattr(ocr, "predict"):
-                    result = ocr.predict(str(path))
-                else:
-                    result = ocr.ocr(str(path), cls=True)
-            finally:
-                _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
+    with _runtime_gpu_operation(scheduler, profile, ticket, tracker) as measurement:
+        pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        ocr = _load_paddleocr(model)
+        post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        try:
+            if hasattr(ocr, "predict"):
+                result = ocr.predict(str(path))
+            else:
+                result = ocr.ocr(str(path), cls=True)
+        finally:
+            _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
     return _paddleocr_text(result)
 
 
@@ -1156,22 +1156,22 @@ def _ocr_document_with_paddle_direct(
         priority_class=_runtime_request_class(request_class), timeout_seconds=timeout_seconds,
         metadata={"workload_class": "unknown"},
     )
-    ticket = _runtime_tracker().enqueue(
+    tracker = _runtime_tracker()
+    ticket = tracker.enqueue(
         RuntimeModelKey("ocr_document", model),
         priority_class=_runtime_request_class(request_class),
+        priority=profile.priority,
         request_id=request_id,
     )
-    tracker = _runtime_tracker()
     scheduler = get_gpu_scheduler()
-    with _runtime_operation(ticket) as measurement:
-        with _acquire_gpu_lease(scheduler, profile, ticket):
-            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            pipeline = _load_paddleocr_vl(model)
-            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
-            try:
-                return _paddleocr_text(list(pipeline.predict(str(path))))
-            finally:
-                _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
+    with _runtime_gpu_operation(scheduler, profile, ticket, tracker) as measurement:
+        pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        pipeline = _load_paddleocr_vl(model)
+        post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+        try:
+            return _paddleocr_text(list(pipeline.predict(str(path))))
+        finally:
+            _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
 
 
 def _with_ocr_input_path(payload: dict[str, Any], consumer: Any, *, validate_image: bool = False) -> str:
@@ -1424,6 +1424,22 @@ def create_app():
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail={"reason": str(exc)}) from exc
 
+    @app.post("/v1/gpu/trim")
+    def gpu_trim(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return _trim_resident_model(
+                str(payload.get("task_type") or ""),
+                str(payload.get("model_id") or ""),
+                expected_generation=str(payload.get("expected_generation") or ""),
+                expected_activity_sequence=_expected_activity_sequence(payload),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail={"reason": str(exc)}) from exc
+
     @app.post("/v1/embeddings")
     def embeddings(payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1630,34 +1646,57 @@ def _runtime_request_kwargs(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _yield_wait_for_ticket(ticket: Any) -> Callable[[], bool]:
-    """Allow an ungranted background admission to yield to a local interactive ticket."""
+def _yield_wait_for_ticket(ticket: Any, tracker: Any | None = None) -> Callable[[], bool]:
+    """Yield an ungranted lease only to a higher-priority waiting local ticket."""
+    should_yield = getattr(tracker, "should_yield", None)
+    if callable(should_yield):
+        return lambda: bool(should_yield(ticket))
     return lambda: getattr(ticket, "priority_class", "background") == "background" and not bool(getattr(ticket, "is_head", True))
 
 
-def _acquire_gpu_lease(scheduler: Any, profile: Any, ticket: Any) -> Any:
+def _acquire_gpu_lease(scheduler: Any, profile: Any, ticket: Any, *, tracker: Any | None = None) -> Any:
     """Use the priority handshake where supported, retaining legacy scheduler compatibility."""
     try:
-        return scheduler.acquire(profile, yield_wait=_yield_wait_for_ticket(ticket))
+        return scheduler.acquire(profile, yield_wait=_yield_wait_for_ticket(ticket, tracker))
     except TypeError as exc:
         if "yield_wait" not in str(exc):
             raise
         return scheduler.acquire(profile)
 
 
+def _wait_for_runtime_turn(ticket: Any, tracker: Any) -> None:
+    """Wait locally without claiming a global GPU lease for a queued operation."""
+    ready_to_start = getattr(tracker, "ready_to_start", None)
+    if not callable(ready_to_start):
+        return
+    while not bool(ready_to_start(ticket)):
+        time.sleep(0.001)
+
+
 @contextmanager
-def _runtime_operation(ticket: Any):
-    """Wait for the tracker queue before entering the non-pre-emptive operation."""
-    tracker = _runtime_tracker()
-    while True:
-        try:
-            with tracker.operation(ticket) as measurement:
-                yield measurement
-            return
-        except RuntimeError as exc:
-            if str(exc) not in {"a runtime operation is already active for this model", "runtime operation ticket is not at the queue head"}:
-                raise
-            time.sleep(0.001)
+def _runtime_gpu_operation(scheduler: Any, profile: Any, ticket: Any, tracker: Any):
+    """Acquire global capacity before marking the runtime operation in flight.
+
+    The short retry handles a higher-priority local ticket that arrives between
+    the local readiness check and the global lease grant. The lease is released
+    before waiting again, so an inactive waiter never pins GPU capacity.
+    """
+    try:
+        while True:
+            _wait_for_runtime_turn(ticket, tracker)
+            try:
+                with _acquire_gpu_lease(scheduler, profile, ticket, tracker=tracker):
+                    with tracker.operation(ticket) as measurement:
+                        yield measurement
+                        return
+            except RuntimeOperationNotReady:
+                # The local head changed after the readiness check.  Leaving the
+                # ``with`` block releases the global lease before waiting again.
+                continue
+    finally:
+        discard_waiting = getattr(tracker, "discard_waiting", None)
+        if callable(discard_waiting):
+            discard_waiting(ticket)
 
 
 def _allocator_reservation_snapshot(tracker: RuntimeResidencyTracker, loaded_models: Iterable[RuntimeModelKey]) -> tuple[str, int | None]:
@@ -1722,6 +1761,10 @@ def _runtime_residency_payload() -> dict[str, Any]:
     return {
         "owner_component": _scheduler_component(),
         "worker_count": 1,
+        "preemption": runtime_preemption_policy(
+            _scheduler_component(),
+            ("embedding", "rerank", "ocr_image", "ocr_document"),
+        ),
         **payload,
     }
 
@@ -1800,15 +1843,14 @@ def _unload_resident_model(
         expected_generation=expected_generation,
         expected_activity_sequence=expected_activity_sequence,
         remove=lambda: _remove_resident_model(task, model),
+        release_allocator=_release_gpu_memory,
     )
-    if result["reason"] in {"generation_mismatch", "activity_mismatch", "in_flight", "queued"}:
+    if result["reason"] in {"generation_mismatch", "activity_mismatch", "in_flight", "process_in_flight", "queued"}:
         raise RuntimeError(str(result["reason"]))
     unload_confirmed = bool(result["unloaded"]) or not target_present
     if not unload_confirmed:
         raise RuntimeError(str(result["reason"]))
     _record_model_residency_state(task, model, resident=False)
-    if result["unloaded"]:
-        _release_gpu_memory()
     allocator_after = tracker.inventory(_loaded_runtime_model_keys())["allocator"]
     return {
         "ok": True,
@@ -1818,6 +1860,50 @@ def _unload_resident_model(
         "unload_confirmed": True,
         "target_present": target_present,
         "resident": False,
+        "allocator_before": allocator_before,
+        "allocator_after": allocator_after,
+    }
+
+
+def _trim_resident_model(
+    task_type: str,
+    model_id: str,
+    *,
+    expected_generation: str,
+    expected_activity_sequence: int,
+) -> dict[str, Any]:
+    """Release allocator cache while retaining a runtime-confirmed model."""
+    task = str(task_type or "").strip()
+    model = str(model_id or "").strip()
+    if not task:
+        raise ValueError("task_type is required")
+    if not model:
+        raise ValueError("model_id is required")
+    key = RuntimeModelKey(task, model)
+    if task not in {"embedding", "rerank", "ocr_image", "ocr_document"}:
+        raise ValueError(f"unsupported GPU trim task_type: {task}")
+    loaded_models = _loaded_runtime_model_keys()
+    if key not in loaded_models:
+        raise LookupError(f"model is not resident: {model}")
+    _SERVED_RUNTIME_MODEL_KEYS.add(key)
+    tracker = _runtime_tracker()
+    allocator_before = tracker.inventory(loaded_models)["allocator"]
+    result = tracker.trim_allocator(
+        key,
+        expected_generation=expected_generation,
+        expected_activity_sequence=expected_activity_sequence,
+        trim=_release_gpu_memory,
+    )
+    if not result["trimmed"]:
+        raise RuntimeError(str(result["reason"]))
+    allocator_after = tracker.inventory(_loaded_runtime_model_keys())["allocator"]
+    return {
+        "ok": True,
+        "task_type": task,
+        "model_id": model,
+        "unloaded": False,
+        "trim_confirmed": True,
+        "resident": True,
         "allocator_before": allocator_before,
         "allocator_after": allocator_after,
     }

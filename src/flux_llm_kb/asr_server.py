@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
-from .gpu_runtime import RuntimeModelKey, RuntimeResidencyTracker, normalise_priority_class
+from .gpu_runtime import RuntimeModelKey, RuntimeOperationNotReady, RuntimeResidencyTracker, normalise_priority_class, runtime_preemption_policy
 from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
 
 
@@ -178,7 +178,7 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             expected_activity_sequence=expected_activity_sequence,
             remove=lambda: bool(service_runtime.unload_model()) if hasattr(service_runtime, "unload_model") else False,
         )
-        if result["reason"] in {"generation_mismatch", "activity_mismatch", "in_flight", "queued"}:
+        if result["reason"] in {"generation_mismatch", "activity_mismatch", "in_flight", "process_in_flight", "queued"}:
             raise HTTPException(status_code=409, detail={"reason": result["reason"]})
         unload_confirmed = bool(result["unloaded"]) or not target_present
         if not unload_confirmed:
@@ -196,12 +196,51 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             "allocator_after": tracker.inventory([])["allocator"],
         }
 
+    @app.post("/v1/gpu/trim")
+    def gpu_trim(payload: dict[str, Any]) -> dict[str, Any]:
+        task_type = str(payload.get("task_type") or "")
+        model_id = str(payload.get("model_id") or "")
+        if task_type != "asr":
+            raise HTTPException(status_code=400, detail=f"unsupported GPU trim task_type: {task_type}")
+        if model_id and model_id not in {service_config.model, resolve_model_alias(service_config.model), str(service_config.model_path)}:
+            raise HTTPException(status_code=404, detail=f"model is not served: {model_id}")
+        expected_generation = str(payload.get("expected_generation") or "")
+        if not expected_generation:
+            raise HTTPException(status_code=400, detail="expected_generation is required")
+        try:
+            expected_activity_sequence = int(payload["expected_activity_sequence"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="expected_activity_sequence is required") from exc
+        loaded_models = [model_key] if getattr(service_runtime, "_model", None) is not None else []
+        if not loaded_models:
+            raise HTTPException(status_code=404, detail=f"model is not resident: {service_config.model}")
+        allocator_before = tracker.inventory(loaded_models)["allocator"]
+        result = tracker.trim_allocator(
+            model_key,
+            expected_generation=expected_generation,
+            expected_activity_sequence=expected_activity_sequence,
+            trim=_release_gpu_memory,
+        )
+        if not result["trimmed"]:
+            raise HTTPException(status_code=409, detail={"reason": result["reason"]})
+        return {
+            "ok": True,
+            "task_type": "asr",
+            "model_id": service_config.model,
+            "unloaded": False,
+            "trim_confirmed": True,
+            "resident": True,
+            "allocator_before": allocator_before,
+            "allocator_after": tracker.inventory([model_key])["allocator"],
+        }
+
     @app.get("/v1/gpu/residency")
     def gpu_residency() -> dict[str, Any]:
         loaded_models = [model_key] if getattr(service_runtime, "_model", None) is not None else []
         return {
             "owner_component": "asr",
             "worker_count": 1,
+            "preemption": runtime_preemption_policy("asr", ("asr",)),
             **tracker.inventory(loaded_models),
         }
 
@@ -226,23 +265,32 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             temp_path = Path(handle.name)
             shutil.copyfileobj(file.file, handle)
         try:
-            profile = task_profile("asr", model_id=service_config.model, component="asr", metadata={"workload_class": "unknown"})
+            resolved_request_class = _runtime_request_class(request_class)
+            resolved_request_id = request_id if isinstance(request_id, str) else ""
+            profile = task_profile(
+                "asr",
+                model_id=service_config.model,
+                component="asr",
+                request_id=resolved_request_id,
+                priority_class=resolved_request_class,
+                metadata={"workload_class": "unknown"},
+            )
             ticket = tracker.enqueue(
                 model_key,
-                priority_class=_runtime_request_class(request_class),
-                request_id=request_id if isinstance(request_id, str) else "",
+                priority_class=resolved_request_class,
+                priority=profile.priority,
+                request_id=resolved_request_id,
             )
-            with _runtime_operation(tracker, ticket) as measurement:
-                with scheduler.acquire(profile):
-                    pre_load = _allocator_reservation_snapshot(tracker, [model_key])
-                    loader = getattr(service_runtime, "_load_model", None)
-                    if callable(loader):
-                        loader()
-                    post_load = _allocator_reservation_snapshot(tracker, [model_key])
-                    try:
-                        return dict(service_runtime.transcribe(temp_path))
-                    finally:
-                        _record_vram_measurement(scheduler, profile, tracker, measurement, [model_key], pre_load, post_load)
+            with _runtime_gpu_operation(scheduler, profile, ticket, tracker) as measurement:
+                pre_load = _allocator_reservation_snapshot(tracker, [model_key])
+                loader = getattr(service_runtime, "_load_model", None)
+                if callable(loader):
+                    loader()
+                post_load = _allocator_reservation_snapshot(tracker, [model_key])
+                try:
+                    return dict(service_runtime.transcribe(temp_path))
+                finally:
+                    _record_vram_measurement(scheduler, profile, tracker, measurement, [model_key], pre_load, post_load)
         except GpuLeaseTimeout as exc:
             raise HTTPException(
                 status_code=429,
@@ -309,18 +357,49 @@ def _runtime_request_class(value: Any) -> str:
         return "background"
 
 
+def _yield_wait_for_ticket(ticket: Any, tracker: Any) -> Any:
+    should_yield = getattr(tracker, "should_yield", None)
+    if callable(should_yield):
+        return lambda: bool(should_yield(ticket))
+    return lambda: getattr(ticket, "priority_class", "background") == "background" and not bool(getattr(ticket, "is_head", True))
+
+
+def _acquire_gpu_lease(scheduler: Any, profile: Any, ticket: Any, tracker: Any) -> Any:
+    try:
+        return scheduler.acquire(profile, yield_wait=_yield_wait_for_ticket(ticket, tracker))
+    except TypeError as exc:
+        if "yield_wait" not in str(exc):
+            raise
+        return scheduler.acquire(profile)
+
+
+def _wait_for_runtime_turn(ticket: Any, tracker: Any) -> None:
+    ready_to_start = getattr(tracker, "ready_to_start", None)
+    if not callable(ready_to_start):
+        return
+    while not bool(ready_to_start(ticket)):
+        time.sleep(0.001)
+
+
 @contextmanager
-def _runtime_operation(tracker: RuntimeResidencyTracker, ticket: Any):
-    """Wait for the tracker queue before entering an ASR operation."""
-    while True:
-        try:
-            with tracker.operation(ticket) as measurement:
-                yield measurement
-            return
-        except RuntimeError as exc:
-            if str(exc) not in {"a runtime operation is already active for this model", "runtime operation ticket is not at the queue head"}:
-                raise
-            time.sleep(0.001)
+def _runtime_gpu_operation(scheduler: Any, profile: Any, ticket: Any, tracker: Any):
+    """Acquire global capacity before marking an ASR runtime call active."""
+    try:
+        while True:
+            _wait_for_runtime_turn(ticket, tracker)
+            try:
+                with _acquire_gpu_lease(scheduler, profile, ticket, tracker):
+                    with tracker.operation(ticket) as measurement:
+                        yield measurement
+                        return
+            except RuntimeOperationNotReady:
+                # The local head changed after admission.  Release the global
+                # lease before yielding to the higher-priority local operation.
+                continue
+    finally:
+        discard_waiting = getattr(tracker, "discard_waiting", None)
+        if callable(discard_waiting):
+            discard_waiting(ticket)
 
 
 def _allocator_reservation_snapshot(tracker: RuntimeResidencyTracker, loaded_models: list[RuntimeModelKey]) -> tuple[str, int | None]:

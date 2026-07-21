@@ -345,6 +345,107 @@ def test_resident_snowflake_hit_reserves_working_set_headroom():
     assert decision.available_vram_mb == 0
 
 
+def test_postgres_admission_trims_a_confirmed_resident_model_cache_before_rejecting():
+    events: list[str] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def __init__(self):
+            super().__init__(_config(mode="postgres"), database_url="postgresql://example")
+            self.attempts = 0
+
+        def _insert_waiting(self, _profile, lease_id):
+            return lease_id
+
+        def _try_grant(self, _profile, lease_id):
+            self.attempts += 1
+            if self.attempts == 1:
+                return GpuAdmissionDecision(
+                    granted=False,
+                    rejected=True,
+                    reason="vram_budget_exceeded",
+                    active_vram_mb=0,
+                    resident_vram_mb=6_500,
+                    available_vram_mb=500,
+                    resident_hit=True,
+                )
+            return _lease(lease_id, task_type="embedding", model_id="Snowflake/test")
+
+        def _trim_requested_model_allocator(self, _profile):
+            events.append("trim")
+            return {"trimmed": True, "retryable": False, "reason": "trimmed"}
+
+        def _record_allocator_trim_outcome(self, _lease_id, _result):
+            return None
+
+        def _mark_terminal(self, _lease_id, _status):
+            return None
+
+    scheduler = RecordingScheduler()
+    profile = GpuTaskProfile(task_type="embedding", model_id="Snowflake/test", estimated_vram_mb=2_500)
+
+    with scheduler.acquire(profile) as lease:
+        assert lease.id
+
+    assert scheduler.attempts == 2
+    assert events == ["trim"]
+
+
+def test_allocator_trim_is_limited_to_runtime_owners_that_expose_a_fenced_trim_endpoint():
+    scheduler = PostgresGpuScheduler(_config(mode="postgres"), database_url="postgresql://example")
+    decision = GpuAdmissionDecision(
+        granted=False,
+        rejected=True,
+        reason="vram_budget_exceeded",
+        active_vram_mb=0,
+        resident_vram_mb=6_500,
+        available_vram_mb=500,
+        resident_hit=True,
+    )
+
+    assert scheduler._should_trim_requested_model_allocator(
+        GpuTaskProfile(task_type="embedding", model_id="Snowflake/test", estimated_vram_mb=2_500), decision
+    )
+    assert not scheduler._should_trim_requested_model_allocator(
+        GpuTaskProfile(task_type="video_extraction", model_id="ffmpeg", estimated_vram_mb=2_500), decision
+    )
+
+
+def test_runtime_trim_posts_a_fenced_cache_release_without_unloading_the_model(monkeypatch):
+    candidate = GpuEvictionCandidate("embedding", "Snowflake/test", 2_500, "model-runner")
+    target = {
+        "owner": "model-runner",
+        "generation": "generation-1",
+        "activity": 4,
+    }
+    posted: list[tuple[str, str, dict[str, object]]] = []
+
+    def post(base_url, path, payload, **_kwargs):
+        posted.append((base_url, path, payload))
+        return {"trim_confirmed": True, "unloaded": False, "resident": True}
+
+    monkeypatch.setattr(gpu_scheduler, "_post_json", post)
+    result = gpu_scheduler._runtime_trim(
+        _config(mode="postgres", model_runner_base_url="http://model-runner"),
+        candidate,
+        target,
+    )
+
+    assert result["trim_confirmed"] is True
+    assert result["unloaded"] is False
+    assert posted == [
+        (
+            "http://model-runner",
+            "/v1/gpu/trim",
+            {
+                "task_type": "embedding",
+                "model_id": "Snowflake/test",
+                "expected_generation": "generation-1",
+                "expected_activity_sequence": 4,
+            },
+        )
+    ]
+
+
 def test_embedding_shape_buckets_distinguish_batch_one_and_sixteen_without_text_content():
     one = GpuTaskProfile(
         task_type="embedding",
@@ -380,6 +481,60 @@ def test_task_profile_uses_opaque_class_and_stable_admission_key():
     assert profile.priority_class == "interactive"
     assert profile.admission_key == "job-123:embedding:embedding:Snowflake/test:embedding|count=1|chars=0-256|item=0-256|dims=1024"
     assert profile.shape_bucket == "embedding|count=1|chars=0-256|item=0-256|dims=1024"
+
+
+@pytest.mark.parametrize(
+    ("task_type", "priority_class", "expected_priority", "expected_lane"),
+    [
+        ("embedding", "interactive", 500, "mcp_retrieval"),
+        ("embedding", "background", 400, "document_indexing"),
+        ("ocr_image", "background", 300, "image_ocr"),
+        ("ocr_image", "interactive", 300, "image_ocr"),
+        ("ollama_vision", "background", 200, "image_llm_enrichment"),
+        ("ollama_vision", "interactive", 200, "image_llm_enrichment"),
+        ("asr", "background", 100, "video_extraction"),
+        ("asr", "interactive", 100, "video_extraction"),
+    ],
+)
+def test_task_profile_assigns_explicit_gpu_priority_lanes(task_type, priority_class, expected_priority, expected_lane):
+    profile = task_profile(
+        task_type,
+        model_id="model",
+        component="worker",
+        request_id="job-or-request",
+        priority_class=priority_class,
+    )
+
+    assert profile.priority == expected_priority
+    assert profile.metadata["priority_lane"] == expected_lane
+
+
+def test_task_profile_cannot_promote_a_task_above_its_assigned_lane():
+    profile = task_profile(
+        "ocr_image",
+        model_id="PP-OCRv5",
+        request_id="request-1",
+        priority=999,
+        priority_class="interactive",
+    )
+    request = {"metadata": {"request_profile": {"task_type": "asr", "model_id": "large-v3-turbo", "priority": 999}}}
+
+    replayed = gpu_scheduler._gpu_task_profile_from_eviction_request(request)
+
+    assert profile.priority == 300
+    assert profile.metadata["priority_lane"] == "image_ocr"
+    assert replayed.priority == 100
+
+
+def test_scheduler_status_exposes_mcp_only_non_preemptive_runtime_policy():
+    payload = InProcessGpuScheduler(_config()).status()["preemption"]
+
+    assert payload["mcp_only"] is True
+    assert payload["fallback"] == "priority_at_safe_boundary"
+    assert {item["task_type"] for item in payload["tasks"]} == {
+        "embedding", "rerank", "ocr_image", "ocr_document", "asr", "ollama_vision", "video_extraction",
+    }
+    assert all(item["cancellation"] == "unsupported" for item in payload["tasks"])
 
 
 def test_background_yield_detaches_without_an_asynchronous_grant():
@@ -464,6 +619,7 @@ def test_eviction_candidates_exclude_requested_model_and_use_lru_idle_models():
         profile,
         resident_models=[
             _resident("ocr_document", "PaddleOCR-VL", estimated_vram_mb=8_000, last_used_at=1.0, component="paddle-runner"),
+            _resident("ollama_vision", "qwen3-vl:8b", estimated_vram_mb=8_000, last_used_at=1.5, component="ollama"),
             _resident("embedding", "Snowflake/snowflake-arctic-embed-l-v2.0", estimated_vram_mb=2_500, last_used_at=2.0),
             _resident("rerank", "drawais/Qwen3-Reranker-4B-AWQ-INT4", estimated_vram_mb=7_000, last_used_at=3.0),
         ],
@@ -479,6 +635,38 @@ def test_eviction_candidates_exclude_requested_model_and_use_lru_idle_models():
     ]
     assert candidates[0].component == "model-runner"
     assert candidates[1].component == "model-runner"
+
+
+def test_runtime_confirmed_idle_targets_exclude_unfenced_ollama_inventory():
+    observation = GpuReconciliationObservation(
+        observation_id="observation-1", state="healthy", driver_used_mb=2_000, driver_free_mb=8_000,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(
+            component="ollama", owner_component="ollama", process_generation="fingerprint-1", state="present",
+            models=({"task_type": "ollama_vision", "model_id": "qwen3-vl:8b", "owner_component": "ollama", "process_generation": "fingerprint-1", "activity_sequence": 0, "in_flight": 0},),
+        ),),
+    )
+
+    assert gpu_scheduler._runtime_confirmed_idle_targets(observation) == set()
+
+
+def test_direct_scheduler_ollama_eviction_never_calls_the_unfenced_api(monkeypatch):
+    posted: list[object] = []
+    monkeypatch.setattr(gpu_scheduler, "_post_json", lambda *_args, **_kwargs: posted.append(True))
+    scheduler = PostgresGpuScheduler(_config(mode="postgres", ollama_base_url="http://ollama"), database_url="postgresql://example")
+
+    payload = scheduler._evict_candidate(
+        GpuEvictionCandidate("ollama_vision", "qwen3-vl:8b", 8_000, "ollama")
+    )
+
+    assert payload == {
+        "ok": True,
+        "unloaded": False,
+        "resident": True,
+        "unload_confirmed": False,
+        "reason": "unload_capability_unavailable",
+    }
+    assert posted == []
 
 
 def test_eviction_candidates_protect_active_and_waiting_residents():
@@ -538,6 +726,64 @@ def test_admission_reports_eviction_candidates_before_rejecting_for_vram():
     assert [(item.task_type, item.model_id) for item in decision.eviction_candidates] == [
         ("embedding", "Snowflake/snowflake-arctic-embed-l-v2.0"),
         ("rerank", "drawais/Qwen3-Reranker-4B-AWQ-INT4"),
+    ]
+
+
+def test_postgres_try_grant_preserves_an_eviction_decision_for_broker_delivery(monkeypatch):
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @contextmanager
+        def transaction(self):
+            yield self
+
+    waiting = _lease("lease-1", task_type="ocr_document", model_id="PaddleOCR-VL", status="waiting")
+    waiting_row = dict(waiting.__dict__)
+    resident = _resident(
+        "embedding",
+        "Snowflake/snowflake-arctic-embed-l-v2.0",
+        estimated_vram_mb=2_500,
+        last_used_at=1.0,
+        component="model-runner",
+    )
+    resident_row = {
+        "task_type": resident.task_type,
+        "model_id": resident.model_id,
+        "estimated_vram_mb": resident.estimated_vram_mb,
+        "resident": resident.resident,
+        "last_used_at": resident.last_used_at,
+        "metadata": resident.metadata,
+    }
+
+    def fetch(_connection, statement, _params):
+        if "FROM gpu_leases" in statement:
+            return [waiting_row]
+        if "FROM gpu_model_residency" in statement:
+            return [resident_row]
+        raise AssertionError(statement)
+
+    scheduler = PostgresGpuScheduler(_config(mode="postgres"), database_url="postgresql://example")
+    monkeypatch.setattr(scheduler, "_recover_stale", lambda: None)
+    monkeypatch.setattr(scheduler, "_reconcile_runtime_residency", lambda: None)
+    monkeypatch.setattr(scheduler, "_connection", lambda: Connection())
+    monkeypatch.setattr(scheduler, "_resolve_vram_calibration", lambda _profile: None)
+    monkeypatch.setattr(scheduler, "_admission_capacity_state", lambda: "healthy")
+    monkeypatch.setattr(gpu_scheduler, "_fetch_dicts", fetch)
+    monkeypatch.setattr(gpu_scheduler, "_live_free_vram_mb", lambda: 500)
+
+    result = scheduler._try_grant(
+        GpuTaskProfile(task_type="ocr_document", model_id="PaddleOCR-VL", estimated_vram_mb=8_000),
+        "lease-1",
+    )
+
+    assert isinstance(result, GpuAdmissionDecision)
+    assert result.rejected is True
+    assert [(item.task_type, item.model_id) for item in result.eviction_candidates] == [
+        ("embedding", "Snowflake/snowflake-arctic-embed-l-v2.0"),
     ]
 
 
@@ -665,7 +911,15 @@ def test_scheduler_status_projects_cached_reconciliation_evidence_and_wait_count
     )
     waiting = _lease("waiting", status="waiting", expires_at=time.time() + 100)
     scheduler._leases["waiting"] = GpuLeaseRecord(
-        **{**waiting.__dict__, "created_at": 900.0, "wait_reason": "waiting_eviction", "priority_class": "interactive"}
+        **{
+            **waiting.__dict__,
+            "created_at": 900.0,
+            "wait_reason": "waiting_eviction",
+            "priority_class": "interactive",
+            "priority": 500,
+            "task_type": "rerank",
+            "metadata": {"priority_lane": "mcp_retrieval"},
+        }
     )
 
     first = scheduler.status()
@@ -689,7 +943,13 @@ def test_scheduler_status_projects_cached_reconciliation_evidence_and_wait_count
     assert evidence["inventories"][0]["owner_component"] == "model-runner"
     assert evidence["inventories"][0]["process_generation"] == "generation-1"
     assert evidence["inventories"][0]["allocator_capability"] == "measured"
-    assert evidence["queue"]["head"] == {"priority_class": "interactive", "wait_reason": "waiting_eviction"}
+    assert evidence["queue"]["head"] == {
+        "task_type": "rerank",
+        "priority": 500,
+        "priority_class": "interactive",
+        "priority_lane": "mcp_retrieval",
+        "wait_reason": "waiting_eviction",
+    }
     assert evidence["queue"]["wait_reasons"] == {"waiting_eviction": 1}
 
 
@@ -1880,7 +2140,7 @@ def test_known_unmeasured_owner_defers_when_quiet_window_has_no_driver_release(m
     assert db.retried[0]["metadata"]["terminal_reason"] == "verification_deferred"
 
 
-def test_ollama_eviction_uses_fresh_fingerprint_fence_and_quiet_window(monkeypatch):
+def test_ollama_eviction_is_skipped_without_a_fenced_runtime_unload_acknowledgement(monkeypatch):
     request = _brokered_eviction_request()
     request.update({"task_type": "ollama_vision", "model_id": "qwen3-vl:8b", "component": "ollama", "estimated_freed_vram_mb": 1_000, "claim_token": "claim-1", "row_version": 1})
     request["metadata"]["candidate"].update({"task_type": "ollama_vision", "model_id": "qwen3-vl:8b", "component": "ollama", "estimated_vram_mb": 1_000})
@@ -1901,9 +2161,9 @@ def test_ollama_eviction_uses_fresh_fingerprint_fence_and_quiet_window(monkeypat
 
     result = gpu_scheduler.process_gpu_eviction_request(eviction_id="eviction-1", worker_id="worker-1", database_module=db)
 
-    assert posted == [("http://ollama", "/api/generate")]
-    assert result["status"] == "succeeded"
-    assert db.completed[0]["metadata"]["terminal_reason"] == "verified_unload"
+    assert posted == []
+    assert result["status"] == "skipped"
+    assert db.completed[0]["metadata"]["terminal_reason"] == "unload_capability_unavailable"
 
 
 def test_generation_mismatch_persists_fresh_runtime_fence_not_queued_fence(monkeypatch):
@@ -2036,7 +2296,7 @@ def test_still_present_post_target_persists_post_activity_evidence(monkeypatch):
     assert verification["runtime_fingerprint"] == "post-fingerprint"
 
 
-def test_ollama_absent_target_with_unconfirmed_unload_replaces_fingerprint_only(monkeypatch):
+def test_ollama_unfenced_request_is_skipped_without_replacing_runtime_identity(monkeypatch):
     request = _brokered_eviction_request()
     request.update({"task_type": "ollama_vision", "model_id": "qwen3-vl:8b", "component": "ollama", "estimated_freed_vram_mb": 1_000, "claim_token": "claim-1", "row_version": 1})
     request["metadata"]["candidate"].update({"task_type": "ollama_vision", "model_id": "qwen3-vl:8b", "component": "ollama", "estimated_vram_mb": 1_000})
@@ -2050,13 +2310,9 @@ def test_ollama_absent_target_with_unconfirmed_unload_replaces_fingerprint_only(
 
     result = gpu_scheduler.process_gpu_eviction_request(eviction_id="eviction-1", worker_id="worker-1", database_module=db)
 
-    assert result["status"] == "failed"
-    verification = db.residency_updates[0]
-    assert verification["replace_runtime_identity"] is True
-    assert verification["owner_component"] == "ollama"
-    assert verification["runtime_generation"] == ""
-    assert verification["runtime_activity_sequence"] is None
-    assert verification["runtime_fingerprint"]
+    assert result["status"] == "skipped"
+    assert db.completed[0]["metadata"]["terminal_reason"] == "unload_capability_unavailable"
+    assert db.residency_updates == []
 
 
 def test_worker_task_profile_uses_background_timeout_setting(monkeypatch):

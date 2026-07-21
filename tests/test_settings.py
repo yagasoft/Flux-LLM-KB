@@ -67,6 +67,7 @@ def test_settings_registry_contains_runtime_and_mail_defaults():
     assert "gpu.scheduler.eviction_enabled" in keys
     assert "gpu.scheduler.eviction_request_timeout_seconds" in keys
     assert "gpu.scheduler.eviction_max_models" in keys
+    assert "gpu.scheduler.allocator_trim_enabled" in keys
     assert "gpu.scheduler.embedding_vram_mb" in keys
     assert "gpu.scheduler.rerank_vram_mb" in keys
     assert "gpu.scheduler.ocr_image_vram_mb" in keys
@@ -252,7 +253,8 @@ def test_gpu_runtime_reconciliation_settings_defaults_and_validators(monkeypatch
         "gpu.scheduler.priority_drain_enabled": False,
         "gpu.scheduler.retry_coalescing_enabled": False,
         "gpu.scheduler.eviction_expiry_enabled": False,
-        "gpu.scheduler.idle_unload_enabled": False,
+        "gpu.scheduler.allocator_trim_enabled": True,
+        "gpu.scheduler.idle_unload_enabled": True,
         "gpu.scheduler.idle_unload_seconds": 120,
         "gpu.scheduler.idle_sweep_interval_seconds": 30,
         "retrieval.vespa_lexical_fallback_enabled": True,
@@ -475,7 +477,7 @@ def test_lock_tolerant_indexing_settings_defaults(monkeypatch):
     assert service.resolve("worker.failure_max_attempts").raw_value == 3
     assert service.resolve("worker.gpu_busy_retry_base_cooldown_seconds").raw_value == 60
     assert service.resolve("worker.gpu_busy_retry_max_cooldown_seconds").raw_value == 900
-    assert service.resolve("worker.gpu_busy_retry_block_after_seconds").raw_value == 86400
+    assert service.resolve("worker.gpu_busy_retry_block_after_seconds").raw_value == 3600
     assert service.resolve("worker.lock_retry_cooldown_seconds").raw_value == 300
     assert service.resolve("worker.lock_max_attempts").raw_value == 3
     assert service.resolve("host_agent.vss_enabled").raw_value is True

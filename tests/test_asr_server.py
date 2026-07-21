@@ -1,11 +1,13 @@
 import sys
 import threading
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 
+from flux_llm_kb import asr_server
 from flux_llm_kb.asr_server import ASR_MODEL_ALIASES, REQUIRED_MODEL_FILES, AsrRuntime, AsrServiceConfig, create_app, download_model
 
 
@@ -199,6 +201,72 @@ def test_asr_transcription_endpoint_wraps_runtime_in_gpu_lease(tmp_path):
     assert events == ["acquire:asr:large-v3-turbo", "lease-enter", "transcribe", "lease-exit"]
 
 
+def test_asr_runtime_queue_race_releases_global_lease_before_waiting_again():
+    from flux_llm_kb.gpu_runtime import RuntimeOperationNotReady
+
+    events: list[str] = []
+
+    class Ticket:
+        priority_class = "background"
+
+    class Tracker:
+        def __init__(self):
+            self.attempts = 0
+
+        def ready_to_start(self, _ticket):
+            return True
+
+        @contextmanager
+        def operation(self, _ticket):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeOperationNotReady("runtime operation ticket is not at the queue head")
+            yield SimpleNamespace(in_flight=1)
+
+    class Scheduler:
+        @contextmanager
+        def acquire(self, _profile, *, yield_wait=None):
+            assert callable(yield_wait)
+            events.append("lease-enter")
+            try:
+                yield
+            finally:
+                events.append("lease-exit")
+
+    with asr_server._runtime_gpu_operation(Scheduler(), SimpleNamespace(), Ticket(), Tracker()):
+        events.append("body")
+
+    assert events == ["lease-enter", "lease-exit", "lease-enter", "body", "lease-exit"]
+
+
+@pytest.mark.parametrize("error_type", ["deferred", "timeout", "rejected"])
+def test_failed_global_admission_discards_asr_local_ticket(error_type):
+    from flux_llm_kb.gpu_runtime import RuntimeModelKey, RuntimeResidencyTracker
+    from flux_llm_kb.gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout
+
+    errors = {
+        "deferred": GpuLeaseDeferred("deferred"),
+        "timeout": GpuLeaseTimeout("timed out"),
+        "rejected": GpuLeaseRejected("rejected"),
+    }
+    tracker = RuntimeResidencyTracker(owner_component="asr", allocator_probes=[])
+    key = RuntimeModelKey("asr", "large-v3-turbo")
+    ticket = tracker.enqueue(key, priority_class="background")
+
+    class Scheduler:
+        def acquire(self, _profile, *, yield_wait=None):
+            assert callable(yield_wait)
+            raise errors[error_type]
+
+    with pytest.raises(type(errors[error_type])):
+        with asr_server._runtime_gpu_operation(Scheduler(), SimpleNamespace(), ticket, tracker):
+            pass
+
+    assert tracker.next_waiting_ticket_id(key) is None
+    replacement = tracker.enqueue(key, priority_class="background")
+    assert tracker.ready_to_start(replacement) is True
+
+
 def test_asr_transcription_endpoint_returns_structured_gpu_rejection(tmp_path):
     from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
 
@@ -324,6 +392,64 @@ def test_asr_gpu_unload_endpoint_clears_loaded_model_and_is_idempotent(tmp_path)
         "/v1/gpu/residency"
     ).json()["models"][0]["process_generation"]
     assert second_generation != target["process_generation"]
+
+
+def test_asr_trim_endpoint_releases_allocator_cache_without_unloading_model(tmp_path, monkeypatch):
+    from flux_llm_kb import asr_server
+
+    model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
+    config = AsrServiceConfig(model_path=model_path)
+    runtime = AsrRuntime(config)
+    runtime._model = object()
+    runtime.loaded = True
+    release_calls: list[str] = []
+
+    class FakeScheduler:
+        def reset_component_residency(self, _component):
+            return None
+
+    monkeypatch.setattr(asr_server, "_release_gpu_memory", lambda: release_calls.append("trimmed"))
+    client = TestClient(create_app(config, runtime=runtime, gpu_scheduler=FakeScheduler()))
+    target = client.get("/v1/gpu/residency").json()["models"][0]
+    response = client.post(
+        "/v1/gpu/trim",
+        json={
+            "task_type": "asr",
+            "model_id": config.model,
+            "expected_generation": target["process_generation"],
+            "expected_activity_sequence": target["activity_sequence"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["trim_confirmed"] is True
+    assert response.json()["unloaded"] is False
+    assert runtime._model is not None
+    assert release_calls == ["trimmed"]
+
+
+def test_asr_residency_advertises_non_preemptive_runtime_capability(tmp_path):
+    model_path = _model_dir(tmp_path / "faster-whisper-large-v3-turbo")
+
+    class FakeScheduler:
+        def reset_component_residency(self, _component):
+            return None
+
+    payload = TestClient(create_app(AsrServiceConfig(model_path=model_path), gpu_scheduler=FakeScheduler())).get(
+        "/v1/gpu/residency"
+    ).json()
+
+    assert payload["preemption"]["mcp_only"] is True
+    assert payload["preemption"]["fallback"] == "priority_at_safe_boundary"
+    assert payload["preemption"]["tasks"] == [
+        {
+            "task_type": "asr",
+            "owner_component": "asr",
+            "cancellation": "unsupported",
+            "cooperative_confirmation": False,
+            "reason": "ASR transcription has no cooperative cancellation acknowledgement",
+        }
+    ]
 
 
 def test_asr_residency_is_fast_and_unload_refuses_an_active_transcription(tmp_path):

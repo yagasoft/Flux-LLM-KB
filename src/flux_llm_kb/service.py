@@ -6264,7 +6264,7 @@ def _configured_gpu_busy_retry_block_after_seconds() -> int:
     try:
         return int(SettingsService().resolve("worker.gpu_busy_retry_block_after_seconds").raw_value)
     except Exception:
-        return 86400
+        return 3600
 
 
 def _gpu_busy_retry_plan(*, job: dict[str, Any], process_telemetry: dict[str, Any]) -> dict[str, Any]:

@@ -78,7 +78,8 @@ class GpuSchedulerConfig:
     eviction_enabled: bool = True
     eviction_request_timeout_seconds: float = 10.0
     eviction_max_models: int = 4
-    idle_unload_enabled: bool = False
+    allocator_trim_enabled: bool = True
+    idle_unload_enabled: bool = True
     idle_unload_seconds: float = 120.0
     idle_sweep_interval_seconds: float = 30.0
     model_runner_base_url: str = ""
@@ -560,12 +561,15 @@ def select_gpu_eviction_candidates(
         key = (residency.task_type, residency.model_id)
         if key in protected:
             continue
+        component = _resident_component(residency)
+        if not _runtime_owner_supports_fenced_unload(component):
+            continue
         idle.append(
             GpuEvictionCandidate(
                 task_type=residency.task_type,
                 model_id=residency.model_id,
                 estimated_vram_mb=max(0, int(residency.estimated_vram_mb or 0)),
-                component=_resident_component(residency),
+                component=component,
                 last_used_at=residency.last_used_at,
                 metadata=dict(residency.metadata or {}),
             )
@@ -627,8 +631,8 @@ class InProcessGpuScheduler(BaseGpuScheduler):
                         eviction_id=record.eviction_id,
                         retry_after_seconds=1.0,
                     )
-                if yield_wait is not None and profile.priority_class == "background" and bool(yield_wait()):
-                    detached = _replace_record(record, caller_attached=False, wait_reason="yielded_to_interactive")
+                if yield_wait is not None and bool(yield_wait()):
+                    detached = _replace_record(record, caller_attached=False, wait_reason="yielded_to_higher_priority")
                     self._leases[lease_id] = detached
                     self._condition.notify_all()
                     raise GpuLeaseDeferred(
@@ -758,6 +762,7 @@ class InProcessGpuScheduler(BaseGpuScheduler):
                 "rejections": counts.get("rejected", 0),
                 "evictions": _empty_eviction_status(),
                 "vram_samples": {"skipped": dict(self._sample_skipped_reasons)},
+                "preemption": _runtime_preemption_payload(),
             }
 
     def _make_record(
@@ -951,9 +956,10 @@ class PostgresGpuScheduler(BaseGpuScheduler):
         if attached_lease_id:
             lease_id = str(attached_lease_id)
         last_reason = "queue_wait"
+        allocator_trim_attempted = False
         while True:
-            if yield_wait is not None and profile.priority_class == "background" and bool(yield_wait()):
-                self._detach_waiting(lease_id, reason="yielded_to_interactive")
+            if yield_wait is not None and bool(yield_wait()):
+                self._detach_waiting(lease_id, reason="yielded_to_higher_priority")
                 raise GpuLeaseDeferred(
                     f"GPU scheduler deferred {profile.task_type} while a higher-priority request waits",
                     capacity_state=self._admission_capacity_state(),
@@ -965,36 +971,59 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 return GpuLease(self, decision_record)
             if isinstance(decision_record, GpuAdmissionDecision):
                 last_reason = decision_record.reason
-                queued = self._enqueue_eviction_requests(profile, lease_id, list(decision_record.eviction_candidates))
-                if int(queued.get("queued") or queued.get("deduped") or 0) > 0:
-                    eviction_id = str((queued.get("eviction_ids") or [""])[0] or "")
-                    if eviction_id:
-                        self._mark_waiting_eviction(lease_id, eviction_id=eviction_id)
-                    if profile.priority_class == "background" and profile.admission_key:
-                        self._detach_waiting(lease_id, reason="waiting_eviction")
-                        raise GpuLeaseDeferred(
-                            f"GPU scheduler deferred {profile.task_type} pending eviction",
+                if self._should_trim_requested_model_allocator(profile, decision_record):
+                    if allocator_trim_attempted:
+                        self._mark_terminal(lease_id, "rejected")
+                        raise GpuLeaseRejected(
+                            "vram_budget_exceeded_after_allocator_trim",
                             capacity_state=decision_record.capacity_state,
-                            admission_id=lease_id,
-                            eviction_id=eviction_id,
-                            retry_after_seconds=_retry_after_seconds(last_reason),
                         )
-                    # Interactive callers retain their attached admission while
-                    # the brokered eviction is verified, then retry normally.
-                    if profile.priority_class == "interactive":
-                        pass
+                    trim_result = self._trim_requested_model_allocator(profile)
+                    self._record_allocator_trim_outcome(lease_id, trim_result)
+                    last_reason = str(trim_result.get("reason") or "allocator_trim_failed")
+                    if bool(trim_result.get("trimmed")):
+                        allocator_trim_attempted = True
+                        # Reconcile and re-run admission against fresh driver and
+                        # allocator observations before declaring capacity lost.
+                        continue
+                    if bool(trim_result.get("retryable")):
+                        # A runtime operation or control lock is still live.
+                        # Keep the lease queued; no model is cancelled or evicted.
+                        decision_record = last_reason
                     else:
-                        self._mark_terminal(lease_id, "timed_out")
-                        raise GpuLeaseTimeout(
-                            f"GPU scheduler queued eviction before retrying {profile.task_type}",
-                            retry_after_seconds=_retry_after_seconds(last_reason),
+                        self._mark_terminal(lease_id, "rejected")
+                        raise GpuLeaseRejected(last_reason, capacity_state=decision_record.capacity_state)
+                else:
+                    queued = self._enqueue_eviction_requests(profile, lease_id, list(decision_record.eviction_candidates))
+                    if int(queued.get("queued") or queued.get("deduped") or 0) > 0:
+                        eviction_id = str((queued.get("eviction_ids") or [""])[0] or "")
+                        if eviction_id:
+                            self._mark_waiting_eviction(lease_id, eviction_id=eviction_id)
+                        if profile.priority_class == "background" and profile.admission_key:
+                            self._detach_waiting(lease_id, reason="waiting_eviction")
+                            raise GpuLeaseDeferred(
+                                f"GPU scheduler deferred {profile.task_type} pending eviction",
+                                capacity_state=decision_record.capacity_state,
+                                admission_id=lease_id,
+                                eviction_id=eviction_id,
+                                retry_after_seconds=_retry_after_seconds(last_reason),
+                            )
+                        # Interactive callers retain their attached admission while
+                        # the brokered eviction is verified, then retry normally.
+                        if profile.priority_class == "interactive":
+                            pass
+                        else:
+                            self._mark_terminal(lease_id, "timed_out")
+                            raise GpuLeaseTimeout(
+                                f"GPU scheduler queued eviction before retrying {profile.task_type}",
+                                retry_after_seconds=_retry_after_seconds(last_reason),
+                            )
+                    if int(queued.get("queued") or queued.get("deduped") or 0) <= 0:
+                        self._mark_terminal(lease_id, "rejected")
+                        raise GpuLeaseRejected(
+                            decision_record.reason,
+                            capacity_state="unschedulable" if decision_record.reason == "unschedulable" else decision_record.capacity_state,
                         )
-                if int(queued.get("queued") or queued.get("deduped") or 0) <= 0:
-                    self._mark_terminal(lease_id, "rejected")
-                    raise GpuLeaseRejected(
-                        decision_record.reason,
-                        capacity_state="unschedulable" if decision_record.reason == "unschedulable" else decision_record.capacity_state,
-                    )
             if decision_record == "rejected":
                 raise GpuLeaseRejected("vram_budget_exceeded")
             if isinstance(decision_record, str):
@@ -1178,6 +1207,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 "timeouts": counts.get("timed_out", 0),
                 "rejections": counts.get("rejected", 0),
                 "evictions": evictions,
+                "preemption": _runtime_preemption_payload(),
             }
         except Exception as exc:  # pragma: no cover - deployment-dependent
             return {
@@ -1197,6 +1227,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 "timeouts": 0,
                 "rejections": 0,
                 "evictions": _empty_eviction_status(),
+                "preemption": _runtime_preemption_payload(),
             }
 
     def _insert_waiting(self, profile: GpuTaskProfile, lease_id: str) -> str:
@@ -1337,7 +1368,11 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                         """,
                         (recovered_id,),
                     )
-                if decision.rejected and not decision.eviction_candidates:
+                if (
+                    decision.rejected
+                    and not decision.eviction_candidates
+                    and not self._should_trim_requested_model_allocator(profile, decision)
+                ):
                     _execute_cursor(
                         conn,
                         "UPDATE gpu_leases SET status = 'rejected', released_at = now() WHERE id = %s",
@@ -1345,7 +1380,12 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                     )
                     return decision
                 if not decision.granted:
-                    return decision.reason
+                    # Rejected decisions carry the authoritative idle-owner
+                    # candidates that ``acquire`` must turn into brokered,
+                    # runtime-confirmed eviction requests. Returning only the
+                    # reason here silently loses those candidates and leaves
+                    # the waiter retrying the same capacity state forever.
+                    return decision if decision.rejected else decision.reason
                 _execute_cursor(
                     conn,
                     """
@@ -1372,6 +1412,131 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 )
                 granted = _fetch_dicts(conn, "SELECT * FROM gpu_leases WHERE id = %s", (lease_id,))
                 return _record_from_row(granted[0])
+
+    def _should_trim_requested_model_allocator(
+        self,
+        profile: GpuTaskProfile,
+        decision: GpuAdmissionDecision,
+    ) -> bool:
+        """Whether a resident request may safely try a cache trim before rejection."""
+        owner = _component_for_task_type(profile.task_type)
+        return bool(
+            self.config.allocator_trim_enabled
+            and decision.rejected
+            and decision.reason == "vram_budget_exceeded"
+            and decision.resident_hit
+            and not decision.eviction_candidates
+            and str(profile.task_type or "").strip()
+            and str(profile.model_id or "").strip()
+            and owner in {"model-runner", "paddle-runner", "asr"}
+        )
+
+    def _trim_requested_model_allocator(self, profile: GpuTaskProfile) -> dict[str, Any]:
+        """Trim only a fresh, runtime-confirmed idle owner and retain its model."""
+        from . import database
+
+        candidate = GpuEvictionCandidate(
+            task_type=profile.task_type,
+            model_id=profile.model_id,
+            estimated_vram_mb=max(0, int(profile.estimated_vram_mb or 0)),
+            component=_component_for_task_type(profile.task_type),
+        )
+        try:
+            with database.gpu_control_lock(
+                timeout_seconds=self.config.control_lock_timeout_seconds,
+                url=self.database_url,
+            ) as connection:
+                pre = _runtime_eviction_observation(self.config, database, connection=connection)
+                target_state, target = _runtime_eviction_target(pre, candidate)
+                if target_state != "present" or target is None:
+                    return {
+                        "trimmed": False,
+                        "retryable": target_state == "inventory_incomplete",
+                        "reason": f"allocator_trim_{target_state}",
+                        "pre_observation_id": str(getattr(pre, "observation_id", "") or ""),
+                    }
+                in_flight = _required_int(target["model"].get("in_flight"))
+                if in_flight is None:
+                    return {
+                        "trimmed": False,
+                        "retryable": True,
+                        "reason": "allocator_trim_inventory_incomplete",
+                        "pre_observation_id": str(getattr(pre, "observation_id", "") or ""),
+                    }
+                if in_flight != 0:
+                    return {
+                        "trimmed": False,
+                        "retryable": True,
+                        "reason": "allocator_trim_runtime_busy",
+                        "pre_observation_id": str(getattr(pre, "observation_id", "") or ""),
+                    }
+                payload = _runtime_trim(
+                    self.config,
+                    candidate,
+                    target,
+                    timeout_seconds=min(
+                        float(self.config.eviction_request_timeout_seconds),
+                        float(self.config.inventory_timeout_seconds),
+                    ),
+                )
+                if not bool(payload.get("trim_confirmed")) or bool(payload.get("unloaded")):
+                    return {
+                        "trimmed": False,
+                        "retryable": False,
+                        "reason": "allocator_trim_unconfirmed",
+                        "pre_observation_id": str(getattr(pre, "observation_id", "") or ""),
+                    }
+                post = _runtime_eviction_observation(self.config, database, connection=connection)
+                post_state, post_target = _runtime_eviction_target(post, candidate)
+                if post_state != "present" or post_target is None:
+                    return {
+                        "trimmed": False,
+                        "retryable": True,
+                        "reason": "allocator_trim_post_inventory_incomplete",
+                        "pre_observation_id": str(getattr(pre, "observation_id", "") or ""),
+                        "post_observation_id": str(getattr(post, "observation_id", "") or ""),
+                    }
+                if str(post_target["generation"]) != str(target["generation"]):
+                    return {
+                        "trimmed": False,
+                        "retryable": True,
+                        "reason": "allocator_trim_generation_changed",
+                        "pre_observation_id": str(getattr(pre, "observation_id", "") or ""),
+                        "post_observation_id": str(getattr(post, "observation_id", "") or ""),
+                    }
+                return {
+                    "trimmed": True,
+                    "retryable": False,
+                    "reason": "allocator_trimmed",
+                    "pre_observation_id": str(getattr(pre, "observation_id", "") or ""),
+                    "post_observation_id": str(getattr(post, "observation_id", "") or ""),
+                    "driver_free_delta_mb": int(getattr(post, "driver_free_mb", 0) or 0) - int(getattr(pre, "driver_free_mb", 0) or 0),
+                }
+        except Exception as exc:  # pragma: no cover - deployment-dependent transport failures
+            return {
+                "trimmed": False,
+                "retryable": True,
+                "reason": "allocator_trim_control_or_transport_busy",
+                "error": str(exc)[:240],
+            }
+
+    def _record_allocator_trim_outcome(self, lease_id: str, result: dict[str, Any]) -> None:
+        """Retain a bounded decision trace on the waiting lease for operators."""
+        Jsonb = _jsonb_adapter()
+        trace = {
+            key: value
+            for key, value in dict(result or {}).items()
+            if key in {"trimmed", "retryable", "reason", "pre_observation_id", "post_observation_id", "driver_free_delta_mb"}
+        }
+        self._execute(
+            """
+            UPDATE gpu_leases
+               SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('allocator_trim', %s::jsonb)
+             WHERE id = %s
+               AND status = 'waiting'
+            """,
+            (Jsonb(trace), lease_id),
+        )
 
     def _detach_waiting(self, lease_id: str, *, reason: str) -> None:
         self._execute(
@@ -1525,6 +1690,13 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 metadata={"attempt": attempt, "before_free_vram_mb": None},
             )
         payload = self._evict_candidate(candidate)
+        if str(payload.get("reason") or "") == "unload_capability_unavailable":
+            return GpuEvictionVerificationResult(
+                verified=False,
+                payload=payload,
+                error="runtime owner does not expose a fenced unload acknowledgement",
+                metadata={"attempt": attempt, "terminal_reason": "unload_capability_unavailable"},
+            )
         if (
             _optional_bool(payload.get("unloaded")) is False
             and _optional_bool(payload.get("resident")) is False
@@ -1639,8 +1811,14 @@ class PostgresGpuScheduler(BaseGpuScheduler):
 
     def _evict_candidate(self, candidate: GpuEvictionCandidate) -> dict[str, Any]:
         component = candidate.component or _component_for_task_type(candidate.task_type)
-        if component == "ollama":
-            return self._evict_ollama(candidate)
+        if not _runtime_owner_supports_fenced_unload(component):
+            return {
+                "ok": True,
+                "unloaded": False,
+                "resident": True,
+                "unload_confirmed": False,
+                "reason": "unload_capability_unavailable",
+            }
         base_url = {
             "model-runner": self.config.model_runner_base_url,
             "paddle-runner": self.config.paddle_runner_base_url,
@@ -1678,13 +1856,6 @@ class PostgresGpuScheduler(BaseGpuScheduler):
             "expected_activity_sequence": expected_activity_sequence,
         }
         return _post_json(base_url, "/v1/gpu/unload", payload, timeout_seconds=self.config.eviction_request_timeout_seconds)
-
-    def _evict_ollama(self, candidate: GpuEvictionCandidate) -> dict[str, Any]:
-        base_url = self.config.ollama_base_url
-        if not base_url:
-            raise GpuSchedulerError("Ollama eviction URL is not configured")
-        payload = {"model": candidate.model_id, "prompt": "", "keep_alive": 0, "stream": False}
-        return _post_json(base_url, "/api/generate", payload, timeout_seconds=self.config.eviction_request_timeout_seconds)
 
     def _record_eviction(
         self,
@@ -2214,7 +2385,7 @@ def _runtime_confirmed_idle_targets(observation: Any) -> set[tuple[str, str, str
             model_id = str(model.get("model_id") or "").strip()
             owner = str(model.get("owner_component") or inventory_owner).strip()
             generation = str(model.get("process_generation") or inventory_generation).strip()
-            if task_type and model_id and owner and generation and in_flight == 0:
+            if task_type and model_id and owner and generation and in_flight == 0 and _runtime_owner_supports_fenced_unload(owner):
                 confirmed.add((task_type, model_id, owner, generation, activity_sequence))
     return confirmed
 
@@ -2252,6 +2423,11 @@ def _runtime_owner_base_url(config: GpuSchedulerConfig, owner: str) -> str:
         "asr": config.asr_base_url,
         "ollama": config.ollama_base_url,
     }.get(owner, "")
+
+
+def _runtime_owner_supports_fenced_unload(owner: str) -> bool:
+    """Whether the owner can prove idle state and fence an unload atomically."""
+    return str(owner or "").strip().lower() in {"model-runner", "paddle-runner", "asr"}
 
 
 def _runtime_identity_metadata(
@@ -2304,12 +2480,7 @@ def _runtime_unload(
     if not base_url:
         raise GpuSchedulerError(f"GPU eviction URL is not configured for authoritative owner {owner}")
     if owner == "ollama":
-        return _post_json(
-            base_url,
-            "/api/generate",
-            {"model": candidate.model_id, "prompt": "", "keep_alive": 0, "stream": False},
-            timeout_seconds=config.eviction_request_timeout_seconds,
-        )
+        raise GpuSchedulerError("Ollama does not expose a fenced unload acknowledgement")
     return _post_json(
         base_url,
         "/v1/gpu/unload",
@@ -2320,6 +2491,33 @@ def _runtime_unload(
             "expected_activity_sequence": target["activity"],
         },
         timeout_seconds=config.eviction_request_timeout_seconds,
+    )
+
+
+def _runtime_trim(
+    config: GpuSchedulerConfig,
+    candidate: GpuEvictionCandidate,
+    target: dict[str, Any],
+    *,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Ask the authoritative owner to release allocator cache, not its model."""
+    owner = str(target["owner"])
+    if owner == "ollama":
+        raise GpuSchedulerError("Ollama does not expose a fenced allocator-trim endpoint")
+    base_url = _runtime_owner_base_url(config, owner)
+    if not base_url:
+        raise GpuSchedulerError(f"GPU trim URL is not configured for authoritative owner {owner}")
+    return _post_json(
+        base_url,
+        "/v1/gpu/trim",
+        {
+            "task_type": candidate.task_type,
+            "model_id": candidate.model_id,
+            "expected_generation": target["generation"],
+            "expected_activity_sequence": target["activity"],
+        },
+        timeout_seconds=max(0.1, float(timeout_seconds if timeout_seconds is not None else config.eviction_request_timeout_seconds)),
     )
 
 
@@ -2342,6 +2540,12 @@ def _runtime_evict_result(
     if target_state != "present" or target is None:
         return GpuEvictionVerificationResult(False, error="fresh runtime inventory is incomplete", metadata={**base_metadata, "terminal_reason": "inventory_incomplete"}), claim_token, row_version
     target_metadata = _runtime_target_metadata(target)
+    if not _runtime_owner_supports_fenced_unload(str(target["owner"])):
+        return GpuEvictionVerificationResult(
+            False,
+            error="runtime owner does not expose a fenced unload acknowledgement",
+            metadata={**base_metadata, **target_metadata, "terminal_reason": "unload_capability_unavailable"},
+        ), claim_token, row_version
     expected_generation = str(request.get("runtime_generation") or "").strip()
     expected_activity = _optional_int(request.get("runtime_activity_sequence"))
     if expected_generation and expected_generation != target["generation"]:
@@ -2482,6 +2686,7 @@ def scheduler_config_from_settings() -> GpuSchedulerConfig:
         eviction_enabled=bool(values["gpu.scheduler.eviction_enabled"]),
         eviction_request_timeout_seconds=float(values["gpu.scheduler.eviction_request_timeout_seconds"] or 10),
         eviction_max_models=int(values["gpu.scheduler.eviction_max_models"] or 4),
+        allocator_trim_enabled=bool(values.get("gpu.scheduler.allocator_trim_enabled", True)),
         idle_unload_enabled=bool(values.get("gpu.scheduler.idle_unload_enabled")),
         idle_unload_seconds=float(values.get("gpu.scheduler.idle_unload_seconds") or 0),
         idle_sweep_interval_seconds=float(values.get("gpu.scheduler.idle_sweep_interval_seconds") or 30),
@@ -2497,6 +2702,25 @@ def scheduler_config_from_settings() -> GpuSchedulerConfig:
         unattributed_threshold_percent=int(values.get("gpu.scheduler.unattributed_threshold_percent") or 5),
         reconciliation_retry_seconds=float(values.get("gpu.scheduler.reconciliation_retry_seconds") or 15),
     )
+
+
+def _gpu_priority_lane(task_type: str, priority_class: str) -> tuple[str, int]:
+    """Map trusted request class and work type to the user-visible GPU order."""
+    normalized = str(task_type or "").strip().lower()
+    if str(priority_class or "").strip().lower() == "interactive" and normalized in {"embedding", "rerank"}:
+        # Interactive retrieval shares the MCP lane. Direct OCR, vision and
+        # ASR requests retain their task-family lanes; only MCP may ever gain a
+        # separately verified running-work cancellation capability.
+        return "mcp_retrieval", 500
+    if normalized in {"embedding", "rerank"}:
+        return "document_indexing", 400
+    if normalized in {"ocr_image", "ocr_document"}:
+        return "image_ocr", 300
+    if normalized == "ollama_vision":
+        return "image_llm_enrichment", 200
+    if normalized in {"asr", "video_extraction", "video"}:
+        return "video_extraction", 100
+    return "background", 0
 
 
 def task_profile(
@@ -2531,12 +2755,18 @@ def task_profile(
     if effective_timeout_seconds is None and str(component or "") == "worker":
         effective_timeout_seconds = float(values.get("gpu.scheduler.background_timeout_seconds") or 1)
     canonical_class = "interactive" if str(priority_class or "").strip().lower() == "interactive" else "background"
+    priority_lane, lane_priority = _gpu_priority_lane(normalized, canonical_class)
+    # Task-family lanes are fixed policy.  Never allow a caller-provided value
+    # to promote OCR/vision/ASR or unknown work above its assigned lane.
+    del priority
+    resolved_priority = lane_priority
     profile_metadata = dict(metadata or {})
+    profile_metadata.setdefault("priority_lane", priority_lane)
     provisional = GpuTaskProfile(
         task_type=normalized,
         model_id=model_id,
         estimated_vram_mb=estimate,
-        priority=100 if canonical_class == "interactive" else 0,
+        priority=resolved_priority,
         timeout_seconds=effective_timeout_seconds,
         lease_ttl_seconds=float(values["gpu.scheduler.lease_ttl_seconds"] or 120),
         exclusive=bool(exclusive),
@@ -2557,6 +2787,7 @@ def _gpu_task_profile_payload(profile: GpuTaskProfile) -> dict[str, Any]:
         "task_type": profile.task_type,
         "model_id": profile.model_id,
         "estimated_vram_mb": max(0, int(profile.estimated_vram_mb or 0)),
+        "priority": int(profile.priority or 0),
         "timeout_seconds": profile.timeout_seconds,
         "lease_ttl_seconds": profile.lease_ttl_seconds,
         "exclusive": bool(profile.exclusive),
@@ -2587,18 +2818,20 @@ def _gpu_eviction_candidate_payload(candidate: GpuEvictionCandidate) -> dict[str
 def _gpu_task_profile_from_eviction_request(request: dict[str, Any]) -> GpuTaskProfile:
     metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
     raw_profile = metadata.get("request_profile") if isinstance(metadata.get("request_profile"), dict) else {}
+    priority_class = "interactive" if str(raw_profile.get("priority_class") or "").lower() == "interactive" else "background"
+    _lane, lane_priority = _gpu_priority_lane(str(raw_profile.get("task_type") or "unknown"), priority_class)
     return GpuTaskProfile(
         task_type=str(raw_profile.get("task_type") or "unknown"),
         model_id=str(raw_profile.get("model_id") or ""),
         estimated_vram_mb=max(0, int(raw_profile.get("estimated_vram_mb") or 0)),
-        priority=100 if str(raw_profile.get("priority_class") or "").lower() == "interactive" else 0,
+        priority=lane_priority,
         timeout_seconds=_optional_float(raw_profile.get("timeout_seconds")),
         lease_ttl_seconds=_optional_float(raw_profile.get("lease_ttl_seconds")),
         exclusive=bool(raw_profile.get("exclusive", True)),
         share_group=str(raw_profile.get("share_group") or ""),
         component=str(raw_profile.get("component") or ""),
         request_id=str(raw_profile.get("request_id") or ""),
-        priority_class="interactive" if str(raw_profile.get("priority_class") or "").lower() == "interactive" else "background",
+        priority_class=priority_class,
         admission_key=str(raw_profile.get("admission_key") or ""),
         shape_bucket=str(raw_profile.get("shape_bucket") or ""),
         metadata=dict(raw_profile.get("metadata") if isinstance(raw_profile.get("metadata"), dict) else {}),
@@ -2684,6 +2917,8 @@ def _terminal_gpu_eviction_outcome(
     explicit_reason = str(metadata.get("terminal_reason") or "")
     if explicit_reason == "target_already_absent":
         return ("skipped", "target_already_absent")
+    if explicit_reason == "unload_capability_unavailable":
+        return ("skipped", "unload_capability_unavailable")
     if explicit_reason in {"generation_changed", "became_active", "unload_failed", "memory_release_unverified"}:
         return ("failed", explicit_reason)
     if explicit_reason in {"verification_deferred", "inventory_incomplete"}:
@@ -2852,6 +3087,10 @@ def _scheduler_setting_values() -> dict[str, Any]:
         "gpu.scheduler.eviction_enabled": True,
         "gpu.scheduler.eviction_request_timeout_seconds": 10,
         "gpu.scheduler.eviction_max_models": 4,
+        "gpu.scheduler.allocator_trim_enabled": True,
+        "gpu.scheduler.idle_unload_enabled": True,
+        "gpu.scheduler.idle_unload_seconds": 120,
+        "gpu.scheduler.idle_sweep_interval_seconds": 30,
         "gpu.scheduler.embedding_vram_mb": 2_500,
         "gpu.scheduler.rerank_vram_mb": 7_000,
         "gpu.scheduler.ocr_image_vram_mb": 2_000,
@@ -2957,6 +3196,28 @@ def _budget_payload(config: GpuSchedulerConfig) -> dict[str, Any]:
         "eviction_enabled": config.eviction_enabled,
         "eviction_request_timeout_seconds": config.eviction_request_timeout_seconds,
         "eviction_max_models": config.eviction_max_models,
+        "allocator_trim_enabled": config.allocator_trim_enabled,
+        "idle_unload_enabled": config.idle_unload_enabled,
+        "idle_unload_seconds": config.idle_unload_seconds,
+    }
+
+
+def _runtime_preemption_payload() -> dict[str, Any]:
+    """Surface the verified no-force-cancellation policy across GPU owners."""
+    from .gpu_runtime import runtime_preemption_policy
+
+    policies = (
+        runtime_preemption_policy("model-runner", ("embedding", "rerank")),
+        runtime_preemption_policy("paddle-runner", ("ocr_image", "ocr_document")),
+        runtime_preemption_policy("asr", ("asr",)),
+        runtime_preemption_policy("ollama", ("ollama_vision",)),
+        runtime_preemption_policy("worker", ("video_extraction",)),
+    )
+    return {
+        "mcp_only": True,
+        "cancellation_request": "unavailable",
+        "fallback": "priority_at_safe_boundary",
+        "tasks": [task for policy in policies for task in policy["tasks"]],
     }
 
 
@@ -3100,10 +3361,30 @@ def _reconciliation_status_evidence(
     for record in running:
         source = str(dict(record.metadata or {}).get("calibration_source") or "unknown")[:80]
         calibration_sources[source] = calibration_sources.get(source, 0) + 1
+    queue_head = waiting[0] if waiting else None
+    if queue_head is None:
+        queue_head_payload = None
+        drain_reason = ""
+    else:
+        task_type = str(queue_head.task_type or "unknown")[:80]
+        priority_class = str(queue_head.priority_class or "background")[:40]
+        configured_lane = str(dict(queue_head.metadata or {}).get("priority_lane") or "").strip()
+        derived_lane, _derived_priority = _gpu_priority_lane(task_type, priority_class)
+        priority_lane = configured_lane if configured_lane in {
+            "mcp_retrieval", "document_indexing", "image_ocr", "image_llm_enrichment", "video_extraction", "background",
+        } else derived_lane
+        queue_head_payload = {
+            "task_type": task_type,
+            "priority": int(queue_head.priority or 0),
+            "priority_class": priority_class,
+            "priority_lane": priority_lane,
+            "wait_reason": str(queue_head.wait_reason or "queue_wait"),
+        }
+        drain_reason = f"{priority_lane}_queue_head" if priority_lane != "background" else ""
     return {
         "queue": {
-            "head": ({"priority_class": str(waiting[0].priority_class or "background"), "wait_reason": str(waiting[0].wait_reason or "queue_wait")} if waiting else None),
-            "drain_reason": "interactive_queue_head" if waiting and waiting[0].priority_class == "interactive" else "",
+            "head": queue_head_payload,
+            "drain_reason": drain_reason,
             "wait_reasons": {str(key[1]): int(value["count"]) for key, value in sorted(wait_groups.items())},
             "wait_duration_by_reason_class": [wait_groups[key] for key in sorted(wait_groups)],
         },

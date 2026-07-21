@@ -4,7 +4,7 @@ import asyncio
 import threading
 import pytest
 
-from flux_llm_kb import database, event_worker, messaging
+from flux_llm_kb import database, event_worker, messaging, model_activity
 from flux_llm_kb.service import KnowledgeService
 from flux_llm_kb.worker import JobProcessResult
 
@@ -168,6 +168,33 @@ def test_event_worker_marks_message_handled_after_success():
     )
     assert events[2][0] == "complete"
     assert events[2][1]["status"] == "handled"
+
+
+def test_event_worker_gives_each_corpus_job_a_background_request_context():
+    contexts = []
+
+    class FakeDatabase:
+        def begin_message_inbox(self, **_kwargs):
+            return True
+
+        def complete_message_inbox(self, **_kwargs):
+            return None
+
+    class FakeService:
+        def process_corpus_job_by_id(self, **_kwargs):
+            contexts.append(model_activity.current_model_request_context())
+            return {"job_id": "job-1", "status": "completed", "retryable": False}
+
+    message = messaging.build_message(
+        message_type="flux.corpus.process",
+        routing_key=messaging.CORPUS_PROCESS_ROUTING_KEY,
+        job_id="job-1",
+        payload={"job_id": "job-1"},
+    )
+
+    event_worker.EventWorker(service=FakeService(), database_module=FakeDatabase()).handle(message)
+
+    assert contexts == [{"request_class": "background", "request_id": "job-1"}]
 
 
 def test_event_worker_marks_retryable_result_failed_and_rejects_for_broker_retry():

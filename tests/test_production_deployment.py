@@ -1062,6 +1062,16 @@ def test_docs_describe_j_drive_production_runtime_boundary():
     assert "| shipped | 100%" in roadmap
 
 
+def test_gpu_deploy_scripts_enable_scheduler_cache_recovery_and_bounded_busy_retries():
+    for script_name in ("install-flux.ps1", "update-flux.ps1"):
+        script = _script(script_name)
+
+        assert '"gpu.scheduler.allocator_trim_enabled", "true", "--confirm"' in script
+        assert '"gpu.scheduler.idle_unload_enabled", "true", "--confirm"' in script
+        assert '"gpu.scheduler.idle_unload_seconds", "120", "--confirm"' in script
+        assert '"worker.gpu_busy_retry_block_after_seconds", "3600", "--confirm"' in script
+
+
 def _embedded_compose_template(script: str) -> str:
     function_start = script.find("function Write-FluxCompose")
     if function_start == -1:

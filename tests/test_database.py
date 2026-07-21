@@ -194,7 +194,44 @@ def test_persist_gpu_runtime_observation_supersedes_prior_generation_and_marks_o
     database.persist_gpu_runtime_observation(observation)
 
     absent_update = next(params for statement, params in executed if "runtime_state = 'absent'" in statement)
-    assert absent_update[0] == "asr"
+    assert absent_update[1] == "asr"
+
+
+def test_persist_gpu_runtime_observation_uses_the_observation_timestamp_for_absent_rows(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    observed_at = 1_700_000_000.0
+    observation = GpuReconciliationObservation(
+        observation_id="obs-timestamp", state="healthy", driver_used_mb=10, driver_free_mb=20,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(
+            component="model-runner", owner_component="model-runner", process_generation="generation-1",
+            state="present", observed_at=observed_at,
+            models=({"task_type": "embedding", "model_id": "snowflake", "in_flight": 0},),
+        ),),
+    )
+
+    database.persist_gpu_runtime_observation(observation)
+
+    absent_sql, absent_params = next((sql, params) for sql, params in executed if "runtime_state = 'absent'" in sql)
+    assert "runtime_observed_at = to_timestamp(%s)" in absent_sql
+    assert absent_params[-1] == observed_at
 
 
 def test_persist_gpu_runtime_observation_records_runtime_operation_timestamps_for_idle_fencing(monkeypatch):
