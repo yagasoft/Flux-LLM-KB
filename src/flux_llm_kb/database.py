@@ -491,7 +491,7 @@ def persist_gpu_runtime_observation(
                                )
                                OR (
                                     gpu_model_residency.runtime_generation <> EXCLUDED.runtime_generation
-                                    AND gpu_model_residency.runtime_observed_at < EXCLUDED.runtime_observed_at
+                                    AND gpu_model_residency.runtime_observed_at <= EXCLUDED.runtime_observed_at
                                )
                             """,
                             (

@@ -309,6 +309,50 @@ def test_generation_fence_prevents_delayed_observation_overwriting_newer_runtime
     assert "WHERE gpu_model_residency.runtime_observed_at IS NULL" in statements
 
 
+def test_present_model_refreshes_after_same_snapshot_marks_old_generation_absent(monkeypatch):
+    """A new-generation snapshot must restore its own present model row.
+
+    The omission pass runs before the model upsert.  It advances an old
+    generation's observation time to the current snapshot time while marking it
+    absent, so the present-model fence must accept that same timestamp.
+    """
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    observation = GpuReconciliationObservation(
+        observation_id="new-generation-present", state="healthy", driver_used_mb=10, driver_free_mb=20,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(
+            component="model-runner", owner_component="model-runner", process_generation="new", state="present",
+            observed_at=200.0, models=({"task_type": "embedding", "model_id": "snowflake"},),
+        ),),
+    )
+
+    database.persist_gpu_runtime_observation(observation)
+
+    upsert_sql = next(statement for statement, _params in executed if "ON CONFLICT (model_id, task_type)" in statement)
+    compact_sql = " ".join(upsert_sql.split())
+    assert (
+        "gpu_model_residency.runtime_generation <> EXCLUDED.runtime_generation "
+        "AND gpu_model_residency.runtime_observed_at <= EXCLUDED.runtime_observed_at"
+    ) in compact_sql
+
+
 def test_forget_episode_rejects_invalid_uuid_without_database():
     assert forget_episode("not-a-uuid") is False
 
