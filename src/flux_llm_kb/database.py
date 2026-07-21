@@ -3997,7 +3997,7 @@ GPU_EVICTION_REQUEST_MESSAGE_TYPE = "flux.gpu.eviction.request"
 
 def enqueue_gpu_eviction_request(
     *,
-    lease_id: str,
+    lease_id: str | None,
     request_profile: dict[str, Any],
     candidate: dict[str, Any],
     metadata: dict[str, Any] | None = None,
@@ -4008,15 +4008,16 @@ def enqueue_gpu_eviction_request(
     url: str | None = None,
     connection: Any | None = None,
 ) -> dict[str, Any]:
+    reason = "idle" if str(request_reason or "").strip().lower() == "idle" else "demand"
     clean_lease_id = str(lease_id or "").strip()
-    if not clean_lease_id:
-        raise ValueError("lease_id is required")
+    if not clean_lease_id and reason != "idle":
+        raise ValueError("lease_id is required for demand eviction")
+    lease_reference = clean_lease_id or None
     task_type = str(candidate.get("task_type") or "").strip()
     model_id = str(candidate.get("model_id") or "").strip()
     component = str(candidate.get("component") or "").strip()
     generation = str(runtime_generation if runtime_generation is not None else candidate.get("runtime_generation") or "").strip()
     activity_sequence = max(0, int(runtime_activity_sequence if runtime_activity_sequence is not None else candidate.get("runtime_activity_sequence") or 0))
-    reason = "idle" if str(request_reason or "").strip().lower() == "idle" else "demand"
     observation_id = str(reconciliation_observation_id if reconciliation_observation_id is not None else candidate.get("reconciliation_observation_id") or "").strip()
     if not task_type:
         raise ValueError("GPU eviction candidate task_type is required")
@@ -4104,7 +4105,7 @@ def enqueue_gpu_eviction_request(
                     RETURNING id::text
                     """,
                     (
-                        clean_lease_id,
+                        lease_reference,
                         task_type,
                         model_id,
                         component,
@@ -4127,7 +4128,7 @@ def enqueue_gpu_eviction_request(
                 message_id = _stable_message_id("gpu-eviction", eviction_id)
                 command_payload = {
                     "eviction_id": eviction_id,
-                    "lease_id": clean_lease_id,
+                    "lease_id": lease_reference,
                     "task_type": task_type,
                     "model_id": model_id,
                     "component": component,

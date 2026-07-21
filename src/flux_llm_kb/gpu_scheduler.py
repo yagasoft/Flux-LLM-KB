@@ -2287,9 +2287,8 @@ def run_gpu_idle_unload_maintenance(
             if key not in confirmed:
                 skipped += 1
                 continue
-            lease_id = "idle:" + ":".join(key[:4])
             result = db.enqueue_gpu_eviction_request(
-                lease_id=lease_id,
+                lease_id=None,
                 request_profile={"task_type": candidate["task_type"], "model_id": candidate["model_id"], "worker_id": worker_id},
                 candidate=candidate,
                 metadata={"source": "gpu_idle_unload", "worker_id": worker_id},

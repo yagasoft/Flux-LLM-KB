@@ -1985,6 +1985,7 @@ def test_idle_unload_maintenance_expires_then_queues_one_runtime_confirmed_idle_
         ("select", {"idle_unload_seconds": 120.0, "connection": leader.connection}),
     ]
     enqueue = next(item[1] for item in events if isinstance(item, tuple) and item[0] == "enqueue")
+    assert enqueue["lease_id"] is None
     assert enqueue["request_reason"] == "idle"
     assert enqueue["runtime_generation"] == "generation-1"
     assert enqueue["runtime_activity_sequence"] == 4

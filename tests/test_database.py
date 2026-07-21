@@ -6762,7 +6762,16 @@ def test_repair_stranded_capture_commands_apply_requires_exact_confirmation():
         database.repair_stranded_capture_commands(apply=True, confirm="wrong")
 
 
-def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(monkeypatch):
+@pytest.mark.parametrize(
+    ("lease_id", "request_reason", "expected_lease_id"),
+    [
+        ("lease-1", "demand", "lease-1"),
+        (None, "idle", None),
+    ],
+)
+def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(
+    monkeypatch, lease_id, request_reason, expected_lease_id,
+):
     executed = []
 
     class FakeCursor:
@@ -6805,9 +6814,10 @@ def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(monkeypatc
     monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
 
     result = database.enqueue_gpu_eviction_request(
-        lease_id="lease-1",
+        lease_id=lease_id,
         request_profile={"task_type": "ocr_document", "model_id": "PaddleOCR-VL", "estimated_vram_mb": 8_000},
         candidate={"task_type": "embedding", "model_id": "snowflake", "estimated_vram_mb": 2_500, "component": "model-runner"},
+        request_reason=request_reason,
     )
 
     outbox_params = next(params for statement, params in executed if "INSERT INTO message_outbox" in statement)
@@ -6819,13 +6829,22 @@ def test_enqueue_gpu_eviction_request_writes_state_and_broker_command(monkeypatc
     assert outbox_params[3] == "flux.gpu.eviction.request"
     assert payload["payload"] == {
         "eviction_id": "42",
-        "lease_id": "lease-1",
+        "lease_id": expected_lease_id,
         "task_type": "embedding",
         "model_id": "snowflake",
         "component": "model-runner",
         "estimated_vram_mb": 2500,
     }
     assert "raw_content" not in json.dumps(payload)
+
+
+def test_enqueue_gpu_eviction_request_requires_lease_for_demand():
+    with pytest.raises(ValueError, match="lease_id is required for demand eviction"):
+        database.enqueue_gpu_eviction_request(
+            lease_id=None,
+            request_profile={"task_type": "rerank", "model_id": "qwen"},
+            candidate={"task_type": "embedding", "model_id": "snowflake", "component": "model-runner"},
+        )
 
 
 def test_enqueue_gpu_eviction_request_dedupes_active_candidate_across_leases(monkeypatch):
