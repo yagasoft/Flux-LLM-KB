@@ -4038,7 +4038,7 @@ def enqueue_gpu_eviction_request(
                 cur.execute(
                     """
                     SELECT pg_advisory_xact_lock(
-                        hashtextextended(jsonb_build_array(%s, %s, %s)::text, 0)
+                        hashtextextended(jsonb_build_array(%s::text, %s::text, %s::text)::text, 0)
                     )
                     """,
                     (task_type, model_id, component),

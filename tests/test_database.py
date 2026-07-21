@@ -6916,7 +6916,10 @@ def test_enqueue_gpu_eviction_request_locks_logical_key_before_absent_row_lookup
     )
     lock_sql, lock_params = executed[lock_index]
     assert lock_index < select_index
-    assert "jsonb_build_array(%s, %s, %s)::text" in lock_sql
+    # PostgreSQL cannot resolve ``jsonb_build_array``'s polymorphic inputs
+    # from untyped extended-query parameters.  Keep each element explicitly
+    # text-typed so the logical-key advisory lock works against real psycopg.
+    assert "jsonb_build_array(%s::text, %s::text, %s::text)::text" in lock_sql
     assert lock_params == ("embedding", "snowflake", "model-runner")
 
 
