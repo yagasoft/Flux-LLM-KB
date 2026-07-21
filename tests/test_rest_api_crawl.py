@@ -38,6 +38,37 @@ def test_remember_endpoint_passes_workspace_scope(monkeypatch):
     }
 
 
+def test_audit_endpoint_does_not_expose_raw_cas_identifiers(monkeypatch):
+    from flux_llm_kb.rest_api import create_app
+
+    stored: dict[str, object] = {}
+    monkeypatch.setattr(
+        database,
+        "record_audit_event",
+        lambda **kwargs: stored.update(kwargs) or {"id": "audit-1", "event_type": kwargs["event_type"]},
+    )
+    database.record_gpu_eviction_cas_rejection(
+        eviction_id="eviction-1",
+        stage="claim",
+        worker_id="worker\x00sk-live-secret",
+        broker_message_id="message\nBearer private-token",
+    )
+
+    class FakeService:
+        def audit(self, limit):  # noqa: ANN001
+            return [{"id": "audit-1", "event_type": "gpu_eviction.cas_rejected", "details": stored["details"]}]
+
+    monkeypatch.setattr("flux_llm_kb.rest_api.KnowledgeService", lambda: FakeService())
+
+    response = fastapi_testclient.TestClient(create_app()).get("/api/audit")
+
+    assert response.status_code == 200
+    assert response.json()[0]["details"]["stage"] == "claim"
+    assert "sk-live-secret" not in response.text
+    assert "private-token" not in response.text
+    assert "\\u0000" not in response.text
+
+
 def test_crawl_root_create_endpoint_validates_and_adds_root(tmp_path, monkeypatch):
     from flux_llm_kb.rest_api import create_app
 

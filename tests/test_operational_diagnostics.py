@@ -45,6 +45,18 @@ def test_service_operational_diagnostics_reads_existing_status_helpers(monkeypat
     assert payload["sections"]["retrieval"]["recent_explains"][0]["query_hash"] == "sha256:abc"
 
 
+def test_operational_diagnostics_passes_through_gpu_reconciliation_evidence(monkeypatch):
+    from flux_llm_kb import gpu_scheduler
+
+    evidence = {"state": "reconciliation_required", "observation_id": "obs-1", "counters": {"unverified_release": 1}}
+    monkeypatch.setattr(database, "worker_family_stats", lambda **_kwargs: [])
+    monkeypatch.setattr(gpu_scheduler, "get_gpu_scheduler", lambda: type("Scheduler", (), {"status": lambda self: {"evictions": {}, "runtime_reconciliation": evidence}})())
+
+    payload = KnowledgeService().operational_diagnostics(section="workers", limit=10)
+
+    assert payload["sections"]["workers"]["gpu_runtime_reconciliation"] == evidence
+
+
 def test_operational_diagnostics_filters_and_standardizes_drilldown_items():
     report = summarize_operational_diagnostics(
         watcher={

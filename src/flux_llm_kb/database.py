@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
@@ -11,7 +12,7 @@ import re
 import time
 from typing import Any, Callable, Iterable
 from urllib.parse import quote, urlsplit, urlunsplit
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .acceleration import (
     JOB_FAMILIES,
@@ -33,6 +34,25 @@ from .redaction import redactions_enabled
 from .scoring import LifecycleScoreInput, RankedItem, lifecycle_score, reciprocal_rank_fusion
 from .text_safety import sanitize_postgres_text_value, strip_postgres_nul
 from . import messaging
+
+
+class GpuControlLockTimeout(RuntimeError):
+    """Raised when a separate reconciler already owns the GPU control lock."""
+
+
+@dataclass(frozen=True)
+class GpuEvictionMaintenanceLeader:
+    """Session-bound ownership of one idle-eviction maintenance sweep."""
+
+    connection: Any
+
+    def is_valid(self) -> bool:
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute("SELECT 1")
+                return bool(cur.fetchone())
+        except Exception:
+            return False
 
 
 DEFAULT_DATABASE_URL = "postgresql://flux:flux@127.0.0.1:5432/flux_llm_kb?connect_timeout=1"
@@ -64,6 +84,8 @@ _CODE_IMPLEMENTATION_INTENT_BOOST = 0.025
 _VESPA_RRF_K = 60
 _VESPA_RRF_RANK_PROFILE = "hybrid_rrf"
 _VESPA_RRF_QUERY_MODE = "vespa_hybrid_rrf"
+_VESPA_LEXICAL_RANK_PROFILE = "bm25"
+_VESPA_LEXICAL_QUERY_MODE = "vespa_lexical_fallback"
 _VESPA_RRF_STREAM = "vespa_rrf"
 _VESPA_LEXICAL_STREAM = "vespa_lexical"
 _VESPA_DENSE_STREAM = "vespa_dense"
@@ -304,6 +326,317 @@ def check_database(url: str | None = None) -> DatabaseStatus:
         return DatabaseStatus(ok=True, message="database reachable")
     except Exception as exc:  # pragma: no cover - message is environment-specific
         return DatabaseStatus(ok=False, message=str(exc))
+
+
+@contextmanager
+def gpu_control_lock(*, timeout_seconds: float, url: str | None = None):
+    """Acquire the session-scoped reconciliation lock with bounded polling."""
+    psycopg = _load_psycopg()
+    deadline = time.monotonic() + max(0.01, float(timeout_seconds))
+    with psycopg.connect(url or database_url()) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            acquired = False
+            while time.monotonic() < deadline:
+                cur.execute("SELECT pg_try_advisory_lock(hashtextextended('flux.gpu.control', 0))")
+                row = cur.fetchone()
+                if bool(row and row[0]):
+                    acquired = True
+                    break
+                time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+            if not acquired:
+                raise GpuControlLockTimeout("GPU reconciliation control lock timed out")
+            try:
+                yield conn
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(hashtextextended('flux.gpu.control', 0))")
+
+
+@contextmanager
+def gpu_eviction_maintenance_leader_lock(*, url: str | None = None):
+    """Yield whether this process owns the independent idle-eviction sweep."""
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(hashtextextended('flux.gpu.eviction.maintenance', 0))")
+            row = cur.fetchone()
+            if not bool(row and row[0]):
+                yield False
+                return
+            try:
+                yield GpuEvictionMaintenanceLeader(connection=conn)
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(hashtextextended('flux.gpu.eviction.maintenance', 0))")
+
+
+def persist_gpu_runtime_observation(
+    observation: Any, *, url: str | None = None, connection: Any | None = None,
+) -> None:
+    """Persist one completed observation atomically, without changing admission policy."""
+    connection_context = nullcontext(connection) if connection is not None else _load_psycopg().connect(url or database_url())
+    with connection_context as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                for inventory in observation.inventories:
+                    component = str(inventory.component or "")
+                    owner = str(inventory.owner_component or component)
+                    error_metadata = _gpu_reconciliation_error_metadata(getattr(inventory, "error_metadata", {}))
+                    state = str(inventory.state or "unknown")
+                    cur.execute(
+                        """
+                        INSERT INTO gpu_runtime_inventory (
+                            observation_id, component, owner_component, process_generation,
+                            runtime_fingerprint, state, allocator_capability, driver_used_mb,
+                            driver_free_mb, known_measured_mb, known_reported_mb,
+                            context_allowance_mb, unresolved_known_owner_mb, unattributed_mb,
+                            models, allocators, error_code, error_metadata, observed_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s::jsonb, %s::jsonb, %s, %s::jsonb, to_timestamp(%s)
+                        )
+                        ON CONFLICT (observation_id, component) DO UPDATE
+                        SET state = EXCLUDED.state, models = EXCLUDED.models,
+                            allocators = EXCLUDED.allocators, error_code = EXCLUDED.error_code,
+                            error_metadata = EXCLUDED.error_metadata, observed_at = EXCLUDED.observed_at
+                        """,
+                        (
+                            str(observation.observation_id), component, owner,
+                            str(inventory.process_generation or ""), str(inventory.runtime_fingerprint or ""),
+                            state, str(inventory.allocator_capability or "unknown"),
+                            int(observation.driver_used_mb), int(observation.driver_free_mb),
+                            int(inventory.known_measured_mb), int(inventory.known_reported_mb),
+                            int(observation.context_allowance_mb), int(observation.unresolved_known_owner_mb),
+                            int(observation.unattributed_mb), _json(list(inventory.models)), _json(list(inventory.allocators)),
+                            str(inventory.error_code or "")[:80], _json(error_metadata), float(inventory.observed_at),
+                        ),
+                    )
+                    if state in {"unknown", "conflicted"}:
+                        cur.execute(
+                            """
+                            UPDATE gpu_model_residency
+                               SET runtime_state = %s, runtime_failure_reason = %s,
+                                   runtime_observed_at = now()
+                             WHERE owner_component = %s
+                            """,
+                            (state, str(inventory.error_code or "inventory_failed")[:300], owner),
+                        )
+                        if state == "conflicted":
+                            for model in inventory.models:
+                                if not isinstance(model, dict):
+                                    continue
+                                task_type = str(model.get("task_type") or "")
+                                model_id = str(model.get("model_id") or "")
+                                if task_type and model_id:
+                                    cur.execute(
+                                        """
+                                        UPDATE gpu_model_residency
+                                           SET runtime_state = 'conflicted', runtime_failure_reason = 'owner_conflict',
+                                               runtime_observed_at = to_timestamp(%s)
+                                         WHERE task_type = %s AND model_id = %s
+                                        """,
+                                        (float(inventory.observed_at), task_type, model_id),
+                                    )
+                        continue
+                    generation = str(inventory.process_generation or "")
+                    cur.execute(
+                        """
+                        UPDATE gpu_model_residency
+                           SET runtime_state = 'absent', runtime_observed_at = now(),
+                               runtime_failure_reason = ''
+                         WHERE owner_component = %s
+                           AND (
+                                runtime_observed_at IS NULL
+                                OR (runtime_generation = %s AND runtime_observed_at <= to_timestamp(%s))
+                                OR (runtime_generation <> %s AND runtime_observed_at < to_timestamp(%s))
+                           )
+                        """,
+                        (owner, generation, float(inventory.observed_at), generation, float(inventory.observed_at)),
+                    )
+                    for model in inventory.models:
+                        if not isinstance(model, dict):
+                            continue
+                        task_type = str(model.get("task_type") or "")
+                        model_id = str(model.get("model_id") or "")
+                        if not task_type or not model_id:
+                            continue
+                        operation_started_at = _runtime_operation_epoch(model.get("last_operation_started_at", model.get("last_started_at")))
+                        operation_completed_at = _runtime_operation_epoch(model.get("last_operation_completed_at", model.get("last_activity_at")))
+                        cur.execute(
+                            """
+                            INSERT INTO gpu_model_residency (
+                                task_type, model_id, estimated_vram_mb, resident, last_used_at,
+                                metadata, runtime_state, owner_component, runtime_generation,
+                                runtime_fingerprint, runtime_activity_sequence, runtime_in_flight,
+                                last_operation_started_at, last_operation_completed_at,
+                                runtime_observed_at, runtime_failure_reason
+                            ) VALUES (%s, %s, 0, true, now(), '{}'::jsonb, 'present', %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), to_timestamp(%s), '')
+                            ON CONFLICT (model_id, task_type) DO UPDATE
+                            SET resident = true, runtime_state = 'present', owner_component = EXCLUDED.owner_component,
+                                runtime_generation = EXCLUDED.runtime_generation,
+                                runtime_fingerprint = EXCLUDED.runtime_fingerprint,
+                                runtime_activity_sequence = EXCLUDED.runtime_activity_sequence,
+                                runtime_in_flight = EXCLUDED.runtime_in_flight,
+                                last_operation_started_at = EXCLUDED.last_operation_started_at,
+                                last_operation_completed_at = EXCLUDED.last_operation_completed_at,
+                                runtime_observed_at = EXCLUDED.runtime_observed_at, runtime_failure_reason = ''
+                            WHERE gpu_model_residency.runtime_observed_at IS NULL
+                               OR (
+                                    gpu_model_residency.runtime_generation = EXCLUDED.runtime_generation
+                                    AND gpu_model_residency.runtime_observed_at <= EXCLUDED.runtime_observed_at
+                               )
+                               OR (
+                                    gpu_model_residency.runtime_generation <> EXCLUDED.runtime_generation
+                                    AND gpu_model_residency.runtime_observed_at < EXCLUDED.runtime_observed_at
+                               )
+                            """,
+                            (
+                                task_type, model_id, owner, generation,
+                                str(inventory.runtime_fingerprint or ""), int(model.get("activity_sequence") or 0),
+                                int(model.get("in_flight") or 0), operation_started_at, operation_completed_at,
+                                float(inventory.observed_at),
+                            ),
+                        )
+
+
+def _gpu_reconciliation_error_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    clean: dict[str, Any] = {}
+    for key, item in value.items():
+        safe_key = str(key).replace("\x00", "")[:80]
+        if isinstance(item, str):
+            clean[safe_key] = item.replace("\x00", " ")[:300]
+        elif isinstance(item, (int, float, bool)) or item is None:
+            clean[safe_key] = item
+    return clean
+
+
+def _runtime_operation_epoch(value: Any) -> float | None:
+    """Normalise runtime-operation timestamps supplied as epoch seconds or ISO text."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.timestamp()
+    return None
+
+
+def record_gpu_vram_sample(
+    *,
+    task_type: str,
+    model_id: str,
+    shape_bucket: str,
+    load_delta_mb: int | None,
+    working_set_mb: int | None,
+    allocator_capability: str,
+    tracker_overlapped: bool,
+    observed_at: float | None = None,
+    url: str | None = None,
+) -> bool:
+    """Persist one measured, non-overlapping shape sample and retain only 32."""
+    if str(allocator_capability or "") != "measured" or tracker_overlapped:
+        return False
+    if load_delta_mb is None or working_set_mb is None:
+        return False
+    try:
+        load_delta = max(0, int(load_delta_mb))
+        working_set = max(0, int(working_set_mb))
+    except (TypeError, ValueError):
+        return False
+    captured_at = time.time() if observed_at is None else float(observed_at)
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO gpu_vram_samples (
+                        task_type, model_id, shape_bucket, load_delta_mb, working_set_mb,
+                        allocator_capability, tracker_overlapped, observed_at
+                    ) VALUES (%s, %s, %s, %s, %s, 'measured', false, to_timestamp(%s))
+                    """,
+                    (str(task_type)[:80], str(model_id)[:300], str(shape_bucket)[:300], load_delta, working_set, captured_at),
+                )
+                cur.execute(
+                    """
+                    DELETE FROM gpu_vram_samples
+                     WHERE id IN (
+                        SELECT id
+                          FROM gpu_vram_samples
+                         WHERE task_type = %s AND model_id = %s AND shape_bucket = %s
+                         ORDER BY observed_at DESC, id DESC
+                         OFFSET 32
+                     )
+                    """,
+                    (str(task_type)[:80], str(model_id)[:300], str(shape_bucket)[:300]),
+                )
+    return True
+
+
+def resolve_gpu_vram_calibration(
+    *,
+    task_type: str,
+    model_id: str,
+    shape_bucket: str,
+    now: float | None = None,
+    max_age_seconds: float = 3600.0,
+    url: str | None = None,
+):
+    """Resolve a conservative fresh calibration without accepting contended samples."""
+    from .gpu_scheduler import GpuVramCalibration
+
+    timestamp = time.time() if now is None else float(now)
+    minimum_observed_at = timestamp - max(0.0, float(max_age_seconds))
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT load_delta_mb, working_set_mb, EXTRACT(EPOCH FROM observed_at), tracker_overlapped
+                  FROM gpu_vram_samples
+                 WHERE task_type = %s AND model_id = %s AND shape_bucket = %s
+                   AND allocator_capability = 'measured'
+                   AND tracker_overlapped = false
+                   AND observed_at >= to_timestamp(%s)
+                 ORDER BY observed_at DESC, id DESC
+                 LIMIT 32
+                """,
+                (str(task_type)[:80], str(model_id)[:300], str(shape_bucket)[:300], minimum_observed_at),
+            )
+            rows = list(cur.fetchall() or ())
+
+    samples: list[tuple[int, int]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            load, working, observed_at, overlapped = row.get("load_delta_mb"), row.get("working_set_mb"), row.get("extract"), row.get("tracker_overlapped")
+        else:
+            load, working, observed_at, overlapped = row[:4]
+        try:
+            if bool(overlapped) or float(observed_at) < minimum_observed_at:
+                continue
+            samples.append((max(0, int(load)), max(0, int(working))))
+        except (TypeError, ValueError):
+            continue
+    if len(samples) < 5:
+        return GpuVramCalibration(sample_count=len(samples), source="insufficient_samples")
+    # High-water is deliberately at least as conservative as the 90th percentile.
+    loads = sorted(sample[0] for sample in samples)
+    working_sets = sorted(sample[1] for sample in samples)
+    percentile_index = min(len(samples) - 1, max(0, int(len(samples) * 0.9 + 0.999999) - 1))
+    return GpuVramCalibration(
+        load_delta_mb=max(loads[-1], loads[percentile_index]),
+        working_set_mb=max(working_sets[-1], working_sets[percentile_index]),
+        sample_count=len(samples),
+        source="measured",
+    )
 
 
 def _database_check_payload(
@@ -1082,7 +1415,10 @@ def _vespa_streams_from_raw_scores(raw_scores: dict[str, Any], extra_streams: It
     return streams
 
 
-def _vespa_candidate_signals(candidate: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+def _vespa_candidate_signals(candidate: dict[str, Any], *, query_mode: str) -> tuple[dict[str, float], list[str]]:
+    if query_mode == _VESPA_LEXICAL_QUERY_MODE:
+        raw_scores = {_VESPA_LEXICAL_STREAM: float(candidate.get("score") or 0.0)}
+        return raw_scores, _vespa_streams_from_raw_scores(raw_scores)
     match_features = candidate.get("match_features") if isinstance(candidate.get("match_features"), dict) else {}
     raw_scores = {_VESPA_RRF_STREAM: float(candidate.get("score") or 0.0)}
     lexical_score = _vespa_lexical_score(match_features)
@@ -1094,7 +1430,11 @@ def _vespa_candidate_signals(candidate: dict[str, Any]) -> tuple[dict[str, float
     return raw_scores, _vespa_streams_from_raw_scores(raw_scores)
 
 
-def _merge_vespa_rrf_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_vespa_rrf_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    query_mode: str = _VESPA_RRF_QUERY_MODE,
+) -> list[dict[str, Any]]:
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     order: list[tuple[str, str]] = []
     for candidate in candidates:
@@ -1102,8 +1442,8 @@ def _merge_vespa_rrf_candidates(candidates: list[dict[str, Any]]) -> list[dict[s
         owner_id = str(candidate.get("owner_id") or "")
         if owner_table not in _VESPA_VALID_OWNER_TABLES or not owner_id:
             continue
-        raw_scores, streams = _vespa_candidate_signals(candidate)
-        score = raw_scores[_VESPA_RRF_STREAM]
+        raw_scores, streams = _vespa_candidate_signals(candidate, query_mode=query_mode)
+        score = float(candidate.get("score") or 0.0)
         key = (owner_table, owner_id)
         if key not in merged:
             row = dict(candidate)
@@ -1206,18 +1546,29 @@ def search_corpus_chunks_vespa(
     file_kinds = list(filters.get("file_kinds") or []) if isinstance(filters, dict) else []
     languages = list(filters.get("languages") or []) if isinstance(filters, dict) else []
     started = time.perf_counter()
-    embedding_result, embedding_elapsed_ms, embedding_cache_hit = _embed_query_for_retrieval(
-        query,
-        model=SNOWFLAKE_EMBEDDING_MODEL,
-        dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-    )
-    rank_profile = _VESPA_RRF_RANK_PROFILE
+    embedding_failure = None
+    try:
+        embedding_result, embedding_elapsed_ms, embedding_cache_hit = _embed_query_for_retrieval(
+            query,
+            model=SNOWFLAKE_EMBEDDING_MODEL,
+            dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        )
+    except Exception as exc:
+        embedding_elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        embedding_failure = _classify_retryable_vespa_embedding_failure(exc)
+        if embedding_failure is None or not _configured_vespa_lexical_fallback_enabled():
+            raise
+        embedding_result = None
+        embedding_cache_hit = False
+    query_mode = _VESPA_LEXICAL_QUERY_MODE if embedding_result is None else _VESPA_RRF_QUERY_MODE
+    rank_profile = _VESPA_LEXICAL_RANK_PROFILE if embedding_result is None else _VESPA_RRF_RANK_PROFILE
+    candidate_stream = _VESPA_LEXICAL_STREAM if embedding_result is None else _VESPA_RRF_STREAM
     candidate_limit = min(max(limit * 8, 80), 200)
     query_started = time.perf_counter()
     resolved_vespa_base_url = vespa_base_url or "http://127.0.0.1:8080"
     candidates = VespaSearchAdapter(base_url=resolved_vespa_base_url).query(
         query,
-        embedding=embedding_result.vector,
+        embedding=embedding_result.vector if embedding_result is not None else None,
         root_name=root_name,
         file_kinds=file_kinds,
         languages=languages,
@@ -1225,13 +1576,13 @@ def search_corpus_chunks_vespa(
         rank_profile=rank_profile,
     )
     query_elapsed_ms = max(0, int((time.perf_counter() - query_started) * 1000))
-    fused_candidates = _merge_vespa_rrf_candidates(candidates)
+    fused_candidates = _merge_vespa_rrf_candidates(candidates, query_mode=query_mode)
     _record_corpus_stream_diagnostics(
         diagnostics,
-        _VESPA_RRF_STREAM,
+        candidate_stream,
         started,
         rows=len(fused_candidates),
-        plan="vespa_hybrid_rrf_candidates",
+        plan="vespa_lexical_candidates" if embedding_result is None else "vespa_hybrid_rrf_candidates",
         candidate_limit=candidate_limit,
     )
     match_feature_keys = sorted(
@@ -1247,8 +1598,8 @@ def search_corpus_chunks_vespa(
             "search_engine": "vespa",
             "base_url": resolved_vespa_base_url,
             "rank_profile": rank_profile,
-            "query_mode": _VESPA_RRF_QUERY_MODE,
-            "rrf_k": _VESPA_RRF_K,
+            "query_mode": query_mode,
+            "rrf_k": _VESPA_RRF_K if embedding_result is not None else None,
             "candidate_limit": candidate_limit,
             "candidate_count": len(candidates),
             "fused_candidate_count": len(fused_candidates),
@@ -1257,6 +1608,8 @@ def search_corpus_chunks_vespa(
             "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
             "embedding_latency_ms": embedding_elapsed_ms,
             "embedding_cache_hit": embedding_cache_hit,
+            "embedding_failure_class": embedding_failure[0] if embedding_failure else None,
+            "embedding_capacity_state": embedding_failure[1] if embedding_failure else None,
             "query_latency_ms": query_elapsed_ms,
             "match_feature_keys": match_feature_keys,
         }
@@ -1266,7 +1619,7 @@ def search_corpus_chunks_vespa(
         if str(item.get("owner_table") or "") == "asset_chunks"
     ]
     raw_scores = _vespa_raw_scores_by_owner(fused_candidates)
-    streams = {_VESPA_RRF_STREAM: candidate_ids}
+    streams = {candidate_stream: candidate_ids}
     if not candidate_ids:
         if diagnostics is not None:
             diagnostics["vespa"]["hydrated_count"] = 0
@@ -1349,18 +1702,29 @@ def search_evidence_vespa(
     file_kinds = list(filters.get("file_kinds") or []) if isinstance(filters, dict) else []
     languages = list(filters.get("languages") or []) if isinstance(filters, dict) else []
     started = time.perf_counter()
-    embedding_result, embedding_elapsed_ms, embedding_cache_hit = _embed_query_for_retrieval(
-        query,
-        model=SNOWFLAKE_EMBEDDING_MODEL,
-        dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
-    )
-    rank_profile = _VESPA_RRF_RANK_PROFILE
+    embedding_failure = None
+    try:
+        embedding_result, embedding_elapsed_ms, embedding_cache_hit = _embed_query_for_retrieval(
+            query,
+            model=SNOWFLAKE_EMBEDDING_MODEL,
+            dimensions=SNOWFLAKE_EMBEDDING_DIMENSIONS,
+        )
+    except Exception as exc:
+        embedding_elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
+        embedding_failure = _classify_retryable_vespa_embedding_failure(exc)
+        if embedding_failure is None or not _configured_vespa_lexical_fallback_enabled():
+            raise
+        embedding_result = None
+        embedding_cache_hit = False
+    query_mode = _VESPA_LEXICAL_QUERY_MODE if embedding_result is None else _VESPA_RRF_QUERY_MODE
+    rank_profile = _VESPA_LEXICAL_RANK_PROFILE if embedding_result is None else _VESPA_RRF_RANK_PROFILE
+    candidate_stream = _VESPA_LEXICAL_STREAM if embedding_result is None else _VESPA_RRF_STREAM
     candidate_limit = min(max(limit * 8, 80), 200)
     query_started = time.perf_counter()
     resolved_vespa_base_url = vespa_base_url or "http://127.0.0.1:8080"
     candidates = VespaSearchAdapter(base_url=resolved_vespa_base_url).query(
         query,
-        embedding=embedding_result.vector,
+        embedding=embedding_result.vector if embedding_result is not None else None,
         root_name=root_name,
         file_kinds=file_kinds,
         languages=languages,
@@ -1368,13 +1732,13 @@ def search_evidence_vespa(
         rank_profile=rank_profile,
     )
     query_elapsed_ms = max(0, int((time.perf_counter() - query_started) * 1000))
-    fused_candidates = _merge_vespa_rrf_candidates(candidates)
+    fused_candidates = _merge_vespa_rrf_candidates(candidates, query_mode=query_mode)
     _record_corpus_stream_diagnostics(
         diagnostics,
-        _VESPA_RRF_STREAM,
+        candidate_stream,
         started,
         rows=len(fused_candidates),
-        plan="vespa_hybrid_rrf_all_evidence",
+        plan="vespa_lexical_all_evidence" if embedding_result is None else "vespa_hybrid_rrf_all_evidence",
         candidate_limit=candidate_limit,
     )
     match_feature_keys = sorted(
@@ -1393,8 +1757,8 @@ def search_evidence_vespa(
             "search_engine": "vespa",
             "base_url": resolved_vespa_base_url,
             "rank_profile": rank_profile,
-            "query_mode": _VESPA_RRF_QUERY_MODE,
-            "rrf_k": _VESPA_RRF_K,
+            "query_mode": query_mode,
+            "rrf_k": _VESPA_RRF_K if embedding_result is not None else None,
             "candidate_limit": candidate_limit,
             "candidate_count": len(candidates),
             "fused_candidate_count": len(fused_candidates),
@@ -1404,6 +1768,8 @@ def search_evidence_vespa(
             "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
             "embedding_latency_ms": embedding_elapsed_ms,
             "embedding_cache_hit": embedding_cache_hit,
+            "embedding_failure_class": embedding_failure[0] if embedding_failure else None,
+            "embedding_capacity_state": embedding_failure[1] if embedding_failure else None,
             "query_latency_ms": query_elapsed_ms,
             "match_feature_keys": match_feature_keys,
         }
@@ -1449,7 +1815,7 @@ def search_evidence_vespa(
         corpus_stream_ids = [item_id for item_id in grouped_ids["asset_chunks"] if item_id in corpus_details]
         corpus_ranked = _rank_corpus_candidates(
             query,
-            streams={_VESPA_RRF_STREAM: corpus_stream_ids},
+            streams={candidate_stream: corpus_stream_ids},
             details=corpus_details,
             filters=filters,
         )
@@ -1469,7 +1835,7 @@ def search_evidence_vespa(
         score = float(item.get("score") or 0.0)
         if owner_table == "asset_chunks" and owner_id in corpus_details:
             payloads = _corpus_results_from_fused(
-                [RankedItem(item_id=owner_id, score=score, streams=tuple(item.get("streams") or (_VESPA_RRF_STREAM,)))],
+                [RankedItem(item_id=owner_id, score=score, streams=tuple(item.get("streams") or (candidate_stream,)))],
                 corpus_details,
             )
             if payloads:
@@ -1572,6 +1938,18 @@ def _configured_embedding_wait_timeout_seconds() -> float:
     )
 
 
+def _configured_vespa_lexical_fallback_enabled() -> bool:
+    try:
+        from .settings import SettingsService
+
+        value = SettingsService().resolve("retrieval.vespa_lexical_fallback_enabled").raw_value
+    except Exception:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
+
+
 def _configured_search_index_embedding_timeout_seconds() -> float:
     return float(
         _retrieval_int_setting(
@@ -1655,6 +2033,34 @@ def _embed_query_for_retrieval(query: str, *, model: str, dimensions: int) -> tu
     return embedding_result, elapsed_ms, False
 
 
+def _classify_retryable_vespa_embedding_failure(exc: Exception) -> tuple[str, str | None] | None:
+    """Classify only temporary query-embedding failures eligible for lexical Vespa."""
+    try:
+        from .gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout
+        from .model_runner import ModelRunnerBusy, ModelRunnerError
+    except Exception:
+        GpuLeaseDeferred = GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
+    if isinstance(exc, TimeoutError):
+        return ("embedding_timeout", None)
+    if isinstance(exc, ModelRunnerBusy):
+        return ("model_runner_busy", None)
+    if isinstance(exc, GpuLeaseTimeout):
+        return ("gpu_lease_timeout", None)
+    capacity_state = _search_index_embedding_capacity_state(exc)
+    if isinstance(exc, (GpuLeaseDeferred, GpuLeaseRejected)) and capacity_state in {
+        "inventory_incomplete",
+        "reconciliation_required",
+    }:
+        return ("gpu_capacity", capacity_state)
+    if isinstance(exc, ModelRunnerError):
+        message = str(exc).lower()
+        if any(marker in message for marker in ("timed out", "timeout", "503")):
+            return ("model_runner_timeout", None)
+        if any(marker in message for marker in ("busy", "429")):
+            return ("model_runner_busy", None)
+    return None
+
+
 def _reranker_base_diagnostics(
     reranker: Any,
     candidates: list[dict[str, Any]],
@@ -1682,17 +2088,17 @@ def _reranker_base_diagnostics(
 
 def _rerank_fallback_reason(exc: Exception) -> str | None:
     try:
-        from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout
+        from .gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout
         from .model_runner import ModelRunnerBusy, ModelRunnerError
         from .reranking import RerankBudgetExceeded
     except Exception:
-        GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
+        GpuLeaseDeferred = GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
         RerankBudgetExceeded = ()  # type: ignore[assignment]
     if isinstance(exc, RerankBudgetExceeded):
         return "budget_exceeded"
     if isinstance(exc, ModelRunnerBusy):
         return "model_runner_busy"
-    if isinstance(exc, GpuLeaseTimeout):
+    if isinstance(exc, (GpuLeaseDeferred, GpuLeaseTimeout)):
         return "gpu_lease_timeout"
     if isinstance(exc, GpuLeaseRejected):
         return "gpu_lease_rejected"
@@ -1705,20 +2111,49 @@ def _rerank_fallback_reason(exc: Exception) -> str | None:
 
 def _raise_retryable_search_index_embedding_exception(exc: Exception) -> None:
     try:
-        from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout
+        from .gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout
         from .model_runner import ModelRunnerBusy, ModelRunnerError
     except Exception:
-        GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
+        GpuLeaseDeferred = GpuLeaseRejected = GpuLeaseTimeout = ModelRunnerBusy = ModelRunnerError = ()  # type: ignore[assignment]
     if isinstance(exc, TimeoutError):
         raise ModelRunnerBusy(str(exc) or "search-index embedding request timed out", retry_after_seconds=1.0) from exc
     if isinstance(exc, ModelRunnerBusy):
         raise exc
-    if isinstance(exc, (GpuLeaseRejected, GpuLeaseTimeout)):
+    if isinstance(exc, (GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout)):
         raise exc
     if isinstance(exc, ModelRunnerError):
         message = str(exc).lower()
         if any(marker in message for marker in ("timed out", "timeout", "scheduler", "busy", "503", "429")):
             raise ModelRunnerBusy(str(exc), retry_after_seconds=1.0) from exc
+
+
+def _search_index_embedding_capacity_state(exc: Exception) -> str | None:
+    state = getattr(exc, "capacity_state", None)
+    if isinstance(state, str) and state.strip():
+        return state.strip()
+    for attribute in ("metadata", "details", "payload"):
+        structured = getattr(exc, attribute, None)
+        if not isinstance(structured, dict):
+            continue
+        state = structured.get("capacity_state")
+        if isinstance(state, str) and state.strip():
+            return state.strip()
+    return None
+
+
+def _normalised_capacity_source_content_hash(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _search_index_capacity_blocker_priority(
+    *,
+    retry_capacity_blockers: bool,
+    recorded_content_hash: Any,
+    current_content_hash: Any,
+) -> int:
+    recorded = _normalised_capacity_source_content_hash(recorded_content_hash)
+    current = str(current_content_hash or "")
+    return 1 if retry_capacity_blockers or (recorded and current and recorded != current) else 4
 
 
 def _rerank_fallback_results(
@@ -3082,6 +3517,39 @@ def record_audit_event(
             return {"id": row[0], "event_type": row[1]}
 
 
+def record_gpu_eviction_cas_rejection(
+    *,
+    eviction_id: str,
+    stage: str,
+    worker_id: str = "",
+    broker_message_id: str = "",
+    url: str | None = None,
+) -> dict[str, Any]:
+    """Persist a CAS race without mutating the eviction's terminal history."""
+    return record_audit_event(
+        event_type="gpu_eviction.cas_rejected",
+        target_table="gpu_evictions",
+        target_id=str(eviction_id),
+        details={
+            "stage": _gpu_eviction_audit_stage(stage),
+            "worker_id_hash": _gpu_eviction_audit_identifier_hash(worker_id),
+            "broker_message_id_hash": _gpu_eviction_audit_identifier_hash(broker_message_id),
+        },
+        url=url,
+    )
+
+
+def _gpu_eviction_audit_stage(value: str) -> str:
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+    cleaned = "".join(char if char in allowed else "_" for char in str(value or ""))[:80]
+    return cleaned or "unknown"
+
+
+def _gpu_eviction_audit_identifier_hash(value: str) -> str:
+    text = str(value or "")
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:24] if text else ""
+
+
 def enqueue_message_outbox(
     *,
     message_id: str | None = None,
@@ -3468,7 +3936,58 @@ def record_event_journal(
 
 
 GPU_EVICTION_ACTIVE_STATUSES = ("queued", "running", "retrying")
-GPU_EVICTION_TERMINAL_STATUSES = ("succeeded", "failed", "skipped")
+GPU_EVICTION_TERMINAL_STATUSES = ("succeeded", "failed", "skipped", "expired")
+_GPU_EVICTION_ROW_COLUMNS = """id::text, lease_id, task_type, model_id, component, status,
+       estimated_freed_vram_mb, error, metadata, broker_message_id, routing_key,
+       correlation_id, causation_id, broker_delivery_count, runtime_generation,
+       runtime_activity_sequence, claim_token, row_version, status_changed_at,
+       heartbeat_at, retry_not_before, expires_at, request_reason, terminal_reason,
+       reconciliation_observation_id"""
+
+
+def _gpu_eviction_deadlines(*, delivery_count: int = 0) -> dict[str, float]:
+    """Return lifecycle guards from the live broker retry policy.
+
+    The database owns the durable deadline, rather than relying on a worker's
+    process-local timer.  A running eviction is bounded by the configured
+    unload/verification window; retries also reserve the remaining broker
+    deliveries and one final running guard.
+    """
+    config = messaging.RabbitMqConfig.from_env()
+    retry_seconds = max(1, int(config.retry_delay_ms or 1000) // 1000)
+    delivery_limit = max(1, int(config.delivery_limit or 1))
+    unload_timeout_seconds = _gpu_eviction_request_timeout_seconds()
+    running_seconds = max(60, 2 * (unload_timeout_seconds + unload_timeout_seconds))
+    return {
+        "queued_seconds": max(120, 2 * retry_seconds),
+        "running_seconds": running_seconds,
+        "retry_delay_seconds": retry_seconds,
+        "retry_seconds": retry_seconds * (1 + max(0, delivery_limit - max(0, int(delivery_count)))) + running_seconds,
+    }
+
+
+def _gpu_eviction_request_timeout_seconds() -> float:
+    """Resolve the same reloadable timeout used by the eviction worker.
+
+    Importing the settings service here keeps database deadline derivation
+    independent of the scheduler module, avoiding a database/scheduler import
+    cycle while preserving the worker's setting precedence.
+    """
+    value: Any = 10
+    try:
+        from .settings import SettingsService
+
+        value = SettingsService().resolve("gpu.scheduler.eviction_request_timeout_seconds").raw_value
+    except Exception:
+        pass
+    try:
+        return max(0.0, float(value or 10))
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def _gpu_eviction_cas_rejected(eviction_id: str) -> dict[str, Any]:
+    return {"eviction_id": str(eviction_id), "cas_rejected": True}
 GPU_EVICTION_REQUEST_MESSAGE_TYPE = "flux.gpu.eviction.request"
 
 
@@ -3478,7 +3997,12 @@ def enqueue_gpu_eviction_request(
     request_profile: dict[str, Any],
     candidate: dict[str, Any],
     metadata: dict[str, Any] | None = None,
+    runtime_generation: str | None = None,
+    runtime_activity_sequence: int | None = None,
+    request_reason: str = "demand",
+    reconciliation_observation_id: str | None = None,
     url: str | None = None,
+    connection: Any | None = None,
 ) -> dict[str, Any]:
     clean_lease_id = str(lease_id or "").strip()
     if not clean_lease_id:
@@ -3486,50 +4010,93 @@ def enqueue_gpu_eviction_request(
     task_type = str(candidate.get("task_type") or "").strip()
     model_id = str(candidate.get("model_id") or "").strip()
     component = str(candidate.get("component") or "").strip()
+    generation = str(runtime_generation if runtime_generation is not None else candidate.get("runtime_generation") or "").strip()
+    activity_sequence = max(0, int(runtime_activity_sequence if runtime_activity_sequence is not None else candidate.get("runtime_activity_sequence") or 0))
+    reason = "idle" if str(request_reason or "").strip().lower() == "idle" else "demand"
+    observation_id = str(reconciliation_observation_id if reconciliation_observation_id is not None else candidate.get("reconciliation_observation_id") or "").strip()
     if not task_type:
         raise ValueError("GPU eviction candidate task_type is required")
     if not model_id:
         raise ValueError("GPU eviction candidate model_id is required")
-    message_id = _stable_message_id("gpu-eviction", clean_lease_id, task_type, model_id, component)
     request_metadata = {
         "request_profile": dict(request_profile or {}),
         "candidate": dict(candidate or {}),
         **dict(metadata or {}),
     }
-    psycopg = _load_psycopg()
-    with psycopg.connect(url or database_url()) as conn:
+    connection_context = nullcontext(connection) if connection is not None else _load_psycopg().connect(url or database_url())
+    with connection_context as conn:
         with conn.transaction():
             with conn.cursor() as cur:
+                # Row locks cannot protect a logical eviction key before its
+                # first row exists. Serialise this key for the complete
+                # lookup/insert/outbox transaction so concurrent admissions
+                # reuse the same active eviction and publish one command.
                 cur.execute(
                     """
-                    SELECT id::text, status, broker_message_id
+                    SELECT pg_advisory_xact_lock(
+                        hashtextextended(jsonb_build_array(%s, %s, %s)::text, 0)
+                    )
+                    """,
+                    (task_type, model_id, component),
+                )
+                expired = _expire_stale_gpu_eviction_requests_with_cursor(cur)
+                for request in expired:
+                    _enqueue_gpu_eviction_event_with_cursor(
+                        cur,
+                        request=request,
+                        event_status="expired",
+                        correlation_id=request.get("correlation_id"),
+                        causation_id=request.get("broker_message_id"),
+                    )
+                cur.execute(
+                    """
+                    SELECT id::text, status, broker_message_id, request_reason
                       FROM gpu_evictions
                      WHERE task_type = %s
                        AND model_id = %s
                        AND component = %s
+                       AND runtime_generation = %s
                        AND status IN ('queued', 'running', 'retrying')
                      ORDER BY id ASC
                      LIMIT 1
                      FOR UPDATE
                     """,
-                    (task_type, model_id, component),
+                    (task_type, model_id, component, generation),
                 )
                 existing = cur.fetchone()
                 if existing:
+                    existing_reason = str(existing[3] or "") if len(existing) > 3 else "demand"
+                    if reason == "demand" and existing[1] == "queued" and existing_reason == "idle":
+                        cur.execute(
+                            """
+                            UPDATE gpu_evictions
+                               SET lease_id = %s,
+                                   request_reason = 'demand',
+                                   reconciliation_observation_id = %s,
+                                   runtime_activity_sequence = GREATEST(runtime_activity_sequence, %s),
+                                   metadata = metadata || %s::jsonb,
+                                   row_version = row_version + 1,
+                                   status_changed_at = now()
+                             WHERE id::text = %s
+                               AND status = 'queued'
+                            """,
+                            (clean_lease_id, observation_id, activity_sequence, _json({"demand_lease_id": clean_lease_id}), existing[0]),
+                        )
                     return {
                         "id": existing[0],
                         "eviction_id": existing[0],
                         "status": existing[1],
-                        "message_id": existing[2] or message_id,
+                        "message_id": existing[2] or _stable_message_id("gpu-eviction", existing[0]),
                         "deduped": True,
                     }
                 cur.execute(
                     """
                     INSERT INTO gpu_evictions (
                         lease_id, task_type, model_id, component, status, estimated_freed_vram_mb,
-                        created_at, queued_at, metadata
+                        created_at, queued_at, metadata, runtime_generation, runtime_activity_sequence,
+                        request_reason, reconciliation_observation_id, status_changed_at, expires_at
                     )
-                    VALUES (%s, %s, %s, %s, 'queued', %s, now(), now(), %s::jsonb)
+                    VALUES (%s, %s, %s, %s, 'queued', %s, now(), now(), %s::jsonb, %s, %s, %s, %s, now(), now() + (%s * interval '1 second'))
                     RETURNING id::text
                     """,
                     (
@@ -3539,10 +4106,21 @@ def enqueue_gpu_eviction_request(
                         component,
                         max(0, int(candidate.get("estimated_vram_mb") or 0)),
                         _json(request_metadata),
+                        generation,
+                        activity_sequence,
+                        reason,
+                        observation_id,
+                        _gpu_eviction_deadlines()["queued_seconds"],
                     ),
                 )
                 inserted = cur.fetchone()
                 eviction_id = str(inserted[0])
+                # A replacement for an expired eviction may have the same
+                # lease, runtime and generation as its predecessor.  The
+                # outbox identity must therefore name this durable request,
+                # otherwise the unique message constraint preserves an old
+                # published payload that points at the expired eviction.
+                message_id = _stable_message_id("gpu-eviction", eviction_id)
                 command_payload = {
                     "eviction_id": eviction_id,
                     "lease_id": clean_lease_id,
@@ -3593,11 +4171,18 @@ def claim_gpu_eviction_request(
     with psycopg.connect(url or database_url()) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
+                expired = _expire_stale_gpu_eviction_requests_with_cursor(cur)
+                for request in expired:
+                    _enqueue_gpu_eviction_event_with_cursor(
+                        cur,
+                        request=request,
+                        event_status="expired",
+                        correlation_id=request.get("correlation_id"),
+                        causation_id=request.get("broker_message_id"),
+                    )
                 cur.execute(
                     """
-                    SELECT id::text, lease_id, task_type, model_id, component, status,
-                           estimated_freed_vram_mb, error, metadata, broker_message_id,
-                           routing_key, correlation_id, causation_id, broker_delivery_count
+                    SELECT """ + _GPU_EVICTION_ROW_COLUMNS + """
                       FROM gpu_evictions
                      WHERE id::text = %s
                      FOR UPDATE
@@ -3610,6 +4195,10 @@ def claim_gpu_eviction_request(
                 current = _gpu_eviction_request_from_row(row)
                 if current["status"] in GPU_EVICTION_TERMINAL_STATUSES:
                     return current
+                if current["status"] == "running":
+                    return _gpu_eviction_cas_rejected(eviction_id)
+                claim_token = uuid4().hex
+                deadlines = _gpu_eviction_deadlines(delivery_count=int(current.get("broker_delivery_count") or 0) + 1)
                 cur.execute(
                     """
                     UPDATE gpu_evictions
@@ -3617,21 +4206,27 @@ def claim_gpu_eviction_request(
                            started_at = COALESCE(started_at, now()),
                            broker_message_id = COALESCE(%s, broker_message_id),
                            broker_delivery_count = broker_delivery_count + 1,
-                           metadata = metadata || %s::jsonb
+                           metadata = metadata || %s::jsonb,
+                           claim_token = %s,
+                           row_version = row_version + 1,
+                           status_changed_at = now(),
+                           heartbeat_at = now(),
+                           retry_not_before = NULL,
+                           expires_at = now() + (%s * interval '1 second')
                      WHERE id::text = %s
-                       AND status IN ('queued', 'running', 'retrying')
-                     RETURNING id::text, lease_id, task_type, model_id, component, status,
-                               estimated_freed_vram_mb, error, metadata, broker_message_id,
-                               routing_key, correlation_id, causation_id, broker_delivery_count
+                       AND status IN ('queued', 'retrying')
+                     RETURNING """ + _GPU_EVICTION_ROW_COLUMNS + """
                     """,
                     (
                         broker_message_id,
                         _json({"last_worker_id": str(worker_id or "")}),
+                        claim_token,
+                        deadlines["running_seconds"],
                         str(eviction_id),
                     ),
                 )
                 updated = cur.fetchone()
-                return _gpu_eviction_request_from_row(updated) if updated else current
+                return _gpu_eviction_request_from_row(updated) if updated else _gpu_eviction_cas_rejected(eviction_id)
 
 
 def complete_gpu_eviction_request(
@@ -3640,11 +4235,16 @@ def complete_gpu_eviction_request(
     status: str,
     error: str = "",
     metadata: dict[str, Any] | None = None,
+    claim_token: str | None = None,
+    row_version: int | None = None,
     correlation_id: str | None = None,
     causation_id: str | None = None,
+    residency_verification: dict[str, Any] | None = None,
     url: str | None = None,
 ) -> dict[str, Any] | None:
-    clean_status = status if status in GPU_EVICTION_TERMINAL_STATUSES else "failed"
+    clean_status = status if status in GPU_EVICTION_TERMINAL_STATUSES and status != "expired" else "failed"
+    if not claim_token or row_version is None:
+        return _gpu_eviction_cas_rejected(eviction_id)
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.transaction():
@@ -3655,18 +4255,25 @@ def complete_gpu_eviction_request(
                        SET status = %s,
                            error = %s,
                            completed_at = now(),
-                           metadata = metadata || %s::jsonb
+                           metadata = metadata || %s::jsonb,
+                           row_version = row_version + 1,
+                           status_changed_at = now(),
+                           heartbeat_at = now(),
+                           expires_at = NULL
                      WHERE id::text = %s
-                     RETURNING id::text, lease_id, task_type, model_id, component, status,
-                               estimated_freed_vram_mb, error, metadata, broker_message_id,
-                               routing_key, correlation_id, causation_id, broker_delivery_count
+                       AND status = 'running'
+                       AND claim_token = %s
+                       AND row_version = %s
+                     RETURNING """ + _GPU_EVICTION_ROW_COLUMNS + """
                     """,
-                    (clean_status, str(error or "")[:1000], _json(metadata or {}), str(eviction_id)),
+                    (clean_status, str(error or "")[:1000], _json(metadata or {}), str(eviction_id), claim_token, int(row_version)),
                 )
                 row = cur.fetchone()
                 if row is None:
-                    return None
+                    return _gpu_eviction_cas_rejected(eviction_id)
                 request = _gpu_eviction_request_from_row(row)
+                if residency_verification:
+                    _update_gpu_residency_verification_with_cursor(cur, **residency_verification)
                 _enqueue_gpu_eviction_event_with_cursor(
                     cur,
                     request=request,
@@ -3682,31 +4289,43 @@ def retry_gpu_eviction_request(
     eviction_id: str,
     error: str,
     metadata: dict[str, Any] | None = None,
+    claim_token: str | None = None,
+    row_version: int | None = None,
+    broker_delivery_count: int | None = None,
     correlation_id: str | None = None,
     causation_id: str | None = None,
     url: str | None = None,
 ) -> dict[str, Any] | None:
+    if not claim_token or row_version is None:
+        return _gpu_eviction_cas_rejected(eviction_id)
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
+                deadlines = _gpu_eviction_deadlines(delivery_count=max(0, int(broker_delivery_count or 0)))
                 cur.execute(
                     """
                     UPDATE gpu_evictions
                        SET status = 'retrying',
                            error = %s,
                            completed_at = NULL,
-                           metadata = metadata || %s::jsonb
+                           metadata = metadata || %s::jsonb,
+                           row_version = row_version + 1,
+                           status_changed_at = now(),
+                           heartbeat_at = now(),
+                           retry_not_before = now() + (%s * interval '1 second'),
+                           expires_at = now() + (%s * interval '1 second')
                      WHERE id::text = %s
-                     RETURNING id::text, lease_id, task_type, model_id, component, status,
-                               estimated_freed_vram_mb, error, metadata, broker_message_id,
-                               routing_key, correlation_id, causation_id, broker_delivery_count
+                       AND status = 'running'
+                       AND claim_token = %s
+                       AND row_version = %s
+                     RETURNING """ + _GPU_EVICTION_ROW_COLUMNS + """
                     """,
-                    (str(error or "")[:1000], _json(metadata or {}), str(eviction_id)),
+                    (str(error or "")[:1000], _json(metadata or {}), deadlines["retry_delay_seconds"], deadlines["retry_seconds"], str(eviction_id), claim_token, int(row_version)),
                 )
                 row = cur.fetchone()
                 if row is None:
-                    return None
+                    return _gpu_eviction_cas_rejected(eviction_id)
                 request = _gpu_eviction_request_from_row(row)
                 _enqueue_gpu_eviction_event_with_cursor(
                     cur,
@@ -3735,7 +4354,242 @@ def _gpu_eviction_request_from_row(row: Any) -> dict[str, Any]:
         "correlation_id": row[11],
         "causation_id": row[12],
         "broker_delivery_count": int(row[13] or 0),
+        "runtime_generation": (row[14] or "") if len(row) > 14 else "",
+        "runtime_activity_sequence": int(row[15] or 0) if len(row) > 15 else 0,
+        "claim_token": (row[16] or "") if len(row) > 16 else "",
+        "row_version": int(row[17] or 0) if len(row) > 17 else 0,
+        "status_changed_at": _iso_or_none(row[18]) if len(row) > 18 else None,
+        "heartbeat_at": _iso_or_none(row[19]) if len(row) > 19 else None,
+        "retry_not_before": _iso_or_none(row[20]) if len(row) > 20 else None,
+        "expires_at": _iso_or_none(row[21]) if len(row) > 21 else None,
+        "request_reason": (row[22] or "demand") if len(row) > 22 else "demand",
+        "terminal_reason": (row[23] or "") if len(row) > 23 else "",
+        "reconciliation_observation_id": (row[24] or "") if len(row) > 24 else "",
     }
+
+
+def heartbeat_gpu_eviction_request(
+    *, eviction_id: str, claim_token: str, row_version: int, url: str | None = None
+) -> dict[str, Any]:
+    """Extend a running claim only when its current fence still owns the row."""
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE gpu_evictions
+                       SET heartbeat_at = now(), status_changed_at = now(), row_version = row_version + 1,
+                           expires_at = now() + (%s * interval '1 second')
+                     WHERE id::text = %s AND status = 'running' AND claim_token = %s AND row_version = %s
+                     RETURNING """ + _GPU_EVICTION_ROW_COLUMNS,
+                    (_gpu_eviction_deadlines()["running_seconds"], str(eviction_id), claim_token, int(row_version)),
+                )
+                row = cur.fetchone()
+                return _gpu_eviction_request_from_row(row) if row else _gpu_eviction_cas_rejected(eviction_id)
+
+
+def list_active_gpu_leases(*, url: str | None = None) -> list[dict[str, Any]]:
+    """Return current running GPU leases for eviction quiet-window fencing."""
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text, task_type, model_id, component
+                  FROM gpu_leases
+                 WHERE status = 'running'
+                """
+            )
+            return [
+                {"id": row[0], "task_type": row[1], "model_id": row[2], "component": row[3]}
+                for row in cur.fetchall()
+            ]
+
+
+def update_gpu_residency_verification(
+    *,
+    task_type: str,
+    model_id: str,
+    runtime_state: str,
+    failure_reason: str = "",
+    observation_id: str = "",
+    owner_component: str = "",
+    runtime_generation: str = "",
+    runtime_activity_sequence: int | None = None,
+    runtime_fingerprint: str = "",
+    replace_runtime_identity: bool = False,
+    capacity_state: str = "",
+    url: str | None = None,
+) -> None:
+    """Persist a failed/unverified runtime result without clearing owner evidence."""
+    allowed = {"unload_failed", "memory_release_unverified"}
+    if runtime_state not in allowed:
+        raise ValueError(f"unsupported GPU residency verification state: {runtime_state}")
+    psycopg = _load_psycopg()
+    with psycopg.connect(url or database_url()) as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                _update_gpu_residency_verification_with_cursor(
+                    cur,
+                    task_type=task_type,
+                    model_id=model_id,
+                    runtime_state=runtime_state,
+                    failure_reason=failure_reason,
+                    observation_id=observation_id,
+                    owner_component=owner_component,
+                    runtime_generation=runtime_generation,
+                    runtime_activity_sequence=runtime_activity_sequence,
+                    runtime_fingerprint=runtime_fingerprint,
+                    replace_runtime_identity=replace_runtime_identity,
+                    capacity_state=capacity_state,
+                )
+
+
+def _update_gpu_residency_verification_with_cursor(
+    cur: Any,
+    *,
+    task_type: str,
+    model_id: str,
+    runtime_state: str,
+    failure_reason: str = "",
+    observation_id: str = "",
+    owner_component: str = "",
+    runtime_generation: str = "",
+    runtime_activity_sequence: int | None = None,
+    runtime_fingerprint: str = "",
+    replace_runtime_identity: bool = False,
+    capacity_state: str = "",
+) -> None:
+    cur.execute(
+        """
+        UPDATE gpu_model_residency
+           SET runtime_state = %s,
+               runtime_failure_reason = %s,
+               owner_component = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), owner_component) END,
+               runtime_generation = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), runtime_generation) END,
+               runtime_activity_sequence = CASE WHEN %s THEN %s ELSE COALESCE(%s, runtime_activity_sequence) END,
+               runtime_fingerprint = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), runtime_fingerprint) END,
+               runtime_observed_at = now(),
+               metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                   'runtime_verification_observation_id', %s::text,
+                   'runtime_verification_capacity_state', NULLIF(%s::text, '')
+               ))
+         WHERE task_type = %s AND model_id = %s
+        """,
+        (
+            runtime_state,
+            str(failure_reason or "")[:300],
+            bool(replace_runtime_identity),
+            str(owner_component or ""),
+            str(owner_component or ""),
+            bool(replace_runtime_identity),
+            str(runtime_generation or ""),
+            str(runtime_generation or ""),
+            bool(replace_runtime_identity),
+            runtime_activity_sequence,
+            runtime_activity_sequence,
+            bool(replace_runtime_identity),
+            str(runtime_fingerprint or ""),
+            str(runtime_fingerprint or ""),
+            str(observation_id or ""),
+            str(capacity_state or ""),
+            str(task_type),
+            str(model_id),
+        ),
+    )
+
+
+def _expire_stale_gpu_eviction_requests_with_cursor(cur: Any) -> list[dict[str, Any]]:
+    cur.execute(
+        """
+        UPDATE gpu_evictions
+           SET status = 'expired', terminal_reason = 'stale_request_expired', completed_at = now(),
+               status_changed_at = now(), row_version = row_version + 1, expires_at = NULL,
+               metadata = metadata || '{"terminal_reason":"stale_request_expired"}'::jsonb
+         WHERE status IN ('queued', 'running', 'retrying') AND expires_at IS NOT NULL AND expires_at <= now()
+         RETURNING """ + _GPU_EVICTION_ROW_COLUMNS
+    )
+    rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+    return [_gpu_eviction_request_from_row(row) for row in rows]
+
+
+def expire_stale_gpu_eviction_requests(
+    *, url: str | None = None, connection: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Terminally expire stale rows while retaining their audit history."""
+    connection_context = nullcontext(connection) if connection is not None else _load_psycopg().connect(url or database_url())
+    with connection_context as conn:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                expired = _expire_stale_gpu_eviction_requests_with_cursor(cur)
+                for request in expired:
+                    _enqueue_gpu_eviction_event_with_cursor(
+                        cur, request=request, event_status="expired",
+                        correlation_id=request.get("correlation_id"), causation_id=request.get("broker_message_id"),
+                    )
+                return expired
+
+
+def list_idle_gpu_eviction_candidates(
+    *, idle_unload_seconds: float, url: str | None = None, connection: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Return idle, runtime-confirmed residents that have no protected GPU work.
+
+    This is intentionally a selection-only read: the caller must enqueue each
+    candidate through ``enqueue_gpu_eviction_request`` so the existing logical
+    candidate lock and generation/activity fences remain authoritative.
+    """
+    idle_seconds = max(0.0, float(idle_unload_seconds))
+    if idle_seconds <= 0:
+        return []
+    connection_context = nullcontext(connection) if connection is not None else _load_psycopg().connect(url or database_url())
+    with connection_context as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.task_type, r.model_id, r.estimated_vram_mb,
+                       r.owner_component, r.runtime_generation, r.runtime_activity_sequence
+                  FROM gpu_model_residency r
+                 WHERE r.resident = true
+                   AND r.runtime_state = 'present'
+                   AND r.last_operation_completed_at IS NOT NULL
+                   AND r.last_operation_completed_at <= now() - (%s * interval '1 second')
+                   AND r.runtime_in_flight = 0
+                   AND (r.last_operation_started_at IS NULL OR r.last_operation_started_at <= r.last_operation_completed_at)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM gpu_leases running
+                        WHERE running.status = 'running'
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM gpu_leases waiting
+                        WHERE waiting.status = 'waiting'
+                          AND waiting.caller_attached = true
+                          AND waiting.task_type = r.task_type
+                          AND waiting.model_id = r.model_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM gpu_evictions active
+                        WHERE active.task_type = r.task_type
+                          AND active.model_id = r.model_id
+                          AND active.component = r.owner_component
+                          AND active.status IN ('queued', 'running', 'retrying')
+                   )
+                 ORDER BY r.last_operation_completed_at ASC, r.task_type ASC, r.model_id ASC
+                """,
+                (idle_seconds,),
+            )
+            return [
+                {
+                    "task_type": str(row[0] or ""),
+                    "model_id": str(row[1] or ""),
+                    "estimated_vram_mb": int(row[2] or 0),
+                    "component": str(row[3] or ""),
+                    "runtime_generation": str(row[4] or ""),
+                    "runtime_activity_sequence": int(row[5] or 0),
+                }
+                for row in cur.fetchall()
+            ]
 
 
 def list_gpu_lease_jobs(*, limit: int = 50, url: str | None = None) -> list[dict[str, Any]]:
@@ -16848,6 +17702,7 @@ def enqueue_search_index_sync(
     owner_class: str = "all",
     root_name: str | None = None,
     limit: int = DEFAULT_SEARCH_INDEX_JOB_LIMIT,
+    retry_capacity_blockers: bool = False,
     url: str | None = None,
 ) -> dict[str, Any]:
     row_limit = _search_index_job_limit(limit)
@@ -16862,6 +17717,8 @@ def enqueue_search_index_sync(
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
     }
+    if retry_capacity_blockers:
+        payload["retry_capacity_blockers"] = True
     schedule = _job_schedule_metadata("search_index_sync")
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -16888,6 +17745,7 @@ def enqueue_search_index_sync_continuation(
     page_size: int,
     continuation_of: str,
     page_sequence: int,
+    retry_capacity_blockers: bool = False,
     url: str | None = None,
 ) -> dict[str, Any]:
     row_limit = _search_index_job_limit(limit)
@@ -16903,6 +17761,8 @@ def enqueue_search_index_sync_continuation(
         "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
         "embedding_dimensions": 1024,
     }
+    if retry_capacity_blockers:
+        payload["retry_capacity_blockers"] = True
     schedule = _job_schedule_metadata("search_index_sync")
     psycopg = _load_psycopg()
     with psycopg.connect(url or database_url()) as conn:
@@ -17346,6 +18206,7 @@ def sync_search_index(
     limit: int = DEFAULT_SEARCH_INDEX_JOB_LIMIT,
     page_size: int | None = None,
     page_sequence: int = 0,
+    retry_capacity_blockers: bool = False,
     embedding_provider: Any | None = None,
     adapter: Any | None = None,
     vespa_base_url: str | None = None,
@@ -17388,6 +18249,13 @@ def sync_search_index(
         "errors": [],
         "embedding_batch_size": _search_index_embedding_batch_size(),
         "embedding_batches": 0,
+        "embedding_attempted_size_histogram": {},
+        "embedding_split_count": 0,
+        "embedding_smallest_attempted_size": None,
+        "embedding_capacity_state": None,
+        "non_retryable": False,
+        "non_retryable_blocker": None,
+        "skipped_capacity_blockers": 0,
         "hydrated_body_chars": 0,
         "truncated_body_chars": 0,
         "vespa_feed_count": 0,
@@ -17445,18 +18313,47 @@ def sync_search_index(
                 root_name=root_name,
                 limit=remaining,
                 embedding_model=SNOWFLAKE_EMBEDDING_MODEL,
+                retry_capacity_blockers=retry_capacity_blockers,
             )
             result["requested"] = len(rows)
             result["rows_loaded"] += len(rows)
             result["hydrated_body_chars"] += sum(int(row.get("search_index_hydrated_body_chars") or 0) for row in rows)
             result["truncated_body_chars"] += sum(int(row.get("search_index_truncated_chars") or 0) for row in rows)
-            pending = [
-                row
-                for row in rows
-                if row.get("existing_source_hash") != row.get("source_hash")
-                or row.get("existing_index_status") != "indexed"
-                or row.get("existing_embedding_model") != SNOWFLAKE_EMBEDDING_MODEL
-            ]
+            pending = []
+            for row in rows:
+                unchanged_capacity_blocker = (
+                    not retry_capacity_blockers
+                    and row.get("existing_index_status") == "blocked_embedding_capacity"
+                    and row.get("existing_source_hash") == row.get("source_hash")
+                    and row.get("existing_embedding_model") == SNOWFLAKE_EMBEDDING_MODEL
+                )
+                if unchanged_capacity_blocker:
+                    current_content_hash = str(row.get("owner_content_hash") or "")
+                    recorded_content_hash = _normalised_capacity_source_content_hash(row.get("existing_capacity_source_content_hash"))
+                    should_record_current_content_hash = bool(current_content_hash) and (
+                        not recorded_content_hash
+                        or _search_index_capacity_blocker_priority(
+                            retry_capacity_blockers=False,
+                            recorded_content_hash=recorded_content_hash,
+                            current_content_hash=current_content_hash,
+                        ) == 1
+                    )
+                    if should_record_current_content_hash:
+                        _upsert_search_index_record(
+                            cur,
+                            row=row,
+                            status="blocked_embedding_capacity",
+                            last_error=str(row.get("existing_last_error") or "") or None,
+                            metadata={"capacity_source_content_hash": current_content_hash},
+                        )
+                    result["skipped_capacity_blockers"] += 1
+                    continue
+                if (
+                    row.get("existing_source_hash") != row.get("source_hash")
+                    or row.get("existing_index_status") != "indexed"
+                    or row.get("existing_embedding_model") != SNOWFLAKE_EMBEDDING_MODEL
+                ):
+                    pending.append(row)
             result["skipped_unchanged"] = len(rows) - len(pending)
             for row in pending:
                 _upsert_search_index_record(
@@ -17474,9 +18371,15 @@ def sync_search_index(
                 return finish_result()
 
     batch_size = int(result["embedding_batch_size"])
-    for offset in range(0, len(pending), batch_size):
-        batch_rows = pending[offset : offset + batch_size]
+    batches = deque((offset, pending[offset : offset + batch_size]) for offset in range(0, len(pending), batch_size))
+    while batches:
+        offset, batch_rows = batches.popleft()
         result["embedding_batches"] += 1
+        attempted_size = len(batch_rows)
+        histogram = result["embedding_attempted_size_histogram"]
+        histogram[str(attempted_size)] = int(histogram.get(str(attempted_size)) or 0) + 1
+        smallest = result.get("embedding_smallest_attempted_size")
+        result["embedding_smallest_attempted_size"] = attempted_size if smallest is None else min(int(smallest), attempted_size)
         inputs = [
             EmbeddingInput(
                 owner_table=str(row["owner_table"]),
@@ -17492,8 +18395,42 @@ def sync_search_index(
             if len(embeddings) != len(batch_rows):
                 raise ValueError("embedding provider returned a different number of embeddings than requested")
         except Exception as exc:
+            capacity_state = _search_index_embedding_capacity_state(exc)
+            if capacity_state:
+                result["embedding_capacity_state"] = capacity_state
+            if capacity_state == "unschedulable" and len(batch_rows) > 1:
+                split_at = len(batch_rows) // 2
+                batches.appendleft((offset + split_at, batch_rows[split_at:]))
+                batches.appendleft((offset, batch_rows[:split_at]))
+                result["embedding_split_count"] += 1
+                continue
+            if capacity_state == "unschedulable":
+                failed_row = batch_rows[0]
+
+                def mark_capacity_blocker(cur):
+                    _upsert_search_index_record(
+                        cur,
+                        row=failed_row,
+                        status="blocked_embedding_capacity",
+                        last_error=str(exc),
+                        metadata={
+                            "failed_stage": "embedding_capacity",
+                            "capacity_state": "unschedulable",
+                            "capacity_source_content_hash": str(failed_row.get("owner_content_hash") or ""),
+                            "retryable": False,
+                        },
+                    )
+
+                with_cursor(mark_capacity_blocker)
+                result["failed"] += 1
+                result["non_retryable"] = True
+                result["non_retryable_blocker"] = "embedding_capacity"
+                result["errors"].append(str(exc)[:300])
+                return finish_result()
             _raise_retryable_search_index_embedding_exception(exc)
-            remaining_rows = pending[offset:]
+            remaining_rows = list(batch_rows)
+            for _queued_offset, queued_rows in batches:
+                remaining_rows.extend(queued_rows)
 
             def mark_embedding_failures(cur):
                 for row in remaining_rows:
@@ -17568,6 +18505,7 @@ def _fetch_search_index_rows(
     root_name: str | None,
     limit: int,
     embedding_model: str,
+    retry_capacity_blockers: bool = False,
 ) -> list[dict[str, Any]]:
     row_limit = _search_index_fetch_limit(limit)
     classes = ["corpus", "episodes", "claims"] if owner_class == "all" else [owner_class]
@@ -17578,11 +18516,29 @@ def _fetch_search_index_rows(
         if class_limit <= 0:
             continue
         if item_class == "corpus":
-            batch = _fetch_corpus_search_index_rows(cur, root_name=root_name, limit=class_limit, embedding_model=embedding_model)
+            batch = _fetch_corpus_search_index_rows(
+                cur,
+                root_name=root_name,
+                limit=class_limit,
+                embedding_model=embedding_model,
+                retry_capacity_blockers=retry_capacity_blockers,
+            )
         elif item_class == "episodes":
-            batch = _fetch_episode_search_index_rows(cur, root_name=root_name, limit=class_limit, embedding_model=embedding_model)
+            batch = _fetch_episode_search_index_rows(
+                cur,
+                root_name=root_name,
+                limit=class_limit,
+                embedding_model=embedding_model,
+                retry_capacity_blockers=retry_capacity_blockers,
+            )
         else:
-            batch = _fetch_claim_search_index_rows(cur, root_name=root_name, limit=class_limit, embedding_model=embedding_model)
+            batch = _fetch_claim_search_index_rows(
+                cur,
+                root_name=root_name,
+                limit=class_limit,
+                embedding_model=embedding_model,
+                retry_capacity_blockers=retry_capacity_blockers,
+            )
         rows.extend(batch)
     return rows[:row_limit]
 
@@ -17601,6 +18557,7 @@ def _fetch_corpus_search_index_rows(
     root_name: str | None,
     limit: int,
     embedding_model: str,
+    retry_capacity_blockers: bool = False,
 ) -> list[dict[str, Any]]:
     from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, vespa_document_id
 
@@ -17609,8 +18566,9 @@ def _fetch_corpus_search_index_rows(
     cur.execute(
         f"""
         SELECT c.id::text, a.id::text, r.id::text, r.name,
-               c.title, c.body, a.path, a.file_kind, c.metadata,
-               rec.source_hash, rec.index_status, rec.embedding_model
+               c.title, c.body, a.path, a.file_kind, c.metadata, a.content_hash,
+               rec.source_hash, rec.index_status, rec.embedding_model,
+               rec.metadata->>'capacity_source_content_hash', rec.last_error
         FROM asset_chunks c
         JOIN source_assets a ON a.id = c.asset_id
         JOIN monitored_roots r ON r.id = a.root_id
@@ -17625,6 +18583,8 @@ def _fetch_corpus_search_index_rows(
         ORDER BY CASE
                     WHEN rec.index_status = 'failed' THEN 0
                     WHEN rec.index_status IS NULL THEN 1
+                    WHEN rec.index_status = 'blocked_embedding_capacity' AND (%s OR (NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL AND NULLIF(a.content_hash, '') IS NOT NULL AND NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS DISTINCT FROM a.content_hash)) THEN 1
+                    WHEN rec.index_status = 'blocked_embedding_capacity' THEN 4
                     WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
                     ELSE 3
                  END,
@@ -17632,10 +18592,10 @@ def _fetch_corpus_search_index_rows(
                  c.id
         LIMIT %s
         """,
-        (embedding_model, *root_params, _search_index_fetch_limit(limit)),
+        (embedding_model, *root_params, bool(retry_capacity_blockers), _search_index_fetch_limit(limit)),
     )
     items: list[dict[str, Any]] = []
-    for owner_id, asset_id, row_root_id, row_root_name, title, body, source_path, file_kind, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
+    for owner_id, asset_id, row_root_id, row_root_name, title, body, source_path, file_kind, metadata, owner_content_hash, existing_hash, existing_status, existing_model, existing_capacity_source_content_hash, existing_last_error in cur.fetchall():
         item_metadata = metadata if isinstance(metadata, dict) else {}
         hydrated_body = mail_content_store.hydrate_chunk_body({"body": body, "metadata": item_metadata})
         bounded_body, hydrated_body_chars, truncated_body_chars = _bounded_search_index_body(hydrated_body)
@@ -17659,12 +18619,15 @@ def _fetch_corpus_search_index_rows(
                 "deleted": False,
                 "canonical": True,
                 "source_hash": embedding_source_hash(text),
+                "owner_content_hash": str(owner_content_hash or ""),
                 "index_text": text,
                 "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
                 "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
                 "existing_source_hash": existing_hash,
                 "existing_index_status": existing_status,
                 "existing_embedding_model": existing_model,
+                "existing_capacity_source_content_hash": str(existing_capacity_source_content_hash or ""),
+                "existing_last_error": str(existing_last_error or "") or None,
                 "search_index_hydrated_body_chars": hydrated_body_chars,
                 "search_index_truncated_chars": truncated_body_chars,
             }
@@ -17678,6 +18641,7 @@ def _fetch_episode_search_index_rows(
     root_name: str | None,
     limit: int,
     embedding_model: str,
+    retry_capacity_blockers: bool = False,
 ) -> list[dict[str, Any]]:
     from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, vespa_document_id
 
@@ -17685,9 +18649,11 @@ def _fetch_episode_search_index_rows(
     root_params: tuple[Any, ...] = (root_name,) if root_name else ()
     cur.execute(
         f"""
-        SELECT e.id::text, e.title, e.summary, e.metadata,
-               rec.source_hash, rec.index_status, rec.embedding_model
+        SELECT e.id::text, e.title, e.summary, e.metadata, s.content_hash,
+               rec.source_hash, rec.index_status, rec.embedding_model,
+               rec.metadata->>'capacity_source_content_hash', rec.last_error
         FROM episodes e
+        LEFT JOIN sources s ON s.id = e.source_id
         LEFT JOIN search_index_records rec ON rec.owner_table = 'episodes'
                                           AND rec.owner_id = e.id
                                           AND rec.embedding_model = %s
@@ -17696,6 +18662,8 @@ def _fetch_episode_search_index_rows(
         ORDER BY CASE
                     WHEN rec.index_status = 'failed' THEN 0
                     WHEN rec.index_status IS NULL THEN 1
+                    WHEN rec.index_status = 'blocked_embedding_capacity' AND (%s OR (NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL AND NULLIF(s.content_hash, '') IS NOT NULL AND NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS DISTINCT FROM s.content_hash)) THEN 1
+                    WHEN rec.index_status = 'blocked_embedding_capacity' THEN 4
                     WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
                     ELSE 3
                  END,
@@ -17703,10 +18671,10 @@ def _fetch_episode_search_index_rows(
                  e.id
         LIMIT %s
         """,
-        (embedding_model, *root_params, _search_index_fetch_limit(limit)),
+        (embedding_model, *root_params, bool(retry_capacity_blockers), _search_index_fetch_limit(limit)),
     )
     items: list[dict[str, Any]] = []
-    for owner_id, title, summary, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
+    for owner_id, title, summary, metadata, owner_content_hash, existing_hash, existing_status, existing_model, existing_capacity_source_content_hash, existing_last_error in cur.fetchall():
         item_metadata = metadata if isinstance(metadata, dict) else {}
         symbols = _search_index_symbols(item_metadata)
         source_path = str(item_metadata.get("source_path") or item_metadata.get("source") or "")
@@ -17729,12 +18697,15 @@ def _fetch_episode_search_index_rows(
                 "deleted": False,
                 "canonical": True,
                 "source_hash": embedding_source_hash(text),
+                "owner_content_hash": str(owner_content_hash or ""),
                 "index_text": text,
                 "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
                 "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
                 "existing_source_hash": existing_hash,
                 "existing_index_status": existing_status,
                 "existing_embedding_model": existing_model,
+                "existing_capacity_source_content_hash": str(existing_capacity_source_content_hash or ""),
+                "existing_last_error": str(existing_last_error or "") or None,
                 "search_index_hydrated_body_chars": hydrated_body_chars,
                 "search_index_truncated_chars": truncated_body_chars,
             }
@@ -17748,6 +18719,7 @@ def _fetch_claim_search_index_rows(
     root_name: str | None,
     limit: int,
     embedding_model: str,
+    retry_capacity_blockers: bool = False,
 ) -> list[dict[str, Any]]:
     from .search_index import SNOWFLAKE_EMBEDDING_DIMENSIONS, SNOWFLAKE_EMBEDDING_MODEL, vespa_document_id
 
@@ -17756,10 +18728,13 @@ def _fetch_claim_search_index_rows(
     cur.execute(
         f"""
         SELECT c.id::text, concat_ws(' ', e.name, c.predicate) AS title,
-               c.object_text, c.lifecycle_state, c.metadata,
-               rec.source_hash, rec.index_status, rec.embedding_model
+               c.object_text, c.lifecycle_state, c.metadata, source.content_hash,
+               rec.source_hash, rec.index_status, rec.embedding_model,
+               rec.metadata->>'capacity_source_content_hash', rec.last_error
         FROM claims c
         LEFT JOIN entities e ON e.id = c.subject_entity_id
+        LEFT JOIN episodes source_episode ON source_episode.id = c.episode_id
+        LEFT JOIN sources source ON source.id = source_episode.source_id
         LEFT JOIN search_index_records rec ON rec.owner_table = 'claims'
                                           AND rec.owner_id = c.id
                                           AND rec.embedding_model = %s
@@ -17769,6 +18744,8 @@ def _fetch_claim_search_index_rows(
         ORDER BY CASE
                     WHEN rec.index_status = 'failed' THEN 0
                     WHEN rec.index_status IS NULL THEN 1
+                    WHEN rec.index_status = 'blocked_embedding_capacity' AND (%s OR (NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL AND NULLIF(source.content_hash, '') IS NOT NULL AND NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS DISTINCT FROM source.content_hash)) THEN 1
+                    WHEN rec.index_status = 'blocked_embedding_capacity' THEN 4
                     WHEN rec.index_status IS DISTINCT FROM 'indexed' THEN 2
                     ELSE 3
                  END,
@@ -17776,10 +18753,10 @@ def _fetch_claim_search_index_rows(
                  c.id
         LIMIT %s
         """,
-        (embedding_model, *root_params, _search_index_fetch_limit(limit)),
+        (embedding_model, *root_params, bool(retry_capacity_blockers), _search_index_fetch_limit(limit)),
     )
     items: list[dict[str, Any]] = []
-    for owner_id, title, object_text, lifecycle_state, metadata, existing_hash, existing_status, existing_model in cur.fetchall():
+    for owner_id, title, object_text, lifecycle_state, metadata, owner_content_hash, existing_hash, existing_status, existing_model, existing_capacity_source_content_hash, existing_last_error in cur.fetchall():
         item_metadata = metadata if isinstance(metadata, dict) else {}
         symbols = _search_index_symbols(item_metadata)
         source_path = str(item_metadata.get("source_path") or item_metadata.get("source") or "")
@@ -17802,12 +18779,15 @@ def _fetch_claim_search_index_rows(
                 "deleted": False,
                 "canonical": True,
                 "source_hash": embedding_source_hash(text),
+                "owner_content_hash": str(owner_content_hash or ""),
                 "index_text": text,
                 "embedding_model": SNOWFLAKE_EMBEDDING_MODEL,
                 "embedding_dimensions": SNOWFLAKE_EMBEDDING_DIMENSIONS,
                 "existing_source_hash": existing_hash,
                 "existing_index_status": existing_status,
                 "existing_embedding_model": existing_model,
+                "existing_capacity_source_content_hash": str(existing_capacity_source_content_hash or ""),
+                "existing_last_error": str(existing_last_error or "") or None,
                 "search_index_hydrated_body_chars": hydrated_body_chars,
                 "search_index_truncated_chars": truncated_body_chars,
             }
@@ -17970,7 +18950,7 @@ def _upsert_search_index_record(
     last_error: str | None,
     metadata: dict[str, Any],
 ) -> None:
-    completed = status in {"indexed", "deleted", "failed", "skipped"}
+    completed = status in {"indexed", "deleted", "failed", "skipped", "blocked_embedding_capacity"}
     cur.execute(
         """
         INSERT INTO search_index_records (

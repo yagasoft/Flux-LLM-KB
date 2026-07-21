@@ -503,6 +503,29 @@ def test_collect_status_reports_over_cap_running_workers():
     assert image["over_cap_running"] == 3
 
 
+def test_collect_status_passes_through_scheduler_reconciliation_evidence(monkeypatch):
+    from flux_llm_kb import gpu_scheduler
+
+    evidence = {"state": "healthy", "observation_id": "obs-1", "counters": {"idle_unload_queued": 1}}
+    monkeypatch.setattr(gpu_scheduler, "get_gpu_scheduler", lambda: SimpleNamespace(status=lambda: {"enabled": True, "mode": "postgres", "runtime_reconciliation": evidence}))
+
+    payload = collect_acceleration_status(
+        settings={
+            "acceleration.cache_root": "",
+            "acceleration.local_inference.enabled": False,
+            "acceleration.local_inference.provider": "ollama",
+            "acceleration.local_inference.base_url": "http://127.0.0.1:11434",
+            "acceleration.local_inference.probe_timeout_seconds": 1,
+        },
+        command_runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="", stderr="missing"),
+        module_importer=lambda _name: (_ for _ in ()).throw(ModuleNotFoundError("missing")),
+        worker_family_stats=lambda: [],
+        benchmark_stats=lambda: [],
+    )
+
+    assert payload["capabilities"]["gpu_scheduler"]["runtime_reconciliation"] == evidence
+
+
 def test_collect_status_reports_empty_deterministic_benchmark_fixtures():
     payload = collect_acceleration_status(
         settings={

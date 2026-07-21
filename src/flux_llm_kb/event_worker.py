@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+import logging
+import threading
 from typing import Any
 from uuid import uuid4
 
 from . import database, messaging
-from .gpu_scheduler import process_gpu_eviction_request
+from .gpu_scheduler import process_gpu_eviction_request, run_gpu_idle_unload_maintenance, scheduler_config_from_settings
 from .service import KnowledgeService
 
 
 DEFAULT_CONSUMER_NAME = "flux-kb-event-worker"
+LOGGER = logging.getLogger(__name__)
 
 
 class EventWorker:
@@ -139,12 +143,64 @@ class EventWorker:
         raise ValueError(f"unsupported routing key: {message.routing_key}")
 
 
+def idle_unload_enabled() -> bool:
+    config = scheduler_config_from_settings()
+    return bool(config.idle_unload_enabled and config.idle_unload_seconds > 0)
+
+
+async def run_gpu_eviction_maintenance_once(
+    *, worker_id: str, stop_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """Move the blocking reconciliation/database sweep off the consumer loop."""
+    return await asyncio.to_thread(run_gpu_idle_unload_maintenance, worker_id=worker_id, stop_event=stop_event)
+
+
+async def run_gpu_eviction_maintenance_loop(
+    *, worker_id: str, stop_event: threading.Event | None = None, shutdown_event: asyncio.Event | None = None,
+) -> None:
+    """Run an immediate sweep, then repeat at the reloadable 30-second tick."""
+    thread_stop = stop_event or threading.Event()
+    async_stop = shutdown_event or asyncio.Event()
+    while not thread_stop.is_set():
+        try:
+            await run_gpu_eviction_maintenance_once(worker_id=worker_id, stop_event=thread_stop)
+        except asyncio.CancelledError:
+            thread_stop.set()
+            raise
+        except Exception:
+            LOGGER.exception("GPU eviction maintenance tick failed; retrying on the next interval")
+        if thread_stop.is_set():
+            return
+        interval = max(1.0, float(scheduler_config_from_settings().idle_sweep_interval_seconds or 30))
+        try:
+            await asyncio.wait_for(async_stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def run_worker_loop(*, queue_name: str = messaging.COMMAND_CORPUS_QUEUE, worker_id: str | None = None) -> dict[str, Any]:
     worker = EventWorker(worker_id=worker_id)
     consumer = messaging.RabbitMqConsumer()
+    maintenance_task: asyncio.Task[None] | None = None
+    maintenance_stop: threading.Event | None = None
+    maintenance_shutdown: asyncio.Event | None = None
+    if queue_name == messaging.COMMAND_GPU_EVICTION_QUEUE and idle_unload_enabled():
+        maintenance_stop = threading.Event()
+        maintenance_shutdown = asyncio.Event()
+        maintenance_task = asyncio.create_task(
+            run_gpu_eviction_maintenance_loop(
+                worker_id=worker.worker_id, stop_event=maintenance_stop, shutdown_event=maintenance_shutdown,
+            )
+        )
     try:
         await consumer.consume(queue_name=queue_name, handler=lambda message: worker.handle(message))
     finally:
+        if maintenance_task is not None:
+            assert maintenance_stop is not None and maintenance_shutdown is not None
+            maintenance_stop.set()
+            maintenance_shutdown.set()
+            with suppress(asyncio.CancelledError):
+                await maintenance_task
         close = getattr(consumer, "close", None)
         if close is not None:
             await close()

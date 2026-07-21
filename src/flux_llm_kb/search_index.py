@@ -222,12 +222,12 @@ class VespaSearchAdapter:
         self,
         query: str,
         *,
-        embedding: list[float],
+        embedding: list[float] | None,
         root_name: str | None = None,
         file_kinds: Iterable[str] | None = None,
         languages: Iterable[str] | None = None,
         limit: int = 20,
-        rank_profile: str = "hybrid",
+        rank_profile: str | None = None,
     ) -> list[dict[str, Any]]:
         yql_filters = [
             "lifecycle_state contains \"active\"",
@@ -240,18 +240,23 @@ class VespaSearchAdapter:
         _add_string_attribute_filter(yql_filters, query_params, field="file_kind", param_prefix="file_kind", values=file_kinds)
         _add_string_attribute_filter(yql_filters, query_params, field="language", param_prefix="language", values=languages)
         where = " and ".join(yql_filters)
+        lexical_only = embedding is None
         payload: dict[str, Any] = {
             "yql": (
                 "select * from sources * where "
+                f"({where}) and userQuery()"
+                if lexical_only
+                else "select * from sources * where "
                 f"({where}) and ({{targetHits:200}}nearestNeighbor(embedding, query_embedding) or userQuery())"
             ),
             "query": query,
             "type": "all",
             "hits": max(1, min(int(limit or 20), 200)),
-            "ranking.profile": rank_profile,
+            "ranking.profile": rank_profile or ("bm25" if lexical_only else "hybrid_rrf"),
             "ranking.listFeatures": "true",
-            "input.query(query_embedding)": embedding,
         }
+        if not lexical_only:
+            payload["input.query(query_embedding)"] = embedding
         if root_name:
             payload["root_name"] = root_name
         payload.update(query_params)

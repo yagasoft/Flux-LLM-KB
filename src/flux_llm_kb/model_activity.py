@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import re
 import time
 from typing import Any, Iterator
+from uuid import uuid4
 
 from . import dashboard_realtime, database
 from .error_diagnostics import redact_secrets
@@ -40,16 +41,28 @@ MODEL_ACTIVITY_STALE_FLOOR_SECONDS = 5 * 60
 DEFAULT_GPU_SCHEDULER_STALE_AFTER_SECONDS = 180.0
 
 _CALLER_SURFACE: ContextVar[str] = ContextVar("flux_model_activity_caller_surface", default="")
+_MODEL_REQUEST_ID: ContextVar[str] = ContextVar("flux_model_activity_request_id", default="")
 _PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|/)[^\s,;]+")
 
 
 @contextmanager
-def caller_surface(surface: str) -> Iterator[None]:
+def caller_surface(surface: str, request_id: str | None = None) -> Iterator[None]:
     token = _CALLER_SURFACE.set(_safe_label(surface, max_length=40))
+    caller = _CALLER_SURFACE.get().strip().lower()
+    resolved_request_id = request_id if request_id is not None else (uuid4().hex if caller in {"mcp", "api", "cli"} else "")
+    request_token = _MODEL_REQUEST_ID.set(_safe_label(resolved_request_id, max_length=160))
     try:
         yield
     finally:
+        _MODEL_REQUEST_ID.reset(request_token)
         _CALLER_SURFACE.reset(token)
+
+
+def current_model_request_context() -> dict[str, str]:
+    """Return the opaque request class and identity for the current caller."""
+    surface = _CALLER_SURFACE.get().strip().lower()
+    request_class = "interactive" if surface in {"mcp", "api", "cli"} else "background"
+    return {"request_class": request_class, "request_id": _MODEL_REQUEST_ID.get()}
 
 
 @contextmanager
@@ -396,6 +409,7 @@ def _scheduler_summary(*, now: datetime, event_last_at: str | None) -> dict[str,
         "last_activity_at": last_activity_at,
         "resident_models": resident_models,
         "live_gpu_memory": _live_gpu_memory_summary(status.get("live_gpu_memory")),
+        "runtime_reconciliation": status.get("runtime_reconciliation") if isinstance(status.get("runtime_reconciliation"), dict) else None,
     }
 
 
@@ -413,6 +427,7 @@ def _unavailable_scheduler_summary() -> dict[str, Any]:
         "last_activity_at": None,
         "resident_models": [],
         "live_gpu_memory": {"available": False, "used_mb": None, "total_mb": None},
+        "runtime_reconciliation": None,
     }
 
 
@@ -464,7 +479,7 @@ def _oldest_wait_age_ms(waiting: list[dict[str, Any]], *, now: datetime) -> int 
 
 def _status_for_exception(exc: Exception) -> str:
     name = exc.__class__.__name__
-    if name in {"ModelRunnerBusy", "GpuLeaseRejected", "GpuLeaseTimeout"}:
+    if name in {"ModelRunnerBusy", "GpuLeaseDeferred", "GpuLeaseRejected", "GpuLeaseTimeout"}:
         return "busy"
     if _is_missing_dependency_exception(exc):
         return "blocked_missing_dependency"

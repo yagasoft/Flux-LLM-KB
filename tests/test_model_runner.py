@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager, nullcontext
 from io import BytesIO
 import threading
 import time
@@ -76,6 +77,39 @@ def test_model_runner_http_400_structured_ocr_input_error_is_terminal(monkeypatc
     assert exc_info.value.__class__.__name__ == "OcrInvalidInputError"
     assert "ocr.invalid_image_input" in str(exc_info.value)
     assert getattr(exc_info.value, "retryable", True) is False
+
+
+def test_model_runner_client_preserves_unschedulable_capacity_state(monkeypatch):
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    body = (
+        b'{"detail":{"code":"gpu.scheduler_busy",'
+        b'"message":"unschedulable",'
+        b'"retryable":false,'
+        b'"retry_after_seconds":1.0,'
+        b'"capacity_state":"unschedulable"}}'
+    )
+
+    def fake_urlopen(*_args, **_kwargs):
+        raise HTTPError(
+            url="http://model-runner:8790/v1/embeddings",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={},
+            fp=BytesIO(body),
+        )
+
+    monkeypatch.setattr(model_runner, "urlopen", fake_urlopen)
+
+    with pytest.raises(GpuLeaseRejected) as exc_info:
+        model_runner.ModelRunnerClient("http://model-runner:8790").embed(
+            ["hello"],
+            model="Snowflake/snowflake-arctic-embed-l-v2.0",
+            dimensions=1024,
+        )
+
+    assert exc_info.value.capacity_state == "unschedulable"
+    assert exc_info.value.retryable is False
 
 
 def test_model_runner_client_rerank_uses_request_timeout_for_http_wait(monkeypatch):
@@ -1738,19 +1772,27 @@ def test_gpu_unload_endpoint_removes_exact_embedding_model_and_preserves_unrelat
     model_runner._EMBEDDING_MODELS["Snowflake/keep"] = object()
     monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
 
-    response = TestClient(model_runner.create_app()).post(
-        "/v1/gpu/unload",
-        json={"task_type": "embedding", "model_id": "Snowflake/remove"},
-    )
-    repeat = TestClient(model_runner.create_app()).post(
-        "/v1/gpu/unload",
-        json={"task_type": "embedding", "model_id": "Snowflake/remove"},
-    )
+    client = TestClient(model_runner.create_app())
+    residency = client.get("/v1/gpu/residency").json()
+    target = next(item for item in residency["models"] if item["model_id"] == "Snowflake/remove")
+    request = {
+        "task_type": "embedding",
+        "model_id": "Snowflake/remove",
+        "expected_generation": target["process_generation"],
+        "expected_activity_sequence": target["activity_sequence"],
+    }
+    response = client.post("/v1/gpu/unload", json=request)
+    repeat = client.post("/v1/gpu/unload", json=request)
 
     assert response.status_code == 200
     assert response.json()["unloaded"] is True
+    assert response.json()["unload_confirmed"] is True
+    assert response.json()["target_present"] is True
+    assert set(response.json()) >= {"allocator_before", "allocator_after"}
     assert repeat.status_code == 200
     assert repeat.json()["unloaded"] is False
+    assert repeat.json()["unload_confirmed"] is True
+    assert repeat.json()["target_present"] is False
     assert "Snowflake/remove" not in model_runner._EMBEDDING_MODELS
     assert "Snowflake/keep" in model_runner._EMBEDDING_MODELS
     assert records[-1].resident is False
@@ -1788,9 +1830,20 @@ def test_gpu_unload_endpoint_removes_exact_rerank_and_ocr_models(monkeypatch):
     monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: FakeScheduler())
 
     client = TestClient(model_runner.create_app())
-    rerank_response = client.post("/v1/gpu/unload", json={"task_type": "rerank", "model_id": "drawais/remove"})
-    ocr_response = client.post("/v1/gpu/unload", json={"task_type": "ocr_image", "model_id": "PP-OCRv5"})
-    vl_response = client.post("/v1/gpu/unload", json={"task_type": "ocr_document", "model_id": "PaddleOCR-VL"})
+    residency = client.get("/v1/gpu/residency").json()
+
+    def unload_request(task_type, model_id):
+        target = next(item for item in residency["models"] if item["task_type"] == task_type and item["model_id"] == model_id)
+        return {
+            "task_type": task_type,
+            "model_id": model_id,
+            "expected_generation": target["process_generation"],
+            "expected_activity_sequence": target["activity_sequence"],
+        }
+
+    rerank_response = client.post("/v1/gpu/unload", json=unload_request("rerank", "drawais/remove"))
+    ocr_response = client.post("/v1/gpu/unload", json=unload_request("ocr_image", "PP-OCRv5"))
+    vl_response = client.post("/v1/gpu/unload", json=unload_request("ocr_document", "PaddleOCR-VL"))
 
     assert rerank_response.status_code == 200
     assert ocr_response.status_code == 200
@@ -1809,3 +1862,220 @@ def test_gpu_unload_endpoint_removes_exact_rerank_and_ocr_models(monkeypatch):
         ("ocr_image", "PP-OCRv5", False),
         ("ocr_document", "PaddleOCR-VL", False),
     ]
+
+
+def test_gpu_residency_reports_real_model_caches_without_scheduler_status(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    model_runner._EMBEDDING_MODELS.clear()
+    model_runner._RERANKER_MODELS.clear()
+    model_runner._PADDLE_OCR_MODELS.clear()
+    model_runner._PADDLE_OCR_VL_MODELS.clear()
+    model_runner._EMBEDDING_MODELS["Snowflake/cache"] = object()
+    model_runner._RERANKER_MODELS[("Qwen/base", "awq_int4", "drawais/cache")] = object()
+    model_runner._PADDLE_OCR_MODELS["PP-OCRv5"] = object()
+    model_runner._PADDLE_OCR_VL_MODELS["PaddleOCR-VL"] = object()
+    monkeypatch.setenv("FLUX_KB_MODEL_RUNNER_ROLE", "paddle-runner")
+
+    class SchedulerMustNotRun:
+        def reset_component_residency(self, _component):
+            return None
+
+        def status(self):
+            raise AssertionError("residency must not query scheduler status")
+
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: SchedulerMustNotRun())
+    payload = TestClient(model_runner.create_app()).get("/v1/gpu/residency").json()
+    repeated = TestClient(model_runner.create_app()).get("/v1/gpu/residency").json()
+
+    assert payload["owner_component"] == "paddle-runner"
+    assert payload["worker_count"] == 1
+    assert {item["task_type"] for item in payload["models"]} == {"embedding", "rerank", "ocr_image", "ocr_document"}
+    assert {item["model_id"] for item in payload["models"]} == {
+        "Snowflake/cache",
+        "drawais/cache",
+        "PP-OCRv5",
+        "PaddleOCR-VL",
+    }
+    generations = {item["process_generation"] for item in payload["models"]}
+    assert len(generations) == 1
+    assert {item["process_generation"] for item in repeated["models"]} == generations
+    assert all(item["in_flight"] == 0 for item in payload["models"])
+    assert all(item["last_started_at"] is None and item["last_activity_at"] is None for item in payload["models"])
+    assert all(item["capability"] in {"measured", "known_unmeasured"} for item in payload["allocator"])
+
+
+def test_gpu_unload_rejects_a_stale_activity_fence(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    model_runner._EMBEDDING_MODELS.clear()
+    model_runner._EMBEDDING_MODELS["Snowflake/fenced"] = object()
+    client = TestClient(model_runner.create_app())
+    target = client.get("/v1/gpu/residency").json()["models"][0]
+
+    response = client.post(
+        "/v1/gpu/unload",
+        json={
+            "task_type": "embedding",
+            "model_id": "Snowflake/fenced",
+            "expected_generation": target["process_generation"],
+            "expected_activity_sequence": target["activity_sequence"] + 1,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason"] == "activity_mismatch"
+    assert "Snowflake/fenced" in model_runner._EMBEDDING_MODELS
+
+
+def test_model_runner_invalid_request_class_defaults_to_background(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    calls = []
+
+    def fake_embed(_texts, *, request_class="background", request_id="", **_kwargs):
+        calls.append((request_class, request_id))
+        return [[0.1, 0.2]]
+
+    monkeypatch.setattr(model_runner, "_embed_with_sentence_transformers", fake_embed)
+
+    response = TestClient(model_runner.create_app()).post(
+        "/v1/embeddings",
+        json={"input": "hello", "dimensions": 2, "request_class": "unknown", "request_id": "request-1"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("background", "request-1")]
+
+
+def test_embedding_scheduler_receives_local_ticket_yield_callback(monkeypatch):
+    captured = {}
+
+    class Ticket:
+        priority_class = "background"
+        is_head = False
+
+    class Scheduler:
+        def acquire(self, _profile, *, yield_wait=None):
+            captured["yield_wait"] = yield_wait
+            return nullcontext()
+
+    @contextmanager
+    def fake_operation(_ticket):
+        yield SimpleNamespace(in_flight=1)
+
+    monkeypatch.setattr(model_runner, "_runtime_tracker", lambda: SimpleNamespace(enqueue=lambda *_args, **_kwargs: Ticket()))
+    monkeypatch.setattr(model_runner, "_runtime_operation", fake_operation)
+    monkeypatch.setattr(model_runner, "get_gpu_scheduler", lambda: Scheduler())
+    monkeypatch.setattr(model_runner, "_load_embedding_model", lambda _model: SimpleNamespace(encode=lambda *_args, **_kwargs: SimpleNamespace(tolist=lambda: [[0.1]])))
+    monkeypatch.setattr(model_runner, "_allocator_reservation_snapshot", lambda *_args: ("known_unmeasured", None))
+    monkeypatch.setattr(model_runner, "_record_vram_measurement", lambda *_args: None)
+
+    assert model_runner._embed_with_sentence_transformers(["text"], model="Snowflake/test", dimensions=1) == [[0.1]]
+    assert callable(captured["yield_wait"])
+    assert captured["yield_wait"]() is True
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "model", "direct_function"),
+    [
+        ("/v1/ocr/image", "PP-OCRv5", "_ocr_image_with_paddle_direct"),
+        ("/v1/ocr/document", "PaddleOCR-VL", "_ocr_document_with_paddle_direct"),
+    ],
+)
+def test_direct_ocr_requests_forward_invalid_request_class_as_background(monkeypatch, endpoint, model, direct_function):
+    from fastapi.testclient import TestClient
+
+    calls = []
+
+    def fake_direct(_path, *, request_class="background", request_id="", **_kwargs):
+        calls.append((request_class, request_id))
+        return "OCR text"
+
+    monkeypatch.delenv("FLUX_KB_PADDLE_RUNNER_BASE_URL", raising=False)
+    monkeypatch.setattr(model_runner, direct_function, fake_direct)
+
+    response = TestClient(model_runner.create_app()).post(
+        endpoint,
+        json={"path": "/tmp/page.png", "model": model, "request_class": "not-valid", "request_id": "ocr-request"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "OCR text"
+    assert calls == [("background", "ocr-request")]
+
+
+def test_vram_measurement_records_allocator_load_and_execution_peak(monkeypatch):
+    recorded = []
+
+    class Scheduler:
+        def record_vram_sample(self, profile, **kwargs):
+            recorded.append((profile, kwargs))
+
+    class Tracker:
+        def __init__(self): self.values = iter((220,))
+        def inventory(self, _loaded):
+            return {"allocator": [{"capability": "measured", "reserved_mb": next(self.values), "peak_reserved_mb": 0}]}
+
+    monkeypatch.setattr(model_runner, "_loaded_runtime_model_keys", lambda: [])
+    profile = model_runner.task_profile("embedding", model_id="Snowflake/test")
+    model_runner._record_vram_measurement(
+        Scheduler(), profile, Tracker(), SimpleNamespace(in_flight=1), ("measured", 100), ("measured", 160)
+    )
+
+    assert recorded[0][1] == {
+        "pre_load_reserved_mb": 100,
+        "post_load_reserved_mb": 160,
+        "execution_peak_reserved_mb": 220,
+        "allocator_capability": "measured",
+        "tracker_overlapped": False,
+        "sample_skipped_reason": "",
+    }
+
+
+def test_vram_measurement_skips_when_another_process_local_model_is_active(monkeypatch):
+    recorded = []
+
+    class Scheduler:
+        def record_vram_sample(self, profile, **kwargs):
+            recorded.append(kwargs)
+
+    class Tracker:
+        def inventory(self, _loaded):
+            return {"allocator": [{"capability": "measured", "reserved_mb": 200, "peak_reserved_mb": 200}]}
+        def process_in_flight(self):
+            return 2
+
+    monkeypatch.setattr(model_runner, "_loaded_runtime_model_keys", lambda: [])
+    model_runner._record_vram_measurement(
+        Scheduler(), model_runner.task_profile("embedding", model_id="Snowflake/test"), Tracker(),
+        SimpleNamespace(in_flight=1), ("measured", 100), ("measured", 150),
+    )
+
+    assert recorded[0]["tracker_overlapped"] is True
+    assert recorded[0]["sample_skipped_reason"] == "tracker_overlap"
+
+
+def test_vram_measurement_skips_when_overlap_finished_before_sample_commit(monkeypatch):
+    recorded = []
+
+    class Scheduler:
+        def record_vram_sample(self, profile, **kwargs):
+            recorded.append(kwargs)
+
+    class Tracker:
+        def inventory(self, _loaded):
+            return {"allocator": [{"capability": "measured", "reserved_mb": 200, "peak_reserved_mb": 200}]}
+        def process_in_flight(self):
+            return 1
+        def process_activity_epoch(self):
+            return 3
+
+    monkeypatch.setattr(model_runner, "_loaded_runtime_model_keys", lambda: [])
+    model_runner._record_vram_measurement(
+        Scheduler(), model_runner.task_profile("embedding", model_id="Snowflake/test"), Tracker(),
+        SimpleNamespace(in_flight=1, process_activity_epoch=1), ("measured", 100), ("measured", 150),
+    )
+
+    assert recorded[0]["tracker_overlapped"] is True
+    assert recorded[0]["sample_skipped_reason"] == "tracker_overlap"

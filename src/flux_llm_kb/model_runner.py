@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 from binascii import Error as BinasciiError
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import gc
 from dataclasses import dataclass
 import json
@@ -11,14 +11,15 @@ import os
 import tempfile
 import threading
 import time
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 from pathlib import Path
 
-from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
-from .model_activity import record_model_activity
+from .gpu_runtime import RuntimeModelKey, RuntimeResidencyTracker, normalise_priority_class
+from .gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
+from .model_activity import current_model_request_context, record_model_activity
 from .onnxruntime_logging import configure_onnxruntime_logging
 
 
@@ -45,9 +46,11 @@ _LOCKS_GUARD = threading.Lock()
 _EMBEDDING_MODEL_LOCKS: dict[str, threading.Lock] = {}
 _EMBEDDING_ENCODE_LOCKS: dict[str, threading.Lock] = {}
 _RERANKER_MODEL_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
-_RERANKER_PREDICT_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _PADDLE_OCR_MODEL_LOCKS: dict[str, threading.Lock] = {}
 _PADDLE_OCR_VL_MODEL_LOCKS: dict[str, threading.Lock] = {}
+_RUNTIME_TRACKERS: dict[str, RuntimeResidencyTracker] = {}
+_RUNTIME_TRACKERS_LOCK = threading.Lock()
+_SERVED_RUNTIME_MODEL_KEYS: set[RuntimeModelKey] = set()
 
 
 class ModelRunnerError(RuntimeError):
@@ -240,6 +243,12 @@ class ModelRunnerClient:
             raise ModelRunnerError(str(exc)) from exc
 
     def _post_json(self, path: str, payload: dict[str, Any], *, timeout_seconds: float | None = None) -> dict[str, Any]:
+        request_context = current_model_request_context()
+        payload = {
+            **payload,
+            "request_class": request_context["request_class"],
+            "request_id": request_context["request_id"],
+        }
         with record_model_activity(**_model_runner_activity_kwargs(path, payload)):
             request_timeout = self.timeout_seconds if timeout_seconds is None else max(0.001, float(timeout_seconds))
             return _post_json_to_base_url(self.base_url, path, payload, request_timeout)
@@ -359,6 +368,13 @@ def _raise_model_runner_http_error(exc: HTTPError) -> None:
     if isinstance(payload, dict):
         detail = payload.get("detail")
         if isinstance(detail, dict) and detail.get("code") == "gpu.scheduler_busy":
+            capacity_state = str(detail.get("capacity_state") or "").strip()
+            if capacity_state:
+                raise GpuLeaseRejected(
+                    str(detail.get("message") or "model-runner GPU scheduler rejected the request"),
+                    capacity_state=capacity_state,
+                    retry_after_seconds=float(detail.get("retry_after_seconds") or 1.0),
+                ) from exc
             raise ModelRunnerBusy(
                 str(detail.get("message") or "model-runner GPU scheduler is busy"),
                 retry_after_seconds=float(detail.get("retry_after_seconds") or 1.0),
@@ -625,6 +641,8 @@ def _embed_with_sentence_transformers(
     model: str,
     dimensions: int,
     timeout_seconds: float | None = None,
+    request_class: str = "background",
+    request_id: str = "",
 ) -> list[list[float]]:
     if not texts:
         return []
@@ -634,18 +652,34 @@ def _embed_with_sentence_transformers(
         "embedding",
         model_id=model,
         component=_scheduler_component(),
+        request_id=request_id,
+        priority_class=_runtime_request_class(request_class),
         timeout_seconds=timeout_seconds,
         metadata={
             "input_count": len(texts),
+            "total_input_characters": sum(len(text) for text in texts),
+            "max_input_characters": max((len(text) for text in texts), default=0),
             "dimensions": dimensions,
             "phase": "embedding_encode",
             "max_active_seconds": _embedding_lease_max_active_seconds(timeout_seconds),
         },
     )
-    with _named_lock(_EMBEDDING_ENCODE_LOCKS, model):
-        with get_gpu_scheduler().acquire(profile):
+    ticket = _runtime_tracker().enqueue(
+        RuntimeModelKey("embedding", model),
+        priority_class=_runtime_request_class(request_class),
+        request_id=request_id,
+    )
+    tracker = _runtime_tracker()
+    scheduler = get_gpu_scheduler()
+    with _runtime_operation(ticket) as measurement:
+        with _acquire_gpu_lease(scheduler, profile, ticket):
+            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
             encoder = _load_embedding_model(model)
-            vectors = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+            try:
+                vectors = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+            finally:
+                _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
     result = [[float(value) for value in vector] for vector in vectors.tolist()]
     for vector in result:
         if len(vector) != dimensions:
@@ -815,6 +849,8 @@ def _rerank_with_transformers(
     quantization: str,
     awq_model: str | None = None,
     timeout_seconds: float | None = None,
+    request_class: str = "background",
+    request_id: str = "",
 ) -> list[float]:
     if not passages:
         return []
@@ -823,15 +859,33 @@ def _rerank_with_transformers(
         "rerank",
         model_id=resolved_profile.load_model,
         component=_scheduler_component(),
+        request_id=request_id,
+        priority_class=_runtime_request_class(request_class),
         timeout_seconds=timeout_seconds,
+        metadata={
+            "passage_count": len(passages),
+            "total_token_count": sum((len(query) + len(passage) + 3) // 4 for passage in passages),
+        },
     )
     cache_key = (resolved_profile.model, resolved_profile.quantization, resolved_profile.load_model)
     if cache_key in _RERANKER_MODELS:
         _record_model_residency_state("rerank", resolved_profile.load_model, resident=True)
-    with get_gpu_scheduler().acquire(lease_profile):
-        reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
-        with _named_lock(_RERANKER_PREDICT_LOCKS, cache_key):
-            scores = reranker.predict([(query, passage) for passage in passages])
+    ticket = _runtime_tracker().enqueue(
+        RuntimeModelKey("rerank", resolved_profile.load_model),
+        priority_class=_runtime_request_class(request_class),
+        request_id=request_id,
+    )
+    tracker = _runtime_tracker()
+    scheduler = get_gpu_scheduler()
+    with _runtime_operation(ticket) as measurement:
+        with _acquire_gpu_lease(scheduler, lease_profile, ticket):
+            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+            reranker = _load_reranker_model(model, quantization, awq_model=awq_model)
+            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+            try:
+                scores = reranker.predict([(query, passage) for passage in passages])
+            finally:
+                _record_vram_measurement(scheduler, lease_profile, tracker, measurement, pre_load, post_load)
     return [float(score) for score in scores]
 
 
@@ -971,11 +1025,16 @@ def _ocr_image_with_paddle(
     activity_service: str | None = None,
     activity_caller_surface: str | None = None,
     timeout_seconds: float | None = None,
+    request_class: str = "background",
+    request_id: str = "",
 ) -> str:
     if _paddle_runner_base_url():
         payload: dict[str, Any] = {"path": str(path), "model": model}
         if timeout_seconds is not None:
             payload["timeout_seconds"] = float(timeout_seconds)
+        if request_class != "background" or request_id:
+            payload["request_class"] = request_class
+            payload["request_id"] = request_id
         payload = _proxy_paddle_request("/v1/ocr/image", payload)
         return str(payload.get("text") or "")
     activity_kwargs = _direct_ocr_activity_kwargs(
@@ -987,19 +1046,49 @@ def _ocr_image_with_paddle(
     )
     recorder = record_model_activity(**activity_kwargs) if record_activity else nullcontext()
     with recorder:
-        return _ocr_image_with_paddle_direct(path, model=model, timeout_seconds=timeout_seconds)
+        return _ocr_image_with_paddle_direct(
+            path,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            request_class=request_class,
+            request_id=request_id,
+        )
 
 
-def _ocr_image_with_paddle_direct(path: str, *, model: str, timeout_seconds: float | None = None) -> str:
+def _ocr_image_with_paddle_direct(
+    path: str,
+    *,
+    model: str,
+    timeout_seconds: float | None = None,
+    request_class: str = "background",
+    request_id: str = "",
+) -> str:
     if model in _PADDLE_OCR_MODELS:
         _record_model_residency_state("ocr_image", model, resident=True)
-    profile = task_profile("ocr_image", model_id=model, component=_scheduler_component(), timeout_seconds=timeout_seconds)
-    with get_gpu_scheduler().acquire(profile):
-        ocr = _load_paddleocr(model)
-        if hasattr(ocr, "predict"):
-            result = ocr.predict(str(path))
-        else:
-            result = ocr.ocr(str(path), cls=True)
+    profile = task_profile(
+        "ocr_image", model_id=model, component=_scheduler_component(), request_id=request_id,
+        priority_class=_runtime_request_class(request_class), timeout_seconds=timeout_seconds,
+        metadata={"workload_class": "unknown"},
+    )
+    ticket = _runtime_tracker().enqueue(
+        RuntimeModelKey("ocr_image", model),
+        priority_class=_runtime_request_class(request_class),
+        request_id=request_id,
+    )
+    tracker = _runtime_tracker()
+    scheduler = get_gpu_scheduler()
+    with _runtime_operation(ticket) as measurement:
+        with _acquire_gpu_lease(scheduler, profile, ticket):
+            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+            ocr = _load_paddleocr(model)
+            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+            try:
+                if hasattr(ocr, "predict"):
+                    result = ocr.predict(str(path))
+                else:
+                    result = ocr.ocr(str(path), cls=True)
+            finally:
+                _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
     return _paddleocr_text(result)
 
 
@@ -1011,11 +1100,16 @@ def _ocr_document_with_paddle(
     activity_service: str | None = None,
     activity_caller_surface: str | None = None,
     timeout_seconds: float | None = None,
+    request_class: str = "background",
+    request_id: str = "",
 ) -> str:
     if _paddle_runner_base_url():
         payload: dict[str, Any] = {"path": str(path), "model": model}
         if timeout_seconds is not None:
             payload["timeout_seconds"] = float(timeout_seconds)
+        if request_class != "background" or request_id:
+            payload["request_class"] = request_class
+            payload["request_id"] = request_id
         payload = _proxy_paddle_request("/v1/ocr/document", payload)
         return str(payload.get("text") or "")
     if model.startswith("PaddleOCR-VL"):
@@ -1028,7 +1122,13 @@ def _ocr_document_with_paddle(
         )
         recorder = record_model_activity(**activity_kwargs) if record_activity else nullcontext()
         with recorder:
-            return _ocr_document_with_paddle_direct(path, model=model, timeout_seconds=timeout_seconds)
+            return _ocr_document_with_paddle_direct(
+                path,
+                model=model,
+                timeout_seconds=timeout_seconds,
+                request_class=request_class,
+                request_id=request_id,
+            )
     return _ocr_image_with_paddle(
         path,
         model=model,
@@ -1036,16 +1136,42 @@ def _ocr_document_with_paddle(
         activity_service=activity_service,
         activity_caller_surface=activity_caller_surface,
         timeout_seconds=timeout_seconds,
+        request_class=request_class,
+        request_id=request_id,
     )
 
 
-def _ocr_document_with_paddle_direct(path: str, *, model: str, timeout_seconds: float | None = None) -> str:
+def _ocr_document_with_paddle_direct(
+    path: str,
+    *,
+    model: str,
+    timeout_seconds: float | None = None,
+    request_class: str = "background",
+    request_id: str = "",
+) -> str:
     if model in _PADDLE_OCR_VL_MODELS:
         _record_model_residency_state("ocr_document", model, resident=True)
-    profile = task_profile("ocr_document", model_id=model, component=_scheduler_component(), timeout_seconds=timeout_seconds)
-    with get_gpu_scheduler().acquire(profile):
-        pipeline = _load_paddleocr_vl(model)
-        return _paddleocr_text(list(pipeline.predict(str(path))))
+    profile = task_profile(
+        "ocr_document", model_id=model, component=_scheduler_component(), request_id=request_id,
+        priority_class=_runtime_request_class(request_class), timeout_seconds=timeout_seconds,
+        metadata={"workload_class": "unknown"},
+    )
+    ticket = _runtime_tracker().enqueue(
+        RuntimeModelKey("ocr_document", model),
+        priority_class=_runtime_request_class(request_class),
+        request_id=request_id,
+    )
+    tracker = _runtime_tracker()
+    scheduler = get_gpu_scheduler()
+    with _runtime_operation(ticket) as measurement:
+        with _acquire_gpu_lease(scheduler, profile, ticket):
+            pre_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+            pipeline = _load_paddleocr_vl(model)
+            post_load = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+            try:
+                return _paddleocr_text(list(pipeline.predict(str(path))))
+            finally:
+                _record_vram_measurement(scheduler, profile, tracker, measurement, pre_load, post_load)
 
 
 def _with_ocr_input_path(payload: dict[str, Any], consumer: Any, *, validate_image: bool = False) -> str:
@@ -1278,15 +1404,25 @@ def create_app():
     def gpu_status() -> dict[str, Any]:
         return get_gpu_scheduler().status()
 
+    @app.get("/v1/gpu/residency")
+    def gpu_residency() -> dict[str, Any]:
+        return _runtime_residency_payload()
+
     @app.post("/v1/gpu/unload")
     def gpu_unload(payload: dict[str, Any]) -> dict[str, Any]:
         try:
             return _unload_resident_model(
                 str(payload.get("task_type") or ""),
                 str(payload.get("model_id") or ""),
+                expected_generation=str(payload.get("expected_generation") or ""),
+                expected_activity_sequence=_expected_activity_sequence(payload),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail={"reason": str(exc)}) from exc
 
     @app.post("/v1/embeddings")
     def embeddings(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1299,6 +1435,7 @@ def create_app():
                 model=model,
                 dimensions=dimensions,
                 timeout_seconds=_optional_timeout_seconds_from_payload(payload),
+                **_runtime_request_kwargs(payload),
             )
             return {
                 "ok": True,
@@ -1310,7 +1447,7 @@ def create_app():
             }
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except (GpuLeaseRejected, GpuLeaseTimeout) as exc:
+        except (GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
     @app.post("/v1/rerank")
@@ -1328,8 +1465,9 @@ def create_app():
                 quantization=quantization,
                 awq_model=profile.awq_model,
                 timeout_seconds=_optional_timeout_seconds_from_payload(payload),
+                **_runtime_request_kwargs(payload),
             )
-        except (GpuLeaseRejected, GpuLeaseTimeout) as exc:
+        except (GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
         return {
             "ok": True,
@@ -1369,6 +1507,7 @@ def create_app():
                         model=model,
                         record_activity=False,
                         timeout_seconds=timeout_seconds,
+                        **_runtime_request_kwargs(payload),
                     ),
                     validate_image=True,
                 )
@@ -1379,7 +1518,7 @@ def create_app():
             }
         except OcrInvalidInputError as exc:
             raise HTTPException(status_code=400, detail=_ocr_invalid_input_detail(exc)) from exc
-        except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
+        except (GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
     @app.post("/v1/ocr/document")
@@ -1395,12 +1534,17 @@ def create_app():
                 "model": model,
                 "text": _with_ocr_input_path(
                     payload,
-                    lambda input_path: _ocr_document_with_paddle(str(input_path or path), model=model, timeout_seconds=timeout_seconds),
+                    lambda input_path: _ocr_document_with_paddle(
+                        str(input_path or path),
+                        model=model,
+                        timeout_seconds=timeout_seconds,
+                        **_runtime_request_kwargs(payload),
+                    ),
                 ),
             }
         except OcrInvalidInputError as exc:
             raise HTTPException(status_code=400, detail=_ocr_invalid_input_detail(exc)) from exc
-        except (GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
+        except (GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout, ModelRunnerBusy) as exc:
             raise HTTPException(status_code=429, detail=_gpu_busy_detail(exc)) from exc
 
     return app
@@ -1434,12 +1578,16 @@ def _optional_timeout_seconds_from_payload(payload: dict[str, Any]) -> float | N
 
 
 def _gpu_busy_detail(exc: GpuLeaseRejected | GpuLeaseTimeout | ModelRunnerBusy) -> dict[str, Any]:
-    return {
+    detail = {
         "code": "gpu.scheduler_busy",
         "message": str(exc),
-        "retryable": True,
+        "retryable": bool(getattr(exc, "retryable", True)),
         "retry_after_seconds": float(getattr(exc, "retry_after_seconds", 1.0) or 1.0),
     }
+    capacity_state = str(getattr(exc, "capacity_state", "") or "").strip()
+    if capacity_state:
+        detail["capacity_state"] = capacity_state
+    return detail
 
 
 def _ocr_invalid_input_detail(exc: OcrInvalidInputError) -> dict[str, Any]:
@@ -1453,6 +1601,138 @@ def _ocr_invalid_input_detail(exc: OcrInvalidInputError) -> dict[str, Any]:
 
 def _scheduler_component() -> str:
     return os.environ.get("FLUX_KB_MODEL_RUNNER_ROLE", "model-runner")
+
+
+def _runtime_tracker() -> RuntimeResidencyTracker:
+    owner_component = _scheduler_component()
+    with _RUNTIME_TRACKERS_LOCK:
+        tracker = _RUNTIME_TRACKERS.get(owner_component)
+        if tracker is None:
+            tracker = RuntimeResidencyTracker(owner_component=owner_component)
+            _RUNTIME_TRACKERS[owner_component] = tracker
+        return tracker
+
+
+def _runtime_request_class(value: Any) -> str:
+    try:
+        return normalise_priority_class(str(value or "background"))
+    except ValueError:
+        return "background"
+
+
+def _runtime_request_kwargs(payload: dict[str, Any]) -> dict[str, str]:
+    if "request_class" not in payload and "request_id" not in payload:
+        return {}
+    request_id = payload.get("request_id")
+    return {
+        "request_class": _runtime_request_class(payload.get("request_class")),
+        "request_id": request_id if isinstance(request_id, str) else "",
+    }
+
+
+def _yield_wait_for_ticket(ticket: Any) -> Callable[[], bool]:
+    """Allow an ungranted background admission to yield to a local interactive ticket."""
+    return lambda: getattr(ticket, "priority_class", "background") == "background" and not bool(getattr(ticket, "is_head", True))
+
+
+def _acquire_gpu_lease(scheduler: Any, profile: Any, ticket: Any) -> Any:
+    """Use the priority handshake where supported, retaining legacy scheduler compatibility."""
+    try:
+        return scheduler.acquire(profile, yield_wait=_yield_wait_for_ticket(ticket))
+    except TypeError as exc:
+        if "yield_wait" not in str(exc):
+            raise
+        return scheduler.acquire(profile)
+
+
+@contextmanager
+def _runtime_operation(ticket: Any):
+    """Wait for the tracker queue before entering the non-pre-emptive operation."""
+    tracker = _runtime_tracker()
+    while True:
+        try:
+            with tracker.operation(ticket) as measurement:
+                yield measurement
+            return
+        except RuntimeError as exc:
+            if str(exc) not in {"a runtime operation is already active for this model", "runtime operation ticket is not at the queue head"}:
+                raise
+            time.sleep(0.001)
+
+
+def _allocator_reservation_snapshot(tracker: RuntimeResidencyTracker, loaded_models: Iterable[RuntimeModelKey]) -> tuple[str, int | None]:
+    try:
+        inventory = tracker.inventory(loaded_models)
+        allocators = inventory.get("allocator") if isinstance(inventory, dict) else None
+        measured = [
+            max(int(item.get("reserved_mb") or 0), int(item.get("peak_reserved_mb") or 0))
+            for item in allocators or ()
+            if isinstance(item, dict) and item.get("capability") == "measured"
+        ]
+        if measured:
+            return "measured", max(measured)
+        return "known_unmeasured", None
+    except Exception:
+        return "unknown", None
+
+
+def _record_vram_measurement(
+    scheduler: Any,
+    profile: Any,
+    tracker: RuntimeResidencyTracker,
+    measurement: Any,
+    pre_load: tuple[str, int | None],
+    post_load: tuple[str, int | None],
+) -> None:
+    record = getattr(scheduler, "record_vram_sample", None)
+    if not callable(record):
+        return
+    peak = _allocator_reservation_snapshot(tracker, _loaded_runtime_model_keys())
+    capabilities = (pre_load[0], post_load[0], peak[0])
+    current_process_in_flight = getattr(tracker, "process_in_flight", None)
+    if callable(current_process_in_flight):
+        process_in_flight = int(current_process_in_flight() or 0)
+    else:
+        process_in_flight = int(getattr(measurement, "process_in_flight", getattr(measurement, "in_flight", 0)) or 0)
+    current_epoch = getattr(tracker, "process_activity_epoch", None)
+    measurement_epoch = getattr(measurement, "process_activity_epoch", None)
+    epoch_changed = callable(current_epoch) and measurement_epoch is not None and int(current_epoch() or 0) != int(measurement_epoch)
+    overlapped = process_in_flight != 1 or epoch_changed
+    if capabilities != ("measured", "measured", "measured"):
+        record(profile, pre_load_reserved_mb=None, post_load_reserved_mb=None, execution_peak_reserved_mb=None,
+               allocator_capability="known_unmeasured", tracker_overlapped=overlapped, sample_skipped_reason="allocator_unmeasured")
+        return
+    record(profile, pre_load_reserved_mb=pre_load[1], post_load_reserved_mb=post_load[1], execution_peak_reserved_mb=peak[1],
+           allocator_capability="measured", tracker_overlapped=overlapped,
+           sample_skipped_reason="tracker_overlap" if overlapped else "")
+
+
+def _loaded_runtime_model_keys() -> list[RuntimeModelKey]:
+    keys = [RuntimeModelKey("embedding", model) for model in _EMBEDDING_MODELS]
+    keys.extend(RuntimeModelKey("rerank", key[2]) for key in _RERANKER_MODELS)
+    keys.extend(RuntimeModelKey("ocr_image", model) for model in _PADDLE_OCR_MODELS)
+    keys.extend(RuntimeModelKey("ocr_document", model) for model in _PADDLE_OCR_VL_MODELS)
+    return sorted(set(keys), key=lambda key: (key.task_type, key.model_id))
+
+
+def _runtime_residency_payload() -> dict[str, Any]:
+    loaded_models = _loaded_runtime_model_keys()
+    _SERVED_RUNTIME_MODEL_KEYS.update(loaded_models)
+    payload = _runtime_tracker().inventory(loaded_models)
+    return {
+        "owner_component": _scheduler_component(),
+        "worker_count": 1,
+        **payload,
+    }
+
+
+def _expected_activity_sequence(payload: dict[str, Any]) -> int:
+    if not str(payload.get("expected_generation") or ""):
+        raise ValueError("expected_generation is required")
+    try:
+        return int(payload["expected_activity_sequence"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("expected_activity_sequence is required") from exc
 
 
 def _clear_startup_residency() -> None:
@@ -1492,13 +1772,58 @@ def _record_model_residency_state(task_type: str, model_id: str, *, resident: bo
         pass
 
 
-def _unload_resident_model(task_type: str, model_id: str) -> dict[str, Any]:
+def _unload_resident_model(
+    task_type: str,
+    model_id: str,
+    *,
+    expected_generation: str,
+    expected_activity_sequence: int,
+) -> dict[str, Any]:
     task = str(task_type or "").strip()
     model = str(model_id or "").strip()
     if not task:
         raise ValueError("task_type is required")
     if not model:
         raise ValueError("model_id is required")
+    key = RuntimeModelKey(task, model)
+    if task not in {"embedding", "rerank", "ocr_image", "ocr_document"}:
+        raise ValueError(f"unsupported GPU unload task_type: {task}")
+    loaded_models = _loaded_runtime_model_keys()
+    target_present = key in loaded_models
+    if not target_present and key not in _SERVED_RUNTIME_MODEL_KEYS:
+        raise LookupError(f"model is not served: {model}")
+    _SERVED_RUNTIME_MODEL_KEYS.add(key)
+    tracker = _runtime_tracker()
+    allocator_before = tracker.inventory(loaded_models)["allocator"]
+    result = tracker.unload(
+        key,
+        expected_generation=expected_generation,
+        expected_activity_sequence=expected_activity_sequence,
+        remove=lambda: _remove_resident_model(task, model),
+    )
+    if result["reason"] in {"generation_mismatch", "activity_mismatch", "in_flight", "queued"}:
+        raise RuntimeError(str(result["reason"]))
+    unload_confirmed = bool(result["unloaded"]) or not target_present
+    if not unload_confirmed:
+        raise RuntimeError(str(result["reason"]))
+    _record_model_residency_state(task, model, resident=False)
+    if result["unloaded"]:
+        _release_gpu_memory()
+    allocator_after = tracker.inventory(_loaded_runtime_model_keys())["allocator"]
+    return {
+        "ok": True,
+        "task_type": task,
+        "model_id": model,
+        "unloaded": bool(result["unloaded"]),
+        "unload_confirmed": True,
+        "target_present": target_present,
+        "resident": False,
+        "allocator_before": allocator_before,
+        "allocator_after": allocator_after,
+    }
+
+
+def _remove_resident_model(task: str, model: str) -> bool:
     removed: list[Any] = []
     if task == "embedding":
         lock = _named_lock(_EMBEDDING_MODEL_LOCKS, model)
@@ -1524,13 +1849,9 @@ def _unload_resident_model(task_type: str, model_id: str) -> dict[str, Any]:
             if model in _PADDLE_OCR_VL_MODELS:
                 removed.append(_PADDLE_OCR_VL_MODELS.pop(model))
             _PADDLE_OCR_VL_FACTORY_IDS.pop(model, None)
-    else:
-        raise ValueError(f"unsupported GPU unload task_type: {task}")
     unloaded = bool(removed)
     removed.clear()
-    _record_model_residency_state(task, model, resident=False)
-    _release_gpu_memory()
-    return {"ok": True, "task_type": task, "model_id": model, "unloaded": unloaded, "resident": False}
+    return unloaded
 
 
 def _release_gpu_memory() -> None:

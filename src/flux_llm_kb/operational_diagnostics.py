@@ -122,7 +122,11 @@ def _filter_sections(sections: dict[str, Any], *, filters: dict[str, Any]) -> di
     result = {
         "retrieval": sections.get("retrieval", {}),
         "watcher": {"events": []},
-        "workers": {"families": [], "gpu_evictions": sections.get("workers", {}).get("gpu_evictions", {})},
+        "workers": {
+            "families": [],
+            "gpu_evictions": sections.get("workers", {}).get("gpu_evictions", {}),
+            "gpu_runtime_reconciliation": sections.get("workers", {}).get("gpu_runtime_reconciliation"),
+        },
         "jobs": {"jobs": []},
         "mail": sections.get("mail", {}),
     }

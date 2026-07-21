@@ -9,6 +9,25 @@ from flux_llm_kb import database, model_activity
 from flux_llm_kb.gpu_scheduler import GpuLeaseRejected, GpuModelResidency, GpuSchedulerConfig, InProcessGpuScheduler
 
 
+@pytest.mark.parametrize(
+    ("surface", "expected_class"),
+    [
+        ("mcp", "interactive"),
+        ("api", "interactive"),
+        ("cli", "interactive"),
+        ("worker", "background"),
+        ("gpu_scheduler", "background"),
+        ("unknown", "background"),
+        ("", "background"),
+    ],
+)
+def test_caller_surface_exposes_an_opaque_request_context(surface, expected_class):
+    with model_activity.caller_surface(surface, request_id="request-opaque"):
+        context = model_activity.current_model_request_context()
+
+    assert context == {"request_class": expected_class, "request_id": "request-opaque"}
+
+
 def test_record_model_activity_sanitizes_metadata_and_completes(monkeypatch):
     started: list[dict[str, object]] = []
     finished: list[dict[str, object]] = []
@@ -428,6 +447,15 @@ def test_collect_model_activity_payload_summarizes_events_and_scheduler(monkeypa
         }
     ]
     assert payload["scheduler"]["live_gpu_memory"] == {"available": True, "used_mb": 8120, "total_mb": 16380}
+
+
+def test_model_activity_scheduler_summary_passes_through_reconciliation_evidence(monkeypatch):
+    evidence = {"state": "healthy", "observation_id": "obs-1", "counters": {"cas_rejections": 2}}
+    monkeypatch.setattr(model_activity, "get_gpu_scheduler", lambda: SimpleNamespace(status=lambda: {"mode": "postgres", "runtime_reconciliation": evidence}))
+
+    summary = model_activity._scheduler_summary(now=datetime(2026, 7, 3, tzinfo=UTC), event_last_at=None)
+
+    assert summary["runtime_reconciliation"] == evidence
 
 
 def test_collect_model_activity_payload_recovers_stale_running_before_listing(monkeypatch):

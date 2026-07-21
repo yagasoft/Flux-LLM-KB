@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import pytest
 
 from flux_llm_kb import database, event_worker, messaging
@@ -19,6 +21,7 @@ def test_event_worker_run_loop_defers_initial_broker_connection_to_consume(monke
 
         async def consume(self, *, queue_name, handler):
             events.append(("consume", queue_name, callable(handler)))
+            await asyncio.sleep(0)
 
     monkeypatch.setattr(event_worker.messaging, "RabbitMqConsumer", FakeConsumer)
 
@@ -26,6 +29,104 @@ def test_event_worker_run_loop_defers_initial_broker_connection_to_consume(monke
 
     assert payload == {"status": "stopped", "queue": messaging.COMMAND_OUTLOOK_QUEUE}
     assert events == [("consume", messaging.COMMAND_OUTLOOK_QUEUE, True)]
+
+
+def test_gpu_eviction_worker_starts_and_cancels_idle_maintenance_only_for_its_queue(monkeypatch):
+    events = []
+
+    class FakeConsumer:
+        async def consume(self, *, queue_name, handler):
+            events.append(("consume", queue_name, callable(handler)))
+            await asyncio.sleep(0)
+
+        async def close(self):
+            events.append(("close",))
+
+    async def maintenance_loop(*, worker_id, stop_event, **_kwargs):
+        events.append(("maintenance", worker_id))
+        await asyncio.to_thread(stop_event.wait)
+        events.append(("maintenance_cancelled", worker_id))
+
+    monkeypatch.setattr(event_worker.messaging, "RabbitMqConsumer", FakeConsumer)
+    monkeypatch.setattr(event_worker, "run_gpu_eviction_maintenance_loop", maintenance_loop, raising=False)
+    monkeypatch.setattr(event_worker, "idle_unload_enabled", lambda: True, raising=False)
+
+    asyncio.run(event_worker.run_worker_loop(queue_name=messaging.COMMAND_OUTLOOK_QUEUE, worker_id="other-1"))
+    asyncio.run(event_worker.run_worker_loop(queue_name=messaging.COMMAND_GPU_EVICTION_QUEUE, worker_id="gpu-1"))
+
+    assert ("maintenance", "other-1") not in events
+    assert ("maintenance", "gpu-1") in events
+    assert ("maintenance_cancelled", "gpu-1") in events
+
+
+def test_gpu_eviction_maintenance_once_uses_a_thread_for_blocking_work(monkeypatch):
+    calls = []
+
+    async def fake_to_thread(function, /, *args, **kwargs):
+        calls.append((function, args, kwargs))
+        return {"status": "queued"}
+
+    monkeypatch.setattr(event_worker.asyncio, "to_thread", fake_to_thread)
+
+    result = asyncio.run(event_worker.run_gpu_eviction_maintenance_once(worker_id="gpu-1"))
+
+    assert result == {"status": "queued"}
+    assert calls == [(event_worker.run_gpu_idle_unload_maintenance, (), {"worker_id": "gpu-1", "stop_event": None})]
+
+
+def test_gpu_eviction_maintenance_loop_recovers_after_a_transient_tick_failure(monkeypatch):
+    calls = []
+    stop_event = threading.Event()
+    shutdown_event = asyncio.Event()
+
+    async def fake_once(*, worker_id, stop_event):
+        calls.append(worker_id)
+        if len(calls) == 1:
+            shutdown_event.set()
+            raise RuntimeError("temporary database outage")
+        stop_event.set()
+        shutdown_event.set()
+        return {"status": "queued"}
+
+    monkeypatch.setattr(event_worker, "run_gpu_eviction_maintenance_once", fake_once)
+
+    asyncio.run(event_worker.run_gpu_eviction_maintenance_loop(
+        worker_id="gpu-1", stop_event=stop_event, shutdown_event=shutdown_event,
+    ))
+
+    assert calls == ["gpu-1", "gpu-1"]
+
+
+def test_gpu_eviction_worker_waits_for_blocked_sweep_to_observe_stop_before_closing_consumer(monkeypatch):
+    events = []
+    started = threading.Event()
+
+    class FakeConsumer:
+        async def consume(self, *, queue_name, handler):
+            for _ in range(50):
+                if started.is_set():
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("maintenance sweep did not start")
+
+        async def close(self):
+            events.append("consumer_closed")
+
+    def blocked_sweep(*, worker_id, stop_event):
+        events.append(("sweep_started", worker_id))
+        started.set()
+        assert stop_event is not None
+        stop_event.wait(timeout=1.0)
+        events.append("sweep_observed_stop")
+        return {"status": "stopped"}
+
+    monkeypatch.setattr(event_worker.messaging, "RabbitMqConsumer", FakeConsumer)
+    monkeypatch.setattr(event_worker, "run_gpu_idle_unload_maintenance", blocked_sweep)
+    monkeypatch.setattr(event_worker, "idle_unload_enabled", lambda: True)
+
+    asyncio.run(event_worker.run_worker_loop(queue_name=messaging.COMMAND_GPU_EVICTION_QUEUE, worker_id="gpu-1"))
+
+    assert events == [("sweep_started", "gpu-1"), "sweep_observed_stop", "consumer_closed"]
 
 
 def test_event_worker_marks_message_handled_after_success():

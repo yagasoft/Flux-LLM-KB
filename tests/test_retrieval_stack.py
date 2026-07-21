@@ -23,6 +23,7 @@ from flux_llm_kb.search_index import (
     build_vespa_document,
 )
 from flux_llm_kb.model_runner import ModelRunnerBusy, ModelRunnerError
+from flux_llm_kb.gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout
 
 
 class SequenceClock:
@@ -214,6 +215,34 @@ def test_vespa_adapter_allows_rrf_rank_profile():
     assert "nearestNeighbor(embedding, query_embedding) or userQuery()" in requests[0][1]["yql"]
 
 
+def test_vespa_adapter_uses_filtered_bm25_user_query_without_embedding():
+    requests = []
+
+    class FakeHttp:
+        def post_json(self, path, payload):
+            requests.append((path, payload))
+            return {"root": {"children": []}}
+
+    adapter = VespaSearchAdapter(base_url="http://vespa:8080", http=FakeHttp())
+
+    adapter.query(
+        "lexical fallback",
+        embedding=None,
+        root_name="docs",
+        file_kinds=["text"],
+        languages=["markdown"],
+    )
+
+    payload = requests[0][1]
+    assert payload["ranking.profile"] == "bm25"
+    assert "userQuery()" in payload["yql"]
+    assert "root_name contains @root_name" in payload["yql"]
+    assert "file_kind contains @file_kind_0" in payload["yql"]
+    assert "language contains @language_0" in payload["yql"]
+    assert "nearestNeighbor" not in payload["yql"]
+    assert "input.query(query_embedding)" not in payload
+
+
 def test_vespa_schema_defines_native_rrf_profile_and_weighted_comparison():
     schema = Path("vespa/schemas/flux_evidence.sd").read_text(encoding="utf-8")
 
@@ -371,7 +400,7 @@ def test_vespa_adapter_builds_hybrid_query_with_filters_and_features():
     assert 'nearestNeighbor(embedding, query_embedding)' in payload["yql"]
     assert 'userQuery()' in payload["yql"]
     assert 'body %%' not in payload["yql"]
-    assert payload["ranking.profile"] == "hybrid"
+    assert payload["ranking.profile"] == "hybrid_rrf"
     assert payload["hits"] == 10
     assert payload["input.query(query_embedding)"] == [0.0] * 1024
     assert payload["root_name"] == "docs"
@@ -731,6 +760,9 @@ def test_sync_search_index_feeds_vespa_and_records_status(monkeypatch):
                         None,
                         None,
                         None,
+                        None,
+                        None,
+                        None,
                     )
                 ]
             return []
@@ -968,6 +1000,9 @@ def test_search_index_fetch_all_owner_class_does_not_starve_episodes_or_claims()
                         None,
                         None,
                         None,
+                        None,
+                        None,
+                        None,
                     )
                     for idx in range(requested)
                 ]
@@ -978,6 +1013,9 @@ def test_search_index_fetch_all_owner_class_does_not_starve_episodes_or_claims()
                         f"Episode {idx}",
                         "Durable memory episode.",
                         {"root_name": "docs"},
+                        None,
+                        None,
+                        None,
                         None,
                         None,
                         None,
@@ -992,6 +1030,9 @@ def test_search_index_fetch_all_owner_class_does_not_starve_episodes_or_claims()
                         "Durable claim text.",
                         "active",
                         {"root_name": "docs"},
+                        None,
+                        None,
+                        None,
                         None,
                         None,
                         None,
@@ -1151,6 +1192,136 @@ def test_vespa_search_records_explain_diagnostics(monkeypatch):
     assert diagnostics["reranker"]["awq_model"] == "drawais/Qwen3-Reranker-4B-AWQ-INT4"
     assert diagnostics["reranker"]["input_count"] == 1
     assert results[0]["streams"] == ["vespa_rrf", "vespa_lexical", "vespa_dense"]
+
+
+@pytest.mark.parametrize(
+    ("exception", "failure_class", "capacity_state"),
+    [
+        (TimeoutError("Snowflake timed out"), "embedding_timeout", None),
+        (ModelRunnerBusy("model runner busy"), "model_runner_busy", None),
+        (GpuLeaseTimeout("lease timed out"), "gpu_lease_timeout", None),
+        (GpuLeaseDeferred("inventory incomplete", capacity_state="inventory_incomplete"), "gpu_capacity", "inventory_incomplete"),
+        (GpuLeaseDeferred("reconciliation required", capacity_state="reconciliation_required"), "gpu_capacity", "reconciliation_required"),
+    ],
+)
+def test_retryable_embedding_failure_uses_lexical_vespa_without_postgres(monkeypatch, exception, failure_class, capacity_state):
+    vespa_queries = []
+
+    class FakeAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def query(self, *_args, **kwargs):
+            vespa_queries.append(kwargs)
+            return []
+
+    monkeypatch.setattr(database, "_embed_query_for_retrieval", lambda *_args, **_kwargs: (_ for _ in ()).throw(exception))
+    monkeypatch.setattr(database, "_configured_vespa_lexical_fallback_enabled", lambda: True)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: pytest.fail("PostgreSQL must not run while Vespa succeeds"))
+
+    corpus_diagnostics: dict[str, object] = {}
+    evidence_diagnostics: dict[str, object] = {}
+    assert database.search_corpus_chunks_vespa("query", diagnostics=corpus_diagnostics) == []
+    assert database.search_evidence_vespa("query", diagnostics=evidence_diagnostics) == []
+
+    assert [query["embedding"] for query in vespa_queries] == [None, None]
+    assert [query["rank_profile"] for query in vespa_queries] == ["bm25", "bm25"]
+    for diagnostics in (corpus_diagnostics, evidence_diagnostics):
+        assert diagnostics["vespa"]["query_mode"] == "vespa_lexical_fallback"
+        assert diagnostics["vespa"]["rank_profile"] == "bm25"
+        assert diagnostics["vespa"]["embedding_failure_class"] == failure_class
+        assert diagnostics["vespa"]["embedding_capacity_state"] == capacity_state
+
+
+def test_unschedulable_embedding_failure_does_not_call_vespa(monkeypatch):
+    exception = GpuLeaseRejected("cannot fit", capacity_state="unschedulable")
+    monkeypatch.setattr(database, "_embed_query_for_retrieval", lambda *_args, **_kwargs: (_ for _ in ()).throw(exception))
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", lambda **_kwargs: pytest.fail("Vespa must not hide unschedulable errors"))
+
+    with pytest.raises(GpuLeaseRejected, match="cannot fit"):
+        database.search_corpus_chunks_vespa("query")
+
+
+def test_lexical_vespa_candidates_keep_only_bm25_signal():
+    candidates = [
+        {
+            "owner_table": "asset_chunks",
+            "owner_id": "chunk-1",
+            "score": 4.2,
+            "match_features": {"lexical_score": 4.2, "dense_score": 0.9},
+        }
+    ]
+
+    merged = database._merge_vespa_rrf_candidates(candidates, query_mode="vespa_lexical_fallback")
+
+    assert merged[0]["raw_scores"] == {"vespa_lexical": 4.2}
+    assert merged[0]["streams"] == ["vespa_lexical"]
+
+
+def test_lexical_vespa_fallback_keeps_vespa_order_when_qwen_is_busy(monkeypatch):
+    class FakeAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def query(self, *_args, **_kwargs):
+            return [
+                {"owner_table": "asset_chunks", "owner_id": "chunk-first", "score": 4.0},
+                {"owner_table": "asset_chunks", "owner_id": "chunk-second", "score": 2.0},
+            ]
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self): return self
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs): return FakeConnection()
+
+    class BusyReranker:
+        model = "Qwen/Qwen3-Reranker-4B"
+        quantization = "awq_int4"
+        requested_quantization = "awq_int4"
+        quantization_backend = "compressed_tensors_awq"
+        load_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        awq_model = "drawais/Qwen3-Reranker-4B-AWQ-INT4"
+        max_passage_tokens = 1536
+        microbatch_size = 2
+
+        def __init__(self, **kwargs): self.top_n = kwargs["top_n"]
+        def rerank(self, *_args): raise ModelRunnerBusy("Qwen busy")
+
+    monkeypatch.setattr(database, "_embed_query_for_retrieval", lambda *_args, **_kwargs: (_ for _ in ()).throw(ModelRunnerBusy("Snowflake busy")))
+    monkeypatch.setattr(database, "_configured_vespa_lexical_fallback_enabled", lambda: True)
+    monkeypatch.setattr("flux_llm_kb.search_index.VespaSearchAdapter", FakeAdapter)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_hydrate_corpus_candidate_details", lambda *_args, **kwargs: {item_id: {} for item_id in kwargs["candidate_ids"]})
+    monkeypatch.setattr(database, "_add_semantic_duplicate_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        database,
+        "_rank_corpus_candidates",
+        lambda _query, *, streams, **_kwargs: [
+            SimpleNamespace(item_id=item_id, score=4.0 if item_id == "chunk-first" else 2.0, streams=("vespa_lexical",))
+            for item_id in streams["vespa_lexical"]
+        ],
+    )
+    monkeypatch.setattr(
+        database,
+        "_corpus_results_from_fused",
+        lambda fused, details: [
+            {"id": item.item_id, "score": item.score, "raw_scores": details[item.item_id]["raw_scores"]}
+            for item in fused
+        ],
+    )
+    monkeypatch.setattr("flux_llm_kb.reranking.QwenReranker", BusyReranker)
+
+    diagnostics: dict[str, object] = {}
+    results = database.search_corpus_chunks_vespa("query", limit=2, diagnostics=diagnostics)
+
+    assert [result["id"] for result in results] == ["chunk-first", "chunk-second"]
+    assert all(result["streams"] == ["vespa_lexical"] for result in results)
+    assert diagnostics["reranker"]["reason"] == "model_runner_busy"
+    assert diagnostics["reranker"]["fallback"] == "vespa_ranked"
 
 
 def test_vespa_query_embedding_cache_reuses_same_query_vector(monkeypatch):

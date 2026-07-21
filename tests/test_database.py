@@ -6,10 +6,270 @@ from types import SimpleNamespace
 
 import pytest
 
-from flux_llm_kb import database
+from flux_llm_kb import database, settings
 from flux_llm_kb.crawler import AssetChunk, CrawlPlan, DiscoveredAsset
 from flux_llm_kb.database import forget_episode
 from flux_llm_kb.embeddings import EmbeddingResult
+from flux_llm_kb.gpu_scheduler import GpuLeaseDeferred, GpuLeaseRejected, GpuLeaseTimeout
+from flux_llm_kb.gpu_reconciliation import GpuReconciliationObservation, RuntimeInventorySnapshot
+from flux_llm_kb.model_runner import ModelRunnerBusy, ModelRunnerError
+
+
+def test_gpu_control_lock_uses_session_advisory_lock_and_releases(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+        def fetchone(self): return (True,)
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+
+    connection = Connection()
+    connection.autocommit = False
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: connection))
+
+    with database.gpu_control_lock(timeout_seconds=0.1):
+        pass
+
+    sql = "\n".join(statement for statement, _ in executed)
+    assert "pg_try_advisory_lock(hashtextextended('flux.gpu.control', 0))" in sql
+    assert "pg_advisory_unlock(hashtextextended('flux.gpu.control', 0))" in sql
+    assert connection.autocommit is True
+
+
+def test_gpu_vram_calibration_keeps_latest_numeric_samples_and_ignores_stale_or_contended_rows(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+        def fetchall(self):
+            return [
+                (100 + index, 20, 1000.0 + index, False)
+                for index in range(5)
+            ] + [
+                (900, 10, 1.0, True),
+                (900, 10, 1.0, False),
+            ]
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    for index in range(33):
+        database.record_gpu_vram_sample(
+            task_type="embedding",
+            model_id="Snowflake/test",
+            shape_bucket="embedding|count=9-16|chars=*|item=*|dims=1024",
+            load_delta_mb=100 + index,
+            working_set_mb=20,
+            allocator_capability="measured",
+            tracker_overlapped=False,
+            observed_at=1000.0 + index,
+        )
+
+    calibration = database.resolve_gpu_vram_calibration(
+        task_type="embedding",
+        model_id="Snowflake/test",
+        shape_bucket="embedding|count=9-16|chars=*|item=*|dims=1024",
+        now=1010.0,
+        max_age_seconds=60,
+    )
+
+    assert calibration.sample_count == 5
+    assert calibration.load_delta_mb == 104
+    assert calibration.working_set_mb == 20
+    assert calibration.source == "measured"
+    sql = "\n".join(statement for statement, _params in executed)
+    assert "LIMIT 32" in sql
+    assert "DELETE FROM gpu_vram_samples" in sql
+    assert "tracker_overlapped = false" in sql
+
+
+def test_persist_gpu_runtime_observation_marks_failed_component_unknown_not_absent(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    observation = GpuReconciliationObservation(
+        observation_id="obs-1", state="inventory_incomplete", driver_used_mb=10, driver_free_mb=20,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(component="asr", owner_component="asr", state="unknown", error_code="timeout", error_metadata={"message": "x" * 500}),),
+    )
+
+    database.persist_gpu_runtime_observation(observation)
+
+    statements = "\n".join(statement for statement, _ in executed)
+    assert any(params and params[0] == "unknown" for _statement, params in executed)
+    assert "runtime_state = 'absent'" not in statements
+    inserted_params = next(params for statement, params in executed if "INSERT INTO gpu_runtime_inventory" in statement)
+    assert len(json.loads(inserted_params[-2])["message"]) <= 300
+
+
+def test_persist_gpu_runtime_observation_does_not_choose_an_owner_for_a_conflict(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    observation = GpuReconciliationObservation(
+        observation_id="obs-conflict", state="inventory_incomplete", driver_used_mb=10, driver_free_mb=20,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(component="model-runner", state="conflicted", models=({"task_type": "embedding", "model_id": "snowflake"},)),),
+    )
+
+    database.persist_gpu_runtime_observation(observation)
+
+    statements = "\n".join(statement for statement, _ in executed)
+    assert any(params and params[0] == "conflicted" for _statement, params in executed)
+    assert "runtime_state = 'absent'" not in statements
+    assert "ON CONFLICT (model_id, task_type)" not in statements
+
+
+def test_persist_gpu_runtime_observation_supersedes_prior_generation_and_marks_omissions_absent(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    observation = GpuReconciliationObservation(
+        observation_id="obs-present", state="healthy", driver_used_mb=10, driver_free_mb=20,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(component="asr", owner_component="asr", process_generation="new", state="present"),),
+    )
+
+    database.persist_gpu_runtime_observation(observation)
+
+    absent_update = next(params for statement, params in executed if "runtime_state = 'absent'" in statement)
+    assert absent_update[0] == "asr"
+
+
+def test_persist_gpu_runtime_observation_records_runtime_operation_timestamps_for_idle_fencing(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    observation = GpuReconciliationObservation(
+        observation_id="obs-idle", state="healthy", driver_used_mb=10, driver_free_mb=20,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(
+            component="model-runner", owner_component="model-runner", process_generation="generation-1", state="present",
+            models=({
+                "task_type": "embedding", "model_id": "snowflake", "in_flight": 0,
+                "last_started_at": 1_700_000_000.0, "last_activity_at": 1_700_000_012.0,
+            },),
+        ),),
+    )
+
+    database.persist_gpu_runtime_observation(observation)
+
+    sql, params = next((statement, params) for statement, params in executed if "ON CONFLICT (model_id, task_type)" in statement)
+    assert "last_operation_started_at" in sql
+    assert "last_operation_completed_at" in sql
+    assert 1_700_000_000.0 in params
+    assert 1_700_000_012.0 in params
+
+
+def test_generation_fence_prevents_delayed_observation_overwriting_newer_runtime(monkeypatch):
+    executed = []
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class Transaction:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def transaction(self): return Transaction()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_a, **_k: Connection()))
+    observation = GpuReconciliationObservation(
+        observation_id="old", state="healthy", driver_used_mb=10, driver_free_mb=20,
+        raw_residual_mb=0, unresolved_known_owner_mb=0, unattributed_mb=0,
+        inventories=(RuntimeInventorySnapshot(
+            component="asr", owner_component="asr", process_generation="old", state="present", observed_at=100.0,
+            models=({"task_type": "asr", "model_id": "whisper"},),
+        ),),
+    )
+
+    database.persist_gpu_runtime_observation(observation)
+
+    statements = "\n".join(statement for statement, _ in executed)
+    assert "runtime_observed_at <= to_timestamp(%s)" in statements
+    assert "WHERE gpu_model_residency.runtime_observed_at IS NULL" in statements
 
 
 def test_forget_episode_rejects_invalid_uuid_without_database():
@@ -2898,6 +3158,611 @@ def test_sync_search_index_reraises_retryable_embedding_timeout_without_failed_r
     assert "failed" not in statuses
 
 
+def test_sync_search_index_splits_only_unschedulable_embedding_batches(monkeypatch):
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    batch_calls: list[list[str]] = []
+    fed: list[str] = []
+    records: list[dict] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class CapacityProvider:
+        name = "model_runner"
+
+        def embed_batch(self, inputs):
+            batch_calls.append([item.owner_id for item in inputs])
+            if len(inputs) > 4:
+                error = GpuLeaseRejected("batch exceeds embedding capacity")
+                error.capacity_state = "unschedulable"
+                raise error
+            return [
+                EmbeddingResult(
+                    owner_table=item.owner_table,
+                    owner_id=item.owner_id,
+                    model="Snowflake/snowflake-arctic-embed-l-v2.0",
+                    dimensions=1024,
+                    vector=[1.0] + [0.0] * 1023,
+                    metadata={"source_hash": f"hash-{item.owner_id}"},
+                )
+                for item in inputs
+            ]
+
+    class FakeAdapter:
+        def feed(self, document):
+            fed.append(document["fields"]["owner_id"])
+            return {"ok": True}
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
+    def candidate(index):
+        return {
+            "vespa_document_id": f"id:flux:flux_evidence::asset_chunks--chunk-{index}",
+            "owner_table": "asset_chunks",
+            "owner_id": f"chunk-{index}",
+            "asset_id": f"asset-{index}",
+            "root_id": "33333333-3333-3333-3333-333333333333",
+            "root_name": "docs",
+            "title": f"Chunk {index}",
+            "body": f"body {index}",
+            "source_path": f"docs/chunk-{index}.md",
+            "symbols": [],
+            "language": "",
+            "file_kind": "text",
+            "lifecycle_state": "active",
+            "deleted": False,
+            "canonical": True,
+            "source_hash": f"old-hash-{index}",
+            "index_text": f"Chunk {index}\nbody {index}",
+            "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+            "embedding_dimensions": 1024,
+            "existing_source_hash": None,
+            "existing_index_status": None,
+            "existing_embedding_model": None,
+        }
+
+    monkeypatch.setenv("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE", "16")
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [candidate(index) for index in range(16)])
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **kwargs: records.append(kwargs))
+
+    result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=16, embedding_provider=CapacityProvider(), adapter=FakeAdapter())
+
+    assert batch_calls == [
+        [f"chunk-{index}" for index in range(16)],
+        [f"chunk-{index}" for index in range(8)],
+        [f"chunk-{index}" for index in range(4)],
+        [f"chunk-{index}" for index in range(4, 8)],
+        [f"chunk-{index}" for index in range(8, 16)],
+        [f"chunk-{index}" for index in range(8, 12)],
+        [f"chunk-{index}" for index in range(12, 16)],
+    ]
+    assert fed == [f"chunk-{index}" for index in range(16)]
+    assert [item["row"]["owner_id"] for item in records if item["status"] == "syncing"] == [f"chunk-{index}" for index in range(16)]
+    assert [item["row"]["owner_id"] for item in records if item["status"] == "indexed"] == [f"chunk-{index}" for index in range(16)]
+    assert result["embedding_attempted_size_histogram"] == {"4": 4, "8": 2, "16": 1}
+    assert result["embedding_split_count"] == 3
+    assert result["embedding_smallest_attempted_size"] == 4
+    assert result["embedding_capacity_state"] == "unschedulable"
+
+
+def test_sync_search_index_blocks_unschedulable_batch_one_without_resetting_unchanged_rows(monkeypatch):
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected
+
+    batch_calls: list[list[str]] = []
+    records: list[dict] = []
+    row = {
+        "vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-1",
+        "owner_table": "asset_chunks",
+        "owner_id": "chunk-1",
+        "asset_id": "asset-1",
+        "root_id": "33333333-3333-3333-3333-333333333333",
+        "root_name": "docs",
+        "title": "Chunk One",
+        "body": "body",
+        "source_path": "docs/chunk.md",
+        "symbols": [],
+        "language": "",
+        "file_kind": "text",
+        "lifecycle_state": "active",
+        "deleted": False,
+        "canonical": True,
+        "source_hash": "source-hash",
+        "owner_content_hash": "content-hash",
+        "index_text": "Chunk One\nbody",
+        "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "embedding_dimensions": 1024,
+        "existing_source_hash": None,
+        "existing_index_status": None,
+        "existing_embedding_model": None,
+    }
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class CapacityProvider:
+        def embed_batch(self, inputs):
+            batch_calls.append([item.owner_id for item in inputs])
+            if inputs[0].owner_id == "chunk-1":
+                error = GpuLeaseRejected("single item exceeds embedding capacity")
+                error.capacity_state = "unschedulable"
+                raise error
+            return [
+                EmbeddingResult(
+                    owner_table=item.owner_table,
+                    owner_id=item.owner_id,
+                    model="Snowflake/snowflake-arctic-embed-l-v2.0",
+                    dimensions=1024,
+                    vector=[1.0] + [0.0] * 1023,
+                    metadata={"source_hash": f"hash-{item.owner_id}"},
+                )
+                for item in inputs
+            ]
+
+    class FakeAdapter:
+        def feed(self, _document):
+            return {"ok": True}
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [row])
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **kwargs: records.append(kwargs))
+
+    result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=1, embedding_provider=CapacityProvider(), adapter=FakeAdapter())
+
+    assert batch_calls == [["chunk-1"]]
+    assert result["failed"] == 1
+    assert result["non_retryable"] is True
+    assert result["non_retryable_blocker"] == "embedding_capacity"
+    assert result["embedding_capacity_state"] == "unschedulable"
+    assert records[-1]["status"] == "blocked_embedding_capacity"
+    assert records[-1]["metadata"] == {
+        "failed_stage": "embedding_capacity",
+        "capacity_state": "unschedulable",
+        "capacity_source_content_hash": "content-hash",
+        "retryable": False,
+    }
+
+    unchanged = {
+        **row,
+        "existing_source_hash": "source-hash",
+        "existing_index_status": "blocked_embedding_capacity",
+        "existing_embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+        "existing_capacity_source_content_hash": "content-hash",
+        "existing_last_error": "single item exceeds embedding capacity",
+        "search_index_hydrated_body_chars": 0,
+        "search_index_truncated_chars": 0,
+    }
+    batch_calls.clear()
+    records.clear()
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [unchanged])
+
+    unchanged_result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=1, embedding_provider=CapacityProvider(), adapter=FakeAdapter())
+
+    assert unchanged_result["skipped_unchanged"] == 1
+    assert batch_calls == []
+    assert records == []
+
+    legacy = {
+        **unchanged,
+        "existing_capacity_source_content_hash": " \t ",
+    }
+    batch_calls.clear()
+    records.clear()
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [legacy])
+
+    legacy_result = database.sync_search_index(
+        owner_class="corpus", root_name="docs", limit=1, embedding_provider=CapacityProvider(), adapter=FakeAdapter()
+    )
+
+    assert legacy_result["skipped_capacity_blockers"] == 1
+    assert batch_calls == []
+    assert [item["status"] for item in records] == ["blocked_embedding_capacity"]
+    assert records[-1]["last_error"] == "single item exceeds embedding capacity"
+    assert records[-1]["metadata"] == {"capacity_source_content_hash": "content-hash"}
+
+    raw_content_only = {
+        **unchanged,
+        "owner_content_hash": "changed-content-hash",
+    }
+    batch_calls.clear()
+    records.clear()
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [raw_content_only])
+
+    raw_content_only_result = database.sync_search_index(
+        owner_class="corpus", root_name="docs", limit=1, embedding_provider=CapacityProvider(), adapter=FakeAdapter()
+    )
+
+    assert raw_content_only_result["skipped_capacity_blockers"] == 1
+    assert batch_calls == []
+    assert records[-1]["metadata"] == {"capacity_source_content_hash": "changed-content-hash"}
+
+    missing_current_hash = {
+        **unchanged,
+        "owner_content_hash": "",
+    }
+    batch_calls.clear()
+    records.clear()
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [missing_current_hash])
+
+    missing_hash_result = database.sync_search_index(
+        owner_class="corpus", root_name="docs", limit=1, embedding_provider=CapacityProvider(), adapter=FakeAdapter()
+    )
+
+    assert missing_hash_result["skipped_capacity_blockers"] == 1
+    assert batch_calls == []
+    assert records == []
+
+    later = {
+        **row,
+        "vespa_document_id": "id:flux:flux_evidence::asset_chunks--chunk-2",
+        "owner_id": "chunk-2",
+        "asset_id": "asset-2",
+        "source_hash": "later-source-hash",
+        "index_text": "Chunk Two\nbody",
+        "existing_source_hash": None,
+        "existing_index_status": None,
+        "existing_embedding_model": None,
+    }
+    batch_calls.clear()
+    records.clear()
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [unchanged, later])
+
+    later_result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=2, embedding_provider=CapacityProvider(), adapter=FakeAdapter())
+
+    assert later_result["skipped_unchanged"] == 1
+    assert later_result["indexed"] == 1
+    assert batch_calls == [["chunk-2"]]
+    assert [item["row"]["owner_id"] for item in records] == ["chunk-2", "chunk-2"]
+
+    # Once the legacy blocker has been normalised, repeated LIMIT 1 pages can
+    # advance to later pending rows rather than repeatedly consuming it.
+    for pending_id in ("chunk-3", "chunk-4"):
+        limited_pending = {
+            **later,
+            "vespa_document_id": f"id:flux:flux_evidence::asset_chunks--{pending_id}",
+            "owner_id": pending_id,
+            "asset_id": f"asset-{pending_id[-1]}",
+            "source_hash": f"{pending_id}-source-hash",
+            "index_text": f"{pending_id}\nbody",
+        }
+        batch_calls.clear()
+        records.clear()
+        monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, row=limited_pending, **_kwargs: [row])
+
+        limited_page_result = database.sync_search_index(
+            owner_class="corpus", root_name="docs", limit=1, embedding_provider=CapacityProvider(), adapter=FakeAdapter()
+        )
+
+        assert limited_page_result["indexed"] == 1
+        assert batch_calls == [[pending_id]]
+
+    # Metadata-only owner revisions must leave the capacity blocker unchanged so
+    # later pending work remains eligible on each cursorless sync page.
+    for revision, pending_id in (("2030-01-01T00:00:00Z", "chunk-3"), ("2030-01-02T00:00:00Z", "chunk-4")):
+        timestamp_only = {**unchanged, "owner_updated_at": revision}
+        pending = {
+            **later,
+            "vespa_document_id": f"id:flux:flux_evidence::asset_chunks--{pending_id}",
+            "owner_id": pending_id,
+            "asset_id": f"asset-{pending_id[-1]}",
+            "source_hash": f"{pending_id}-source-hash",
+            "index_text": f"{pending_id}\nbody",
+        }
+        batch_calls.clear()
+        records.clear()
+        monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, rows=[timestamp_only, pending], **_kwargs: rows)
+
+        timestamp_only_result = database.sync_search_index(
+            owner_class="corpus", root_name="docs", limit=2, embedding_provider=CapacityProvider(), adapter=FakeAdapter()
+        )
+
+        assert timestamp_only_result["skipped_unchanged"] == 1
+        assert timestamp_only_result["indexed"] == 1
+        assert batch_calls == [[pending_id]]
+        assert [item["row"]["owner_id"] for item in records] == [pending_id, pending_id]
+
+    changed = {
+        **unchanged,
+        "source_hash": "changed-source-hash",
+        "index_text": "Chunk One\nchanged body",
+    }
+    batch_calls.clear()
+    records.clear()
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [changed])
+
+    changed_result = database.sync_search_index(owner_class="corpus", root_name="docs", limit=1, embedding_provider=CapacityProvider(), adapter=FakeAdapter())
+
+    assert changed_result["non_retryable"] is True
+    assert batch_calls == [["chunk-1"]]
+    assert [item["status"] for item in records] == ["syncing", "blocked_embedding_capacity"]
+
+    batch_calls.clear()
+    records.clear()
+    retry_result = database.sync_search_index(
+        owner_class="corpus",
+        root_name="docs",
+        limit=1,
+        retry_capacity_blockers=True,
+        embedding_provider=CapacityProvider(),
+        adapter=FakeAdapter(),
+    )
+
+    assert retry_result["non_retryable"] is True
+    assert batch_calls == [["chunk-1"]]
+
+
+def test_sync_search_index_splits_scheduler_unschedulable_model_runner_responses(monkeypatch):
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    from flux_llm_kb.embeddings import SnowflakeEmbeddingProvider
+    from flux_llm_kb.gpu_scheduler import GpuLeaseRejected, GpuSchedulerConfig, GpuTaskProfile, InProcessGpuScheduler
+    from flux_llm_kb.model_runner import ModelRunnerClient, _gpu_busy_detail
+
+    scheduler = InProcessGpuScheduler(
+        GpuSchedulerConfig(vram_budget_mb=1_000, safety_margin_mb=0),
+        reconciliation_provider=lambda: None,
+    )
+    with pytest.raises(GpuLeaseRejected) as exc_info:
+        scheduler.acquire(GpuTaskProfile(task_type="embedding", model_id="Snowflake/test", estimated_vram_mb=2_000))
+    detail = _gpu_busy_detail(exc_info.value)
+    fed: list[str] = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    class FakeAdapter:
+        def feed(self, document):
+            fed.append(document["fields"]["owner_id"])
+            return {"ok": True}
+
+        def delete(self, _document_id):
+            return {"ok": True}
+
+    def fake_urlopen(request, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        text_count = len(payload["texts"])
+        if text_count > 4:
+            raise HTTPError(
+                url=request.full_url,
+                code=429,
+                msg="Too Many Requests",
+                hdrs={},
+                fp=BytesIO(json.dumps({"detail": detail}).encode("utf-8")),
+            )
+        return FakeResponse({"ok": True, "vectors": [[0.0] * 1024 for _ in range(text_count)]})
+
+    def candidate(index):
+        return {
+            "vespa_document_id": f"id:flux:flux_evidence::asset_chunks--chunk-{index}",
+            "owner_table": "asset_chunks",
+            "owner_id": f"chunk-{index}",
+            "asset_id": f"asset-{index}",
+            "root_id": "33333333-3333-3333-3333-333333333333",
+            "root_name": "docs",
+            "title": f"Chunk {index}",
+            "body": f"body {index}",
+            "source_path": f"docs/chunk-{index}.md",
+            "symbols": [],
+            "language": "",
+            "file_kind": "text",
+            "lifecycle_state": "active",
+            "deleted": False,
+            "canonical": True,
+            "source_hash": f"old-hash-{index}",
+            "index_text": f"Chunk {index}\nbody {index}",
+            "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+            "embedding_dimensions": 1024,
+            "existing_source_hash": None,
+            "existing_index_status": None,
+            "existing_embedding_model": None,
+        }
+
+    monkeypatch.setenv("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE", "8")
+    monkeypatch.setattr("flux_llm_kb.model_runner.urlopen", fake_urlopen)
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_fetch_stale_search_index_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(database, "_fetch_search_index_rows", lambda *_args, **_kwargs: [candidate(index) for index in range(8)])
+    monkeypatch.setattr(database, "_upsert_search_index_record", lambda *_args, **_kwargs: None)
+
+    result = database.sync_search_index(
+        owner_class="corpus",
+        root_name="docs",
+        limit=8,
+        embedding_provider=SnowflakeEmbeddingProvider(model_runner=ModelRunnerClient("http://model-runner:8790")),
+        adapter=FakeAdapter(),
+    )
+
+    assert result["indexed"] == 8
+    assert result["embedding_attempted_size_histogram"] == {"4": 2, "8": 1}
+    assert result["embedding_capacity_state"] == "unschedulable"
+    assert fed == [f"chunk-{index}" for index in range(8)]
+
+
+def test_fetch_corpus_search_index_rows_prioritises_content_changed_capacity_blockers():
+    executed: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    database._fetch_corpus_search_index_rows(
+        FakeCursor(),
+        root_name="docs",
+        limit=1,
+        embedding_model="Snowflake/snowflake-arctic-embed-l-v2.0",
+        retry_capacity_blockers=False,
+    )
+
+    sql, params = executed[0]
+    assert "WHEN rec.index_status = 'blocked_embedding_capacity' AND (%s OR (NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL AND NULLIF(a.content_hash, '') IS NOT NULL AND NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS DISTINCT FROM a.content_hash)) THEN 1" in sql
+    assert sql.index("WHEN rec.index_status = 'blocked_embedding_capacity' AND") < sql.index("WHEN rec.index_status = 'blocked_embedding_capacity' THEN 4")
+    assert "c.updated_at > rec.updated_at" not in sql
+    assert params == ("Snowflake/snowflake-arctic-embed-l-v2.0", "docs", False, 1)
+
+
+def test_fetch_corpus_search_index_rows_prioritises_explicit_capacity_retries():
+    executed: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    database._fetch_corpus_search_index_rows(
+        FakeCursor(),
+        root_name="docs",
+        limit=1,
+        embedding_model="Snowflake/snowflake-arctic-embed-l-v2.0",
+        retry_capacity_blockers=True,
+    )
+
+    sql, params = executed[0]
+    assert "WHEN rec.index_status = 'blocked_embedding_capacity' AND (%s OR (NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL AND NULLIF(a.content_hash, '') IS NOT NULL AND NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', '^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS DISTINCT FROM a.content_hash)) THEN 1" in sql
+    assert params == ("Snowflake/snowflake-arctic-embed-l-v2.0", "docs", True, 1)
+
+
+@pytest.mark.parametrize(
+    ("fetch_rows", "current_content_hash"),
+    [
+        (database._fetch_episode_search_index_rows, "s.content_hash"),
+        (database._fetch_claim_search_index_rows, "source.content_hash"),
+    ],
+)
+def test_fetch_non_corpus_rows_reactivate_capacity_blockers_only_for_content_changes(fetch_rows, current_content_hash):
+    executed: list[tuple[str, tuple]] = []
+
+    class FakeCursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            return []
+
+    fetch_rows(
+        FakeCursor(),
+        root_name="docs",
+        limit=1,
+        embedding_model="Snowflake/snowflake-arctic-embed-l-v2.0",
+    )
+
+    sql, params = executed[0]
+    assert (
+        "WHEN rec.index_status = 'blocked_embedding_capacity' AND "
+        "(%s OR (NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', "
+        "'^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS NOT NULL "
+        f"AND NULLIF({current_content_hash}, '') IS NOT NULL "
+        "AND NULLIF(regexp_replace(rec.metadata->>'capacity_source_content_hash', "
+        f"'^[[:space:]]+|[[:space:]]+$', '', 'g'), '') IS DISTINCT FROM {current_content_hash})) THEN 1"
+    ) in sql
+    assert "updated_at > rec.updated_at" not in sql
+    assert params == ("Snowflake/snowflake-arctic-embed-l-v2.0", "docs", False, 1)
+
+
+def test_capacity_blocker_priority_normalises_only_persisted_outer_whitespace():
+    later_pending_rank = 1
+    whitespace_legacy_rank = database._search_index_capacity_blocker_priority(
+        retry_capacity_blockers=False,
+        recorded_content_hash="\t\n",
+        current_content_hash="current-hash",
+    )
+    exact_mismatch_rank = database._search_index_capacity_blocker_priority(
+        retry_capacity_blockers=False,
+        recorded_content_hash="abc",
+        current_content_hash=" abc ",
+    )
+
+    assert sorted([(whitespace_legacy_rank, "legacy"), (later_pending_rank, "pending")]) == [
+        (1, "pending"),
+        (4, "legacy"),
+    ]
+    assert exact_mismatch_rank == 1
+    assert database._search_index_capacity_blocker_priority(
+        retry_capacity_blockers=True,
+        recorded_content_hash="\t\n",
+        current_content_hash="current-hash",
+    ) == 1
+
+
 def test_search_index_embedding_batch_size_defaults_to_memory_safe_value(monkeypatch):
     monkeypatch.delenv("FLUX_KB_SEARCH_INDEX_EMBEDDING_BATCH_SIZE", raising=False)
 
@@ -3028,6 +3893,9 @@ def test_fetch_corpus_search_index_rows_truncates_indexed_body_text(monkeypatch)
                     "docs/chunk.md",
                     "text",
                     {},
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -3284,6 +4152,9 @@ def test_corpus_search_index_rows_hydrate_managed_mail_sidecar(monkeypatch):
                     None,
                     None,
                     None,
+                    None,
+                    None,
+                    None,
                 ),
                 (
                     "chunk-file",
@@ -3295,9 +4166,12 @@ def test_corpus_search_index_rows_hydrate_managed_mail_sidecar(monkeypatch):
                     "docs/plan.txt",
                     "text",
                     {},
+                    None,
                     "old-hash",
                     "indexed",
                     "Snowflake/snowflake-arctic-embed-l-v2.0",
+                    None,
+                    None,
                 ),
             ]
 
@@ -5926,9 +6800,13 @@ def test_enqueue_gpu_eviction_request_dedupes_active_candidate_across_leases(mon
         },
     )
 
-    select_sql, select_params = executed[0]
+    select_sql, select_params = next(
+        (statement, params)
+        for statement, params in executed
+        if "SELECT id::text, status, broker_message_id" in statement
+    )
     assert "lease_id = %s" not in select_sql
-    assert select_params == ("embedding", "snowflake", "model-runner")
+    assert select_params == ("embedding", "snowflake", "model-runner", "")
     assert result == {
         "id": "42",
         "eviction_id": "42",
@@ -5937,6 +6815,533 @@ def test_enqueue_gpu_eviction_request_dedupes_active_candidate_across_leases(mon
         "deduped": True,
     }
     assert not any("INSERT INTO gpu_evictions" in statement for statement, _params in executed)
+
+
+def test_enqueue_gpu_eviction_request_locks_logical_key_before_absent_row_lookup(monkeypatch):
+    """The absent-key path must serialise before it decides to publish."""
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status, broker_message_id" in sql:
+                return None
+            if "INSERT INTO gpu_evictions" in sql:
+                return ("42",)
+            if "INSERT INTO message_outbox" in sql:
+                return ("outbox-1", "message-1", "pending")
+            return None
+
+        def fetchall(self):
+            return []
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def transaction(self):
+            return self
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(
+        database,
+        "_load_psycopg",
+        lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()),
+    )
+
+    database.enqueue_gpu_eviction_request(
+        lease_id="lease-1",
+        request_profile={"task_type": "rerank", "model_id": "qwen"},
+        candidate={"task_type": "embedding", "model_id": "snowflake", "component": "model-runner"},
+    )
+
+    lock_index = next(
+        index for index, (statement, _params) in enumerate(executed) if "pg_advisory_xact_lock" in statement
+    )
+    select_index = next(
+        index
+        for index, (statement, _params) in enumerate(executed)
+        if "SELECT id::text, status, broker_message_id" in statement
+    )
+    lock_sql, lock_params = executed[lock_index]
+    assert lock_index < select_index
+    assert "jsonb_build_array(%s, %s, %s)::text" in lock_sql
+    assert lock_params == ("embedding", "snowflake", "model-runner")
+
+
+def test_enqueue_gpu_eviction_request_fences_dedupe_by_runtime_generation_and_upgrades_idle(monkeypatch):
+    """An old generation cannot suppress a fresh demand eviction."""
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text, status, broker_message_id" in sql:
+                return ("42", "queued", "message-existing", "idle")
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def transaction(self):
+            return self
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+
+    result = database.enqueue_gpu_eviction_request(
+        lease_id="lease-demand",
+        request_profile={"task_type": "rerank", "model_id": "qwen"},
+        candidate={
+            "task_type": "embedding",
+            "model_id": "snowflake",
+            "component": "model-runner",
+            "runtime_generation": "generation-2",
+            "runtime_activity_sequence": 11,
+        },
+        request_reason="demand",
+        reconciliation_observation_id="observation-2",
+    )
+
+    select_sql, select_params = next((sql, params) for sql, params in executed if "SELECT id::text, status, broker_message_id" in sql)
+    assert "runtime_generation = %s" in select_sql
+    assert select_params[-1] == "generation-2"
+    assert result["deduped"] is True
+    upgrade_sql, upgrade_params = next((sql, params) for sql, params in executed if "request_reason = 'demand'" in sql)
+    assert "lease_id = %s" in upgrade_sql
+    assert upgrade_params[0] == "lease-demand"
+
+
+@pytest.mark.parametrize(
+    ("request_reason", "lease_id"),
+    [
+        ("demand", "lease-demand"),
+        ("idle", "idle:embedding:snowflake:model-runner:generation-1"),
+    ],
+)
+def test_enqueue_gpu_eviction_request_replaces_published_expired_same_generation_command(
+    monkeypatch, request_reason, lease_id,
+):
+    """A replacement must publish a command for its own eviction row."""
+    evictions = []
+    outbox = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            self.sql = sql
+            self.params = params
+            if "INSERT INTO gpu_evictions" in sql:
+                evictions.append({"id": str(42 + len(evictions)), "status": "queued"})
+            elif "INSERT INTO message_outbox" in sql:
+                message_id = params[0]
+                outbox.setdefault(
+                    message_id,
+                    {
+                        "id": f"outbox-{len(outbox) + 1}",
+                        "message_id": message_id,
+                        "aggregate_id": params[8],
+                        "payload": json.loads(params[9]),
+                        "status": "pending",
+                    },
+                )
+
+        def fetchone(self):
+            if "SELECT id::text, status, broker_message_id" in self.sql:
+                active = next((row for row in evictions if row["status"] in {"queued", "running", "retrying"}), None)
+                return None if active is None else (active["id"], active["status"], active.get("broker_message_id"), "demand")
+            if "INSERT INTO gpu_evictions" in self.sql:
+                return (evictions[-1]["id"],)
+            if "INSERT INTO message_outbox" in self.sql:
+                row = outbox[self.params[0]]
+                return (row["id"], row["message_id"], row["status"])
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def transaction(self):
+            return self
+
+        def cursor(self):
+            return FakeCursor()
+
+    monkeypatch.setattr(
+        database,
+        "_load_psycopg",
+        lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()),
+    )
+    monkeypatch.setattr(database, "_expire_stale_gpu_eviction_requests_with_cursor", lambda _cur: [])
+
+    first = database.enqueue_gpu_eviction_request(
+        lease_id=lease_id,
+        request_profile={"task_type": "rerank", "model_id": "qwen"},
+        candidate={"task_type": "embedding", "model_id": "snowflake", "component": "model-runner"},
+        runtime_generation="generation-1",
+        request_reason=request_reason,
+    )
+    evictions[0]["status"] = "expired"
+    outbox[first["message_id"]]["status"] = "published"
+
+    replacement = database.enqueue_gpu_eviction_request(
+        lease_id=lease_id,
+        request_profile={"task_type": "rerank", "model_id": "qwen"},
+        candidate={"task_type": "embedding", "model_id": "snowflake", "component": "model-runner"},
+        runtime_generation="generation-1",
+        request_reason=request_reason,
+    )
+
+    assert replacement["deduped"] is False
+    assert replacement["eviction_id"] != first["eviction_id"]
+    assert replacement["message_id"] != first["message_id"]
+    assert len(outbox) == 2
+    replacement_outbox = outbox[replacement["message_id"]]
+    assert replacement_outbox["status"] == "pending"
+    assert replacement_outbox["aggregate_id"] == replacement["eviction_id"]
+    assert replacement_outbox["payload"]["payload"]["eviction_id"] == replacement["eviction_id"]
+
+
+def test_expire_stale_gpu_eviction_requests_preserves_rows_and_emits_terminal_audit(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchall(self):
+            if "UPDATE gpu_evictions" in executed[-1][0]:
+                return [(str(index), "lease-1", "embedding", "snowflake", "model-runner", "expired", 2500, "", {}, None, None, None, None, 1, "generation-1", 4, "", 7, None, None, None, None, "idle", "stale_request_expired", "obs-1") for index in range(1, 5)]
+            return []
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def transaction(self): return self
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+    monkeypatch.setattr(database, "_enqueue_gpu_eviction_event_with_cursor", lambda *_args, **_kwargs: {})
+
+    expired = database.expire_stale_gpu_eviction_requests()
+
+    assert [item["id"] for item in expired] == ["1", "2", "3", "4"]
+    sql = next(statement for statement, _params in executed if "UPDATE gpu_evictions" in statement)
+    assert "status = 'expired'" in sql
+    assert "terminal_reason" in sql
+    assert "DELETE FROM gpu_evictions" not in sql
+
+
+def test_idle_eviction_candidate_query_requires_confirmed_idle_residency_without_protected_work(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+        def fetchall(self):
+            return [("embedding", "snowflake", 2500, "model-runner", "generation-1", 4)]
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+
+    candidates = database.list_idle_gpu_eviction_candidates(idle_unload_seconds=120)
+
+    assert candidates == [{
+        "task_type": "embedding", "model_id": "snowflake", "estimated_vram_mb": 2500,
+        "component": "model-runner", "runtime_generation": "generation-1", "runtime_activity_sequence": 4,
+    }]
+    sql, params = executed[0]
+    assert "runtime_state = 'present'" in sql
+    assert "last_operation_completed_at <= now() - (%s * interval '1 second')" in sql
+    assert "runtime_in_flight = 0" in sql
+    assert "last_operation_started_at <= r.last_operation_completed_at" in sql
+    assert "status = 'running'" in sql
+    assert "status = 'waiting'" in sql
+    assert "status IN ('queued', 'running', 'retrying')" in sql
+    assert params == (120.0,)
+
+
+def test_gpu_eviction_maintenance_leader_lock_loser_is_a_noop(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+        def fetchone(self): return (False,)
+
+    class FakeConnection:
+        autocommit = False
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+
+    with database.gpu_eviction_maintenance_leader_lock() as is_leader:
+        assert is_leader is False
+
+    assert len(executed) == 1
+    assert "pg_try_advisory_lock(hashtextextended('flux.gpu.eviction.maintenance', 0))" in executed[0][0]
+
+
+def test_complete_gpu_eviction_request_rejects_late_claim_token_without_mutation(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+        def fetchone(self): return None
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def transaction(self): return self
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+
+    result = database.complete_gpu_eviction_request(
+        eviction_id="42", status="succeeded", claim_token="stale-token", row_version=4
+    )
+
+    assert result == {"eviction_id": "42", "cas_rejected": True}
+    sql, params = executed[-1]
+    assert "claim_token = %s" in sql
+    assert "row_version = %s" in sql
+    assert params[-2:] == ("stale-token", 4)
+
+
+def test_gpu_eviction_cas_rejection_is_a_bounded_audit_event(monkeypatch):
+    recorded: dict[str, object] = {}
+
+    def record_audit_event(**kwargs):
+        recorded.update(kwargs)
+        return {"id": "audit-1", "event_type": "gpu_eviction.cas_rejected"}
+
+    monkeypatch.setattr(database, "record_audit_event", record_audit_event)
+
+    result = database.record_gpu_eviction_cas_rejection(
+        eviction_id="eviction-1",
+        stage="claim\n" + ("x" * 100),
+        worker_id="worker\x00sk-live-secret" + ("x" * 200),
+        broker_message_id="message\nBearer private-token" + ("x" * 200),
+    )
+
+    assert result == {"id": "audit-1", "event_type": "gpu_eviction.cas_rejected"}
+    assert recorded["event_type"] == "gpu_eviction.cas_rejected"
+    assert recorded["target_table"] == "gpu_evictions"
+    assert recorded["target_id"] == "eviction-1"
+    details = recorded["details"]
+    assert details["stage"] == "claim_" + ("x" * 74)
+    assert len(details["worker_id_hash"]) == 24
+    assert len(details["broker_message_id_hash"]) == 24
+    assert "sk-live-secret" not in json.dumps(details)
+    assert "private-token" not in json.dumps(details)
+    assert "\x00" not in json.dumps(details)
+    assert "\n" not in json.dumps(details)
+
+
+def test_gpu_eviction_deadlines_follow_current_rabbitmq_retry_policy(monkeypatch):
+    monkeypatch.setattr(
+        database.messaging,
+        "RabbitMqConfig",
+        SimpleNamespace(from_env=lambda: SimpleNamespace(retry_delay_ms=30_000, delivery_limit=8)),
+    )
+    monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS", "40")
+
+    deadlines = database._gpu_eviction_deadlines(delivery_count=3)
+
+    assert deadlines == {
+        "queued_seconds": 120,
+        "running_seconds": 160,
+        "retry_delay_seconds": 30,
+        "retry_seconds": 340,
+    }
+
+
+def test_gpu_eviction_running_deadline_matches_settings_service_precedence(monkeypatch):
+    reads = []
+
+    def get_runtime_setting(key):
+        reads.append(key)
+        return {"key": key, "value": 47}
+
+    monkeypatch.setenv("FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS", "5")
+    monkeypatch.setattr(database, "get_runtime_setting", get_runtime_setting)
+    monkeypatch.setattr(
+        database.messaging,
+        "RabbitMqConfig",
+        SimpleNamespace(from_env=lambda: SimpleNamespace(retry_delay_ms=30_000, delivery_limit=8)),
+    )
+
+    deadlines = database._gpu_eviction_deadlines(delivery_count=1)
+
+    assert settings.SettingsService().resolve("gpu.scheduler.eviction_request_timeout_seconds").raw_value == 5
+    assert deadlines["running_seconds"] == 60
+    assert reads == []
+
+    monkeypatch.delenv("FLUX_KB_GPU_SCHEDULER_EVICTION_REQUEST_TIMEOUT_SECONDS", raising=False)
+    reads.clear()
+
+    deadlines = database._gpu_eviction_deadlines(delivery_count=1)
+
+    assert settings.SettingsService().resolve("gpu.scheduler.eviction_request_timeout_seconds").raw_value == 47
+    assert deadlines["running_seconds"] == 188
+    assert reads == ["gpu.scheduler.eviction_request_timeout_seconds", "gpu.scheduler.eviction_request_timeout_seconds"]
+
+
+def test_retry_gpu_eviction_request_uses_claim_fence_and_remaining_delivery_deadline(monkeypatch):
+    executed = []
+    row = (
+        "42", "lease-1", "embedding", "snowflake", "model-runner", "retrying", 2500, "transient", {}, None,
+        None, None, None, 3, "generation-1", 4, "token-1", 8, None, None, None, None, "demand", "", "obs-1",
+    )
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+        def fetchone(self): return row
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def transaction(self): return self
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+    monkeypatch.setattr(database, "_gpu_eviction_deadlines", lambda *, delivery_count=0: {"retry_delay_seconds": 30, "retry_seconds": 340})
+    monkeypatch.setattr(database, "_enqueue_gpu_eviction_event_with_cursor", lambda *_args, **_kwargs: {})
+
+    result = database.retry_gpu_eviction_request(
+        eviction_id="42", error="transient", claim_token="token-1", row_version=7, broker_delivery_count=3
+    )
+
+    assert result["status"] == "retrying"
+    sql, params = executed[-1]
+    assert "claim_token = %s" in sql and "row_version = %s" in sql
+    assert params[2:4] == (30, 340)
+    assert params[-2:] == ("token-1", 7)
+
+
+def test_update_gpu_residency_verification_retains_owner_and_records_unverified_state(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=()): executed.append((sql, params))
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def transaction(self): return self
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection()))
+
+    database.update_gpu_residency_verification(
+        task_type="embedding", model_id="snowflake", runtime_state="memory_release_unverified",
+        failure_reason="allocator did not drop", observation_id="obs-post", owner_component="model-runner",
+        runtime_generation="generation-1", runtime_activity_sequence=4,
+    )
+
+    sql, params = executed[0]
+    assert "runtime_state = %s" in sql
+    assert "runtime_verification_capacity_state" in sql
+    assert "owner_component = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), owner_component) END" in sql
+    assert params[:5] == ("memory_release_unverified", "allocator did not drop", False, "model-runner", "model-runner")
+
+
+def test_fenced_residency_verification_replaces_absent_post_identity_with_explicit_null_activity():
+    executed = []
+
+    class Cursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    database._update_gpu_residency_verification_with_cursor(
+        Cursor(),
+        task_type="embedding", model_id="snowflake", runtime_state="unload_failed",
+        owner_component="model-runner", runtime_generation="generation-2",
+        runtime_activity_sequence=None, runtime_fingerprint="post-fingerprint",
+        replace_runtime_identity=True,
+    )
+
+    sql, params = executed[0]
+    assert "CASE WHEN %s THEN %s" in sql
+    assert "runtime_activity_sequence = CASE WHEN %s THEN %s" in sql
+    assert params[2:5] == (True, "model-runner", "model-runner")
+    assert (True, None) in tuple(zip(params, params[1:]))
+
+
+def test_fenced_residency_verification_replaces_ollama_fingerprint_without_generation_or_activity():
+    executed = []
+
+    class Cursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+    database._update_gpu_residency_verification_with_cursor(
+        Cursor(),
+        task_type="ollama_vision", model_id="qwen3-vl:8b", runtime_state="unload_failed",
+        owner_component="ollama", runtime_generation="", runtime_activity_sequence=None,
+        runtime_fingerprint="fresh-empty-inventory", replace_runtime_identity=True,
+    )
+
+    _sql, params = executed[0]
+    assert "fresh-empty-inventory" in params
+    assert (True, "") in tuple(zip(params, params[1:]))
 
 
 def test_enqueue_corpus_sync_job_upgrades_existing_active_schedule(monkeypatch):
@@ -9014,3 +10419,30 @@ def test_service_capture_ingestion_blocks_missing_source(monkeypatch, tmp_path):
     assert updates[0]["ingestion"]["status"] == "blocked_missing_dependency"
     assert updates[0]["ingestion"]["error"] == "source_missing"
     assert audits[0]["event_type"] == "capture.ingestion_failed"
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        (TimeoutError("Snowflake timed out"), ("embedding_timeout", None)),
+        (ModelRunnerBusy("model runner busy"), ("model_runner_busy", None)),
+        (ModelRunnerError("HTTP 503 model runner timeout"), ("model_runner_timeout", None)),
+        (GpuLeaseTimeout("lease timed out"), ("gpu_lease_timeout", None)),
+        (GpuLeaseDeferred("inventory incomplete", capacity_state="inventory_incomplete"), ("gpu_capacity", "inventory_incomplete")),
+        (GpuLeaseDeferred("reconciliation required", capacity_state="reconciliation_required"), ("gpu_capacity", "reconciliation_required")),
+    ],
+)
+def test_retryable_vespa_embedding_failure_classifier_accepts_only_temporary_embedding_failures(exception, expected):
+    assert database._classify_retryable_vespa_embedding_failure(exception) == expected
+
+
+def test_retryable_vespa_embedding_failure_classifier_leaves_unschedulable_visible():
+    assert database._classify_retryable_vespa_embedding_failure(
+        GpuLeaseRejected("cannot fit", capacity_state="unschedulable")
+    ) is None
+
+
+def test_retryable_vespa_embedding_failure_classifier_leaves_scheduler_configuration_errors_visible():
+    assert database._classify_retryable_vespa_embedding_failure(
+        ModelRunnerError("scheduler configuration is invalid")
+    ) is None

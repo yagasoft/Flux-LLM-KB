@@ -236,6 +236,57 @@ def test_gpu_scheduler_settings_defaults_and_env_overrides(monkeypatch):
     assert service.resolve("gpu.scheduler.eviction_max_models").raw_value == 2
 
 
+def test_gpu_runtime_reconciliation_settings_defaults_and_validators(monkeypatch):
+    monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
+    service = SettingsService()
+    expected_defaults = {
+        "gpu.scheduler.runtime_reconciliation_mode": "observation",
+        "gpu.scheduler.inventory_timeout_seconds": 2,
+        "gpu.scheduler.control_lock_timeout_seconds": 2,
+        "gpu.scheduler.context_allowance_mb": 256,
+        "gpu.scheduler.unattributed_threshold_mb": 512,
+        "gpu.scheduler.unattributed_threshold_percent": 5,
+        "gpu.scheduler.reconciliation_retry_seconds": 15,
+        "gpu.scheduler.calibration_min_samples": 5,
+        "gpu.scheduler.calibration_guard_margin_mb": 512,
+        "gpu.scheduler.priority_drain_enabled": False,
+        "gpu.scheduler.retry_coalescing_enabled": False,
+        "gpu.scheduler.eviction_expiry_enabled": False,
+        "gpu.scheduler.idle_unload_enabled": False,
+        "gpu.scheduler.idle_unload_seconds": 120,
+        "gpu.scheduler.idle_sweep_interval_seconds": 30,
+        "retrieval.vespa_lexical_fallback_enabled": True,
+    }
+
+    for key, expected in expected_defaults.items():
+        definition = get_definition(key)
+        assert service.resolve(key).raw_value == expected
+        assert definition.default == expected
+        assert definition.apply_mode == APPLY_RELOAD
+        assert definition.affected_components
+
+    assert get_definition("gpu.scheduler.embedding_vram_mb").default == 2500
+    assert get_definition("gpu.scheduler.runtime_reconciliation_mode").validate("observation") == "observation"
+    with pytest.raises(ValueError):
+        get_definition("gpu.scheduler.runtime_reconciliation_mode").validate("invalid")
+
+    numeric_keys = (
+        "gpu.scheduler.inventory_timeout_seconds",
+        "gpu.scheduler.control_lock_timeout_seconds",
+        "gpu.scheduler.context_allowance_mb",
+        "gpu.scheduler.unattributed_threshold_mb",
+        "gpu.scheduler.unattributed_threshold_percent",
+        "gpu.scheduler.reconciliation_retry_seconds",
+        "gpu.scheduler.calibration_min_samples",
+        "gpu.scheduler.calibration_guard_margin_mb",
+        "gpu.scheduler.idle_unload_seconds",
+        "gpu.scheduler.idle_sweep_interval_seconds",
+    )
+    for key in numeric_keys:
+        with pytest.raises(ValueError):
+            get_definition(key).validate(1_000_000)
+
+
 def test_reranker_quantization_settings_canonicalize_legacy_aliases(monkeypatch):
     monkeypatch.setattr(database, "get_runtime_setting", lambda _key: None)
     definitions = {definition.key: definition for definition in SETTING_REGISTRY}

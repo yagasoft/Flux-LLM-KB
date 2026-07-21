@@ -10,6 +10,7 @@ from . import __version__, database
 from .acceleration import JOB_FAMILIES
 from .health import doctor_payload
 from .migrations import load_migrations
+from .model_activity import caller_surface
 from .settings import SettingsService
 
 
@@ -704,7 +705,8 @@ def main(argv: list[str] | None = None) -> int:
         "outlook-host": _outlook_host,
         "host-agent": _host_agent,
     }
-    return handlers[args.command](args)
+    with caller_surface("cli"):
+        return handlers[args.command](args)
 
 
 def _add_mail_schedule_args(parser: argparse.ArgumentParser) -> None:

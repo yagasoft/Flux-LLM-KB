@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
 import gc
 import importlib
@@ -11,10 +12,12 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
+from .gpu_runtime import RuntimeModelKey, RuntimeResidencyTracker, normalise_priority_class
 from .gpu_scheduler import GpuLeaseRejected, GpuLeaseTimeout, GpuModelResidency, get_gpu_scheduler, task_profile
 
 
@@ -126,6 +129,8 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
     service_config = config or AsrServiceConfig.from_env()
     service_runtime = runtime or AsrRuntime(service_config)
     scheduler = gpu_scheduler or get_gpu_scheduler()
+    tracker = RuntimeResidencyTracker(owner_component="asr")
+    model_key = RuntimeModelKey("asr", service_config.model)
     app = FastAPI(title="Flux local ASR service")
     _clear_startup_residency(scheduler)
 
@@ -156,16 +161,57 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
         if task_type != "asr":
             raise HTTPException(status_code=400, detail=f"unsupported GPU unload task_type: {task_type}")
         if model_id and model_id not in {service_config.model, resolve_model_alias(service_config.model), str(service_config.model_path)}:
-            raise HTTPException(status_code=400, detail=f"model is not served: {model_id}")
-        unloaded = bool(service_runtime.unload_model()) if hasattr(service_runtime, "unload_model") else False
+            raise HTTPException(status_code=404, detail=f"model is not served: {model_id}")
+        expected_generation = str(payload.get("expected_generation") or "")
+        if not expected_generation:
+            raise HTTPException(status_code=400, detail="expected_generation is required")
+        try:
+            expected_activity_sequence = int(payload["expected_activity_sequence"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="expected_activity_sequence is required") from exc
+        loaded_models = [model_key] if getattr(service_runtime, "_model", None) is not None else []
+        target_present = bool(loaded_models)
+        allocator_before = tracker.inventory(loaded_models)["allocator"]
+        result = tracker.unload(
+            model_key,
+            expected_generation=expected_generation,
+            expected_activity_sequence=expected_activity_sequence,
+            remove=lambda: bool(service_runtime.unload_model()) if hasattr(service_runtime, "unload_model") else False,
+        )
+        if result["reason"] in {"generation_mismatch", "activity_mismatch", "in_flight", "queued"}:
+            raise HTTPException(status_code=409, detail={"reason": result["reason"]})
+        unload_confirmed = bool(result["unloaded"]) or not target_present
+        if not unload_confirmed:
+            raise HTTPException(status_code=409, detail={"reason": result["reason"]})
         _record_asr_residency(scheduler, service_config, resident=False)
-        return {"ok": True, "task_type": "asr", "model_id": service_config.model, "unloaded": unloaded, "resident": False}
+        return {
+            "ok": True,
+            "task_type": "asr",
+            "model_id": service_config.model,
+            "unloaded": bool(result["unloaded"]),
+            "unload_confirmed": True,
+            "target_present": target_present,
+            "resident": False,
+            "allocator_before": allocator_before,
+            "allocator_after": tracker.inventory([])["allocator"],
+        }
+
+    @app.get("/v1/gpu/residency")
+    def gpu_residency() -> dict[str, Any]:
+        loaded_models = [model_key] if getattr(service_runtime, "_model", None) is not None else []
+        return {
+            "owner_component": "asr",
+            "worker_count": 1,
+            **tracker.inventory(loaded_models),
+        }
 
     @app.post("/v1/audio/transcriptions")
     async def transcriptions(
         file: UploadFile = File(...),
         model: str = Form(DEFAULT_ASR_MODEL),
         response_format: str = Form("json"),
+        request_class: str = Form("background"),
+        request_id: str = Form(""),
     ) -> dict[str, Any]:
         if model and model != service_config.model:
             raise HTTPException(status_code=400, detail=f"model is not served: {model}")
@@ -180,9 +226,23 @@ def create_app(config: AsrServiceConfig | None = None, *, runtime: Any | None = 
             temp_path = Path(handle.name)
             shutil.copyfileobj(file.file, handle)
         try:
-            profile = task_profile("asr", model_id=service_config.model, component="asr")
-            with scheduler.acquire(profile):
-                return dict(service_runtime.transcribe(temp_path))
+            profile = task_profile("asr", model_id=service_config.model, component="asr", metadata={"workload_class": "unknown"})
+            ticket = tracker.enqueue(
+                model_key,
+                priority_class=_runtime_request_class(request_class),
+                request_id=request_id if isinstance(request_id, str) else "",
+            )
+            with _runtime_operation(tracker, ticket) as measurement:
+                with scheduler.acquire(profile):
+                    pre_load = _allocator_reservation_snapshot(tracker, [model_key])
+                    loader = getattr(service_runtime, "_load_model", None)
+                    if callable(loader):
+                        loader()
+                    post_load = _allocator_reservation_snapshot(tracker, [model_key])
+                    try:
+                        return dict(service_runtime.transcribe(temp_path))
+                    finally:
+                        _record_vram_measurement(scheduler, profile, tracker, measurement, [model_key], pre_load, post_load)
         except GpuLeaseTimeout as exc:
             raise HTTPException(
                 status_code=429,
@@ -240,6 +300,72 @@ def _release_gpu_memory() -> None:
                 torch.cuda.ipc_collect()
     except Exception:
         pass
+
+
+def _runtime_request_class(value: Any) -> str:
+    try:
+        return normalise_priority_class(str(value or "background"))
+    except ValueError:
+        return "background"
+
+
+@contextmanager
+def _runtime_operation(tracker: RuntimeResidencyTracker, ticket: Any):
+    """Wait for the tracker queue before entering an ASR operation."""
+    while True:
+        try:
+            with tracker.operation(ticket) as measurement:
+                yield measurement
+            return
+        except RuntimeError as exc:
+            if str(exc) not in {"a runtime operation is already active for this model", "runtime operation ticket is not at the queue head"}:
+                raise
+            time.sleep(0.001)
+
+
+def _allocator_reservation_snapshot(tracker: RuntimeResidencyTracker, loaded_models: list[RuntimeModelKey]) -> tuple[str, int | None]:
+    try:
+        inventory = tracker.inventory(loaded_models)
+        allocators = inventory.get("allocator") if isinstance(inventory, dict) else None
+        measured = [
+            max(int(item.get("reserved_mb") or 0), int(item.get("peak_reserved_mb") or 0))
+            for item in allocators or ()
+            if isinstance(item, dict) and item.get("capability") == "measured"
+        ]
+        return ("measured", max(measured)) if measured else ("known_unmeasured", None)
+    except Exception:
+        return "unknown", None
+
+
+def _record_vram_measurement(
+    scheduler: Any,
+    profile: Any,
+    tracker: RuntimeResidencyTracker,
+    measurement: Any,
+    loaded_models: list[RuntimeModelKey],
+    pre_load: tuple[str, int | None],
+    post_load: tuple[str, int | None],
+) -> None:
+    record = getattr(scheduler, "record_vram_sample", None)
+    if not callable(record):
+        return
+    peak = _allocator_reservation_snapshot(tracker, loaded_models)
+    current_process_in_flight = getattr(tracker, "process_in_flight", None)
+    if callable(current_process_in_flight):
+        process_in_flight = int(current_process_in_flight() or 0)
+    else:
+        process_in_flight = int(getattr(measurement, "process_in_flight", getattr(measurement, "in_flight", 0)) or 0)
+    current_epoch = getattr(tracker, "process_activity_epoch", None)
+    measurement_epoch = getattr(measurement, "process_activity_epoch", None)
+    epoch_changed = callable(current_epoch) and measurement_epoch is not None and int(current_epoch() or 0) != int(measurement_epoch)
+    overlapped = process_in_flight != 1 or epoch_changed
+    if (pre_load[0], post_load[0], peak[0]) != ("measured", "measured", "measured"):
+        record(profile, pre_load_reserved_mb=None, post_load_reserved_mb=None, execution_peak_reserved_mb=None,
+               allocator_capability="known_unmeasured", tracker_overlapped=overlapped, sample_skipped_reason="allocator_unmeasured")
+        return
+    record(profile, pre_load_reserved_mb=pre_load[1], post_load_reserved_mb=post_load[1], execution_peak_reserved_mb=peak[1],
+           allocator_capability="measured", tracker_overlapped=overlapped,
+           sample_skipped_reason="tracker_overlap" if overlapped else "")
 
 
 def _health_command(config: AsrServiceConfig) -> int:

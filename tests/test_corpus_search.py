@@ -4,6 +4,7 @@ import pytest
 
 from flux_llm_kb import database
 from flux_llm_kb import service
+from flux_llm_kb.search_index import SearchIndexError
 from flux_llm_kb.service import KnowledgeService
 
 
@@ -532,7 +533,7 @@ def test_service_explain_degrades_to_postgres_when_vespa_fails(monkeypatch):
     monkeypatch.setattr(database, "search_episodes", lambda *_args, **_kwargs: [])
 
     def fail_vespa(*_args, **_kwargs):
-        raise RuntimeError("vespa unavailable")
+        raise SearchIndexError("vespa unavailable")
 
     def fake_postgres_fallback(query, *, diagnostics=None, **_kwargs):
         if diagnostics is not None:
@@ -571,6 +572,21 @@ def test_service_explain_degrades_to_postgres_when_vespa_fails(monkeypatch):
         "fallback": "postgres_lexical_diagnostic",
     }
     assert corpus_diagnostics["streams"]["postgres_lexical_diagnostic"]["plan"] == "degraded_tsquery_only"
+
+
+@pytest.mark.parametrize("exception", [ValueError("invalid embedding"), RuntimeError("non-retryable model failure")])
+def test_service_propagates_non_vespa_failures_without_postgres_fallback(monkeypatch, exception):
+    monkeypatch.setattr(service, "_configured_retrieval_search_engine", lambda: "vespa")
+    monkeypatch.setattr(service, "_configured_vespa_base_url", lambda: "http://vespa:8080")
+    monkeypatch.setattr(database, "search_corpus_chunks_vespa", lambda *_args, **_kwargs: (_ for _ in ()).throw(exception))
+    monkeypatch.setattr(
+        database,
+        "search_corpus_chunks_postgres_diagnostic",
+        lambda *_args, **_kwargs: pytest.fail("PostgreSQL fallback must only run for SearchIndexError"),
+    )
+
+    with pytest.raises(type(exception), match=str(exception)):
+        service._search_corpus_with_configured_engine("visible failure")
 
 
 def test_service_semantic_duplicate_methods_forward_to_database(monkeypatch):

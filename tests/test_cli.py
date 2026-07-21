@@ -9,6 +9,17 @@ import pytest
 from flux_llm_kb import cli
 
 
+def test_cli_dispatches_inside_interactive_request_context(monkeypatch):
+    from flux_llm_kb import model_activity
+
+    observed = {}
+    monkeypatch.setattr(cli, "_doctor", lambda _args: observed.setdefault("context", model_activity.current_model_request_context()) and 0)
+
+    assert cli.main(["doctor"]) == 0
+    assert observed["context"]["request_class"] == "interactive"
+    assert observed["context"]["request_id"]
+
+
 def test_cli_doctor_reports_missing_docker_without_failing():
     repo_root = Path(__file__).resolve().parents[1]
 

@@ -310,6 +310,7 @@ def _gpu_scheduler_status() -> dict[str, Any]:
             "rejections": int(status.get("rejections") or 0),
             "budget": status.get("budget") or {},
             "live_gpu_memory": status.get("live_gpu_memory") or {},
+            "runtime_reconciliation": status.get("runtime_reconciliation") if isinstance(status.get("runtime_reconciliation"), dict) else None,
         }
     except Exception as exc:
         return {"ok": False, "mode": "unknown", "error": str(exc)}

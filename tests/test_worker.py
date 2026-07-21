@@ -856,6 +856,82 @@ def test_search_index_sync_gpu_lease_rejection_is_retryable(monkeypatch):
     }
 
 
+def test_search_index_sync_worker_returns_non_retryable_capacity_blocker(monkeypatch):
+    continuation_calls: list[dict] = []
+    monkeypatch.setattr(
+        database,
+        "sync_search_index",
+        lambda **_kwargs: {
+            "search_engine": "vespa",
+            "requested": 1,
+            "indexed": 0,
+            "deleted": 0,
+            "skipped_unchanged": 0,
+            "failed": 1,
+            "embedding_model": "Snowflake/snowflake-arctic-embed-l-v2.0",
+            "embedding_dimensions": 1024,
+            "embedding_batch_size": 16,
+            "embedding_batches": 1,
+            "embedding_attempted_size_histogram": {"1": 1},
+            "embedding_split_count": 0,
+            "embedding_smallest_attempted_size": 1,
+            "embedding_capacity_state": "unschedulable",
+            "non_retryable": True,
+            "non_retryable_blocker": "embedding_capacity",
+            "errors": ["single item exceeds embedding capacity"],
+            "model_generation": "snowflake-qwen-paddleocr-v1",
+            "more_pending": True,
+            "continuation_remaining": 10,
+            "page_size": 10,
+            "page_sequence": 0,
+            "rows_loaded": 1,
+        },
+    )
+    monkeypatch.setattr(database, "enqueue_search_index_sync_continuation", lambda **kwargs: continuation_calls.append(kwargs), raising=False)
+
+    result = worker.process_search_index_sync_job({"payload": {"owner_class": "corpus", "limit": 10}})
+
+    assert result.status == "blocked_embedding_capacity"
+    assert result.message == "single item exceeds embedding capacity"
+    assert result.telemetry["search_index_non_retryable"] is True
+    assert result.telemetry["search_index_non_retryable_blocker"] == "embedding_capacity"
+    assert result.telemetry["search_index_embedding_capacity_state"] == "unschedulable"
+    assert "retry_after_seconds" not in result.telemetry
+    assert continuation_calls == []
+
+
+def test_finalize_embedding_capacity_blocker_does_not_retry(monkeypatch):
+    calls = {"retried": [], "blocked": []}
+    monkeypatch.setattr(database, "retry_corpus_job", lambda **kwargs: calls["retried"].append(kwargs))
+    monkeypatch.setattr(database, "block_corpus_job", lambda **kwargs: calls["blocked"].append(kwargs))
+
+    outcome = KnowledgeService()._finalize_corpus_job_process_result(
+        {
+            "id": "job-search-capacity",
+            "job_type": "search_index_sync",
+            "job_family": "embedding",
+            "resource_class": "gpu",
+            "attempts": 0,
+            "telemetry": {},
+        },
+        duration_ms=25,
+        process_result=worker.JobProcessResult(
+            status="blocked_embedding_capacity",
+            message="single item exceeds embedding capacity",
+            telemetry={
+                "search_index_non_retryable": True,
+                "search_index_non_retryable_blocker": "embedding_capacity",
+            },
+        ),
+    )
+
+    assert outcome["status"] == "blocked_embedding_capacity"
+    assert outcome["category"] == "blocked"
+    assert outcome["retryable"] is False
+    assert calls["retried"] == []
+    assert calls["blocked"][0]["status"] == "blocked_embedding_capacity"
+
+
 def test_search_index_sync_worker_enqueues_continuation_after_success(monkeypatch):
     continuation_calls: list[dict] = []
 

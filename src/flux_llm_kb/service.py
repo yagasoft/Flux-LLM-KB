@@ -48,6 +48,7 @@ from .retrieval_explain import enrich_search_result
 from .result_details import collapse_mail_spool_search_results, decorate_corpus_search_item
 from .runtime_heartbeat import WatcherHeartbeatRunner
 from .scoring import ContextCandidate, pack_context, pack_context_with_trace
+from .search_index import SearchIndexError
 from .settings import SettingsService
 from .versioning import collapse_version_families
 from .watcher import WatchEvent, WatchRoot, create_corpus_watcher, probe_watcher_backend
@@ -1813,8 +1814,14 @@ class KnowledgeService:
         owner_class: str = "all",
         root_name: str | None = None,
         limit: int = database.DEFAULT_SEARCH_INDEX_JOB_LIMIT,
+        retry_capacity_blockers: bool = False,
     ) -> dict[str, Any]:
-        return database.enqueue_search_index_sync(owner_class=owner_class, root_name=root_name, limit=limit)
+        return database.enqueue_search_index_sync(
+            owner_class=owner_class,
+            root_name=root_name,
+            limit=limit,
+            retry_capacity_blockers=retry_capacity_blockers,
+        )
 
     def search_index_rebuild(self, *, root_name: str | None = None, confirmed: bool = False) -> dict[str, Any]:
         return database.mark_search_index_rebuild(root_name=root_name, confirmed=confirmed)
@@ -2744,8 +2751,12 @@ class KnowledgeService:
                 scheduler_status = get_gpu_scheduler().status()
                 evictions = scheduler_status.get("evictions") if isinstance(scheduler_status.get("evictions"), dict) else {}
                 workers["gpu_evictions"] = evictions
+                workers["gpu_runtime_reconciliation"] = (
+                    scheduler_status.get("runtime_reconciliation") if isinstance(scheduler_status.get("runtime_reconciliation"), dict) else None
+                )
             except Exception:
                 workers["gpu_evictions"] = {"retrying": 0, "recent": []}
+                workers["gpu_runtime_reconciliation"] = None
         else:
             workers = {}
         if normalized in {"all", "jobs"}:
@@ -3915,7 +3926,7 @@ class KnowledgeService:
                 telemetry=telemetry,
             )
             return {**outcome, "status": "cancelled_unseen_asset", "category": "cancelled_unseen_asset"}
-        if process_result.status in {"blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source"}:
+        if process_result.status in {"blocked_missing_dependency", "blocked_by_policy", "blocked_invalid_source", "blocked_embedding_capacity"}:
             kwargs: dict[str, Any] = {}
             if process_result.status != "blocked_missing_dependency":
                 kwargs["status"] = process_result.status
@@ -6041,7 +6052,7 @@ def _search_corpus_with_configured_engine(query: str, **kwargs: Any) -> list[dic
             vespa_base_url=_configured_vespa_base_url(),
             **kwargs,
         )
-    except Exception as exc:
+    except SearchIndexError as exc:
         if diagnostics is not None:
             diagnostics.setdefault("degraded_mode", {})["reason"] = str(exc)[:300]
             diagnostics["degraded_mode"]["search_engine"] = "vespa"
@@ -6062,7 +6073,7 @@ def _search_evidence_with_configured_engine(query: str, **kwargs: Any) -> list[d
             vespa_base_url=_configured_vespa_base_url(),
             **kwargs,
         )
-    except Exception as exc:
+    except SearchIndexError as exc:
         if diagnostics is not None:
             diagnostics.setdefault("degraded_mode", {})["reason"] = str(exc)[:300]
             diagnostics["degraded_mode"]["search_engine"] = "vespa"

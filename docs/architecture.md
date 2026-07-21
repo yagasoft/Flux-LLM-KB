@@ -169,6 +169,39 @@ evidence for later calibration and governance apply gates; they do not mutate
 ranking, thresholds, retention policy, semantic clusters, lifecycle state, or
 settings.
 
+## GPU runtime reconciliation
+
+GPU admission and eviction use PostgreSQL as the cross-process coordination
+authority. Model-runner, Paddle, ASR, and Ollama report process-local residency
+and allocator facts; the scheduler reads those endpoints and one driver reading
+under a short-lived, dedicated GPU-control advisory-lock session. HTTP inventory
+reads are never made while row locks are held. The persisted observation records
+runtime owner/generation, allocator capability, aggregate capacity, unresolved
+ownership, and unattributed residual without request or content data.
+
+Driver-free physical capacity, less the safety margin and active peak
+reservations, is the admission boundary. A cold request reserves load delta plus
+working set; a resident hit reserves working set only. An interactive waiting
+head establishes a drain barrier but does not cancel granted work. Owner
+generation and activity sequence fence unloads; stale delivery, changed
+activity, in-flight work, a failed unload, or an unverified release cannot
+rewrite terminal audit history.
+
+Reconciliation remains observation-first. Enforcement, priority drain, retry
+coalescing, expiry, and idle unload are independent reloadable flags. Scheduler
+status carries one bounded `runtime_reconciliation` object through model
+activity, acceleration status, dashboard snapshots, and operational diagnostics.
+It reuses the cached observation for the configured cooldown and contains only
+sanitised, length-limited identifiers, bounded inventory rows, timestamps,
+full-observation capacity aggregates, queue wait groups,
+reservation/calibration sources, and aggregate eviction counters; reading
+status does not start another reconciliation before that cooldown expires. CAS
+races are kept as bounded `audit_events` outcomes with hashed external
+identifiers, indexed for the status-window count, rather than mutating an
+eviction's terminal history. PostgreSQL status failures still emit an
+unavailable reconciliation object, so downstream diagnostic schemas remain
+stable.
+
 ## Memory Governance Automation
 
 Governance automation is an evaluated proposal layer over existing memory

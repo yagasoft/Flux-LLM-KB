@@ -45,6 +45,10 @@ def test_load_migrations_returns_ordered_sql_files():
     runtime_control_updated_at = next(item for item in migrations if item.name == "0042_runtime_control_updated_at")
     assert "ALTER TABLE runtime_control_requests" in runtime_control_updated_at.sql
     assert "ADD COLUMN IF NOT EXISTS updated_at" in runtime_control_updated_at.sql
+    gpu_eviction_cas_audit_index = next(item for item in migrations if item.name == "0047_gpu_eviction_cas_audit_index")
+    assert "CREATE INDEX IF NOT EXISTS idx_audit_events_gpu_eviction_cas_rejected_created" in gpu_eviction_cas_audit_index.sql
+    assert "ON audit_events (created_at DESC)" in gpu_eviction_cas_audit_index.sql
+    assert "WHERE event_type = 'gpu_eviction.cas_rejected'" in gpu_eviction_cas_audit_index.sql
     assert any("sync_interval_seconds" in item.sql for item in migrations)
     graph_migration = next(item for item in migrations if item.name == "0010_graph_lifecycle")
     assert "CREATE TABLE IF NOT EXISTS claim_lifecycle_events" in graph_migration.sql
@@ -249,6 +253,69 @@ def test_load_migrations_returns_ordered_sql_files():
     assert "DROP INDEX IF EXISTS idx_asset_chunks_body_trgm" in purge_migration.sql
     assert "DROP EXTENSION IF EXISTS vector" in purge_migration.sql
     assert all(Path(item.path).suffix == ".sql" for item in migrations)
+
+
+def test_gpu_runtime_reconciliation_migration_is_additive():
+    migration = next(item for item in load_migrations() if item.name == "0045_gpu_runtime_reconciliation")
+    sql = migration.sql
+    for fragment in (
+        "CREATE TABLE IF NOT EXISTS gpu_runtime_inventory",
+        "CREATE TABLE IF NOT EXISTS gpu_model_vram_calibration",
+        "ADD COLUMN IF NOT EXISTS admission_key",
+        "ADD COLUMN IF NOT EXISTS priority_class",
+        "ADD COLUMN IF NOT EXISTS wait_reason",
+        "ADD COLUMN IF NOT EXISTS runtime_generation",
+        "ADD COLUMN IF NOT EXISTS runtime_activity_sequence",
+        "ADD COLUMN IF NOT EXISTS claim_token",
+        "ADD COLUMN IF NOT EXISTS row_version",
+        "ADD COLUMN IF NOT EXISTS heartbeat_at",
+        "ADD COLUMN IF NOT EXISTS retry_not_before",
+        "ADD COLUMN IF NOT EXISTS expires_at",
+        "'expired'",
+    ):
+        assert fragment in sql
+
+
+def test_gpu_vram_samples_migration_follows_immutable_reconciliation_migration():
+    migrations = load_migrations()
+    reconciliation = next(item for item in migrations if item.name == "0045_gpu_runtime_reconciliation")
+    samples = next(item for item in migrations if item.name == "0046_gpu_vram_samples")
+
+    assert reconciliation.version < samples.version
+    assert "gpu_vram_samples" not in reconciliation.sql
+    assert "CREATE TABLE IF NOT EXISTS gpu_vram_samples" in samples.sql
+    assert "idx_gpu_vram_samples_shape_observed" in samples.sql
+
+
+def test_run_migrations_applies_samples_after_reconciliation_was_already_recorded(monkeypatch):
+    executed: list[tuple[str, object]] = []
+
+    class FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def execute(self, sql, params=None): executed.append((sql, params))
+        def fetchone(self):
+            sql, params = executed[-1]
+            if "SELECT 1 FROM schema_migrations" in sql:
+                return (1,) if params == (45,) else None
+            if "RETURNING version" in sql:
+                return (46,)
+            return None
+
+    class FakeConnection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def cursor(self): return FakeCursor()
+
+    monkeypatch.setattr(database, "_load_psycopg", lambda: type("Psycopg", (), {"connect": lambda *_a, **_k: FakeConnection()})())
+    monkeypatch.setattr(database, "load_migrations", lambda: [
+        Migration(version=45, name="0045_gpu_runtime_reconciliation", path="0045.sql", sql="SELECT 'old'"),
+        Migration(version=46, name="0046_gpu_vram_samples", path="0046.sql", sql="CREATE TABLE gpu_vram_samples"),
+    ])
+
+    assert database.run_migrations("postgresql://test") == ["0046_gpu_vram_samples"]
+    assert "SELECT 'old'" not in [statement for statement, _params in executed]
+    assert "CREATE TABLE gpu_vram_samples" in [statement for statement, _params in executed]
 
 
 def test_run_migrations_uses_advisory_lock_and_idempotent_insert(monkeypatch):

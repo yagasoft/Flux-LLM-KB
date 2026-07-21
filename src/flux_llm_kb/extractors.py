@@ -66,7 +66,7 @@ from .crawler import (
 )
 from .error_diagnostics import redact_secrets
 from .onnxruntime_logging import configure_onnxruntime_logging
-from .model_activity import record_model_activity
+from .model_activity import current_model_request_context, record_model_activity
 from .processes import run_no_window
 from .redaction import redact_text, redactions_enabled
 from .text_safety import decode_text_bytes, read_text_with_bom
@@ -4863,7 +4863,11 @@ def _asr_with_faster_whisper(
                 model_kwargs["device"] = device
             if compute_type != "default":
                 model_kwargs["compute_type"] = compute_type
-            profile = task_profile("asr", model_id=str(model_path), component="worker")
+            request_context = current_model_request_context()
+            profile = task_profile(
+                "asr", model_id=str(model_path), component="worker",
+                request_id=request_context["request_id"], priority_class=request_context["request_class"],
+            )
             with get_gpu_scheduler().acquire(profile):
                 model = faster_whisper.WhisperModel(str(model_path), **model_kwargs)
                 segments_iter, info = model.transcribe(str(audio_path))
@@ -5948,7 +5952,11 @@ def _vision_with_ollama_compatible(
             method="POST",
         )
         request_attempted = True
-        profile = task_profile("ollama_vision", model_id=model, component="worker")
+        request_context = current_model_request_context()
+        profile = task_profile(
+            "ollama_vision", model_id=model, component="worker",
+            request_id=request_context["request_id"], priority_class=request_context["request_class"],
+        )
         scheduler = get_gpu_scheduler()
         with record_model_activity(
             service="ollama",
@@ -6669,7 +6677,11 @@ def _run_paddleocr_image(path: Path, *, model: str) -> str:
         kwargs["ocr_version"] = model
     from .gpu_scheduler import get_gpu_scheduler, task_profile
 
-    profile = task_profile("ocr_image", model_id=model, component="worker")
+    request_context = current_model_request_context()
+    profile = task_profile(
+        "ocr_image", model_id=model, component="worker",
+        request_id=request_context["request_id"], priority_class=request_context["request_class"],
+    )
     with record_model_activity(
         service="worker",
         endpoint="/v1/ocr/image",

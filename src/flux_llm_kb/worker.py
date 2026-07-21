@@ -82,7 +82,10 @@ def process_corpus_job(job: dict) -> JobProcessResult:
 
     job_type = str(job.get("job_type") or "")
     try:
-        result = _extract_for_corpus_job(job_type, path, policy, payload)
+        from .model_activity import caller_surface
+
+        with caller_surface("worker", request_id=job_id):
+            result = _extract_for_corpus_job(job_type, path, policy, payload)
     except OSError as exc:
         if _is_locked_error(exc):
             vss_result = _extract_locked_file_with_vss(
@@ -255,6 +258,7 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
             limit=int(payload.get("limit") or database.DEFAULT_SEARCH_INDEX_JOB_LIMIT),
             page_size=int(payload.get("page_size") or 0) or None,
             page_sequence=int(payload.get("page_sequence") or 0),
+            retry_capacity_blockers=bool(payload.get("retry_capacity_blockers")),
         )
     except ValueError as exc:
         return JobProcessResult(status="failed", message=str(exc))
@@ -277,6 +281,13 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
         "search_index_embedding_dimensions": int(result.get("embedding_dimensions") or 0),
         "search_index_embedding_batch_size": int(result.get("embedding_batch_size") or 0),
         "search_index_embedding_batches": int(result.get("embedding_batches") or 0),
+        "search_index_embedding_attempted_size_histogram": dict(result.get("embedding_attempted_size_histogram") or {}),
+        "search_index_embedding_split_count": int(result.get("embedding_split_count") or 0),
+        "search_index_embedding_smallest_attempted_size": result.get("embedding_smallest_attempted_size"),
+        "search_index_embedding_capacity_state": result.get("embedding_capacity_state"),
+        "search_index_non_retryable": bool(result.get("non_retryable")),
+        "search_index_non_retryable_blocker": result.get("non_retryable_blocker"),
+        "search_index_skipped_capacity_blockers": int(result.get("skipped_capacity_blockers") or 0),
         "search_index_model_generation": result.get("model_generation"),
         "search_index_page_size": int(result.get("page_size") or 0),
         "search_index_page_sequence": int(result.get("page_sequence") or 0),
@@ -295,15 +306,22 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
     failed = int(result.get("failed") or 0)
     if failed:
         message = "; ".join(str(item) for item in (result.get("errors") or [])[:3]) or f"{failed} search-index documents failed"
+        if bool(result.get("non_retryable")) and result.get("non_retryable_blocker") == "embedding_capacity":
+            return JobProcessResult(status="blocked_embedding_capacity", message=message, telemetry=telemetry)
         return JobProcessResult(status="failed", message=message, telemetry=telemetry)
     if result.get("more_pending") and int(result.get("continuation_remaining") or 0) > 0:
+        continuation_kwargs = {
+            "owner_class": str(payload.get("owner_class") or "all"),
+            "root_name": payload.get("root_name"),
+            "limit": int(result.get("continuation_remaining") or 0),
+            "page_size": int(result.get("page_size") or 0),
+            "continuation_of": str(payload.get("continuation_of") or job.get("id") or "search_index_sync"),
+            "page_sequence": int(result.get("page_sequence") or 0) + 1,
+        }
+        if payload.get("retry_capacity_blockers"):
+            continuation_kwargs["retry_capacity_blockers"] = True
         continuation = database.enqueue_search_index_sync_continuation(
-            owner_class=str(payload.get("owner_class") or "all"),
-            root_name=payload.get("root_name"),
-            limit=int(result.get("continuation_remaining") or 0),
-            page_size=int(result.get("page_size") or 0),
-            continuation_of=str(payload.get("continuation_of") or job.get("id") or "search_index_sync"),
-            page_sequence=int(result.get("page_sequence") or 0) + 1,
+            **continuation_kwargs,
         )
         telemetry["search_index_continuation_queued"] = int(continuation.get("queued") or 0)
         telemetry["search_index_continuation_job_id"] = continuation.get("job_id")
@@ -312,19 +330,29 @@ def process_search_index_sync_job(job: dict) -> JobProcessResult:
 
 
 def _is_gpu_busy_exception(exc: Exception) -> bool:
-    return exc.__class__.__name__ in {"GpuLeaseRejected", "GpuLeaseTimeout", "ModelRunnerBusy"}
+    return exc.__class__.__name__ in {"GpuLeaseDeferred", "GpuLeaseRejected", "GpuLeaseTimeout", "ModelRunnerBusy"}
 
 
 def _gpu_busy_result(exc: Exception) -> JobProcessResult:
     retry_after = float(getattr(exc, "retry_after_seconds", 1.0) or 1.0)
+    telemetry = {
+        "error_type": exc.__class__.__name__,
+        "retry_after_seconds": retry_after,
+        "gpu_scheduler_status": "busy",
+    }
+    if exc.__class__.__name__ == "GpuLeaseDeferred":
+        telemetry.update(
+            {
+                "deferred_gpu_capacity": True,
+                "gpu_capacity_state": str(getattr(exc, "capacity_state", "healthy") or "healthy"),
+                "gpu_admission_id": str(getattr(exc, "admission_id", "") or ""),
+                "gpu_eviction_id": str(getattr(exc, "eviction_id", "") or ""),
+            }
+        )
     return JobProcessResult(
         status="retrying_gpu_busy",
         message=str(exc),
-        telemetry={
-            "error_type": exc.__class__.__name__,
-            "retry_after_seconds": retry_after,
-            "gpu_scheduler_status": "busy",
-        },
+        telemetry=telemetry,
     )
 
 
