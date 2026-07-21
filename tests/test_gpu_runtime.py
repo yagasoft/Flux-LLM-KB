@@ -393,6 +393,19 @@ def test_repeated_unload_after_real_operation_confirms_known_absence() -> None:
     assert not remove_called
 
 
+def test_empty_inventory_preserves_process_generation_for_post_unload_reconciliation() -> None:
+    tracker = RuntimeResidencyTracker(owner_component="model-runner", allocator_probes=[])
+
+    first = tracker.inventory([])
+    second = tracker.inventory([])
+
+    assert first["models"] == []
+    assert first["process"]["generation"] == tracker.process_generation
+    assert first["process"]["generation"] == second["process"]["generation"]
+    assert first["process"]["in_flight"] == 0
+    assert first["process"]["inventory_aggregated"] is True
+
+
 def test_allocator_probe_failures_are_known_but_unmeasured() -> None:
     def unavailable_probe() -> AllocatorSnapshot:
         raise ImportError("CUDA library unavailable")

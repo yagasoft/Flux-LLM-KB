@@ -1900,6 +1900,9 @@ def test_gpu_residency_reports_real_model_caches_without_scheduler_status(monkey
     generations = {item["process_generation"] for item in payload["models"]}
     assert len(generations) == 1
     assert {item["process_generation"] for item in repeated["models"]} == generations
+    assert payload["process"]["generation"] in generations
+    assert repeated["process"]["generation"] == payload["process"]["generation"]
+    assert payload["process"]["inventory_aggregated"] is True
     assert all(item["in_flight"] == 0 for item in payload["models"])
     assert all(item["last_started_at"] is None and item["last_activity_at"] is None for item in payload["models"])
     assert all(item["capability"] in {"measured", "known_unmeasured"} for item in payload["allocator"])

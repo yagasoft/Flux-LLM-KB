@@ -1871,6 +1871,35 @@ def test_brokered_eviction_requires_allocator_release_not_global_free_vram_or_re
     assert db.completed[0]["metadata"]["allocator_reserved_drop_mb"] == 2_000
 
 
+def test_brokered_eviction_accepts_confirmed_absence_when_post_generation_is_not_reported(monkeypatch):
+    """A fenced unload plus measured release is sufficient when an older endpoint omits process identity."""
+    request = _brokered_eviction_request()
+    request.update({"claim_token": "claim-1", "row_version": 1, "runtime_generation": "generation-1", "runtime_activity_sequence": 4})
+    db = FakeGpuEvictionDb(request)
+    phase = {"after": False}
+
+    def runtime_get(_base_url, _path, *, timeout_seconds):  # noqa: ANN001
+        if phase["after"]:
+            return {
+                "owner_component": "model-runner", "models": [],
+                "allocator": [{"capability": "measured", "reserved_mb": 1_000}],
+            }
+        return {
+            "owner_component": "model-runner", "process_generation": "generation-1",
+            "models": [{"task_type": "embedding", "model_id": "snowflake", "owner_component": "model-runner", "activity_sequence": 4, "in_flight": 0}],
+            "allocator": [{"capability": "measured", "reserved_mb": 3_000}],
+        }
+
+    monkeypatch.setattr(gpu_scheduler, "_get_json", runtime_get)
+    monkeypatch.setattr(gpu_scheduler, "_post_json", lambda *_args, **_kwargs: phase.update(after=True) or {"unload_confirmed": True, "target_present": False})
+    monkeypatch.setattr(gpu_scheduler, "scheduler_config_from_settings", lambda: _config(mode="postgres", model_runner_base_url="http://model-runner"))
+
+    result = gpu_scheduler.process_gpu_eviction_request(eviction_id="eviction-1", worker_id="worker-1", database_module=db)
+
+    assert result["status"] == "succeeded"
+    assert db.completed[0]["metadata"]["terminal_reason"] == "verified_unload"
+
+
 def test_brokered_eviction_does_not_unload_when_fresh_activity_fence_changed(monkeypatch):
     request = _brokered_eviction_request()
     request.update({"claim_token": "claim-1", "row_version": 1, "runtime_generation": "generation-1", "runtime_activity_sequence": 4})

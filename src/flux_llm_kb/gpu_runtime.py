@@ -334,7 +334,13 @@ class RuntimeResidencyTracker:
                         "last_activity_at": state.last_activity_at,
                     }
                 )
-        return {"models": models, "allocator": self._allocator_snapshots()}
+            process = {
+                "generation": self.process_generation,
+                "in_flight": sum(state.in_flight for state in self._states.values()),
+                "activity_epoch": self._process_activity_epoch,
+                "inventory_aggregated": True,
+            }
+        return {"process": process, "models": models, "allocator": self._allocator_snapshots()}
 
     def next_waiting_ticket_id(self, key: RuntimeModelKey) -> str | None:
         with self._lock:

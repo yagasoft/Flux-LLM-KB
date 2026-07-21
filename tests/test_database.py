@@ -7406,7 +7406,7 @@ def test_update_gpu_residency_verification_retains_owner_and_records_unverified_
     assert params[:5] == ("memory_release_unverified", "allocator did not drop", False, "model-runner", "model-runner")
 
 
-def test_fenced_residency_verification_replaces_absent_post_identity_with_explicit_null_activity():
+def test_fenced_residency_verification_preserves_prior_activity_when_absent_post_identity_has_no_activity():
     executed = []
 
     class Cursor:
@@ -7423,9 +7423,9 @@ def test_fenced_residency_verification_replaces_absent_post_identity_with_explic
 
     sql, params = executed[0]
     assert "CASE WHEN %s THEN %s" in sql
-    assert "runtime_activity_sequence = CASE WHEN %s THEN %s" in sql
+    assert "runtime_activity_sequence = CASE WHEN %s AND %s IS NOT NULL THEN %s" in sql
     assert params[2:5] == (True, "model-runner", "model-runner")
-    assert (True, None) in tuple(zip(params, params[1:]))
+    assert params[8:12] == (True, None, None, None)
 
 
 def test_fenced_residency_verification_replaces_ollama_fingerprint_without_generation_or_activity():

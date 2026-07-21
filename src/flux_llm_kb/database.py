@@ -4473,7 +4473,7 @@ def _update_gpu_residency_verification_with_cursor(
                runtime_failure_reason = %s,
                owner_component = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), owner_component) END,
                runtime_generation = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), runtime_generation) END,
-               runtime_activity_sequence = CASE WHEN %s THEN %s ELSE COALESCE(%s, runtime_activity_sequence) END,
+               runtime_activity_sequence = CASE WHEN %s AND %s IS NOT NULL THEN %s ELSE COALESCE(%s, runtime_activity_sequence) END,
                runtime_fingerprint = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), runtime_fingerprint) END,
                runtime_observed_at = now(),
                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
@@ -4492,6 +4492,7 @@ def _update_gpu_residency_verification_with_cursor(
             str(runtime_generation or ""),
             str(runtime_generation or ""),
             bool(replace_runtime_identity),
+            runtime_activity_sequence,
             runtime_activity_sequence,
             runtime_activity_sequence,
             bool(replace_runtime_identity),

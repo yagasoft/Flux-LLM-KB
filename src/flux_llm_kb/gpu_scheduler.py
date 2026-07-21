@@ -2594,7 +2594,7 @@ def _runtime_evict_result(
     if target["owner"] == "ollama":
         if not str(getattr(post_owner_inventory, "runtime_fingerprint", "") or "") or str(getattr(post_owner_inventory, "runtime_fingerprint", "")) == target_metadata["runtime_fingerprint"]:
             return GpuEvictionVerificationResult(False, payload=payload, error="Ollama inventory fingerprint was not refreshed", metadata={**metadata, "terminal_reason": "verification_deferred"}), claim_token, row_version
-    elif post_generation != target["generation"]:
+    elif post_generation and post_generation != target["generation"]:
         return GpuEvictionVerificationResult(False, payload=payload, error="runtime generation changed during unload", metadata={**metadata, "terminal_reason": "generation_changed"}), claim_token, row_version
     unload_confirmed = _optional_bool(payload.get("unload_confirmed")) is True
     if target["owner"] == "ollama":
