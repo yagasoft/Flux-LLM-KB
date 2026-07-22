@@ -199,6 +199,20 @@ REQUEUE_DOCUMENT_EXTENSIONS = {
     ".xltm",
     ".xltx",
 }
+_DEFERRED_REQUEUE_IDENTITY_KEY = "deferred_requeue_identity"
+
+
+def _deferred_requeue_identity(content_hash: str | None, size_bytes: int) -> str:
+    """Return the stable evidence used to allow one automatic deferred retry.
+
+    A quick hash includes mtime, so it cannot distinguish a timestamp-only
+    watcher event from a content edit.  Prefer the verified hash; when one is
+    unavailable, size is the only non-timestamp signal we retain.
+    """
+    verified_hash = str(content_hash or "").strip()
+    if verified_hash:
+        return f"content_hash:{verified_hash}"
+    return f"size:{max(0, int(size_bytes or 0))}"
 
 
 @dataclass(frozen=True)
@@ -442,7 +456,7 @@ def persist_gpu_runtime_observation(
                     cur.execute(
                         """
                         UPDATE gpu_model_residency
-                           SET runtime_state = 'absent', runtime_observed_at = to_timestamp(%s),
+                           SET resident = false, runtime_state = 'absent', runtime_observed_at = to_timestamp(%s),
                                runtime_failure_reason = ''
                          WHERE owner_component = %s
                            AND (
@@ -474,9 +488,10 @@ def persist_gpu_runtime_observation(
                                 runtime_fingerprint, runtime_activity_sequence, runtime_in_flight,
                                 last_operation_started_at, last_operation_completed_at,
                                 runtime_observed_at, runtime_failure_reason
-                            ) VALUES (%s, %s, 0, true, now(), '{}'::jsonb, 'present', %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), to_timestamp(%s), '')
+                            ) VALUES (%s, %s, 0, true, now(), jsonb_build_object('reconciliation_observation_id', %s::text), 'present', %s, %s, %s, %s, %s, to_timestamp(%s), to_timestamp(%s), to_timestamp(%s), '')
                             ON CONFLICT (model_id, task_type) DO UPDATE
                             SET resident = true, runtime_state = 'present', owner_component = EXCLUDED.owner_component,
+                                metadata = COALESCE(gpu_model_residency.metadata, '{}'::jsonb) || EXCLUDED.metadata,
                                 runtime_generation = EXCLUDED.runtime_generation,
                                 runtime_fingerprint = EXCLUDED.runtime_fingerprint,
                                 runtime_activity_sequence = EXCLUDED.runtime_activity_sequence,
@@ -495,7 +510,7 @@ def persist_gpu_runtime_observation(
                                )
                             """,
                             (
-                                task_type, model_id, owner, generation,
+                                task_type, model_id, str(observation.observation_id), owner, generation,
                                 str(inventory.runtime_fingerprint or ""), int(model.get("activity_sequence") or 0),
                                 int(model.get("in_flight") or 0), operation_started_at, operation_completed_at,
                                 float(inventory.observed_at),
@@ -3533,8 +3548,9 @@ def record_gpu_eviction_cas_rejection(
     return record_audit_event(
         event_type="gpu_eviction.cas_rejected",
         target_table="gpu_evictions",
-        target_id=str(eviction_id),
+        target_id=None,
         details={
+            "gpu_eviction_id": str(eviction_id),
             "stage": _gpu_eviction_audit_stage(stage),
             "worker_id_hash": _gpu_eviction_audit_identifier_hash(worker_id),
             "broker_message_id_hash": _gpu_eviction_audit_identifier_hash(broker_message_id),
@@ -4473,7 +4489,7 @@ def _update_gpu_residency_verification_with_cursor(
                runtime_failure_reason = %s,
                owner_component = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), owner_component) END,
                runtime_generation = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), runtime_generation) END,
-               runtime_activity_sequence = CASE WHEN %s AND %s IS NOT NULL THEN %s ELSE COALESCE(%s, runtime_activity_sequence) END,
+               runtime_activity_sequence = CASE WHEN %s AND %s::bigint IS NOT NULL THEN %s::bigint ELSE COALESCE(%s::bigint, runtime_activity_sequence) END,
                runtime_fingerprint = CASE WHEN %s THEN %s ELSE COALESCE(NULLIF(%s, ''), runtime_fingerprint) END,
                runtime_observed_at = now(),
                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
@@ -5548,22 +5564,37 @@ def persist_crawl_plan(
                     manifest_skipped_unchanged += 1
                 cur.execute(
                     """
-                    SELECT id::text, quick_hash, content_hash, extraction_status, extension
+                    SELECT id::text, quick_hash, content_hash, extraction_status, extension, size_bytes, metadata
                     FROM source_assets
                     WHERE root_id = %s AND path = %s
                     """,
                     (root_id, asset.relative_path),
                 )
                 previous = cur.fetchone()
-                content_hash_matches = bool(
+                previous_metadata = (
+                    dict(previous[6] or {})
+                    if previous is not None and len(previous) > 6 and isinstance(previous[6], dict)
+                    else {}
+                )
+                previous_size = (
+                    int(previous[5])
+                    if previous is not None and len(previous) > 5 and previous[5] is not None
+                    else None
+                )
+                verified_content_change = bool(
                     previous is not None
                     and previous[2]
                     and asset.content_hash
-                    and str(previous[2]) == str(asset.content_hash)
+                    and str(previous[2]) != str(asset.content_hash)
                 )
-                changed_asset = previous is None or (
-                    previous[1] != asset.quick_hash and not content_hash_matches
+                unverified_size_change = bool(
+                    previous is not None
+                    and not previous[2]
+                    and not asset.content_hash
+                    and previous_size is not None
+                    and previous_size != int(asset.size_bytes)
                 )
+                changed_asset = previous is None or verified_content_change or unverified_size_change
                 if changed_asset:
                     changed += 1
                 status = {
@@ -5575,13 +5606,20 @@ def persist_crawl_plan(
                 canonical_id = _find_canonical_asset_id(cur, asset.content_hash, previous[0] if previous else None)
                 if canonical_id:
                     status = "duplicate_suppressed"
-                legacy_metadata_requeue = (
+                deferred_requeue_identity = _deferred_requeue_identity(asset.content_hash, asset.size_bytes)
+                previous_requeue_identity = str(previous_metadata.get(_DEFERRED_REQUEUE_IDENTITY_KEY) or "")
+                deferred_requeue_eligible = (
                     previous is not None
                     and not changed_asset
+                    and asset.extraction_tier == "deferred"
+                    and status == "queued"
+                    and canonical_id is None
+                    and previous_requeue_identity != deferred_requeue_identity
+                )
+                legacy_metadata_requeue = (
+                    deferred_requeue_eligible
                     and previous[3] == "metadata_only"
                     and asset.extension in REQUEUE_DOCUMENT_EXTENSIONS
-                    and asset.extraction_tier == "deferred"
-                    and canonical_id is None
                 )
                 recovered_indexed_asset = (
                     previous is not None
@@ -5591,11 +5629,11 @@ def persist_crawl_plan(
                     and canonical_id is None
                 )
                 recovered_deferred_asset = (
-                    previous is not None
-                    and not changed_asset
-                    and (previous[3] == "metadata_only" or str(previous[3]).startswith("blocked_"))
-                    and status == "queued"
-                    and canonical_id is None
+                    deferred_requeue_eligible
+                    and (
+                        (previous[3] == "metadata_only" and asset.extension not in REQUEUE_DOCUMENT_EXTENSIONS)
+                        or str(previous[3]).startswith("blocked_")
+                    )
                 )
                 existing_chunk_count: int | None = None
                 if previous is not None and not changed_asset and status == "indexed" and canonical_id is None:
@@ -5613,6 +5651,9 @@ def persist_crawl_plan(
                         or (existing_chunk_count is not None and existing_chunk_count <= 0)
                     )
                 )
+                source_metadata = {"source": "corpus_crawler", **asset.metadata}
+                if legacy_metadata_requeue or recovered_deferred_asset:
+                    source_metadata[_DEFERRED_REQUEUE_IDENTITY_KEY] = deferred_requeue_identity
                 cur.execute(
                     """
                     INSERT INTO source_assets (
@@ -5640,18 +5681,23 @@ def persist_crawl_plan(
                             WHEN EXCLUDED.extraction_status LIKE 'blocked_%%'
                                  AND EXCLUDED.metadata ? 'metadata_only_blocked'
                                 THEN EXCLUDED.extraction_status
-                            WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
-                                 AND NOT (
-                                     source_assets.content_hash IS NOT NULL
-                                     AND source_assets.content_hash = EXCLUDED.content_hash
+                            WHEN (
+                                    source_assets.content_hash IS NOT NULL
+                                    AND EXCLUDED.content_hash IS NOT NULL
+                                    AND source_assets.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                                 )
+                                 OR (
+                                    source_assets.content_hash IS NULL
+                                    AND EXCLUDED.content_hash IS NULL
+                                    AND source_assets.size_bytes IS DISTINCT FROM EXCLUDED.size_bytes
                                  )
                                 THEN EXCLUDED.extraction_status
-                            WHEN source_assets.extraction_status = 'metadata_only'
-                                 AND source_assets.extension = ANY(%s)
+                            WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
                                  AND EXCLUDED.extraction_status = 'queued'
+                                 AND EXCLUDED.metadata ? 'deferred_requeue_identity'
                                 THEN EXCLUDED.extraction_status
                             WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
-                                 AND EXCLUDED.extraction_status IN ('indexed', 'queued')
+                                 AND EXCLUDED.extraction_status = 'indexed'
                                 THEN EXCLUDED.extraction_status
                             WHEN source_assets.extraction_status = 'indexed'
                                  OR source_assets.extraction_status = 'metadata_only'
@@ -5662,10 +5708,15 @@ def persist_crawl_plan(
                         extraction_tier = EXCLUDED.extraction_tier,
                         last_seen_at = now(),
                         indexed_at = CASE
-                            WHEN source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash
-                                 AND NOT (
-                                     source_assets.content_hash IS NOT NULL
-                                     AND source_assets.content_hash = EXCLUDED.content_hash
+                            WHEN (
+                                    source_assets.content_hash IS NOT NULL
+                                    AND EXCLUDED.content_hash IS NOT NULL
+                                    AND source_assets.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                                 )
+                                 OR (
+                                    source_assets.content_hash IS NULL
+                                    AND EXCLUDED.content_hash IS NULL
+                                    AND source_assets.size_bytes IS DISTINCT FROM EXCLUDED.size_bytes
                                  )
                                 THEN EXCLUDED.indexed_at
                             WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
@@ -5675,8 +5726,25 @@ def persist_crawl_plan(
                         END,
                         deleted_at = NULL,
                         metadata = CASE
+                            WHEN source_assets.content_hash IS NOT NULL
+                                 AND EXCLUDED.content_hash IS NOT NULL
+                                 AND source_assets.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+                                THEN (
+                                    source_assets.metadata
+                                    - 'deferred_requeue_identity'
+                                    - 'metadata_only_blocked'
+                                    - 'readiness_status'
+                                    - 'readiness_reason'
+                                    - 'original_status'
+                                ) || EXCLUDED.metadata
                             WHEN (source_assets.extraction_status = 'metadata_only' OR source_assets.extraction_status LIKE 'blocked_%%')
-                                 AND EXCLUDED.extraction_status IN ('indexed', 'queued')
+                                 AND (
+                                    EXCLUDED.extraction_status = 'indexed'
+                                    OR (
+                                        EXCLUDED.extraction_status = 'queued'
+                                        AND EXCLUDED.metadata ? 'deferred_requeue_identity'
+                                    )
+                                 )
                                 THEN (
                                     source_assets.metadata
                                     - 'metadata_only_blocked'
@@ -5704,8 +5772,7 @@ def persist_crawl_plan(
                         status,
                         asset.extraction_tier,
                         status,
-                        _json({"source": "corpus_crawler", **asset.metadata}),
-                        sorted(REQUEUE_DOCUMENT_EXTENSIONS),
+                        _json(source_metadata),
                     ),
                 )
                 asset_id = cur.fetchone()[0]

@@ -1382,6 +1382,51 @@ def test_interactive_postgres_admission_retries_after_linked_eviction(monkeypatc
     assert events == ["enqueue", ("linked", lease.id, "eviction-1"), ("terminal", lease.id, "released")]
 
 
+def test_waiting_eviction_link_casts_the_numeric_eviction_id_for_postgresql():
+    statements: list[tuple[str, tuple[object, ...]]] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _execute(self, statement, params):
+            statements.append((statement, params))
+
+    scheduler = RecordingScheduler(_config(mode="postgres"), database_url="postgresql://example")
+
+    scheduler._mark_waiting_eviction("lease-1", eviction_id="3474")
+
+    statement, params = statements[0]
+    assert "linked_eviction_id = NULLIF(%s::text, '')::bigint" in statement
+    assert params == ("3474", "lease-1")
+
+
+def test_persisted_runtime_identity_flows_into_demand_eviction_candidates():
+    residency = gpu_scheduler._residency_from_row(
+        {
+            "task_type": "ocr_image",
+            "model_id": "PP-OCRv5",
+            "estimated_vram_mb": 4_000,
+            "resident": True,
+            "last_used_at": 1.0,
+            "metadata": {"component": "paddle-runner", "reconciliation_observation_id": "observation-8"},
+            "runtime_generation": "generation-53",
+            "runtime_activity_sequence": 19,
+        }
+    )
+
+    candidates = select_gpu_eviction_candidates(
+        GpuTaskProfile(task_type="rerank", model_id="reranker", estimated_vram_mb=4_000),
+        resident_models=[residency],
+        active_leases=[],
+        waiting_leases=[],
+        required_vram_mb=4_000,
+        available_vram_mb=0,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].metadata["runtime_generation"] == "generation-53"
+    assert candidates[0].metadata["runtime_activity_sequence"] == 19
+    assert candidates[0].metadata["reconciliation_observation_id"] == "observation-8"
+
+
 def test_postgres_admission_reattachment_is_atomic_for_concurrent_same_key(monkeypatch):
     statements = []
     barrier = threading.Barrier(2)

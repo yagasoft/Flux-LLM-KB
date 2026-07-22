@@ -180,13 +180,18 @@ def paddle_allocator_snapshot() -> AllocatorSnapshot:
     if not all(callable(metric) for metric in (allocated, reserved, peak_reserved)):
         return _known_unmeasured("paddle", "allocator metrics unavailable", device="gpu:0")
     try:
+        allocated_mb = int(allocated() // _MEBIBYTE)
+        reserved_mb = int(reserved() // _MEBIBYTE)
+        peak_reserved_mb = int(peak_reserved() // _MEBIBYTE)
+        if min(allocated_mb, reserved_mb, peak_reserved_mb) < 0:
+            return _known_unmeasured("paddle", "invalid negative allocator reading", device="gpu:0")
         return AllocatorSnapshot(
             framework="paddle",
             device="gpu:0",
             capability="measured",
-            allocated_mb=int(allocated() // _MEBIBYTE),
-            reserved_mb=int(reserved() // _MEBIBYTE),
-            peak_reserved_mb=int(peak_reserved() // _MEBIBYTE),
+            allocated_mb=allocated_mb,
+            reserved_mb=reserved_mb,
+            peak_reserved_mb=peak_reserved_mb,
         )
     except (RuntimeError, TypeError, ValueError, AttributeError, OSError) as exc:
         return _known_unmeasured("paddle", str(exc), device="gpu:0")

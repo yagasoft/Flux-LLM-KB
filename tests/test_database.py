@@ -193,7 +193,8 @@ def test_persist_gpu_runtime_observation_supersedes_prior_generation_and_marks_o
 
     database.persist_gpu_runtime_observation(observation)
 
-    absent_update = next(params for statement, params in executed if "runtime_state = 'absent'" in statement)
+    absent_sql, absent_update = next((statement, params) for statement, params in executed if "runtime_state = 'absent'" in statement)
+    assert "SET resident = false, runtime_state = 'absent'" in absent_sql
     assert absent_update[1] == "asr"
 
 
@@ -270,6 +271,9 @@ def test_persist_gpu_runtime_observation_records_runtime_operation_timestamps_fo
     sql, params = next((statement, params) for statement, params in executed if "ON CONFLICT (model_id, task_type)" in statement)
     assert "last_operation_started_at" in sql
     assert "last_operation_completed_at" in sql
+    assert "jsonb_build_object('reconciliation_observation_id', %s::text)" in sql
+    assert "metadata = COALESCE(gpu_model_residency.metadata, '{}'::jsonb) || EXCLUDED.metadata" in sql
+    assert "obs-idle" in params
     assert 1_700_000_000.0 in params
     assert 1_700_000_012.0 in params
 
@@ -7283,7 +7287,8 @@ def test_gpu_eviction_cas_rejection_is_a_bounded_audit_event(monkeypatch):
     assert result == {"id": "audit-1", "event_type": "gpu_eviction.cas_rejected"}
     assert recorded["event_type"] == "gpu_eviction.cas_rejected"
     assert recorded["target_table"] == "gpu_evictions"
-    assert recorded["target_id"] == "eviction-1"
+    assert recorded["target_id"] is None
+    assert recorded["details"]["gpu_eviction_id"] == "eviction-1"
     details = recorded["details"]
     assert details["stage"] == "claim_" + ("x" * 74)
     assert len(details["worker_id_hash"]) == 24
@@ -7423,9 +7428,31 @@ def test_fenced_residency_verification_preserves_prior_activity_when_absent_post
 
     sql, params = executed[0]
     assert "CASE WHEN %s THEN %s" in sql
-    assert "runtime_activity_sequence = CASE WHEN %s AND %s IS NOT NULL THEN %s" in sql
+    assert "runtime_activity_sequence = CASE WHEN %s AND %s::bigint IS NOT NULL THEN %s::bigint ELSE COALESCE(%s::bigint, runtime_activity_sequence) END" in sql
     assert params[2:5] == (True, "model-runner", "model-runner")
     assert params[8:12] == (True, None, None, None)
+
+
+def test_gpu_eviction_cas_audit_uses_details_for_the_non_uuid_eviction_identifier(monkeypatch):
+    captured = {}
+
+    def record(**kwargs):
+        captured.update(kwargs)
+        return {"id": "audit-1", "event_type": kwargs["event_type"]}
+
+    monkeypatch.setattr(database, "record_audit_event", record)
+
+    result = database.record_gpu_eviction_cas_rejection(
+        eviction_id="3474",
+        stage="complete",
+        worker_id="worker-1",
+        broker_message_id="message-1",
+    )
+
+    assert result["event_type"] == "gpu_eviction.cas_rejected"
+    assert captured["target_table"] == "gpu_evictions"
+    assert captured["target_id"] is None
+    assert captured["details"]["gpu_eviction_id"] == "3474"
 
 
 def test_fenced_residency_verification_replaces_ollama_fingerprint_without_generation_or_activity():
@@ -8785,7 +8812,8 @@ def test_clear_completed_corpus_job_errors_clears_legacy_errors(monkeypatch):
 def test_persist_crawl_plan_does_not_reset_unchanged_deferred_asset_status():
     source = Path(database.__file__).read_text(encoding="utf-8")
 
-    assert "source_assets.quick_hash IS DISTINCT FROM EXCLUDED.quick_hash" in source
+    assert "source_assets.content_hash IS NOT NULL" in source
+    assert "source_assets.size_bytes IS DISTINCT FROM EXCLUDED.size_bytes" in source
     assert "source_assets.extraction_status LIKE 'blocked_%%'" in source
 
 
@@ -8862,6 +8890,165 @@ def test_persist_crawl_plan_does_not_requeue_completed_deferred_asset_when_conte
     assert result["files_changed"] == 0
     assert result["jobs_queued"] == 0
     assert "INSERT INTO capture_jobs" not in sql
+
+
+def _persist_one_deferred_asset(
+    monkeypatch,
+    tmp_path,
+    *,
+    previous,
+    quick_hash: str,
+    content_hash: str | None,
+    size_bytes: int,
+):
+    executed = []
+    queued_jobs = []
+
+    class FakeCursor:
+        rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def execute(self, sql, params=()):
+            executed.append((sql, params))
+
+        def fetchone(self):
+            sql = executed[-1][0]
+            if "SELECT id::text FROM monitored_roots" in sql:
+                return ("root-1",)
+            if "INSERT INTO crawl_runs" in sql:
+                return ("run-1",)
+            if "SELECT id::text, quick_hash, content_hash, extraction_status, extension" in sql:
+                return previous
+            if "SELECT id::text" in sql and "WHERE content_hash" in sql:
+                return None
+            if "INSERT INTO source_assets" in sql:
+                return ("asset-1",)
+            return None
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def cursor(self):
+            return FakeCursor()
+
+    class FakePsycopg:
+        def connect(self, *_args, **_kwargs):
+            return FakeConnection()
+
+    file_path = tmp_path / "legacy.docx"
+    file_path.write_bytes(b"document")
+    plan = CrawlPlan(
+        root_path=tmp_path,
+        assets=[
+            DiscoveredAsset(
+                path=file_path,
+                relative_path="legacy.docx",
+                file_kind="document",
+                mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                extension=".docx",
+                size_bytes=size_bytes,
+                mtime_ns=200,
+                quick_hash=quick_hash,
+                content_hash=content_hash,
+                extraction_tier="deferred",
+            )
+        ],
+    )
+    monkeypatch.setattr(database, "_load_psycopg", lambda: FakePsycopg())
+    monkeypatch.setattr(database, "_replace_asset_chunks", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        database,
+        "_enqueue_unique_capture_job_with_cursor",
+        lambda *_args, **kwargs: queued_jobs.append(kwargs) or {"deduped": False},
+    )
+
+    result = database.persist_crawl_plan(root_name="docs", plan=plan)
+
+    return result, queued_jobs, executed
+
+
+def test_persist_crawl_plan_does_not_requeue_metadata_only_asset_after_its_one_time_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    marker = "content_hash:sha256-same"
+    result, queued_jobs, _executed = _persist_one_deferred_asset(
+        monkeypatch,
+        tmp_path,
+        previous=("asset-1", "quick-before", "sha256-same", "metadata_only", ".docx", 8, {"deferred_requeue_identity": marker}),
+        quick_hash="quick-after",
+        content_hash="sha256-same",
+        size_bytes=8,
+    )
+
+    assert result["files_changed"] == 0
+    assert result["jobs_queued"] == 0
+    assert queued_jobs == []
+
+
+def test_persist_crawl_plan_records_a_one_time_marker_when_recovering_metadata_only_asset(
+    monkeypatch,
+    tmp_path,
+):
+    result, queued_jobs, executed = _persist_one_deferred_asset(
+        monkeypatch,
+        tmp_path,
+        previous=("asset-1", "quick-before", "sha256-same", "metadata_only", ".docx", 8, {}),
+        quick_hash="quick-after",
+        content_hash="sha256-same",
+        size_bytes=8,
+    )
+
+    source_params = next(params for statement, params in executed if "INSERT INTO source_assets" in statement)
+    assert result["files_changed"] == 0
+    assert result["jobs_queued"] == 1
+    assert len(queued_jobs) == 1
+    assert json.loads(source_params[-1])["deferred_requeue_identity"] == "content_hash:sha256-same"
+
+
+def test_persist_crawl_plan_ignores_timestamp_only_change_without_a_content_hash(
+    monkeypatch,
+    tmp_path,
+):
+    result, queued_jobs, _executed = _persist_one_deferred_asset(
+        monkeypatch,
+        tmp_path,
+        previous=("asset-1", "quick-before", None, "indexed", ".docx", 8, {}),
+        quick_hash="quick-after-timestamp-only",
+        content_hash=None,
+        size_bytes=8,
+    )
+
+    assert result["files_changed"] == 0
+    assert result["jobs_queued"] == 0
+    assert queued_jobs == []
+
+
+def test_persist_crawl_plan_requeues_a_verified_content_hash_change(
+    monkeypatch,
+    tmp_path,
+):
+    result, queued_jobs, _executed = _persist_one_deferred_asset(
+        monkeypatch,
+        tmp_path,
+        previous=("asset-1", "quick-before", "sha256-before", "indexed", ".docx", 8, {}),
+        quick_hash="quick-after-content-change",
+        content_hash="sha256-after",
+        size_bytes=8,
+    )
+
+    assert result["files_changed"] == 1
+    assert result["jobs_queued"] == 1
+    assert len(queued_jobs) == 1
 
 
 def test_persist_crawl_plan_recovers_unchanged_blocked_asset_to_indexed(monkeypatch, tmp_path):
@@ -9024,7 +9211,7 @@ def test_persist_crawl_plan_requeues_unchanged_blocked_deferred_asset(monkeypatc
     sql = "\n".join(statement for statement, _params in executed)
     assert result["files_changed"] == 0
     assert result["jobs_queued"] == 1
-    assert "EXCLUDED.extraction_status IN ('indexed', 'queued')" in sql
+    assert "EXCLUDED.metadata ? 'deferred_requeue_identity'" in sql
     assert "INSERT INTO capture_jobs" in sql
 
 

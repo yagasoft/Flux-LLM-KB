@@ -462,6 +462,30 @@ def test_allocator_capability_probe_errors_become_known_unmeasured(monkeypatch) 
     assert paddle_allocator_snapshot().capability == "known_unmeasured"
 
 
+def test_negative_paddle_allocator_readings_are_reported_as_unmeasured(monkeypatch) -> None:
+    negative = SimpleNamespace(
+        memory_allocated=lambda: -172 * 1024 * 1024,
+        memory_reserved=lambda: -4_219 * 1024 * 1024,
+        max_memory_reserved=lambda: 4_135 * 1024 * 1024,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "paddle",
+        SimpleNamespace(
+            is_compiled_with_cuda=lambda: True,
+            device=SimpleNamespace(cuda=negative),
+        ),
+    )
+
+    snapshot = paddle_allocator_snapshot()
+
+    assert snapshot.capability == "known_unmeasured"
+    assert snapshot.allocated_mb is None
+    assert snapshot.reserved_mb is None
+    assert snapshot.peak_reserved_mb is None
+    assert snapshot.reason == "invalid negative allocator reading"
+
+
 def test_allocator_probe_oserror_becomes_known_unmeasured() -> None:
     def unavailable_probe() -> AllocatorSnapshot:
         raise OSError("CUDA DLL unavailable")

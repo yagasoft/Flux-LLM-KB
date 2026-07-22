@@ -1555,7 +1555,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
             """
             UPDATE gpu_leases
                SET wait_reason = 'waiting_eviction',
-                   linked_eviction_id = NULLIF(%s, '')
+                   linked_eviction_id = NULLIF(%s::text, '')::bigint
              WHERE id = %s
                AND status = 'waiting'
             """,
@@ -1604,10 +1604,14 @@ class PostgresGpuScheduler(BaseGpuScheduler):
         from . import database
 
         request_profile = _gpu_task_profile_payload(profile)
+        observation_id = _reconciliation_observation_id(self._last_reconciliation)
         queued = 0
         deduped = 0
         eviction_ids: list[str] = []
         for candidate in selected:
+            candidate_observation_id = str(
+                observation_id or candidate.metadata.get("reconciliation_observation_id") or ""
+            )
             result = database.enqueue_gpu_eviction_request(
                 lease_id=lease_id,
                 request_profile=request_profile,
@@ -1616,7 +1620,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 runtime_generation=str(candidate.metadata.get("runtime_generation") or ""),
                 runtime_activity_sequence=int(candidate.metadata.get("runtime_activity_sequence") or 0),
                 request_reason="demand",
-                reconciliation_observation_id=str(candidate.metadata.get("reconciliation_observation_id") or ""),
+                reconciliation_observation_id=candidate_observation_id,
             )
             eviction_id = str(result.get("eviction_id") or result.get("id") or "")
             if eviction_id:
@@ -3770,13 +3774,26 @@ def _record_from_row(row: dict[str, Any]) -> GpuLeaseRecord:
 
 
 def _residency_from_row(row: dict[str, Any]) -> GpuModelResidency:
+    metadata = dict(row.get("metadata") or {})
+    owner_component = str(row.get("owner_component") or "").strip()
+    if owner_component:
+        metadata["component"] = owner_component
+    if "runtime_generation" in row:
+        metadata["runtime_generation"] = str(row.get("runtime_generation") or "")
+    if "runtime_activity_sequence" in row:
+        activity_sequence = _required_int(row.get("runtime_activity_sequence"))
+        metadata["runtime_activity_sequence"] = max(0, int(activity_sequence or 0))
+    if "runtime_fingerprint" in row:
+        metadata["runtime_fingerprint"] = str(row.get("runtime_fingerprint") or "")
+    if "reconciliation_observation_id" in row:
+        metadata["reconciliation_observation_id"] = str(row.get("reconciliation_observation_id") or "")
     return GpuModelResidency(
         model_id=str(row.get("model_id") or ""),
         task_type=str(row.get("task_type") or ""),
         estimated_vram_mb=int(row.get("estimated_vram_mb") or 0),
         resident=bool(row.get("resident")),
         last_used_at=_epoch_or_none(row.get("last_used_at")),
-        metadata=dict(row.get("metadata") or {}),
+        metadata=metadata,
     )
 
 
