@@ -1074,7 +1074,7 @@ class PostgresGpuScheduler(BaseGpuScheduler):
                 estimated_vram_mb = EXCLUDED.estimated_vram_mb,
                 resident = EXCLUDED.resident,
                 last_used_at = now(),
-                metadata = EXCLUDED.metadata
+                metadata = COALESCE(gpu_model_residency.metadata, '{}'::jsonb) || EXCLUDED.metadata
             """,
             (
                 residency.model_id,

@@ -1398,6 +1398,28 @@ def test_waiting_eviction_link_casts_the_numeric_eviction_id_for_postgresql():
     assert params == ("3474", "lease-1")
 
 
+def test_recording_model_residency_preserves_reconciliation_metadata():
+    statements: list[tuple[str, tuple[object, ...]]] = []
+
+    class RecordingScheduler(PostgresGpuScheduler):
+        def _execute(self, statement, params):
+            statements.append((statement, params))
+
+    scheduler = RecordingScheduler(_config(mode="postgres"), database_url="postgresql://example")
+    scheduler.record_model_residency(
+        GpuModelResidency(
+            model_id="Snowflake/snowflake-arctic-embed-l-v2.0",
+            task_type="embedding",
+            estimated_vram_mb=2_500,
+            resident=True,
+            metadata={"component": "model-runner"},
+        )
+    )
+
+    statement, _params = statements[0]
+    assert "metadata = COALESCE(gpu_model_residency.metadata, '{}'::jsonb) || EXCLUDED.metadata" in statement
+
+
 def test_persisted_runtime_identity_flows_into_demand_eviction_candidates():
     residency = gpu_scheduler._residency_from_row(
         {
