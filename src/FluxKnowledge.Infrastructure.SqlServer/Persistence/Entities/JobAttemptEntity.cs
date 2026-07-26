@@ -11,5 +11,6 @@ public sealed class JobAttemptEntity
     public DateTimeOffset? CompletedAtUtc { get; set; }
     public string? Outcome { get; set; }
     public string? ErrorDetails { get; set; }
+    public byte[] RowVersion { get; set; } = [];
     public JobEntity Job { get; set; } = null!;
 }

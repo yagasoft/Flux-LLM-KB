@@ -4,6 +4,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
 {
     [DbContext(typeof(FluxKnowledgeDbContext))]
-    partial class FluxKnowledgeDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260726221653_EnforceCanonicalSqlSafety")]
+    partial class EnforceCanonicalSqlSafety
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

@@ -4,6 +4,7 @@ public sealed class JobEntity
 {
     public Guid Id { get; set; }
     public Guid PipelineRecordId { get; set; }
+    public long SourceRevision { get; set; }
     public int Stage { get; set; }
     public string Operation { get; set; } = string.Empty;
     public int PublicState { get; set; }

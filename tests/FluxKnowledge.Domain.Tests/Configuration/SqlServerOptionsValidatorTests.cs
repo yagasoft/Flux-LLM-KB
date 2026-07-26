@@ -59,4 +59,79 @@ public sealed class SqlServerOptionsValidatorTests
         Assert.DoesNotContain("ALTER DATABASE", script, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("ATTACH", script, StringComparison.OrdinalIgnoreCase);
     }
+
+    [Fact]
+    public void Readiness_requires_exactly_the_canonical_data_and_log_files()
+    {
+        var options = ValidOptions();
+        var snapshot = ReadySnapshot() with
+        {
+            DatabaseFiles =
+            [
+                new("ROWS", SqlServerOptions.ProductionDataFilePath),
+                new("ROWS", "I:/FluxKnowledge/Sql/Data/Unexpected.ndf"),
+                new("LOG", SqlServerOptions.ProductionLogFilePath)
+            ]
+        };
+
+        var result = SqlServerReadinessValidator.Evaluate(options, snapshot);
+
+        Assert.False(result.IsReady);
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains("exactly one data file and one log file", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Readiness_requires_artifacts_search_text_in_the_fluxknowledge_fulltext_catalog()
+    {
+        var result = SqlServerReadinessValidator.Evaluate(
+            ValidOptions(),
+            ReadySnapshot() with { HasExpectedArtifactSearchTextFullTextIndex = false });
+
+        Assert.False(result.IsReady);
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains("Artifacts.SearchText", StringComparison.Ordinal));
+
+        var sql = new SqlServerReadinessValidator().BuildValidationSql();
+        Assert.Contains("sys.fulltext_index_columns", sql, StringComparison.Ordinal);
+        Assert.Contains("SearchText", sql, StringComparison.Ordinal);
+        Assert.Contains("FluxKnowledge", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Readiness_requires_the_exact_current_migration_set()
+    {
+        var result = SqlServerReadinessValidator.Evaluate(
+            ValidOptions(),
+            ReadySnapshot() with
+            {
+                ExpectedMigrations = ["20260726215521_InitialPhase1", "20260727000000_EnforceCanonicalSqlLineage"],
+                AppliedMigrations = ["20260726215521_InitialPhase1"]
+            });
+
+        Assert.False(result.IsReady);
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains("current migration set", StringComparison.Ordinal));
+    }
+
+    private static SqlServerOptions ValidOptions() =>
+        SqlServerOptions.ForProduction(
+            "Server=localhost;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+            SqlServerOptions.ProductionDataFilePath,
+            SqlServerOptions.ProductionLogFilePath);
+
+    private static SqlServerReadinessSnapshot ReadySnapshot() =>
+        new(
+            SqlServerOptions.CatalogName,
+            IsFullTextInstalled: true,
+            HasExpectedArtifactSearchTextFullTextIndex: true,
+            [
+                new("ROWS", SqlServerOptions.ProductionDataFilePath),
+                new("LOG", SqlServerOptions.ProductionLogFilePath)
+            ],
+            ["20260726215521_InitialPhase1"],
+            ["20260726215521_InitialPhase1"]);
 }

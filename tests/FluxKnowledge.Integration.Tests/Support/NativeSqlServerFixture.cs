@@ -13,7 +13,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
 
     private readonly string? _serverConnectionString =
         Environment.GetEnvironmentVariable(ConnectionEnvironmentVariable);
-    private bool _databaseCreated;
+    private bool _databaseCreateAttempted;
 
     public string DatabaseName { get; } = $"{TestCatalogPrefix}{Guid.NewGuid():N}";
 
@@ -47,31 +47,29 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         ValidateServerConnectionString(_serverConnectionString);
         ValidateGeneratedCatalog(DatabaseName);
 
-        try
-        {
-            await using var serverConnection = new SqlConnection(_serverConnectionString);
-            await serverConnection.OpenAsync().ConfigureAwait(false);
-            await EnsureSafeServerDefaultsAsync(serverConnection).ConfigureAwait(false);
+        await using var serverConnection = new SqlConnection(_serverConnectionString);
+        await serverConnection.OpenAsync().ConfigureAwait(false);
+        await EnsureSafeServerDefaultsAsync(serverConnection).ConfigureAwait(false);
 
-            await using (var create = new SqlCommand(
-                $"CREATE DATABASE [{DatabaseName}];",
-                serverConnection))
+        await RunCreateSequenceAsync(
+            async () =>
             {
+                _databaseCreateAttempted = true;
+                await using var create = new SqlCommand(
+                    $"CREATE DATABASE [{DatabaseName}];",
+                    serverConnection);
                 await create.ExecuteNonQueryAsync().ConfigureAwait(false);
-                _databaseCreated = true;
-            }
-
-            var options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
-                .UseSqlServer(ConnectionString)
-                .Options;
-            await using var context = new FluxKnowledgeDbContext(options);
-            await context.Database.MigrateAsync().ConfigureAwait(false);
-        }
-        catch
-        {
-            await DropDatabaseAsync().ConfigureAwait(false);
-            throw;
-        }
+            },
+            () => VerifyCreatedDatabaseFilesAsync(serverConnection),
+            async () =>
+            {
+                var options = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                    .UseSqlServer(ConnectionString)
+                    .Options;
+                await using var context = new FluxKnowledgeDbContext(options);
+                await context.Database.MigrateAsync().ConfigureAwait(false);
+            },
+            DropDatabaseAsync).ConfigureAwait(false);
     }
 
     public async Task DisposeAsync()
@@ -122,6 +120,48 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }
     }
 
+    internal static async Task RunCreateSequenceAsync(
+        Func<Task> createDatabase,
+        Func<Task> verifyDatabaseFiles,
+        Func<Task> applyMigration,
+        Func<Task> cleanupDatabase)
+    {
+        try
+        {
+            await createDatabase().ConfigureAwait(false);
+            await verifyDatabaseFiles().ConfigureAwait(false);
+            await applyMigration().ConfigureAwait(false);
+        }
+        catch
+        {
+            await cleanupDatabase().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    internal static void ValidateCreatedDatabaseFiles(IReadOnlyList<string?> filePaths)
+    {
+        ArgumentNullException.ThrowIfNull(filePaths);
+        if (filePaths.Count < 2)
+        {
+            throw new InvalidOperationException(
+                "Every native SQL test database file must be verified outside I:.");
+        }
+
+        foreach (var filePath in filePaths)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) ||
+                !Path.IsPathFullyQualified(filePath) ||
+                !TryGetPathRoot(filePath, out var root) ||
+                string.Equals(root, "I:\\", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(root, "I:/", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Every native SQL test database file must be verified outside I:.");
+            }
+        }
+    }
+
     private static async Task EnsureSafeServerDefaultsAsync(SqlConnection connection)
     {
         const string sql =
@@ -133,15 +173,16 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             """;
         await using var command = new SqlCommand(sql, connection);
         await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
-        await reader.ReadAsync().ConfigureAwait(false);
-
-        var dataPath = reader.IsDBNull(0) ? null : reader.GetString(0);
-        var logPath = reader.IsDBNull(1) ? null : reader.GetString(1);
-        if (IsIPath(dataPath) || IsIPath(logPath))
+        if (!await reader.ReadAsync().ConfigureAwait(false) ||
+            reader.IsDBNull(0) ||
+            reader.IsDBNull(1) ||
+            reader.IsDBNull(2))
         {
             throw new InvalidOperationException(
-                "Native SQL tests refuse a server whose default data or log path is on I:.");
+                "Native SQL tests could not verify server file defaults and Full-Text state.");
         }
+
+        ValidateCreatedDatabaseFiles([reader.GetString(0), reader.GetString(1)]);
 
         if (reader.GetInt32(2) != 1)
         {
@@ -150,9 +191,31 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }
     }
 
+    private async Task VerifyCreatedDatabaseFilesAsync(SqlConnection connection)
+    {
+        ValidateGeneratedCatalog(DatabaseName);
+        const string sql =
+            """
+            SELECT [physical_name]
+            FROM sys.master_files
+            WHERE [database_id] = DB_ID(@databaseName)
+            ORDER BY [file_id];
+            """;
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@databaseName", DatabaseName);
+        await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+        var filePaths = new List<string?>();
+        while (await reader.ReadAsync().ConfigureAwait(false))
+        {
+            filePaths.Add(reader.IsDBNull(0) ? null : reader.GetString(0));
+        }
+
+        ValidateCreatedDatabaseFiles(filePaths);
+    }
+
     private async Task DropDatabaseAsync()
     {
-        if (!_databaseCreated || string.IsNullOrWhiteSpace(_serverConnectionString))
+        if (!_databaseCreateAttempted || string.IsNullOrWhiteSpace(_serverConnectionString))
         {
             return;
         }
@@ -169,9 +232,9 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
                  DROP DATABASE [{DatabaseName}];
              END;
              """,
-            serverConnection);
+             serverConnection);
         await drop.ExecuteNonQueryAsync().ConfigureAwait(false);
-        _databaseCreated = false;
+        _databaseCreateAttempted = false;
     }
 
     private static void ValidateGeneratedCatalog(string databaseName)
@@ -185,8 +248,18 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }
     }
 
-    private static bool IsIPath(string? path) =>
-        path is not null &&
-        (path.StartsWith("I:\\", StringComparison.OrdinalIgnoreCase) ||
-         path.StartsWith("I:/", StringComparison.OrdinalIgnoreCase));
+    private static bool TryGetPathRoot(string path, out string root)
+    {
+        root = string.Empty;
+        try
+        {
+            root = Path.GetPathRoot(Path.GetFullPath(path)) ?? string.Empty;
+            return root.Length > 0;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
 }

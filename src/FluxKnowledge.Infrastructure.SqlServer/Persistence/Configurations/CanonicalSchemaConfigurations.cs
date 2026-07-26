@@ -42,6 +42,7 @@ public sealed class PipelineRecordConfiguration : IEntityTypeConfiguration<Pipel
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentHash));
         builder.Property(entity => entity.RegisteredAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasAlternateKey(entity => new { entity.Id, entity.Revision });
         builder.HasIndex(entity => new { entity.SourceIdentityId, entity.Revision }).IsUnique();
         builder.HasOne(entity => entity.SourceIdentity)
             .WithMany()
@@ -72,10 +73,12 @@ public sealed class JobConfiguration : IEntityTypeConfiguration<JobEntity>
         builder.Property(entity => entity.Reason).HasMaxLength(512);
         builder.Property(entity => entity.ErrorDetails).HasMaxLength(4000);
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasAlternateKey(entity => new { entity.Id, entity.SourceRevision });
         builder.HasIndex(entity => new { entity.PublicState, entity.DueAtUtc });
         builder.HasOne(entity => entity.PipelineRecord)
             .WithMany()
-            .HasForeignKey(entity => entity.PipelineRecordId)
+            .HasForeignKey(entity => new { entity.PipelineRecordId, entity.SourceRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.Revision })
             .OnDelete(DeleteBehavior.Restrict);
     }
 }
@@ -92,6 +95,7 @@ public sealed class JobAttemptConfiguration : IEntityTypeConfiguration<JobAttemp
         builder.Property(entity => entity.CompletedAtUtc).HasColumnType("datetimeoffset(7)");
         builder.Property(entity => entity.Outcome).HasMaxLength(128);
         builder.Property(entity => entity.ErrorDetails).HasMaxLength(4000);
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => new { entity.JobId, entity.AttemptNumber }).IsUnique();
         builder.HasOne(entity => entity.Job)
             .WithMany()
@@ -119,7 +123,8 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
         builder.HasIndex(entity => new { entity.DispatchedAtUtc, entity.DueAtUtc });
         builder.HasOne(entity => entity.PipelineRecord)
             .WithMany()
-            .HasForeignKey(entity => entity.PipelineRecordId)
+            .HasForeignKey(entity => new { entity.PipelineRecordId, entity.SourceRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.Revision })
             .OnDelete(DeleteBehavior.Restrict);
     }
 }
@@ -137,10 +142,12 @@ public sealed class ArtifactConfiguration : IEntityTypeConfiguration<ArtifactEnt
         builder.Property(entity => entity.ContentType).HasMaxLength(256).IsRequired();
         builder.Property(entity => entity.SearchText).HasColumnType("nvarchar(max)").IsRequired();
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasAlternateKey(entity => new { entity.Id, entity.SourceRevision });
         builder.HasIndex(entity => new { entity.PipelineRecordId, entity.SourceRevision, entity.Stage }).IsUnique();
         builder.HasOne(entity => entity.PipelineRecord)
             .WithMany()
-            .HasForeignKey(entity => entity.PipelineRecordId)
+            .HasForeignKey(entity => new { entity.PipelineRecordId, entity.SourceRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.Revision })
             .OnDelete(DeleteBehavior.Restrict);
     }
 }
@@ -156,10 +163,12 @@ public sealed class TextChunkConfiguration : IEntityTypeConfiguration<TextChunkE
         builder.Property(entity => entity.Id).UseIdentityColumn();
         SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentHash));
         builder.Property(entity => entity.Content).HasColumnType("nvarchar(max)").IsRequired();
+        builder.HasAlternateKey(entity => new { entity.Id, entity.SourceRevision });
         builder.HasIndex(entity => new { entity.ArtifactId, entity.Ordinal }).IsUnique();
         builder.HasOne(entity => entity.Artifact)
             .WithMany()
-            .HasForeignKey(entity => entity.ArtifactId)
+            .HasForeignKey(entity => new { entity.ArtifactId, entity.SourceRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.SourceRevision })
             .OnDelete(DeleteBehavior.Cascade);
     }
 }
@@ -203,7 +212,8 @@ public sealed class VectorConfiguration : IEntityTypeConfiguration<VectorEntity>
         }).IsUnique();
         builder.HasOne(entity => entity.TextChunk)
             .WithMany()
-            .HasForeignKey(entity => entity.TextChunkId)
+            .HasForeignKey(entity => new { entity.TextChunkId, entity.SourceRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.SourceRevision })
             .OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.IndexGeneration)
             .WithMany()
@@ -266,7 +276,8 @@ public sealed class GpuMiniTaskConfiguration : IEntityTypeConfiguration<GpuMiniT
         builder.HasIndex(entity => new { entity.State, entity.PriorityLane, entity.CreatedAtUtc });
         builder.HasOne(entity => entity.ParentJob)
             .WithMany()
-            .HasForeignKey(entity => entity.ParentJobId)
+            .HasForeignKey(entity => new { entity.ParentJobId, entity.SourceRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.SourceRevision })
             .OnDelete(DeleteBehavior.Restrict);
     }
 }

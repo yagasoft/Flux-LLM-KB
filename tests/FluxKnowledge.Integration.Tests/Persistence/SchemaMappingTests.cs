@@ -29,6 +29,50 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Revision_bearing_records_are_foreign_keyed_to_their_canonical_lineage()
+    {
+        using var context = CreateContext();
+        var model = context.Model;
+
+        AssertForeignKey(
+            model,
+            "Artifacts",
+            ["PipelineRecordId", "SourceRevision"],
+            "PipelineRecords",
+            ["Id", "Revision"]);
+        AssertForeignKey(
+            model,
+            "OutboxMessages",
+            ["PipelineRecordId", "SourceRevision"],
+            "PipelineRecords",
+            ["Id", "Revision"]);
+        AssertForeignKey(
+            model,
+            "Jobs",
+            ["PipelineRecordId", "SourceRevision"],
+            "PipelineRecords",
+            ["Id", "Revision"]);
+        AssertForeignKey(
+            model,
+            "TextChunks",
+            ["ArtifactId", "SourceRevision"],
+            "Artifacts",
+            ["Id", "SourceRevision"]);
+        AssertForeignKey(
+            model,
+            "Vectors",
+            ["TextChunkId", "SourceRevision"],
+            "TextChunks",
+            ["Id", "SourceRevision"]);
+        AssertForeignKey(
+            model,
+            "GpuMiniTasks",
+            ["ParentJobId", "SourceRevision"],
+            "Jobs",
+            ["Id", "SourceRevision"]);
+    }
+
+    [Fact]
     public void Vector_mapping_preserves_stable_identity_and_rebuild_metadata()
     {
         using var context = CreateContext();
@@ -68,6 +112,18 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Mutable_job_attempts_use_rowversion_concurrency()
+    {
+        using var context = CreateContext();
+        var entityType = FindTable(context.Model, "JobAttempts");
+
+        var rowVersion = AssertProperty<byte[]>(entityType, "RowVersion");
+
+        Assert.True(rowVersion.IsConcurrencyToken);
+        Assert.Equal(ValueGenerated.OnAddOrUpdate, rowVersion.ValueGenerated);
+    }
+
+    [Fact]
     public void Model_uses_only_the_sql_server_provider_and_standard_server_connection()
     {
         using var context = CreateContext();
@@ -103,6 +159,25 @@ public sealed class SchemaMappingTests
         Assert.True(index.IsUnique);
     }
 
+    private static void AssertForeignKey(
+        IModel model,
+        string dependentTable,
+        string[] dependentProperties,
+        string principalTable,
+        string[] principalProperties)
+    {
+        var entityType = FindTable(model, dependentTable);
+        var foreignKey = Assert.Single(
+            entityType.GetForeignKeys(),
+            candidate =>
+                candidate.Properties.Select(property => property.Name).SequenceEqual(dependentProperties) &&
+                candidate.PrincipalEntityType.GetTableName() == principalTable);
+
+        Assert.Equal(
+            principalProperties,
+            foreignKey.PrincipalKey.Properties.Select(property => property.Name));
+    }
+
     private static IEntityType FindTable(IModel model, string table) =>
         Assert.Single(model.GetEntityTypes(), entity => entity.GetTableName() == table);
 
@@ -128,6 +203,52 @@ public sealed class NativeSqlServerFixtureValidationTests
             () => NativeSqlServerFixture.ValidateServerConnectionString(connectionString));
 
         Assert.Contains("server-level", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("relative\\test.mdf")]
+    [InlineData("I:\\FluxKnowledge\\Tests\\test.mdf")]
+    [InlineData("I:/FluxKnowledge/Tests/test.ldf")]
+    public void Native_fixture_fails_closed_for_unverifiable_or_i_drive_file_paths(string? path)
+    {
+        var error = Assert.Throws<InvalidOperationException>(
+            () => NativeSqlServerFixture.ValidateCreatedDatabaseFiles([path]));
+
+        Assert.Contains("verified outside I:", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Native_fixture_accepts_only_verified_non_i_drive_file_paths()
+    {
+        NativeSqlServerFixture.ValidateCreatedDatabaseFiles(
+            ["C:\\SqlData\\test.mdf", "D:\\SqlLog\\test.ldf"]);
+    }
+
+    [Fact]
+    public async Task Ambiguous_create_failure_still_runs_generated_database_cleanup()
+    {
+        var serverCommittedCreate = false;
+        var cleanupCalled = false;
+
+        await Assert.ThrowsAsync<IOException>(
+            () => NativeSqlServerFixture.RunCreateSequenceAsync(
+                () =>
+                {
+                    serverCommittedCreate = true;
+                    throw new IOException("client lost acknowledgement");
+                },
+                () => Task.CompletedTask,
+                () => Task.CompletedTask,
+                () =>
+                {
+                    Assert.True(serverCommittedCreate);
+                    cleanupCalled = true;
+                    return Task.CompletedTask;
+                }));
+
+        Assert.True(cleanupCalled);
     }
 }
 

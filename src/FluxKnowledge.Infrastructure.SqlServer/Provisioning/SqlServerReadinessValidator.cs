@@ -1,49 +1,52 @@
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 
 public sealed class SqlServerReadinessValidator
 {
-    private const string InitialMigrationSuffix = "_InitialPhase1";
-
     public string BuildValidationSql() =>
         """
         SELECT
             CAST(DB_NAME() AS nvarchar(128)) AS [CatalogName],
             CONVERT(int, SERVERPROPERTY('IsFullTextInstalled')) AS [IsFullTextInstalled],
-            CONVERT(bit, CASE WHEN EXISTS (
-                SELECT 1
-                FROM sys.fulltext_catalogs
-                WHERE [name] = N'FluxKnowledge'
-            ) THEN 1 ELSE 0 END) AS [HasFullTextCatalog],
-            CONVERT(bit, CASE WHEN EXISTS (
-                SELECT 1
-                FROM sys.fulltext_indexes
-                WHERE [object_id] = OBJECT_ID(N'[dbo].[Artifacts]')
-            ) THEN 1 ELSE 0 END) AS [HasArtifactFullTextIndex],
-            CONVERT(bit, CASE WHEN OBJECT_ID(N'[dbo].[__EFMigrationsHistory]', N'U') IS NULL
-                THEN 0 ELSE 1 END) AS [HasMigrationHistory],
-            (SELECT TOP (1) [physical_name]
-                FROM sys.database_files
-                WHERE [type_desc] = N'ROWS'
-                ORDER BY [file_id]) AS [DataFilePath],
-            (SELECT TOP (1) [physical_name]
-                FROM sys.database_files
-                WHERE [type_desc] = N'LOG'
-                ORDER BY [file_id]) AS [LogFilePath];
+            CONVERT(bit, CASE WHEN
+                (
+                    SELECT COUNT_BIG(*)
+                    FROM sys.fulltext_index_columns
+                    WHERE [object_id] = OBJECT_ID(N'[dbo].[Artifacts]')
+                ) = 1
+                AND EXISTS (
+                    SELECT 1
+                    FROM sys.fulltext_indexes AS [index]
+                    INNER JOIN sys.fulltext_catalogs AS [catalog]
+                        ON [catalog].[fulltext_catalog_id] = [index].[fulltext_catalog_id]
+                    INNER JOIN sys.fulltext_index_columns AS [indexColumn]
+                        ON [indexColumn].[object_id] = [index].[object_id]
+                    INNER JOIN sys.columns AS [column]
+                        ON [column].[object_id] = [indexColumn].[object_id]
+                        AND [column].[column_id] = [indexColumn].[column_id]
+                    WHERE [index].[object_id] = OBJECT_ID(N'[dbo].[Artifacts]')
+                        AND [catalog].[name] = N'FluxKnowledge'
+                        AND [column].[name] = N'SearchText'
+                )
+            THEN 1 ELSE 0 END) AS [HasExpectedArtifactSearchTextFullTextIndex];
+
+        SELECT [type_desc], [physical_name]
+        FROM sys.database_files
+        ORDER BY [file_id];
         """;
 
     public async Task<SqlServerReadinessResult> ValidateAsync(
         SqlServerOptions options,
         CancellationToken cancellationToken = default)
     {
-        var failures = new List<string>();
         var optionValidation = SqlServerOptionsValidator.Validate(options);
-        failures.AddRange(optionValidation.Failures);
-        if (failures.Count > 0)
+        if (!optionValidation.IsValid)
         {
-            return new SqlServerReadinessResult(false, failures);
+            return new SqlServerReadinessResult(false, optionValidation.Failures);
         }
 
         await using var connection = new SqlConnection(options.ConnectionString);
@@ -58,70 +61,141 @@ public sealed class SqlServerReadinessValidator
 
         var catalogName = reader.GetString(0);
         var fullTextInstalled = reader.GetInt32(1) == 1;
-        var hasFullTextCatalog = reader.GetBoolean(2);
-        var hasArtifactFullTextIndex = reader.GetBoolean(3);
-        var hasMigrationHistory = reader.GetBoolean(4);
-        var dataFilePath = reader.IsDBNull(5) ? null : reader.GetString(5);
-        var logFilePath = reader.IsDBNull(6) ? null : reader.GetString(6);
-        await reader.CloseAsync().ConfigureAwait(false);
+        var hasExpectedFullTextIndex = reader.GetBoolean(2);
 
-        if (!string.Equals(catalogName, SqlServerOptions.CatalogName, StringComparison.Ordinal))
+        if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false))
         {
-            failures.Add($"Connected catalog is {catalogName}, not {SqlServerOptions.CatalogName}.");
+            return new SqlServerReadinessResult(false, ["SQL Server returned no database file state."]);
         }
 
-        if (!fullTextInstalled)
+        var databaseFiles = new List<SqlServerDatabaseFileSnapshot>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (reader.IsDBNull(0) || reader.IsDBNull(1))
+            {
+                return new SqlServerReadinessResult(
+                    false,
+                    ["SQL Server returned an unverifiable database file row."]);
+            }
+
+            databaseFiles.Add(new SqlServerDatabaseFileSnapshot(reader.GetString(0), reader.GetString(1)));
+        }
+
+        await reader.CloseAsync().ConfigureAwait(false);
+
+        var contextOptions = new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+            .UseSqlServer(connection)
+            .Options;
+        await using var context = new FluxKnowledgeDbContext(contextOptions);
+        var expectedMigrations = context.Database.GetMigrations().ToArray();
+        var appliedMigrations = (
+            await context.Database.GetAppliedMigrationsAsync(cancellationToken).ConfigureAwait(false))
+            .ToArray();
+
+        return Evaluate(
+            options,
+            new SqlServerReadinessSnapshot(
+                catalogName,
+                fullTextInstalled,
+                hasExpectedFullTextIndex,
+                databaseFiles,
+                expectedMigrations,
+                appliedMigrations));
+    }
+
+    public static SqlServerReadinessResult Evaluate(
+        SqlServerOptions options,
+        SqlServerReadinessSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(snapshot);
+
+        var failures = new List<string>();
+        failures.AddRange(SqlServerOptionsValidator.Validate(options).Failures);
+
+        if (!string.Equals(snapshot.CatalogName, SqlServerOptions.CatalogName, StringComparison.Ordinal))
+        {
+            failures.Add(
+                $"Connected catalog is {snapshot.CatalogName}, not {SqlServerOptions.CatalogName}.");
+        }
+
+        if (!snapshot.IsFullTextInstalled)
         {
             failures.Add("SQL Server Full-Text is not installed.");
         }
-        else if (!hasFullTextCatalog || !hasArtifactFullTextIndex)
+        else if (!snapshot.HasExpectedArtifactSearchTextFullTextIndex)
         {
-            failures.Add("The FluxKnowledge SQL Full-Text catalog and Artifacts index are not ready.");
+            failures.Add(
+                "The FluxKnowledge Full-Text catalogue must index only Artifacts.SearchText.");
         }
 
-        if (!PathsMatch(dataFilePath, options.DataFilePath))
+        var dataFiles = snapshot.DatabaseFiles
+            .Where(file => string.Equals(file.TypeDescription, "ROWS", StringComparison.Ordinal))
+            .ToArray();
+        var logFiles = snapshot.DatabaseFiles
+            .Where(file => string.Equals(file.TypeDescription, "LOG", StringComparison.Ordinal))
+            .ToArray();
+        if (snapshot.DatabaseFiles.Count != 2 || dataFiles.Length != 1 || logFiles.Length != 1)
         {
-            failures.Add($"The SQL data file is not at {options.DataFilePath}.");
+            failures.Add(
+                "The FluxKnowledge catalog must have exactly one data file and one log file.");
         }
 
-        if (!PathsMatch(logFilePath, options.LogFilePath))
+        if (dataFiles.Length != 1 || !PathsMatch(dataFiles[0].PhysicalName, options.DataFilePath))
         {
-            failures.Add($"The SQL log file is not at {options.LogFilePath}.");
+            failures.Add($"The SQL data file set is not exactly {options.DataFilePath}.");
         }
 
-        if (!hasMigrationHistory ||
-            !await HasInitialMigrationAsync(connection, cancellationToken).ConfigureAwait(false))
+        if (logFiles.Length != 1 || !PathsMatch(logFiles[0].PhysicalName, options.LogFilePath))
         {
-            failures.Add("The InitialPhase1 schema migration has not been applied.");
+            failures.Add($"The SQL log file set is not exactly {options.LogFilePath}.");
+        }
+
+        if (snapshot.ExpectedMigrations.Count == 0 ||
+            !snapshot.ExpectedMigrations.SequenceEqual(
+                snapshot.AppliedMigrations,
+                StringComparer.Ordinal))
+        {
+            failures.Add("The database does not have the exact current migration set.");
         }
 
         return new SqlServerReadinessResult(failures.Count == 0, failures);
     }
 
-    private static async Task<bool> HasInitialMigrationAsync(
-        SqlConnection connection,
-        CancellationToken cancellationToken)
-    {
-        const string sql =
-            """
-            SELECT CONVERT(int, CASE WHEN EXISTS (
-                SELECT 1
-                FROM [dbo].[__EFMigrationsHistory]
-                WHERE [MigrationId] LIKE N'%' + @suffix
-            ) THEN 1 ELSE 0 END);
-            """;
-        await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@suffix", InitialMigrationSuffix);
-        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-        return Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture) == 1;
-    }
+    private static bool PathsMatch(string actual, string expected) =>
+        TryNormalisePath(actual, out var normalisedActual) &&
+        TryNormalisePath(expected, out var normalisedExpected) &&
+        string.Equals(normalisedActual, normalisedExpected, StringComparison.OrdinalIgnoreCase);
 
-    private static bool PathsMatch(string? actual, string expected) =>
-        actual is not null &&
-        string.Equals(
-            actual.Replace('\\', '/'),
-            expected.Replace('\\', '/'),
-            StringComparison.OrdinalIgnoreCase);
+    private static bool TryNormalisePath(string path, out string normalised)
+    {
+        normalised = string.Empty;
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            normalised = Path.GetFullPath(path).Replace('/', '\\');
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
 }
+
+public sealed record SqlServerDatabaseFileSnapshot(string TypeDescription, string PhysicalName);
+
+public sealed record SqlServerReadinessSnapshot(
+    string CatalogName,
+    bool IsFullTextInstalled,
+    bool HasExpectedArtifactSearchTextFullTextIndex,
+    IReadOnlyList<SqlServerDatabaseFileSnapshot> DatabaseFiles,
+    IReadOnlyList<string> ExpectedMigrations,
+    IReadOnlyList<string> AppliedMigrations);
 
 public sealed record SqlServerReadinessResult(bool IsReady, IReadOnlyList<string> Failures);
