@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
+    <ProjectReference Include="../FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" />
+    <ProjectReference Include="../FluxKnowledge.Infrastructure.Usearch/FluxKnowledge.Infrastructure.Usearch.csproj" />
+    <ProjectReference Include="../FluxKnowledge.Infrastructure.Inference/FluxKnowledge.Infrastructure.Inference.csproj" />
+    <ProjectReference Include="../FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+  </ItemGroup>
+</Project>

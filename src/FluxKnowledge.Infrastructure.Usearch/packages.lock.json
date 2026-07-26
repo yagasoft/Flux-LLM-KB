@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "dependencies": {
+    "net10.0": {
+      "Cloud.Unum.USearch": {
+        "type": "Direct",
+        "requested": "[2.19.3, )",
+        "resolved": "2.19.3",
+        "contentHash": "xbIOMMcR3HVMWgwy4t9/vmXIyZ672cSxk2JEhLkJjJntnEmeIMCrVOtr3fEC/BtOB2fNGeyGM0Mumgrm9SdHyQ=="
+      },
+      "fluxknowledge.application": {
+        "type": "Project",
+        "dependencies": {
+          "FluxKnowledge.Domain": "[1.0.0, )"
+        }
+      },
+      "fluxknowledge.domain": {
+        "type": "Project"
+      }
+    }
+  }
+}

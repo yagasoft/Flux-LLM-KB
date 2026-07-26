@@ -1,0 +1,13 @@
+<Solution>
+  <Project Path="src/FluxKnowledge.Domain/FluxKnowledge.Domain.csproj" />
+  <Project Path="src/FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
+  <Project Path="src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" />
+  <Project Path="src/FluxKnowledge.Infrastructure.Usearch/FluxKnowledge.Infrastructure.Usearch.csproj" />
+  <Project Path="src/FluxKnowledge.Infrastructure.Inference/FluxKnowledge.Infrastructure.Inference.csproj" />
+  <Project Path="src/FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
+  <Project Path="src/FluxKnowledge.Web/FluxKnowledge.Web.csproj" />
+  <Project Path="src/FluxKnowledge.Cli/FluxKnowledge.Cli.csproj" />
+  <Project Path="tests/FluxKnowledge.Domain.Tests/FluxKnowledge.Domain.Tests.csproj" />
+  <Project Path="tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj" />
+  <Project Path="tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj" />
+</Solution>

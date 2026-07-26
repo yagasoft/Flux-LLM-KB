@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.Usearch/FluxKnowledge.Infrastructure.Usearch.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.Inference/FluxKnowledge.Infrastructure.Inference.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+  </ItemGroup>
+</Project>

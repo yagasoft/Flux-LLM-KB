@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Cloud.Unum.USearch" />
+  </ItemGroup>
+</Project>

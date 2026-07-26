@@ -48,3 +48,15 @@ Thumbs.db
 .idea/
 .vscode/
 .codex-remote-attachments/
+
+# Native FluxKnowledge local build and runtime data
+.vs/
+artifacts/
+TestResults/
+.tools/
+appsettings.Local.json
+*.mdf
+*.ndf
+*.ldf
+FluxKnowledgeData/
+FluxKnowledgeIndexes/
