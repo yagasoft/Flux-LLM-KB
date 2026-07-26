@@ -44,6 +44,7 @@ public static class OutboxWorkerServiceCollectionExtensions
         this IServiceCollection services)
     {
         ArgumentNullException.ThrowIfNull(services);
+        services.AddLogging();
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<ChannelOutboxWakeSignal>();
         services.TryAddSingleton<IOutboxWakeSignal>(

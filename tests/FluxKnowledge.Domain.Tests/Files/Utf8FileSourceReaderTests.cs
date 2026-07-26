@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using FluxKnowledge.Integrations.Files;
 using Xunit;
+using Xunit.Sdk;
 
 namespace FluxKnowledge.Domain.Tests.Files;
 
@@ -61,6 +62,65 @@ public sealed class Utf8FileSourceReaderTests : IDisposable
             async () => await reader.ReadAsync(path, CancellationToken.None));
 
         Assert.Contains("valid UTF-8", exception.Message);
+    }
+
+    [Fact]
+    public async Task Filesystem_root_is_a_valid_allowed_root_without_separator_duplication()
+    {
+        var path = Path.Combine(_testRoot, "root-allowed.txt");
+        await File.WriteAllTextAsync(path, "inside");
+        var filesystemRoot = Path.GetPathRoot(path);
+        Assert.False(string.IsNullOrWhiteSpace(filesystemRoot));
+        var reader = new Utf8FileSourceReader(new LocalIngressOptions([filesystemRoot]));
+
+        var source = await reader.ReadAsync(path, CancellationToken.None);
+
+        Assert.Equal("inside", source.Text);
+    }
+
+    [Fact]
+    public async Task Reparse_point_cannot_escape_an_allowed_root()
+    {
+        var outsideRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"FluxKnowledgeOutside_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideRoot);
+        var outsideFile = Path.Combine(outsideRoot, "outside.txt");
+        await File.WriteAllTextAsync(outsideFile, "outside secret");
+        var linkPath = Path.Combine(_testRoot, "escape");
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkPath, outsideRoot);
+            }
+            catch (Exception linkException) when (
+                linkException is UnauthorizedAccessException or
+                PlatformNotSupportedException or
+                IOException)
+            {
+                throw SkipException.ForSkip(
+                    $"This host cannot create a directory symbolic link: {linkException.Message}");
+            }
+
+            var reader = new Utf8FileSourceReader(new LocalIngressOptions([_testRoot]));
+
+            var exception = await Assert.ThrowsAsync<UnauthorizedAccessException>(
+                async () => await reader.ReadAsync(
+                    Path.Combine(linkPath, "outside.txt"),
+                    CancellationToken.None));
+
+            Assert.Contains("physical target", exception.Message);
+        }
+        finally
+        {
+            if (Directory.Exists(linkPath))
+            {
+                Directory.Delete(linkPath);
+            }
+
+            Directory.Delete(outsideRoot, recursive: true);
+        }
     }
 
     public void Dispose()

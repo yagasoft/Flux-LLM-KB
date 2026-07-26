@@ -10,11 +10,17 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
 
-    private readonly IReadOnlyList<string> _allowedRoots;
+    private readonly IReadOnlyList<AllowedRoot> _allowedRoots;
 
     public Utf8FileSourceReader(LocalIngressOptions options)
     {
-        _allowedRoots = LocalIngressOptionsValidator.ValidateAndCanonicalise(options);
+        _allowedRoots = LocalIngressOptionsValidator
+            .ValidateAndCanonicalise(options)
+            .Select(
+                root => new AllowedRoot(
+                    root,
+                    ResolvePhysicalExistingPath(root, finalComponentIsDirectory: true)))
+            .ToArray();
     }
 
     public async ValueTask<Utf8FileSource> ReadAsync(
@@ -23,13 +29,29 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(suppliedPath);
         var canonicalPath = Path.GetFullPath(suppliedPath);
-        if (!_allowedRoots.Any(root => IsWithinRoot(root, canonicalPath)))
+        var candidateRoots = _allowedRoots
+            .Where(
+                root =>
+                    IsWithinRoot(root.ConfiguredPath, canonicalPath) ||
+                    IsWithinRoot(root.PhysicalPath, canonicalPath))
+            .ToArray();
+        if (candidateRoots.Length == 0)
         {
             throw new UnauthorizedAccessException(
                 $"The source path is outside the configured local ingress roots: {canonicalPath}");
         }
 
-        var bytes = await File.ReadAllBytesAsync(canonicalPath, cancellationToken)
+        var physicalPath = ResolvePhysicalExistingPath(
+            canonicalPath,
+            finalComponentIsDirectory: false);
+        if (!candidateRoots.Any(root => IsWithinRoot(root.PhysicalPath, physicalPath)))
+        {
+            throw new UnauthorizedAccessException(
+                "The source path physical target is outside the configured local ingress roots: " +
+                physicalPath);
+        }
+
+        var bytes = await File.ReadAllBytesAsync(physicalPath, cancellationToken)
             .ConfigureAwait(false);
         string text;
         try
@@ -44,7 +66,7 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
         }
 
         return new Utf8FileSource(
-            canonicalPath,
+            physicalPath,
             bytes,
             text,
             Convert.ToHexStringLower(SHA256.HashData(bytes)));
@@ -57,7 +79,70 @@ public sealed class Utf8FileSourceReader : IUtf8FileSourceReader
             return true;
         }
 
-        var rootWithSeparator = root + Path.DirectorySeparatorChar;
+        var rootWithSeparator = Path.EndsInDirectorySeparator(root)
+            ? root
+            : root + Path.DirectorySeparatorChar;
         return path.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase);
     }
+
+    private static string ResolvePhysicalExistingPath(
+        string path,
+        bool finalComponentIsDirectory)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var fileSystemRoot = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(fileSystemRoot))
+        {
+            throw new IOException($"The source path has no filesystem root: {fullPath}");
+        }
+
+        var relative = Path.GetRelativePath(fileSystemRoot, fullPath);
+        if (string.Equals(relative, ".", StringComparison.Ordinal))
+        {
+            return Path.GetFullPath(fileSystemRoot);
+        }
+
+        var components = relative.Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        var current = Path.GetFullPath(fileSystemRoot);
+        for (var index = 0; index < components.Length; index++)
+        {
+            var candidate = Path.Combine(current, components[index]);
+            var isDirectory = index < components.Length - 1 || finalComponentIsDirectory;
+            FileSystemInfo info = isDirectory
+                ? new DirectoryInfo(candidate)
+                : new FileInfo(candidate);
+            info.Refresh();
+            if (!info.Exists)
+            {
+                throw isDirectory
+                    ? new DirectoryNotFoundException(
+                        $"The local ingress path does not exist: {candidate}")
+                    : new FileNotFoundException(
+                        "The local ingress file does not exist.",
+                        candidate);
+            }
+
+            if ((info.Attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                var target = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (target is null)
+                {
+                    throw new IOException(
+                        $"The local ingress reparse target cannot be resolved: {candidate}");
+                }
+
+                current = Path.GetFullPath(target.FullName);
+            }
+            else
+            {
+                current = Path.GetFullPath(candidate);
+            }
+        }
+
+        return current;
+    }
+
+    private sealed record AllowedRoot(string ConfiguredPath, string PhysicalPath);
 }

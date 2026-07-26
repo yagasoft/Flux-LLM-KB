@@ -3,17 +3,22 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Workers;
 
 public sealed class OutboxPumpService(
     IServiceScopeFactory scopeFactory,
     ChannelOutboxWakeSignal wakeSignal,
-    TimeProvider timeProvider) : BackgroundService, IOutboxPump
+    TimeProvider timeProvider,
+    ILogger<OutboxPumpService>? logger = null) : BackgroundService, IOutboxPump
 {
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan FallbackInterval = TimeSpan.FromSeconds(60);
     private readonly string _leaseOwner = $"in-process-outbox:{Guid.NewGuid():N}";
+    private readonly ILogger<OutboxPumpService> _logger =
+        logger ?? NullLogger<OutboxPumpService>.Instance;
     public async ValueTask<int> PumpOnceAsync(CancellationToken cancellationToken)
     {
         await using var scope = scopeFactory.CreateAsyncScope();
@@ -108,7 +113,21 @@ public sealed class OutboxPumpService(
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                await PumpOnceAsync(stoppingToken).ConfigureAwait(false);
+                try
+                {
+                    await PumpOnceAsync(stoppingToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    _logger.LogError(
+                        exception,
+                        "The SQL outbox pump iteration failed; the hosted loop will continue.");
+                }
+
                 await WaitForWakeOrFallbackAsync(stoppingToken).ConfigureAwait(false);
             }
         }
