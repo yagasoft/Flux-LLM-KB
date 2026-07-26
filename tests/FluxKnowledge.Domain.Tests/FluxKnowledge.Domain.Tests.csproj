@@ -2,6 +2,11 @@
   <ItemGroup>
     <ProjectReference Include="../../src/FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
     <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
   <ItemGroup>

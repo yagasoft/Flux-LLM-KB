@@ -24,10 +24,12 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton(options);
         services.AddSingleton<SqlServerReadinessValidator>();
-        services.AddDbContext<FluxKnowledgeDbContext>(
-            builder => builder.UseSqlServer(
+        void ConfigureDatabase(DbContextOptionsBuilder builder) =>
+            builder.UseSqlServer(
                 options.ConnectionString,
-                sqlServer => sqlServer.EnableRetryOnFailure()));
+                sqlServer => sqlServer.EnableRetryOnFailure());
+
+        services.AddDbContextFactory<FluxKnowledgeDbContext>(ConfigureDatabase);
 
         return services;
     }
