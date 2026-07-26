@@ -86,9 +86,7 @@ public sealed record Job
         {
             PublicJobState.WorkerProcessing => PublicJobState.WorkerQueued,
             PublicJobState.GpuProcessing => PublicJobState.GpuQueued,
-            PublicJobState.WorkerQueued => PublicJobState.WorkerQueued,
-            PublicJobState.GpuQueued => PublicJobState.GpuQueued,
-            _ => throw new DomainInvariantException("Only queued or processing jobs can be returned for capacity.")
+            _ => throw new DomainInvariantException("Only processing jobs can be returned for capacity.")
         };
 
         return this with
