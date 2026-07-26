@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 using FluxKnowledge.Integrations.Files;
 using Xunit;
 using Xunit.Sdk;
@@ -123,8 +124,46 @@ public sealed class Utf8FileSourceReaderTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Containment_is_validated_against_the_same_open_handle_used_for_reading()
+    {
+        var insidePath = Path.Combine(_testRoot, "inside.txt");
+        await File.WriteAllTextAsync(insidePath, "inside");
+        var outsidePath = Path.Combine(
+            Path.GetTempPath(),
+            $"FluxKnowledgeHandleOutside_{Guid.NewGuid():N}.txt");
+        await File.WriteAllTextAsync(outsidePath, "outside secret");
+        var reader = new Utf8FileSourceReader(
+            new LocalIngressOptions([_testRoot]),
+            new RedirectingHandleOpener(outsidePath));
+
+        try
+        {
+            var exception = await Assert.ThrowsAsync<UnauthorizedAccessException>(
+                async () => await reader.ReadAsync(insidePath, CancellationToken.None));
+
+            Assert.Contains("opened file handle", exception.Message);
+        }
+        finally
+        {
+            File.Delete(outsidePath);
+        }
+    }
+
     public void Dispose()
     {
         Directory.Delete(_testRoot, recursive: true);
+    }
+
+    private sealed class RedirectingHandleOpener(string redirectedPath)
+        : IUtf8FileHandleOpener
+    {
+        public SafeFileHandle OpenRead(string canonicalPath) =>
+            File.OpenHandle(
+                redirectedPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read | FileShare.Delete,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
     }
 }
