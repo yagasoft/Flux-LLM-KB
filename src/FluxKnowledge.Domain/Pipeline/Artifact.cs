@@ -2,15 +2,22 @@ using FluxKnowledge.Domain.Common;
 
 namespace FluxKnowledge.Domain.Pipeline;
 
-public sealed record Artifact(
-    Guid Id,
-    PipelineRecordId PipelineRecordId,
-    long SourceRevision,
-    PipelineStage Stage,
-    string ContentHash,
-    string ContentType,
-    DateTimeOffset CreatedAtUtc)
+public sealed record Artifact
 {
+    public Guid Id { get; private init; }
+
+    public PipelineRecordId PipelineRecordId { get; private init; }
+
+    public long SourceRevision { get; private init; }
+
+    public PipelineStage Stage { get; private init; }
+
+    public string ContentHash { get; private init; }
+
+    public string ContentType { get; private init; }
+
+    public DateTimeOffset CreatedAtUtc { get; private init; }
+
     public static Artifact Create(
         PipelineRecordId pipelineRecordId,
         long sourceRevision,
@@ -24,4 +31,22 @@ public sealed record Artifact(
             contentHash,
             contentType,
             DateTimeOffset.UtcNow);
+
+    private Artifact(
+        Guid id,
+        PipelineRecordId pipelineRecordId,
+        long sourceRevision,
+        PipelineStage stage,
+        string contentHash,
+        string contentType,
+        DateTimeOffset createdAtUtc)
+    {
+        Id = id;
+        PipelineRecordId = pipelineRecordId;
+        SourceRevision = sourceRevision;
+        Stage = stage;
+        ContentHash = contentHash;
+        ContentType = contentType;
+        CreatedAtUtc = createdAtUtc;
+    }
 }

@@ -2,17 +2,26 @@ using FluxKnowledge.Domain.Common;
 
 namespace FluxKnowledge.Domain.Pipeline;
 
-public sealed record PipelineRecord(
-    PipelineRecordId Id,
-    SourceIdentityId SourceIdentityId,
-    long Revision,
-    string ContentHash,
-    PipelineRecordId RootLineageRecordId,
-    PipelineRecordId? ParentRevisionRecordId,
-    PipelineStage CurrentStage,
-    bool CompletionCriteriaMet,
-    DateTimeOffset RegisteredAtUtc)
+public sealed record PipelineRecord
 {
+    public PipelineRecordId Id { get; private init; }
+
+    public SourceIdentityId SourceIdentityId { get; private init; }
+
+    public long Revision { get; private init; }
+
+    public string ContentHash { get; private init; }
+
+    public PipelineRecordId RootLineageRecordId { get; private init; }
+
+    public PipelineRecordId? ParentRevisionRecordId { get; private init; }
+
+    public PipelineStage CurrentStage { get; private init; }
+
+    public bool CompletionCriteriaMet { get; private init; }
+
+    public DateTimeOffset RegisteredAtUtc { get; private init; }
+
     public bool IsCompleted => CompletionCriteriaMet && CurrentStage == PipelineStage.Publish;
 
     public static PipelineRecord Register(
@@ -95,5 +104,27 @@ public sealed record PipelineRecord(
         {
             throw new DomainInvariantException("Content hash is required.");
         }
+    }
+
+    private PipelineRecord(
+        PipelineRecordId id,
+        SourceIdentityId sourceIdentityId,
+        long revision,
+        string contentHash,
+        PipelineRecordId rootLineageRecordId,
+        PipelineRecordId? parentRevisionRecordId,
+        PipelineStage currentStage,
+        bool completionCriteriaMet,
+        DateTimeOffset registeredAtUtc)
+    {
+        Id = id;
+        SourceIdentityId = sourceIdentityId;
+        Revision = revision;
+        ContentHash = contentHash;
+        RootLineageRecordId = rootLineageRecordId;
+        ParentRevisionRecordId = parentRevisionRecordId;
+        CurrentStage = currentStage;
+        CompletionCriteriaMet = completionCriteriaMet;
+        RegisteredAtUtc = registeredAtUtc;
     }
 }
