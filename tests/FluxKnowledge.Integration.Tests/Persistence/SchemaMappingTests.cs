@@ -211,10 +211,13 @@ public sealed class NativeSqlServerFixtureValidationTests
     [InlineData("relative\\test.mdf")]
     [InlineData("I:\\FluxKnowledge\\Tests\\test.mdf")]
     [InlineData("I:/FluxKnowledge/Tests/test.ldf")]
+    [InlineData("\\\\?\\I:\\FluxKnowledge\\Tests\\test.mdf")]
+    [InlineData("\\\\.\\I:\\FluxKnowledge\\Tests\\test.ldf")]
     public void Native_fixture_fails_closed_for_unverifiable_or_i_drive_file_paths(string? path)
     {
         var error = Assert.Throws<InvalidOperationException>(
-            () => NativeSqlServerFixture.ValidateCreatedDatabaseFiles([path]));
+            () => NativeSqlServerFixture.ValidateCreatedDatabaseFiles(
+                [path, "C:\\SqlData\\known-valid.mdf"]));
 
         Assert.Contains("verified outside I:", error.Message, StringComparison.Ordinal);
     }
@@ -223,7 +226,12 @@ public sealed class NativeSqlServerFixtureValidationTests
     public void Native_fixture_accepts_only_verified_non_i_drive_file_paths()
     {
         NativeSqlServerFixture.ValidateCreatedDatabaseFiles(
-            ["C:\\SqlData\\test.mdf", "D:\\SqlLog\\test.ldf"]);
+            [
+                "C:\\SqlData\\test.mdf",
+                "D:\\SqlLog\\test.ldf",
+                "\\\\?\\C:\\SqlData\\device-test.mdf",
+                "\\\\.\\D:\\SqlLog\\device-test.ldf"
+            ]);
     }
 
     [Fact]

@@ -153,8 +153,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
             if (string.IsNullOrWhiteSpace(filePath) ||
                 !Path.IsPathFullyQualified(filePath) ||
                 !TryGetPathRoot(filePath, out var root) ||
-                string.Equals(root, "I:\\", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(root, "I:/", StringComparison.OrdinalIgnoreCase))
+                IsIFileSystemRoot(root))
             {
                 throw new InvalidOperationException(
                     "Every native SQL test database file must be verified outside I:.");
@@ -261,5 +260,17 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         {
             return false;
         }
+    }
+
+    private static bool IsIFileSystemRoot(string root)
+    {
+        var normalisedRoot = root.Replace('/', '\\');
+        if (normalisedRoot.StartsWith("\\\\?\\", StringComparison.Ordinal) ||
+            normalisedRoot.StartsWith("\\\\.\\", StringComparison.Ordinal))
+        {
+            normalisedRoot = normalisedRoot[4..];
+        }
+
+        return string.Equals(normalisedRoot, "I:\\", StringComparison.OrdinalIgnoreCase);
     }
 }
