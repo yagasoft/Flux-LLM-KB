@@ -1,5 +1,22 @@
 # Architecture
 
+## Approved native Windows replacement target
+
+The codex/flux-native-windows branch replaces the legacy runtime with one
+IIS-hosted ASP.NET Core application, a new Interactive Server Blazor UI, SQL
+Server as the canonical store and embedded USearch as an immutable,
+rebuildable ANN projection. The target does not run Docker, WSL, RabbitMQ,
+Vespa, Elasticsearch, external worker services or separately deployed
+microservices.
+
+The complete durable pipeline, compatibility, integration, GPU, retrieval,
+installation and phased-delivery design is in
+[the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md).
+
+Legacy architecture below remains a compatibility reference only. It is not the
+target architecture for this branch and must not be deleted until local
+replacement, SQL-to-USearch rebuild and explicit cutover approval exist.
+
 Flux-LLM-KB stores agent interaction knowledge as a lifecycle-managed knowledge
 system rather than a large prompt-injected memory file.
 

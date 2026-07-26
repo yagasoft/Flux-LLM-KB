@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-07-08
+Last reviewed: 2026-07-26
 
 This file is the canonical public roadmap and implementation-status tracker for
 Flux-LLM-KB. It is intentionally separate from live runtime state. Do not add
@@ -10,6 +10,22 @@ content, local deployment-only details, or private memory exports here.
 Every roadmap-significant session or turn must update affected `Progress %` and
 `Remaining Work` entries before closeout. Percentages are conservative planning
 estimates toward `shipped`; they are not live runtime health measurements.
+
+## Native Windows replacement programme
+
+| Piece | Priority | Status | Progress % | Current evidence / remaining work |
+| --- | --- | --- | ---: | --- |
+| Target architecture and requirements traceability | P0 | in progress | 0% | The target and full traceability baseline are documented in [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md). This is design evidence only; no executable replacement exists. Review the specification, then write the detailed Phase 1 plan. |
+| Phase 1: disposable UTF-8 file vertical slice | P0 | planned | 0% | Local file to SQL PipelineRecord/Job/outbox, deterministic embedding, immutable USearch generation, hydrated search, Blazor live state and kb.search/kb.brief compatibility. Implement only after written-specification approval. |
+| Pipeline durability, scheduler and rebuild invariants | P0 | planned | 0% | Prove atomic claims, duplicate delivery, stale-revision rejection, lease recovery, snapshot failure/swap, SQL rebuild and strict-priority mini-task batching. |
+| MCP, plugin, REST and CLI contract parity | P0 | planned | 0% | Preserve all 54 current kb.* names, schemas, errors, hooks, installation, readiness and required REST/CLI behaviour through executable compatibility fixtures. |
+| Source, mail, extraction and code branches | P1 | planned | 0% | Add filesystem crawl/watch, Gmail, Outlook VSTO ingress, documents, archives, image/OCR/enrichment, video/audio, code understanding and provenance branches in dependency order. |
+| Authorised native inference adapters | P1 | blocked pending approval | 0% | No model is downloaded, converted, copied, activated or parity-tested until explicitly authorised. Use only an approved versioned app-owned cache and ONNX Runtime CUDA/DirectML where appropriate. |
+| Local replacement readiness and legacy retirement decision | P0 | planned | 0% | Requires SQL backup/restore, SQL-to-USearch rebuild, end-to-end integration and operator evidence, then a separate explicit cutover approval. Legacy data, code, Docker assets, model caches and private spools remain preserved until then. |
+
+The replacement work does not change historic legacy progress figures below.
+Its first executable evidence will be recorded only after Phase 1 has a tested
+local vertical slice.
 
 ## 2026-07-08 Realtime Dashboard Degradation And State Tab Correction Update
 
