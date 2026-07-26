@@ -70,6 +70,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 SearchText = request.Artifact.SearchText,
                 CreatedAtUtc = request.Artifact.CreatedAtUtc
             });
+        WriteIndexingOutput(context, request);
         context.AuditEvents.Add(
             new AuditEventEntity
             {
@@ -160,6 +161,14 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         else
         {
             validated.PipelineRecord.CurrentStage = (int)request.Artifact.Stage;
+        }
+
+        if (request.IndexingOutput?.ActivateGeneration is { } activeGeneration)
+        {
+            var state = await context.IndexState.SingleAsync(state => state.Id == 1, cancellationToken)
+                .ConfigureAwait(false);
+            state.ActiveIndexGenerationId = activeGeneration.Id;
+            state.UpdatedAtUtc = _timeProvider.GetUtcNow();
         }
 
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -433,6 +442,61 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             throw new ArgumentException(
                 "Stage transition inputs must describe the same record revision and stage.",
                 nameof(request));
+        }
+    }
+
+    private void WriteIndexingOutput(FluxKnowledgeDbContext context, StageTransitionRequest request)
+    {
+        var output = request.IndexingOutput;
+        if (output is null)
+        {
+            return;
+        }
+
+        if (output.Chunks is not null)
+        {
+            foreach (var chunk in output.Chunks)
+            {
+                context.TextChunks.Add(new TextChunkEntity
+                {
+                    ArtifactId = request.Artifact.Id,
+                    SourceRevision = request.CurrentJob.SourceRevision,
+                    Ordinal = chunk.Ordinal,
+                    StartOffset = chunk.StartOffset,
+                    Length = chunk.Length,
+                    Content = chunk.Content,
+                    ContentHash = chunk.ContentHash
+                });
+            }
+        }
+
+        if (output.IndexGenerationId is { } generationId)
+        {
+            context.IndexGenerations.Add(new IndexGenerationEntity
+            {
+                Id = generationId,
+                ModelFingerprint = output.ModelFingerprint!,
+                Dimensions = output.Vectors?.FirstOrDefault()?.Dimensions ?? 256,
+                IndexPath = string.Empty,
+                MetadataChecksum = new string('0', 64),
+                VectorCount = output.Vectors?.Count ?? 0,
+                CreatedAtUtc = _timeProvider.GetUtcNow()
+            });
+            foreach (var vector in output.Vectors ?? [])
+            {
+                context.Vectors.Add(new VectorEntity
+                {
+                    TextChunkId = vector.TextChunkId,
+                    ModelFingerprint = vector.ModelFingerprint,
+                    Dimensions = vector.Dimensions,
+                    Values = vector.Values,
+                    ContentHash = vector.ContentHash,
+                    SourceRevision = vector.SourceRevision,
+                    IsDeleted = false,
+                    IndexGenerationId = generationId,
+                    CreatedAtUtc = _timeProvider.GetUtcNow()
+                });
+            }
         }
     }
 

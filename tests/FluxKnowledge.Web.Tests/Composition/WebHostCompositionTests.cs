@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
@@ -38,7 +39,8 @@ public sealed class WebHostCompositionTests : IDisposable
                     ["ConnectionStrings:FluxKnowledge"] =
                         "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;" +
                         "Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
-                    ["LocalIngress:AllowedRoots:0"] = _ingressRoot
+                    ["LocalIngress:AllowedRoots:0"] = _ingressRoot,
+                    ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}")
                 })
             .Build();
         var services = new ServiceCollection();
@@ -67,8 +69,11 @@ public sealed class WebHostCompositionTests : IDisposable
         var workers = scope.ServiceProvider.GetServices<IStageWorker>().ToArray();
         Assert.Collection(
             workers.OrderBy(worker => worker.Operation, StringComparer.Ordinal),
+            worker => Assert.IsType<CanonicalIndexStageWorker>(worker),
+            worker => Assert.IsType<EmbedStageWorker>(worker),
             worker => Assert.IsType<ExtractUtf8StageWorker>(worker),
-            worker => Assert.IsType<NormaliseTextStageWorker>(worker));
+            worker => Assert.IsType<NormaliseTextStageWorker>(worker),
+            worker => Assert.IsType<PublishStageWorker>(worker));
         _ = scope.ServiceProvider.GetRequiredService<RegisterUtf8FileHandler>();
         _ = scope.ServiceProvider.GetRequiredService<
             IDbContextFactory<FluxKnowledgeDbContext>>();
@@ -91,8 +96,11 @@ public sealed class WebHostCompositionTests : IDisposable
             scope.ServiceProvider
                 .GetServices<IStageWorker>()
                 .OrderBy(worker => worker.Operation, StringComparer.Ordinal),
+            worker => Assert.IsType<CanonicalIndexStageWorker>(worker),
+            worker => Assert.IsType<EmbedStageWorker>(worker),
             worker => Assert.IsType<ExtractUtf8StageWorker>(worker),
-            worker => Assert.IsType<NormaliseTextStageWorker>(worker));
+            worker => Assert.IsType<NormaliseTextStageWorker>(worker),
+            worker => Assert.IsType<PublishStageWorker>(worker));
     }
 
     public void Dispose()
@@ -110,6 +118,7 @@ public sealed class WebHostCompositionTests : IDisposable
                 "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;" +
                 "Integrated Security=true;Encrypt=true;TrustServerCertificate=true");
             builder.UseSetting("LocalIngress:AllowedRoots:0", ingressRoot);
+            builder.UseSetting("Usearch:RootPath", Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}"));
             builder.ConfigureAppConfiguration(
                 (_, configuration) =>
                     configuration.AddInMemoryCollection(
@@ -118,7 +127,8 @@ public sealed class WebHostCompositionTests : IDisposable
                             ["ConnectionStrings:FluxKnowledge"] =
                                 "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;" +
                                 "Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
-                            ["LocalIngress:AllowedRoots:0"] = ingressRoot
+                            ["LocalIngress:AllowedRoots:0"] = ingressRoot,
+                            ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}")
                         }));
             builder.ConfigureTestServices(
                 services => services.AddSingleton<IOutboxStore, EmptyOutboxStore>());

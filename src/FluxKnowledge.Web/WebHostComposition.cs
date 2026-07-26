@@ -1,6 +1,11 @@
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Infrastructure.Inference;
 using FluxKnowledge.Infrastructure.SqlServer;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
+using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
 
 namespace FluxKnowledge.Web;
@@ -25,9 +30,14 @@ public static class WebHostComposition
         _ = LocalIngressOptionsValidator.ValidateAndCanonicalise(ingressOptions);
 
         services.AddFluxKnowledgeSqlServer(configuration);
+        services.AddFluxKnowledgeUsearch(configuration);
         services.AddSingleton(ingressOptions);
         services.AddSingleton<IUtf8FileSourceReader, Utf8FileSourceReader>();
+        services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
         services.AddFluxKnowledgeOutboxWorkers();
+        services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
+        services.AddScoped<IStageWorker, EmbedStageWorker>();
+        services.AddScoped<IStageWorker, PublishStageWorker>();
         return services;
     }
 }

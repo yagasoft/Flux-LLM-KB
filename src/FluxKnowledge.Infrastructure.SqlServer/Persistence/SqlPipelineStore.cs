@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text.Json;
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
@@ -12,7 +13,7 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
 public sealed class SqlPipelineStore(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    TimeProvider timeProvider) : IRegistrationStore, IPipelineStageReader
+    TimeProvider timeProvider) : IRegistrationStore, IPipelineStageReader, IIndexGenerationStore
 {
     public SqlPipelineStore(IDbContextFactory<FluxKnowledgeDbContext> contextFactory)
         : this(contextFactory, TimeProvider.System)
@@ -214,6 +215,76 @@ public sealed class SqlPipelineStore(
             source.StableKey,
             source.ContentHash,
             inputText);
+    }
+
+    public async ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(
+        PipelineRecordId pipelineRecordId,
+        long sourceRevision,
+        CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+        return await (
+            from chunk in context.TextChunks.AsNoTracking()
+            join artifact in context.Artifacts.AsNoTracking() on chunk.ArtifactId equals artifact.Id
+            where artifact.PipelineRecordId == pipelineRecordId.Value &&
+                  artifact.SourceRevision == sourceRevision &&
+                  artifact.Stage == (int)PipelineStage.CanonicalIndex
+            orderby chunk.Ordinal
+            select new CanonicalTextChunk(chunk.Id, chunk.Ordinal, chunk.StartOffset, chunk.Length,
+                chunk.Content, chunk.ContentHash))
+            .ToListAsync(cancellationToken);
+    }
+
+    public async ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(
+        Guid indexGenerationId,
+        CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+        return await context.Vectors.AsNoTracking()
+            .Where(vector => vector.IndexGenerationId == indexGenerationId && !vector.IsDeleted)
+            .OrderBy(vector => vector.VectorId)
+            .Select(vector => new CanonicalVector(vector.VectorId, vector.TextChunkId,
+                vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,
+                vector.SourceRevision))
+            .ToListAsync(cancellationToken);
+    }
+
+    public async ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(
+        Guid indexGenerationId,
+        CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+        return await context.IndexGenerations.AsNoTracking()
+            .Where(generation => generation.Id == indexGenerationId)
+            .Select(generation => new IndexGenerationDescriptor(generation.Id,
+                generation.ModelFingerprint, generation.Dimensions, generation.IndexPath,
+                generation.MetadataChecksum, generation.VectorCount))
+            .SingleOrDefaultAsync(cancellationToken);
+    }
+
+    public async ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+        return await context.IndexState.AsNoTracking()
+            .Where(state => state.Id == 1)
+            .Select(state => state.ActiveIndexGenerationId)
+            .SingleAsync(cancellationToken);
+    }
+
+    public async ValueTask UpdateGenerationMetadataAsync(
+        IndexGenerationDescriptor generation,
+        CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+        var entity = await context.IndexGenerations.SingleAsync(
+            candidate => candidate.Id == generation.Id, cancellationToken);
+        entity.ModelFingerprint = generation.ModelFingerprint;
+        entity.Dimensions = generation.Dimensions;
+        entity.IndexPath = generation.IndexPath;
+        entity.MetadataChecksum = generation.MetadataChecksum;
+        entity.VectorCount = generation.VectorCount;
+        entity.ValidatedAtUtc = timeProvider.GetUtcNow();
+        await context.SaveChangesAsync(cancellationToken);
     }
 
     internal static string CreateIdempotencyKey(

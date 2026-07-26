@@ -58,6 +58,8 @@ public static class OutboxWorkerServiceCollectionExtensions
             provider => provider.GetRequiredService<SqlPipelineStore>());
         services.TryAddScoped<IPipelineStageReader>(
             provider => provider.GetRequiredService<SqlPipelineStore>());
+        services.TryAddScoped<IIndexGenerationStore>(
+            provider => provider.GetRequiredService<SqlPipelineStore>());
         services.TryAddScoped<SqlJobClaimStore>();
         services.TryAddScoped<IJobClaimStore>(
             provider => provider.GetRequiredService<SqlJobClaimStore>());

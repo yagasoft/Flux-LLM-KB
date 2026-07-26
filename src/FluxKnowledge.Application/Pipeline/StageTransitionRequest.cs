@@ -13,13 +13,21 @@ public sealed record StageArtifact(
     string SearchText,
     DateTimeOffset CreatedAtUtc);
 
+public sealed record IndexingStageOutput(
+    IReadOnlyList<CanonicalTextChunk>? Chunks = null,
+    Guid? IndexGenerationId = null,
+    string? ModelFingerprint = null,
+    IReadOnlyList<CanonicalVector>? Vectors = null,
+    IndexGenerationDescriptor? ActivateGeneration = null);
+
 public sealed record StageTransitionRequest(
     ClaimedDispatchMessage DispatchMessage,
     ClaimedJob CurrentJob,
     StageArtifact Artifact,
     PipelineStage? NextStage,
     string? NextOperation,
-    string Actor);
+    string Actor,
+    IndexingStageOutput? IndexingOutput = null);
 
 public sealed record StageTransitionResult(
     Guid ArtifactId,
