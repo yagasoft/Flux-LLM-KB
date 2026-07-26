@@ -24,7 +24,7 @@ Passed: 1; failed: 0; skipped: 1. The passing local test exercised USearch save,
 dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter FullyQualifiedName~Indexing
 ```
 
-Passed: 1; failed: 0; skipped: 1 for the same absent `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` opt-in.
+Passed: 2; failed: 0; skipped: 1 for the same absent `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` opt-in.
 
 ```powershell
 dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj --configuration Release --no-restore
@@ -33,6 +33,8 @@ git diff --check
 ```
 
 Web tests passed 2/2; the Release build succeeded with zero warnings and zero errors; `git diff --check` succeeded.
+
+The focused active-reader replacement check also passed: it reuses the loaded immutable generation while the SQL pointer is unchanged and replaces it when that pointer changes.
 
 ## Native SQL evidence not run
 

@@ -16,8 +16,8 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<UsearchGenerationValidator>();
         services.AddScoped<UsearchGenerationBuilder>();
         services.AddScoped<IIndexGenerationPublisher>(provider => provider.GetRequiredService<UsearchGenerationBuilder>());
-        services.AddScoped<UsearchAnnIndex>();
-        services.AddScoped<IAnnIndex>(provider => provider.GetRequiredService<UsearchAnnIndex>());
+        services.AddSingleton<UsearchAnnIndex>();
+        services.AddSingleton<IAnnIndex>(provider => provider.GetRequiredService<UsearchAnnIndex>());
         return services;
     }
 }

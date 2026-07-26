@@ -1,10 +1,11 @@
 using System.Threading;
 using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Ports;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
-public sealed class UsearchAnnIndex(IIndexGenerationStore store) : IAnnIndex, IDisposable
+public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnIndex, IDisposable
 {
     private readonly ReaderWriterLockSlim _gate = new();
     private Guid? _generationId;
@@ -21,13 +22,15 @@ public sealed class UsearchAnnIndex(IIndexGenerationStore store) : IAnnIndex, ID
             return [];
         }
 
+        using var scope = scopeFactory.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IIndexGenerationStore>();
         var activeId = await store.GetActiveGenerationIdAsync(cancellationToken);
         if (activeId is null)
         {
             return [];
         }
 
-        EnsureOpen(activeId.Value, cancellationToken);
+        await EnsureOpenAsync(activeId.Value, store, cancellationToken);
         _gate.EnterReadLock();
         try
         {
@@ -60,36 +63,45 @@ public sealed class UsearchAnnIndex(IIndexGenerationStore store) : IAnnIndex, ID
         }
     }
 
-    private void EnsureOpen(Guid activeId, CancellationToken cancellationToken)
+    private async ValueTask EnsureOpenAsync(
+        Guid activeId,
+        IIndexGenerationStore store,
+        CancellationToken cancellationToken)
     {
-        _gate.EnterUpgradeableReadLock();
+        _gate.EnterReadLock();
         try
         {
             if (_generationId == activeId && _index is not null)
             {
                 return;
             }
-
-            var generation = store.GetGenerationAsync(activeId, cancellationToken).AsTask().GetAwaiter().GetResult()
-                ?? throw new IndexGenerationValidationException("The active SQL index generation is missing.");
-            var vectors = store.ReadVectorsAsync(activeId, cancellationToken).AsTask().GetAwaiter().GetResult();
-            new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
-            var opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
-            _gate.EnterWriteLock();
-            try
-            {
-                _index?.Dispose();
-                _index = opened;
-                _generationId = activeId;
-            }
-            finally
-            {
-                _gate.ExitWriteLock();
-            }
         }
         finally
         {
-            _gate.ExitUpgradeableReadLock();
+            _gate.ExitReadLock();
+        }
+
+        var generation = await store.GetGenerationAsync(activeId, cancellationToken)
+            ?? throw new IndexGenerationValidationException("The active SQL index generation is missing.");
+        var vectors = await store.ReadVectorsAsync(activeId, cancellationToken);
+        new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
+        var opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
+        _gate.EnterWriteLock();
+        try
+        {
+            if (_generationId == activeId && _index is not null)
+            {
+                opened.Dispose();
+                return;
+            }
+
+                _index?.Dispose();
+                _index = opened;
+                _generationId = activeId;
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
         }
     }
 }
