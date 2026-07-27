@@ -1,6 +1,6 @@
 # Native Windows Phase 2 derived-index recovery design
 
-Status: approved for implementation planning; no implementation has started.
+Status: approved; implementation is paused before code changes.
 
 ## Goal
 
@@ -62,12 +62,17 @@ it records that outcome and returns to `Healthy` without rebuilding.
      failures are operator-actionable. They do not enter automatic retry.
 4. For a recoverable fault, build a replacement only in an app-owned staging
    directory, reopen and validate it against the immutable SQL membership, then
-   safely place it at the active generation's derived path.
-5. If an existing active directory is invalid, move it into the app-owned
-   quarantine area only after the replacement has validated. Atomically place
-   the replacement within the same root. A failed rebuild leaves the SQL active
-   pointer unchanged.
-6. On success, write a sanitised audit outcome, set `Healthy`, and publish a
+   atomically place it at a new immutable recovery path within the same app-owned
+   root.
+5. Only after placement and validation succeed, update the existing generation's
+   SQL metadata to that new derived path. `IndexState.ActiveIndexGenerationId`
+   is not changed. If metadata update fails, the old SQL-referenced path remains
+   untouched and the unreferenced replacement becomes a quarantine candidate.
+6. After the metadata update succeeds, the previous invalid path is no longer
+   SQL-referenced and may be moved into the app-owned quarantine area. It is not
+   deleted as part of recovery. A failed rebuild leaves the SQL active pointer
+   unchanged.
+7. On success, write a sanitised audit outcome, set `Healthy`, and publish a
    status invalidation. Only then can readiness return 200.
 
 The current active or any SQL-referenced generation is never deleted. Cleanup
@@ -125,7 +130,9 @@ recovers; no IIS restart is required for a successful recovery.
    from immutable SQL membership, validates and safely places the result, then
    restores readiness to 200 and searchable ANN results.
 3. The active SQL pointer is identical before and after successful derived-index
-   recovery. A failed recovery never changes it.
+   recovery. A successful recovery may update only the active generation's
+   derived path after placement and validation; a failed recovery never changes
+   the active pointer or its SQL-referenced path.
 4. A transient derived-index failure follows the exact bounded retry schedule
    and succeeds if a later attempt validates. Retry exhaustion ends in
    `OperatorActionRequired`, not an endless loop.
