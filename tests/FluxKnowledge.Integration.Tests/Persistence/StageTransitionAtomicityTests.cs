@@ -24,14 +24,14 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
             now,
             PublicJobState.WorkerQueued,
             leaseExpiresAtUtc: null);
-        var factory = SqlTestData.CreateFactory(_fixture);
+        var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
         var store = new SqlStageTransitionStore(factory, new ThrowAfterArtifactWrite());
 
         await Assert.ThrowsAsync<InjectedTransitionException>(
             async () => await store.TransitionAsync(request, CancellationToken.None));
 
-        await using var context = await factory.CreateDbContextAsync();
+        await using var context = factory.CreateDbContext();
         Assert.Empty(
             await context.Artifacts
                 .Where(artifact => artifact.PipelineRecordId == seeded.PipelineRecordId.Value)
@@ -61,7 +61,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
             now,
             PublicJobState.WorkerQueued,
             leaseExpiresAtUtc: null);
-        var factory = SqlTestData.CreateFactory(_fixture);
+        var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
         var request = await ClaimExtractAsync(factory, now);
         var store = new SqlStageTransitionStore(factory);
 
@@ -73,7 +73,7 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
         Assert.Equal(first.ArtifactId, second.ArtifactId);
         Assert.Equal(first.NextJobId, second.NextJobId);
         Assert.Equal(first.NextDispatchMessageId, second.NextDispatchMessageId);
-        await using var context = await factory.CreateDbContextAsync();
+        await using var context = factory.CreateDbContext();
         Assert.Single(
             await context.Artifacts
                 .Where(artifact => artifact.PipelineRecordId == seeded.PipelineRecordId.Value)
@@ -86,6 +86,57 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
             2,
             await context.OutboxMessages.CountAsync(
                 message => message.PipelineRecordId == seeded.PipelineRecordId.Value));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Production_retrying_execution_strategy_allows_stage_transition()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var now = DateTimeOffset.Parse("2026-07-27T08:00:00+00:00");
+        var seeded = await SqlTestData.SeedWorkItemAsync(
+            _fixture,
+            now,
+            PublicJobState.WorkerQueued,
+            leaseExpiresAtUtc: null);
+        var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
+        var request = await ClaimExtractAsync(factory, now);
+
+        var result = await new SqlStageTransitionStore(factory)
+            .TransitionAsync(request, CancellationToken.None);
+
+        Assert.False(result.ExistingTransition);
+        await using var context = factory.CreateDbContext();
+        Assert.Single(
+            await context.Artifacts.Where(
+                    artifact => artifact.PipelineRecordId == seeded.PipelineRecordId.Value)
+                .ToListAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Production_retrying_execution_strategy_allows_stage_failure_transition()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var now = DateTimeOffset.Parse("2026-07-27T08:00:00+00:00");
+        var seeded = await SqlTestData.SeedWorkItemAsync(
+            _fixture,
+            now,
+            PublicJobState.WorkerQueued,
+            leaseExpiresAtUtc: null);
+        var factory = new RetryingDbContextFactory(_fixture.ConnectionString);
+        var request = await ClaimExtractAsync(factory, now);
+
+        await new SqlStageTransitionStore(factory).FailAsync(
+            new StageFailureRequest(
+                request.DispatchMessage,
+                request.CurrentJob,
+                "integration failure",
+                "intentional retry-strategy regression coverage",
+                "test-worker"),
+            CancellationToken.None);
+
+        await using var context = factory.CreateDbContext();
+        var job = await context.Jobs.SingleAsync(job => job.Id == seeded.JobId.Value);
+        Assert.Equal((int)PublicJobState.Failed, job.PublicState);
     }
 
     private static async Task<StageTransitionRequest> ClaimExtractAsync(
@@ -125,6 +176,17 @@ public sealed class StageTransitionAtomicityTests(NativeSqlServerFixture fixture
     {
         public ValueTask AfterArtifactWrittenAsync(CancellationToken cancellationToken) =>
             ValueTask.FromException(new InjectedTransitionException());
+    }
+
+    private sealed class RetryingDbContextFactory(string connectionString)
+        : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .UseSqlServer(connectionString, sqlServer => sqlServer.EnableRetryOnFailure())
+                .Options;
+
+        public FluxKnowledgeDbContext CreateDbContext() => new(_options);
     }
 
     private sealed class InjectedTransitionException : Exception;

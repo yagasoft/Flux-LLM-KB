@@ -23,7 +23,7 @@ public sealed class SqlFullTextSearch(IDbContextFactory<FluxKnowledgeDbContext> 
                  INNER JOIN [Artifacts] AS [artifact]
                     ON [chunk].[ArtifactId] = [artifact].[Id]
                    AND [chunk].[SourceRevision] = [artifact].[SourceRevision]
-                 INNER JOIN CONTAINSTABLE([Artifacts], [SearchText], {query}) AS [fulltext]
+                 INNER JOIN FREETEXTTABLE([Artifacts], [SearchText], {query}) AS [fulltext]
                     ON [artifact].[Id] = [fulltext].[KEY]
                  INNER JOIN [PipelineRecords] AS [record]
                     ON [artifact].[PipelineRecordId] = [record].[Id]

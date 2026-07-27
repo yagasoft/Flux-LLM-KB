@@ -39,9 +39,30 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
     {
         ArgumentNullException.ThrowIfNull(request);
         ValidateRequest(request);
-        await using var context = await _contextFactory
+        await using var executionContext = await _contextFactory
             .CreateDbContextAsync(cancellationToken)
             .ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(
+                async () =>
+                {
+                    await using var context = await _contextFactory
+                        .CreateDbContextAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    return await TransitionWithinTransactionAsync(
+                            context,
+                            request,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                })
+            .ConfigureAwait(false);
+    }
+
+    private async Task<StageTransitionResult> TransitionWithinTransactionAsync(
+        FluxKnowledgeDbContext context,
+        StageTransitionRequest request,
+        CancellationToken cancellationToken)
+    {
         await using var transaction = await context.Database
             .BeginTransactionAsync(
                 request.IndexingOutput?.ActivateGeneration is null
@@ -236,9 +257,27 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.Reason);
-        await using var context = await _contextFactory
+        await using var executionContext = await _contextFactory
             .CreateDbContextAsync(cancellationToken)
             .ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(
+                async () =>
+                {
+                    await using var context = await _contextFactory
+                        .CreateDbContextAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    await FailWithinTransactionAsync(context, request, cancellationToken)
+                        .ConfigureAwait(false);
+                })
+            .ConfigureAwait(false);
+    }
+
+    private async Task FailWithinTransactionAsync(
+        FluxKnowledgeDbContext context,
+        StageFailureRequest request,
+        CancellationToken cancellationToken)
+    {
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
             .ConfigureAwait(false);

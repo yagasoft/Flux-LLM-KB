@@ -39,6 +39,36 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
         Assert.DoesNotContain(hit.Explanation, item => item.Contains("\\", StringComparison.Ordinal));
     }
 
+    [NativeSqlServerFact]
+    public async Task Hybrid_search_accepts_plain_text_multiword_query()
+    {
+        await using var environment = await SearchEnvironment.CreateAsync(_fixture);
+        await environment.WaitForLexicalCandidateAsync();
+
+        var response = await environment.Service.SearchAsync(
+            new SearchRequest("restart safely", 5, "local_first", null, null, null),
+            CancellationToken.None);
+
+        var hit = Assert.Single(response.Results);
+        Assert.Equal("C:/ingress/guide.txt", hit.SourceIdentity);
+        Assert.Contains(hit.Explanation, item => item.StartsWith("lexical:", StringComparison.Ordinal));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Hybrid_search_accepts_plain_text_punctuation()
+    {
+        await using var environment = await SearchEnvironment.CreateAsync(_fixture);
+        await environment.WaitForLexicalCandidateAsync();
+
+        var response = await environment.Service.SearchAsync(
+            new SearchRequest("restart, safely!", 5, "local_first", null, null, null),
+            CancellationToken.None);
+
+        var hit = Assert.Single(response.Results);
+        Assert.Equal("C:/ingress/guide.txt", hit.SourceIdentity);
+        Assert.Contains(hit.Explanation, item => item.StartsWith("lexical:", StringComparison.Ordinal));
+    }
+
     private sealed class SearchEnvironment : IAsyncDisposable
     {
         private readonly ServiceProvider _provider;
