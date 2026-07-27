@@ -86,9 +86,12 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             await using var lease = await recoveryStore.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, cancellationToken);
             if (lease is null)
             {
-                await recoveryStore.AppendAuditAsync(new("recovery_lock_contended", activeId, beforeAttempt.FailureCategory, _attempts,
-                    TimeSpan.Zero, null, 0), cancellationToken);
-                if (detectionRecorded) await MarkRecoveringAsync(activeId, beforeAttempt.FailureCategory ?? DerivedIndexRecoveryFailureCategory.TransientIo, cancellationToken);
+                if (recoveryEpisode)
+                {
+                    await recoveryStore.AppendAuditAsync(new("recovery_lock_contended", activeId, beforeAttempt.FailureCategory, _attempts,
+                        TimeSpan.Zero, null, 0), cancellationToken);
+                    if (detectionRecorded) await MarkRecoveringAsync(activeId, beforeAttempt.FailureCategory ?? DerivedIndexRecoveryFailureCategory.TransientIo, cancellationToken);
+                }
                 return;
             }
 
@@ -135,7 +138,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
                 }
                 else
                 {
-                    await CompleteProbeAsync(activeId, cancellationToken);
+                    await CompleteProbeAsync(beforeAttempt, activeId, cancellationToken);
                 }
                 return;
             }
@@ -261,11 +264,17 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         await PublishAsync(cancellationToken);
     }
 
-    private async ValueTask CompleteProbeAsync(Guid? activeId, CancellationToken cancellationToken)
+    private async ValueTask CompleteProbeAsync(DerivedIndexRecoverySnapshot expectedSnapshot, Guid? activeId,
+        CancellationToken cancellationToken)
     {
+        var completed = new DerivedIndexRecoverySnapshot(DerivedIndexRecoveryState.Healthy, activeId,
+            _timeProvider.GetUtcNow(), null, null, 0);
+        if (!ReferenceEquals(Interlocked.CompareExchange(ref _snapshot, completed, expectedSnapshot), expectedSnapshot))
+        {
+            return;
+        }
         Volatile.Write(ref _episodeDetectionRecorded, 0);
         _attempts = 0;
-        Volatile.Write(ref _snapshot, new(DerivedIndexRecoveryState.Healthy, activeId, _timeProvider.GetUtcNow(), null, null, 0));
         await PublishAsync(cancellationToken);
     }
 

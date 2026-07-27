@@ -120,11 +120,16 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         {
             new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
         }
-        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or IndexGenerationValidationException)
+        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or
+            IndexGenerationValidationException or IOException or UnauthorizedAccessException)
         {
-            NotifyRecovery(exception is DirectoryNotFoundException or FileNotFoundException
-                ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
-                : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, activeId);
+            NotifyRecovery(exception switch
+            {
+                DirectoryNotFoundException or FileNotFoundException => DerivedIndexRecoveryFailureCategory.MissingDerivedIndex,
+                IOException => DerivedIndexRecoveryFailureCategory.TransientIo,
+                UnauthorizedAccessException => DerivedIndexRecoveryFailureCategory.PermissionsDenied,
+                _ => DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex
+            }, activeId);
             throw;
         }
         USearchIndex opened;
