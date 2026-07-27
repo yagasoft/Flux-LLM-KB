@@ -251,6 +251,19 @@ reads a stable generation then rejects deleted or revision-mismatched SQL rows.
 A rebuild enumerates SQL vectors and repeats publication; it never relies on a
 USearch directory as recovery data.
 
+Phase 2 adds continuous derived-index recovery. If the active USearch
+generation is missing or invalid after startup, readiness becomes unready while
+an in-process hosted recovery service rebuilds from the immutable SQL membership
+and validates a safely placed replacement. Recoverable derived-index failures
+use bounded backoff; invalid SQL membership/checksum, schema, configuration and
+permissions failures are operator-actionable and are not retried indefinitely.
+Recovery never changes the SQL active pointer on failure and never deletes an
+active or SQL-referenced generation. Only aged, unreferenced staging or
+quarantine candidates may be cleaned up.
+
+The detailed approved recovery contract and acceptance criteria are recorded in
+[the Phase 2 derived-index recovery design](2026-07-27-native-windows-phase-2-recovery-rebuild-design.md).
+
     SQL Full-Text + exact code/symbol retrieval + USearch ANN
         -> C# reciprocal-rank fusion
         -> optional authorised Qwen rerank
@@ -327,7 +340,7 @@ vectors. Backup must be off I:.
 | --- | --- | --- |
 | 0 | Target design, requirements traceability, contract inventory and roadmap | Reviewed specification; no runtime claim |
 | 1 | Local UTF-8 file vertical slice: SQL record/job/outbox, deterministic embedding, USearch, hydrated search, live Blazor, kb.search/kb.brief | Focused SQL, snapshot, MCP and browser tests |
-| 2 | Pipeline durability, scheduler, rebuild and full job/read projections | Atomic claim, duplicate, lease, snapshot, rebuild and strict-priority evidence |
+| 2 | Pipeline durability, continuous derived-index recovery, scheduler, rebuild and full job/read projections | Atomic claim, duplicate, lease, runtime recovery, snapshot, rebuild and strict-priority evidence |
 | 3 | Full MCP/plugin, REST and CLI parity in bounded contract groups | Tool/schema/error/hook/readiness contract evidence |
 | 4 | Filesystem, Gmail and Outlook ingestion | Restart-safe ingress, receipts, spool, provenance and operator evidence |
 | 5 | Document, archive, image, video/audio and code branches | Parent/child provenance and branch-completion evidence |
@@ -343,7 +356,7 @@ replacement passes local verification.
 | --- | --- | --- | --- |
 | NW-01 | IIS-hosted ASP.NET Core and new Blazor UI | Modular monolith; one deployed Web host; Interactive Server | Phases 1 and 7 |
 | NW-02 | Fixed SQL Server canonical store | Provisioning, SQL-owned files, no AttachDbFilename, backup-off-I health | Phases 1 and 7 |
-| NW-03 | Derived/rebuildable USearch | Canonical SQL vectors, immutable generations and SQL pointer switch | Phases 1 and 2 |
+| NW-03 | Derived/rebuildable USearch | Canonical SQL vectors, immutable generations, SQL pointer switch and bounded runtime recovery from SQL | Phases 1 and 2 |
 | NW-04 | No forbidden target runtime components | In-process workers, SQL outbox and hosted integrations | Every phase |
 | NW-05 | Preserve sources, extraction, code/search and visibility | Adapter and route-family model with staged delivery | Phases 3 through 6 |
 | NW-06 | Preserve MCP and Codex plugin | 54-tool ledger, hosted MCP, hooks and installation/readiness parity | Phases 1 and 3 |
@@ -372,7 +385,9 @@ Local replacement readiness requires proof that:
 4. A stale source revision cannot replace a newer record or hydrate in search.
 5. An expired lease recovers by normal claim after crash/IIS recycle.
 6. A failed candidate snapshot leaves the active snapshot live; SQL vectors
-   rebuild an index from no snapshot.
+   rebuild an index from no snapshot. A missing or invalid active derived index
+   after startup makes readiness unready until a validated SQL-based recovery
+   succeeds, without requiring an IIS restart.
 7. GPU mini-tasks obey lane order, compatible batching, FIFO and drain barriers
    without interrupting active work.
 8. MCP kb.search/kb.brief preserve current temporary-unavailable and retry
