@@ -41,8 +41,8 @@ public sealed class PhaseOneVerticalSliceBrowserTests
     {
         await using var sql = new NativeSqlServerFixture();
         await sql.InitializeAsync();
-        var ingressRoot = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeBrowserIngress_{Guid.NewGuid():N}");
-        var indexRoot = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeBrowserIndexes_{Guid.NewGuid():N}");
+        var ingressRoot = BrowserTestRoots.Create($"FluxKnowledgeBrowserIngress_{Guid.NewGuid():N}");
+        var indexRoot = BrowserTestRoots.Create($"FluxKnowledgeBrowserIndexes_{Guid.NewGuid():N}");
         Directory.CreateDirectory(ingressRoot);
         Directory.CreateDirectory(indexRoot);
         try
@@ -144,5 +144,54 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             await application.StopAsync();
             await application.DisposeAsync();
         }
+    }
+}
+
+public static class BrowserTestRoots
+{
+    public static string Create(string leafName, IEnumerable<string>? candidates = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leafName);
+        foreach (var candidate in candidates ?? DefaultCandidates())
+        {
+            if (string.IsNullOrWhiteSpace(candidate))
+            {
+                continue;
+            }
+
+            var root = Path.GetFullPath(candidate);
+            if (!IsIFileSystemRoot(Path.GetPathRoot(root)))
+            {
+                return Path.Combine(root, leafName);
+            }
+        }
+
+        throw new InvalidOperationException(
+            "Browser tests require a writable temporary root outside I:.");
+    }
+
+    private static IEnumerable<string> DefaultCandidates()
+    {
+        yield return Path.GetTempPath();
+        yield return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "FluxKnowledgeTests");
+    }
+
+    private static bool IsIFileSystemRoot(string? root)
+    {
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return true;
+        }
+
+        var normalisedRoot = root.Replace('/', '\\');
+        if (normalisedRoot.StartsWith("\\\\?\\", StringComparison.Ordinal) ||
+            normalisedRoot.StartsWith("\\\\.\\", StringComparison.Ordinal))
+        {
+            normalisedRoot = normalisedRoot[4..];
+        }
+
+        return string.Equals(normalisedRoot, "I:\\", StringComparison.OrdinalIgnoreCase);
     }
 }
