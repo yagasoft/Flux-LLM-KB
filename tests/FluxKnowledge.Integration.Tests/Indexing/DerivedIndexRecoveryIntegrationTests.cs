@@ -7,6 +7,7 @@ using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
@@ -48,11 +49,19 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             }
 
             var options = UsearchIndexOptions.FromConfiguredRoot(root);
-            var coordinator = new DerivedIndexRecoveryCoordinator(
-                new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System),
-                indexStore,
-                new UsearchGenerationBuilder(indexStore, options, new UsearchGenerationValidator()),
-                new UsearchGenerationValidator(), options, new DerivedIndexFileSystem(options), TimeProvider.System);
+            var services = new ServiceCollection();
+            services.AddSingleton(factory);
+            services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
+            services.AddScoped<SqlPipelineStore>();
+            services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<SqlPipelineStore>());
+            services.AddSingleton(options);
+            services.AddSingleton<UsearchGenerationValidator>();
+            services.AddScoped<UsearchGenerationBuilder>();
+            services.AddSingleton<DerivedIndexFileSystem>();
+            services.AddSingleton(TimeProvider.System);
+            services.AddSingleton<DerivedIndexRecoveryCoordinator>();
+            using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+            var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
 
             await coordinator.RunOnceAsync(CancellationToken.None);
 
@@ -75,15 +84,57 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
         try
         {
-            var coordinator = DerivedIndexRecoveryCoordinator.ForTesting(
-                new UsearchIndexOptions(root), TimeProvider.System);
+            var decision = DerivedIndexRecoveryPolicy.Decide(
+                DerivedIndexRecoveryFailureCategory.PermissionsDenied, failedAttemptCount: 1);
 
-            await coordinator.RecordFaultAsync(
-                new UnauthorizedAccessException("injected permission failure"), Guid.NewGuid(), CancellationToken.None);
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, decision.NextState);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, decision.FailureCategory);
+            Assert.Null(decision.Delay);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
 
-            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
-            Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, coordinator.Snapshot.FailureCategory);
-            Assert.Null(coordinator.Snapshot.NextRetryAtUtc);
+    [Fact]
+    public void Cleanup_retains_an_aged_candidate_when_sql_references_a_descendant()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            var candidate = Path.Combine(root, "staging", "candidate");
+            Directory.CreateDirectory(Path.Combine(candidate, "nested"));
+            Directory.SetLastWriteTimeUtc(candidate, DateTime.UtcNow.AddDays(-2));
+            var fileSystem = new DerivedIndexFileSystem(new UsearchIndexOptions(root));
+
+            var cleaned = fileSystem.Cleanup("staging", TimeSpan.FromHours(24), DateTimeOffset.UtcNow,
+                [Path.Combine(candidate, "nested")]);
+
+            Assert.Equal(0, cleaned);
+            Assert.True(Directory.Exists(candidate));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Cleanup_rejects_a_non_recovery_area()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            var candidate = Path.Combine(root, "arbitrary", "candidate");
+            Directory.CreateDirectory(candidate);
+            Directory.SetLastWriteTimeUtc(candidate, DateTime.UtcNow.AddDays(-2));
+
+            var cleaned = new DerivedIndexFileSystem(new UsearchIndexOptions(root)).Cleanup(
+                "arbitrary", TimeSpan.Zero, DateTimeOffset.UtcNow, []);
+
+            Assert.Equal(0, cleaned);
+            Assert.True(Directory.Exists(candidate));
         }
         finally
         {

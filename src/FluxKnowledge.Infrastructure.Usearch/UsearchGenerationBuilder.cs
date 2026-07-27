@@ -4,6 +4,12 @@ using FluxKnowledge.Application.Ports;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
+public sealed class RecoveryCandidatePlacementException(string path, Exception innerException)
+    : Exception("Recovery candidate validation failed after placement.", innerException)
+{
+    public string Path { get; } = path;
+}
+
 public sealed class UsearchGenerationBuilder(
     IIndexGenerationStore store,
     UsearchIndexOptions options,
@@ -17,13 +23,19 @@ public sealed class UsearchGenerationBuilder(
         cancellationToken.ThrowIfCancellationRequested();
         var staging = Path.Combine(options.RootPath, "staging", "recovery", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(staging);
+        string? placedPath = null;
         try
         {
             SaveCandidate(staging, generation, membership);
             validator.Validate(staging, generation, membership);
             var path = AtomicGenerationPlacement.PlaceRecovery(options, generation.Id, staging);
+            placedPath = path;
             validator.Validate(path, generation with { IndexPath = path }, membership);
             return ValueTask.FromResult(generation with { IndexPath = path });
+        }
+        catch (Exception exception) when (placedPath is not null)
+        {
+            throw new RecoveryCandidatePlacementException(placedPath, exception);
         }
         catch
         {

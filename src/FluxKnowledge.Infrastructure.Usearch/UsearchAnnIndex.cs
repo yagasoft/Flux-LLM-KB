@@ -100,8 +100,12 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
             _gate.ExitReadLock();
         }
 
-        var generation = await store.GetGenerationAsync(activeId, cancellationToken)
-            ?? throw new IndexGenerationValidationException("The active SQL index generation is missing.");
+        var generation = await store.GetGenerationAsync(activeId, cancellationToken);
+        if (generation is null)
+        {
+            NotifyRecovery(DerivedIndexRecoveryFailureCategory.MissingDerivedIndex, activeId);
+            throw new IndexGenerationValidationException("The active SQL index generation is missing.");
+        }
         var vectors = await store.ReadVectorsAsync(activeId, cancellationToken);
         try
         {
@@ -109,13 +113,9 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         }
         catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or IndexGenerationValidationException)
         {
-            using var signalScope = scopeFactory.CreateScope();
-            var signal = signalScope.ServiceProvider.GetService<IDerivedIndexRecoverySignal>();
-            signal?.Notify(new DerivedIndexRecoveryFault(
-                exception is DirectoryNotFoundException or FileNotFoundException
-                    ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
-                    : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex,
-                activeId));
+            NotifyRecovery(exception is DirectoryNotFoundException or FileNotFoundException
+                ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
+                : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, activeId);
             throw;
         }
         var opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
@@ -152,6 +152,13 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         {
             _gate.ExitWriteLock();
         }
+    }
+
+    private void NotifyRecovery(DerivedIndexRecoveryFailureCategory category, Guid activeId)
+    {
+        using var signalScope = scopeFactory.CreateScope();
+        signalScope.ServiceProvider.GetService<IDerivedIndexRecoverySignal>()?.Notify(
+            new DerivedIndexRecoveryFault(category, activeId));
     }
 
     private void ThrowIfDisposed()
