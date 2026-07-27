@@ -131,3 +131,7 @@ guarded two-current-source corpus assertion proving that the next active
 generation retains all canonical vector IDs. The non-SQL schema mapping subset
 passed 7/7. The guarded corpus test remains source-complete but skipped without
 the explicit disposable SQL connection.
+
+Additional guarded regression source covers deleted-latest revision eligibility
+and repeated active-generation fixture cleanup. Both compile and skip locally
+without the disposable SQL connection; no database was opened.
