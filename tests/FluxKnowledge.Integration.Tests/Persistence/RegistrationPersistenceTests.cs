@@ -14,6 +14,24 @@ public sealed class RegistrationPersistenceTests(NativeSqlServerFixture fixture)
     private readonly NativeSqlServerFixture _fixture = fixture;
 
     [NativeSqlServerFact]
+    public async Task Registration_succeeds_with_the_production_retrying_execution_strategy()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var store = new SqlPipelineStore(new RetryingDbContextFactory(_fixture.ConnectionString));
+
+        var receipt = await store.RegisterAsync(
+            new Utf8FileRegistration(
+                $"C:\\ingress\\{Guid.NewGuid():N}.txt",
+                new string('a', 64),
+                "integration-test",
+                null),
+            CancellationToken.None);
+
+        Assert.NotEqual(Guid.Empty, receipt.PipelineRecordId.Value);
+        Assert.False(receipt.ExistingReceipt);
+    }
+
+    [NativeSqlServerFact]
     public async Task Same_bytes_return_original_ids_and_changed_bytes_append_a_linked_revision()
     {
         await SqlTestData.ClearPipelineAsync(_fixture);
@@ -64,5 +82,16 @@ public sealed class RegistrationPersistenceTests(NativeSqlServerFixture fixture)
         {
             Directory.Delete(ingressRoot, recursive: true);
         }
+    }
+
+    private sealed class RetryingDbContextFactory(string connectionString)
+        : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .UseSqlServer(connectionString, sqlServer => sqlServer.EnableRetryOnFailure())
+                .Options;
+
+        public FluxKnowledgeDbContext CreateDbContext() => new(_options);
     }
 }

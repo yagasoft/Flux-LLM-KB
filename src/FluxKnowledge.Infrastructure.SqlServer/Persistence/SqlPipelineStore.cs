@@ -35,9 +35,30 @@ public sealed class SqlPipelineStore(
                 nameof(registration));
         }
 
-        await using var context = await contextFactory
+        await using var executionContext = await contextFactory
             .CreateDbContextAsync(cancellationToken)
             .ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(
+                async () =>
+                {
+                    await using var context = await contextFactory
+                        .CreateDbContextAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    return await RegisterWithinTransactionAsync(
+                            context,
+                            registration,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                })
+            .ConfigureAwait(false);
+    }
+
+    private async Task<RegistrationReceipt> RegisterWithinTransactionAsync(
+        FluxKnowledgeDbContext context,
+        Utf8FileRegistration registration,
+        CancellationToken cancellationToken)
+    {
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
