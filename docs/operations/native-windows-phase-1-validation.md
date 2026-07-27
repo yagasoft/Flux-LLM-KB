@@ -349,9 +349,9 @@ Residual concerns:
 4. Treat Outlook, model/GPU activation and legacy retirement as separate
    approval-gated milestones.
 
-## Phase 2 local derived-index recovery verification
+## Phase 2 recovery verification and live rollback checkpoint
 
-At `b263e53` on 2026-07-27, local verification confirmed recovery of a missing
+At `6d155f4` on 2026-07-28, local verification confirmed recovery of a missing
 or invalid active derived index from immutable SQL membership, bounded retries
 for recoverable failures, safe cleanup of aged unreferenced staging or
 quarantine candidates, readiness gating until validation, and a sanitised local
@@ -361,10 +361,26 @@ active pointer.
 - Locked restore passed. The Release `-warnaserror` build passed with 0 warnings
   and 0 errors.
 - The non-browser solution test run against local disposable SQL passed: Domain
-  64/64, Integration 96/96 and Web 36/36. The enabled browser Web slice passed
+  64/64, Integration 101/101 and Web 36/36. The enabled browser Web slice passed
   1/1.
 - The disposable recovery-catalogue query returned 0, and
   `git diff --check 5994007..HEAD` passed.
+- A guarded loopback-only IIS application-pool deployment preserved the
+  target-only production-settings bytes and kept the site binding unchanged.
+  The new payload returned 200 from liveness and the read-only recovery status,
+  but readiness correctly stayed 503 with a sanitised
+  `OperatorActionRequired`/`ConfigurationInvalid` state.
+- Read-only SQL classification established that the active generation had the
+  expected direct-generation path shape, while one inactive generation held an
+  empty stored index path. The recovery contract treated the complete SQL
+  reference set as unsafe and did not rebuild, update a SQL path or active
+  pointer, or clean up any candidate.
+- The prior payload was restored from the retained rollback directory. Its
+  loopback root, liveness and readiness endpoints returned 200; the new status
+  route was again absent, as expected for the prior payload.
 
-No new IIS, live or deployment validation occurred. This work did not restart
-IIS or change external access, legacy operation, models or GPU scope.
+This is not a successful Phase 2 live deployment. A separately approved,
+read-only metadata audit and remediation design is required before another
+attempt. No IIS server restart, external-access, legacy, model or GPU action
+occurred; only the application pool was stopped and started during the guarded
+swap and rollback.
