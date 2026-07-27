@@ -55,9 +55,16 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             }
             if (Directory.Exists(activePath))
             {
-                validator.Validate(activePath, sql.Generation with { IndexPath = activePath }, sql.Membership);
-                await CompleteAsync(recoveryStore, sql.ActiveGenerationId, started, 0, cancellationToken);
-                return;
+                try
+                {
+                    validator.Validate(activePath, sql.Generation with { IndexPath = activePath }, sql.Membership);
+                    await CompleteAsync(recoveryStore, sql.ActiveGenerationId, started, 0, cancellationToken);
+                    return;
+                }
+                catch (IndexGenerationValidationException)
+                {
+                    // A corrupt derived directory is replaceable from the already validated SQL snapshot.
+                }
             }
             var oldPath = sql.Generation!.IndexPath;
             var replacement = await builder.BuildRecoveryCandidateAsync(sql.Generation, sql.Membership, cancellationToken);
