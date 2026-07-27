@@ -4,18 +4,18 @@
 
 **Goal:** Recover a missing or invalid active USearch generation after startup from immutable SQL membership, without an IIS restart, while keeping readiness unready until the derived index is validated.
 
-**Architecture:** Add provider-neutral recovery state, fault classification, and bounded retry policy in Application. SQL Server supplies the active-generation snapshot, durable audit evidence, referenced-generation set, and an exclusive application lock; USearch owns safe staging, placement, quarantine, validation, cleanup, and the hosted recovery loop. Web composes SQL and derived-index health into readiness and exposes only a sanitised local status projection.
+**Architecture:** Add provider-neutral recovery state, fault classification, and bounded retry policy in Application. SQL Server supplies the active-generation snapshot, durable audit evidence, canonical referenced-path set, and an exclusive application lock; USearch owns safe staging, placement, quarantine, validation, cleanup, and the hosted recovery loop. Web composes SQL and derived-index health into readiness and exposes only a sanitised local status projection.
 
 **Tech Stack:** .NET 10, ASP.NET Core hosted services and Minimal APIs, EF Core SQL Server, `sp_getapplock`, SQL Server `AuditEvents`, Cloud.Unum.USearch, Blazor Interactive Server, xUnit, Playwright.
 
-**Status:** Approved; implementation is paused before code changes.
+**Status:** Approved; implementation in progress.
 
 ## Global constraints
 
 - Keep the application loopback/local-only. Do not alter bindings, expose an external endpoint, perform a deployment action, or cut over legacy operation.
 - SQL is authoritative. Never rebuild SQL from a derived directory, create a replacement active pointer, or change `IndexState.ActiveIndexGenerationId` during recovery.
 - A failed recovery must not change the active pointer or its SQL-referenced derived path. A successful recovery may update only the existing generation's derived path after placement and validation succeed.
-- Never delete an active or SQL-referenced generation. Delete only aged, unreferenced direct children of the app-owned `staging` or `quarantine` roots; do not follow links outside the configured USearch root.
+- Never delete an active or SQL-referenced generation. Treat a fresh, canonical SQL `IndexPath` reference as the deletion guard (not only a generation ID, because recovery keeps the ID while changing its path). Delete only aged, unreferenced direct children of the app-owned `staging` or `quarantine` roots; do not follow links outside the configured USearch root.
 - Invalid SQL membership/checksum, schema/configuration, and permission failures are operator-actionable. They do not enter an automatic retry loop.
 - Do not add model/GPU work, scheduler lanes, full Jobs/timeline UI, external access, legacy actions, user-manual assets, or database migrations in this slice.
 - Preserve public/private boundaries: status and audit evidence contain only generation IDs, safe categories, attempt counts, timing, and candidate counts—never source content, paths, credentials, or raw exception text.
@@ -27,7 +27,7 @@
 | --- | --- |
 | `src/FluxKnowledge.Application/Indexing/DerivedIndexRecoveryContracts.cs` | State machine, safe failure categories, immutable snapshots, retry policy, and recovery signal/status contracts. |
 | `src/FluxKnowledge.Application/Ports/IDerivedIndexRecoveryStore.cs` | Provider-neutral SQL recovery snapshot, application-lock lease, and sanitised audit port. |
-| `src/FluxKnowledge.Infrastructure.SqlServer/Persistence/SqlDerivedIndexRecoveryStore.cs` | EF/SqlClient implementation of active membership reads, `sp_getapplock`, referenced IDs, and `AuditEvents` writes. |
+| `src/FluxKnowledge.Infrastructure.SqlServer/Persistence/SqlDerivedIndexRecoveryStore.cs` | EF/SqlClient implementation of active membership reads, `sp_getapplock`, canonical referenced paths/IDs, and `AuditEvents` writes. |
 | `src/FluxKnowledge.Infrastructure.Usearch/DerivedIndexRecoveryOptions.cs` | Validated local-only probe, retry, staging-retention, and quarantine-retention options. |
 | `src/FluxKnowledge.Infrastructure.Usearch/DerivedIndexFileSystem.cs` | Root-confined validation, unique placement, post-success quarantine, and safe cleanup. |
 | `src/FluxKnowledge.Infrastructure.Usearch/DerivedIndexRecoveryCoordinator.cs` | One recovery episode: classify, lock, re-read SQL, rebuild, audit, publish status, and transition state. |
@@ -138,7 +138,10 @@ public static class DerivedIndexRecoveryPolicy
 ```
 
 Define `DerivedIndexRecoverySqlSnapshot` as the active pointer ID, descriptor,
-immutable membership, and referenced generation IDs. Define an
+immutable membership, referenced generation IDs, and immutable SQL-referenced
+index paths. The paths are an internal recovery guard only: canonicalise them
+inside the USearch root before comparison and never expose them in audit or
+status. Define an
 `IDerivedIndexRecoveryLease : IAsyncDisposable` and this exact store operation:
 
 ```csharp
@@ -230,8 +233,9 @@ Expected: fail because no recovery SQL store or application lock exists.
 - [ ] **Step 3: Implement the SQL store without a migration**
 
 Use a fresh DbContext for each read/audit write. Read `IndexState`, the active
-`IndexGeneration`, ordered `IndexGenerationVectors`, joined vectors, and all
-currently referenced generation IDs as no-tracking queries. Retain a dedicated
+`IndexGeneration`, ordered `IndexGenerationVectors`, joined vectors, all
+currently referenced generation IDs, and all `IndexGenerations.IndexPath`
+values as no-tracking queries in the same point-in-time read transaction. Retain a dedicated
 open `SqlConnection` in the lease and call `sp_getapplock` with
 `@LockOwner = 'Session'`, an exclusive lock mode, and the exact resource name.
 Dispose the lease by calling `sp_releaseapplock` and closing the connection.
@@ -347,15 +351,16 @@ already-read descriptor and immutable membership. It builds and validates in
 staging, atomically moves that staging directory to a new unique recovery path,
 then asks the SQL store to update only `IndexGenerations.IndexPath` and
 `ValidatedAtUtc`. It must not update `IndexState.ActiveIndexGenerationId`.
-Only after that metadata update may `DerivedIndexFileSystem` move the old
-unreferenced path into quarantine. If placement or metadata update fails, leave
-the old SQL-referenced path intact and quarantine only a safely unreferenced
-replacement candidate.
+Only after that metadata update may `DerivedIndexFileSystem` move the old path
+into quarantine, and only after a fresh SQL path-reference snapshot under the
+recovery lock proves that no `IndexGenerations.IndexPath` still names it. If
+placement or metadata update fails, leave the old SQL-referenced path intact and
+quarantine only a safely unreferenced replacement candidate.
 
 Make cleanup enumerate direct children only, normalise every candidate against
 the canonical root, reject reparse points, require the configured age, and skip
-every currently referenced generation. Never call recursive deletion on a path
-that has not passed those checks.
+every candidate named by a fresh canonical SQL path-reference snapshot. Never
+call recursive deletion on a path that has not passed those checks.
 
 `DerivedIndexRecoveryService` starts in the background, performs an initial
 cycle, consumes ANN-reader fault signals, and runs bounded periodic probes.
@@ -370,12 +375,12 @@ Add and pass tests for:
 
 ```text
 missing active directory -> 503 state -> validated rebuild -> same active pointer -> Healthy
-corrupt index/metadata -> unique replacement path -> prior path quarantined only after metadata update
+corrupt index/metadata -> unique replacement path -> prior path quarantined only after metadata update and fresh SQL path-reference proof
 recoverable transient I/O -> exact 2/5/15/30 schedule -> later success
 five recoverable failures -> OperatorActionRequired with no sixth automatic attempt
 invalid SQL checksum -> OperatorActionRequired with no filesystem mutation
 access denied/configuration invalid -> OperatorActionRequired with no retry
-old unreferenced staging/quarantine -> removed; old referenced paths -> retained
+old unreferenced staging/quarantine -> removed; old referenced paths (including a duplicate SQL path under another generation ID) -> retained
 two coordinators -> one SQL-locked rebuild and one converged Healthy outcome
 ```
 
@@ -578,7 +583,6 @@ git commit -m "docs: record Phase 2 recovery verification"
 
 ## Execution handoff
 
-Implementation is intentionally paused before code changes. When the user lifts
-that pause, use `superpowers:using-git-worktrees`, create a dedicated
-`codex/` worktree, then use `superpowers:executing-plans` to execute Tasks 1–5
-in order. Do not perform a deployment action under this plan.
+Implementation is proceeding in a dedicated `codex/` worktree using
+`superpowers:executing-plans` task-by-task. Do not perform a deployment action
+under this plan.
