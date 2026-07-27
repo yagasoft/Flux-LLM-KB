@@ -24,6 +24,7 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
     public async Task Hybrid_search_hydrates_only_current_non_deleted_candidates_and_explains_contributions()
     {
         await using var environment = await SearchEnvironment.CreateAsync(_fixture);
+        await environment.WaitForLexicalCandidateAsync();
 
         var response = await environment.Service.SearchAsync(
             new SearchRequest("restart", 5, "local_first", null, null, null),
@@ -51,6 +52,26 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
 
         private IServiceScope Scope { get; }
         public HybridSearchService Service { get; }
+
+        public async Task WaitForLexicalCandidateAsync()
+        {
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+            var lexicalSearch = Scope.ServiceProvider.GetRequiredService<ILexicalSearch>();
+            while (DateTimeOffset.UtcNow < deadline)
+            {
+                var candidates = await lexicalSearch
+                    .SearchAsync("restart", 5, CancellationToken.None)
+                    .ConfigureAwait(false);
+                if (candidates.Count == 1)
+                {
+                    return;
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(100));
+            }
+
+            throw new TimeoutException("The SQL Server Full-Text index did not publish the current candidate in time.");
+        }
 
         public static async Task<SearchEnvironment> CreateAsync(NativeSqlServerFixture fixture)
         {

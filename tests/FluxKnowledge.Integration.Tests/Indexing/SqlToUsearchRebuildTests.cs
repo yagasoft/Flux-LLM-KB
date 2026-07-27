@@ -251,10 +251,13 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
 
         var firstTransition = first.TransitionAsync(firstRequest, CancellationToken.None).AsTask();
         var secondTransition = second.TransitionAsync(secondRequest, CancellationToken.None).AsTask();
-        await barrier.BothArtifactsWritten.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var barrierReached = await Task.WhenAny(
+            barrier.ArtifactWritten.Task,
+            Task.Delay(TimeSpan.FromSeconds(10)));
         barrier.Release();
         var transitions = await Task.WhenAll(firstTransition, secondTransition);
 
+        Assert.Same(barrier.ArtifactWritten.Task, barrierReached);
         Assert.All(transitions, transition => Assert.False(transition.ExistingTransition));
         Assert.Equal(candidate.Generation.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
         await using var context = await environment.Factory.CreateDbContextAsync();
@@ -370,16 +373,12 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
 
     private sealed class ActivationBarrier : IStageTransitionFailureInjector
     {
-        private int _arrivals;
         private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<bool> BothArtifactsWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> ArtifactWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public ValueTask AfterArtifactWrittenAsync(CancellationToken cancellationToken)
         {
-            if (Interlocked.Increment(ref _arrivals) == 2)
-            {
-                BothArtifactsWritten.TrySetResult(true);
-            }
+            ArtifactWritten.TrySetResult(true);
 
             return new ValueTask(_release.Task.WaitAsync(cancellationToken));
         }

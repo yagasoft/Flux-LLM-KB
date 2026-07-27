@@ -1,8 +1,11 @@
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Integration.Tests.Support;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Persistence;
@@ -70,6 +73,54 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
     }
 
     [NativeSqlServerFact]
+    public async Task Claim_paths_handle_connections_reused_after_serializable_registration()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var now = DateTimeOffset.Parse("2026-07-27T08:00:00+00:00");
+        var connectionString = new SqlConnectionStringBuilder(_fixture.ConnectionString)
+        {
+            MaxPoolSize = 1
+        }.ConnectionString;
+        var factory = new TestDbContextFactory(connectionString);
+        var registrationStore = new SqlPipelineStore(factory);
+        var first = await registrationStore.RegisterAsync(
+            new Utf8FileRegistration(
+                $"C:\\ingress\\{Guid.NewGuid():N}.txt",
+                new string('a', 64),
+                "integration-test",
+                null),
+            CancellationToken.None);
+
+        var outboxClaim = await new SqlOutboxStore(factory).ClaimNextDueAsync(
+            "dispatcher",
+            now,
+            TimeSpan.FromMinutes(1),
+            [PipelineOperations.ExtractUtf8],
+            CancellationToken.None);
+
+        Assert.NotNull(outboxClaim);
+        Assert.Equal(first.InitialDispatchMessageId, outboxClaim.DispatchMessageId);
+
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var second = await registrationStore.RegisterAsync(
+            new Utf8FileRegistration(
+                $"C:\\ingress\\{Guid.NewGuid():N}.txt",
+                new string('b', 64),
+                "integration-test",
+                null),
+            CancellationToken.None);
+
+        var jobClaim = await new SqlJobClaimStore(factory).ClaimNextDueAsync(
+            "worker",
+            now,
+            TimeSpan.FromMinutes(1),
+            CancellationToken.None);
+
+        Assert.NotNull(jobClaim);
+        Assert.Equal(second.InitialJobId, jobClaim.JobId);
+    }
+
+    [NativeSqlServerFact]
     public async Task Expired_processing_job_is_reclaimed_under_a_new_lease_generation()
     {
         await SqlTestData.ClearPipelineAsync(_fixture);
@@ -119,5 +170,16 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
             CancellationToken.None);
 
         Assert.Null(claim);
+    }
+
+    private sealed class TestDbContextFactory(string connectionString)
+        : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .UseSqlServer(connectionString)
+                .Options;
+
+        public FluxKnowledgeDbContext CreateDbContext() => new(_options);
     }
 }

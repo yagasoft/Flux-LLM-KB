@@ -62,21 +62,22 @@ public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext
         CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        return await BuildPipelineRecordQuery(context)
-            .OrderByDescending(record => record.RegisteredAtUtc)
+        var rows = await BuildPipelineRecordQuery(context)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+        return rows.Select(ToProjection).ToArray();
     }
 
     public async ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        return await BuildPipelineRecordQuery(context)
-            .SingleOrDefaultAsync(record => record.Id == id, cancellationToken)
+        var row = await BuildPipelineRecordQuery(context)
+            .SingleOrDefaultAsync(candidate => candidate.Id == id, cancellationToken)
             .ConfigureAwait(false);
+        return row is null ? null : ToProjection(row);
     }
 
-    private static IQueryable<PipelineRecordProjection> BuildPipelineRecordQuery(FluxKnowledgeDbContext context) =>
+    private static IQueryable<PipelineRecordProjectionRow> BuildPipelineRecordQuery(FluxKnowledgeDbContext context) =>
         from record in context.PipelineRecords.AsNoTracking()
         join identity in context.SourceIdentities.AsNoTracking() on record.SourceIdentityId equals identity.Id
         join job in context.Jobs.AsNoTracking()
@@ -86,13 +87,35 @@ public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext
             equals new { job.PipelineRecordId, job.SourceRevision, job.Stage } into jobs
         from job in jobs.Take(1).DefaultIfEmpty()
         where !record.IsDeleted
-        select new PipelineRecordProjection(
+        orderby record.RegisteredAtUtc descending
+        select new PipelineRecordProjectionRow(
             record.Id,
             identity.StableKey,
             record.Revision,
-            ((FluxKnowledge.Domain.Pipeline.PipelineStage)record.CurrentStage).ToString(),
-            job == null ? "Unscheduled" : ((PublicJobState)job.PublicState).ToString(),
-            record.ContentHash.Substring(0, 12),
+            record.CurrentStage,
+            job == null ? null : job.PublicState,
+            record.ContentHash,
             record.RegisteredAtUtc,
             job == null ? null : job.DueAtUtc);
+
+    private static PipelineRecordProjection ToProjection(PipelineRecordProjectionRow row) =>
+        new(
+            row.Id,
+            row.SourceIdentity,
+            row.Revision,
+            ((FluxKnowledge.Domain.Pipeline.PipelineStage)row.CurrentStage).ToString(),
+            row.PublicState is null ? "Unscheduled" : ((PublicJobState)row.PublicState.Value).ToString(),
+            row.ContentHash[..12],
+            row.RegisteredAtUtc,
+            row.DueAtUtc);
+
+    private sealed record PipelineRecordProjectionRow(
+        Guid Id,
+        string SourceIdentity,
+        long Revision,
+        int CurrentStage,
+        int? PublicState,
+        string ContentHash,
+        DateTimeOffset RegisteredAtUtc,
+        DateTimeOffset? DueAtUtc);
 }

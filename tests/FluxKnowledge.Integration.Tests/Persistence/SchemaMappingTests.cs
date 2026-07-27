@@ -1,11 +1,13 @@
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Persistence;
@@ -14,6 +16,22 @@ public sealed class SchemaMappingTests
 {
     private const string ModelOnlyConnection =
         "Server=localhost;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true";
+
+    [Fact]
+    public void Initial_phase_full_text_operations_are_transaction_suppressed()
+    {
+        var migration = new InspectableInitialPhase1Migration();
+
+        var upOperation = Assert.Single(
+            migration.BuildUpOperations().OfType<SqlOperation>(),
+            operation => operation.Sql.Contains("CREATE FULLTEXT CATALOG", StringComparison.Ordinal));
+        var downOperation = Assert.Single(
+            migration.BuildDownOperations().OfType<SqlOperation>(),
+            operation => operation.Sql.Contains("DROP FULLTEXT CATALOG", StringComparison.Ordinal));
+
+        Assert.True(upOperation.SuppressTransaction);
+        Assert.True(downOperation.SuppressTransaction);
+    }
 
     [Fact]
     public void Canonical_identity_and_dispatch_keys_are_unique()
@@ -230,6 +248,23 @@ public sealed class SchemaMappingTests
         Assert.NotNull(property);
         Assert.Equal(typeof(T), property.ClrType);
         return property;
+    }
+
+    private sealed class InspectableInitialPhase1Migration : InitialPhase1
+    {
+        public IReadOnlyList<MigrationOperation> BuildUpOperations()
+        {
+            var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.SqlServer");
+            Up(builder);
+            return builder.Operations;
+        }
+
+        public IReadOnlyList<MigrationOperation> BuildDownOperations()
+        {
+            var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.SqlServer");
+            Down(builder);
+            return builder.Operations;
+        }
     }
 }
 

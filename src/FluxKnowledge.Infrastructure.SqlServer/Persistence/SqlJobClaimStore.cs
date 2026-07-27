@@ -111,6 +111,7 @@ public sealed class SqlJobClaimStore(
               """;
         var sql =
             $"""
+             SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
              ;WITH [candidate] AS
              (
                  SELECT TOP (1)
@@ -118,7 +119,7 @@ public sealed class SqlJobClaimStore(
                      [PublicState], [DueAtUtc], [AttemptCount], [LeaseOwner],
                      [LeaseExpiresAtUtc], [LeaseGeneration], [Reason], [ErrorDetails],
                      [RowVersion]
-                 FROM [Jobs] WITH (UPDLOCK, READPAST, ROWLOCK)
+                 FROM [Jobs] WITH (UPDLOCK, READPAST, READCOMMITTEDLOCK)
                  WHERE [DueAtUtc] <= @nowUtc
                    AND
                    (

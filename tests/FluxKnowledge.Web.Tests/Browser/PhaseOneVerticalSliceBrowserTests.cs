@@ -3,6 +3,7 @@ using System.Text;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Integration.Tests.Support;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components;
 using FluxKnowledge.Web.Components.Status;
@@ -11,8 +12,10 @@ using FluxKnowledge.Web.Mcp;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Playwright;
 using Xunit;
 
@@ -54,6 +57,12 @@ public sealed class PhaseOneVerticalSliceBrowserTests
 
             await using var host = await BrowserHost.StartAsync(sql.ConnectionString, ingressRoot, indexRoot);
             using var client = new HttpClient { BaseAddress = host.BaseAddress };
+            using var overviewResponse = await client.GetAsync("/");
+            var overviewMarkup = await overviewResponse.Content.ReadAsStringAsync();
+            Assert.True(
+                overviewResponse.IsSuccessStatusCode,
+                $"Overview returned {(int)overviewResponse.StatusCode}: {overviewMarkup}");
+            Assert.Contains("Pipeline overview", overviewMarkup, StringComparison.Ordinal);
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
@@ -73,6 +82,16 @@ public sealed class PhaseOneVerticalSliceBrowserTests
                 """,
                 null,
                 new PageWaitForFunctionOptions { Timeout = 30_000 });
+
+            using var recordsResponse = await client.GetAsync("/api/pipeline-records");
+            if (!recordsResponse.IsSuccessStatusCode)
+            {
+                var recordsPayload = await recordsResponse.Content.ReadAsStringAsync();
+                Assert.Fail(
+                    $"Pipeline record projection returned {(int)recordsResponse.StatusCode}: {recordsPayload}");
+            }
+            var records = await recordsResponse.Content.ReadFromJsonAsync<IReadOnlyList<PipelineRecordProjection>>();
+            Assert.Contains(records ?? [], record => record.SourceIdentity.EndsWith(fileName, StringComparison.Ordinal));
 
             await page.GetByRole(AriaRole.Link, new() { Name = "Pipeline records" }).ClickAsync();
             await page.GetByText(fileName, new PageGetByTextOptions { Exact = false }).WaitForAsync(
@@ -102,6 +121,10 @@ public sealed class PhaseOneVerticalSliceBrowserTests
 
     private sealed class BrowserHost(WebApplication application, Uri baseAddress) : IAsyncDisposable
     {
+        private const string ValidatedPlaceholderConnection =
+            "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;" +
+            "Integrated Security=true;Encrypt=true;TrustServerCertificate=true";
+
         public Uri BaseAddress { get; } = baseAddress;
 
         public static async Task<BrowserHost> StartAsync(
@@ -109,16 +132,30 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             string ingressRoot,
             string indexRoot)
         {
-            var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
+            var builder = WebApplication.CreateBuilder(
+                new WebApplicationOptions
+                {
+                    Args = [],
+                    ApplicationName = typeof(App).Assembly.GetName().Name,
+                    // Development enables the real application's static-web-asset manifest
+                    // for this Kestrel test host; it does not enable a development exception page.
+                    EnvironmentName = "Development"
+                });
             builder.WebHost.UseUrls("http://127.0.0.1:0");
             builder.Configuration.AddInMemoryCollection(
                 new Dictionary<string, string?>
                 {
-                    ["ConnectionStrings:FluxKnowledge"] = connectionString,
+                    ["ConnectionStrings:FluxKnowledge"] = ValidatedPlaceholderConnection,
                     ["LocalIngress:AllowedRoots:0"] = ingressRoot,
                     ["Usearch:RootPath"] = indexRoot
                 });
             WebHostComposition.AddFluxKnowledgeServices(builder.Services, builder.Configuration);
+            // The production options validator deliberately accepts only the FluxKnowledge
+            // catalogue. Browser tests retain that contract and replace only the EF factory
+            // with their generated disposable catalogue.
+            builder.Services.RemoveAll<IDbContextFactory<FluxKnowledgeDbContext>>();
+            builder.Services.AddSingleton<IDbContextFactory<FluxKnowledgeDbContext>>(
+                new DisposableDbContextFactory(connectionString));
             builder.Services.AddRazorComponents().AddInteractiveServerComponents();
             builder.Services.AddSingleton<StatusEventFeed>();
             builder.Services.AddSingleton<IStatusEventPublisher>(provider => provider.GetRequiredService<StatusEventFeed>());
@@ -129,6 +166,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<KnowledgeMcpTools>();
 
             var application = builder.Build();
+            application.UseAntiforgery();
             application.MapStaticAssets();
             application.MapRazorComponents<App>().AddInteractiveServerRenderMode();
             application.MapFluxKnowledgeHealth();
@@ -143,6 +181,17 @@ public sealed class PhaseOneVerticalSliceBrowserTests
         {
             await application.StopAsync();
             await application.DisposeAsync();
+        }
+
+        private sealed class DisposableDbContextFactory(string connectionString)
+            : IDbContextFactory<FluxKnowledgeDbContext>
+        {
+            private readonly DbContextOptions<FluxKnowledgeDbContext> _options =
+                new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                    .UseSqlServer(connectionString)
+                    .Options;
+
+            public FluxKnowledgeDbContext CreateDbContext() => new(_options);
         }
     }
 }

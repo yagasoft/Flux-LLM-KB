@@ -67,6 +67,7 @@ public sealed class SqlOutboxStore(
             Enumerable.Range(0, operations.Length).Select(index => $"@operation{index}"));
         var sql =
             $"""
+             SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
              ;WITH [candidate] AS
              (
                  SELECT TOP (1)
@@ -74,7 +75,7 @@ public sealed class SqlOutboxStore(
                      [DispatchGeneration], [IdempotencyKey], [DueAtUtc], [CreatedAtUtc],
                      [DispatchedAtUtc], [LeaseOwner], [LeaseExpiresAtUtc],
                      [LeaseGeneration], [RowVersion]
-                 FROM [OutboxMessages] WITH (UPDLOCK, READPAST, ROWLOCK)
+                 FROM [OutboxMessages] WITH (UPDLOCK, READPAST, READCOMMITTEDLOCK)
                  WHERE [DispatchedAtUtc] IS NULL
                    AND [DueAtUtc] <= @nowUtc
                    AND ([LeaseExpiresAtUtc] IS NULL OR [LeaseExpiresAtUtc] <= @nowUtc)

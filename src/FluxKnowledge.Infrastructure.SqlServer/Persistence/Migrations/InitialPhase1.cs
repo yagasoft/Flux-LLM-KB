@@ -458,7 +458,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         WITH CHANGE_TRACKING AUTO;
                     END;
                 END;
-                """);
+                """,
+                suppressTransaction: true);
         }
 
         /// <inheritdoc />
@@ -482,7 +483,8 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         DROP FULLTEXT CATALOG [FluxKnowledge];
                     END;
                 END;
-                """);
+                """,
+                suppressTransaction: true);
 
             migrationBuilder.DropTable(
                 name: "AuditEvents");
