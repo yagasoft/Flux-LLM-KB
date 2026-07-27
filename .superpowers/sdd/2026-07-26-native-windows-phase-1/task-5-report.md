@@ -191,3 +191,60 @@ and skipped because `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` is unset. The Release
 build passed with zero warnings and errors; `git diff --check` passed. No SQL
 connection, target catalogue, migration, deployment, restart, I: action,
 model/runtime or GPU asset was touched.
+
+## Correctness round 3 of 5
+
+### Root cause
+
+- The validation-failure test captured the first active generation, then fully
+  published a second source before asserting the pointer. A candidate build
+  failure correctly preserves the second, current pointer, so the assertion was
+  wrong.
+- Reopen validation checked only metadata, dimensions, count and key presence.
+  It never retrieved USearch values and skipped the metric probe when only one
+  vector existed.
+- Activation inferred generation-row absence from an empty membership range.
+  Concurrent activation, and a pre-existing empty membership, could therefore
+  insert the same generation row again.
+- Physical path resolution stopped at the closest existing directory. A normal
+  child below an existing repository link concealed that ancestor link.
+
+### Red/green evidence
+
+Red, before the validator/path fixes:
+
+```powershell
+dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~Validator_rejects|FullyQualifiedName~Configured_root_below"
+```
+
+Failed 3/3 as expected: wrong persisted payload, one-vector L2-squared index,
+and a configured root below a repository link were all accepted.
+
+Green after the minimal fixes: the same command passed 3/3. USearch validation
+now retrieves every keyed `float32` payload and bit-compares it to SQL bytes;
+it probes the stored vector with a scaled query, so cosine distance remains
+zero while L2-squared does not, including for one vector. Root resolution walks
+every existing ancestor and resolves each reparse target before appending a
+missing suffix.
+
+The corrected guarded SQL test now captures the active pointer after the second
+publish. New guarded tests hold two Publish transitions at their artefact
+boundary before simultaneous same-candidate activation, and separately repair
+an existing generation with an empty membership. SQL activation now uses
+`UPDLOCK, HOLDLOCK` insert-if-absent operations for generation and membership
+rows, then validates descriptor and membership compatibility before updating
+the pointer.
+
+Fresh guarded-source compilation:
+
+```powershell
+dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~Existing_generation_with_empty_membership|FullyQualifiedName~Concurrent_same_candidate_activation|FullyQualifiedName~Validator_rejects|FullyQualifiedName~Configured_root_below"
+```
+
+Passed 3 non-SQL tests; skipped 2 guarded SQL tests because
+`FLUXKNOWLEDGE_TEST_SQL_CONNECTION` is unset. No SQL connection or target
+catalogue action occurred.
+
+Final focused index evidence passed 7/7 non-SQL tests with 8 expected guarded
+SQL skips; the Release solution build passed with zero warnings/errors and
+`git diff --check` passed.

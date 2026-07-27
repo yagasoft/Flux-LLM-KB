@@ -184,7 +184,18 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 goto SkipActivation;
             }
 
-            var existingMembership = await context.IndexGenerationVectors
+            await EnsureGenerationExistsAsync(context, activeGeneration, cancellationToken)
+                .ConfigureAwait(false);
+            var existingGeneration = await context.IndexGenerations.AsNoTracking()
+                .SingleAsync(generation => generation.Id == activeGeneration.Id, cancellationToken)
+                .ConfigureAwait(false);
+            if (!SameGeneration(existingGeneration, activeGeneration))
+            {
+                throw new IndexGenerationStaleException(
+                    "The immutable generation ID already has incompatible SQL metadata.");
+            }
+
+            var existingMembership = await context.IndexGenerationVectors.AsNoTracking()
                 .Where(membership => membership.GenerationId == activeGeneration.Id)
                 .Select(membership => membership.VectorId).OrderBy(vectorId => vectorId)
                 .ToListAsync(cancellationToken)
@@ -195,26 +206,8 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                     "The immutable generation ID already has incompatible SQL membership.");
             }
 
-            if (existingMembership.Count == 0)
-            {
-                context.IndexGenerations.Add(new IndexGenerationEntity
-                {
-                    Id = activeGeneration.Id,
-                    ModelFingerprint = activeGeneration.ModelFingerprint,
-                    Dimensions = activeGeneration.Dimensions,
-                    IndexPath = activeGeneration.IndexPath,
-                    MetadataChecksum = activeGeneration.MetadataChecksum,
-                    VectorCount = activeGeneration.VectorCount,
-                    CreatedAtUtc = _timeProvider.GetUtcNow(),
-                    ValidatedAtUtc = _timeProvider.GetUtcNow()
-                });
-                context.IndexGenerationVectors.AddRange(currentMembership.Select(vector =>
-                    new IndexGenerationVectorEntity
-                    {
-                        GenerationId = activeGeneration.Id,
-                        VectorId = vector.VectorId
-                    }));
-            }
+            await EnsureMembershipExistsAsync(context, activeGeneration.Id, currentMembership, cancellationToken)
+                .ConfigureAwait(false);
             var state = await context.IndexState.SingleAsync(state => state.Id == 1, cancellationToken)
                 .ConfigureAwait(false);
             state.ActiveIndexGenerationId = activeGeneration.Id;
@@ -577,6 +570,61 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             left.Dimensions == right.Dimensions &&
             string.Equals(left.ModelFingerprint, right.ModelFingerprint, StringComparison.Ordinal) &&
             string.Equals(left.ContentHash, right.ContentHash, StringComparison.Ordinal)).All(static equal => equal);
+
+    private async Task EnsureGenerationExistsAsync(
+        FluxKnowledgeDbContext context,
+        IndexGenerationDescriptor generation,
+        CancellationToken cancellationToken)
+    {
+        await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 INSERT INTO [IndexGenerations]
+                     ([Id], [ModelFingerprint], [Dimensions], [IndexPath], [MetadataChecksum], [VectorCount], [CreatedAtUtc], [ValidatedAtUtc])
+                 SELECT {generation.Id}, {generation.ModelFingerprint}, {generation.Dimensions}, {generation.IndexPath},
+                        {generation.MetadataChecksum}, {generation.VectorCount}, {_timeProvider.GetUtcNow()}, {_timeProvider.GetUtcNow()}
+                 WHERE NOT EXISTS
+                 (
+                     SELECT 1
+                     FROM [IndexGenerations] WITH (UPDLOCK, HOLDLOCK)
+                     WHERE [Id] = {generation.Id}
+                 );
+                 """,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task EnsureMembershipExistsAsync(
+        FluxKnowledgeDbContext context,
+        Guid generationId,
+        IReadOnlyList<CanonicalVector> vectors,
+        CancellationToken cancellationToken)
+    {
+        foreach (var vector in vectors)
+        {
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                    $"""
+                     INSERT INTO [IndexGenerationVectors] ([GenerationId], [VectorId])
+                     SELECT {generationId}, {vector.VectorId}
+                     WHERE NOT EXISTS
+                     (
+                         SELECT 1
+                         FROM [IndexGenerationVectors] WITH (UPDLOCK, HOLDLOCK)
+                         WHERE [GenerationId] = {generationId} AND [VectorId] = {vector.VectorId}
+                     );
+                     """,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static bool SameGeneration(
+        IndexGenerationEntity actual,
+        IndexGenerationDescriptor expected) =>
+        string.Equals(actual.ModelFingerprint, expected.ModelFingerprint, StringComparison.Ordinal) &&
+        actual.Dimensions == expected.Dimensions &&
+        string.Equals(actual.IndexPath, expected.IndexPath, StringComparison.Ordinal) &&
+        string.Equals(actual.MetadataChecksum, expected.MetadataChecksum, StringComparison.Ordinal) &&
+        actual.VectorCount == expected.VectorCount;
 
     private static string ComputeSnapshotChecksum(
         string fingerprint,

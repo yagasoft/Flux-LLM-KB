@@ -44,10 +44,9 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     public async Task Candidate_validation_failure_preserves_the_prior_active_pointer_and_immutable_directory()
     {
         await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first document");
-        var active = await environment.ActiveGenerationAsync();
-        var priorPath = active.IndexPath;
-
         await environment.AddAndPumpAsync("second document");
+        var active = await environment.ActiveGenerationAsync();
+        var activePath = active.IndexPath;
         var failing = new UsearchGenerationBuilder(
             environment.Store,
             new UsearchIndexOptions(environment.IndexRoot),
@@ -57,7 +56,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             async () => await failing.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None));
 
         Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
-        Assert.True(File.Exists(Path.Combine(priorPath, UsearchGenerationValidator.IndexFileName)));
+        Assert.True(File.Exists(Path.Combine(activePath, UsearchGenerationValidator.IndexFileName)));
     }
 
     [NativeSqlServerFact]
@@ -144,6 +143,87 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         Assert.True(File.Exists(Path.Combine(candidate.Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
     }
 
+    [NativeSqlServerFact]
+    public async Task Concurrent_same_candidate_activation_creates_one_generation_and_membership_snapshot()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "concurrent source");
+        await PrepareUntrackedCandidateAsync(environment);
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var barrier = new ActivationBarrier();
+        var first = new SqlStageTransitionStore(environment.Factory, barrier);
+        var second = new SqlStageTransitionStore(environment.Factory, barrier);
+        var firstRequest = await ClaimPublishAsync(environment, candidate);
+        var secondRequest = await ClaimPublishAsync(environment, candidate);
+
+        var firstTransition = first.TransitionAsync(firstRequest, CancellationToken.None).AsTask();
+        var secondTransition = second.TransitionAsync(secondRequest, CancellationToken.None).AsTask();
+        await barrier.BothArtifactsWritten.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        barrier.Release();
+        var transitions = await Task.WhenAll(firstTransition, secondTransition);
+
+        Assert.All(transitions, transition => Assert.False(transition.ExistingTransition));
+        Assert.Equal(candidate.Generation.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        Assert.Single(await context.IndexGenerations.Where(generation => generation.Id == candidate.Generation.Id).ToListAsync());
+        Assert.Equal(candidate.Vectors.Count, await context.IndexGenerationVectors.CountAsync(
+            membership => membership.GenerationId == candidate.Generation.Id));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Existing_generation_with_empty_membership_is_repaired_idempotently()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "empty membership source");
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            await context.IndexGenerationVectors
+                .Where(membership => membership.GenerationId == candidate.Generation.Id)
+                .ExecuteDeleteAsync();
+        }
+
+        await new SqlStageTransitionStore(environment.Factory).TransitionAsync(
+            await ClaimPublishAsync(environment, candidate),
+            CancellationToken.None);
+
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        Assert.Single(await verification.IndexGenerations.Where(generation => generation.Id == candidate.Generation.Id).ToListAsync());
+        Assert.Equal(candidate.Vectors.Count, await verification.IndexGenerationVectors.CountAsync(
+            membership => membership.GenerationId == candidate.Generation.Id));
+    }
+
+    private static async Task PrepareUntrackedCandidateAsync(PipelineEnvironment environment)
+    {
+        var active = await environment.ActiveGenerationAsync();
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var origin = new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationEntity
+        {
+            Id = Guid.NewGuid(),
+            ModelFingerprint = active.ModelFingerprint,
+            Dimensions = active.Dimensions,
+            IndexPath = active.IndexPath,
+            MetadataChecksum = active.MetadataChecksum,
+            VectorCount = active.VectorCount,
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            ValidatedAtUtc = DateTimeOffset.UtcNow
+        };
+        context.IndexGenerations.Add(origin);
+        await context.SaveChangesAsync();
+        var vectors = await context.Vectors.ToListAsync();
+        foreach (var vector in vectors)
+        {
+            vector.IndexGenerationId = origin.Id;
+        }
+        var state = await context.IndexState.SingleAsync(candidate => candidate.Id == 1);
+        state.ActiveIndexGenerationId = null;
+        await context.SaveChangesAsync();
+        await context.IndexGenerationVectors
+            .Where(membership => membership.GenerationId == active.Id)
+            .ExecuteDeleteAsync();
+        await context.IndexGenerations
+            .Where(generation => generation.Id == active.Id)
+            .ExecuteDeleteAsync();
+    }
+
     private async Task<StageTransitionRequest> ClaimPublishAsync(
         PipelineEnvironment environment,
         IndexGenerationCandidateSnapshot candidate)
@@ -192,6 +272,25 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     {
         public override void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors) =>
             throw new IndexGenerationValidationException("injected candidate validation failure");
+    }
+
+    private sealed class ActivationBarrier : IStageTransitionFailureInjector
+    {
+        private int _arrivals;
+        private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> BothArtifactsWritten { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask AfterArtifactWrittenAsync(CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _arrivals) == 2)
+            {
+                BothArtifactsWritten.TrySetResult(true);
+            }
+
+            return new ValueTask(_release.Task.WaitAsync(cancellationToken));
+        }
+
+        public void Release() => _release.TrySetResult(true);
     }
 
     private sealed class PipelineEnvironment : IAsyncDisposable

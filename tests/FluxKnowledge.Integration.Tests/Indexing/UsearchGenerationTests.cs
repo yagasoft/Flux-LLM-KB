@@ -1,3 +1,4 @@
+using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.Usearch;
 using Microsoft.Extensions.DependencyInjection;
@@ -45,6 +46,58 @@ public sealed class UsearchGenerationTests : IDisposable
 
         Assert.Equal(candidates[0].Generation.Id, candidates[1].Generation.Id);
         Assert.True(File.Exists(Path.Combine(candidates[0].Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
+    }
+
+    [Fact]
+    public async Task Validator_rejects_a_reopened_index_with_correct_keys_but_wrong_vector_payloads()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+
+        ReplaceIndex(snapshot, MetricKind.Cos, _ => Vector(1).ToArray());
+
+        Assert.Throws<IndexGenerationValidationException>(
+            () => new UsearchGenerationValidator().Validate(snapshot.Generation.IndexPath, snapshot.Generation, snapshot.Vectors));
+    }
+
+    [Fact]
+    public async Task Validator_rejects_a_single_vector_index_with_a_non_cosine_metric()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+
+        ReplaceIndex(snapshot, MetricKind.L2sq, vector => ToFloatValues(vector.Values));
+
+        Assert.Throws<IndexGenerationValidationException>(
+            () => new UsearchGenerationValidator().Validate(snapshot.Generation.IndexPath, snapshot.Generation, snapshot.Vectors));
+    }
+
+    [Fact]
+    public void Configured_root_below_an_existing_link_to_the_repository_is_rejected()
+    {
+        var sandbox = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRootValidation_{Guid.NewGuid():N}");
+        var repository = Path.Combine(sandbox, "repository");
+        var deployment = Path.Combine(sandbox, "deployment");
+        var link = Path.Combine(sandbox, "linked-repository");
+        try
+        {
+            Directory.CreateDirectory(repository);
+            Directory.CreateDirectory(deployment);
+            Directory.CreateSymbolicLink(link, repository);
+            Directory.CreateDirectory(Path.Combine(link, "existing-child"));
+
+            Assert.Throws<InvalidOperationException>(() => UsearchIndexOptions.FromConfiguredRoot(
+                Path.Combine(link, "existing-child", "future-root"), repository, deployment));
+        }
+        finally
+        {
+            if (Directory.Exists(sandbox))
+            {
+                Directory.Delete(sandbox, recursive: true);
+            }
+        }
     }
 
     [Fact]
@@ -179,6 +232,33 @@ public sealed class UsearchGenerationTests : IDisposable
     {
         var values = new float[256];
         values[dimension] = 1F;
+        return values;
+    }
+
+    private static void ReplaceIndex(
+        IndexGenerationCandidateSnapshot snapshot,
+        MetricKind metric,
+        Func<CanonicalVector, float[]> values)
+    {
+        using var index = new USearchIndex(
+            metric,
+            ScalarKind.Float32,
+            (ulong)snapshot.Generation.Dimensions,
+            0,
+            0,
+            0,
+            false);
+        foreach (var vector in snapshot.Vectors)
+        {
+            index.Add((ulong)vector.VectorId, values(vector));
+        }
+        index.Save(Path.Combine(snapshot.Generation.IndexPath, UsearchGenerationValidator.IndexFileName));
+    }
+
+    private static float[] ToFloatValues(byte[] bytes)
+    {
+        var values = new float[bytes.Length / sizeof(float)];
+        Buffer.BlockCopy(bytes, 0, values, 0, bytes.Length);
         return values;
     }
 }

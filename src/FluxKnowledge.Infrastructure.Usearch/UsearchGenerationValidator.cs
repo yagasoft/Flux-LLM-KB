@@ -62,43 +62,59 @@ public class UsearchGenerationValidator
             {
                 throw new IndexGenerationValidationException("USearch generation does not contain every SQL vector ID.");
             }
+
+            var found = index.Get((ulong)vector.VectorId, out float[] persisted);
+            var expectedValues = ToFloatValues(vector.Values);
+            if (found != 1 || persisted.Length != expectedValues.Length ||
+                !persisted.Zip(expectedValues, static (actual, expected) =>
+                    BitConverter.SingleToInt32Bits(actual) == BitConverter.SingleToInt32Bits(expected)).All(static equal => equal))
+            {
+                throw new IndexGenerationValidationException("USearch generation vector payload does not match SQL bytes.");
+            }
         }
 
-        VerifyCosineMetric(index, vectors, expected.Dimensions);
+        VerifyCosineMetric(index, vectors);
     }
 
     private static void VerifyCosineMetric(
         USearchIndex index,
-        IReadOnlyList<CanonicalVector> vectors,
-        int dimensions)
+        IReadOnlyList<CanonicalVector> vectors)
     {
-        if (vectors.Count < 2)
+        var vector = vectors[0];
+        var stored = ToFloatValues(vector.Values);
+        if (stored.All(static value => value == 0F))
         {
-            return;
+            throw new IndexGenerationValidationException("USearch metric cannot be validated against a zero vector.");
         }
 
-        var query = new float[dimensions];
-        Buffer.BlockCopy(vectors[0].Values, 0, query, 0, vectors[0].Values.Length);
-        var count = index.Search(query, Math.Min(2, vectors.Count), out var keys, out var distances);
-        var second = Enumerable.Range(0, count).FirstOrDefault(position => keys[position] != (ulong)vectors[0].VectorId);
-        if (count < 2)
+        var query = stored.Select(static value => value * 0.5F).ToArray();
+        var count = index.Search(query, Math.Max(1, vectors.Count), out var keys, out var distances);
+        var position = Array.IndexOf(keys, (ulong)vector.VectorId, 0, count);
+        if (position < 0)
         {
-            throw new IndexGenerationValidationException("USearch metric probe did not return two vectors.");
+            throw new IndexGenerationValidationException("USearch metric probe did not return the stored vector.");
         }
 
-        var other = vectors.Single(vector => vector.VectorId == (long)keys[second]);
-        var expectedDistance = 1F - Dot(query, other.Values);
-        if (MathF.Abs(distances[second] - expectedDistance) > 0.001F)
+        var expectedDistance = CosineDistance(query, stored);
+        if (MathF.Abs(distances[position] - expectedDistance) > 0.001F)
         {
             throw new IndexGenerationValidationException("The reopened USearch index metric is not cosine distance.");
         }
     }
 
-    private static float Dot(float[] left, byte[] rightBytes)
+    private static float[] ToFloatValues(byte[] bytes)
     {
-        var right = new float[left.Length];
-        Buffer.BlockCopy(rightBytes, 0, right, 0, rightBytes.Length);
-        return left.Zip(right, static (a, b) => a * b).Sum();
+        var values = new float[bytes.Length / sizeof(float)];
+        Buffer.BlockCopy(bytes, 0, values, 0, bytes.Length);
+        return values;
+    }
+
+    private static float CosineDistance(float[] left, float[] right)
+    {
+        var dot = left.Zip(right, static (a, b) => a * b).Sum();
+        var leftNorm = MathF.Sqrt(left.Sum(static value => value * value));
+        var rightNorm = MathF.Sqrt(right.Sum(static value => value * value));
+        return 1F - dot / (leftNorm * rightNorm);
     }
 
     public sealed record Metadata(

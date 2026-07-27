@@ -41,8 +41,20 @@ public sealed record UsearchIndexOptions(string RootPath)
             suffix.Push(directory.Name);
             directory = directory.Parent;
         }
-        var resolved = directory.ResolveLinkTarget(returnFinalTarget: true);
-        var physical = (resolved ?? directory).FullName;
+
+        var existingAncestors = new Stack<DirectoryInfo>();
+        for (var ancestor = directory; ancestor is not null; ancestor = ancestor.Parent)
+        {
+            existingAncestors.Push(ancestor);
+        }
+
+        var physical = existingAncestors.Pop().FullName;
+        while (existingAncestors.Count > 0)
+        {
+            var ancestor = existingAncestors.Pop();
+            var resolved = ancestor.ResolveLinkTarget(returnFinalTarget: true);
+            physical = (resolved ?? new DirectoryInfo(Path.Combine(physical, ancestor.Name))).FullName;
+        }
         while (suffix.Count > 0)
         {
             physical = Path.Combine(physical, suffix.Pop());
