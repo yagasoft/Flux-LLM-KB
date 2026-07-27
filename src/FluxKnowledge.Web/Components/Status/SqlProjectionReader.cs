@@ -71,14 +71,26 @@ public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext
     public async ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        var row = await BuildPipelineRecordQuery(context)
-            .SingleOrDefaultAsync(candidate => candidate.Id == id, cancellationToken)
+        var row = await BuildPipelineRecordQuery(context, id)
+            .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
         return row is null ? null : ToProjection(row);
     }
 
-    private static IQueryable<PipelineRecordProjectionRow> BuildPipelineRecordQuery(FluxKnowledgeDbContext context) =>
-        from record in context.PipelineRecords.AsNoTracking()
+    private static IQueryable<PipelineRecordProjectionRow> BuildPipelineRecordQuery(
+        FluxKnowledgeDbContext context,
+        Guid? pipelineRecordId = null)
+    {
+        var records = context.PipelineRecords
+            .AsNoTracking()
+            .Where(record => !record.IsDeleted);
+        if (pipelineRecordId is { } id)
+        {
+            records = records.Where(record => record.Id == id);
+        }
+
+        return
+        from record in records
         join identity in context.SourceIdentities.AsNoTracking() on record.SourceIdentityId equals identity.Id
         join job in context.Jobs.AsNoTracking()
                 .Where(job => job.SourceRevision > 0)
@@ -86,7 +98,6 @@ public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext
             on new { PipelineRecordId = record.Id, SourceRevision = record.Revision, Stage = record.CurrentStage }
             equals new { job.PipelineRecordId, job.SourceRevision, job.Stage } into jobs
         from job in jobs.Take(1).DefaultIfEmpty()
-        where !record.IsDeleted
         orderby record.RegisteredAtUtc descending
         select new PipelineRecordProjectionRow(
             record.Id,
@@ -97,6 +108,7 @@ public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext
             record.ContentHash,
             record.RegisteredAtUtc,
             job == null ? null : job.DueAtUtc);
+    }
 
     private static PipelineRecordProjection ToProjection(PipelineRecordProjectionRow row) =>
         new(
