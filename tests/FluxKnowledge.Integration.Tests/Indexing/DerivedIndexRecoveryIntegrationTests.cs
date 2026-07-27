@@ -42,18 +42,18 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var factory = SqlTestData.CreateFactory(_fixture);
         var activeGenerationId = Guid.NewGuid();
         var referencedGenerationId = Guid.NewGuid();
+        const string activeIndexPath = "pending";
         const string sharedIndexPath = @"C:\flux\indexes\shared";
+        const string sharedIndexPathWithDifferentCasing = @"c:\FLUX\INDEXES\SHARED";
         await SeedSnapshotAsync(factory, activeGenerationId, referencedGenerationId);
         await using (var context = await factory.CreateDbContextAsync())
         {
-            var generations = await context.IndexGenerations
-                .Where(generation => generation.Id == activeGenerationId || generation.Id == referencedGenerationId)
-                .ToListAsync();
-            foreach (var generation in generations)
-            {
-                generation.IndexPath = sharedIndexPath;
-            }
-
+            var referencedGeneration = await context.IndexGenerations
+                .SingleAsync(generation => generation.Id == referencedGenerationId);
+            referencedGeneration.IndexPath = @"C:\flux\indexes\referenced";
+            context.IndexGenerations.AddRange(
+                CreateGeneration(Guid.NewGuid(), sharedIndexPath),
+                CreateGeneration(Guid.NewGuid(), sharedIndexPathWithDifferentCasing));
             await context.SaveChangesAsync();
         }
 
@@ -61,7 +61,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
 
         var snapshot = await store.ReadActiveAsync(CancellationToken.None);
 
-        Assert.Contains(sharedIndexPath, snapshot.ReferencedIndexPaths);
+        Assert.Contains(activeIndexPath, snapshot.ReferencedIndexPaths);
+        Assert.Contains(sharedIndexPathWithDifferentCasing, snapshot.ReferencedIndexPaths);
         Assert.Equal(1, snapshot.ReferencedIndexPaths.Count(path =>
             string.Equals(path, sharedIndexPath, StringComparison.OrdinalIgnoreCase)));
     }
@@ -282,12 +283,12 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         return [firstVector.VectorId, secondVector.VectorId];
     }
 
-    private static IndexGenerationEntity CreateGeneration(Guid id) => new()
+    private static IndexGenerationEntity CreateGeneration(Guid id, string indexPath = "pending") => new()
     {
         Id = id,
         ModelFingerprint = "deterministic-tokenhash-v1:256",
         Dimensions = 256,
-        IndexPath = "pending",
+        IndexPath = indexPath,
         MetadataChecksum = new string('0', 64),
         CreatedAtUtc = DateTimeOffset.UtcNow
     };
