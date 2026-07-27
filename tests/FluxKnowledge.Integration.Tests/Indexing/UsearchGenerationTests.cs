@@ -75,6 +75,32 @@ public sealed class UsearchGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Validator_rejects_a_reopened_single_vector_Pearson_index()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+
+        ReplaceIndex(snapshot, MetricKind.Pearson, vector => ToFloatValues(vector.Values));
+
+        Assert.Throws<IndexGenerationValidationException>(
+            () => new UsearchGenerationValidator().Validate(snapshot.Generation.IndexPath, snapshot.Generation, snapshot.Vectors));
+    }
+
+    [Fact]
+    public async Task Validator_accepts_a_reopened_single_vector_cosine_index()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+
+        new UsearchGenerationValidator().Validate(
+            snapshot.Generation.IndexPath,
+            snapshot.Generation,
+            snapshot.Vectors);
+    }
+
+    [Fact]
     public void Configured_root_below_an_existing_link_to_the_repository_is_rejected()
     {
         var sandbox = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRootValidation_{Guid.NewGuid():N}");

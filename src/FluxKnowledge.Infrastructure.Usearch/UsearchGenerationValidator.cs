@@ -87,18 +87,27 @@ public class UsearchGenerationValidator
             throw new IndexGenerationValidationException("USearch metric cannot be validated against a zero vector.");
         }
 
-        var query = stored.Select(static value => value * 0.5F).ToArray();
-        var count = index.Search(query, Math.Max(1, vectors.Count), out var keys, out var distances);
-        var position = Array.IndexOf(keys, (ulong)vector.VectorId, 0, count);
-        if (position < 0)
+        var queries = new[]
         {
-            throw new IndexGenerationValidationException("USearch metric probe did not return the stored vector.");
-        }
+            stored.Select(static value => value * 0.5F).ToArray(),
+            stored.Select(static value => value + 0.5F).ToArray()
+        };
+        foreach (var query in queries)
+        {
+            var count = index.Search(query, Math.Max(1, vectors.Count), out var keys, out var distances);
+            var position = Array.IndexOf(keys, (ulong)vector.VectorId, 0, count);
+            if (position < 0)
+            {
+                throw new IndexGenerationValidationException("USearch metric probe did not return the stored vector.");
+            }
 
-        var expectedDistance = CosineDistance(query, stored);
-        if (MathF.Abs(distances[position] - expectedDistance) > 0.001F)
-        {
-            throw new IndexGenerationValidationException("The reopened USearch index metric is not cosine distance.");
+            var expectedDistance = CosineDistance(query, stored);
+            if (!float.IsFinite(distances[position]) ||
+                !float.IsFinite(expectedDistance) ||
+                MathF.Abs(distances[position] - expectedDistance) > 0.001F)
+            {
+                throw new IndexGenerationValidationException("The reopened USearch index metric is not cosine distance.");
+            }
         }
     }
 

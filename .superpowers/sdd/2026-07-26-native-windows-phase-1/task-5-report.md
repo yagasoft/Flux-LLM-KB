@@ -248,3 +248,68 @@ catalogue action occurred.
 Final focused index evidence passed 7/7 non-SQL tests with 8 expected guarded
 SQL skips; the Release solution build passed with zero warnings/errors and
 `git diff --check` passed.
+
+## Correctness round 4 of 5: reopened metric identity
+
+### Root cause and native semantics
+
+The reopened-index metric probe queried a positive scalar multiple of one
+persisted vector. Cosine and Pearson distance are both invariant under positive
+scaling, so the native Pearson index returned the keyed vector at distance zero
+and satisfied the independently calculated cosine expectation.
+
+The installed Cloud.Unum.USearch 2.19.3 API exposes the metric when constructing
+an index but has no managed metric getter after reopening. Direct save, reopen
+and search characterisation against the real Windows native library confirmed
+that the old scaled one-vector probe returns zero for both cosine and Pearson.
+A second query formed by adding the same non-zero offset to every component
+preserves Pearson correlation but changes cosine distance. For the focused
+one-hot fixture, reopened cosine returned approximately 0.815 while Pearson
+returned zero; the shifted probe also differed from cosine for every other
+supported non-cosine `MetricKind`.
+
+### Red/green evidence
+
+The new focused test creates a real one-vector cosine candidate, replaces only
+its native index file with a saved Pearson index containing the correct key and
+payload, then invokes the production validator on the reopened file.
+
+RED before production changes:
+
+```powershell
+dotnet test tests\FluxKnowledge.Integration.Tests\FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter FullyQualifiedName~Validator_rejects_a_reopened_single_vector_Pearson_index
+```
+
+Failed 1/1 as expected with `Assert.Throws() Failure: No exception was thrown`.
+This proves the regression test reaches the native reopened-index path and
+captures the Pearson false acceptance.
+
+The minimal correction retains the existing positive-scale probe and adds the
+independent constant-shift probe. Both returned distances must match a locally
+calculated cosine distance; non-finite native or expected values now fail
+closed. Key lookup and bit-exact payload validation are unchanged.
+
+GREEN after the correction:
+
+```powershell
+dotnet test tests\FluxKnowledge.Integration.Tests\FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~Validator_rejects_a_reopened_single_vector_Pearson_index|FullyQualifiedName~Validator_accepts_a_reopened_single_vector_cosine_index|FullyQualifiedName~Validator_rejects_a_single_vector_index_with_a_non_cosine_metric|FullyQualifiedName~Validator_rejects_a_reopened_index_with_correct_keys_but_wrong_vector_payloads"
+```
+
+Passed 4/4: a true reopened one-vector cosine index is accepted, reopened
+Pearson and L2-squared indexes are rejected, and wrong persisted payload bytes
+remain rejected.
+
+Fresh broader evidence:
+
+```powershell
+dotnet test tests\FluxKnowledge.Integration.Tests\FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter FullyQualifiedName~Indexing
+dotnet build FluxKnowledge.slnx --configuration Release --no-restore
+git diff --check
+```
+
+The Indexing subset passed 9 non-SQL tests with 10 expected guarded native-SQL
+skips. The Release solution build succeeded with zero warnings and zero errors,
+and `git diff --check` passed. `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` was not
+supplied: no SQL connection, target catalogue, provisioning, migration,
+deployment, restart, replay-directory change, model/runtime or GPU asset was
+used or touched.
