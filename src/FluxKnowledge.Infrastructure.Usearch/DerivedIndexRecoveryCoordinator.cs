@@ -120,8 +120,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             activeId = sql.ActiveGenerationId;
             ValidateSql(sql);
             if (!fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
-                !fileSystem.TryCanonicalInRoot(sql.Generation!.IndexPath, out var activePath) ||
-                !fileSystem.IsIntendedGenerationPath(activePath))
+                !fileSystem.TryCanonicalIntendedGenerationPath(sql.Generation!.IndexPath, out var activePath))
             {
                 throw new InvalidOperationException("The derived-index path configuration is invalid.");
             }
