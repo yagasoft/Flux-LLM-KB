@@ -8,7 +8,7 @@ namespace FluxKnowledge.Infrastructure.Usearch;
 
 public sealed class IndexGenerationValidationException(string message) : Exception(message);
 
-public sealed class UsearchGenerationValidator
+public class UsearchGenerationValidator
 {
     public const string IndexFileName = "index.usearch";
     public const string MetadataFileName = "metadata.json";
@@ -25,7 +25,7 @@ public sealed class UsearchGenerationValidator
         return new Guid(bytes);
     }
 
-    public void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
+    public virtual void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
     {
         var metadataPath = Path.Combine(directory, MetadataFileName);
         var metadata = JsonSerializer.Deserialize<Metadata>(File.ReadAllText(metadataPath))

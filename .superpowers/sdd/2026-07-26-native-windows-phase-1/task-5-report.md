@@ -77,3 +77,18 @@ dotnet build FluxKnowledge.slnx --configuration Release --no-restore
 
 Domain: 35 passed. Integration Indexing: 2 passed and 1 expected guarded SQL
 skip. Web: 2 passed. Release build: zero warnings and errors.
+
+## Guarded native SQL test source completion
+
+`SqlToUsearchRebuildTests` now contains three complete guarded disposable-SQL
+tests rather than a fixture-open placeholder: SQL-membership rebuild after
+deleting the entire index root, injected candidate validation failure preserving
+the prior active pointer/directory, and the full Register → Extract → Normalise
+→ CanonicalIndex → Embed → Publish hosted-pump slice with durable artefact,
+chunk, stable vector-ID, membership, pointer and index assertions. The rebuild
+path now reads the immutable SQL membership snapshot for the specified active
+generation rather than using a deleted directory or a fresh corpus query.
+
+The current environment did not supply `FLUXKNOWLEDGE_TEST_SQL_CONNECTION`, so
+these three bodies compiled and skipped cleanly (no disposable database was
+created). They remain unexecuted live-SQL evidence.

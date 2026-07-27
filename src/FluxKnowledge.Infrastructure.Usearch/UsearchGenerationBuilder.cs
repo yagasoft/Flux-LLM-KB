@@ -9,9 +9,44 @@ public sealed class UsearchGenerationBuilder(
     UsearchIndexOptions options,
     UsearchGenerationValidator validator) : IIndexGenerationPublisher
 {
-    public ValueTask<IndexGenerationDescriptor> RebuildFromSqlAsync(
+    public async ValueTask<IndexGenerationDescriptor> RebuildFromSqlAsync(
         Guid indexGenerationId,
-        CancellationToken cancellationToken) => BuildAndPlaceAsync(indexGenerationId, cancellationToken);
+        CancellationToken cancellationToken)
+    {
+        var existing = await store.GetGenerationAsync(indexGenerationId, cancellationToken)
+            ?? throw new InvalidOperationException("The SQL index generation does not exist.");
+        var vectors = await store.ReadVectorsAsync(indexGenerationId, cancellationToken);
+        if (vectors.Count == 0 || !string.Equals(
+                existing.MetadataChecksum,
+                UsearchGenerationValidator.ComputeChecksum(existing.ModelFingerprint, existing.Dimensions, vectors),
+                StringComparison.Ordinal))
+        {
+            throw new IndexGenerationValidationException("The immutable SQL generation membership cannot be rebuilt safely.");
+        }
+
+        if (Directory.Exists(existing.IndexPath))
+        {
+            validator.Validate(existing.IndexPath, existing, vectors);
+            return existing;
+        }
+
+        var staging = Path.Combine(options.RootPath, "staging", existing.Id.ToString("N"), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        try
+        {
+            SaveCandidate(staging, existing, vectors);
+            validator.Validate(staging, existing, vectors);
+            var finalPath = AtomicGenerationPlacement.Place(options, existing.Id, staging);
+            var rebuilt = existing with { IndexPath = finalPath };
+            await store.UpdateGenerationMetadataAsync(rebuilt, cancellationToken);
+            return rebuilt;
+        }
+        catch
+        {
+            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            throw;
+        }
+    }
 
     public async ValueTask<IndexGenerationDescriptor> BuildAndPlaceAsync(
         Guid indexGenerationId,
@@ -51,22 +86,7 @@ public sealed class UsearchGenerationBuilder(
         Directory.CreateDirectory(staging);
         try
         {
-            using (var index = new USearchIndex(MetricKind.Cos, ScalarKind.Float32, (ulong)dimensions, 0, 0, 0, false))
-            {
-                foreach (var vector in vectors)
-                {
-                    var values = new float[dimensions];
-                    Buffer.BlockCopy(vector.Values, 0, values, 0, vector.Values.Length);
-                    index.Add((ulong)vector.VectorId, values);
-                }
-
-                index.Save(Path.Combine(staging, UsearchGenerationValidator.IndexFileName));
-            }
-
-            File.WriteAllText(Path.Combine(staging, UsearchGenerationValidator.MetadataFileName),
-                JsonSerializer.Serialize(new UsearchGenerationValidator.Metadata(
-                    candidate.Id, candidate.ModelFingerprint, "cos", candidate.Dimensions,
-                    candidate.VectorCount, candidate.MetadataChecksum)));
+            SaveCandidate(staging, candidate, vectors);
             validator.Validate(staging, candidate, vectors);
             var finalPath = AtomicGenerationPlacement.Place(options, candidateId, staging);
             candidate = candidate with { IndexPath = finalPath };
@@ -82,5 +102,26 @@ public sealed class UsearchGenerationBuilder(
 
             throw;
         }
+    }
+
+    private static void SaveCandidate(
+        string staging,
+        IndexGenerationDescriptor candidate,
+        IReadOnlyList<CanonicalVector> vectors)
+    {
+        using (var index = new USearchIndex(MetricKind.Cos, ScalarKind.Float32, (ulong)candidate.Dimensions, 0, 0, 0, false))
+        {
+            foreach (var vector in vectors)
+            {
+                var values = new float[candidate.Dimensions];
+                Buffer.BlockCopy(vector.Values, 0, values, 0, vector.Values.Length);
+                index.Add((ulong)vector.VectorId, values);
+            }
+            index.Save(Path.Combine(staging, UsearchGenerationValidator.IndexFileName));
+        }
+        File.WriteAllText(Path.Combine(staging, UsearchGenerationValidator.MetadataFileName),
+            JsonSerializer.Serialize(new UsearchGenerationValidator.Metadata(
+                candidate.Id, candidate.ModelFingerprint, "cos", candidate.Dimensions,
+                candidate.VectorCount, candidate.MetadataChecksum)));
     }
 }
