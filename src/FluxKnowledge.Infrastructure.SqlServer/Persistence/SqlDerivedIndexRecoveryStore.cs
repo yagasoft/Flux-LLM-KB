@@ -87,13 +87,18 @@ public sealed class SqlDerivedIndexRecoveryStore(
         {
             referencedGenerationIds.Add(activeId);
         }
+        var referencedIndexPaths = await context.IndexGenerations.AsNoTracking()
+            .Select(generation => generation.IndexPath)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new DerivedIndexRecoverySqlSnapshot(
             activeGenerationId,
             generation,
             [.. membership],
-            referencedGenerationIds.ToImmutableHashSet());
+            referencedGenerationIds.ToImmutableHashSet(),
+            referencedIndexPaths.ToImmutableHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
     public async ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(

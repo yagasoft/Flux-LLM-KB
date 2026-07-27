@@ -22,7 +22,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var factory = SqlTestData.CreateFactory(_fixture);
         var activeGenerationId = Guid.NewGuid();
         var referencedGenerationId = Guid.NewGuid();
-        await SeedSnapshotAsync(factory, activeGenerationId, referencedGenerationId);
+        var vectorIds = await SeedSnapshotAsync(factory, activeGenerationId, referencedGenerationId);
         var store = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
 
         var snapshot = await store.ReadActiveAsync(CancellationToken.None);
@@ -30,9 +30,40 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         Assert.Equal(activeGenerationId, snapshot.ActiveGenerationId);
         Assert.NotNull(snapshot.Generation);
         Assert.Equal(activeGenerationId, snapshot.Generation!.Id);
-        Assert.Equal([1L, 2L], snapshot.Membership.Select(member => member.VectorId));
+        Assert.Equal(vectorIds.Order(), snapshot.Membership.Select(member => member.VectorId));
         Assert.Contains(activeGenerationId, snapshot.ReferencedGenerationIds);
         Assert.Contains(referencedGenerationId, snapshot.ReferencedGenerationIds);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Recovery_snapshot_retains_a_shared_sql_index_path_reference()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var activeGenerationId = Guid.NewGuid();
+        var referencedGenerationId = Guid.NewGuid();
+        const string sharedIndexPath = @"C:\flux\indexes\shared";
+        await SeedSnapshotAsync(factory, activeGenerationId, referencedGenerationId);
+        await using (var context = await factory.CreateDbContextAsync())
+        {
+            var generations = await context.IndexGenerations
+                .Where(generation => generation.Id == activeGenerationId || generation.Id == referencedGenerationId)
+                .ToListAsync();
+            foreach (var generation in generations)
+            {
+                generation.IndexPath = sharedIndexPath;
+            }
+
+            await context.SaveChangesAsync();
+        }
+
+        var store = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
+
+        var snapshot = await store.ReadActiveAsync(CancellationToken.None);
+
+        Assert.Contains(sharedIndexPath, snapshot.ReferencedIndexPaths);
+        Assert.Equal(1, snapshot.ReferencedIndexPaths.Count(path =>
+            string.Equals(path, sharedIndexPath, StringComparison.OrdinalIgnoreCase)));
     }
 
     [NativeSqlServerFact]
@@ -164,7 +195,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         Assert.Contains("\"category\":\"unknown\"", audit.DetailsJson, StringComparison.Ordinal);
     }
 
-    private static async Task SeedSnapshotAsync(
+    private static async Task<long[]> SeedSnapshotAsync(
         IDbContextFactory<FluxKnowledgeDbContext> factory,
         Guid activeGenerationId,
         Guid referencedGenerationId)
@@ -216,8 +247,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         };
         context.TextChunks.Add(chunk);
         await context.SaveChangesAsync();
-        context.Vectors.AddRange(
-            new VectorEntity
+        var firstVector = new VectorEntity
         {
             TextChunkId = chunk.Id,
             SourceRevision = 1,
@@ -228,26 +258,28 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values)),
             IndexGenerationId = referencedGenerationId,
             CreatedAtUtc = DateTimeOffset.UtcNow
-        },
-            new VectorEntity
-            {
-                TextChunkId = chunk.Id,
-                SourceRevision = 1,
-                ModelFingerprint = "deterministic-tokenhash-v1:256",
-                Dimensions = 256,
-                Values = values,
-                TextChunkContentHash = chunk.ContentHash,
-                PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values)),
-                IndexGenerationId = activeGenerationId,
-                CreatedAtUtc = DateTimeOffset.UtcNow
-            });
+        };
+        var secondVector = new VectorEntity
+        {
+            TextChunkId = chunk.Id,
+            SourceRevision = 1,
+            ModelFingerprint = "deterministic-tokenhash-v1:256",
+            Dimensions = 256,
+            Values = values,
+            TextChunkContentHash = chunk.ContentHash,
+            PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values)),
+            IndexGenerationId = activeGenerationId,
+            CreatedAtUtc = DateTimeOffset.UtcNow
+        };
+        context.Vectors.AddRange(firstVector, secondVector);
         await context.SaveChangesAsync();
         context.IndexGenerationVectors.AddRange(
-            new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = 2 },
-            new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = 1 });
+            new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = secondVector.VectorId },
+            new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = firstVector.VectorId });
         var state = await context.IndexState.SingleAsync(item => item.Id == 1);
         state.ActiveIndexGenerationId = activeGenerationId;
         await context.SaveChangesAsync();
+        return [firstVector.VectorId, secondVector.VectorId];
     }
 
     private static IndexGenerationEntity CreateGeneration(Guid id) => new()

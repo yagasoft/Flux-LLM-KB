@@ -7,7 +7,8 @@ public sealed record DerivedIndexRecoverySqlSnapshot(
     Guid? ActiveGenerationId,
     IndexGenerationDescriptor? Generation,
     ImmutableArray<CanonicalVector> Membership,
-    ImmutableHashSet<Guid> ReferencedGenerationIds);
+    ImmutableHashSet<Guid> ReferencedGenerationIds,
+    ImmutableHashSet<string> ReferencedIndexPaths);
 
 public interface IDerivedIndexRecoveryLease : IAsyncDisposable;
 
