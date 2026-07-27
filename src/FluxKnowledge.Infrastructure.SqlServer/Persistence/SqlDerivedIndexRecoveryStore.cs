@@ -20,9 +20,24 @@ public sealed class SqlDerivedIndexRecoveryStore(
     public async ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(
         CancellationToken cancellationToken)
     {
-        await using var context = await contextFactory
+        await using var executionContext = await contextFactory
             .CreateDbContextAsync(cancellationToken)
             .ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var context = await contextFactory
+                .CreateDbContextAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return await ReadActiveWithinTransactionAsync(context, cancellationToken)
+                .ConfigureAwait(false);
+        }).ConfigureAwait(false);
+    }
+
+    private static async Task<DerivedIndexRecoverySqlSnapshot> ReadActiveWithinTransactionAsync(
+        FluxKnowledgeDbContext context,
+        CancellationToken cancellationToken)
+    {
         await using var transaction = await context.Database
             .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
             .ConfigureAwait(false);
@@ -138,6 +153,7 @@ public sealed class SqlDerivedIndexRecoveryStore(
         }
         catch (SqlException) when (cancellationToken.IsCancellationRequested)
         {
+            await connection.DisposeAsync().ConfigureAwait(false);
             throw new OperationCanceledException(cancellationToken);
         }
         catch

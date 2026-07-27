@@ -100,11 +100,16 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var otherStore = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
         var held = await store.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
         Assert.NotNull(held);
-        await using var heldLease = held!;
+        var heldLease = held!;
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
             await otherStore.TryAcquireExclusiveLeaseAsync(TimeSpan.FromSeconds(5), cancellation.Token));
+        await heldLease.DisposeAsync();
+
+        var recovered = await otherStore.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(recovered);
+        await recovered!.DisposeAsync();
     }
 
     [NativeSqlServerFact]
