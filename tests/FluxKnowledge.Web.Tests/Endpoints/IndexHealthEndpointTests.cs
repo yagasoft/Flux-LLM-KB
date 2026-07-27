@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Http.Json;
 using System.Text.Json;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Web.Endpoints;
@@ -26,24 +25,32 @@ public sealed class IndexHealthEndpointTests
 
         using var response = await application.GetTestClient().GetAsync("/api/index-health");
         var payload = await response.Content.ReadAsStringAsync();
-        var result = JsonSerializer.Deserialize<IndexHealthResponse>(payload, JsonOptions);
+        using var document = JsonDocument.Parse(payload);
+        var result = document.RootElement;
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.NotNull(result);
-        Assert.Equal("RetryScheduled", result.State);
-        Assert.Equal("11111111222233334444555555555555", result.ActiveGeneration);
-        Assert.Equal(DateTimeOffset.Parse("2026-07-27T08:00:00Z"), result.LastCompletedAtUtc);
-        Assert.Equal(DateTimeOffset.Parse("2026-07-27T08:00:05Z"), result.NextRetryAtUtc);
-        Assert.Equal("TransientIo", result.FailureCategory);
-        Assert.Equal(3, result.CleanedCandidateCount);
-        Assert.DoesNotContain("path", payload, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("error", payload, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(JsonValueKind.Object, result.ValueKind);
+        Assert.Equal(
+            new[]
+            {
+                "activeGeneration",
+                "cleanedCandidateCount",
+                "failureCategory",
+                "lastCompletedAtUtc",
+                "nextRetryAtUtc",
+                "state"
+            },
+            result.EnumerateObject().Select(property => property.Name).OrderBy(name => name, StringComparer.Ordinal));
+        Assert.Equal("RetryScheduled", result.GetProperty("state").GetString());
+        Assert.Equal("11111111222233334444555555555555", result.GetProperty("activeGeneration").GetString());
+        Assert.Equal("2026-07-27T08:00:00+00:00", result.GetProperty("lastCompletedAtUtc").GetString());
+        Assert.Equal("2026-07-27T08:00:05+00:00", result.GetProperty("nextRetryAtUtc").GetString());
+        Assert.Equal("TransientIo", result.GetProperty("failureCategory").GetString());
+        Assert.Equal(3, result.GetProperty("cleanedCandidateCount").GetInt32());
 
         using var post = await application.GetTestClient().PostAsync("/api/index-health", null);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, post.StatusCode);
     }
-
-    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private static async Task<WebApplication> CreateApplicationAsync(DerivedIndexRecoverySnapshot snapshot)
     {
@@ -55,14 +62,6 @@ public sealed class IndexHealthEndpointTests
         await application.StartAsync();
         return application;
     }
-
-    private sealed record IndexHealthResponse(
-        string State,
-        string? ActiveGeneration,
-        DateTimeOffset? LastCompletedAtUtc,
-        DateTimeOffset? NextRetryAtUtc,
-        string? FailureCategory,
-        int CleanedCandidateCount);
 
     private sealed class FixedRecoveryStatus(DerivedIndexRecoverySnapshot snapshot)
         : IDerivedIndexRecoveryStatus

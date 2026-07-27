@@ -18,6 +18,25 @@ public sealed class OverviewProjectionState(IProjectionReader reader)
     public async ValueTask ReloadAsync(CancellationToken cancellationToken) =>
         Current = await reader.ReadOverviewAsync(cancellationToken).ConfigureAwait(false);
 
+    public async ValueTask<StatusEventSubscription> SubscribeAndReloadAsync(
+        StatusEventFeed statusEvents,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(statusEvents);
+
+        var subscription = statusEvents.Subscribe();
+        try
+        {
+            await ReloadAsync(cancellationToken).ConfigureAwait(false);
+            return subscription;
+        }
+        catch
+        {
+            await subscription.DisposeAsync();
+            throw;
+        }
+    }
+
     public ValueTask HandleStatusChangedAsync(StatusChanged statusChanged, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(statusChanged);

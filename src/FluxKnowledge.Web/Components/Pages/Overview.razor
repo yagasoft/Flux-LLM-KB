@@ -46,9 +46,8 @@
 
     protected override async Task OnInitializedAsync()
     {
-        await ProjectionState.ReloadAsync(_stopping.Token);
+        _subscription = await ProjectionState.SubscribeAndReloadAsync(StatusEvents, _stopping.Token);
         _statusMessage = "Pipeline status loaded.";
-        _subscription = StatusEvents.Subscribe();
         _ = ObserveAsync(_subscription, _stopping.Token);
     }
 
