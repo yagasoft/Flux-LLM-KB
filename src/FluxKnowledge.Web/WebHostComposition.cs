@@ -2,6 +2,7 @@ using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Application.Search;
 using FluxKnowledge.Infrastructure.Inference;
 using FluxKnowledge.Infrastructure.SqlServer;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
@@ -34,6 +35,7 @@ public static class WebHostComposition
         services.AddSingleton(ingressOptions);
         services.AddSingleton<IUtf8FileSourceReader, Utf8FileSourceReader>();
         services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
+        services.AddScoped<ISearchService, HybridSearchService>();
         services.AddFluxKnowledgeOutboxWorkers();
         services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
         services.AddScoped<IStageWorker, EmbedStageWorker>();

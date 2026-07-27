@@ -1,6 +1,8 @@
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
+using FluxKnowledge.Infrastructure.SqlServer.Search;
+using FluxKnowledge.Application.Ports;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -30,6 +32,8 @@ public static class ServiceCollectionExtensions
                 sqlServer => sqlServer.EnableRetryOnFailure());
 
         services.AddDbContextFactory<FluxKnowledgeDbContext>(ConfigureDatabase);
+        services.AddScoped<ILexicalSearch, SqlFullTextSearch>();
+        services.AddScoped<ISearchHydrator, SqlSearchHydrator>();
 
         return services;
     }
