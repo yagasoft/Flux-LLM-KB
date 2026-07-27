@@ -10,7 +10,8 @@ namespace FluxKnowledge.Infrastructure.Usearch;
 public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatus, IDerivedIndexRecoverySignal
 {
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly DerivedIndexFileSystem _fileSystem;
+    private readonly InvalidOperationException? _configurationFailure;
+    private readonly DerivedIndexFileSystem? _fileSystem;
     private readonly IStatusEventPublisher? _statusPublisher;
     private readonly TimeProvider _timeProvider;
     private readonly DerivedIndexRecoveryOptions _options;
@@ -20,11 +21,20 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     private int _episodeDetectionRecorded;
 
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
+        UsearchIndexConfiguration configuration, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
+        DerivedIndexRecoveryOptions? options = null)
+    {
+        _scopeFactory = scopeFactory; _configurationFailure = configuration.Failure; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
+        _options = options ?? DerivedIndexRecoveryOptions.Default;
+    }
+
+    public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         DerivedIndexFileSystem fileSystem, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
         DerivedIndexRecoveryOptions? options = null)
     {
-        _scopeFactory = scopeFactory; _fileSystem = fileSystem; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
+        _scopeFactory = scopeFactory; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
         _options = options ?? DerivedIndexRecoveryOptions.Default;
+        _fileSystem = fileSystem;
     }
 
     public DerivedIndexRecoverySnapshot Snapshot => Volatile.Read(ref _snapshot);
@@ -65,7 +75,14 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             return;
         }
 
+        if (_configurationFailure is { } configurationFailure)
+        {
+            await RecordConfigurationFailureAsync(configurationFailure, cancellationToken);
+            return;
+        }
+
         IDerivedIndexRecoveryStore? recoveryStore = null;
+        DerivedIndexFileSystem? fileSystem = null;
         Guid? activeId = beforeAttempt.ActiveGenerationId;
         string? replacementPath = null;
         var sqlUpdated = false;
@@ -75,6 +92,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
             recoveryStore = scope.ServiceProvider.GetRequiredService<IDerivedIndexRecoveryStore>();
+            fileSystem = _fileSystem ?? scope.ServiceProvider.GetRequiredService<DerivedIndexFileSystem>();
             var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
             var validator = scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>();
             var started = _timeProvider.GetUtcNow();
@@ -98,10 +116,10 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
             activeId = sql.ActiveGenerationId;
             ValidateSql(sql);
-            if (!_fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
-                !_fileSystem.TryCanonicalInRoot(sql.Generation!.IndexPath, out var activePath) ||
-                !_fileSystem.IsIntendedGenerationPath(activePath) ||
-                Directory.Exists(activePath) && !_fileSystem.IsValidDirectory(activePath))
+            if (!fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
+                !fileSystem.TryCanonicalInRoot(sql.Generation!.IndexPath, out var activePath) ||
+                !fileSystem.IsIntendedGenerationPath(activePath) ||
+                Directory.Exists(activePath) && !fileSystem.IsValidDirectory(activePath))
             {
                 throw new InvalidOperationException("The derived-index path configuration is invalid.");
             }
@@ -170,7 +188,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             {
                 throw new DerivedIndexRecoveryActiveGenerationChangedException();
             }
-            if (!_fileSystem.AreAllReferencedGenerationPathsSafe(fresh.ReferencedIndexPaths))
+            if (!fileSystem.AreAllReferencedGenerationPathsSafe(fresh.ReferencedIndexPaths))
             {
                 throw new InvalidOperationException("The derived-index path configuration is invalid.");
             }
@@ -178,9 +196,9 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             var cleanupSucceeded = true;
             try
             {
-                _fileSystem.TryQuarantine(oldPath, fresh.ReferencedIndexPaths);
-                cleaned = _fileSystem.Cleanup("staging", _options.StagingRetention, _timeProvider.GetUtcNow(), fresh.ReferencedIndexPaths) +
-                    _fileSystem.Cleanup("quarantine", _options.QuarantineRetention, _timeProvider.GetUtcNow(), fresh.ReferencedIndexPaths);
+                fileSystem.TryQuarantine(oldPath, fresh.ReferencedIndexPaths);
+                cleaned = fileSystem.Cleanup("staging", _options.StagingRetention, _timeProvider.GetUtcNow(), fresh.ReferencedIndexPaths) +
+                    fileSystem.Cleanup("quarantine", _options.QuarantineRetention, _timeProvider.GetUtcNow(), fresh.ReferencedIndexPaths);
             }
             catch (Exception) when (sqlUpdated)
             {
@@ -193,9 +211,9 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             if (!sqlUpdated && exception is RecoveryCandidatePlacementException placement) replacementPath = placement.Path;
-            if (!sqlUpdated && replacementPath is not null && recoveryStore is not null)
+            if (!sqlUpdated && replacementPath is not null && recoveryStore is not null && fileSystem is not null)
             {
-                try { _fileSystem.TryQuarantine(replacementPath, (await recoveryStore.ReadActiveAsync(cancellationToken)).ReferencedIndexPaths); }
+                try { fileSystem.TryQuarantine(replacementPath, (await recoveryStore.ReadActiveAsync(cancellationToken)).ReferencedIndexPaths); }
                 catch (Exception) { }
             }
             await RecordFaultAsync(recoveryStore, exception, activeId, detectionRecorded, cancellationToken);
@@ -206,6 +224,28 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     {
         Volatile.Write(ref _snapshot, new(DerivedIndexRecoveryState.Recovering, activeId, null, null, category, 0));
         await PublishAsync(cancellationToken);
+    }
+
+    private async ValueTask RecordConfigurationFailureAsync(InvalidOperationException failure, CancellationToken cancellationToken)
+    {
+        AsyncServiceScope scope;
+        try
+        {
+            scope = _scopeFactory.CreateAsyncScope();
+        }
+        catch (Exception)
+        {
+            await RecordFaultAsync(null, failure, null, false, cancellationToken);
+            return;
+        }
+
+        await using (scope)
+        {
+            IDerivedIndexRecoveryStore? recoveryStore = null;
+            try { recoveryStore = scope.ServiceProvider.GetService<IDerivedIndexRecoveryStore>(); }
+            catch (Exception) { }
+            await RecordFaultAsync(recoveryStore, failure, null, false, cancellationToken);
+        }
     }
 
     private async ValueTask RecordFaultAsync(IDerivedIndexRecoveryStore? recoveryStore, Exception exception, Guid? activeGenerationId,
