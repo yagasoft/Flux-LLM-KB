@@ -17,6 +17,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     private readonly Channel<DerivedIndexRecoveryFault> _signals = Channel.CreateBounded<DerivedIndexRecoveryFault>(1);
     private DerivedIndexRecoverySnapshot _snapshot = new(DerivedIndexRecoveryState.Starting, null, null, null, null, 0);
     private int _attempts;
+    private int _episodeDetectionRecorded;
 
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         DerivedIndexFileSystem fileSystem, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
@@ -68,6 +69,8 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         Guid? activeId = beforeAttempt.ActiveGenerationId;
         string? replacementPath = null;
         var sqlUpdated = false;
+        var recoveryEpisode = IsRecoveryEpisode(beforeAttempt);
+        var detectionRecorded = Volatile.Read(ref _episodeDetectionRecorded) != 0;
         try
         {
             await using var scope = _scopeFactory.CreateAsyncScope();
@@ -75,11 +78,17 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
             var validator = scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>();
             var started = _timeProvider.GetUtcNow();
+            if (recoveryEpisode)
+            {
+                await EnsureDetectionAsync(recoveryStore, activeId, beforeAttempt.FailureCategory, cancellationToken);
+                detectionRecorded = true;
+            }
             await using var lease = await recoveryStore.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, cancellationToken);
             if (lease is null)
             {
-                await recoveryStore.AppendAuditAsync(new("recovery_lock_contended", activeId, null, _attempts,
+                await recoveryStore.AppendAuditAsync(new("recovery_lock_contended", activeId, beforeAttempt.FailureCategory, _attempts,
                     TimeSpan.Zero, null, 0), cancellationToken);
+                if (detectionRecorded) await MarkRecoveringAsync(activeId, beforeAttempt.FailureCategory ?? DerivedIndexRecoveryFailureCategory.TransientIo, cancellationToken);
                 return;
             }
 
@@ -94,40 +103,70 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
                 throw new InvalidOperationException("The derived-index path configuration is invalid.");
             }
 
-            await recoveryStore.AppendAuditAsync(new("recovery_attempt", activeId, null, _attempts + 1,
-                TimeSpan.Zero, null, 0), cancellationToken);
+            DerivedIndexRecoveryFailureCategory? detectedCategory = null;
             if (Directory.Exists(activePath))
             {
                 try
                 {
                     validator.Validate(activePath, sql.Generation with { IndexPath = activePath }, sql.Membership);
-                    await CompleteAsync(recoveryStore, activeId, started, 0, cancellationToken);
-                    return;
                 }
                 catch (Exception exception) when (exception is IndexGenerationValidationException or
                     FileNotFoundException or DirectoryNotFoundException or IOException)
                 {
-                    await MarkRecoveringAsync(activeId,
-                        exception is FileNotFoundException or DirectoryNotFoundException
-                            ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
-                            : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex,
-                        cancellationToken);
+                    detectedCategory = exception is FileNotFoundException or DirectoryNotFoundException
+                        ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
+                        : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex;
                 }
             }
             else
             {
-                await MarkRecoveringAsync(activeId, DerivedIndexRecoveryFailureCategory.MissingDerivedIndex, cancellationToken);
+                detectedCategory = DerivedIndexRecoveryFailureCategory.MissingDerivedIndex;
             }
+
+            if (detectedCategory is null)
+            {
+                if (recoveryEpisode)
+                {
+                    await recoveryStore.AppendAuditAsync(new("recovery_attempt", activeId, null, _attempts + 1,
+                        TimeSpan.Zero, null, 0), cancellationToken);
+                    await recoveryStore.AppendAuditAsync(new("recovery_validation_succeeded", activeId, null, _attempts + 1,
+                        _timeProvider.GetUtcNow() - started, null, 0), cancellationToken);
+                    await CompleteAsync(recoveryStore, activeId, started, 0, cancellationToken);
+                }
+                else
+                {
+                    await CompleteProbeAsync(activeId, cancellationToken);
+                }
+                return;
+            }
+
+            if (!detectionRecorded)
+            {
+                await EnsureDetectionAsync(recoveryStore, activeId, detectedCategory, cancellationToken);
+                detectionRecorded = true;
+            }
+            await MarkRecoveringAsync(activeId, detectedCategory.Value, cancellationToken);
+            await recoveryStore.AppendAuditAsync(new("recovery_attempt", activeId, detectedCategory, _attempts + 1,
+                TimeSpan.Zero, null, 0), cancellationToken);
 
             var oldPath = sql.Generation!.IndexPath;
             var replacement = await builder.BuildRecoveryCandidateAsync(sql.Generation, sql.Membership, cancellationToken);
             replacementPath = replacement.IndexPath;
-            await recoveryStore.UpdateRecoveryPathAsync(replacement.Id, replacement.IndexPath, _timeProvider.GetUtcNow(), cancellationToken);
+            if (!await recoveryStore.TryUpdateRecoveryPathAsync(activeId!.Value, oldPath, replacement.IndexPath,
+                    _timeProvider.GetUtcNow(), cancellationToken))
+            {
+                throw new DerivedIndexRecoveryActiveGenerationChangedException();
+            }
             sqlUpdated = true;
             await recoveryStore.AppendAuditAsync(new("recovery_rebuild_succeeded", activeId, null, _attempts + 1,
                 _timeProvider.GetUtcNow() - started, null, 0), cancellationToken);
 
             var fresh = await recoveryStore.ReadActiveAsync(cancellationToken);
+            if (fresh.ActiveGenerationId != activeId || fresh.Generation is null ||
+                !string.Equals(fresh.Generation.IndexPath, replacement.IndexPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new DerivedIndexRecoveryActiveGenerationChangedException();
+            }
             if (!_fileSystem.AreAllReferencedGenerationPathsSafe(fresh.ReferencedIndexPaths))
             {
                 throw new InvalidOperationException("The derived-index path configuration is invalid.");
@@ -156,7 +195,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
                 try { _fileSystem.TryQuarantine(replacementPath, (await recoveryStore.ReadActiveAsync(cancellationToken)).ReferencedIndexPaths); }
                 catch (Exception) { }
             }
-            await RecordFaultAsync(recoveryStore, exception, activeId, cancellationToken);
+            await RecordFaultAsync(recoveryStore, exception, activeId, detectionRecorded, cancellationToken);
         }
     }
 
@@ -166,7 +205,8 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         await PublishAsync(cancellationToken);
     }
 
-    private async ValueTask RecordFaultAsync(IDerivedIndexRecoveryStore? recoveryStore, Exception exception, Guid? activeGenerationId, CancellationToken cancellationToken)
+    private async ValueTask RecordFaultAsync(IDerivedIndexRecoveryStore? recoveryStore, Exception exception, Guid? activeGenerationId,
+        bool detectionRecorded, CancellationToken cancellationToken)
     {
         var category = exception switch
         {
@@ -184,6 +224,10 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         {
             try
             {
+                if (!detectionRecorded)
+                {
+                    await EnsureDetectionAsync(recoveryStore, activeGenerationId, category, cancellationToken);
+                }
                 await recoveryStore.AppendAuditAsync(new(decision.ShouldRetry ? "recovery_retry_scheduled" : "recovery_operator_required",
                     activeGenerationId, decision.FailureCategory, _attempts, TimeSpan.Zero, nextRetry, 0), cancellationToken);
             }
@@ -211,9 +255,29 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     {
         await recoveryStore.AppendAuditAsync(new("recovery_healthy", activeId, null, 0,
             _timeProvider.GetUtcNow() - started, null, cleaned), cancellationToken);
+        Volatile.Write(ref _episodeDetectionRecorded, 0);
         _attempts = 0;
         Volatile.Write(ref _snapshot, new(DerivedIndexRecoveryState.Healthy, activeId, _timeProvider.GetUtcNow(), null, null, cleaned));
         await PublishAsync(cancellationToken);
+    }
+
+    private async ValueTask CompleteProbeAsync(Guid? activeId, CancellationToken cancellationToken)
+    {
+        Volatile.Write(ref _episodeDetectionRecorded, 0);
+        _attempts = 0;
+        Volatile.Write(ref _snapshot, new(DerivedIndexRecoveryState.Healthy, activeId, _timeProvider.GetUtcNow(), null, null, 0));
+        await PublishAsync(cancellationToken);
+    }
+
+    private static bool IsRecoveryEpisode(DerivedIndexRecoverySnapshot snapshot) =>
+        snapshot.State is DerivedIndexRecoveryState.Recovering or DerivedIndexRecoveryState.RetryScheduled;
+
+    private async ValueTask EnsureDetectionAsync(IDerivedIndexRecoveryStore recoveryStore, Guid? activeId,
+        DerivedIndexRecoveryFailureCategory? category, CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _episodeDetectionRecorded) != 0) return;
+        await recoveryStore.AppendAuditAsync(new("recovery_detected", activeId, category, 0, TimeSpan.Zero, null, 0), cancellationToken);
+        Volatile.Write(ref _episodeDetectionRecorded, 1);
     }
 
     private ValueTask PublishAsync(CancellationToken cancellationToken) => _statusPublisher?.PublishAsync(
@@ -227,3 +291,5 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 }
 
 internal sealed class SqlMembershipValidationException : Exception;
+
+internal sealed class DerivedIndexRecoveryActiveGenerationChangedException : Exception;

@@ -33,9 +33,10 @@ public interface IDerivedIndexRecoveryStore
         TimeSpan lockTimeout,
         CancellationToken cancellationToken);
 
-    ValueTask UpdateRecoveryPathAsync(
-        Guid generationId,
-        string indexPath,
+    ValueTask<bool> TryUpdateRecoveryPathAsync(
+        Guid expectedActiveGenerationId,
+        string expectedIndexPath,
+        string replacementIndexPath,
         DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken);
 

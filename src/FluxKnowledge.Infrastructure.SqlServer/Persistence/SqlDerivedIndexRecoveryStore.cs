@@ -180,27 +180,29 @@ public sealed class SqlDerivedIndexRecoveryStore(
         }
     }
 
-    public async ValueTask UpdateRecoveryPathAsync(
-        Guid generationId,
-        string indexPath,
+    public async ValueTask<bool> TryUpdateRecoveryPathAsync(
+        Guid expectedActiveGenerationId,
+        string expectedIndexPath,
+        string replacementIndexPath,
         DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(indexPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedIndexPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(replacementIndexPath);
         try
         {
             await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-            var updated = await context.IndexGenerations
-                .Where(generation => generation.Id == generationId)
-                .ExecuteUpdateAsync(setters => setters
-                    .SetProperty(generation => generation.IndexPath, indexPath)
-                    .SetProperty(generation => generation.ValidatedAtUtc, validatedAtUtc), cancellationToken)
+            var updated = await context.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE generation
+                SET IndexPath = {replacementIndexPath}, ValidatedAtUtc = {validatedAtUtc}
+                FROM IndexGenerations AS generation
+                INNER JOIN IndexState AS state ON state.Id = 1
+                WHERE generation.Id = {expectedActiveGenerationId}
+                  AND state.ActiveIndexGenerationId = {expectedActiveGenerationId}
+                  AND generation.IndexPath = {expectedIndexPath};
+                """, cancellationToken)
                 .ConfigureAwait(false);
-            if (updated != 1)
-            {
-                throw new DerivedIndexRecoverySqlSchemaException(
-                    new InvalidOperationException("The active recovery generation no longer exists."));
-            }
+            return updated == 1;
         }
         catch (Exception exception) when (TryGetSqlException(exception, out var sqlException))
         {

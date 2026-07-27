@@ -52,7 +52,7 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
 
     public bool TryCreateRecoveryStagingDirectory(out string stagingDirectory)
     {
-        stagingDirectory = Path.Combine(_root, "staging", "recovery", Guid.NewGuid().ToString("N"));
+        stagingDirectory = Path.Combine(_root, "staging", Guid.NewGuid().ToString("N"));
         if (!TryCanonicalInRoot(stagingDirectory, out var canonical)) return false;
         Directory.CreateDirectory(canonical);
         if (!IsValidDirectory(canonical)) return false;

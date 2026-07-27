@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
@@ -81,13 +82,21 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             await using var auditContext = await factory.CreateDbContextAsync();
             var lifecycle = await auditContext.AuditEvents
                 .Where(item => item.EventType == "derived_index_recovery")
+                .OrderBy(item => item.Id)
                 .Select(item => item.DetailsJson)
                 .ToListAsync();
-            Assert.Contains(lifecycle, item => item.Contains("recovery_attempt", StringComparison.Ordinal));
-            Assert.Contains(lifecycle, item => item.Contains("recovery_rebuild_succeeded", StringComparison.Ordinal));
-            Assert.Contains(lifecycle, item => item.Contains("recovery_cleanup_completed", StringComparison.Ordinal));
-            Assert.Contains(lifecycle, item => item.Contains("recovery_healthy", StringComparison.Ordinal));
+            Assert.Collection(lifecycle,
+                item => Assert.Contains("recovery_detected", item, StringComparison.Ordinal),
+                item => Assert.Contains("recovery_attempt", item, StringComparison.Ordinal),
+                item => Assert.Contains("recovery_rebuild_succeeded", item, StringComparison.Ordinal),
+                item => Assert.Contains("recovery_cleanup_completed", item, StringComparison.Ordinal),
+                item => Assert.Contains("recovery_healthy", item, StringComparison.Ordinal));
             Assert.DoesNotContain(lifecycle, item => item.Contains(root, StringComparison.OrdinalIgnoreCase));
+
+            await coordinator.RunOnceAsync(CancellationToken.None);
+            var periodicProbeAuditCount = await auditContext.AuditEvents
+                .CountAsync(item => item.EventType == "derived_index_recovery");
+            Assert.Equal(lifecycle.Count, periodicProbeAuditCount);
         }
         finally
         {
@@ -207,6 +216,47 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     }
 
     [Fact]
+    public void Malformed_metadata_is_reported_as_an_invalid_derived_index()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, UsearchGenerationValidator.MetadataFileName), "{");
+            var generation = EmptyGeneration(directory);
+
+            Assert.Throws<IndexGenerationValidationException>(() =>
+                new UsearchGenerationValidator().Validate(directory, generation, []));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Native_index_open_failure_is_reported_as_an_invalid_derived_index()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var generation = EmptyGeneration(directory);
+            File.WriteAllText(Path.Combine(directory, UsearchGenerationValidator.MetadataFileName), JsonSerializer.Serialize(
+                new UsearchGenerationValidator.Metadata(generation.Id, generation.ModelFingerprint, "cos", generation.Dimensions,
+                    generation.VectorCount, generation.MetadataChecksum)));
+            File.WriteAllText(Path.Combine(directory, UsearchGenerationValidator.IndexFileName), "not a USearch index");
+
+            Assert.Throws<IndexGenerationValidationException>(() =>
+                new UsearchGenerationValidator().Validate(directory, generation, []));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Retry_scheduled_state_rejects_reader_signals_and_an_early_sixth_attempt()
     {
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
@@ -245,6 +295,24 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
 
             Assert.Equal(0, cleaned);
             Assert.True(Directory.Exists(candidate));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Recovery_staging_candidate_is_a_direct_child_of_staging()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            var fileSystem = new DerivedIndexFileSystem(new UsearchIndexOptions(root));
+
+            Assert.True(fileSystem.TryCreateRecoveryStagingDirectory(out var staging));
+
+            Assert.Equal(Path.Combine(root, "staging"), Path.GetDirectoryName(staging));
         }
         finally
         {
@@ -597,15 +665,41 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var validatedAt = DateTimeOffset.UtcNow;
         var store = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
 
-        await store.UpdateRecoveryPathAsync(generationId, @"C:\safe\generations\replacement", validatedAt, CancellationToken.None);
+        var updateSucceeded = await store.TryUpdateRecoveryPathAsync(generationId, before.IndexPath,
+            @"C:\safe\generations\replacement", validatedAt, CancellationToken.None);
 
         await using var verification = await factory.CreateDbContextAsync();
+        Assert.True(updateSucceeded);
         var updated = await verification.IndexGenerations.SingleAsync(item => item.Id == generationId);
         Assert.Equal(@"C:\safe\generations\replacement", updated.IndexPath);
         Assert.Equal(validatedAt, updated.ValidatedAtUtc);
         Assert.Equal(immutable, (updated.ModelFingerprint, updated.Dimensions, updated.MetadataChecksum, updated.VectorCount, updated.CreatedAtUtc));
         Assert.Equal(2, await verification.IndexGenerations.CountAsync());
         Assert.Equal(generationId, (await verification.IndexState.SingleAsync(item => item.Id == 1)).ActiveIndexGenerationId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Recovery_path_update_does_not_mutate_when_the_active_generation_has_changed()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var generationId = Guid.NewGuid();
+        var replacementActiveGenerationId = Guid.NewGuid();
+        await SeedSnapshotAsync(factory, generationId, replacementActiveGenerationId);
+        await using var beforeContext = await factory.CreateDbContextAsync();
+        var generation = await beforeContext.IndexGenerations.SingleAsync(item => item.Id == generationId);
+        var originalPath = generation.IndexPath;
+        var state = await beforeContext.IndexState.SingleAsync(item => item.Id == 1);
+        state.ActiveIndexGenerationId = replacementActiveGenerationId;
+        await beforeContext.SaveChangesAsync();
+        var store = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
+
+        var updated = await store.TryUpdateRecoveryPathAsync(generationId, originalPath,
+            @"C:\safe\generations\replacement", DateTimeOffset.UtcNow, CancellationToken.None);
+
+        await using var verification = await factory.CreateDbContextAsync();
+        Assert.False(updated);
+        Assert.Equal(originalPath, (await verification.IndexGenerations.SingleAsync(item => item.Id == generationId)).IndexPath);
     }
 
     [NativeSqlServerFact]
@@ -858,6 +952,13 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         return [firstVector.VectorId, secondVector.VectorId];
     }
 
+    private static IndexGenerationDescriptor EmptyGeneration(string indexPath)
+    {
+        const string fingerprint = "test-model";
+        return new IndexGenerationDescriptor(Guid.NewGuid(), fingerprint, 1, indexPath,
+            UsearchGenerationValidator.ComputeChecksum(fingerprint, 1, []), 0);
+    }
+
     private static IndexGenerationEntity CreateGeneration(Guid id, string indexPath = "pending") => new()
     {
         Id = id,
@@ -964,7 +1065,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     {
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) => throw fault;
         public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) => throw fault;
-        public ValueTask UpdateRecoveryPathAsync(Guid generationId, string indexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw fault;
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath, string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw fault;
         public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken) => ValueTask.CompletedTask;
     }
 
@@ -981,8 +1082,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             if (Acquisitions <= failures) throw new IOException("injected transient failure");
             return inner.TryAcquireExclusiveLeaseAsync(lockTimeout, cancellationToken);
         }
-        public ValueTask UpdateRecoveryPathAsync(Guid generationId, string indexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) =>
-            inner.UpdateRecoveryPathAsync(generationId, indexPath, validatedAtUtc, cancellationToken);
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath, string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) =>
+            inner.TryUpdateRecoveryPathAsync(expectedActiveGenerationId, expectedIndexPath, replacementIndexPath, validatedAtUtc, cancellationToken);
         public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken) =>
             inner.AppendAuditAsync(auditEvent, cancellationToken);
     }
@@ -1000,7 +1101,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             if (Acquisitions == 5) cancellation.Cancel();
             throw new IOException("injected transient failure");
         }
-        public ValueTask UpdateRecoveryPathAsync(Guid generationId, string indexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath, string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken) =>
             ValueTask.CompletedTask;
     }
@@ -1016,7 +1117,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             Acquisitions++;
             throw new IOException("injected transient failure");
         }
-        public ValueTask UpdateRecoveryPathAsync(Guid generationId, string indexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath, string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken) => ValueTask.CompletedTask;
     }
 
