@@ -86,7 +86,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
         try
         {
-            var coordinator = CreateFaultingCoordinator(root, new UnauthorizedAccessException("injected"));
+            using var fixture = CreateFaultingCoordinator(root, new UnauthorizedAccessException("injected"));
+            var coordinator = fixture.Coordinator;
 
             await coordinator.RunOnceAsync(CancellationToken.None);
 
@@ -106,7 +107,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
         try
         {
-            var coordinator = CreateFaultingCoordinator(root, new InvalidOperationException("configuration invalid"));
+            using var fixture = CreateFaultingCoordinator(root, new InvalidOperationException("configuration invalid"));
+            var coordinator = fixture.Coordinator;
 
             await coordinator.RunOnceAsync(CancellationToken.None);
 
@@ -155,6 +157,28 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
 
             var cleaned = new DerivedIndexFileSystem(new UsearchIndexOptions(root)).Cleanup(
                 "arbitrary", TimeSpan.Zero, DateTimeOffset.UtcNow, []);
+
+            Assert.Equal(0, cleaned);
+            Assert.True(Directory.Exists(candidate));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Cleanup_retains_a_candidate_when_any_sql_reference_is_outside_the_root()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            var candidate = Path.Combine(root, "staging", "candidate");
+            Directory.CreateDirectory(candidate);
+            Directory.SetLastWriteTimeUtc(candidate, DateTime.UtcNow.AddDays(-2));
+
+            var cleaned = new DerivedIndexFileSystem(new UsearchIndexOptions(root)).Cleanup(
+                "staging", TimeSpan.Zero, DateTimeOffset.UtcNow, [Path.GetTempPath()]);
 
             Assert.Equal(0, cleaned);
             Assert.True(Directory.Exists(candidate));
@@ -445,7 +469,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         CreatedAtUtc = DateTimeOffset.UtcNow
     };
 
-    private static DerivedIndexRecoveryCoordinator CreateFaultingCoordinator(string root, Exception fault)
+    private static FaultingCoordinatorFixture CreateFaultingCoordinator(string root, Exception fault)
     {
         var services = new ServiceCollection();
         var options = new UsearchIndexOptions(root);
@@ -457,8 +481,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         services.AddSingleton<DerivedIndexFileSystem>();
         services.AddSingleton(TimeProvider.System);
         services.AddSingleton<DerivedIndexRecoveryCoordinator>();
-        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true })
-            .GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        return new FaultingCoordinatorFixture(provider, provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
     }
 
     private sealed class FaultingRecoveryStore(Exception fault) : IDerivedIndexRecoveryStore
@@ -476,5 +500,10 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         public ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(Guid indexGenerationId, CancellationToken cancellationToken) => ValueTask.FromResult<IndexGenerationDescriptor?>(null);
         public ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken) => ValueTask.FromResult<Guid?>(null);
         public ValueTask UpdateGenerationMetadataAsync(IndexGenerationDescriptor generation, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed record FaultingCoordinatorFixture(ServiceProvider Provider, DerivedIndexRecoveryCoordinator Coordinator) : IDisposable
+    {
+        public void Dispose() => Provider.Dispose();
     }
 }

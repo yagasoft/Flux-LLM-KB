@@ -31,7 +31,7 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
         if (!TryCanonicalInRoot(path, out var canonical)) return false;
         foreach (var reference in referencedPaths)
         {
-            if (!TryCanonicalInRoot(reference, out var referenced)) continue;
+            if (!TryCanonicalInRoot(reference, out var referenced)) return false;
             if (IsSameOrUnder(canonical, referenced) || IsSameOrUnder(referenced, canonical)) return false;
         }
         return true;
