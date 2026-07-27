@@ -322,9 +322,12 @@ Review corrections:
 
 Residual concerns:
 
-- the completed Phase 2 recovery slice now cleans aged, unreferenced derived
-  candidates while preserving SQL-referenced paths; derived-index orphan
-  cleanup is therefore no longer a residual Phase 2 hardening item;
+- a completed Publish replay can build or reuse a derived candidate directory
+  before SQL recognises the already-completed dispatch. SQL authority and the
+  active pointer remain protected. Phase 2 recovery cleanup is limited to aged,
+  unreferenced direct children of the `staging` or `quarantine` roots; the
+  disposition of an unreferenced `generations` candidate remains deliberately
+  out of scope pending a separately designed safety contract;
 - the SQL hydration explanation test rejects backslash path leakage but does not
   independently assert every forward-slash form. Current explanation production
   emits rank contributions only; strengthen the guarded assertion in a later
@@ -350,9 +353,10 @@ Residual concerns:
 
 At `b263e53` on 2026-07-27, local verification confirmed recovery of a missing
 or invalid active derived index from immutable SQL membership, bounded retries
-for recoverable failures, safe cleanup of aged unreferenced candidates,
-readiness gating until validation, and a sanitised local status projection. SQL
-remains authoritative and recovery does not replace the active pointer.
+for recoverable failures, safe cleanup of aged unreferenced staging or
+quarantine candidates, readiness gating until validation, and a sanitised local
+status projection. SQL remains authoritative and recovery does not replace the
+active pointer.
 
 - Locked restore passed. The Release `-warnaserror` build passed with 0 warnings
   and 0 errors.
