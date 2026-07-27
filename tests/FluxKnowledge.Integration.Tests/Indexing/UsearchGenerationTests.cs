@@ -48,6 +48,37 @@ public sealed class UsearchGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Pointer_replacement_dispose_race_stops_the_new_reader_before_a_wrong_result()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var first = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        store.Record(first);
+        store.UseSecondVector = true;
+        var second = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        store.Record(second);
+        store.ActiveGeneration = first.Generation.Id;
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<CachingStore>());
+        services.AddSingleton<UsearchAnnIndex>();
+        using var provider = services.BuildServiceProvider();
+        var reader = provider.GetRequiredService<UsearchAnnIndex>();
+
+        var initial = await reader.SearchAsync(Vector(0), 1, CancellationToken.None);
+        store.ActiveGeneration = second.Generation.Id;
+        store.BlockNextGenerationRead();
+        var replacement = reader.SearchAsync(Vector(1), 1, CancellationToken.None).AsTask();
+        await store.GenerationReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        reader.Dispose();
+        store.ReleaseGenerationRead();
+
+        Assert.Equal(11, Assert.Single(initial).VectorId);
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await replacement);
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await reader.SearchAsync(Vector(1), 1, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Active_reader_reuses_a_matching_generation_and_replaces_it_after_the_sql_pointer_changes()
     {
         var store = new CachingStore();
@@ -114,7 +145,11 @@ public sealed class UsearchGenerationTests : IDisposable
         public Guid ActiveGeneration { get; set; }
         public bool UseSecondVector { get; set; }
         public int GenerationReads { get; private set; }
+        public TaskCompletionSource<bool> GenerationReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private TaskCompletionSource<bool>? _generationReadRelease;
         public void ResetGenerationReads() => GenerationReads = 0;
+        public void BlockNextGenerationRead() => _generationReadRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void ReleaseGenerationRead() => _generationReadRelease?.TrySetResult(true);
         public void Record(IndexGenerationCandidateSnapshot snapshot)
         {
             _generations[snapshot.Generation.Id] = snapshot.Generation;
@@ -123,7 +158,18 @@ public sealed class UsearchGenerationTests : IDisposable
         public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(FluxKnowledge.Domain.Common.PipelineRecordId pipelineRecordId, long sourceRevision, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalTextChunk>>([]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(Guid indexGenerationId, CancellationToken cancellationToken) => ValueTask.FromResult(_memberships[indexGenerationId]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalVector>>([UseSecondVector ? Vector(22, 1) : Vector(11, 0)]);
-        public ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(Guid indexGenerationId, CancellationToken cancellationToken) { GenerationReads++; return ValueTask.FromResult<IndexGenerationDescriptor?>(_generations[indexGenerationId]); }
+        public async ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(Guid indexGenerationId, CancellationToken cancellationToken)
+        {
+            GenerationReads++;
+            var release = _generationReadRelease;
+            if (release is not null)
+            {
+                GenerationReadStarted.TrySetResult(true);
+                await release.Task.WaitAsync(cancellationToken);
+                _generationReadRelease = null;
+            }
+            return _generations[indexGenerationId];
+        }
         public ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken) => ValueTask.FromResult<Guid?>(ActiveGeneration);
         public ValueTask UpdateGenerationMetadataAsync(IndexGenerationDescriptor generation, CancellationToken cancellationToken) { _generations[generation.Id] = generation; _memberships[generation.Id] = UseSecondVector ? [Vector(22, 1)] : [Vector(11, 0)]; return ValueTask.CompletedTask; }
         private static CanonicalVector Vector(long id, int dimension) { var values = UsearchGenerationTests.Vector(dimension).ToArray(); var bytes = new byte[values.Length * sizeof(float)]; Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length); return new CanonicalVector(id, id, "deterministic-tokenhash-v1:256", 256, bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), 1); }

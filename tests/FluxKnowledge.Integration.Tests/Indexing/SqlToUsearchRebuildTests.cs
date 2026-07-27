@@ -2,6 +2,8 @@ using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
+using FluxKnowledge.Domain.Jobs;
+using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.Inference;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
@@ -100,6 +102,90 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
 
         Assert.Equal(allVectors, membership);
         Assert.True(membership.Count >= 2);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Prebuilt_snapshot_is_superseded_by_a_newer_publish_without_pointer_regression()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        var stale = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        await environment.AddAndPumpAsync("second source");
+        var active = await environment.ActiveGenerationAsync();
+        var transition = new SqlStageTransitionStore(environment.Factory);
+
+        var result = await transition.TransitionAsync(
+            await ClaimPublishAsync(environment, stale),
+            CancellationToken.None);
+
+        Assert.False(result.ExistingTransition);
+        Assert.NotEqual(stale.Generation.Id, active.Id);
+        Assert.True(File.Exists(Path.Combine(stale.Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
+        Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Completed_publish_replay_does_not_duplicate_membership_or_replace_a_valid_placement()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "replay source");
+        var active = await environment.ActiveGenerationAsync();
+        var candidate = await environment.Builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var transition = new SqlStageTransitionStore(environment.Factory);
+        var request = await ClaimPublishAsync(environment, candidate);
+        var first = await transition.TransitionAsync(request, CancellationToken.None);
+        var replay = await transition.TransitionAsync(request, CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var members = await context.IndexGenerationVectors.Where(member => member.GenerationId == active.Id).ToListAsync();
+
+        Assert.False(first.ExistingTransition);
+        Assert.True(replay.ExistingTransition);
+        Assert.Equal(first.ArtifactId, replay.ArtifactId);
+        Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        Assert.Equal(members.Select(member => member.VectorId).Distinct().Count(), members.Count);
+        Assert.True(File.Exists(Path.Combine(candidate.Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
+    }
+
+    private async Task<StageTransitionRequest> ClaimPublishAsync(
+        PipelineEnvironment environment,
+        IndexGenerationCandidateSnapshot candidate)
+    {
+        var now = DateTimeOffset.UtcNow;
+        await SqlTestData.SeedWorkItemAsync(
+            _fixture,
+            now,
+            PublicJobState.WorkerQueued,
+            leaseExpiresAtUtc: null,
+            stage: PipelineStage.Publish,
+            operation: PipelineOperations.Publish);
+        var outbox = await new SqlOutboxStore(environment.Factory).ClaimNextDueAsync(
+            "task-5-publish-dispatcher",
+            now.AddMinutes(1),
+            TimeSpan.FromMinutes(2),
+            [PipelineOperations.Publish],
+            CancellationToken.None);
+        Assert.NotNull(outbox);
+        var job = await new SqlJobClaimStore(environment.Factory).ClaimForDispatchAsync(
+            outbox!,
+            "task-5-publish-worker",
+            now.AddMinutes(1),
+            TimeSpan.FromMinutes(2),
+            CancellationToken.None);
+        Assert.NotNull(job);
+        return new StageTransitionRequest(
+            outbox!,
+            job!,
+            new StageArtifact(
+                Guid.NewGuid(),
+                PipelineStage.Publish,
+                candidate.Generation.MetadataChecksum,
+                "application/vnd.fluxknowledge.usearch-generation",
+                candidate.Generation.Id.ToString("N"),
+                now),
+            null,
+            null,
+            nameof(SqlToUsearchRebuildTests),
+            new IndexingStageOutput(
+                ActivateGeneration: candidate.Generation,
+                ActivateMembership: candidate.Vectors));
     }
 
     private sealed class ThrowingValidator : UsearchGenerationValidator

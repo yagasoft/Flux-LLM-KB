@@ -135,3 +135,34 @@ the explicit disposable SQL connection.
 Additional guarded regression source covers deleted-latest revision eligibility
 and repeated active-generation fixture cleanup. Both compile and skip locally
 without the disposable SQL connection; no database was opened.
+
+## Correction round 3: stale and replay evidence
+
+Completed source coverage for the requested publication and reader races:
+
+- A guarded disposable-SQL test builds a first-corpus candidate, publishes a
+  newer two-source corpus, then executes a real durable Publish transition for
+  the prebuilt candidate. The transition completes its artefact/delivery but
+  leaves the newer active pointer unchanged.
+- A guarded disposable-SQL test executes a placed Publish transition twice with
+  the same completed delivery. The replay returns the original artefact,
+  reports `ExistingTransition`, keeps the active pointer, and verifies the
+  generation membership has no duplicate vector IDs.
+- A deterministic non-SQL test opens generation one, changes the pointer to
+  generation two, blocks the replacement load, and disposes the reader before
+  release. The in-flight replacement and all later searches throw
+  `ObjectDisposedException`; no empty or wrong-generation result is returned.
+
+Fresh focused evidence:
+
+```powershell
+dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~UsearchGenerationTests|FullyQualifiedName~SqlToUsearchRebuildTests"
+dotnet build FluxKnowledge.slnx --configuration Release --no-restore
+git diff --check
+```
+
+The focused suite passed 4/4 non-SQL tests and skipped 6/6 guarded native-SQL
+tests because `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` remains unset. The Release
+build passed with zero warnings and errors; `git diff --check` passed. No SQL
+connection, target migration, deployment, restart, model/runtime or GPU asset
+was touched.
