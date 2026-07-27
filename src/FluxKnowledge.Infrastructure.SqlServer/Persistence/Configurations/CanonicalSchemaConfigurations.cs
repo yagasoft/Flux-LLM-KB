@@ -241,6 +241,24 @@ public sealed class IndexStateConfiguration : IEntityTypeConfiguration<IndexStat
     }
 }
 
+public sealed class IndexGenerationVectorConfiguration : IEntityTypeConfiguration<IndexGenerationVectorEntity>
+{
+    public void Configure(EntityTypeBuilder<IndexGenerationVectorEntity> builder)
+    {
+        builder.ToTable("IndexGenerationVectors");
+        builder.HasKey(entity => new { entity.GenerationId, entity.VectorId });
+        builder.HasIndex(entity => entity.VectorId);
+        builder.HasOne(entity => entity.Generation)
+            .WithMany()
+            .HasForeignKey(entity => entity.GenerationId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.Vector)
+            .WithMany()
+            .HasForeignKey(entity => entity.VectorId)
+            .OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
 public sealed class AuditEventConfiguration : IEntityTypeConfiguration<AuditEventEntity>
 {
     public void Configure(EntityTypeBuilder<AuditEventEntity> builder)

@@ -165,6 +165,37 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
 
         if (request.IndexingOutput?.ActivateGeneration is { } activeGeneration)
         {
+            var expectedMembership = request.IndexingOutput.ActivateMembershipVectorIds
+                ?? throw new ArgumentException("An active generation requires an immutable vector membership snapshot.", nameof(request));
+            var currentMembership = await ReadEligibleVectorIdsAsync(context, cancellationToken)
+                .ConfigureAwait(false);
+            if (!expectedMembership.Order().SequenceEqual(currentMembership))
+            {
+                throw new IndexGenerationStaleException(
+                    "The eligible SQL vector corpus changed while the immutable candidate was being published.");
+            }
+
+            var existingMembership = await context.IndexGenerationVectors
+                .Where(membership => membership.GenerationId == activeGeneration.Id)
+                .Select(membership => membership.VectorId)
+                .OrderBy(vectorId => vectorId)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (existingMembership.Count > 0 && !existingMembership.SequenceEqual(currentMembership))
+            {
+                throw new IndexGenerationStaleException(
+                    "The immutable generation ID already has incompatible SQL membership.");
+            }
+
+            if (existingMembership.Count == 0)
+            {
+                context.IndexGenerationVectors.AddRange(currentMembership.Select(vectorId =>
+                    new IndexGenerationVectorEntity
+                    {
+                        GenerationId = activeGeneration.Id,
+                        VectorId = vectorId
+                    }));
+            }
             var state = await context.IndexState.SingleAsync(state => state.Id == 1, cancellationToken)
                 .ConfigureAwait(false);
             state.ActiveIndexGenerationId = activeGeneration.Id;
@@ -499,6 +530,23 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             }
         }
     }
+
+    private static Task<List<long>> ReadEligibleVectorIdsAsync(
+        FluxKnowledgeDbContext context,
+        CancellationToken cancellationToken) =>
+        (
+            from vector in context.Vectors
+            join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
+            join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
+            join record in context.PipelineRecords on artifact.PipelineRecordId equals record.Id
+            where !vector.IsDeleted && !record.IsDeleted &&
+                  !context.PipelineRecords.Any(newer =>
+                      newer.SourceIdentityId == record.SourceIdentityId &&
+                      newer.Revision > record.Revision &&
+                      !newer.IsDeleted)
+            orderby vector.VectorId
+            select vector.VectorId)
+        .ToListAsync(cancellationToken);
 
     private sealed record ValidatedClaim(
         PipelineRecordEntity PipelineRecord,

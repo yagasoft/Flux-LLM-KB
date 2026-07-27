@@ -37,6 +37,17 @@ public sealed class DeterministicTokenHashEmbeddingProviderTests
 
         var result = await provider.CreateEmbeddingAsync("— · —", CancellationToken.None);
 
-        Assert.All(result.Values, static value => Assert.Equal(0F, value));
+        Assert.InRange(result.Values.Sum(static value => value * value), 0.9999F, 1.0001F);
+    }
+
+    [Fact]
+    public async Task Signed_token_collisions_use_a_deterministic_nonzero_safeguard()
+    {
+        var provider = new DeterministicTokenHashEmbeddingProvider();
+
+        var result = await provider.CreateEmbeddingAsync("abc 2rc", CancellationToken.None);
+
+        Assert.InRange(result.Values.Sum(static value => value * value), 0.9999F, 1.0001F);
+        Assert.Contains(result.Values, static value => value != 0F);
     }
 }

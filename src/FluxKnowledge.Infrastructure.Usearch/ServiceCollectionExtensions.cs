@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Ports;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
@@ -10,9 +11,10 @@ public static class ServiceCollectionExtensions
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        var options = UsearchIndexOptions.FromConfiguredRoot(
-            configuration[$"{UsearchIndexOptions.ConfigurationSectionName}:RootPath"]);
-        services.AddSingleton(options);
+        services.AddSingleton(provider => UsearchIndexOptions.FromConfiguredRoot(
+            configuration[$"{UsearchIndexOptions.ConfigurationSectionName}:RootPath"],
+            provider.GetService<IHostEnvironment>()?.ContentRootPath ?? Directory.GetCurrentDirectory(),
+            AppContext.BaseDirectory));
         services.AddSingleton<UsearchGenerationValidator>();
         services.AddScoped<UsearchGenerationBuilder>();
         services.AddScoped<IIndexGenerationPublisher>(provider => provider.GetRequiredService<UsearchGenerationBuilder>());

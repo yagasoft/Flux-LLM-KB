@@ -10,6 +10,7 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
     private readonly ReaderWriterLockSlim _gate = new();
     private Guid? _generationId;
     private USearchIndex? _index;
+    private int _disposed;
 
     public async ValueTask<IReadOnlyList<AnnMatch>> SearchAsync(
         IReadOnlyList<float> query,
@@ -22,34 +23,44 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
             return [];
         }
 
+        ThrowIfDisposed();
         using var scope = scopeFactory.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IIndexGenerationStore>();
-        var activeId = await store.GetActiveGenerationIdAsync(cancellationToken);
-        if (activeId is null)
+        while (true)
         {
-            return [];
-        }
-
-        await EnsureOpenAsync(activeId.Value, store, cancellationToken);
-        _gate.EnterReadLock();
-        try
-        {
-            if (_index is null || _generationId != activeId)
+            var activeId = await store.GetActiveGenerationIdAsync(cancellationToken);
+            if (activeId is null)
             {
                 return [];
             }
 
-            var count = _index.Search(query.ToArray(), limit, out var keys, out var distances);
-            return Enumerable.Range(0, count).Select(index => new AnnMatch((long)keys[index], distances[index])).ToArray();
-        }
-        finally
-        {
-            _gate.ExitReadLock();
+            await EnsureOpenAsync(activeId.Value, store, cancellationToken);
+            _gate.EnterReadLock();
+            try
+            {
+                ThrowIfDisposed();
+                if (_index is null || _generationId != activeId)
+                {
+                    continue;
+                }
+
+                var count = _index.Search(query.ToArray(), limit, out var keys, out var distances);
+                return Enumerable.Range(0, count).Select(index => new AnnMatch((long)keys[index], distances[index])).ToArray();
+            }
+            finally
+            {
+                _gate.ExitReadLock();
+            }
         }
     }
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _gate.EnterWriteLock();
         try
         {
@@ -59,7 +70,6 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         finally
         {
             _gate.ExitWriteLock();
-            _gate.Dispose();
         }
     }
 
@@ -68,6 +78,7 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         IIndexGenerationStore store,
         CancellationToken cancellationToken)
     {
+        ThrowIfDisposed();
         _gate.EnterReadLock();
         try
         {
@@ -86,9 +97,19 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         var vectors = await store.ReadVectorsAsync(activeId, cancellationToken);
         new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
         var opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            opened.Dispose();
+            ThrowIfDisposed();
+        }
         _gate.EnterWriteLock();
         try
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                opened.Dispose();
+                ThrowIfDisposed();
+            }
             if (_generationId == activeId && _index is not null)
             {
                 opened.Dispose();
@@ -102,6 +123,14 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         finally
         {
             _gate.ExitWriteLock();
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(UsearchAnnIndex));
         }
     }
 }

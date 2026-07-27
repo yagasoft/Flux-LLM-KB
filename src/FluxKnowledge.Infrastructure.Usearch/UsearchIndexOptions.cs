@@ -4,7 +4,10 @@ public sealed record UsearchIndexOptions(string RootPath)
 {
     public const string ConfigurationSectionName = "Usearch";
 
-    public static UsearchIndexOptions FromConfiguredRoot(string? rootPath)
+    public static UsearchIndexOptions FromConfiguredRoot(
+        string? rootPath,
+        string? repositoryRoot = null,
+        string? deploymentRoot = null)
     {
         if (string.IsNullOrWhiteSpace(rootPath))
         {
@@ -12,9 +15,10 @@ public sealed record UsearchIndexOptions(string RootPath)
         }
 
         var fullPath = Path.GetFullPath(rootPath);
-        var repositoryRoot = Path.GetFullPath(Directory.GetCurrentDirectory());
-        var deploymentRoot = Path.GetFullPath(AppContext.BaseDirectory);
-        if (IsUnder(fullPath, repositoryRoot) || IsUnder(fullPath, deploymentRoot))
+        var resolvedRepositoryRoot = ResolvePhysicalPath(repositoryRoot ?? Directory.GetCurrentDirectory());
+        var resolvedDeploymentRoot = ResolvePhysicalPath(deploymentRoot ?? AppContext.BaseDirectory);
+        var resolvedRoot = ResolvePhysicalPath(fullPath);
+        if (IsUnder(resolvedRoot, resolvedRepositoryRoot) || IsUnder(resolvedRoot, resolvedDeploymentRoot))
         {
             throw new InvalidOperationException("The USearch root must be outside the repository and deployment directories.");
         }
@@ -26,4 +30,16 @@ public sealed record UsearchIndexOptions(string RootPath)
         candidate.StartsWith(Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar,
             StringComparison.OrdinalIgnoreCase) ||
         string.Equals(candidate, root, StringComparison.OrdinalIgnoreCase);
+
+    private static string ResolvePhysicalPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var directory = new DirectoryInfo(fullPath);
+        if (!directory.Exists)
+        {
+            return Path.TrimEndingDirectorySeparator(fullPath);
+        }
+        var resolved = directory.ResolveLinkTarget(returnFinalTarget: true);
+        return Path.TrimEndingDirectorySeparator((resolved ?? directory).FullName);
+    }
 }

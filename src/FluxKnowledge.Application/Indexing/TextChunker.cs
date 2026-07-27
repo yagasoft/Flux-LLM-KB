@@ -12,9 +12,15 @@ public static class TextChunker
     {
         ArgumentNullException.ThrowIfNull(text);
         var chunks = new List<CanonicalTextChunk>();
-        for (var start = 0; start < text.Length; start += MaximumChunkLength)
+        for (var start = 0; start < text.Length;)
         {
             var length = Math.Min(MaximumChunkLength, text.Length - start);
+            if (start + length < text.Length &&
+                char.IsHighSurrogate(text[start + length - 1]) &&
+                char.IsLowSurrogate(text[start + length]))
+            {
+                length--;
+            }
             var content = text.Substring(start, length);
             chunks.Add(new CanonicalTextChunk(
                 0,
@@ -23,6 +29,7 @@ public static class TextChunker
                 length,
                 content,
                 Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(content)))));
+            start += length;
         }
 
         return chunks;

@@ -240,10 +240,33 @@ public sealed class SqlPipelineStore(
         CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
-        return await context.Vectors.AsNoTracking()
-            .Where(vector => vector.IndexGenerationId == indexGenerationId && !vector.IsDeleted)
-            .OrderBy(vector => vector.VectorId)
-            .Select(vector => new CanonicalVector(vector.VectorId, vector.TextChunkId,
+        return await (
+            from membership in context.IndexGenerationVectors.AsNoTracking()
+            join vector in context.Vectors.AsNoTracking() on membership.VectorId equals vector.VectorId
+            where membership.GenerationId == indexGenerationId
+            orderby vector.VectorId
+            select new CanonicalVector(vector.VectorId, vector.TextChunkId,
+                vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,
+                vector.SourceRevision))
+            .ToListAsync(cancellationToken);
+    }
+
+    public async ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(
+        CancellationToken cancellationToken)
+    {
+        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
+        return await (
+            from vector in context.Vectors.AsNoTracking()
+            join chunk in context.TextChunks.AsNoTracking() on vector.TextChunkId equals chunk.Id
+            join artifact in context.Artifacts.AsNoTracking() on chunk.ArtifactId equals artifact.Id
+            join record in context.PipelineRecords.AsNoTracking() on artifact.PipelineRecordId equals record.Id
+            where !vector.IsDeleted && !record.IsDeleted &&
+                  !context.PipelineRecords.Any(newer =>
+                      newer.SourceIdentityId == record.SourceIdentityId &&
+                      newer.Revision > record.Revision &&
+                      !newer.IsDeleted)
+            orderby vector.VectorId
+            select new CanonicalVector(vector.VectorId, vector.TextChunkId,
                 vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,
                 vector.SourceRevision))
             .ToListAsync(cancellationToken);
@@ -276,8 +299,13 @@ public sealed class SqlPipelineStore(
         CancellationToken cancellationToken)
     {
         await using var context = await contextFactory.CreateDbContextAsync(cancellationToken);
-        var entity = await context.IndexGenerations.SingleAsync(
+        var entity = await context.IndexGenerations.SingleOrDefaultAsync(
             candidate => candidate.Id == generation.Id, cancellationToken);
+        if (entity is null)
+        {
+            entity = new IndexGenerationEntity { Id = generation.Id, CreatedAtUtc = timeProvider.GetUtcNow() };
+            context.IndexGenerations.Add(entity);
+        }
         entity.ModelFingerprint = generation.ModelFingerprint;
         entity.Dimensions = generation.Dimensions;
         entity.IndexPath = generation.IndexPath;

@@ -13,10 +13,16 @@ public sealed class UsearchGenerationValidator
     public const string IndexFileName = "index.usearch";
     public const string MetadataFileName = "metadata.json";
 
-    public static string ComputeChecksum(Guid id, int dimensions, IReadOnlyList<CanonicalVector> vectors)
+    public static string ComputeChecksum(string modelFingerprint, int dimensions, IReadOnlyList<CanonicalVector> vectors)
     {
-        var data = $"{id:N}|{dimensions}|{string.Join(',', vectors.Select(vector => vector.VectorId))}";
+        var data = $"{modelFingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.ContentHash}"))}";
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(data)));
+    }
+
+    public static Guid DeterministicGenerationId(string checksum)
+    {
+        var bytes = Convert.FromHexString(checksum)[..16];
+        return new Guid(bytes);
     }
 
     public void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
@@ -24,7 +30,8 @@ public sealed class UsearchGenerationValidator
         var metadataPath = Path.Combine(directory, MetadataFileName);
         var metadata = JsonSerializer.Deserialize<Metadata>(File.ReadAllText(metadataPath))
             ?? throw new IndexGenerationValidationException("Generation metadata cannot be read.");
-        if (metadata.GenerationId != expected.Id || metadata.Dimensions != expected.Dimensions ||
+        if (metadata.GenerationId != expected.Id || metadata.ModelFingerprint != expected.ModelFingerprint ||
+            metadata.Metric != "cos" || metadata.Dimensions != expected.Dimensions ||
             metadata.VectorCount != expected.VectorCount ||
             !string.Equals(metadata.Checksum, expected.MetadataChecksum, StringComparison.Ordinal))
         {
@@ -44,7 +51,49 @@ public sealed class UsearchGenerationValidator
                 throw new IndexGenerationValidationException("USearch generation does not contain every SQL vector ID.");
             }
         }
+
+        VerifyCosineMetric(index, vectors, expected.Dimensions);
     }
 
-    public sealed record Metadata(Guid GenerationId, int Dimensions, long VectorCount, string Checksum);
+    private static void VerifyCosineMetric(
+        USearchIndex index,
+        IReadOnlyList<CanonicalVector> vectors,
+        int dimensions)
+    {
+        if (vectors.Count < 2)
+        {
+            return;
+        }
+
+        var query = new float[dimensions];
+        Buffer.BlockCopy(vectors[0].Values, 0, query, 0, vectors[0].Values.Length);
+        var count = index.Search(query, Math.Min(2, vectors.Count), out var keys, out var distances);
+        var second = Enumerable.Range(0, count).FirstOrDefault(position => keys[position] != (ulong)vectors[0].VectorId);
+        if (count < 2)
+        {
+            throw new IndexGenerationValidationException("USearch metric probe did not return two vectors.");
+        }
+
+        var other = vectors.Single(vector => vector.VectorId == (long)keys[second]);
+        var expectedDistance = 1F - Dot(query, other.Values);
+        if (MathF.Abs(distances[second] - expectedDistance) > 0.001F)
+        {
+            throw new IndexGenerationValidationException("The reopened USearch index metric is not cosine distance.");
+        }
+    }
+
+    private static float Dot(float[] left, byte[] rightBytes)
+    {
+        var right = new float[left.Length];
+        Buffer.BlockCopy(rightBytes, 0, right, 0, rightBytes.Length);
+        return left.Zip(right, static (a, b) => a * b).Sum();
+    }
+
+    public sealed record Metadata(
+        Guid GenerationId,
+        string ModelFingerprint,
+        string Metric,
+        int Dimensions,
+        long VectorCount,
+        string Checksum);
 }

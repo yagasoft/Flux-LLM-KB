@@ -15,6 +15,7 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<TextChunkEntity> TextChunks => Set<TextChunkEntity>();
     public DbSet<VectorEntity> Vectors => Set<VectorEntity>();
     public DbSet<IndexGenerationEntity> IndexGenerations => Set<IndexGenerationEntity>();
+    public DbSet<IndexGenerationVectorEntity> IndexGenerationVectors => Set<IndexGenerationVectorEntity>();
     public DbSet<IndexStateEntity> IndexState => Set<IndexStateEntity>();
     public DbSet<AuditEventEntity> AuditEvents => Set<AuditEventEntity>();
     public DbSet<GpuMiniTaskEntity> GpuMiniTasks => Set<GpuMiniTaskEntity>();

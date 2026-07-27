@@ -38,6 +38,9 @@ public interface IIndexGenerationStore
         Guid indexGenerationId,
         CancellationToken cancellationToken);
 
+    ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(
+        CancellationToken cancellationToken);
+
     ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(
         Guid indexGenerationId,
         CancellationToken cancellationToken);

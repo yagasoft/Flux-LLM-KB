@@ -7,7 +7,9 @@ namespace FluxKnowledge.Infrastructure.Inference;
 /// A local, model-free embedding for Phase 1. Text is normalised with FormKC
 /// and invariant casing, then split at every non-ASCII-letter-or-digit rune.
 /// Each token's FNV-1a 64 hash selects its low-byte dimension; bit 63 supplies
-/// a signed unit term contribution. Non-empty vectors are L2 normalised.
+/// a signed unit term contribution. If no ASCII token exists, or signed terms
+/// exactly cancel, a deterministic FormKC text hash contributes one fallback
+/// term so every non-empty normalised input remains non-zero. Non-empty vectors are L2 normalised.
 /// </summary>
 public sealed class DeterministicTokenHashEmbeddingProvider : IEmbeddingProvider
 {
@@ -49,6 +51,12 @@ public sealed class DeterministicTokenHashEmbeddingProvider : IEmbeddingProvider
         }
 
         var sumSquares = values.Sum(static value => value * value);
+        if (sumSquares == 0F && normalised.Length > 0)
+        {
+            var fallback = HashBytes(Encoding.UTF8.GetBytes(normalised));
+            values[(int)(fallback & 0xffUL)] = 1F;
+            sumSquares = 1F;
+        }
         if (sumSquares > 0F)
         {
             var inverseLength = 1F / MathF.Sqrt(sumSquares);
@@ -71,6 +79,18 @@ public sealed class DeterministicTokenHashEmbeddingProvider : IEmbeddingProvider
         foreach (var character in token)
         {
             hash ^= (byte)character;
+            hash *= FnvPrime;
+        }
+
+        return hash;
+    }
+
+    private static ulong HashBytes(ReadOnlySpan<byte> bytes)
+    {
+        var hash = FnvOffsetBasis;
+        foreach (var value in bytes)
+        {
+            hash ^= value;
             hash *= FnvPrime;
         }
 

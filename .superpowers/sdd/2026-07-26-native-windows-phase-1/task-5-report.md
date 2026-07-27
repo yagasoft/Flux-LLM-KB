@@ -47,3 +47,33 @@ The focused active-reader replacement check also passed: it reuses the loaded im
 - `FluxKnowledge.Infrastructure.Inference`: model-free FormKC/FNV-1a provider.
 - `FluxKnowledge.Infrastructure.Usearch`: configured root validation, staged immutable generations, validation and active reader.
 - Web composition and focused Domain, Integration and Web composition tests.
+
+## Correction round 1
+
+- Added immutable `IndexGenerationVectors` membership with an EF migration and
+  compatibility backfill from the existing vector-origin generation. The
+  migration is source only and was not executed against a database.
+- A new candidate is formed from all current, non-deleted latest-revision
+  vectors. Its deterministic identity and checksum cover fingerprint, cosine
+  metric, dimensions, stable vector IDs and vector content hashes. The SQL
+  transition re-reads the eligible corpus, persists matching membership, then
+  updates the active pointer; a changed corpus raises a stale-candidate error
+  before pointer regression.
+- Existing final directories are validated and reused for the same deterministic
+  candidate rather than overwritten. The reader rechecks the SQL pointer around
+  cache use and holds a host-wide immutable native handle cache.
+- Text chunking now keeps surrogate pairs intact and the deterministic provider
+  has a FormKC-text fallback contribution when ASCII token processing produces
+  no signal, including exact signed cancellation.
+
+Fresh correction evidence:
+
+```powershell
+dotnet test tests/FluxKnowledge.Domain.Tests/FluxKnowledge.Domain.Tests.csproj --configuration Release --no-restore
+dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter FullyQualifiedName~Indexing
+dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj --configuration Release --no-restore
+dotnet build FluxKnowledge.slnx --configuration Release --no-restore
+```
+
+Domain: 35 passed. Integration Indexing: 2 passed and 1 expected guarded SQL
+skip. Web: 2 passed. Release build: zero warnings and errors.
