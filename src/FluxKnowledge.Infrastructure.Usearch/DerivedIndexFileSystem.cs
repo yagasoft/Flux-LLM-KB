@@ -1,27 +1,59 @@
 namespace FluxKnowledge.Infrastructure.Usearch;
 
-public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
+public sealed class DerivedIndexFileSystem
 {
     private static readonly HashSet<string> RecoveryAreas = new(StringComparer.OrdinalIgnoreCase) { "staging", "quarantine" };
-    private readonly string _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(options.RootPath));
+    private readonly string _root;
+    private readonly Func<string, bool> _existingComponentsSafetyCheck;
+
+    public DerivedIndexFileSystem(UsearchIndexOptions options,
+        Func<string, bool>? existingComponentsSafetyCheck = null)
+    {
+        _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(options.RootPath));
+        _existingComponentsSafetyCheck = existingComponentsSafetyCheck ?? ExistingComponentsAreSafe;
+    }
 
     public bool IsValidDirectory(string path) => TryCanonicalInRoot(path, out var canonical) &&
         Directory.Exists(canonical) && IsTreeSafe(canonical);
 
-    public bool IsIntendedGenerationPath(string path) => TryCanonicalInRoot(path, out var canonical) &&
-        string.Equals(Path.GetDirectoryName(canonical), Path.Combine(_root, "generations"), StringComparison.OrdinalIgnoreCase);
+    public bool IsIntendedGenerationPath(string path) =>
+        TryCanonicalIntendedGenerationPath(path, out _);
 
     public bool AreAllReferencedGenerationPathsSafe(IEnumerable<string> referencedPaths) =>
-        referencedPaths.All(path => TryCanonicalInRoot(path, out var canonical) && IsIntendedGenerationPath(canonical));
+        referencedPaths.All(path => TryCanonicalIntendedGenerationPath(path, out _));
+
+    public bool TryCanonicalIntendedGenerationPath(string path, out string canonical)
+    {
+        canonical = string.Empty;
+        if (!TryCanonicalInRootLexically(path, out var candidate) ||
+            !IsIntendedGenerationPathLexically(candidate) ||
+            !_existingComponentsSafetyCheck(candidate))
+        {
+            return false;
+        }
+        canonical = candidate;
+        return true;
+    }
 
     public bool TryCanonicalInRoot(string path, out string canonical)
+    {
+        canonical = string.Empty;
+        if (!TryCanonicalInRootLexically(path, out var candidate) || !_existingComponentsSafetyCheck(candidate))
+        {
+            return false;
+        }
+        canonical = candidate;
+        return true;
+    }
+
+    private bool TryCanonicalInRootLexically(string path, out string canonical)
     {
         canonical = string.Empty;
         if (string.IsNullOrWhiteSpace(path)) return false;
         try
         {
             var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-            if (!IsSameOrUnder(candidate, _root) || !ExistingComponentsAreSafe(candidate)) return false;
+            if (!IsSameOrUnder(candidate, _root)) return false;
             canonical = candidate;
             return true;
         }
@@ -100,6 +132,9 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
     private static bool IsSameOrUnder(string path, string root) =>
         string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    private bool IsIntendedGenerationPathLexically(string canonical) =>
+        string.Equals(Path.GetDirectoryName(canonical), Path.Combine(_root, "generations"), StringComparison.OrdinalIgnoreCase);
 
     private bool ExistingComponentsAreSafe(string path)
     {
