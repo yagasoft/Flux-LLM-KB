@@ -1,6 +1,7 @@
 using System.Threading;
 using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Indexing;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
@@ -102,7 +103,21 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         var generation = await store.GetGenerationAsync(activeId, cancellationToken)
             ?? throw new IndexGenerationValidationException("The active SQL index generation is missing.");
         var vectors = await store.ReadVectorsAsync(activeId, cancellationToken);
-        new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
+        try
+        {
+            new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
+        }
+        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or IndexGenerationValidationException)
+        {
+            using var signalScope = scopeFactory.CreateScope();
+            var signal = signalScope.ServiceProvider.GetService<IDerivedIndexRecoverySignal>();
+            signal?.Notify(new DerivedIndexRecoveryFault(
+                exception is DirectoryNotFoundException or FileNotFoundException
+                    ? DerivedIndexRecoveryFailureCategory.MissingDerivedIndex
+                    : DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex,
+                activeId));
+            throw;
+        }
         var opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
         if (await store.GetActiveGenerationIdAsync(cancellationToken) != activeId)
         {

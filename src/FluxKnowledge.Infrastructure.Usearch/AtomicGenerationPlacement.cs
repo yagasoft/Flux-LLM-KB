@@ -14,4 +14,13 @@ public static class AtomicGenerationPlacement
         Directory.Move(stagingDirectory, finalDirectory);
         return finalDirectory;
     }
+
+    public static string PlaceRecovery(UsearchIndexOptions options, Guid generationId, string stagingDirectory)
+    {
+        var finalDirectory = Path.Combine(options.RootPath, "generations",
+            $"{generationId:N}-recovery-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.GetDirectoryName(finalDirectory)!);
+        Directory.Move(stagingDirectory, finalDirectory);
+        return finalDirectory;
+    }
 }

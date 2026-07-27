@@ -9,6 +9,29 @@ public sealed class UsearchGenerationBuilder(
     UsearchIndexOptions options,
     UsearchGenerationValidator validator) : IIndexGenerationPublisher
 {
+    public ValueTask<IndexGenerationDescriptor> BuildRecoveryCandidateAsync(
+        IndexGenerationDescriptor generation,
+        IReadOnlyList<CanonicalVector> membership,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var staging = Path.Combine(options.RootPath, "staging", "recovery", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        try
+        {
+            SaveCandidate(staging, generation, membership);
+            validator.Validate(staging, generation, membership);
+            var path = AtomicGenerationPlacement.PlaceRecovery(options, generation.Id, staging);
+            validator.Validate(path, generation with { IndexPath = path }, membership);
+            return ValueTask.FromResult(generation with { IndexPath = path });
+        }
+        catch
+        {
+            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            throw;
+        }
+    }
+
     public async ValueTask<IndexGenerationDescriptor> RebuildFromSqlAsync(
         Guid indexGenerationId,
         CancellationToken cancellationToken)

@@ -3,6 +3,7 @@ using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -14,6 +15,81 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Missing_active_directory_recovers_to_a_unique_path_without_changing_the_active_pointer()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var generationId = Guid.NewGuid();
+        await SeedSnapshotAsync(factory, generationId, Guid.NewGuid());
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            var indexStore = new SqlPipelineStore(factory);
+            var vectors = await indexStore.ReadVectorsAsync(generationId, CancellationToken.None);
+            await using (var context = await factory.CreateDbContextAsync())
+            {
+                var storedVectors = await context.Vectors.OrderBy(item => item.VectorId).ToListAsync();
+                for (var index = 0; index < storedVectors.Count; index++)
+                {
+                    var values = new byte[1024];
+                    BitConverter.GetBytes(1F).CopyTo(values, index * sizeof(float));
+                    storedVectors[index].Values = values;
+                    storedVectors[index].PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values));
+                }
+                await context.SaveChangesAsync();
+                vectors = await indexStore.ReadVectorsAsync(generationId, CancellationToken.None);
+                var generation = await context.IndexGenerations.SingleAsync(item => item.Id == generationId);
+                generation.MetadataChecksum = UsearchGenerationValidator.ComputeChecksum(
+                    generation.ModelFingerprint, generation.Dimensions, vectors);
+                generation.VectorCount = vectors.Count;
+                await context.SaveChangesAsync();
+            }
+
+            var options = UsearchIndexOptions.FromConfiguredRoot(root);
+            var coordinator = new DerivedIndexRecoveryCoordinator(
+                new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System),
+                indexStore,
+                new UsearchGenerationBuilder(indexStore, options, new UsearchGenerationValidator()),
+                new UsearchGenerationValidator(), options, new DerivedIndexFileSystem(options), TimeProvider.System);
+
+            await coordinator.RunOnceAsync(CancellationToken.None);
+
+            var recovered = await indexStore.GetGenerationAsync(generationId, CancellationToken.None);
+            Assert.NotNull(recovered);
+            Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+            Assert.Equal(generationId, await indexStore.GetActiveGenerationIdAsync(CancellationToken.None));
+            Assert.NotEqual("pending", recovered!.IndexPath);
+            Assert.True(File.Exists(Path.Combine(recovered.IndexPath, UsearchGenerationValidator.IndexFileName)));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Permission_fault_becomes_operator_actionable_without_a_retry()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            var coordinator = DerivedIndexRecoveryCoordinator.ForTesting(
+                new UsearchIndexOptions(root), TimeProvider.System);
+
+            await coordinator.RecordFaultAsync(
+                new UnauthorizedAccessException("injected permission failure"), Guid.NewGuid(), CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, coordinator.Snapshot.FailureCategory);
+            Assert.Null(coordinator.Snapshot.NextRetryAtUtc);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
 
     [NativeSqlServerFact]
     public async Task Recovery_snapshot_reads_active_immutable_membership_and_referenced_generations()
@@ -207,6 +283,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var recordId = Guid.NewGuid();
         var artifactId = Guid.NewGuid();
         var values = new byte[1024];
+        values[0] = 1;
         context.IndexGenerations.AddRange(
             CreateGeneration(activeGenerationId),
             CreateGeneration(referencedGenerationId));
