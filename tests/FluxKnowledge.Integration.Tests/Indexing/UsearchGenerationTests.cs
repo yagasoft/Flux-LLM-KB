@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.Usearch;
 using Microsoft.Extensions.DependencyInjection;
+using System.Security.Cryptography;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
@@ -16,11 +17,12 @@ public sealed class UsearchGenerationTests : IDisposable
         var store = new MemoryStore(id);
         var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
 
-        var generation = await builder.BuildAndPlaceAsync(id, CancellationToken.None);
+        var snapshot = await builder.BuildAndPlaceAsync(id, CancellationToken.None);
+        var generation = snapshot.Generation;
 
         Assert.True(File.Exists(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
         Assert.Equal(2, generation.VectorCount);
-        Assert.Equal(generation, await store.GetGenerationAsync(id, CancellationToken.None));
+        Assert.Equal(2, snapshot.Vectors.Count);
     }
 
     public void Dispose()
@@ -37,9 +39,13 @@ public sealed class UsearchGenerationTests : IDisposable
         var store = new CachingStore();
         var options = UsearchIndexOptions.FromConfiguredRoot(_root);
         var builder = new UsearchGenerationBuilder(store, options, new UsearchGenerationValidator());
-        var first = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var firstSnapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var first = firstSnapshot.Generation;
+        store.Record(firstSnapshot);
         store.UseSecondVector = true;
-        var second = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var secondSnapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        var second = secondSnapshot.Generation;
+        store.Record(secondSnapshot);
         store.ActiveGeneration = first.Id;
         store.ResetGenerationReads();
         var services = new ServiceCollection();
@@ -82,7 +88,7 @@ public sealed class UsearchGenerationTests : IDisposable
             values[dimension] = 1F;
             var bytes = new byte[values.Length * sizeof(float)];
             Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
-            return new CanonicalVector(id, chunkId, "deterministic-tokenhash-v1:256", 256, bytes, new string('a', 64), 1);
+            return new CanonicalVector(id, chunkId, "deterministic-tokenhash-v1:256", 256, bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), 1);
         }
     }
 
@@ -95,13 +101,18 @@ public sealed class UsearchGenerationTests : IDisposable
         public bool UseSecondVector { get; set; }
         public int GenerationReads { get; private set; }
         public void ResetGenerationReads() => GenerationReads = 0;
+        public void Record(IndexGenerationCandidateSnapshot snapshot)
+        {
+            _generations[snapshot.Generation.Id] = snapshot.Generation;
+            _memberships[snapshot.Generation.Id] = snapshot.Vectors;
+        }
         public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(FluxKnowledge.Domain.Common.PipelineRecordId pipelineRecordId, long sourceRevision, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalTextChunk>>([]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(Guid indexGenerationId, CancellationToken cancellationToken) => ValueTask.FromResult(_memberships[indexGenerationId]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalVector>>([UseSecondVector ? Vector(22, 1) : Vector(11, 0)]);
         public ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(Guid indexGenerationId, CancellationToken cancellationToken) { GenerationReads++; return ValueTask.FromResult<IndexGenerationDescriptor?>(_generations[indexGenerationId]); }
         public ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken) => ValueTask.FromResult<Guid?>(ActiveGeneration);
         public ValueTask UpdateGenerationMetadataAsync(IndexGenerationDescriptor generation, CancellationToken cancellationToken) { _generations[generation.Id] = generation; _memberships[generation.Id] = UseSecondVector ? [Vector(22, 1)] : [Vector(11, 0)]; return ValueTask.CompletedTask; }
-        private static CanonicalVector Vector(long id, int dimension) { var values = UsearchGenerationTests.Vector(dimension).ToArray(); var bytes = new byte[values.Length * sizeof(float)]; Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length); return new CanonicalVector(id, id, "deterministic-tokenhash-v1:256", 256, bytes, new string(id == 11 ? 'a' : 'b', 64), 1); }
+        private static CanonicalVector Vector(long id, int dimension) { var values = UsearchGenerationTests.Vector(dimension).ToArray(); var bytes = new byte[values.Length * sizeof(float)]; Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length); return new CanonicalVector(id, id, "deterministic-tokenhash-v1:256", 256, bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), 1); }
     }
 
     private static IReadOnlyList<float> Vector(int dimension)

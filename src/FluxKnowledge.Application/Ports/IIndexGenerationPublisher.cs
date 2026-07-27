@@ -2,7 +2,7 @@ namespace FluxKnowledge.Application.Ports;
 
 public interface IIndexGenerationPublisher
 {
-    ValueTask<IndexGenerationDescriptor> BuildAndPlaceAsync(
+    ValueTask<IndexGenerationCandidateSnapshot> BuildAndPlaceAsync(
         Guid indexGenerationId,
         CancellationToken cancellationToken);
 
@@ -10,3 +10,7 @@ public interface IIndexGenerationPublisher
         Guid indexGenerationId,
         CancellationToken cancellationToken);
 }
+
+public sealed record IndexGenerationCandidateSnapshot(
+    IndexGenerationDescriptor Generation,
+    IReadOnlyList<CanonicalVector> Vectors);

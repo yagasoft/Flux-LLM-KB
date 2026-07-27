@@ -261,10 +261,9 @@ public sealed class SqlPipelineStore(
             join artifact in context.Artifacts.AsNoTracking() on chunk.ArtifactId equals artifact.Id
             join record in context.PipelineRecords.AsNoTracking() on artifact.PipelineRecordId equals record.Id
             where !vector.IsDeleted && !record.IsDeleted &&
-                  !context.PipelineRecords.Any(newer =>
-                      newer.SourceIdentityId == record.SourceIdentityId &&
-                      newer.Revision > record.Revision &&
-                      !newer.IsDeleted)
+                  record.Revision == context.PipelineRecords
+                      .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
+                      .Max(candidate => candidate.Revision)
             orderby vector.VectorId
             select new CanonicalVector(vector.VectorId, vector.TextChunkId,
                 vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,

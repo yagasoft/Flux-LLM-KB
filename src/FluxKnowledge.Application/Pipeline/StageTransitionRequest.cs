@@ -19,7 +19,7 @@ public sealed record IndexingStageOutput(
     string? ModelFingerprint = null,
     IReadOnlyList<CanonicalVector>? Vectors = null,
     IndexGenerationDescriptor? ActivateGeneration = null,
-    IReadOnlyList<long>? ActivateMembershipVectorIds = null);
+    IReadOnlyList<CanonicalVector>? ActivateMembership = null);
 
 public sealed record StageTransitionRequest(
     ClaimedDispatchMessage DispatchMessage,

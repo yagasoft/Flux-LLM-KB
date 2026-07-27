@@ -48,7 +48,7 @@ public sealed class UsearchGenerationBuilder(
         }
     }
 
-    public async ValueTask<IndexGenerationDescriptor> BuildAndPlaceAsync(
+    public async ValueTask<IndexGenerationCandidateSnapshot> BuildAndPlaceAsync(
         Guid indexGenerationId,
         CancellationToken cancellationToken)
     {
@@ -78,8 +78,7 @@ public sealed class UsearchGenerationBuilder(
         if (Directory.Exists(finalDirectory))
         {
             validator.Validate(finalDirectory, candidate, vectors);
-            await store.UpdateGenerationMetadataAsync(candidate, cancellationToken);
-            return candidate;
+            return new IndexGenerationCandidateSnapshot(candidate, vectors);
         }
 
         var staging = Path.Combine(options.RootPath, "staging", candidateId.ToString("N"), Guid.NewGuid().ToString("N"));
@@ -90,8 +89,7 @@ public sealed class UsearchGenerationBuilder(
             validator.Validate(staging, candidate, vectors);
             var finalPath = AtomicGenerationPlacement.Place(options, candidateId, staging);
             candidate = candidate with { IndexPath = finalPath };
-            await store.UpdateGenerationMetadataAsync(candidate, cancellationToken);
-            return candidate;
+            return new IndexGenerationCandidateSnapshot(candidate, vectors);
         }
         catch
         {

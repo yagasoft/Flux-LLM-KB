@@ -26,8 +26,8 @@ public sealed class PublishStageWorker(
             return;
         }
 
-        var placed = await publisher.BuildAndPlaceAsync(generation.Id, cancellationToken);
-        var membership = await indexStore.ReadEligibleVectorsAsync(cancellationToken);
+        var candidate = await publisher.BuildAndPlaceAsync(generation.Id, cancellationToken);
+        var placed = candidate.Generation;
         await transitions.TransitionAsync(new StageTransitionRequest(
             workItem.DispatchMessage, workItem.Job,
             new StageArtifact(Guid.NewGuid(), PipelineStage.Publish,
@@ -35,7 +35,7 @@ public sealed class PublishStageWorker(
                 "application/vnd.fluxknowledge.usearch-generation", placed.Id.ToString("N"), timeProvider.GetUtcNow()),
             null, null, nameof(PublishStageWorker), new IndexingStageOutput(
                 ActivateGeneration: placed,
-                ActivateMembershipVectorIds: membership.Select(vector => vector.VectorId).ToArray())), cancellationToken);
+                ActivateMembership: candidate.Vectors)), cancellationToken);
     }
 
     private async ValueTask<IndexGenerationDescriptor?> FindGenerationAsync(

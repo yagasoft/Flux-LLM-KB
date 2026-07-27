@@ -51,6 +51,17 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.Sql(
+                """
+                IF EXISTS
+                (
+                    SELECT 1
+                    FROM [IndexGenerationVectors] [m]
+                    INNER JOIN [Vectors] [v] ON [v].[VectorId] = [m].[VectorId]
+                    WHERE [m].[GenerationId] <> [v].[IndexGenerationId]
+                )
+                    THROW 51000, 'Cannot downgrade immutable generation membership with snapshot-only history.', 1;
+                """);
             migrationBuilder.DropTable(
                 name: "IndexGenerationVectors");
         }

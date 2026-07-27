@@ -92,3 +92,23 @@ generation rather than using a deleted directory or a fresh corpus query.
 The current environment did not supply `FLUXKNOWLEDGE_TEST_SQL_CONNECTION`, so
 these three bodies compiled and skipped cleanly (no disposable database was
 created). They remain unexecuted live-SQL evidence.
+
+## Correction round 2
+
+Publication now carries the exact `IndexGenerationCandidateSnapshot` returned
+by the builder into the transition rather than re-reading eligibility in the
+worker. The transition compares vector IDs, model, dimensions and content
+hashes against its SQL current-corpus query and recomputes the snapshot
+checksum before it creates the generation metadata/membership and swaps the
+pointer. A changed corpus completes the superseded Publish work without moving
+the active pointer. Eligibility now selects the newest revision before
+excluding deleted rows, preventing a deleted latest revision from reviving old
+content. Rebuild uses the persisted membership snapshot.
+
+Candidate validation additionally recomputes vector-byte hashes and checksum;
+migration downgrade rejects snapshot-only history, and test cleanup clears the
+active pointer before removing referenced generation rows.
+
+Fresh local source evidence: Integration USearch/Indexing passed 2 with 3
+guarded native-SQL skips; Release build passed with zero warnings/errors. No
+SQL connection was opened.

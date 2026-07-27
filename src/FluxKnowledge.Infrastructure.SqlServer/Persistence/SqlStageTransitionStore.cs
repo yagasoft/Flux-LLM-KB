@@ -1,6 +1,7 @@
 using System.Data;
 using System.Text.Json;
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -165,23 +166,26 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
 
         if (request.IndexingOutput?.ActivateGeneration is { } activeGeneration)
         {
-            var expectedMembership = request.IndexingOutput.ActivateMembershipVectorIds
+            var expectedMembership = request.IndexingOutput.ActivateMembership
                 ?? throw new ArgumentException("An active generation requires an immutable vector membership snapshot.", nameof(request));
-            var currentMembership = await ReadEligibleVectorIdsAsync(context, cancellationToken)
+            var currentMembership = await ReadEligibleVectorsAsync(context, cancellationToken)
                 .ConfigureAwait(false);
-            if (!expectedMembership.Order().SequenceEqual(currentMembership))
+            if (!SameSnapshot(expectedMembership, currentMembership) ||
+                !string.Equals(activeGeneration.MetadataChecksum,
+                    ComputeSnapshotChecksum(activeGeneration.ModelFingerprint, activeGeneration.Dimensions, expectedMembership),
+                    StringComparison.Ordinal))
             {
-                throw new IndexGenerationStaleException(
-                    "The eligible SQL vector corpus changed while the immutable candidate was being published.");
+                // Superseded candidates complete their durable Publish work without moving
+                // the pointer backwards; a later current-corpus Publish owns activation.
+                goto SkipActivation;
             }
 
             var existingMembership = await context.IndexGenerationVectors
                 .Where(membership => membership.GenerationId == activeGeneration.Id)
-                .Select(membership => membership.VectorId)
-                .OrderBy(vectorId => vectorId)
+                .Select(membership => membership.VectorId).OrderBy(vectorId => vectorId)
                 .ToListAsync(cancellationToken)
                 .ConfigureAwait(false);
-            if (existingMembership.Count > 0 && !existingMembership.SequenceEqual(currentMembership))
+            if (existingMembership.Count > 0 && !existingMembership.SequenceEqual(currentMembership.Select(vector => vector.VectorId)))
             {
                 throw new IndexGenerationStaleException(
                     "The immutable generation ID already has incompatible SQL membership.");
@@ -189,17 +193,29 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
 
             if (existingMembership.Count == 0)
             {
-                context.IndexGenerationVectors.AddRange(currentMembership.Select(vectorId =>
+                context.IndexGenerations.Add(new IndexGenerationEntity
+                {
+                    Id = activeGeneration.Id,
+                    ModelFingerprint = activeGeneration.ModelFingerprint,
+                    Dimensions = activeGeneration.Dimensions,
+                    IndexPath = activeGeneration.IndexPath,
+                    MetadataChecksum = activeGeneration.MetadataChecksum,
+                    VectorCount = activeGeneration.VectorCount,
+                    CreatedAtUtc = _timeProvider.GetUtcNow(),
+                    ValidatedAtUtc = _timeProvider.GetUtcNow()
+                });
+                context.IndexGenerationVectors.AddRange(currentMembership.Select(vector =>
                     new IndexGenerationVectorEntity
                     {
                         GenerationId = activeGeneration.Id,
-                        VectorId = vectorId
+                        VectorId = vector.VectorId
                     }));
             }
             var state = await context.IndexState.SingleAsync(state => state.Id == 1, cancellationToken)
                 .ConfigureAwait(false);
             state.ActiveIndexGenerationId = activeGeneration.Id;
             state.UpdatedAtUtc = _timeProvider.GetUtcNow();
+        SkipActivation: ;
         }
 
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -531,7 +547,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         }
     }
 
-    private static Task<List<long>> ReadEligibleVectorIdsAsync(
+    private static Task<List<CanonicalVector>> ReadEligibleVectorsAsync(
         FluxKnowledgeDbContext context,
         CancellationToken cancellationToken) =>
         (
@@ -540,13 +556,32 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
             join record in context.PipelineRecords on artifact.PipelineRecordId equals record.Id
             where !vector.IsDeleted && !record.IsDeleted &&
-                  !context.PipelineRecords.Any(newer =>
-                      newer.SourceIdentityId == record.SourceIdentityId &&
-                      newer.Revision > record.Revision &&
-                      !newer.IsDeleted)
+                  record.Revision == context.PipelineRecords
+                      .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
+                      .Max(candidate => candidate.Revision)
             orderby vector.VectorId
-            select vector.VectorId)
+            select new CanonicalVector(vector.VectorId, vector.TextChunkId,
+                vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,
+                vector.SourceRevision))
         .ToListAsync(cancellationToken);
+
+    private static bool SameSnapshot(
+        IReadOnlyList<CanonicalVector> expected,
+        IReadOnlyList<CanonicalVector> actual) =>
+        expected.Count == actual.Count && expected.Zip(actual, static (left, right) =>
+            left.VectorId == right.VectorId &&
+            left.Dimensions == right.Dimensions &&
+            string.Equals(left.ModelFingerprint, right.ModelFingerprint, StringComparison.Ordinal) &&
+            string.Equals(left.ContentHash, right.ContentHash, StringComparison.Ordinal)).All(static equal => equal);
+
+    private static string ComputeSnapshotChecksum(
+        string fingerprint,
+        int dimensions,
+        IReadOnlyList<CanonicalVector> vectors)
+    {
+        var material = $"{fingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.ContentHash}"))}";
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(material)));
+    }
 
     private sealed record ValidatedClaim(
         PipelineRecordEntity PipelineRecord,

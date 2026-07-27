@@ -27,6 +27,18 @@ public class UsearchGenerationValidator
 
     public virtual void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
     {
+        if (vectors.Any(vector =>
+                !string.Equals(
+                    vector.ContentHash,
+                    Convert.ToHexStringLower(SHA256.HashData(vector.Values)),
+                    StringComparison.Ordinal)) ||
+            !string.Equals(
+                expected.MetadataChecksum,
+                ComputeChecksum(expected.ModelFingerprint, expected.Dimensions, vectors),
+                StringComparison.Ordinal))
+        {
+            throw new IndexGenerationValidationException("SQL vector bytes do not match the candidate content identity.");
+        }
         var metadataPath = Path.Combine(directory, MetadataFileName);
         var metadata = JsonSerializer.Deserialize<Metadata>(File.ReadAllText(metadataPath))
             ?? throw new IndexGenerationValidationException("Generation metadata cannot be read.");

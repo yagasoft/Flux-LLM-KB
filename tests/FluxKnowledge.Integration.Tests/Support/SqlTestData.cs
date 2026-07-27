@@ -21,11 +21,12 @@ internal static class SqlTestData
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
         await context.AuditEvents.ExecuteDeleteAsync();
+        var state = await context.IndexState.SingleAsync(candidate => candidate.Id == 1);
+        state.ActiveIndexGenerationId = null;
+        await context.SaveChangesAsync();
         await context.IndexGenerationVectors.ExecuteDeleteAsync();
         await context.Vectors.ExecuteDeleteAsync();
         await context.IndexGenerations.ExecuteDeleteAsync();
-        var state = await context.IndexState.SingleAsync(candidate => candidate.Id == 1);
-        state.ActiveIndexGenerationId = null;
         await context.Artifacts.ExecuteDeleteAsync();
         await context.OutboxMessages.ExecuteDeleteAsync();
         await context.JobAttempts.ExecuteDeleteAsync();
