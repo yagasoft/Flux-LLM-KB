@@ -19,4 +19,24 @@ public sealed class StatusEventFeedTests
         Assert.Equal(changed, await first.Reader.ReadAsync());
         Assert.Equal(changed, await second.Reader.ReadAsync());
     }
+
+    [Fact]
+    public async Task Circuit_open_publishes_a_reconnect_invalidation()
+    {
+        var occurredAtUtc = DateTimeOffset.Parse("2026-07-27T05:00:00Z");
+        var feed = new StatusEventFeed();
+        await using var subscription = feed.Subscribe();
+        var handler = new StatusEventCircuitHandler(feed, new FixedTimeProvider(occurredAtUtc));
+
+        await handler.OnCircuitOpenedAsync(null!, CancellationToken.None);
+
+        var changed = await subscription.Reader.ReadAsync();
+        Assert.Equal("reconnect", changed.Projection);
+        Assert.Equal(occurredAtUtc, changed.OccurredAtUtc);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => utcNow;
+    }
 }

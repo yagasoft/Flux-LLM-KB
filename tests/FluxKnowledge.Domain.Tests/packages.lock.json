@@ -282,6 +282,12 @@
       "fluxknowledge.domain": {
         "type": "Project"
       },
+      "fluxknowledge.infrastructure.inference": {
+        "type": "Project",
+        "dependencies": {
+          "FluxKnowledge.Application": "[1.0.0, )"
+        }
+      },
       "fluxknowledge.infrastructure.sqlserver": {
         "type": "Project",
         "dependencies": {

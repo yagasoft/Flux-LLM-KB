@@ -1,6 +1,8 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Search;
 using FluxKnowledge.Domain.Common;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -27,6 +29,21 @@ public sealed class SearchEndpointTests : IClassFixture<SearchEndpointTests.Sear
         Assert.Contains(hit.Explanation, static item => item.StartsWith("semantic:", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("/api/search?query=restart&cwd=C%3A%2Fworkspace", "unsupported_scope")]
+    [InlineData("/api/search?query=restart&tag=", "invalid_search_request")]
+    public async Task Search_endpoint_returns_a_non_retryable_problem_for_unsupported_or_malformed_scope(
+        string requestUri,
+        string expectedCode)
+    {
+        using var response = await _client.GetAsync(requestUri);
+        using var payload = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(expectedCode, payload.RootElement.GetProperty("code").GetString());
+        Assert.False(payload.RootElement.GetProperty("retryable").GetBoolean());
+    }
+
     public sealed class SearchApplicationFactory : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -42,8 +59,10 @@ public sealed class SearchEndpointTests : IClassFixture<SearchEndpointTests.Sear
 
     private sealed class HydratedSearchService : ISearchService
     {
-        public ValueTask<SearchResponse> SearchAsync(SearchRequest request, CancellationToken cancellationToken) =>
-            ValueTask.FromResult(
+        public ValueTask<SearchResponse> SearchAsync(SearchRequest request, CancellationToken cancellationToken)
+        {
+            SearchQueryValidator.Validate(request);
+            return ValueTask.FromResult(
                 new SearchResponse(
                     [new SearchHit(
                         new PipelineRecordId(Guid.Parse("00000000-0000-0000-0000-000000000001")),
@@ -56,5 +75,6 @@ public sealed class SearchEndpointTests : IClassFixture<SearchEndpointTests.Sear
                     2,
                     "active-generation",
                     "local_first"));
+        }
     }
 }

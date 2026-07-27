@@ -12,11 +12,11 @@
     <div class="table-scroll">
         <table>
             <caption class="visually-hidden">Registered pipeline records</caption>
-            <thead><tr><th>Source</th><th>Revision</th><th>Current stage</th><th>Status</th><th>Content hash</th><th>Registered</th><th>Last activity</th></tr></thead>
+            <thead><tr><th>Source</th><th>Revision</th><th>Current stage</th><th>Status</th><th>Content hash</th><th>Registered</th><th>Due / scheduled</th></tr></thead>
             <tbody>
                 @foreach (var record in _records)
                 {
-                    <tr><td>@record.SourceIdentity</td><td>@record.Revision</td><td>@record.CurrentStage</td><td>@record.Status</td><td><code>@record.ContentHashPrefix</code></td><td>@record.RegisteredAtUtc.LocalDateTime</td><td>@record.LastActivityAtUtc?.LocalDateTime</td></tr>
+                    <tr><td>@record.SourceIdentity</td><td>@record.Revision</td><td>@record.CurrentStage</td><td>@record.Status</td><td><code>@record.ContentHashPrefix</code></td><td>@record.RegisteredAtUtc.LocalDateTime</td><td>@record.DueAtUtc?.LocalDateTime</td></tr>
                 }
             </tbody>
         </table>

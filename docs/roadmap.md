@@ -15,17 +15,17 @@ estimates toward `shipped`; they are not live runtime health measurements.
 
 | Piece | Priority | Status | Progress % | Current evidence / remaining work |
 | --- | --- | --- | ---: | --- |
-| Target architecture and requirements traceability | P0 | in progress | 0% | The target and full traceability baseline are documented in [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md). This is design evidence only; no executable replacement exists. Review the specification, then write the detailed Phase 1 plan. |
-| Phase 1: disposable UTF-8 file vertical slice | P0 | planned | 0% | Local file to SQL PipelineRecord/Job/outbox, deterministic embedding, immutable USearch generation, hydrated search, Blazor live state and kb.search/kb.brief compatibility. Implement only after written-specification approval. |
-| Pipeline durability, scheduler and rebuild invariants | P0 | planned | 0% | Prove atomic claims, duplicate delivery, stale-revision rejection, lease recovery, snapshot failure/swap, SQL rebuild and strict-priority mini-task batching. |
-| MCP, plugin, REST and CLI contract parity | P0 | planned | 0% | Preserve all 54 current kb.* names, schemas, errors, hooks, installation, readiness and required REST/CLI behaviour through executable compatibility fixtures. |
+| Target architecture and requirements traceability | P0 | complete | 100% | The approved target, phase boundary and full traceability baseline are documented in [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md); the detailed Phase 1 plan and [validation record](operations/native-windows-phase-1-validation.md) now link implementation evidence to that intent. This completes the design/traceability piece only, not the replacement programme. |
+| Phase 1: disposable UTF-8 file vertical slice | P0 | in progress | 80% | The local code slice now covers UTF-8 registration, SQL PipelineRecord/Job/outbox flow, deterministic embedding, immutable USearch generation, hydrated REST/search, live Blazor projections and Phase 1 kb.search/kb.brief hosting. Required non-opt-in evidence passes: locked restore, Release build with 0 warnings, 44 Domain tests, 29 non-SQL Integration tests and 21 Web tests. The weighting is 60 points for implementation and 20 for this baseline; the remaining 15-point disposable SQL matrix and 5-point guarded browser slice were not run because no approved disposable-test connection or browser opt-in was supplied. See [the validation record](operations/native-windows-phase-1-validation.md). |
+| Pipeline durability, scheduler and rebuild invariants | P0 | in progress | 25% | Phase 1 includes six-state Job, provenance, atomic transition, claim/lease-generation, immutable snapshot and SQL-to-USearch rebuild contracts plus local unit/USearch evidence. The 21 SQL-dependent integration checks remain unrun; strict-priority scheduling, recovery/cleanup hardening and the broader Phase 2 projection work remain incomplete. |
+| MCP, plugin, REST and CLI contract parity | P0 | in progress | 5% | Phase 1 hosts and tests only kb.search and kb.brief discovery, retry and error envelopes through the shared search use case. The other 52 current kb.* tools, plugin installation, hooks, readiness, full REST/CLI ledgers and executable compatibility fixtures remain Phase 3 work. |
 | Source, mail, extraction and code branches | P1 | planned | 0% | Add filesystem crawl/watch, Gmail, Outlook VSTO ingress, documents, archives, image/OCR/enrichment, video/audio, code understanding and provenance branches in dependency order. |
 | Authorised native inference adapters | P1 | blocked pending approval | 0% | No model is downloaded, converted, copied, activated or parity-tested until explicitly authorised. Use only an approved versioned app-owned cache and ONNX Runtime CUDA/DirectML where appropriate. |
 | Local replacement readiness and legacy retirement decision | P0 | planned | 0% | Requires SQL backup/restore, SQL-to-USearch rebuild, end-to-end integration and operator evidence, then a separate explicit cutover approval. Legacy data, code, Docker assets, model caches and private spools remain preserved until then. |
 
 The replacement work does not change historic legacy progress figures below.
-Its first executable evidence will be recorded only after Phase 1 has a tested
-local vertical slice.
+Its first executable local evidence is recorded above, but Phase 1 remains short
+of verified completion until its disposable SQL and browser gates run.
 
 ## 2026-07-08 Realtime Dashboard Degradation And State Tab Correction Update
 

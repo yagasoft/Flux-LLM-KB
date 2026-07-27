@@ -13,7 +13,7 @@ public sealed record PipelineRecordProjection(
     string Status,
     string ContentHashPrefix,
     DateTimeOffset RegisteredAtUtc,
-    DateTimeOffset? LastActivityAtUtc);
+    DateTimeOffset? DueAtUtc);
 
 public interface IProjectionReader
 {
