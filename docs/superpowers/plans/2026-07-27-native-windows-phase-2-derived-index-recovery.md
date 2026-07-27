@@ -8,7 +8,7 @@
 
 **Tech Stack:** .NET 10, ASP.NET Core hosted services and Minimal APIs, EF Core SQL Server, `sp_getapplock`, SQL Server `AuditEvents`, Cloud.Unum.USearch, Blazor Interactive Server, xUnit, Playwright.
 
-**Status:** Approved; implementation in progress.
+**Status:** Approved; local implementation and verification complete on 2026-07-27.
 
 ## Global constraints
 

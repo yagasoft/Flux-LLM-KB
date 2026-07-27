@@ -1,6 +1,6 @@
 # Native Windows Phase 2 derived-index recovery design
 
-Status: approved; implementation in progress.
+Status: approved; local implementation and verification complete on 2026-07-27.
 
 ## Goal
 
