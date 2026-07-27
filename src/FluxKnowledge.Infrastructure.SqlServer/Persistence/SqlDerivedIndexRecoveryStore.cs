@@ -23,6 +23,9 @@ public sealed class SqlDerivedIndexRecoveryStore(
         await using var context = await contextFactory
             .CreateDbContextAsync(cancellationToken)
             .ConfigureAwait(false);
+        await using var transaction = await context.Database
+            .BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken)
+            .ConfigureAwait(false);
         var activeGenerationId = await context.IndexState.AsNoTracking()
             .Where(state => state.Id == 1)
             .Select(state => state.ActiveIndexGenerationId)
@@ -70,6 +73,7 @@ public sealed class SqlDerivedIndexRecoveryStore(
             referencedGenerationIds.Add(activeId);
         }
 
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new DerivedIndexRecoverySqlSnapshot(
             activeGenerationId,
             generation,
@@ -113,13 +117,28 @@ public sealed class SqlDerivedIndexRecoveryStore(
             command.Parameters.Add("@resource", SqlDbType.NVarChar, 255).Value = LockResource;
             command.Parameters.Add("@lockTimeout", SqlDbType.Int).Value = (int)Math.Ceiling(lockTimeout.TotalMilliseconds);
             var result = (int)(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) ?? -999);
-            if (result < 0)
+            if (result == -1)
             {
                 await connection.DisposeAsync().ConfigureAwait(false);
                 return null;
             }
 
+            if (result == -2 && cancellationToken.IsCancellationRequested)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            if (result < 0)
+            {
+                throw new InvalidOperationException(
+                    $"SQL application-lock acquisition failed with result code {result}.");
+            }
+
             return new SqlDerivedIndexRecoveryLease(connection);
+        }
+        catch (SqlException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(cancellationToken);
         }
         catch
         {
@@ -162,13 +181,18 @@ public sealed class SqlDerivedIndexRecoveryStore(
     private static string SanitizeCategory(string category)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(category);
-        var sanitised = new string(category
-            .Take(128)
-            .Select(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-'
-                ? char.ToLowerInvariant(character)
-                : '_')
-            .ToArray());
-        return sanitised.Trim('_') is { Length: > 0 } result ? result : "unknown";
+        if (category.Length > 64 ||
+            !char.IsAsciiLetter(category[0]) ||
+            category.Any(character => char.IsAsciiLetterOrDigit(character) is false && character != '_') ||
+            category.Contains("password", StringComparison.OrdinalIgnoreCase) ||
+            category.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+            category.Contains("credential", StringComparison.OrdinalIgnoreCase) ||
+            category.Contains("token", StringComparison.OrdinalIgnoreCase))
+        {
+            return "unknown";
+        }
+
+        return category.ToLowerInvariant();
     }
 
     private sealed class SqlDerivedIndexRecoveryLease(SqlConnection connection)

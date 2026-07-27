@@ -4,6 +4,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -29,8 +30,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         Assert.Equal(activeGenerationId, snapshot.ActiveGenerationId);
         Assert.NotNull(snapshot.Generation);
         Assert.Equal(activeGenerationId, snapshot.Generation!.Id);
-        var member = Assert.Single(snapshot.Membership);
-        Assert.Equal(1, member.VectorId);
+        Assert.Equal([1L, 2L], snapshot.Membership.Select(member => member.VectorId));
         Assert.Contains(activeGenerationId, snapshot.ReferencedGenerationIds);
         Assert.Contains(referencedGenerationId, snapshot.ReferencedGenerationIds);
     }
@@ -51,6 +51,60 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             TimeSpan.Zero, CancellationToken.None);
 
         Assert.Null(second);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Disposed_recovery_lease_can_be_reacquired_and_double_disposed()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var store = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
+
+        var first = await store.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(first);
+        await first!.DisposeAsync();
+        await first.DisposeAsync();
+
+        var second = await store.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(second);
+        await second!.DisposeAsync();
+    }
+
+    [NativeSqlServerFact]
+    public async Task Lease_disposal_closes_a_broken_session_before_the_next_acquisition()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var store = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
+        var lease = await store.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(lease);
+        var field = lease!.GetType().GetField(
+            "_connection",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var connection = Assert.IsType<SqlConnection>(field!.GetValue(lease));
+        await connection.CloseAsync();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await lease.DisposeAsync());
+
+        var reacquired = await store.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(reacquired);
+        await reacquired!.DisposeAsync();
+    }
+
+    [NativeSqlServerFact]
+    public async Task Cancelled_recovery_lease_wait_preserves_cancellation()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var factory = SqlTestData.CreateFactory(_fixture);
+        var store = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
+        var otherStore = new SqlDerivedIndexRecoveryStore(factory, TimeProvider.System);
+        var held = await store.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, CancellationToken.None);
+        Assert.NotNull(held);
+        await using var heldLease = held!;
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await otherStore.TryAcquireExclusiveLeaseAsync(TimeSpan.FromSeconds(5), cancellation.Token));
     }
 
     [NativeSqlServerFact]
@@ -79,6 +133,30 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         Assert.Contains(generationId.ToString("D"), audit.DetailsJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("C:\\", audit.DetailsJson, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", audit.DetailsJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Recovery_audit_bounds_and_sanitises_hostile_category_input()
+    {
+        await SqlTestData.ClearPipelineAsync(_fixture);
+        var store = new SqlDerivedIndexRecoveryStore(
+            SqlTestData.CreateFactory(_fixture), TimeProvider.System);
+        var hostileCategory = "C:\\recovery\\password=secret\\" + new string('x', 4_000);
+
+        await store.AppendAuditAsync(
+            new DerivedIndexRecoveryAuditEvent(
+                hostileCategory, Guid.NewGuid(), null, int.MaxValue,
+                TimeSpan.MaxValue, null, int.MaxValue),
+            CancellationToken.None);
+        await using var context = await SqlTestData.CreateFactory(_fixture)
+            .CreateDbContextAsync();
+        var audit = await context.AuditEvents.OrderByDescending(item => item.Id).FirstAsync();
+
+        Assert.True(audit.DetailsJson.Length < 512);
+        Assert.DoesNotContain("C:\\", audit.DetailsJson, StringComparison.Ordinal);
+        Assert.DoesNotContain("password", audit.DetailsJson, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", audit.DetailsJson, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\"category\":\"unknown\"", audit.DetailsJson, StringComparison.Ordinal);
     }
 
     private static async Task SeedSnapshotAsync(
@@ -133,7 +211,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         };
         context.TextChunks.Add(chunk);
         await context.SaveChangesAsync();
-        context.Vectors.Add(new VectorEntity
+        context.Vectors.AddRange(
+            new VectorEntity
         {
             TextChunkId = chunk.Id,
             SourceRevision = 1,
@@ -144,13 +223,23 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values)),
             IndexGenerationId = referencedGenerationId,
             CreatedAtUtc = DateTimeOffset.UtcNow
-        });
+        },
+            new VectorEntity
+            {
+                TextChunkId = chunk.Id,
+                SourceRevision = 1,
+                ModelFingerprint = "deterministic-tokenhash-v1:256",
+                Dimensions = 256,
+                Values = values,
+                TextChunkContentHash = chunk.ContentHash,
+                PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values)),
+                IndexGenerationId = activeGenerationId,
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            });
         await context.SaveChangesAsync();
-        context.IndexGenerationVectors.Add(new IndexGenerationVectorEntity
-        {
-            GenerationId = activeGenerationId,
-            VectorId = 1
-        });
+        context.IndexGenerationVectors.AddRange(
+            new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = 2 },
+            new IndexGenerationVectorEntity { GenerationId = activeGenerationId, VectorId = 1 });
         var state = await context.IndexState.SingleAsync(item => item.Id == 1);
         state.ActiveIndexGenerationId = activeGenerationId;
         await context.SaveChangesAsync();
