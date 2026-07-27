@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -22,7 +23,9 @@ public interface IProjectionReader
     ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken cancellationToken);
 }
 
-public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext> contextFactory) : IProjectionReader
+public sealed class SqlProjectionReader(
+    IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
+    IDerivedIndexRecoveryStatus recoveryStatus) : IProjectionReader
 {
     public async ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)
     {
@@ -45,6 +48,7 @@ public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false) ?? "none";
 
+        var recovery = recoveryStatus.Snapshot;
         return new OverviewProjection(
             GetCount(PublicJobState.WorkerQueued),
             GetCount(PublicJobState.WorkerProcessing),
@@ -53,7 +57,14 @@ public sealed class SqlProjectionReader(IDbContextFactory<FluxKnowledgeDbContext
             GetCount(PublicJobState.Completed),
             GetCount(PublicJobState.Failed),
             indexed,
-            activeGeneration);
+            activeGeneration,
+            new IndexRecoverySummary(
+                recovery.State.ToString(),
+                recovery.ActiveGenerationId?.ToString("N"),
+                recovery.LastCompletedAtUtc,
+                recovery.NextRetryAtUtc,
+                recovery.FailureCategory?.ToString(),
+                recovery.CleanedCandidateCount));
 
         int GetCount(PublicJobState state) => jobCounts.GetValueOrDefault((int)state);
     }

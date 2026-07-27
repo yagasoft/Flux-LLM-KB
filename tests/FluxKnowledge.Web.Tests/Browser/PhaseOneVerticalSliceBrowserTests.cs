@@ -63,6 +63,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
                 overviewResponse.IsSuccessStatusCode,
                 $"Overview returned {(int)overviewResponse.StatusCode}: {overviewMarkup}");
             Assert.Contains("Pipeline overview", overviewMarkup, StringComparison.Ordinal);
+            Assert.Contains("Index recovery state", overviewMarkup, StringComparison.Ordinal);
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();
@@ -170,6 +171,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
             application.MapStaticAssets();
             application.MapRazorComponents<App>().AddInteractiveServerRenderMode();
             application.MapFluxKnowledgeHealth();
+            application.MapFluxKnowledgeIndexHealth();
             application.MapFluxKnowledgeSearch();
             application.MapFluxKnowledgePipelineRecords();
             application.MapMcp("/mcp");

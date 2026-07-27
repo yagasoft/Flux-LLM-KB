@@ -103,7 +103,16 @@ public sealed class PipelineEndpointContractTests : IClassFixture<PipelineEndpoi
             DateTimeOffset.UnixEpoch);
 
         public ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken) =>
-            ValueTask.FromResult(new OverviewProjection(0, 0, 0, 0, 0, 0, 0, "none"));
+            ValueTask.FromResult(new OverviewProjection(
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                "none",
+                new IndexRecoverySummary("Starting", null, null, null, null, 0)));
 
         public ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(
             CancellationToken cancellationToken) =>

@@ -27,6 +27,7 @@ app.MapStaticAssets();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 app.MapFluxKnowledgeHealth();
+app.MapFluxKnowledgeIndexHealth();
 app.MapFluxKnowledgeSearch();
 app.MapFluxKnowledgePipelineRecords();
 app.MapMcp("/mcp");

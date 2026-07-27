@@ -18,6 +18,24 @@
         <div><dt>Failed</dt><dd><StatusCount Value="ProjectionState.Current.FailedCount" /></dd></div>
         <div><dt>Indexed records</dt><dd><StatusCount Value="ProjectionState.Current.IndexedRecordCount" /></dd></div>
         <div><dt>Active index generation</dt><dd>@ProjectionState.Current.ActiveIndexGeneration</dd></div>
+        <div><dt>Index recovery state</dt><dd>@ProjectionState.Current.IndexRecovery.State</dd></div>
+        @if (ProjectionState.Current.IndexRecovery.ActiveGeneration is { } recoveryGeneration)
+        {
+            <div><dt>Recovery generation</dt><dd>@recoveryGeneration</dd></div>
+        }
+        @if (ProjectionState.Current.IndexRecovery.LastCompletedAtUtc is { } lastCompletedAtUtc)
+        {
+            <div><dt>Recovery last completed</dt><dd>@lastCompletedAtUtc.ToString("O")</dd></div>
+        }
+        @if (ProjectionState.Current.IndexRecovery.NextRetryAtUtc is { } nextRetryAtUtc)
+        {
+            <div><dt>Recovery next retry</dt><dd>@nextRetryAtUtc.ToString("O")</dd></div>
+        }
+        @if (ProjectionState.Current.IndexRecovery.FailureCategory is { } failureCategory)
+        {
+            <div><dt>Recovery failure category</dt><dd>@failureCategory</dd></div>
+        }
+        <div><dt>Recovery cleaned candidates</dt><dd><StatusCount Value="ProjectionState.Current.IndexRecovery.CleanedCandidateCount" /></dd></div>
     </dl>
 </section>
 
