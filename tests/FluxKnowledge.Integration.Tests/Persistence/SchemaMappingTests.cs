@@ -1,8 +1,11 @@
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Persistence;
@@ -303,5 +306,129 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             System.Globalization.CultureInfo.InvariantCulture);
 
         Assert.Equal(13, tableCount);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Membership_migration_backfills_origins_and_blocks_snapshot_only_downgrade()
+    {
+        await using var database = await fixture.CreatePreviousMigrationDatabaseAsync();
+        var now = DateTimeOffset.Parse("2026-07-27T12:00:00+00:00");
+        var sourceId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        var generationId = Guid.NewGuid();
+        long vectorId;
+
+        await using (var context = database.CreateContext())
+        {
+            context.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = sourceId,
+                SourceKind = "migration-test",
+                StableKey = $"migration-test:{sourceId:N}",
+                CreatedAtUtc = now
+            });
+            context.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = recordId,
+                SourceIdentityId = sourceId,
+                Revision = 1,
+                ContentHash = new string('a', 64),
+                RootLineageRecordId = recordId,
+                CurrentStage = 1,
+                RegisteredAtUtc = now
+            });
+            context.IndexGenerations.Add(new IndexGenerationEntity
+            {
+                Id = generationId,
+                ModelFingerprint = "migration-test:1",
+                Dimensions = 1,
+                IndexPath = "C:\\migration-test",
+                MetadataChecksum = new string('0', 64),
+                VectorCount = 1,
+                CreatedAtUtc = now
+            });
+            await context.SaveChangesAsync();
+
+            var artifact = new ArtifactEntity
+            {
+                Id = Guid.NewGuid(),
+                PipelineRecordId = recordId,
+                SourceRevision = 1,
+                Stage = 1,
+                ContentHash = new string('b', 64),
+                ContentType = "text/plain",
+                SearchText = "migration test",
+                CreatedAtUtc = now
+            };
+            context.Artifacts.Add(artifact);
+            await context.SaveChangesAsync();
+
+            var chunk = new TextChunkEntity
+            {
+                ArtifactId = artifact.Id,
+                SourceRevision = 1,
+                Ordinal = 0,
+                StartOffset = 0,
+                Length = 14,
+                Content = "migration test",
+                ContentHash = new string('c', 64)
+            };
+            context.TextChunks.Add(chunk);
+            await context.SaveChangesAsync();
+
+            var vector = new VectorEntity
+            {
+                TextChunkId = chunk.Id,
+                SourceRevision = 1,
+                ModelFingerprint = "migration-test:1",
+                Dimensions = 1,
+                Values = [0, 0, 128, 63],
+                ContentHash = new string('d', 64),
+                IndexGenerationId = generationId,
+                CreatedAtUtc = now
+            };
+            context.Vectors.Add(vector);
+            await context.SaveChangesAsync();
+            vectorId = vector.VectorId;
+        }
+
+        await using (var context = database.CreateContext())
+        {
+            await context.GetService<IMigrator>().MigrateAsync("20260726235718_AddIndexGenerationMembership");
+            var membership = await context.IndexGenerationVectors.SingleAsync();
+
+            Assert.Equal(generationId, membership.GenerationId);
+            Assert.Equal(vectorId, membership.VectorId);
+
+            var snapshotOnlyGenerationId = Guid.NewGuid();
+            context.IndexGenerations.Add(new IndexGenerationEntity
+            {
+                Id = snapshotOnlyGenerationId,
+                ModelFingerprint = "migration-test:1",
+                Dimensions = 1,
+                IndexPath = "C:\\migration-test-history",
+                MetadataChecksum = new string('1', 64),
+                VectorCount = 1,
+                CreatedAtUtc = now
+            });
+            context.IndexGenerationVectors.Add(new IndexGenerationVectorEntity
+            {
+                GenerationId = snapshotOnlyGenerationId,
+                VectorId = vectorId
+            });
+            var activeState = await context.IndexState.SingleAsync(state => state.Id == 1);
+            activeState.ActiveIndexGenerationId = snapshotOnlyGenerationId;
+            await context.SaveChangesAsync();
+
+            var failure = await Assert.ThrowsAsync<SqlException>(
+                async () => await context.GetService<IMigrator>()
+                    .MigrateAsync("20260726221653_EnforceCanonicalSqlSafety"));
+
+            Assert.Equal(51000, failure.Number);
+            Assert.Contains("snapshot-only history", failure.Message, StringComparison.Ordinal);
+        }
+
+        await using var verification = database.CreateContext();
+        Assert.Equal(2, await verification.IndexGenerationVectors.CountAsync());
     }
 }

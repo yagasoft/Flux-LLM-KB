@@ -166,3 +166,28 @@ tests because `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` remains unset. The Release
 build passed with zero warnings and errors; `git diff --check` passed. No SQL
 connection, target migration, deployment, restart, model/runtime or GPU asset
 was touched.
+
+## Final migration behaviour evidence
+
+Added guarded native-SQL migration behaviour coverage using a second uniquely
+generated `FluxKnowledge_Phase1Tests_<guid>` catalogue. The fixture applies
+only `20260726221653_EnforceCanonicalSqlSafety`, seeds an origin
+`IndexGeneration` and stable `Vector`, then applies
+`20260726235718_AddIndexGenerationMembership` and asserts the backfilled
+membership. It adds a second active snapshot-only membership and attempts the
+actual migrator Down path; SQL Server must raise error 51000 and retain the
+membership table/data.
+
+Fresh focused evidence:
+
+```powershell
+dotnet test tests/FluxKnowledge.Integration.Tests/FluxKnowledge.Integration.Tests.csproj --configuration Release --no-restore --filter "FullyQualifiedName~SchemaMappingTests|FullyQualifiedName~Membership_migration_backfills_origins"
+dotnet build FluxKnowledge.slnx --configuration Release --no-restore
+git diff --check
+```
+
+The non-SQL schema subset passed 7/7. The one native migration test compiled
+and skipped because `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` is unset. The Release
+build passed with zero warnings and errors; `git diff --check` passed. No SQL
+connection, target catalogue, migration, deployment, restart, I: action,
+model/runtime or GPU asset was touched.

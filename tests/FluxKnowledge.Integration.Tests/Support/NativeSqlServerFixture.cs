@@ -2,6 +2,8 @@ using System.Data.Common;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Support;
@@ -75,6 +77,22 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     public async Task DisposeAsync()
     {
         await DropDatabaseAsync().ConfigureAwait(false);
+    }
+
+    internal async Task<PreviousMigrationDatabase> CreatePreviousMigrationDatabaseAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_serverConnectionString))
+        {
+            throw new InvalidOperationException(
+                $"{ConnectionEnvironmentVariable} is not configured.");
+        }
+
+        ValidateServerConnectionString(_serverConnectionString);
+        var database = new PreviousMigrationDatabase(
+            _serverConnectionString,
+            $"{TestCatalogPrefix}{Guid.NewGuid():N}");
+        await database.InitializeAsync().ConfigureAwait(false);
+        return database;
     }
 
     public static void ValidateServerConnectionString(string connectionString)
@@ -272,5 +290,107 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         }
 
         return string.Equals(normalisedRoot, "I:\\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal sealed class PreviousMigrationDatabase : IAsyncDisposable
+    {
+        private const string PreviousMigration = "20260726221653_EnforceCanonicalSqlSafety";
+        private readonly string _serverConnectionString;
+        private readonly string _databaseName;
+        private bool _created;
+
+        internal PreviousMigrationDatabase(string serverConnectionString, string databaseName)
+        {
+            ValidateServerConnectionString(serverConnectionString);
+            ValidateGeneratedCatalog(databaseName);
+            _serverConnectionString = serverConnectionString;
+            _databaseName = databaseName;
+        }
+
+        internal string ConnectionString => new SqlConnectionStringBuilder(_serverConnectionString)
+        {
+            InitialCatalog = _databaseName,
+            AttachDBFilename = string.Empty,
+            UserInstance = false
+        }.ConnectionString;
+
+        internal FluxKnowledgeDbContext CreateContext() => new(
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .UseSqlServer(ConnectionString)
+                .Options);
+
+        internal async Task InitializeAsync()
+        {
+            await using var serverConnection = new SqlConnection(_serverConnectionString);
+            await serverConnection.OpenAsync().ConfigureAwait(false);
+            await EnsureSafeServerDefaultsAsync(serverConnection).ConfigureAwait(false);
+            try
+            {
+                _created = true;
+                await using (var create = new SqlCommand(
+                                 $"CREATE DATABASE [{_databaseName}];",
+                                 serverConnection))
+                {
+                    await create.ExecuteNonQueryAsync().ConfigureAwait(false);
+                }
+
+                await VerifyCreatedDatabaseFilesAsync(serverConnection).ConfigureAwait(false);
+                await using var context = CreateContext();
+                await context.GetService<IMigrator>()
+                    .MigrateAsync(PreviousMigration)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                await DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (!_created)
+            {
+                return;
+            }
+
+            ValidateGeneratedCatalog(_databaseName);
+            SqlConnection.ClearAllPools();
+            await using var serverConnection = new SqlConnection(_serverConnectionString);
+            await serverConnection.OpenAsync().ConfigureAwait(false);
+            await using var drop = new SqlCommand(
+                $"""
+                 IF DB_ID(N'{_databaseName}') IS NOT NULL
+                 BEGIN
+                     ALTER DATABASE [{_databaseName}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE;
+                     DROP DATABASE [{_databaseName}];
+                 END;
+                 """,
+                serverConnection);
+            await drop.ExecuteNonQueryAsync().ConfigureAwait(false);
+            _created = false;
+        }
+
+        private async Task VerifyCreatedDatabaseFilesAsync(SqlConnection connection)
+        {
+            ValidateGeneratedCatalog(_databaseName);
+            const string sql =
+                """
+                SELECT [physical_name]
+                FROM sys.master_files
+                WHERE [database_id] = DB_ID(@databaseName)
+                ORDER BY [file_id];
+                """;
+            await using var command = new SqlCommand(sql, connection);
+            command.Parameters.AddWithValue("@databaseName", _databaseName);
+            await using var reader = await command.ExecuteReaderAsync().ConfigureAwait(false);
+            var filePaths = new List<string?>();
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                filePaths.Add(reader.IsDBNull(0) ? null : reader.GetString(0));
+            }
+
+            ValidateCreatedDatabaseFiles(filePaths);
+        }
     }
 }
