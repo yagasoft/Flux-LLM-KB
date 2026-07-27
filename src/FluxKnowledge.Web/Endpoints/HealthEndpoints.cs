@@ -1,5 +1,6 @@
 using FluxKnowledge.Infrastructure.SqlServer.Configuration;
 using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
+using FluxKnowledge.Application.Indexing;
 
 namespace FluxKnowledge.Web.Endpoints;
 
@@ -14,6 +15,7 @@ public static class HealthEndpoints
 
     private static async Task<IResult> ReadyAsync(
         ISqlServerReadinessValidator readinessValidator,
+        IDerivedIndexRecoveryStatus recoveryStatus,
         SqlServerOptions options,
         CancellationToken cancellationToken)
     {
@@ -34,7 +36,7 @@ public static class HealthEndpoints
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
 
-        return result.IsReady
+        return result.IsReady && recoveryStatus.Snapshot.State == DerivedIndexRecoveryState.Healthy
             ? Results.Ok()
             : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     }

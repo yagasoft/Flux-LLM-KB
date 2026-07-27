@@ -15,4 +15,13 @@ public sealed record OverviewProjection(
     int CompletedCount,
     int FailedCount,
     int IndexedRecordCount,
-    string ActiveIndexGeneration);
+    string ActiveIndexGeneration,
+    IndexRecoverySummary IndexRecovery);
+
+public sealed record IndexRecoverySummary(
+    string State,
+    string? ActiveGeneration,
+    DateTimeOffset? LastCompletedAtUtc,
+    DateTimeOffset? NextRetryAtUtc,
+    string? FailureCategory,
+    int CleanedCandidateCount);

@@ -4,11 +4,49 @@ using FluxKnowledge.Application.Ports;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
+public sealed class RecoveryCandidatePlacementException(string path, Exception innerException)
+    : Exception("Recovery candidate validation failed after placement.", innerException)
+{
+    public string Path { get; } = path;
+}
+
 public sealed class UsearchGenerationBuilder(
     IIndexGenerationStore store,
     UsearchIndexOptions options,
     UsearchGenerationValidator validator) : IIndexGenerationPublisher
 {
+    public ValueTask<IndexGenerationDescriptor> BuildRecoveryCandidateAsync(
+        IndexGenerationDescriptor generation,
+        IReadOnlyList<CanonicalVector> membership,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var fileSystem = new DerivedIndexFileSystem(options);
+        if (!fileSystem.TryCreateRecoveryStagingDirectory(out var staging))
+        {
+            throw new InvalidOperationException("The recovery staging directory cannot be created safely.");
+        }
+        string? placedPath = null;
+        try
+        {
+            SaveCandidate(staging, generation, membership);
+            validator.Validate(staging, generation, membership);
+            var path = AtomicGenerationPlacement.PlaceRecovery(options, generation.Id, staging);
+            placedPath = path;
+            validator.Validate(path, generation with { IndexPath = path }, membership);
+            return ValueTask.FromResult(generation with { IndexPath = path });
+        }
+        catch (Exception exception) when (placedPath is not null)
+        {
+            throw new RecoveryCandidatePlacementException(placedPath, exception);
+        }
+        catch
+        {
+            fileSystem.TryQuarantine(staging, []);
+            throw;
+        }
+    }
+
     public async ValueTask<IndexGenerationDescriptor> RebuildFromSqlAsync(
         Guid indexGenerationId,
         CancellationToken cancellationToken)
@@ -30,8 +68,11 @@ public sealed class UsearchGenerationBuilder(
             return existing;
         }
 
-        var staging = Path.Combine(options.RootPath, "staging", existing.Id.ToString("N"), Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(staging);
+        var fileSystem = new DerivedIndexFileSystem(options);
+        if (!fileSystem.TryCreateRecoveryStagingDirectory(out var staging))
+        {
+            throw new InvalidOperationException("The recovery staging directory cannot be created safely.");
+        }
         try
         {
             SaveCandidate(staging, existing, vectors);
@@ -43,7 +84,7 @@ public sealed class UsearchGenerationBuilder(
         }
         catch
         {
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            fileSystem.TryQuarantine(staging, []);
             throw;
         }
     }

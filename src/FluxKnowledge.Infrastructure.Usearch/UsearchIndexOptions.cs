@@ -63,3 +63,30 @@ public sealed record UsearchIndexOptions(string RootPath)
         return Path.TrimEndingDirectorySeparator(physical);
     }
 }
+
+public sealed record UsearchIndexConfiguration(
+    UsearchIndexOptions? Options,
+    InvalidOperationException? Failure)
+{
+    public static UsearchIndexConfiguration FromConfiguredRoot(
+        string? rootPath,
+        string? repositoryRoot = null,
+        string? deploymentRoot = null)
+    {
+        try
+        {
+            return new(UsearchIndexOptions.FromConfiguredRoot(rootPath, repositoryRoot, deploymentRoot), null);
+        }
+        catch (InvalidOperationException exception)
+        {
+            return new(null, exception);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return new(null, new InvalidOperationException("The USearch root configuration is invalid.", exception));
+        }
+    }
+
+    public UsearchIndexOptions GetOptionsOrThrow() => Options ??
+        throw Failure ?? new InvalidOperationException("The USearch root configuration is invalid.");
+}

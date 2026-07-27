@@ -324,8 +324,10 @@ Residual concerns:
 
 - a completed Publish replay can build or reuse a derived candidate directory
   before SQL recognises the already-completed dispatch. SQL authority and the
-  active pointer remain protected, but orphan-candidate cleanup remains a
-  Phase 2 hardening item;
+  active pointer remain protected. Phase 2 recovery cleanup is limited to aged,
+  unreferenced direct children of the `staging` or `quarantine` roots; the
+  disposition of an unreferenced `generations` candidate remains deliberately
+  out of scope pending a separately designed safety contract;
 - the SQL hydration explanation test rejects backslash path leakage but does not
   independently assert every forward-slash form. Current explanation production
   emits rank contributions only; strengthen the guarded assertion in a later
@@ -342,7 +344,27 @@ Residual concerns:
 2. Once an external target and its native operator procedure are approved,
    provision and migrate it, create and validate an active USearch generation,
    deploy to the approved IIS site, and live-validate readiness and rollback.
-3. Address Phase 2 durability, scheduler, recovery and cleanup work, then Phase
-   3 full MCP/plugin/REST/CLI parity.
+3. Complete the remaining Phase 2 strict-priority scheduling and broader
+   projection work, then Phase 3 full MCP/plugin/REST/CLI parity.
 4. Treat Outlook, model/GPU activation and legacy retirement as separate
    approval-gated milestones.
+
+## Phase 2 local derived-index recovery verification
+
+At `b263e53` on 2026-07-27, local verification confirmed recovery of a missing
+or invalid active derived index from immutable SQL membership, bounded retries
+for recoverable failures, safe cleanup of aged unreferenced staging or
+quarantine candidates, readiness gating until validation, and a sanitised local
+status projection. SQL remains authoritative and recovery does not replace the
+active pointer.
+
+- Locked restore passed. The Release `-warnaserror` build passed with 0 warnings
+  and 0 errors.
+- The non-browser solution test run against local disposable SQL passed: Domain
+  64/64, Integration 96/96 and Web 36/36. The enabled browser Web slice passed
+  1/1.
+- The disposable recovery-catalogue query returned 0, and
+  `git diff --check 5994007..HEAD` passed.
+
+No new IIS, live or deployment validation occurred. This work did not restart
+IIS or change external access, legacy operation, models or GPU scope.

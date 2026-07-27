@@ -1,6 +1,6 @@
 # Native Windows Phase 2 derived-index recovery design
 
-Status: approved; implementation is paused before code changes.
+Status: approved; local implementation and verification complete on 2026-07-27.
 
 ## Goal
 
@@ -68,18 +68,24 @@ it records that outcome and returns to `Healthy` without rebuilding.
    SQL metadata to that new derived path. `IndexState.ActiveIndexGenerationId`
    is not changed. If metadata update fails, the old SQL-referenced path remains
    untouched and the unreferenced replacement becomes a quarantine candidate.
-6. After the metadata update succeeds, the previous invalid path is no longer
-   SQL-referenced and may be moved into the app-owned quarantine area. It is not
-   deleted as part of recovery. A failed rebuild leaves the SQL active pointer
-   unchanged.
+6. After the metadata update succeeds, take a fresh SQL path-reference snapshot
+   while still holding the recovery lock. Canonicalise every SQL
+   `IndexGenerations.IndexPath`; only when the previous invalid path is absent
+   from that snapshot may it be moved into the app-owned quarantine area. It is
+   not deleted as part of recovery. An invalid or out-of-root SQL path is an
+   operator-actionable configuration fault and receives no filesystem mutation.
+   A failed rebuild leaves the SQL active pointer unchanged.
 7. On success, write a sanitised audit outcome, set `Healthy`, and publish a
    status invalidation. Only then can readiness return 200.
 
-The current active or any SQL-referenced generation is never deleted. Cleanup
+The current active or any SQL-referenced generation is never deleted. A SQL
+generation reference is a canonical path reference, not only a generation ID:
+the same generation ID can legitimately receive a new recovery path. Cleanup
 may delete only direct children of the canonical USearch `staging` or
 `quarantine` directories after both conditions hold: the candidate is older than
-its configured retention and no SQL generation references it. Cleanup must not
-follow links outside the configured USearch root.
+its configured retention and a fresh, lock-held SQL path-reference snapshot does
+not contain it. Cleanup must not follow links outside the configured USearch
+root.
 
 ## Bounded retry policy
 

@@ -14,4 +14,14 @@ public static class AtomicGenerationPlacement
         Directory.Move(stagingDirectory, finalDirectory);
         return finalDirectory;
     }
+
+    public static string PlaceRecovery(UsearchIndexOptions options, Guid generationId, string stagingDirectory)
+    {
+        var fileSystem = new DerivedIndexFileSystem(options);
+        if (!fileSystem.TryPlaceRecoveryCandidate(generationId, stagingDirectory, out var finalDirectory))
+        {
+            throw new InvalidOperationException("The recovery candidate cannot be placed safely.");
+        }
+        return finalDirectory;
+    }
 }

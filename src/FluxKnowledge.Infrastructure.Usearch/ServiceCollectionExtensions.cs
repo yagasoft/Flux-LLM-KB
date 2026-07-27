@@ -1,4 +1,5 @@
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Infrastructure.Usearch.Search;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -12,11 +13,23 @@ public static class ServiceCollectionExtensions
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        services.AddSingleton(provider => UsearchIndexOptions.FromConfiguredRoot(
+        services.AddSingleton(provider => UsearchIndexConfiguration.FromConfiguredRoot(
             configuration[$"{UsearchIndexOptions.ConfigurationSectionName}:RootPath"],
             provider.GetService<IHostEnvironment>()?.ContentRootPath ?? Directory.GetCurrentDirectory(),
             AppContext.BaseDirectory));
+        services.AddSingleton(provider => provider.GetRequiredService<UsearchIndexConfiguration>().GetOptionsOrThrow());
         services.AddSingleton<UsearchGenerationValidator>();
+        services.AddSingleton(DerivedIndexRecoveryOptions.Default);
+        services.AddSingleton<DerivedIndexFileSystem>();
+        services.AddSingleton(provider => new DerivedIndexRecoveryCoordinator(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            provider.GetRequiredService<UsearchIndexConfiguration>(),
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetService<IStatusEventPublisher>(),
+            provider.GetRequiredService<DerivedIndexRecoveryOptions>()));
+        services.AddSingleton<IDerivedIndexRecoveryStatus>(provider => provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
+        services.AddSingleton<IDerivedIndexRecoverySignal>(provider => provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
+        services.AddHostedService<DerivedIndexRecoveryService>();
         services.AddScoped<UsearchGenerationBuilder>();
         services.AddScoped<IIndexGenerationPublisher>(provider => provider.GetRequiredService<UsearchGenerationBuilder>());
         services.AddSingleton<UsearchAnnIndex>();

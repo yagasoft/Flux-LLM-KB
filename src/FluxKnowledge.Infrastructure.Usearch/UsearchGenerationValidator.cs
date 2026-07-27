@@ -27,6 +27,18 @@ public class UsearchGenerationValidator
 
     public virtual void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
     {
+        try
+        {
+            ValidateCore(directory, expected, vectors);
+        }
+        catch (Exception exception) when (exception is not IndexGenerationValidationException and not IOException and not UnauthorizedAccessException and not OperationCanceledException)
+        {
+            throw new IndexGenerationValidationException("The derived USearch index cannot be validated.");
+        }
+    }
+
+    private static void ValidateCore(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors)
+    {
         if (vectors.Any(vector =>
                 !string.Equals(
                     vector.PayloadChecksum,

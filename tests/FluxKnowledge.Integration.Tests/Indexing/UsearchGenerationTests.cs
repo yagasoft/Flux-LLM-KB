@@ -1,8 +1,10 @@
 using Cloud.Unum.USearch;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.Usearch;
 using Microsoft.Extensions.DependencyInjection;
 using System.Security.Cryptography;
+using System.Collections.Immutable;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
@@ -187,7 +189,148 @@ public sealed class UsearchGenerationTests : IDisposable
         Assert.Equal(11, Assert.Single(initial).VectorId);
         Assert.Equal(11, Assert.Single(repeated).VectorId);
         Assert.Equal(22, Assert.Single(replaced).VectorId);
+        Assert.Equal(3, store.GenerationReads);
+    }
+
+    [Fact]
+    public async Task Active_reader_reopens_when_recovery_replaces_the_path_under_the_same_generation_id()
+    {
+        var store = new CachingStore();
+        var options = UsearchIndexOptions.FromConfiguredRoot(_root);
+        var builder = new UsearchGenerationBuilder(store, options, new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        store.Record(snapshot);
+        store.ActiveGeneration = snapshot.Generation.Id;
+        var replacementPath = Path.Combine(_root, "generations", "same-id-recovery");
+        Directory.CreateDirectory(replacementPath);
+        File.Copy(Path.Combine(snapshot.Generation.IndexPath, UsearchGenerationValidator.IndexFileName),
+            Path.Combine(replacementPath, UsearchGenerationValidator.IndexFileName));
+        File.Copy(Path.Combine(snapshot.Generation.IndexPath, UsearchGenerationValidator.MetadataFileName),
+            Path.Combine(replacementPath, UsearchGenerationValidator.MetadataFileName));
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<CachingStore>());
+        services.AddSingleton<UsearchAnnIndex>();
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var reader = provider.GetRequiredService<UsearchAnnIndex>();
+
+        Assert.Equal(11, Assert.Single(await reader.SearchAsync(Vector(0), 1, CancellationToken.None)).VectorId);
+        store.ReplacePath(snapshot.Generation.Id, replacementPath);
+
+        Assert.Equal(11, Assert.Single(await reader.SearchAsync(Vector(0), 1, CancellationToken.None)).VectorId);
         Assert.Equal(2, store.GenerationReads);
+    }
+
+    [Fact]
+    public async Task Healthy_probe_that_cannot_acquire_the_recovery_lock_does_not_create_recovery_evidence()
+    {
+        var snapshot = await CreateRecoverySnapshotAsync();
+        var store = new ProbeRecoveryStore(snapshot) { LeaseAvailable = true };
+        using var provider = CreateRecoveryProvider(store);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+
+        await coordinator.RunOnceAsync(CancellationToken.None);
+        store.LeaseAvailable = false;
+
+        await coordinator.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.Empty(store.AuditEvents);
+    }
+
+    [Fact]
+    public async Task Probe_does_not_replace_a_concurrent_reader_recovery_transition_with_healthy()
+    {
+        var snapshot = await CreateRecoverySnapshotAsync();
+        var store = new ProbeRecoveryStore(snapshot) { LeaseAvailable = true };
+        using var provider = CreateRecoveryProvider(store);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        await coordinator.RunOnceAsync(CancellationToken.None);
+
+        store.BlockNextRead();
+        var probe = coordinator.RunOnceAsync(CancellationToken.None).AsTask();
+        await store.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        coordinator.Notify(new DerivedIndexRecoveryFault(DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex,
+            snapshot.Generation.Id));
+        store.ReleaseRead();
+        await probe;
+
+        Assert.Equal(DerivedIndexRecoveryState.Recovering, coordinator.Snapshot.State);
+        Assert.Equal(DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, coordinator.Snapshot.FailureCategory);
+    }
+
+    [Fact]
+    public async Task Reader_validation_io_failure_notifies_transient_recovery_before_rethrowing()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        store.Record(snapshot);
+        store.ActiveGeneration = snapshot.Generation.Id;
+        var signal = new CapturingRecoverySignal();
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<CachingStore>());
+        services.AddSingleton<IDerivedIndexRecoverySignal>(signal);
+        services.AddSingleton<UsearchAnnIndex>();
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var reader = provider.GetRequiredService<UsearchAnnIndex>();
+        await using var lockHandle = new FileStream(Path.Combine(snapshot.Generation.IndexPath, UsearchGenerationValidator.MetadataFileName),
+            FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        await Assert.ThrowsAsync<IOException>(async () => await reader.SearchAsync(Vector(0), 1, CancellationToken.None));
+
+        var fault = Assert.Single(signal.Faults);
+        Assert.Equal(DerivedIndexRecoveryFailureCategory.TransientIo, fault.Category);
+        Assert.Equal(snapshot.Generation.Id, fault.ActiveGenerationId);
+    }
+
+    [Fact]
+    public async Task Reader_final_index_open_permission_failure_notifies_non_retryable_recovery()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        store.Record(snapshot);
+        store.ActiveGeneration = snapshot.Generation.Id;
+        var signal = new CapturingRecoverySignal();
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<CachingStore>());
+        services.AddSingleton<IDerivedIndexRecoverySignal>(signal);
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var reader = new UsearchAnnIndex(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            _ => throw new UnauthorizedAccessException("injected native index access denial"));
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(async () =>
+            await reader.SearchAsync(Vector(0), 1, CancellationToken.None));
+
+        var fault = Assert.Single(signal.Faults);
+        Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, fault.Category);
+        Assert.False(DerivedIndexRecoveryPolicy.Decide(fault.Category, 1).ShouldRetry);
+    }
+
+    private async Task<IndexGenerationCandidateSnapshot> CreateRecoverySnapshotAsync()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        return await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+    }
+
+    private ServiceProvider CreateRecoveryProvider(ProbeRecoveryStore store)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddSingleton<IDerivedIndexRecoveryStore>(store);
+        services.AddScoped<IIndexGenerationStore>(_ => new CachingStore());
+        services.AddSingleton(UsearchIndexOptions.FromConfiguredRoot(_root));
+        services.AddSingleton<UsearchGenerationValidator>();
+        services.AddScoped<UsearchGenerationBuilder>();
+        services.AddSingleton<DerivedIndexFileSystem>();
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<DerivedIndexRecoveryCoordinator>();
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
 
     private sealed class MemoryStore(Guid id) : IIndexGenerationStore
@@ -242,6 +385,8 @@ public sealed class UsearchGenerationTests : IDisposable
             _generations[snapshot.Generation.Id] = snapshot.Generation;
             _memberships[snapshot.Generation.Id] = snapshot.Vectors;
         }
+        public void ReplacePath(Guid generationId, string indexPath) =>
+            _generations[generationId] = _generations[generationId] with { IndexPath = indexPath };
         public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(FluxKnowledge.Domain.Common.PipelineRecordId pipelineRecordId, long sourceRevision, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalTextChunk>>([]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(Guid indexGenerationId, CancellationToken cancellationToken) => ValueTask.FromResult(_memberships[indexGenerationId]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalVector>>([UseSecondVector ? Vector(22, 1) : Vector(11, 0)]);
@@ -260,6 +405,56 @@ public sealed class UsearchGenerationTests : IDisposable
         public ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken) => ValueTask.FromResult<Guid?>(ActiveGeneration);
         public ValueTask UpdateGenerationMetadataAsync(IndexGenerationDescriptor generation, CancellationToken cancellationToken) { _generations[generation.Id] = generation; _memberships[generation.Id] = UseSecondVector ? [Vector(22, 1)] : [Vector(11, 0)]; return ValueTask.CompletedTask; }
         private static CanonicalVector Vector(long id, int dimension) { var values = UsearchGenerationTests.Vector(dimension).ToArray(); var bytes = new byte[values.Length * sizeof(float)]; Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length); return new CanonicalVector(id, id, "deterministic-tokenhash-v1:256", 256, bytes, new string('a', 64), Convert.ToHexStringLower(SHA256.HashData(bytes)), 1); }
+    }
+
+    private sealed class ProbeRecoveryStore(IndexGenerationCandidateSnapshot snapshot) : IDerivedIndexRecoveryStore
+    {
+        private readonly DerivedIndexRecoverySqlSnapshot _snapshot = new(
+            snapshot.Generation.Id,
+            snapshot.Generation,
+            snapshot.Vectors.ToImmutableArray(),
+            ImmutableHashSet.Create(snapshot.Generation.Id),
+            ImmutableHashSet.Create(snapshot.Generation.IndexPath));
+        private TaskCompletionSource<bool>? _readRelease;
+
+        public bool LeaseAvailable { get; set; }
+        public List<DerivedIndexRecoveryAuditEvent> AuditEvents { get; } = [];
+        public TaskCompletionSource<bool> ReadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void BlockNextRead() => _readRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void ReleaseRead() => _readRelease?.TrySetResult(true);
+        public async ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken)
+        {
+            var release = _readRelease;
+            if (release is not null)
+            {
+                ReadStarted.TrySetResult(true);
+                await release.Task.WaitAsync(cancellationToken);
+                _readRelease = null;
+            }
+            return _snapshot;
+        }
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IDerivedIndexRecoveryLease?>(LeaseAvailable ? new Lease() : null);
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath, string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(false);
+        public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken)
+        {
+            AuditEvents.Add(auditEvent);
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class Lease : IDerivedIndexRecoveryLease
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class CapturingRecoverySignal : IDerivedIndexRecoverySignal
+    {
+        public List<DerivedIndexRecoveryFault> Faults { get; } = [];
+        public void Notify(DerivedIndexRecoveryFault fault) => Faults.Add(fault);
+        public ValueTask<DerivedIndexRecoveryFault> WaitAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 
     private static IReadOnlyList<float> Vector(int dimension)

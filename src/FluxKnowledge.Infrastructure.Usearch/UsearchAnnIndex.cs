@@ -1,14 +1,20 @@
 using System.Threading;
 using Cloud.Unum.USearch;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Indexing;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
-public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnIndex, IDisposable
+public sealed class UsearchAnnIndex(
+    IServiceScopeFactory scopeFactory,
+    Func<string, USearchIndex>? indexOpener = null) : IAnnIndex, IDisposable
 {
     private readonly ReaderWriterLockSlim _gate = new();
+    private readonly Func<string, USearchIndex> _indexOpener = indexOpener ??
+        (static path => new USearchIndex(path, false));
     private Guid? _generationId;
+    private string? _indexPath;
     private USearchIndex? _index;
     private int _disposed;
 
@@ -51,8 +57,16 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
                     continue;
                 }
 
-                var count = _index.Search(query.ToArray(), limit, out var keys, out var distances);
-                return Enumerable.Range(0, count).Select(index => new AnnMatch((long)keys[index], distances[index])).ToArray();
+                try
+                {
+                    var count = _index.Search(query.ToArray(), limit, out var keys, out var distances);
+                    return Enumerable.Range(0, count).Select(index => new AnnMatch((long)keys[index], distances[index])).ToArray();
+                }
+                catch (Exception) when (_generationId is { } generationId)
+                {
+                    NotifyRecovery(DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, generationId);
+                    throw;
+                }
             }
             finally
             {
@@ -86,10 +100,17 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
+        var generation = await store.GetGenerationAsync(activeId, cancellationToken);
+        if (generation is null)
+        {
+            NotifyRecovery(DerivedIndexRecoveryFailureCategory.MissingDerivedIndex, activeId);
+            throw new IndexGenerationValidationException("The active SQL index generation is missing.");
+        }
         _gate.EnterReadLock();
         try
         {
-            if (_generationId == activeId && _index is not null)
+            if (_generationId == activeId && _index is not null &&
+                string.Equals(_indexPath, generation.IndexPath, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
             }
@@ -98,12 +119,38 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         {
             _gate.ExitReadLock();
         }
-
-        var generation = await store.GetGenerationAsync(activeId, cancellationToken)
-            ?? throw new IndexGenerationValidationException("The active SQL index generation is missing.");
         var vectors = await store.ReadVectorsAsync(activeId, cancellationToken);
-        new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
-        var opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
+        try
+        {
+            new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
+        }
+        catch (Exception exception) when (exception is DirectoryNotFoundException or FileNotFoundException or
+            IndexGenerationValidationException or IOException or UnauthorizedAccessException)
+        {
+            NotifyRecovery(exception switch
+            {
+                DirectoryNotFoundException or FileNotFoundException => DerivedIndexRecoveryFailureCategory.MissingDerivedIndex,
+                IOException => DerivedIndexRecoveryFailureCategory.TransientIo,
+                UnauthorizedAccessException => DerivedIndexRecoveryFailureCategory.PermissionsDenied,
+                _ => DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex
+            }, activeId);
+            throw;
+        }
+        USearchIndex opened;
+        try
+        {
+            opened = _indexOpener(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName));
+        }
+        catch (Exception exception)
+        {
+            NotifyRecovery(exception switch
+            {
+                UnauthorizedAccessException => DerivedIndexRecoveryFailureCategory.PermissionsDenied,
+                IOException => DerivedIndexRecoveryFailureCategory.TransientIo,
+                _ => DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex
+            }, activeId);
+            throw;
+        }
         if (await store.GetActiveGenerationIdAsync(cancellationToken) != activeId)
         {
             opened.Dispose();
@@ -122,7 +169,8 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
                 opened.Dispose();
                 ThrowIfDisposed();
             }
-            if (_generationId == activeId && _index is not null)
+            if (_generationId == activeId && _index is not null &&
+                string.Equals(_indexPath, generation.IndexPath, StringComparison.OrdinalIgnoreCase))
             {
                 opened.Dispose();
                 return true;
@@ -131,12 +179,20 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
                 _index?.Dispose();
                 _index = opened;
                 _generationId = activeId;
+                _indexPath = generation.IndexPath;
                 return true;
         }
         finally
         {
             _gate.ExitWriteLock();
         }
+    }
+
+    private void NotifyRecovery(DerivedIndexRecoveryFailureCategory category, Guid activeId)
+    {
+        using var signalScope = scopeFactory.CreateScope();
+        signalScope.ServiceProvider.GetService<IDerivedIndexRecoverySignal>()?.Notify(
+            new DerivedIndexRecoveryFault(category, activeId));
     }
 
     private void ThrowIfDisposed()
