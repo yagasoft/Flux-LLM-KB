@@ -211,7 +211,10 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     private async ValueTask RecordFaultAsync(IDerivedIndexRecoveryStore? recoveryStore, Exception exception, Guid? activeGenerationId,
         bool detectionRecorded, CancellationToken cancellationToken)
     {
-        var category = exception switch
+        var classifiedException = exception is RecoveryCandidatePlacementException { InnerException: not null } placement
+            ? placement.InnerException
+            : exception;
+        var category = classifiedException switch
         {
             UnauthorizedAccessException or DerivedIndexRecoverySqlPermissionException => DerivedIndexRecoveryFailureCategory.PermissionsDenied,
             DerivedIndexRecoverySqlSchemaException => DerivedIndexRecoveryFailureCategory.SqlSchemaInvalid,

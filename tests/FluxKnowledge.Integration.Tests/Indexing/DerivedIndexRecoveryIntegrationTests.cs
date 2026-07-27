@@ -170,6 +170,30 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     }
 
     [Fact]
+    public async Task Placed_recovery_candidate_permission_fault_becomes_operator_actionable_without_a_retry()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            using var fixture = CreateFaultingCoordinator(root,
+                new RecoveryCandidatePlacementException(
+                    Path.Combine(root, "generations", "candidate"),
+                    new UnauthorizedAccessException("injected post-placement validation denial")));
+            var coordinator = fixture.Coordinator;
+
+            await coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, coordinator.Snapshot.FailureCategory);
+            Assert.Null(coordinator.Snapshot.NextRetryAtUtc);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Configuration_fault_becomes_operator_actionable_without_a_retry()
     {
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");

@@ -6,9 +6,13 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace FluxKnowledge.Infrastructure.Usearch;
 
-public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnIndex, IDisposable
+public sealed class UsearchAnnIndex(
+    IServiceScopeFactory scopeFactory,
+    Func<string, USearchIndex>? indexOpener = null) : IAnnIndex, IDisposable
 {
     private readonly ReaderWriterLockSlim _gate = new();
+    private readonly Func<string, USearchIndex> _indexOpener = indexOpener ??
+        (static path => new USearchIndex(path, false));
     private Guid? _generationId;
     private string? _indexPath;
     private USearchIndex? _index;
@@ -135,11 +139,16 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         USearchIndex opened;
         try
         {
-            opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
+            opened = _indexOpener(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName));
         }
-        catch (Exception)
+        catch (Exception exception)
         {
-            NotifyRecovery(DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex, activeId);
+            NotifyRecovery(exception switch
+            {
+                UnauthorizedAccessException => DerivedIndexRecoveryFailureCategory.PermissionsDenied,
+                IOException => DerivedIndexRecoveryFailureCategory.TransientIo,
+                _ => DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex
+            }, activeId);
             throw;
         }
         if (await store.GetActiveGenerationIdAsync(cancellationToken) != activeId)

@@ -285,6 +285,32 @@ public sealed class UsearchGenerationTests : IDisposable
         Assert.Equal(snapshot.Generation.Id, fault.ActiveGenerationId);
     }
 
+    [Fact]
+    public async Task Reader_final_index_open_permission_failure_notifies_non_retryable_recovery()
+    {
+        var store = new CachingStore();
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        store.Record(snapshot);
+        store.ActiveGeneration = snapshot.Generation.Id;
+        var signal = new CapturingRecoverySignal();
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<CachingStore>());
+        services.AddSingleton<IDerivedIndexRecoverySignal>(signal);
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var reader = new UsearchAnnIndex(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            _ => throw new UnauthorizedAccessException("injected native index access denial"));
+
+        await Assert.ThrowsAsync<UnauthorizedAccessException>(async () =>
+            await reader.SearchAsync(Vector(0), 1, CancellationToken.None));
+
+        var fault = Assert.Single(signal.Faults);
+        Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, fault.Category);
+        Assert.False(DerivedIndexRecoveryPolicy.Decide(fault.Category, 1).ShouldRetry);
+    }
+
     private async Task<IndexGenerationCandidateSnapshot> CreateRecoverySnapshotAsync()
     {
         var store = new CachingStore();
