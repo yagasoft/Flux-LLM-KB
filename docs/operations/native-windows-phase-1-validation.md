@@ -3,29 +3,33 @@
 ## Decision
 
 Phase 1 is verified complete as its defined disposable UTF-8 file vertical
-slice. The local Windows checkpoint exercised the real SQL Server provider,
+slice. The local Windows evidence covers the real SQL Server provider,
 Full-Text migration, registration-to-published pipeline, immutable USearch
 generation, SQL hydration, Kestrel/Blazor projection and browser search flow.
-The roadmap records this bounded Phase 1 item at 100%.
+It also includes a scoped IIS checkpoint on a site bound only to localhost:
+the retained labelled record completed naturally through Publish, readiness and
+search succeeded, and a checksum-verified SQL backup was created. The roadmap
+records this bounded Phase 1 item at 100%.
 
-This is not a target deployment or a claim of replacement-programme
-completion. No target database, IIS site, backup/restore, Outlook integration,
-model, GPU work, complete MCP/CLI surface or legacy cutover was exercised. The
-host inventory did not provide a target application connection, an approved
-backup target, or an intended FluxKnowledge IIS site and deployment root.
+This is not an external production deployment, a cutover, or a claim of
+replacement-programme completion. The checkpoint exercised a local native SQL
+database, IIS application pool and backup/verify sequence, but did not exercise
+Outlook integration, model or GPU work, complete MCP/CLI parity, legacy cutover
+or an externally reachable endpoint.
 
 ## Validation environment
 
 | Field | Checked value |
 | --- | --- |
 | Date | 2026-07-27 |
-| Environment class | Local Windows development/test host; disposable SQL catalogues and Kestrel, not IIS and not a production or target SQL environment |
+| Environment class | Local Windows development/test host; disposable SQL catalogues and Kestrel, plus an isolated IIS checkpoint bound only to localhost; not an external production target or cutover |
 | Operating system | Microsoft Windows NT 10.0.22631.0 |
 | .NET SDK | 10.0.300 |
-| Live-validation base | `a1f8d04024fe4226fc9d71a232ce408089a1c79c` |
+| Live-validation base | `6b92e1660a5b1247ae5355f2fed42a2b49ad3b12` |
 | SQL opt-in | Process-scoped integrated localhost server-level test connection; each test created a `FluxKnowledge_Phase1Tests_<guid>` catalogue and cleanup verification found zero remaining catalogues |
 | Browser opt-in | Process-scoped browser-test opt-in; Kestrel test host and local Playwright Chromium 1228 |
-| Target-drive rule | An `I:` drive exists; no command in this validation accessed or changed it |
+| IIS and SQL checkpoint | The deployed assembly matched its staged payload, target-only configuration was preserved, SQL readiness passed, and the database file mapping matched the approved canonical native locations |
+| Backup checkpoint | A newly named local backup completed with `CHECKSUM`; `RESTORE VERIFYONLY ... WITH CHECKSUM` succeeded. No restore was performed. |
 
 ## Command evidence
 
@@ -36,10 +40,13 @@ All commands ran on 2026-07-27 in the environment class above.
 | `dotnet tool restore` | passed | `dotnet-ef` 10.0.10 restored successfully. |
 | `dotnet restore FluxKnowledge.slnx --locked-mode` | passed after repair | The first run failed with `NU1004` because three lock files omitted already-declared package/project references. `dotnet restore FluxKnowledge.slnx` regenerated only those entries; the required locked restore then passed. |
 | `dotnet build FluxKnowledge.slnx --configuration Release --no-restore` | passed | 0 warnings and 0 errors. |
-| `dotnet test FluxKnowledge.slnx --configuration Release --no-build --no-restore --filter Category!=Browser` | passed | Domain: 54 passed; Integration: 55 passed, including the disposable SQL matrix; Web: 23 passed. No selected test failed. |
+| `dotnet test FluxKnowledge.slnx --configuration Release --no-build --no-restore --filter Category!=Browser` | passed | Domain: 54 passed; Integration: 60 passed, including the disposable SQL matrix; Web: 24 passed. No selected test failed. |
 | `dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj --configuration Release --no-build --no-restore --filter Category=Browser` | passed | 1 guarded browser vertical-slice test passed against Kestrel, disposable SQL and local Chromium. |
 | Disposable-catalogue cleanup query | passed | Returned zero generated `FluxKnowledge_Phase1Tests_` catalogues after the test runs. |
 | `git diff --check` | passed | Exit code 0; no whitespace errors before final review. |
+| Localhost IIS checkpoint | passed | The isolated site stayed loopback-only; liveness and readiness returned 200, the retained record completed through Publish without replay, and the deployed payload matched staging. |
+| Native SQL readiness and file mapping | passed | `validate-sql` passed and a read-only `sys.database_files` query confirmed the canonical native data and log locations. |
+| SQL backup verification | passed | A new backup completed with `CHECKSUM`, and `RESTORE VERIFYONLY ... WITH CHECKSUM` reported a valid backup set. |
 
 The lock-file repair is part of this milestone because the required locked
 restore could not otherwise pass:
@@ -126,7 +133,9 @@ The claim SQL resets a pooled connection to read committed isolation before
 using `READPAST`, and uses `READCOMMITTEDLOCK` so the claim pattern remains
 valid when read-committed snapshot isolation is enabled. The test above proves
 the behaviour after a serializable registration transaction reuses the same
-one-connection pool. A production, target or `I:` connection was not used.
+one-connection pool. The local IIS checkpoint then exercised retry-enabled
+registration and stage transitions against the locally provisioned native SQL
+database; no external production connection was used.
 
 ### Deterministic embedding and immutable USearch
 
@@ -170,6 +179,13 @@ Passed:
 Passed with disposable SQL:
 
 - [`HybridSearchIntegrationTests.Hybrid_search_hydrates_only_current_non_deleted_candidates_and_explains_contributions`](../../tests/FluxKnowledge.Integration.Tests/Search/HybridSearchIntegrationTests.cs)
+- [`HybridSearchIntegrationTests.Hybrid_search_accepts_plain_text_multiword_query`](../../tests/FluxKnowledge.Integration.Tests/Search/HybridSearchIntegrationTests.cs)
+- [`HybridSearchIntegrationTests.Hybrid_search_accepts_plain_text_punctuation`](../../tests/FluxKnowledge.Integration.Tests/Search/HybridSearchIntegrationTests.cs)
+
+The SQL implementation uses `FREETEXTTABLE` for ordinary natural-language
+input, rather than passing unparsed multiword text to `CONTAINSTABLE`. The IIS
+checkpoint returned HTTP 200 and the retained source for both an ordinary
+multiword phrase and its punctuation variant.
 
 ### REST and MCP
 
@@ -213,17 +229,39 @@ dotnet test tests/FluxKnowledge.Web.Tests/FluxKnowledge.Web.Tests.csproj --confi
 
 The test host rendered the real static assets and antiforgery middleware, then
 proved the overview page, UTF-8 registration, hosted pipeline completion,
-SQL-backed pipeline-record projection and hydrated search. It used Kestrel; no
-IIS target was started.
+SQL-backed pipeline-record projection and hydrated search. This guarded test
+uses Kestrel; the separate localhost-only IIS checkpoint is recorded below.
+
+### Localhost IIS checkpoint
+
+State: passed on 2026-07-27 for the exact release base above. This was an
+isolated native-Windows deployment checkpoint, not an external production
+release or legacy cutover.
+
+- Published the release payload to a fresh staging directory, stopped only the
+  dedicated application pool, copied the payload, and confirmed the deployed
+  assembly hash matched staging. Target-only production configuration was
+  preserved.
+- Kept the IIS binding loopback-only. The overview, liveness and readiness
+  endpoints returned HTTP 200 after startup.
+- Allowed the already-registered labelled UTF-8 record to be reclaimed by the
+  hosted pump. It completed naturally through Publish; no re-registration,
+  replay, acknowledgement or dead-letter action was used.
+- Confirmed the REST search endpoint returned HTTP 200 and the retained source
+  for both a multiword query and a punctuation variant.
+- Ran the non-mutating native SQL readiness validator and verified the database
+  data and log file mapping. Created a new local backup with `CHECKSUM` and
+  validated it with `RESTORE VERIFYONLY ... WITH CHECKSUM`; no restore occurred.
 
 ## Whole-branch boundary review
 
 Review range: native replacement merge base
 `48b6a34670d290f4eff555951de5c41c0994c55b` through the final correction wave.
 
-Decision: the source corrections and complete local Phase 1 acceptance matrix
-are verified. A target deployment review remains a separate operational gate,
-because this checkpoint deliberately used disposable SQL and Kestrel only.
+Decision: the source corrections, complete local Phase 1 acceptance matrix and
+scoped localhost IIS checkpoint are verified. An external production deployment
+review remains a separate operational gate; this checkpoint deliberately kept
+the binding local and did not cut over legacy operation.
 
 - The branch adds the isolated .NET modular-monolith solution and its tests. It
   does not modify legacy Python code, Docker assets, deployment scripts, user
@@ -241,9 +279,10 @@ because this checkpoint deliberately used disposable SQL and Kestrel only.
   tools, with retry and error-envelope checks. This is deliberately not full
   MCP parity.
 - The local test runs created and removed generated disposable SQL catalogues.
-  No target provisioning, deployment, restart, IIS action, target database
-  creation, ACL change or cutover ran. GPU types are future durable contracts
-  only.
+  The isolated IIS checkpoint provisioned and validated the local native target,
+  including one application-pool restart and backup verification. It did not
+  expose an external endpoint, process legacy data, or perform a cutover. GPU
+  types remain future durable contracts only.
 - No connection secret, private export, generated USearch index or private
   content is tracked by the milestone.
 
@@ -274,6 +313,12 @@ Review corrections:
 - made the guarded test wait for asynchronous Full-Text population and avoid a
   test-only concurrent uncommitted Full-Text lock while retaining the intended
   single-generation assertion.
+- ran registration, transition and failure transactions inside the configured
+  SQL retry execution strategy, with a fresh context per retry;
+- changed raw natural-language Full-Text searching to `FREETEXTTABLE`, with
+  multiword and punctuation regression coverage;
+- made the serializable-registration connection-reuse test independent of the
+  wall-clock time at which it runs.
 
 Residual concerns:
 
@@ -285,20 +330,18 @@ Residual concerns:
   independently assert every forward-slash form. Current explanation production
   emits rank contributions only; strengthen the guarded assertion in a later
   search hardening pass;
-- a target deployment cannot be safely inferred from the host: no target
-  application/admin SQL connection, approved backup destination, intended IIS
-  site/binding or FluxKnowledge deployment root was configured.
+- the local checkpoint is intentionally loopback-only. Any external endpoint,
+  identity, exposure change or legacy cutover remains separately approval-gated.
 
 ## Remaining deployment and programme gates
 
-1. Supply or approve the target application and administrator SQL connections,
-   backup destination outside `I:`, intended IIS site/binding and deployment
-   root, plus the app-owned ingress and USearch roots. These are required before
-   a target provision/deploy checkpoint can be selected safely.
-2. Once those target values and the native operator procedure are approved,
-   provision and migrate the target, create and validate an active USearch
-   generation, deploy to the approved IIS site, and live-validate readiness.
-   Until that active state exists, `/health/ready` must remain unready.
+1. For any external production target, approve the application and
+   administrator SQL identities, backup destination, IIS site/binding and
+   deployment root, plus the app-owned ingress and USearch roots. This local
+   loopback checkpoint does not authorise wider exposure.
+2. Once an external target and its native operator procedure are approved,
+   provision and migrate it, create and validate an active USearch generation,
+   deploy to the approved IIS site, and live-validate readiness and rollback.
 3. Address Phase 2 durability, scheduler, recovery and cleanup work, then Phase
    3 full MCP/plugin/REST/CLI parity.
 4. Treat Outlook, model/GPU activation and legacy retirement as separate
