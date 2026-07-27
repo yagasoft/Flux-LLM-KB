@@ -95,6 +95,19 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Immutable_generation_membership_has_composite_stable_keys()
+    {
+        using var context = CreateContext();
+        var entity = FindTable(context.Model, "IndexGenerationVectors");
+
+        Assert.Equal(
+            ["GenerationId", "VectorId"],
+            entity.FindPrimaryKey()!.Properties.Select(property => property.Name));
+        AssertForeignKey(context.Model, "IndexGenerationVectors", ["GenerationId"], "IndexGenerations", ["Id"]);
+        AssertForeignKey(context.Model, "IndexGenerationVectors", ["VectorId"], "Vectors", ["VectorId"]);
+    }
+
+    [Fact]
     public void Gpu_mini_task_mapping_preserves_future_lane_fields()
     {
         using var context = CreateContext();
@@ -282,13 +295,13 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             WHERE [name] IN (
                 N'SourceIdentities', N'PipelineRecords', N'Jobs', N'JobAttempts',
                 N'OutboxMessages', N'Artifacts', N'TextChunks', N'Vectors',
-                N'IndexGenerations', N'IndexState', N'AuditEvents', N'GpuMiniTasks');
+                N'IndexGenerations', N'IndexGenerationVectors', N'IndexState', N'AuditEvents', N'GpuMiniTasks');
             """;
         await using var command = new SqlCommand(sql, connection);
         var tableCount = Convert.ToInt32(
             await command.ExecuteScalarAsync(),
             System.Globalization.CultureInfo.InvariantCulture);
 
-        Assert.Equal(12, tableCount);
+        Assert.Equal(13, tableCount);
     }
 }

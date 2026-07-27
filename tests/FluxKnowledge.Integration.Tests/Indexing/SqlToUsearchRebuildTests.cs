@@ -84,6 +84,24 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         Assert.True(File.Exists(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
     }
 
+    [NativeSqlServerFact]
+    public async Task Second_corpus_publish_retains_vectors_from_two_independent_current_sources()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "alpha source");
+        await environment.AddAndPumpAsync("bravo source");
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var activeId = (await context.IndexState.SingleAsync(state => state.Id == 1)).ActiveIndexGenerationId;
+        var membership = await context.IndexGenerationVectors
+            .Where(member => member.GenerationId == activeId)
+            .Select(member => member.VectorId)
+            .OrderBy(id => id)
+            .ToListAsync();
+        var allVectors = await context.Vectors.OrderBy(vector => vector.VectorId).Select(vector => vector.VectorId).ToListAsync();
+
+        Assert.Equal(allVectors, membership);
+        Assert.True(membership.Count >= 2);
+    }
+
     private sealed class ThrowingValidator : UsearchGenerationValidator
     {
         public override void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors) =>

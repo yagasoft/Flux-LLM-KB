@@ -122,3 +122,12 @@ discarding a stale opened handle. Immutable placement handles a concurrent
 cleaning only its staging directory. Root resolution walks to the nearest
 existing ancestor and resolves its reparse target before reconstructing an
 absent configured leaf. A non-SQL concurrent-placement test passed (1/1).
+
+## Regression matrix expansion
+
+Added EF composite-key/FK mapping coverage for `IndexGenerationVectors`,
+updated the guarded native schema table expectation to include it, and added a
+guarded two-current-source corpus assertion proving that the next active
+generation retains all canonical vector IDs. The non-SQL schema mapping subset
+passed 7/7. The guarded corpus test remains source-complete but skipped without
+the explicit disposable SQL connection.
