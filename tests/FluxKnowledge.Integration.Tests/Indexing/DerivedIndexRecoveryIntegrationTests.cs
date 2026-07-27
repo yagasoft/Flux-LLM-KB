@@ -271,6 +271,70 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     }
 
     [Fact]
+    public async Task Unsafe_active_sql_path_requires_configuration_action_without_metadata_probe_or_mutation()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        var activeId = Guid.NewGuid();
+        var unsafePath = Path.Combine(Path.GetTempPath(), $"outside-{Guid.NewGuid():N}");
+        var metadataProbeCount = 0;
+        try
+        {
+            var store = new RecordingRecoveryStore(CreateSnapshot(activeId, unsafePath));
+            using var fixture = CreatePathProbeCoordinator(root, store, _ =>
+            {
+                metadataProbeCount++;
+                return FileAttributes.Directory;
+            });
+
+            await fixture.Coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, fixture.Coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
+                fixture.Coordinator.Snapshot.FailureCategory);
+            Assert.Null(fixture.Coordinator.Snapshot.NextRetryAtUtc);
+            Assert.Equal(0, metadataProbeCount);
+            Assert.Equal(0, store.PathUpdateAttempts);
+            Assert.False(Directory.Exists(Path.Combine(root, "staging")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Malformed_active_sql_path_requires_configuration_action_without_metadata_probe_or_retry()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        var activeId = Guid.NewGuid();
+        var malformedPath = root + "\0";
+        var metadataProbeCount = 0;
+        try
+        {
+            var store = new RecordingRecoveryStore(CreateSnapshot(activeId, malformedPath));
+            using var fixture = CreatePathProbeCoordinator(root, store, _ =>
+            {
+                metadataProbeCount++;
+                return FileAttributes.Directory;
+            });
+
+            await fixture.Coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, fixture.Coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
+                fixture.Coordinator.Snapshot.FailureCategory);
+            Assert.Null(fixture.Coordinator.Snapshot.NextRetryAtUtc);
+            Assert.Equal(0, metadataProbeCount);
+            Assert.Equal(0, store.PathUpdateAttempts);
+            Assert.False(Directory.Exists(Path.Combine(root, "staging")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Reader_fault_immediately_marks_recovery_and_publishes_an_invalidation()
     {
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
@@ -1139,6 +1203,24 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         services.AddSingleton<DerivedIndexRecoveryCoordinator>();
         var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
         return new FaultingCoordinatorFixture(provider, provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
+    }
+
+    private static FaultingCoordinatorFixture CreatePathProbeCoordinator(string root,
+        IDerivedIndexRecoveryStore store, Func<string, FileAttributes> getActivePathAttributes)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddScoped<IIndexGenerationStore, EmptyIndexGenerationStore>();
+        services.AddSingleton(new UsearchIndexOptions(root));
+        services.AddSingleton<UsearchGenerationValidator>();
+        services.AddScoped<UsearchGenerationBuilder>();
+        var fileSystem = new DerivedIndexFileSystem(new UsearchIndexOptions(root));
+        services.AddSingleton(fileSystem);
+        var provider = services.BuildServiceProvider();
+        var coordinator = new DerivedIndexRecoveryCoordinator(
+            provider.GetRequiredService<IServiceScopeFactory>(), fileSystem, TimeProvider.System,
+            getActivePathAttributes: getActivePathAttributes);
+        return new FaultingCoordinatorFixture(provider, coordinator);
     }
 
     private static SqlException CreateSqlException(int number)

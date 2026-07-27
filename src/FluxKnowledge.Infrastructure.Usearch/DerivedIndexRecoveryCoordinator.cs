@@ -119,11 +119,14 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
             activeId = sql.ActiveGenerationId;
             ValidateSql(sql);
-            EnsureActivePathMetadataIsAccessible(sql.Generation!.IndexPath);
             if (!fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
-                !fileSystem.TryCanonicalInRoot(sql.Generation.IndexPath, out var activePath) ||
-                !fileSystem.IsIntendedGenerationPath(activePath) ||
-                Directory.Exists(activePath) && !fileSystem.IsValidDirectory(activePath))
+                !fileSystem.TryCanonicalInRoot(sql.Generation!.IndexPath, out var activePath) ||
+                !fileSystem.IsIntendedGenerationPath(activePath))
+            {
+                throw new InvalidOperationException("The derived-index path configuration is invalid.");
+            }
+            EnsureActivePathMetadataIsAccessible(activePath);
+            if (Directory.Exists(activePath) && !fileSystem.IsValidDirectory(activePath))
             {
                 throw new InvalidOperationException("The derived-index path configuration is invalid.");
             }
