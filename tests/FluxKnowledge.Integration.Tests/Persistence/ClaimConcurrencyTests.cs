@@ -76,7 +76,7 @@ public sealed class ClaimConcurrencyTests(NativeSqlServerFixture fixture)
     public async Task Claim_paths_handle_connections_reused_after_serializable_registration()
     {
         await SqlTestData.ClearPipelineAsync(_fixture);
-        var now = DateTimeOffset.Parse("2026-07-27T08:00:00+00:00");
+        var now = DateTimeOffset.UtcNow.AddMinutes(1);
         var connectionString = new SqlConnectionStringBuilder(_fixture.ConnectionString)
         {
             MaxPoolSize = 1
