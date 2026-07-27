@@ -1,3 +1,19 @@
+using System.Net.Http.Json;
+using System.Text;
+using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Integration.Tests.Support;
+using FluxKnowledge.Web;
+using FluxKnowledge.Web.Components;
+using FluxKnowledge.Web.Components.Status;
+using FluxKnowledge.Web.Endpoints;
+using FluxKnowledge.Web.Mcp;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Components.Server.Circuits;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Playwright;
 using Xunit;
 
 namespace FluxKnowledge.Web.Tests.Browser;
@@ -21,8 +37,112 @@ public sealed class BrowserFactAttribute : FactAttribute
 public sealed class PhaseOneVerticalSliceBrowserTests
 {
     [BrowserFact]
-    public void Sql_backed_utf8_registration_is_visible_in_the_interactive_search_slice()
+    public async Task Sql_backed_utf8_registration_is_visible_in_the_interactive_search_slice()
     {
-        throw new NotImplementedException("The disposable SQL/Kestrel browser fixture has not been implemented.");
+        await using var sql = new NativeSqlServerFixture();
+        await sql.InitializeAsync();
+        var ingressRoot = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeBrowserIngress_{Guid.NewGuid():N}");
+        var indexRoot = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeBrowserIndexes_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(ingressRoot);
+        Directory.CreateDirectory(indexRoot);
+        try
+        {
+            var fileName = "phase-one-browser.txt";
+            var filePath = Path.Combine(ingressRoot, fileName);
+            const string input = "Native browser search phrase from the SQL hydrated pipeline record.";
+            await File.WriteAllTextAsync(filePath, input, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+            await using var host = await BrowserHost.StartAsync(sql.ConnectionString, ingressRoot, indexRoot);
+            using var client = new HttpClient { BaseAddress = host.BaseAddress };
+            using var playwright = await Playwright.CreateAsync();
+            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
+            var page = await browser.NewPageAsync();
+            await page.GotoAsync(host.BaseAddress.ToString(), new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle });
+            await page.GetByRole(AriaRole.Heading, new() { Name = "Pipeline overview" }).WaitForAsync();
+
+            using var response = await client.PostAsJsonAsync(
+                "/api/pipeline-records/utf8-file",
+                new RegisterUtf8FileCommand(filePath, "phase-one-browser-test", fileName));
+            Assert.Equal(System.Net.HttpStatusCode.Accepted, response.StatusCode);
+            Assert.NotNull(await response.Content.ReadFromJsonAsync<RegisterUtf8FileResult>());
+
+            await page.WaitForFunctionAsync(
+                """
+                () => [...document.querySelectorAll('.status-grid div')]
+                    .some(card => card.innerText.includes('Indexed records') && card.innerText.includes('1'))
+                """,
+                null,
+                new PageWaitForFunctionOptions { Timeout = 30_000 });
+
+            await page.GetByRole(AriaRole.Link, new() { Name = "Pipeline records" }).ClickAsync();
+            await page.GetByText(fileName, new PageGetByTextOptions { Exact = false }).WaitForAsync(
+                new LocatorWaitForOptions { Timeout = 30_000 });
+
+            await page.GetByRole(AriaRole.Link, new() { Name = "Search" }).ClickAsync();
+            await page.Locator("#search-query").FillAsync("hydrated");
+            await page.GetByRole(AriaRole.Button, new() { Name = "Search", Exact = true }).ClickAsync();
+            await page.GetByRole(AriaRole.Heading, new() { Name = fileName, Exact = true }).WaitForAsync(
+                new LocatorWaitForOptions { Timeout = 30_000 });
+            await page.GetByText(input, new PageGetByTextOptions { Exact = false }).WaitForAsync(
+                new LocatorWaitForOptions { Timeout = 30_000 });
+        }
+        finally
+        {
+            if (Directory.Exists(ingressRoot))
+            {
+                Directory.Delete(ingressRoot, recursive: true);
+            }
+
+            if (Directory.Exists(indexRoot))
+            {
+                Directory.Delete(indexRoot, recursive: true);
+            }
+        }
+    }
+
+    private sealed class BrowserHost(WebApplication application, Uri baseAddress) : IAsyncDisposable
+    {
+        public Uri BaseAddress { get; } = baseAddress;
+
+        public static async Task<BrowserHost> StartAsync(
+            string connectionString,
+            string ingressRoot,
+            string indexRoot)
+        {
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
+            builder.WebHost.UseUrls("http://127.0.0.1:0");
+            builder.Configuration.AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["ConnectionStrings:FluxKnowledge"] = connectionString,
+                    ["LocalIngress:AllowedRoots:0"] = ingressRoot,
+                    ["Usearch:RootPath"] = indexRoot
+                });
+            WebHostComposition.AddFluxKnowledgeServices(builder.Services, builder.Configuration);
+            builder.Services.AddRazorComponents().AddInteractiveServerComponents();
+            builder.Services.AddSingleton<StatusEventFeed>();
+            builder.Services.AddSingleton<IStatusEventPublisher>(provider => provider.GetRequiredService<StatusEventFeed>());
+            builder.Services.AddScoped<IProjectionReader, SqlProjectionReader>();
+            builder.Services.AddScoped<OverviewProjectionState>();
+            builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
+            builder.Services.AddFluxKnowledgeMcp();
+            builder.Services.AddMcpServer().WithHttpTransport(options => options.Stateless = true).WithTools<KnowledgeMcpTools>();
+
+            var application = builder.Build();
+            application.MapStaticAssets();
+            application.MapRazorComponents<App>().AddInteractiveServerRenderMode();
+            application.MapFluxKnowledgeHealth();
+            application.MapFluxKnowledgeSearch();
+            application.MapFluxKnowledgePipelineRecords();
+            application.MapMcp("/mcp");
+            await application.StartAsync();
+            return new BrowserHost(application, new Uri(application.Urls.Single()));
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await application.StopAsync();
+            await application.DisposeAsync();
+        }
     }
 }
