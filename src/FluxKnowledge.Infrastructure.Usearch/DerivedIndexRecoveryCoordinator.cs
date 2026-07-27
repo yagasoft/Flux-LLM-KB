@@ -31,24 +31,31 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 
     public async ValueTask RunOnceAsync(CancellationToken cancellationToken)
     {
-        await using var scope = _scopeFactory.CreateAsyncScope();
-        var recoveryStore = scope.ServiceProvider.GetRequiredService<IDerivedIndexRecoveryStore>();
-        var generationStore = scope.ServiceProvider.GetRequiredService<IIndexGenerationStore>();
-        var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
-        var validator = scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>();
-        var started = _timeProvider.GetUtcNow();
+        IDerivedIndexRecoveryStore? recoveryStore = null;
         Guid? activeId = null;
         string? replacementPath = null;
-        await using var lease = await recoveryStore.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, cancellationToken);
-        if (lease is null) return;
         try
         {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            recoveryStore = scope.ServiceProvider.GetRequiredService<IDerivedIndexRecoveryStore>();
+            var generationStore = scope.ServiceProvider.GetRequiredService<IIndexGenerationStore>();
+            var builder = scope.ServiceProvider.GetRequiredService<UsearchGenerationBuilder>();
+            var validator = scope.ServiceProvider.GetRequiredService<UsearchGenerationValidator>();
+            var started = _timeProvider.GetUtcNow();
+            await using var lease = await recoveryStore.TryAcquireExclusiveLeaseAsync(TimeSpan.Zero, cancellationToken);
+            if (lease is null) return;
             var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
             activeId = sql.ActiveGenerationId;
             ValidateSql(sql);
-            if (_fileSystem.IsValidDirectory(sql.Generation!.IndexPath))
+            if (!_fileSystem.TryCanonicalInRoot(sql.Generation!.IndexPath, out var activePath) ||
+                !_fileSystem.IsIntendedGenerationPath(activePath) ||
+                (Directory.Exists(activePath) && !_fileSystem.IsValidDirectory(activePath)))
             {
-                validator.Validate(sql.Generation.IndexPath, sql.Generation, sql.Membership);
+                throw new InvalidOperationException("The active derived-index path configuration is invalid.");
+            }
+            if (Directory.Exists(activePath))
+            {
+                validator.Validate(activePath, sql.Generation with { IndexPath = activePath }, sql.Membership);
                 await CompleteAsync(recoveryStore, sql.ActiveGenerationId, started, 0, cancellationToken);
                 return;
             }
@@ -66,7 +73,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             if (exception is RecoveryCandidatePlacementException placement) replacementPath = placement.Path;
-            if (replacementPath is not null)
+            if (replacementPath is not null && recoveryStore is not null)
             {
                 try { _fileSystem.TryQuarantine(replacementPath, (await recoveryStore.ReadActiveAsync(cancellationToken)).ReferencedIndexPaths); }
                 catch (Exception) { }
@@ -75,7 +82,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         }
     }
 
-    private async ValueTask RecordFaultAsync(IDerivedIndexRecoveryStore recoveryStore, Exception exception, Guid? activeGenerationId, CancellationToken cancellationToken)
+    private async ValueTask RecordFaultAsync(IDerivedIndexRecoveryStore? recoveryStore, Exception exception, Guid? activeGenerationId, CancellationToken cancellationToken)
     {
         var category = exception switch
         {
@@ -89,8 +96,12 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         var now = _timeProvider.GetUtcNow();
         Volatile.Write(ref _snapshot, new(decision.NextState, activeGenerationId, null,
             decision.Delay is { } delay ? now + delay : null, decision.FailureCategory, 0));
-        await recoveryStore.AppendAuditAsync(new("recovery_failed", activeGenerationId,
-            decision.FailureCategory, _attempts, TimeSpan.Zero, Snapshot.NextRetryAtUtc, 0), cancellationToken);
+        if (recoveryStore is not null)
+        {
+            try { await recoveryStore.AppendAuditAsync(new("recovery_failed", activeGenerationId,
+                decision.FailureCategory, _attempts, TimeSpan.Zero, Snapshot.NextRetryAtUtc, 0), cancellationToken); }
+            catch (Exception) { }
+        }
         await PublishAsync(cancellationToken);
     }
 

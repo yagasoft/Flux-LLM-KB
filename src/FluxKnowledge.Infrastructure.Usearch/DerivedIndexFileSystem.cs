@@ -8,6 +8,9 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
     public bool IsValidDirectory(string path) => TryCanonicalInRoot(path, out var canonical) &&
         Directory.Exists(canonical) && IsTreeSafe(canonical);
 
+    public bool IsIntendedGenerationPath(string path) => TryCanonicalInRoot(path, out var canonical) &&
+        string.Equals(Path.GetDirectoryName(canonical), Path.Combine(_root, "generations"), StringComparison.OrdinalIgnoreCase);
+
     public bool TryCanonicalInRoot(string path, out string canonical)
     {
         canonical = string.Empty;
@@ -16,6 +19,7 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
         {
             var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
             if (!candidate.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!AncestorsAreSafe(_root)) return false;
             canonical = candidate;
             return true;
         }
@@ -68,6 +72,15 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
     private static bool IsSameOrUnder(string path, string root) =>
         string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    private static bool AncestorsAreSafe(string path)
+    {
+        for (var directory = new DirectoryInfo(path); directory is not null; directory = directory.Parent)
+        {
+            if (directory.Exists && directory.Attributes.HasFlag(FileAttributes.ReparsePoint)) return false;
+        }
+        return true;
+    }
 
     private static bool DeleteTreeAfterFinalSafetyCheck(string candidate)
     {

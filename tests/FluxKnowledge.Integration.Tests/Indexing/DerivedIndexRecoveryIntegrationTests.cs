@@ -8,6 +8,7 @@ using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using System.Collections.Immutable;
 using Xunit;
 
 namespace FluxKnowledge.Integration.Tests.Indexing;
@@ -42,6 +43,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
                 await context.SaveChangesAsync();
                 vectors = await indexStore.ReadVectorsAsync(generationId, CancellationToken.None);
                 var generation = await context.IndexGenerations.SingleAsync(item => item.Id == generationId);
+                generation.IndexPath = Path.Combine(root, "generations", generationId.ToString("N"));
                 generation.MetadataChecksum = UsearchGenerationValidator.ComputeChecksum(
                     generation.ModelFingerprint, generation.Dimensions, vectors);
                 generation.VectorCount = vectors.Count;
@@ -69,7 +71,7 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
             Assert.NotNull(recovered);
             Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
             Assert.Equal(generationId, await indexStore.GetActiveGenerationIdAsync(CancellationToken.None));
-            Assert.NotEqual("pending", recovered!.IndexPath);
+            Assert.NotEqual(Path.Combine(root, "generations", generationId.ToString("N")), recovered!.IndexPath);
             Assert.True(File.Exists(Path.Combine(recovered.IndexPath, UsearchGenerationValidator.IndexFileName)));
         }
         finally
@@ -84,12 +86,33 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
         try
         {
-            var decision = DerivedIndexRecoveryPolicy.Decide(
-                DerivedIndexRecoveryFailureCategory.PermissionsDenied, failedAttemptCount: 1);
+            var coordinator = CreateFaultingCoordinator(root, new UnauthorizedAccessException("injected"));
 
-            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, decision.NextState);
-            Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, decision.FailureCategory);
-            Assert.Null(decision.Delay);
+            await coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, coordinator.Snapshot.FailureCategory);
+            Assert.Null(coordinator.Snapshot.NextRetryAtUtc);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Configuration_fault_becomes_operator_actionable_without_a_retry()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            var coordinator = CreateFaultingCoordinator(root, new InvalidOperationException("configuration invalid"));
+
+            await coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.ConfigurationInvalid, coordinator.Snapshot.FailureCategory);
+            Assert.Null(coordinator.Snapshot.NextRetryAtUtc);
         }
         finally
         {
@@ -421,4 +444,37 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         MetadataChecksum = new string('0', 64),
         CreatedAtUtc = DateTimeOffset.UtcNow
     };
+
+    private static DerivedIndexRecoveryCoordinator CreateFaultingCoordinator(string root, Exception fault)
+    {
+        var services = new ServiceCollection();
+        var options = new UsearchIndexOptions(root);
+        services.AddSingleton<IDerivedIndexRecoveryStore>(new FaultingRecoveryStore(fault));
+        services.AddScoped<IIndexGenerationStore, EmptyIndexGenerationStore>();
+        services.AddSingleton(options);
+        services.AddSingleton<UsearchGenerationValidator>();
+        services.AddScoped<UsearchGenerationBuilder>();
+        services.AddSingleton<DerivedIndexFileSystem>();
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<DerivedIndexRecoveryCoordinator>();
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true })
+            .GetRequiredService<DerivedIndexRecoveryCoordinator>();
+    }
+
+    private sealed class FaultingRecoveryStore(Exception fault) : IDerivedIndexRecoveryStore
+    {
+        public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) => throw fault;
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) => throw fault;
+        public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed class EmptyIndexGenerationStore : IIndexGenerationStore
+    {
+        public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(FluxKnowledge.Domain.Common.PipelineRecordId pipelineRecordId, long sourceRevision, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalTextChunk>>([]);
+        public ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(Guid indexGenerationId, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalVector>>([]);
+        public ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalVector>>([]);
+        public ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(Guid indexGenerationId, CancellationToken cancellationToken) => ValueTask.FromResult<IndexGenerationDescriptor?>(null);
+        public ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken) => ValueTask.FromResult<Guid?>(null);
+        public ValueTask UpdateGenerationMetadataAsync(IndexGenerationDescriptor generation, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
 }
