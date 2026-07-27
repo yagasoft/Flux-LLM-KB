@@ -254,6 +254,7 @@ public sealed class SqlDerivedIndexRecoveryStore(
     {
         207 or 208 or 2812 => new DerivedIndexRecoverySqlSchemaException(exception),
         229 or 230 or 916 or 18456 => new DerivedIndexRecoverySqlPermissionException(exception),
+        4060 => new DerivedIndexRecoverySqlConfigurationException(exception),
         _ => exception
     };
 

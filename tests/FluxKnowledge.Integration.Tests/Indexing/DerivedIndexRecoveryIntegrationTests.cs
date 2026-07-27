@@ -215,6 +215,62 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
     }
 
     [Fact]
+    public async Task Sql_catalogue_error_4060_becomes_configuration_invalid_without_a_retry()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        try
+        {
+            using var fixture = CreateFaultingCoordinator(root, CreateSqlException(4060));
+
+            await fixture.Coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, fixture.Coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
+                fixture.Coordinator.Snapshot.FailureCategory);
+            Assert.Null(fixture.Coordinator.Snapshot.NextRetryAtUtc);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Access_denied_active_directory_requires_operator_action_without_rebuild_or_path_update()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
+        var activeId = Guid.NewGuid();
+        var activePath = Path.Combine(root, "generations", activeId.ToString("N"));
+        try
+        {
+            var store = new RecordingRecoveryStore(CreateSnapshot(activeId, activePath));
+            var services = new ServiceCollection();
+            services.AddSingleton<IDerivedIndexRecoveryStore>(store);
+            services.AddScoped<IIndexGenerationStore, EmptyIndexGenerationStore>();
+            services.AddSingleton(new UsearchIndexOptions(root));
+            services.AddSingleton<UsearchGenerationValidator>();
+            services.AddScoped<UsearchGenerationBuilder>();
+            var fileSystem = new DerivedIndexFileSystem(new UsearchIndexOptions(root));
+            services.AddSingleton(fileSystem);
+            using var provider = services.BuildServiceProvider();
+            var coordinator = new DerivedIndexRecoveryCoordinator(
+                provider.GetRequiredService<IServiceScopeFactory>(), fileSystem, TimeProvider.System,
+                getActivePathAttributes: _ => throw new UnauthorizedAccessException("injected ACL denial"));
+
+            await coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
+            Assert.Equal(DerivedIndexRecoveryFailureCategory.PermissionsDenied, coordinator.Snapshot.FailureCategory);
+            Assert.Equal(0, store.PathUpdateAttempts);
+            Assert.False(Directory.Exists(Path.Combine(root, "staging")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Reader_fault_immediately_marks_recovery_and_publishes_an_invalidation()
     {
         var root = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRecovery_{Guid.NewGuid():N}");
@@ -1085,12 +1141,69 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         return new FaultingCoordinatorFixture(provider, provider.GetRequiredService<DerivedIndexRecoveryCoordinator>());
     }
 
+    private static SqlException CreateSqlException(int number)
+    {
+        var error = (SqlError)Activator.CreateInstance(typeof(SqlError),
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            binder: null,
+            args: [number, (byte)0, (byte)14, "server", "catalogue unavailable", string.Empty, 1, 0, null],
+            culture: null)!;
+        var errors = (SqlErrorCollection)Activator.CreateInstance(typeof(SqlErrorCollection),
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            binder: null, args: null, culture: null)!;
+        typeof(SqlErrorCollection).GetMethod("Add", System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)!.Invoke(errors, [error]);
+        return (SqlException)typeof(SqlException).GetMethods(System.Reflection.BindingFlags.Static |
+                System.Reflection.BindingFlags.NonPublic)
+            .Single(method => method.Name == "CreateException" && method.GetParameters().Length == 2)
+            .Invoke(null, [errors, "server"])!;
+    }
+
+    private static DerivedIndexRecoverySqlSnapshot CreateSnapshot(Guid activeId, string activePath)
+    {
+        var values = BitConverter.GetBytes(1F);
+        var vector = new CanonicalVector(1, 1, "test-model", 1, values, "chunk",
+            Convert.ToHexStringLower(SHA256.HashData(values)), 1);
+        var generation = new IndexGenerationDescriptor(activeId, "test-model", 1, activePath,
+            UsearchGenerationValidator.ComputeChecksum("test-model", 1, [vector]), 1);
+        return new DerivedIndexRecoverySqlSnapshot(activeId, generation, [vector],
+            ImmutableHashSet<Guid>.Empty.Add(activeId),
+            ImmutableHashSet.Create(StringComparer.OrdinalIgnoreCase, activePath));
+    }
+
     private sealed class FaultingRecoveryStore(Exception fault) : IDerivedIndexRecoveryStore
     {
         public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) => throw fault;
         public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(TimeSpan lockTimeout, CancellationToken cancellationToken) => throw fault;
         public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath, string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken) => throw fault;
         public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed class RecordingRecoveryStore(DerivedIndexRecoverySqlSnapshot snapshot) : IDerivedIndexRecoveryStore
+    {
+        public int PathUpdateAttempts { get; private set; }
+
+        public ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult(snapshot);
+
+        public ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(
+            TimeSpan lockTimeout, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IDerivedIndexRecoveryLease?>(new NoopRecoveryLease());
+
+        public ValueTask<bool> TryUpdateRecoveryPathAsync(Guid expectedActiveGenerationId, string expectedIndexPath,
+            string replacementIndexPath, DateTimeOffset validatedAtUtc, CancellationToken cancellationToken)
+        {
+            PathUpdateAttempts++;
+            return ValueTask.FromResult(true);
+        }
+
+        public ValueTask AppendAuditAsync(DerivedIndexRecoveryAuditEvent auditEvent,
+            CancellationToken cancellationToken) => ValueTask.CompletedTask;
+    }
+
+    private sealed class NoopRecoveryLease : IDerivedIndexRecoveryLease
+    {
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class SequencedRecoveryStore(IDerivedIndexRecoveryStore inner, int failures)

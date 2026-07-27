@@ -24,6 +24,12 @@ public sealed class DerivedIndexRecoverySqlPermissionException : Exception
         : base("The recovery SQL principal cannot access required recovery data.", innerException) { }
 }
 
+public sealed class DerivedIndexRecoverySqlConfigurationException : Exception
+{
+    public DerivedIndexRecoverySqlConfigurationException(Exception innerException)
+        : base("The configured recovery SQL catalogue is unavailable.", innerException) { }
+}
+
 public interface IDerivedIndexRecoveryStore
 {
     ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(

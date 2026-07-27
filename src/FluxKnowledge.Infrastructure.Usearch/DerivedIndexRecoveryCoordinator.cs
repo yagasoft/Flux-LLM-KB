@@ -15,6 +15,7 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
     private readonly IStatusEventPublisher? _statusPublisher;
     private readonly TimeProvider _timeProvider;
     private readonly DerivedIndexRecoveryOptions _options;
+    private readonly Func<string, FileAttributes> _getActivePathAttributes;
     private readonly Channel<DerivedIndexRecoveryFault> _signals = Channel.CreateBounded<DerivedIndexRecoveryFault>(1);
     private DerivedIndexRecoverySnapshot _snapshot = new(DerivedIndexRecoveryState.Starting, null, null, null, null, 0);
     private int _attempts;
@@ -22,19 +23,21 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
 
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         UsearchIndexConfiguration configuration, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
-        DerivedIndexRecoveryOptions? options = null)
+        DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null)
     {
         _scopeFactory = scopeFactory; _configurationFailure = configuration.Failure; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
         _options = options ?? DerivedIndexRecoveryOptions.Default;
+        _getActivePathAttributes = getActivePathAttributes ?? File.GetAttributes;
     }
 
     public DerivedIndexRecoveryCoordinator(IServiceScopeFactory scopeFactory,
         DerivedIndexFileSystem fileSystem, TimeProvider timeProvider, IStatusEventPublisher? statusPublisher = null,
-        DerivedIndexRecoveryOptions? options = null)
+        DerivedIndexRecoveryOptions? options = null, Func<string, FileAttributes>? getActivePathAttributes = null)
     {
         _scopeFactory = scopeFactory; _timeProvider = timeProvider; _statusPublisher = statusPublisher;
         _options = options ?? DerivedIndexRecoveryOptions.Default;
         _fileSystem = fileSystem;
+        _getActivePathAttributes = getActivePathAttributes ?? File.GetAttributes;
     }
 
     public DerivedIndexRecoverySnapshot Snapshot => Volatile.Read(ref _snapshot);
@@ -116,8 +119,9 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             var sql = await recoveryStore.ReadActiveAsync(cancellationToken);
             activeId = sql.ActiveGenerationId;
             ValidateSql(sql);
+            EnsureActivePathMetadataIsAccessible(sql.Generation!.IndexPath);
             if (!fileSystem.AreAllReferencedGenerationPathsSafe(sql.ReferencedIndexPaths) ||
-                !fileSystem.TryCanonicalInRoot(sql.Generation!.IndexPath, out var activePath) ||
+                !fileSystem.TryCanonicalInRoot(sql.Generation.IndexPath, out var activePath) ||
                 !fileSystem.IsIntendedGenerationPath(activePath) ||
                 Directory.Exists(activePath) && !fileSystem.IsValidDirectory(activePath))
             {
@@ -252,15 +256,17 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
         bool detectionRecorded, CancellationToken cancellationToken)
     {
         var classifiedException = exception is RecoveryCandidatePlacementException { InnerException: not null } placement
-            ? placement.InnerException
+            ? placement.InnerException!
             : exception;
         var category = classifiedException switch
         {
             UnauthorizedAccessException or DerivedIndexRecoverySqlPermissionException => DerivedIndexRecoveryFailureCategory.PermissionsDenied,
             DerivedIndexRecoverySqlSchemaException => DerivedIndexRecoveryFailureCategory.SqlSchemaInvalid,
+            DerivedIndexRecoverySqlConfigurationException => DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
             SqlMembershipValidationException => DerivedIndexRecoveryFailureCategory.SqlMembershipInvalid,
             IndexGenerationValidationException => DerivedIndexRecoveryFailureCategory.InvalidDerivedIndex,
             InvalidOperationException => DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
+            _ when IsSqlCatalogueConfigurationFailure(classifiedException) => DerivedIndexRecoveryFailureCategory.ConfigurationInvalid,
             _ => DerivedIndexRecoveryFailureCategory.TransientIo
         };
         var decision = DerivedIndexRecoveryPolicy.Decide(category, ++_attempts);
@@ -283,6 +289,20 @@ public sealed class DerivedIndexRecoveryCoordinator : IDerivedIndexRecoveryStatu
             decision.FailureCategory, 0));
         await PublishAsync(cancellationToken);
     }
+
+    private void EnsureActivePathMetadataIsAccessible(string path)
+    {
+        try
+        {
+            _ = _getActivePathAttributes(path);
+        }
+        catch (FileNotFoundException) { }
+        catch (DirectoryNotFoundException) { }
+    }
+
+    private static bool IsSqlCatalogueConfigurationFailure(Exception exception) =>
+        string.Equals(exception.GetType().FullName, "Microsoft.Data.SqlClient.SqlException", StringComparison.Ordinal) &&
+        exception.GetType().GetProperty("Number")?.GetValue(exception) is int number && number == 4060;
 
     private void ValidateSql(DerivedIndexRecoverySqlSnapshot sql)
     {
