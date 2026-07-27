@@ -21,16 +21,17 @@ public sealed class StatusEventFeedTests
     }
 
     [Fact]
-    public async Task Circuit_open_publishes_a_reconnect_invalidation()
+    public async Task Connection_up_publishes_a_reconnect_invalidation()
     {
         var occurredAtUtc = DateTimeOffset.Parse("2026-07-27T05:00:00Z");
         var feed = new StatusEventFeed();
         await using var subscription = feed.Subscribe();
         var handler = new StatusEventCircuitHandler(feed, new FixedTimeProvider(occurredAtUtc));
 
-        await handler.OnCircuitOpenedAsync(null!, CancellationToken.None);
+        await handler.OnConnectionUpAsync(null!, CancellationToken.None);
 
-        var changed = await subscription.Reader.ReadAsync();
+        Assert.True(subscription.Reader.TryRead(out var changed));
+        Assert.NotNull(changed);
         Assert.Equal("reconnect", changed.Projection);
         Assert.Equal(occurredAtUtc, changed.OccurredAtUtc);
     }

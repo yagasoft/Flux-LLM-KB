@@ -178,7 +178,7 @@ Passed:
 
 - [`OverviewProjectionTests.Overview_state_reloads_the_SQL_projection_after_a_status_event`](../../tests/FluxKnowledge.Web.Tests/Components/OverviewProjectionTests.cs)
 - [`StatusEventFeedTests.Feed_delivers_a_published_status_invalidation_to_each_subscriber`](../../tests/FluxKnowledge.Web.Tests/Components/StatusEventFeedTests.cs)
-- [`StatusEventFeedTests.Circuit_open_publishes_a_reconnect_invalidation`](../../tests/FluxKnowledge.Web.Tests/Components/StatusEventFeedTests.cs)
+- [`StatusEventFeedTests.Connection_up_publishes_a_reconnect_invalidation`](../../tests/FluxKnowledge.Web.Tests/Components/StatusEventFeedTests.cs)
 - [`PipelineRecordsProjectionTests.Status_count_formats_the_visible_upper_bound`](../../tests/FluxKnowledge.Web.Tests/Components/PipelineRecordsProjectionTests.cs)
 - [`PipelineRecordsProjectionTests.Pipeline_projection_names_the_job_due_time_truthfully`](../../tests/FluxKnowledge.Web.Tests/Components/PipelineRecordsProjectionTests.cs)
 - [`BrowserTestRootTests.Safe_root_uses_a_non_I_drive_candidate_when_the_temp_root_is_on_I`](../../tests/FluxKnowledge.Web.Tests/Components/BrowserTestRootTests.cs)
@@ -230,7 +230,8 @@ Review corrections:
 - regenerated three stale package lock entries so locked restore is truthful;
 - relabelled the SQL job due time from the incorrect “Last activity” to
   “Due / scheduled” and added a focused test;
-- added direct reconnect-invalidation and REST 400 problem-envelope coverage.
+- added direct `OnConnectionUpAsync` reconnect-invalidation and REST 400
+  problem-envelope coverage.
 
 Residual concerns:
 
