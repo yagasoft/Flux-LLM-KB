@@ -1,0 +1,40 @@
+@page "/search"
+@using System.ComponentModel.DataAnnotations
+@using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Application.Ports
+@inject ISearchService SearchService
+
+<PageTitle>Search | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="search-heading">
+    <h1 id="search-heading">Search</h1>
+    <EditForm Model="this" OnValidSubmit="SearchAsync">
+        <DataAnnotationsValidator />
+        <div class="search-form">
+            <label for="search-query">Search terms</label>
+            <InputText id="search-query" @bind-Value="Query" autocomplete="off" />
+            <ValidationMessage For="@(() => Query)" />
+            <button type="submit">Search</button>
+        </div>
+    </EditForm>
+    <p role="status" aria-live="polite">@_statusMessage</p>
+    <SearchResults Response="_response" Searched="_searched" />
+</section>
+
+@code {
+    [Required(ErrorMessage = "Enter search terms.")]
+    public string Query { get; set; } = string.Empty;
+
+    private SearchResponse? _response;
+    private bool _searched;
+    private string _statusMessage = "";
+
+    private async Task SearchAsync()
+    {
+        _response = await SearchService.SearchAsync(
+            new SearchRequest(Query, 10, "local_first", null, null, null),
+            CancellationToken.None);
+        _searched = true;
+        _statusMessage = $"Found {_response.Results.Count} result(s).";
+    }
+}

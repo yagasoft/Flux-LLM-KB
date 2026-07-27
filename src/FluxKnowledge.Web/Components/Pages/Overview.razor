@@ -1,0 +1,62 @@
+@page "/"
+@implements IAsyncDisposable
+@using FluxKnowledge.Web.Components.Status
+@inject OverviewProjectionState ProjectionState
+@inject StatusEventFeed StatusEvents
+
+<PageTitle>Overview | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="overview-heading">
+    <h1 id="overview-heading">Pipeline overview</h1>
+    <p role="status" aria-live="polite">@_statusMessage</p>
+    <dl class="status-grid">
+        <div><dt>Worker queued</dt><dd><StatusCount Value="ProjectionState.Current.WorkerQueuedCount" /></dd></div>
+        <div><dt>Worker processing</dt><dd><StatusCount Value="ProjectionState.Current.WorkerProcessingCount" /></dd></div>
+        <div><dt>GPU queued</dt><dd><StatusCount Value="ProjectionState.Current.GpuQueuedCount" /></dd></div>
+        <div><dt>GPU processing</dt><dd><StatusCount Value="ProjectionState.Current.GpuProcessingCount" /></dd></div>
+        <div><dt>Completed</dt><dd><StatusCount Value="ProjectionState.Current.CompletedCount" /></dd></div>
+        <div><dt>Failed</dt><dd><StatusCount Value="ProjectionState.Current.FailedCount" /></dd></div>
+        <div><dt>Indexed records</dt><dd><StatusCount Value="ProjectionState.Current.IndexedRecordCount" /></dd></div>
+        <div><dt>Active index generation</dt><dd>@ProjectionState.Current.ActiveIndexGeneration</dd></div>
+    </dl>
+</section>
+
+@code {
+    private readonly CancellationTokenSource _stopping = new();
+    private StatusEventSubscription? _subscription;
+    private string _statusMessage = "Loading pipeline status…";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ProjectionState.ReloadAsync(_stopping.Token);
+        _statusMessage = "Pipeline status loaded.";
+        _subscription = StatusEvents.Subscribe();
+        _ = ObserveAsync(_subscription, _stopping.Token);
+    }
+
+    private async Task ObserveAsync(StatusEventSubscription subscription, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var statusChanged in subscription.Reader.ReadAllAsync(cancellationToken))
+            {
+                await ProjectionState.HandleStatusChangedAsync(statusChanged, cancellationToken);
+                _statusMessage = "Pipeline status updated.";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stopping.CancelAsync();
+        if (_subscription is not null)
+        {
+            await _subscription.DisposeAsync();
+        }
+        _stopping.Dispose();
+    }
+}

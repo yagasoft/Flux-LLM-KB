@@ -1,0 +1,76 @@
+@page "/pipeline-records"
+@implements IAsyncDisposable
+@using FluxKnowledge.Web.Components.Status
+@inject IProjectionReader ProjectionReader
+@inject StatusEventFeed StatusEvents
+
+<PageTitle>Pipeline records | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="pipeline-records-heading">
+    <h1 id="pipeline-records-heading">Pipeline records</h1>
+    <p role="status" aria-live="polite">@_statusMessage</p>
+    <div class="table-scroll">
+        <table>
+            <caption class="visually-hidden">Registered pipeline records</caption>
+            <thead><tr><th>Source</th><th>Revision</th><th>Current stage</th><th>Status</th><th>Content hash</th><th>Registered</th><th>Last activity</th></tr></thead>
+            <tbody>
+                @foreach (var record in _records)
+                {
+                    <tr><td>@record.SourceIdentity</td><td>@record.Revision</td><td>@record.CurrentStage</td><td>@record.Status</td><td><code>@record.ContentHashPrefix</code></td><td>@record.RegisteredAtUtc.LocalDateTime</td><td>@record.LastActivityAtUtc?.LocalDateTime</td></tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</section>
+
+@code {
+    private readonly CancellationTokenSource _stopping = new();
+    private IReadOnlyList<PipelineRecordProjection> _records = [];
+    private StatusEventSubscription? _subscription;
+    private string _statusMessage = "Loading pipeline records…";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+        _subscription = StatusEvents.Subscribe();
+        _ = ObserveAsync(_subscription, _stopping.Token);
+    }
+
+    private async Task ReloadAsync()
+    {
+        _records = await ProjectionReader.ReadPipelineRecordsAsync(_stopping.Token);
+        _statusMessage = "Pipeline records loaded.";
+    }
+
+    private async Task ObserveAsync(StatusEventSubscription subscription, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var statusChanged in subscription.Reader.ReadAllAsync(cancellationToken))
+            {
+                if (!string.Equals(statusChanged.Projection, "pipeline", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(statusChanged.Projection, "reconnect", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                await ReloadAsync();
+                _statusMessage = "Pipeline records updated.";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stopping.CancelAsync();
+        if (_subscription is not null)
+        {
+            await _subscription.DisposeAsync();
+        }
+        _stopping.Dispose();
+    }
+}

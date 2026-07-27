@@ -1,0 +1,34 @@
+@using FluxKnowledge.Application.Contracts
+
+@if (Response is { Results.Count: > 0 })
+{
+    <ol class="search-results" aria-label="Search results">
+        @foreach (var result in Response.Results)
+        {
+            <li>
+                <article>
+                    <h2>@result.Title</h2>
+                    <dl class="metadata">
+                        <dt>Source</dt><dd>@result.SourceIdentity</dd>
+                        <dt>Revision</dt><dd>@result.Revision</dd>
+                        <dt>Score</dt><dd>@result.Score.ToString("0.000")</dd>
+                    </dl>
+                    <p>@result.Snippet</p>
+                    <p><strong>Explanation:</strong> @string.Join("; ", result.Explanation)</p>
+                </article>
+            </li>
+        }
+    </ol>
+}
+else if (Searched)
+{
+    <p>No matching records were found.</p>
+}
+
+@code {
+    [Parameter]
+    public SearchResponse? Response { get; set; }
+
+    [Parameter]
+    public bool Searched { get; set; }
+}
