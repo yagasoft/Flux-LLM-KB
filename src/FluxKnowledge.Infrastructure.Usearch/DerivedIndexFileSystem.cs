@@ -11,6 +11,9 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
     public bool IsIntendedGenerationPath(string path) => TryCanonicalInRoot(path, out var canonical) &&
         string.Equals(Path.GetDirectoryName(canonical), Path.Combine(_root, "generations"), StringComparison.OrdinalIgnoreCase);
 
+    public bool AreAllReferencedGenerationPathsSafe(IEnumerable<string> referencedPaths) =>
+        referencedPaths.All(path => TryCanonicalInRoot(path, out var canonical) && IsIntendedGenerationPath(canonical));
+
     public bool TryCanonicalInRoot(string path, out string canonical)
     {
         canonical = string.Empty;
@@ -18,8 +21,7 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
         try
         {
             var candidate = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
-            if (!candidate.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
-            if (!AncestorsAreSafe(_root)) return false;
+            if (!IsSameOrUnder(candidate, _root) || !ExistingComponentsAreSafe(candidate)) return false;
             canonical = candidate;
             return true;
         }
@@ -43,7 +45,33 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
         var quarantine = Path.Combine(_root, "quarantine");
         if (!EnsureSafeDirectory(quarantine)) return false;
         var destination = Path.Combine(quarantine, $"{Guid.NewGuid():N}");
+        if (!TryCanonicalInRoot(destination, out _)) return false;
         Directory.Move(Path.GetFullPath(path), destination);
+        return true;
+    }
+
+    public bool TryCreateRecoveryStagingDirectory(out string stagingDirectory)
+    {
+        stagingDirectory = Path.Combine(_root, "staging", "recovery", Guid.NewGuid().ToString("N"));
+        if (!TryCanonicalInRoot(stagingDirectory, out var canonical)) return false;
+        Directory.CreateDirectory(canonical);
+        if (!IsValidDirectory(canonical)) return false;
+        stagingDirectory = canonical;
+        return true;
+    }
+
+    public bool TryPlaceRecoveryCandidate(Guid generationId, string stagingDirectory, out string placedDirectory)
+    {
+        placedDirectory = Path.Combine(_root, "generations", $"{generationId:N}-recovery-{Guid.NewGuid():N}");
+        if (!IsValidDirectory(stagingDirectory) ||
+            !TryCanonicalInRoot(placedDirectory, out var canonicalDestination) ||
+            !IsIntendedGenerationPath(canonicalDestination) ||
+            Directory.Exists(canonicalDestination) || File.Exists(canonicalDestination)) return false;
+        var generations = Path.GetDirectoryName(canonicalDestination)!;
+        if (!EnsureSafeDirectory(generations)) return false;
+        Directory.Move(Path.GetFullPath(stagingDirectory), canonicalDestination);
+        if (!IsValidDirectory(canonicalDestination)) return false;
+        placedDirectory = canonicalDestination;
         return true;
     }
 
@@ -73,13 +101,15 @@ public sealed class DerivedIndexFileSystem(UsearchIndexOptions options)
         string.Equals(path, root, StringComparison.OrdinalIgnoreCase) ||
         path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 
-    private static bool AncestorsAreSafe(string path)
+    private bool ExistingComponentsAreSafe(string path)
     {
         for (var directory = new DirectoryInfo(path); directory is not null; directory = directory.Parent)
         {
             if (directory.Exists && directory.Attributes.HasFlag(FileAttributes.ReparsePoint)) return false;
+            if (string.Equals(Path.TrimEndingDirectorySeparator(directory.FullName), _root,
+                    StringComparison.OrdinalIgnoreCase)) return true;
         }
-        return true;
+        return false;
     }
 
     private static bool DeleteTreeAfterFinalSafetyCheck(string candidate)

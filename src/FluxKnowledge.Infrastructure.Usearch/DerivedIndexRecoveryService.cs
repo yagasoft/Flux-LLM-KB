@@ -33,16 +33,31 @@ public sealed class DerivedIndexRecoveryService : BackgroundService
             if (snapshot.State == DerivedIndexRecoveryState.OperatorActionRequired)
             {
                 await _coordinator.WaitAsync(stoppingToken);
+                continue;
             }
-            else
+            if (snapshot.State == DerivedIndexRecoveryState.RetryScheduled && snapshot.NextRetryAtUtc is { } retryAt)
             {
-                var delay = snapshot.State == DerivedIndexRecoveryState.RetryScheduled && snapshot.NextRetryAtUtc is { } retryAt
-                    ? retryAt - _timeProvider.GetUtcNow()
-                    : _options.ProbeInterval;
-                await WaitForSignalOrDelayAsync(delay < TimeSpan.Zero ? TimeSpan.Zero : delay, stoppingToken);
+                var retryDelay = retryAt - _timeProvider.GetUtcNow();
+                if (retryDelay > TimeSpan.Zero)
+                {
+                    await WaitForRetryDueAsync(retryDelay, stoppingToken);
+                    if (!stoppingToken.IsCancellationRequested) await _coordinator.RunOnceAsync(stoppingToken, retryDueWaited: true);
+                    continue;
+                }
             }
+            await WaitForSignalOrDelayAsync(_options.ProbeInterval, stoppingToken);
             if (!stoppingToken.IsCancellationRequested) await _coordinator.RunOnceAsync(stoppingToken);
         }
+    }
+
+    private async Task WaitForRetryDueAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        if (_deterministicWait is not null)
+        {
+            await _deterministicWait(delay, cancellationToken);
+            return;
+        }
+        await Task.Delay(delay, _timeProvider, cancellationToken);
     }
 
     private async Task WaitForSignalOrDelayAsync(TimeSpan delay, CancellationToken cancellationToken)

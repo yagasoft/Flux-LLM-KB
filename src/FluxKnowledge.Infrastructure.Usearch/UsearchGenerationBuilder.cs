@@ -21,8 +21,11 @@ public sealed class UsearchGenerationBuilder(
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var staging = Path.Combine(options.RootPath, "staging", "recovery", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(staging);
+        var fileSystem = new DerivedIndexFileSystem(options);
+        if (!fileSystem.TryCreateRecoveryStagingDirectory(out var staging))
+        {
+            throw new InvalidOperationException("The recovery staging directory cannot be created safely.");
+        }
         string? placedPath = null;
         try
         {
@@ -39,7 +42,7 @@ public sealed class UsearchGenerationBuilder(
         }
         catch
         {
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            fileSystem.TryQuarantine(staging, []);
             throw;
         }
     }
@@ -65,8 +68,11 @@ public sealed class UsearchGenerationBuilder(
             return existing;
         }
 
-        var staging = Path.Combine(options.RootPath, "staging", existing.Id.ToString("N"), Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(staging);
+        var fileSystem = new DerivedIndexFileSystem(options);
+        if (!fileSystem.TryCreateRecoveryStagingDirectory(out var staging))
+        {
+            throw new InvalidOperationException("The recovery staging directory cannot be created safely.");
+        }
         try
         {
             SaveCandidate(staging, existing, vectors);
@@ -78,7 +84,7 @@ public sealed class UsearchGenerationBuilder(
         }
         catch
         {
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            fileSystem.TryQuarantine(staging, []);
             throw;
         }
     }

@@ -12,6 +12,18 @@ public sealed record DerivedIndexRecoverySqlSnapshot(
 
 public interface IDerivedIndexRecoveryLease : IAsyncDisposable;
 
+public sealed class DerivedIndexRecoverySqlSchemaException : Exception
+{
+    public DerivedIndexRecoverySqlSchemaException(Exception innerException)
+        : base("The recovery SQL schema is incompatible with this application.", innerException) { }
+}
+
+public sealed class DerivedIndexRecoverySqlPermissionException : Exception
+{
+    public DerivedIndexRecoverySqlPermissionException(Exception innerException)
+        : base("The recovery SQL principal cannot access required recovery data.", innerException) { }
+}
+
 public interface IDerivedIndexRecoveryStore
 {
     ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(
@@ -19,6 +31,12 @@ public interface IDerivedIndexRecoveryStore
 
     ValueTask<IDerivedIndexRecoveryLease?> TryAcquireExclusiveLeaseAsync(
         TimeSpan lockTimeout,
+        CancellationToken cancellationToken);
+
+    ValueTask UpdateRecoveryPathAsync(
+        Guid generationId,
+        string indexPath,
+        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken);
 
     ValueTask AppendAuditAsync(

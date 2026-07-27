@@ -187,6 +187,35 @@ public sealed class UsearchGenerationTests : IDisposable
         Assert.Equal(11, Assert.Single(initial).VectorId);
         Assert.Equal(11, Assert.Single(repeated).VectorId);
         Assert.Equal(22, Assert.Single(replaced).VectorId);
+        Assert.Equal(3, store.GenerationReads);
+    }
+
+    [Fact]
+    public async Task Active_reader_reopens_when_recovery_replaces_the_path_under_the_same_generation_id()
+    {
+        var store = new CachingStore();
+        var options = UsearchIndexOptions.FromConfiguredRoot(_root);
+        var builder = new UsearchGenerationBuilder(store, options, new UsearchGenerationValidator());
+        var snapshot = await builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None);
+        store.Record(snapshot);
+        store.ActiveGeneration = snapshot.Generation.Id;
+        var replacementPath = Path.Combine(_root, "generations", "same-id-recovery");
+        Directory.CreateDirectory(replacementPath);
+        File.Copy(Path.Combine(snapshot.Generation.IndexPath, UsearchGenerationValidator.IndexFileName),
+            Path.Combine(replacementPath, UsearchGenerationValidator.IndexFileName));
+        File.Copy(Path.Combine(snapshot.Generation.IndexPath, UsearchGenerationValidator.MetadataFileName),
+            Path.Combine(replacementPath, UsearchGenerationValidator.MetadataFileName));
+        var services = new ServiceCollection();
+        services.AddSingleton(store);
+        services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<CachingStore>());
+        services.AddSingleton<UsearchAnnIndex>();
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var reader = provider.GetRequiredService<UsearchAnnIndex>();
+
+        Assert.Equal(11, Assert.Single(await reader.SearchAsync(Vector(0), 1, CancellationToken.None)).VectorId);
+        store.ReplacePath(snapshot.Generation.Id, replacementPath);
+
+        Assert.Equal(11, Assert.Single(await reader.SearchAsync(Vector(0), 1, CancellationToken.None)).VectorId);
         Assert.Equal(2, store.GenerationReads);
     }
 
@@ -242,6 +271,8 @@ public sealed class UsearchGenerationTests : IDisposable
             _generations[snapshot.Generation.Id] = snapshot.Generation;
             _memberships[snapshot.Generation.Id] = snapshot.Vectors;
         }
+        public void ReplacePath(Guid generationId, string indexPath) =>
+            _generations[generationId] = _generations[generationId] with { IndexPath = indexPath };
         public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(FluxKnowledge.Domain.Common.PipelineRecordId pipelineRecordId, long sourceRevision, CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalTextChunk>>([]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(Guid indexGenerationId, CancellationToken cancellationToken) => ValueTask.FromResult(_memberships[indexGenerationId]);
         public ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<CanonicalVector>>([UseSecondVector ? Vector(22, 1) : Vector(11, 0)]);

@@ -20,18 +20,25 @@ public sealed class SqlDerivedIndexRecoveryStore(
     public async ValueTask<DerivedIndexRecoverySqlSnapshot> ReadActiveAsync(
         CancellationToken cancellationToken)
     {
-        await using var executionContext = await contextFactory
-            .CreateDbContextAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var strategy = executionContext.Database.CreateExecutionStrategy();
-        return await strategy.ExecuteAsync(async () =>
+        try
         {
-            await using var context = await contextFactory
+            await using var executionContext = await contextFactory
                 .CreateDbContextAsync(cancellationToken)
                 .ConfigureAwait(false);
-            return await ReadActiveWithinTransactionAsync(context, cancellationToken)
-                .ConfigureAwait(false);
-        }).ConfigureAwait(false);
+            var strategy = executionContext.Database.CreateExecutionStrategy();
+            return await strategy.ExecuteAsync(async () =>
+            {
+                await using var context = await contextFactory
+                    .CreateDbContextAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                return await ReadActiveWithinTransactionAsync(context, cancellationToken)
+                    .ConfigureAwait(false);
+            }).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (TryGetSqlException(exception, out var sqlException))
+        {
+            throw TranslateSqlException(sqlException);
+        }
     }
 
     private static async Task<DerivedIndexRecoverySqlSnapshot> ReadActiveWithinTransactionAsync(
@@ -161,10 +168,43 @@ public sealed class SqlDerivedIndexRecoveryStore(
             await connection.DisposeAsync().ConfigureAwait(false);
             throw new OperationCanceledException(cancellationToken);
         }
+        catch (SqlException exception)
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw TranslateSqlException(exception);
+        }
         catch
         {
             await connection.DisposeAsync().ConfigureAwait(false);
             throw;
+        }
+    }
+
+    public async ValueTask UpdateRecoveryPathAsync(
+        Guid generationId,
+        string indexPath,
+        DateTimeOffset validatedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(indexPath);
+        try
+        {
+            await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            var updated = await context.IndexGenerations
+                .Where(generation => generation.Id == generationId)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(generation => generation.IndexPath, indexPath)
+                    .SetProperty(generation => generation.ValidatedAtUtc, validatedAtUtc), cancellationToken)
+                .ConfigureAwait(false);
+            if (updated != 1)
+            {
+                throw new DerivedIndexRecoverySqlSchemaException(
+                    new InvalidOperationException("The active recovery generation no longer exists."));
+            }
+        }
+        catch (Exception exception) when (TryGetSqlException(exception, out var sqlException))
+        {
+            throw TranslateSqlException(sqlException);
         }
     }
 
@@ -173,19 +213,47 @@ public sealed class SqlDerivedIndexRecoveryStore(
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(auditEvent);
-        await using var context = await contextFactory
-            .CreateDbContextAsync(cancellationToken)
-            .ConfigureAwait(false);
-        context.AuditEvents.Add(new AuditEventEntity
+        try
         {
-            PipelineRecordId = null,
-            EventType = AuditEventType,
-            Actor = AuditActor,
-            DetailsJson = CreateAuditDetails(auditEvent),
-            OccurredAtUtc = timeProvider.GetUtcNow()
-        });
-        await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await using var context = await contextFactory
+                .CreateDbContextAsync(cancellationToken)
+                .ConfigureAwait(false);
+            context.AuditEvents.Add(new AuditEventEntity
+            {
+                PipelineRecordId = null,
+                EventType = AuditEventType,
+                Actor = AuditActor,
+                DetailsJson = CreateAuditDetails(auditEvent),
+                OccurredAtUtc = timeProvider.GetUtcNow()
+            });
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (TryGetSqlException(exception, out var sqlException))
+        {
+            throw TranslateSqlException(sqlException);
+        }
     }
+
+    private static bool TryGetSqlException(Exception exception, out SqlException sqlException)
+    {
+        for (var current = exception; current is not null; current = current.InnerException!)
+        {
+            if (current is SqlException found)
+            {
+                sqlException = found;
+                return true;
+            }
+        }
+        sqlException = null!;
+        return false;
+    }
+
+    private static Exception TranslateSqlException(SqlException exception) => exception.Number switch
+    {
+        207 or 208 or 2812 => new DerivedIndexRecoverySqlSchemaException(exception),
+        229 or 230 or 916 or 18456 => new DerivedIndexRecoverySqlPermissionException(exception),
+        _ => exception
+    };
 
     private static string CreateAuditDetails(DerivedIndexRecoveryAuditEvent auditEvent) =>
         JsonSerializer.Serialize(new
