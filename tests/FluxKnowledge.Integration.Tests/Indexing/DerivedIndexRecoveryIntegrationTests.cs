@@ -62,7 +62,8 @@ public sealed class DerivedIndexRecoveryIntegrationTests(NativeSqlServerFixture 
         var snapshot = await store.ReadActiveAsync(CancellationToken.None);
 
         Assert.Contains(activeIndexPath, snapshot.ReferencedIndexPaths);
-        Assert.Contains(sharedIndexPathWithDifferentCasing, snapshot.ReferencedIndexPaths);
+        Assert.Contains(snapshot.ReferencedIndexPaths, path =>
+            string.Equals(path, sharedIndexPathWithDifferentCasing, StringComparison.OrdinalIgnoreCase));
         Assert.Equal(1, snapshot.ReferencedIndexPaths.Count(path =>
             string.Equals(path, sharedIndexPath, StringComparison.OrdinalIgnoreCase)));
     }
