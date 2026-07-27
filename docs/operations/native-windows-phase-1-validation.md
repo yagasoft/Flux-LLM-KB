@@ -4,8 +4,8 @@
 
 Phase 1 has a buildable local UTF-8 vertical slice and passing non-opt-in
 evidence. It is not verified complete. The disposable SQL Server integration
-suite and the SQL-backed browser vertical slice were not run because the caller
-did not supply an approved server-level disposable-test connection. No target
+suite and the SQL-backed browser vertical slice were not run because the
+environment did not provide the required disposable-SQL opt-in. No target
 database, IIS site, backup, Outlook integration, model, GPU work, complete MCP
 surface or legacy cutover was exercised or claimed.
 
@@ -22,7 +22,7 @@ browser test.
 | Environment class | Local Windows development/test host; not IIS and not a production or target SQL environment |
 | Operating system | Microsoft Windows NT 10.0.22631.0 |
 | .NET SDK | 10.0.300 |
-| Branch baseline | `bc4257c3d0f6a86353b461251e058508e1bfdd18` |
+| Final-fix review base | `eb5ce1205e752275ff8ae26a0a8b65512ea55aa3` |
 | SQL opt-in | `FLUXKNOWLEDGE_TEST_SQL_CONNECTION` absent |
 | Browser opt-in | `FLUXKNOWLEDGE_BROWSER_TESTS` absent |
 | Target-drive rule | An `I:` drive exists; no command in this validation accessed or changed it |
@@ -36,9 +36,9 @@ All commands ran on 2026-07-27 in the environment class above.
 | `dotnet tool restore` | passed | `dotnet-ef` 10.0.10 restored successfully. |
 | `dotnet restore FluxKnowledge.slnx --locked-mode` | passed after repair | The first run failed with `NU1004` because three lock files omitted already-declared package/project references. `dotnet restore FluxKnowledge.slnx` regenerated only those entries; the required locked restore then passed. |
 | `dotnet build FluxKnowledge.slnx --configuration Release --no-restore` | passed | 0 warnings and 0 errors. |
-| `dotnet test FluxKnowledge.slnx --configuration Release --no-build --filter Category!=Browser` | passed with explicit skips | Domain: 44 passed; Integration: 29 passed and 21 SQL-opt-in tests skipped; Web: 21 passed. No selected test failed. |
-| `git diff --check` | passed | Exit code 0; no whitespace errors. |
-| `git status --short` | passed | Showed only the Task 9 documentation, three corrected package lock files and the focused UI/test review changes before commit. |
+| `dotnet test FluxKnowledge.slnx --configuration Release --no-build --filter Category!=Browser` | passed with explicit skips | Domain: 54 passed; Integration: 30 passed and 23 SQL-opt-in tests skipped; Web: 23 passed. No selected test failed. |
+| `git diff --check` | passed | Exit code 0; no whitespace errors before final review. |
+| `git status --short` | passed | Showed only the four blocking-review corrections, their focused tests, the generated EF migration and the affected evidence files before final review. |
 
 The lock-file repair is part of this milestone because the required locked
 restore could not otherwise pass:
@@ -67,6 +67,7 @@ State: passed on 2026-07-27 in the local Windows development/test environment.
 - [`PublicJobStateTests.Capacity_return_keeps_the_job_in_its_existing_queue_family`](../../tests/FluxKnowledge.Domain.Tests/Jobs/PublicJobStateTests.cs)
 - [`PipelineRecordTests.New_revision_keeps_source_identity_and_links_to_prior_revision`](../../tests/FluxKnowledge.Domain.Tests/Pipeline/PipelineRecordTests.cs)
 - [`PipelineRecordTests.Invariant_bearing_contracts_do_not_expose_public_constructors_or_writable_state`](../../tests/FluxKnowledge.Domain.Tests/Pipeline/PipelineRecordTests.cs)
+- [`PipelineRecordTests.Completion_criteria_are_met_only_by_a_terminal_publish_transition`](../../tests/FluxKnowledge.Domain.Tests/Pipeline/PipelineRecordTests.cs)
 - [`GpuMiniTaskTests.Priority_lane_is_part_of_the_durable_contract_without_activating_gpu_work`](../../tests/FluxKnowledge.Domain.Tests/Gpu/GpuMiniTaskTests.cs)
 
 These tests verify permanent contracts only. They do not activate a GPU
@@ -82,15 +83,18 @@ ran.
 - [`SqlServerOptionsValidatorTests.Startup_readiness_does_not_contain_database_creation_or_file_movement`](../../tests/FluxKnowledge.Domain.Tests/Configuration/SqlServerOptionsValidatorTests.cs)
 - [`SqlServerOptionsValidatorTests.Readiness_requires_exactly_the_canonical_data_and_log_files`](../../tests/FluxKnowledge.Domain.Tests/Configuration/SqlServerOptionsValidatorTests.cs)
 - [`SqlServerOptionsValidatorTests.Readiness_requires_artifacts_search_text_in_the_fluxknowledge_fulltext_catalog`](../../tests/FluxKnowledge.Domain.Tests/Configuration/SqlServerOptionsValidatorTests.cs)
+- [`SqlServerOptionsValidatorTests.Readiness_query_includes_the_active_validated_index_state`](../../tests/FluxKnowledge.Domain.Tests/Configuration/SqlServerOptionsValidatorTests.cs)
+- [`SqlServerProvisionerTests.Backup_target_rejects_device_prefixed_i_drive_paths`](../../tests/FluxKnowledge.Domain.Tests/Configuration/SqlServerProvisionerTests.cs)
 - [`SchemaMappingTests.Model_uses_only_the_sql_server_provider_and_standard_server_connection`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
 - [`SchemaMappingTests.Native_fixture_rejects_catalog_and_file_attachment_keys`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
 - [`SchemaMappingTests.Native_fixture_fails_closed_for_unverifiable_or_i_drive_file_paths`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
 - [`SchemaMappingTests.Ambiguous_create_failure_still_runs_generated_database_cleanup`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
+- [`SchemaMappingTests.Vector_hash_migration_preserves_payload_integrity_and_backfills_chunk_identity`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
 
 The live migration tests
 [`NativeSchemaMigrationTests.Native_migration_creates_only_the_generated_phase_one_catalog`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
 and
-[`NativeSchemaMigrationTests.Membership_migration_backfills_origins_and_blocks_snapshot_only_downgrade`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
+[`NativeSchemaMigrationTests.Membership_and_vector_hash_migrations_backfill_safely_and_block_snapshot_only_downgrade`](../../tests/FluxKnowledge.Integration.Tests/Persistence/SchemaMappingTests.cs)
 were skipped because the disposable SQL opt-in was absent.
 
 ### Native SQL registration, claims, leases and atomic transitions
@@ -136,6 +140,9 @@ Not run because they require disposable SQL:
 - [`SqlToUsearchRebuildTests.Rebuild_after_index_root_deletion_uses_sql_membership_and_keeps_the_active_generation_searchable`](../../tests/FluxKnowledge.Integration.Tests/Indexing/SqlToUsearchRebuildTests.cs)
 - [`SqlToUsearchRebuildTests.Prebuilt_snapshot_is_superseded_by_a_newer_publish_without_pointer_regression`](../../tests/FluxKnowledge.Integration.Tests/Indexing/SqlToUsearchRebuildTests.cs)
 - [`SqlToUsearchRebuildTests.Concurrent_same_candidate_activation_creates_one_generation_and_membership_snapshot`](../../tests/FluxKnowledge.Integration.Tests/Indexing/SqlToUsearchRebuildTests.cs)
+- [`SqlToUsearchRebuildTests.Worker_produced_vector_round_trips_through_hybrid_search_and_preserves_stale_chunk_protection`](../../tests/FluxKnowledge.Integration.Tests/Indexing/SqlToUsearchRebuildTests.cs)
+- [`SqlToUsearchRebuildTests.Completed_publish_replay_does_not_duplicate_membership_or_replace_a_valid_placement`](../../tests/FluxKnowledge.Integration.Tests/Indexing/SqlToUsearchRebuildTests.cs)
+- [`SqlToUsearchRebuildTests.Failed_terminal_publish_rolls_back_the_completion_flag`](../../tests/FluxKnowledge.Integration.Tests/Indexing/SqlToUsearchRebuildTests.cs)
 
 ### SQL Full-Text, ANN, RRF and hydration
 
@@ -148,6 +155,7 @@ Passed:
 - [`SearchQueryValidatorTests.Validate_rejects_scope_that_would_change_phase_one_semantics`](../../tests/FluxKnowledge.Domain.Tests/Search/SearchQueryValidatorTests.cs)
 - [`SearchEndpointTests.Search_endpoint_returns_hydrated_results_not_usarch_only_rows`](../../tests/FluxKnowledge.Web.Tests/Endpoints/SearchEndpointTests.cs)
 - [`SearchEndpointTests.Search_endpoint_returns_a_non_retryable_problem_for_unsupported_or_malformed_scope`](../../tests/FluxKnowledge.Web.Tests/Endpoints/SearchEndpointTests.cs)
+- [`HealthEndpointTests.Ready_endpoint_delegates_to_the_canonical_non_mutating_validator`](../../tests/FluxKnowledge.Web.Tests/Endpoints/HealthEndpointTests.cs)
 
 Not run:
 
@@ -199,10 +207,10 @@ target was started for this evidence.
 ## Whole-branch boundary review
 
 Review range: native replacement merge base
-`48b6a34670d290f4eff555951de5c41c0994c55b` through the Task 9 milestone.
+`48b6a34670d290f4eff555951de5c41c0994c55b` through the final correction wave.
 
-Decision: acceptable for a local, incomplete Phase 1 milestone with the guarded
-checks and later phases still open.
+Decision: independently approved source-only for a local, incomplete Phase 1
+milestone, with the guarded checks and later phases still open.
 
 - The branch adds the isolated .NET modular-monolith solution and its tests. It
   does not modify legacy Python code, Docker assets, deployment scripts, user
@@ -232,10 +240,21 @@ Review corrections:
   “Due / scheduled” and added a focused test;
 - added direct `OnConnectionUpAsync` reconnect-invalidation and REST 400
   problem-envelope coverage.
+- separated durable vector-to-chunk identity from vector-payload integrity,
+  including a backfilled EF migration and a guarded worker-to-hybrid-search
+  round trip;
+- made terminal Publish set the durable completion flag inside the transition
+  transaction and strengthened the guarded replay assertions;
+- composed Web readiness through the canonical non-mutating SQL validator and
+  included validated active-generation state in that contract;
+- canonicalised filesystem device paths before enforcing the non-`I:` backup
+  boundary.
+- corrected the USearch integrity diagnostic so it names payload checksums
+  rather than the now-distinct content identity.
 
 Residual concerns:
 
-- all 21 SQL-dependent integration tests and the browser vertical slice still
+- all 23 SQL-dependent integration tests and the browser vertical slice still
   require explicit disposable-test configuration;
 - a completed Publish replay can build or reuse a derived candidate directory
   before SQL recognises the already-completed dispatch. SQL authority and the
@@ -248,9 +267,9 @@ Residual concerns:
 
 ## Remaining gates
 
-1. Obtain explicit approval and a server-level disposable-test connection,
-   then run the complete integration project and preserve the generated-catalog
-   cleanup evidence.
+1. Provide an isolated server-level disposable-test connection, then run the
+   complete integration project and preserve the generated-catalog cleanup
+   evidence.
 2. With the same disposable SQL configuration and explicit browser opt-in, run
    the guarded browser vertical slice using an already-provisioned compatible
    Chromium runtime.
@@ -258,3 +277,7 @@ Residual concerns:
    MCP/plugin/REST/CLI parity.
 4. Treat target SQL provisioning, IIS setup, backup/restore, Outlook, model/GPU
    activation and legacy retirement as later approval-gated milestones.
+5. Before any native deployment, review and apply
+   `20260727055755_DistinguishVectorIdentityAndPayloadChecksum` through the
+   approved native operator path, then create and validate an active USearch
+   generation. Until that state exists, `/health/ready` must remain unready.

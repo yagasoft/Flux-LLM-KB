@@ -5,7 +5,14 @@ using Microsoft.EntityFrameworkCore;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 
-public sealed class SqlServerReadinessValidator
+public interface ISqlServerReadinessValidator
+{
+    Task<SqlServerReadinessResult> ValidateAsync(
+        SqlServerOptions options,
+        CancellationToken cancellationToken = default);
+}
+
+public sealed class SqlServerReadinessValidator : ISqlServerReadinessValidator
 {
     public string BuildValidationSql() =>
         """
@@ -32,7 +39,16 @@ public sealed class SqlServerReadinessValidator
                         AND [catalog].[name] = N'FluxKnowledge'
                         AND [column].[name] = N'SearchText'
                 )
-            THEN 1 ELSE 0 END) AS [HasExpectedArtifactSearchTextFullTextIndex];
+            THEN 1 ELSE 0 END) AS [HasExpectedArtifactSearchTextFullTextIndex],
+            CONVERT(bit, CASE WHEN EXISTS (
+                SELECT 1
+                FROM [dbo].[IndexState] AS [state]
+                INNER JOIN [dbo].[IndexGenerations] AS [generation]
+                    ON [generation].[Id] = [state].[ActiveIndexGenerationId]
+                WHERE [state].[Id] = 1
+                    AND [generation].[ValidatedAtUtc] IS NOT NULL
+                    AND LEN([generation].[IndexPath]) > 0
+            ) THEN 1 ELSE 0 END) AS [HasValidatedActiveIndex];
 
         SELECT [type_desc], [physical_name]
         FROM sys.database_files
@@ -62,6 +78,7 @@ public sealed class SqlServerReadinessValidator
         var catalogName = reader.GetString(0);
         var fullTextInstalled = reader.GetInt32(1) == 1;
         var hasExpectedFullTextIndex = reader.GetBoolean(2);
+        var hasValidatedActiveIndex = reader.GetBoolean(3);
 
         if (!await reader.NextResultAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -98,6 +115,7 @@ public sealed class SqlServerReadinessValidator
                 catalogName,
                 fullTextInstalled,
                 hasExpectedFullTextIndex,
+                hasValidatedActiveIndex,
                 databaseFiles,
                 expectedMigrations,
                 appliedMigrations));
@@ -127,6 +145,12 @@ public sealed class SqlServerReadinessValidator
         {
             failures.Add(
                 "The FluxKnowledge Full-Text catalogue must index only Artifacts.SearchText.");
+        }
+
+        if (!snapshot.HasValidatedActiveIndex)
+        {
+            failures.Add(
+                "IndexState must point to a validated active index generation.");
         }
 
         var dataFiles = snapshot.DatabaseFiles
@@ -194,6 +218,7 @@ public sealed record SqlServerReadinessSnapshot(
     string CatalogName,
     bool IsFullTextInstalled,
     bool HasExpectedArtifactSearchTextFullTextIndex,
+    bool HasValidatedActiveIndex,
     IReadOnlyList<SqlServerDatabaseFileSnapshot> DatabaseFiles,
     IReadOnlyList<string> ExpectedMigrations,
     IReadOnlyList<string> AppliedMigrations);

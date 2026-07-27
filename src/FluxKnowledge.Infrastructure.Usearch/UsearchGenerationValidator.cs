@@ -15,7 +15,7 @@ public class UsearchGenerationValidator
 
     public static string ComputeChecksum(string modelFingerprint, int dimensions, IReadOnlyList<CanonicalVector> vectors)
     {
-        var data = $"{modelFingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.ContentHash}"))}";
+        var data = $"{modelFingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.PayloadChecksum}"))}";
         return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(data)));
     }
 
@@ -29,7 +29,7 @@ public class UsearchGenerationValidator
     {
         if (vectors.Any(vector =>
                 !string.Equals(
-                    vector.ContentHash,
+                    vector.PayloadChecksum,
                     Convert.ToHexStringLower(SHA256.HashData(vector.Values)),
                     StringComparison.Ordinal)) ||
             !string.Equals(
@@ -37,7 +37,8 @@ public class UsearchGenerationValidator
                 ComputeChecksum(expected.ModelFingerprint, expected.Dimensions, vectors),
                 StringComparison.Ordinal))
         {
-            throw new IndexGenerationValidationException("SQL vector bytes do not match the candidate content identity.");
+            throw new IndexGenerationValidationException(
+                "SQL vector payload checksums do not match the candidate generation metadata.");
         }
         var metadataPath = Path.Combine(directory, MetadataFileName);
         var metadata = JsonSerializer.Deserialize<Metadata>(File.ReadAllText(metadataPath))

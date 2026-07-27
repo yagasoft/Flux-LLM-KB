@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
@@ -60,6 +61,7 @@ public sealed class Task5RegressionTests(NativeSqlServerFixture fixture) : IClas
         var chunk = new TextChunkEntity { ArtifactId = artifactId, SourceRevision = revision, Ordinal = 0, StartOffset = 0, Length = 4, Content = "text", ContentHash = new string('a', 64) };
         context.TextChunks.Add(chunk);
         await context.SaveChangesAsync();
-        context.Vectors.Add(new VectorEntity { TextChunkId = chunk.Id, SourceRevision = revision, ModelFingerprint = "deterministic-tokenhash-v1:256", Dimensions = 256, Values = new byte[1024], ContentHash = new string('b', 64), IndexGenerationId = origin, CreatedAtUtc = DateTimeOffset.UtcNow });
+        var values = new byte[1024];
+        context.Vectors.Add(new VectorEntity { TextChunkId = chunk.Id, SourceRevision = revision, ModelFingerprint = "deterministic-tokenhash-v1:256", Dimensions = 256, Values = values, TextChunkContentHash = chunk.ContentHash, PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values)), IndexGenerationId = origin, CreatedAtUtc = DateTimeOffset.UtcNow });
     }
 }

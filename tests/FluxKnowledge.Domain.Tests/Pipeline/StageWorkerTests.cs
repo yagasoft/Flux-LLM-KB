@@ -1,10 +1,14 @@
+using System.Security.Cryptography;
+using System.Text;
 using FluxKnowledge.Application.Contracts;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Infrastructure.Inference;
 using Xunit;
 
 namespace FluxKnowledge.Domain.Tests.Pipeline;
@@ -50,6 +54,36 @@ public sealed class StageWorkerTests
         Assert.Equal("café\nline\n", transition.Artifact.SearchText);
         Assert.Equal(PipelineStage.CanonicalIndex, transition.NextStage);
         Assert.Equal(PipelineOperations.CanonicalIndex, transition.NextOperation);
+    }
+
+    [Fact]
+    public async Task Embed_preserves_chunk_identity_separately_from_vector_payload_integrity()
+    {
+        const string chunkText = "restart the native worker";
+        var chunkContentHash = Convert.ToHexStringLower(
+            SHA256.HashData(Encoding.UTF8.GetBytes(chunkText)));
+        var transitions = new RecordingTransitionStore();
+        var indexStore = new StubIndexGenerationStore(
+            [new CanonicalTextChunk(41, 0, 0, chunkText.Length, chunkText, chunkContentHash)]);
+        var worker = new EmbedStageWorker(
+            indexStore,
+            new DeterministicTokenHashEmbeddingProvider(),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(
+            CreateWork(PipelineStage.Embed, PipelineOperations.Embed),
+            CancellationToken.None);
+
+        var transition = Assert.Single(transitions.Transitions);
+        Assert.NotNull(transition.IndexingOutput);
+        var vector = Assert.Single(transition.IndexingOutput.Vectors!);
+
+        Assert.Equal(chunkContentHash, vector.TextChunkContentHash);
+        Assert.Equal(
+            Convert.ToHexStringLower(SHA256.HashData(vector.Values)),
+            vector.PayloadChecksum);
+        Assert.NotEqual(vector.TextChunkContentHash, vector.PayloadChecksum);
     }
 
     [Fact]
@@ -145,6 +179,39 @@ public sealed class StageWorkerTests
                     "C:\\ingress\\a.txt",
                     registeredHash,
                     inputText));
+    }
+
+    private sealed class StubIndexGenerationStore(
+        IReadOnlyList<CanonicalTextChunk> chunks) : IIndexGenerationStore
+    {
+        public ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(
+            PipelineRecordId pipelineRecordId,
+            long sourceRevision,
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(chunks);
+
+        public ValueTask<IReadOnlyList<CanonicalVector>> ReadVectorsAsync(
+            Guid indexGenerationId,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IReadOnlyList<CanonicalVector>> ReadEligibleVectorsAsync(
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<IndexGenerationDescriptor?> GetGenerationAsync(
+            Guid indexGenerationId,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask<Guid?> GetActiveGenerationIdAsync(
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask UpdateGenerationMetadataAsync(
+            IndexGenerationDescriptor generation,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class RecordingTransitionStore : IStageTransitionStore

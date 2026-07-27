@@ -16,7 +16,8 @@ public sealed record CanonicalVector(
     string ModelFingerprint,
     int Dimensions,
     byte[] Values,
-    string ContentHash,
+    string TextChunkContentHash,
+    string PayloadChecksum,
     long SourceRevision);
 
 public sealed record IndexGenerationDescriptor(

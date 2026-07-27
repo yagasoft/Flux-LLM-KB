@@ -117,6 +117,29 @@ public sealed class SqlServerOptionsValidatorTests
             failure => failure.Contains("current migration set", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Readiness_query_includes_the_active_validated_index_state()
+    {
+        var sql = new SqlServerReadinessValidator().BuildValidationSql();
+
+        Assert.Contains("[IndexState]", sql, StringComparison.Ordinal);
+        Assert.Contains("[IndexGenerations]", sql, StringComparison.Ordinal);
+        Assert.Contains("[ValidatedAtUtc]", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Readiness_rejects_a_missing_or_unvalidated_active_index()
+    {
+        var result = SqlServerReadinessValidator.Evaluate(
+            ValidOptions(),
+            ReadySnapshot() with { HasValidatedActiveIndex = false });
+
+        Assert.False(result.IsReady);
+        Assert.Contains(
+            result.Failures,
+            failure => failure.Contains("validated active index generation", StringComparison.Ordinal));
+    }
+
     private static SqlServerOptions ValidOptions() =>
         SqlServerOptions.ForProduction(
             "Server=localhost;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
@@ -128,6 +151,7 @@ public sealed class SqlServerOptionsValidatorTests
             SqlServerOptions.CatalogName,
             IsFullTextInstalled: true,
             HasExpectedArtifactSearchTextFullTextIndex: true,
+            HasValidatedActiveIndex: true,
             [
                 new("ROWS", SqlServerOptions.ProductionDataFilePath),
                 new("LOG", SqlServerOptions.ProductionLogFilePath)

@@ -1,5 +1,5 @@
-using FluxKnowledge.Infrastructure.SqlServer.Persistence;
-using Microsoft.EntityFrameworkCore;
+using FluxKnowledge.Infrastructure.SqlServer.Configuration;
+using FluxKnowledge.Infrastructure.SqlServer.Provisioning;
 
 namespace FluxKnowledge.Web.Endpoints;
 
@@ -13,28 +13,29 @@ public static class HealthEndpoints
     }
 
     private static async Task<IResult> ReadyAsync(
-        IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
+        ISqlServerReadinessValidator readinessValidator,
+        SqlServerOptions options,
         CancellationToken cancellationToken)
     {
-        await using var context = await contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
-        if (!await context.Database.CanConnectAsync(cancellationToken).ConfigureAwait(false))
+        SqlServerReadinessResult result;
+        try
+        {
+            result = await readinessValidator
+                .ValidateAsync(options, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is Microsoft.Data.SqlClient.SqlException or InvalidOperationException)
         {
             return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }
 
-        var active = await context.IndexState.AsNoTracking()
-            .Where(state => state.Id == 1)
-            .Select(state => state.ActiveIndexGenerationId)
-            .SingleOrDefaultAsync(cancellationToken)
-            .ConfigureAwait(false);
-        if (active is null)
-        {
-            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
-        }
-
-        var valid = await context.IndexGenerations.AsNoTracking()
-            .AnyAsync(generation => generation.Id == active && generation.ValidatedAtUtc != null, cancellationToken)
-            .ConfigureAwait(false);
-        return valid ? Results.Ok() : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        return result.IsReady
+            ? Results.Ok()
+            : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
     }
 }

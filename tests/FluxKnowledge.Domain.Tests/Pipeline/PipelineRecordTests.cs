@@ -1,4 +1,5 @@
 using System.Reflection;
+using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
@@ -40,5 +41,13 @@ public sealed class PipelineRecordTests
         Assert.All(
             contractTypes.SelectMany(contractType => contractType.GetProperties().Where(property => property.CanWrite)),
             property => Assert.Null(property.GetSetMethod(nonPublic: false)));
+    }
+
+    [Fact]
+    public void Completion_criteria_are_met_only_by_a_terminal_publish_transition()
+    {
+        Assert.True(PipelineCompletionCriteria.IsMet(PipelineStage.Publish, nextStage: null));
+        Assert.False(PipelineCompletionCriteria.IsMet(PipelineStage.Embed, nextStage: null));
+        Assert.False(PipelineCompletionCriteria.IsMet(PipelineStage.Publish, PipelineStage.Extract));
     }
 }

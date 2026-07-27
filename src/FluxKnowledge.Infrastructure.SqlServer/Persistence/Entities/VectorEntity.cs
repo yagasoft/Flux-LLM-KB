@@ -11,7 +11,8 @@ public sealed class VectorEntity
     public string ModelFingerprint { get; set; } = string.Empty;
     public int Dimensions { get; set; }
     public byte[] Values { get; set; } = [];
-    public string ContentHash { get; set; } = string.Empty;
+    public string TextChunkContentHash { get; set; } = string.Empty;
+    public string PayloadChecksum { get; set; } = string.Empty;
     public long SourceRevision { get; set; }
     public bool IsDeleted { get; set; }
     public Guid IndexGenerationId { get; set; }

@@ -9,6 +9,9 @@ internal static class SchemaConfiguration
     public const string Sha256Check =
         "LEN([ContentHash]) = 64 AND [ContentHash] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'";
 
+    public static string Sha256CheckFor(string columnName) =>
+        $"LEN([{columnName}]) = 64 AND [{columnName}] COLLATE Latin1_General_100_BIN2 NOT LIKE '%[^0-9a-f]%'";
+
     public static void ConfigureHash(PropertyBuilder<string> property) =>
         property.HasMaxLength(64).IsUnicode(false).IsFixedLength().IsRequired();
 
@@ -195,12 +198,21 @@ public sealed class VectorConfiguration : IEntityTypeConfiguration<VectorEntity>
     {
         builder.ToTable(
             "Vectors",
-            table => table.HasCheckConstraint("CK_Vectors_ContentHash", SchemaConfiguration.Sha256Check));
+            table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_Vectors_TextChunkContentHash",
+                    SchemaConfiguration.Sha256CheckFor(nameof(VectorEntity.TextChunkContentHash)));
+                table.HasCheckConstraint(
+                    "CK_Vectors_PayloadChecksum",
+                    SchemaConfiguration.Sha256CheckFor(nameof(VectorEntity.PayloadChecksum)));
+            });
         builder.HasKey(entity => entity.VectorId);
         builder.Property(entity => entity.VectorId).UseIdentityColumn();
         builder.Property(entity => entity.ModelFingerprint).HasMaxLength(256).IsRequired();
         builder.Property(entity => entity.Values).HasColumnType("varbinary(max)").IsRequired();
-        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentHash));
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.TextChunkContentHash));
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.PayloadChecksum));
         builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => new

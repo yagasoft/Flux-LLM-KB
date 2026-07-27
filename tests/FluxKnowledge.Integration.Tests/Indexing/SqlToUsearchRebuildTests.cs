@@ -1,13 +1,18 @@
+using System.Security.Cryptography;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Search;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Infrastructure.Inference;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Search;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
+using FluxKnowledge.Infrastructure.Usearch.Search;
 using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Integration.Tests.Support;
 using Microsoft.EntityFrameworkCore;
@@ -74,15 +79,71 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         var vectors = await context.Vectors.OrderBy(vector => vector.VectorId).ToListAsync();
         var active = await context.IndexState.SingleAsync(state => state.Id == 1);
         var membership = await context.IndexGenerationVectors.Where(member => member.GenerationId == active.ActiveIndexGenerationId).ToListAsync();
+        var record = await context.PipelineRecords.SingleAsync(candidate =>
+            candidate.Id == receipt.PipelineRecordId.Value);
 
         Assert.Equal("café\nline\n", canonical.SearchText);
         Assert.NotEmpty(chunks);
         Assert.NotEmpty(vectors);
         Assert.All(vectors, vector => Assert.True(vector.VectorId > 0));
         Assert.NotNull(active.ActiveIndexGenerationId);
+        Assert.Equal((int)PipelineStage.Publish, record.CurrentStage);
+        Assert.True(record.CompletionCriteriaMet);
         Assert.Equal(vectors.Select(vector => vector.VectorId).Order(), membership.Select(member => member.VectorId).Order());
         var generation = await context.IndexGenerations.SingleAsync(generation => generation.Id == active.ActiveIndexGenerationId);
         Assert.True(File.Exists(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Worker_produced_vector_round_trips_through_hybrid_search_and_preserves_stale_chunk_protection()
+    {
+        const string sourceText = "restart the native worker safely";
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, sourceText);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var vector = await context.Vectors.SingleAsync();
+        var chunk = await context.TextChunks.SingleAsync(candidate => candidate.Id == vector.TextChunkId);
+
+        Assert.Equal(chunk.ContentHash, vector.TextChunkContentHash);
+        Assert.Equal(
+            Convert.ToHexStringLower(SHA256.HashData(vector.Values)),
+            vector.PayloadChecksum);
+        Assert.NotEqual(vector.TextChunkContentHash, vector.PayloadChecksum);
+
+        var lexical = new SqlFullTextSearch(environment.Factory);
+        IReadOnlyList<RankedCandidate> lexicalCandidates = [];
+        var fullTextDeadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        while (lexicalCandidates.Count == 0 && DateTimeOffset.UtcNow < fullTextDeadline)
+        {
+            lexicalCandidates = await lexical.SearchAsync("restart", 5, CancellationToken.None);
+            if (lexicalCandidates.Count == 0)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100));
+            }
+        }
+
+        Assert.Contains(lexicalCandidates, candidate => candidate.VectorId == vector.VectorId);
+
+        var search = new HybridSearchService(
+            lexical,
+            new UsearchNearestNeighbourQuery(environment.Embeddings, environment.Reader),
+            new SqlSearchHydrator(environment.Factory),
+            environment.Store);
+        var response = await search.SearchAsync(
+            new SearchRequest("restart", 5, "local_first", null, null, null),
+            CancellationToken.None);
+        var hit = Assert.Single(response.Results);
+        Assert.Contains(sourceText, hit.Snippet, StringComparison.Ordinal);
+        Assert.Contains(hit.Explanation, item => item.StartsWith("lexical:", StringComparison.Ordinal));
+        Assert.Contains(hit.Explanation, item => item.StartsWith("semantic:", StringComparison.Ordinal));
+
+        vector.TextChunkContentHash = new string('f', 64);
+        await context.SaveChangesAsync();
+
+        var staleResponse = await search.SearchAsync(
+            new SearchRequest("restart", 5, "local_first", null, null, null),
+            CancellationToken.None);
+
+        Assert.Empty(staleResponse.Results);
     }
 
     [NativeSqlServerFact]
@@ -111,12 +172,17 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         await environment.AddAndPumpAsync("second source");
         var active = await environment.ActiveGenerationAsync();
         var transition = new SqlStageTransitionStore(environment.Factory);
+        var request = await ClaimPublishAsync(environment, stale);
 
         var result = await transition.TransitionAsync(
-            await ClaimPublishAsync(environment, stale),
+            request,
             CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var record = await context.PipelineRecords.SingleAsync(candidate =>
+            candidate.Id == request.CurrentJob.PipelineRecordId.Value);
 
         Assert.False(result.ExistingTransition);
+        Assert.True(record.CompletionCriteriaMet);
         Assert.NotEqual(stale.Generation.Id, active.Id);
         Assert.True(File.Exists(Path.Combine(stale.Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
         Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
@@ -134,13 +200,41 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         var replay = await transition.TransitionAsync(request, CancellationToken.None);
         await using var context = await environment.Factory.CreateDbContextAsync();
         var members = await context.IndexGenerationVectors.Where(member => member.GenerationId == active.Id).ToListAsync();
+        var record = await context.PipelineRecords.SingleAsync(candidate =>
+            candidate.Id == request.CurrentJob.PipelineRecordId.Value);
 
         Assert.False(first.ExistingTransition);
         Assert.True(replay.ExistingTransition);
+        Assert.True(record.CompletionCriteriaMet);
         Assert.Equal(first.ArtifactId, replay.ArtifactId);
         Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
         Assert.Equal(members.Select(member => member.VectorId).Distinct().Count(), members.Count);
         Assert.True(File.Exists(Path.Combine(candidate.Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Failed_terminal_publish_rolls_back_the_completion_flag()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "failed publish source");
+        var active = await environment.ActiveGenerationAsync();
+        var vectors = await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None);
+        var incompatible = active with { IndexPath = active.IndexPath + "-incompatible" };
+        var request = await ClaimPublishAsync(
+            environment,
+            new IndexGenerationCandidateSnapshot(incompatible, vectors));
+
+        await Assert.ThrowsAsync<IndexGenerationStaleException>(
+            async () => await new SqlStageTransitionStore(environment.Factory)
+                .TransitionAsync(request, CancellationToken.None));
+
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var record = await context.PipelineRecords.SingleAsync(candidate =>
+            candidate.Id == request.CurrentJob.PipelineRecordId.Value);
+
+        Assert.False(record.CompletionCriteriaMet);
+        Assert.DoesNotContain(
+            await context.Artifacts.ToListAsync(),
+            artifact => artifact.Id == request.Artifact.Id);
     }
 
     [NativeSqlServerFact]

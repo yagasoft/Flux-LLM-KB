@@ -167,6 +167,10 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         {
             validated.PipelineRecord.CurrentStage = (int)request.Artifact.Stage;
         }
+        if (PipelineCompletionCriteria.IsMet(request.Artifact.Stage, request.NextStage))
+        {
+            validated.PipelineRecord.CompletionCriteriaMet = true;
+        }
 
         if (request.IndexingOutput?.ActivateGeneration is { } activeGeneration)
         {
@@ -534,7 +538,8 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                     ModelFingerprint = vector.ModelFingerprint,
                     Dimensions = vector.Dimensions,
                     Values = vector.Values,
-                    ContentHash = vector.ContentHash,
+                    TextChunkContentHash = vector.TextChunkContentHash,
+                    PayloadChecksum = vector.PayloadChecksum,
                     SourceRevision = vector.SourceRevision,
                     IsDeleted = false,
                     IndexGenerationId = generationId,
@@ -558,7 +563,8 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                       .Max(candidate => candidate.Revision)
             orderby vector.VectorId
             select new CanonicalVector(vector.VectorId, vector.TextChunkId,
-                vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,
+                vector.ModelFingerprint, vector.Dimensions, vector.Values,
+                vector.TextChunkContentHash, vector.PayloadChecksum,
                 vector.SourceRevision))
         .ToListAsync(cancellationToken);
 
@@ -569,7 +575,9 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             left.VectorId == right.VectorId &&
             left.Dimensions == right.Dimensions &&
             string.Equals(left.ModelFingerprint, right.ModelFingerprint, StringComparison.Ordinal) &&
-            string.Equals(left.ContentHash, right.ContentHash, StringComparison.Ordinal)).All(static equal => equal);
+            string.Equals(left.TextChunkContentHash, right.TextChunkContentHash, StringComparison.Ordinal) &&
+            string.Equals(left.PayloadChecksum, right.PayloadChecksum, StringComparison.Ordinal))
+            .All(static equal => equal);
 
     private async Task EnsureGenerationExistsAsync(
         FluxKnowledgeDbContext context,
@@ -631,7 +639,7 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         int dimensions,
         IReadOnlyList<CanonicalVector> vectors)
     {
-        var material = $"{fingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.ContentHash}"))}";
+        var material = $"{fingerprint}|cos|{dimensions}|{string.Join(',', vectors.Select(vector => $"{vector.VectorId}:{vector.PayloadChecksum}"))}";
         return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(material)));
     }
 

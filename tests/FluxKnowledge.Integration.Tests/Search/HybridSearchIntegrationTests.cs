@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
@@ -159,7 +160,8 @@ public sealed class HybridSearchIntegrationTests : IClassFixture<NativeSqlServer
         {
             var artifact = new ArtifactEntity { Id = Guid.NewGuid(), PipelineRecordId = record.Id, SourceRevision = record.Revision, Stage = 3, ContentHash = record.ContentHash, ContentType = "text/plain", SearchText = text, CreatedAtUtc = now };
             var chunk = new TextChunkEntity { ArtifactId = artifact.Id, SourceRevision = record.Revision, Ordinal = 0, StartOffset = 0, Length = text.Length, Content = text, ContentHash = ChunkHash };
-            var vector = new VectorEntity { TextChunk = chunk, SourceRevision = record.Revision, ModelFingerprint = "test", Dimensions = 1, Values = [0, 0, 0, 0], ContentHash = ChunkHash, IsDeleted = isDeleted, IndexGenerationId = generationId, CreatedAtUtc = now };
+            byte[] values = [0, 0, 0, 0];
+            var vector = new VectorEntity { TextChunk = chunk, SourceRevision = record.Revision, ModelFingerprint = "test", Dimensions = 1, Values = values, TextChunkContentHash = ChunkHash, PayloadChecksum = Convert.ToHexStringLower(SHA256.HashData(values)), IsDeleted = isDeleted, IndexGenerationId = generationId, CreatedAtUtc = now };
             context.Artifacts.Add(artifact);
             context.TextChunks.Add(chunk);
             context.Vectors.Add(vector);

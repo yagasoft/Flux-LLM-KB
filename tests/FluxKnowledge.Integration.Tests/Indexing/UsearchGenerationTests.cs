@@ -212,7 +212,15 @@ public sealed class UsearchGenerationTests : IDisposable
             values[dimension] = 1F;
             var bytes = new byte[values.Length * sizeof(float)];
             Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
-            return new CanonicalVector(id, chunkId, "deterministic-tokenhash-v1:256", 256, bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), 1);
+            return new CanonicalVector(
+                id,
+                chunkId,
+                "deterministic-tokenhash-v1:256",
+                256,
+                bytes,
+                new string('a', 64),
+                Convert.ToHexStringLower(SHA256.HashData(bytes)),
+                1);
         }
     }
 
@@ -251,7 +259,7 @@ public sealed class UsearchGenerationTests : IDisposable
         }
         public ValueTask<Guid?> GetActiveGenerationIdAsync(CancellationToken cancellationToken) => ValueTask.FromResult<Guid?>(ActiveGeneration);
         public ValueTask UpdateGenerationMetadataAsync(IndexGenerationDescriptor generation, CancellationToken cancellationToken) { _generations[generation.Id] = generation; _memberships[generation.Id] = UseSecondVector ? [Vector(22, 1)] : [Vector(11, 0)]; return ValueTask.CompletedTask; }
-        private static CanonicalVector Vector(long id, int dimension) { var values = UsearchGenerationTests.Vector(dimension).ToArray(); var bytes = new byte[values.Length * sizeof(float)]; Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length); return new CanonicalVector(id, id, "deterministic-tokenhash-v1:256", 256, bytes, Convert.ToHexStringLower(SHA256.HashData(bytes)), 1); }
+        private static CanonicalVector Vector(long id, int dimension) { var values = UsearchGenerationTests.Vector(dimension).ToArray(); var bytes = new byte[values.Length * sizeof(float)]; Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length); return new CanonicalVector(id, id, "deterministic-tokenhash-v1:256", 256, bytes, new string('a', 64), Convert.ToHexStringLower(SHA256.HashData(bytes)), 1); }
     }
 
     private static IReadOnlyList<float> Vector(int dimension)

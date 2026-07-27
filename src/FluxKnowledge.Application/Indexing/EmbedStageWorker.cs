@@ -26,7 +26,8 @@ public sealed class EmbedStageWorker(
             var values = new byte[embedding.Values.Count * sizeof(float)];
             Buffer.BlockCopy(embedding.Values.ToArray(), 0, values, 0, values.Length);
             vectors.Add(new CanonicalVector(0, chunk.Id, embedding.ModelFingerprint, embedding.Values.Count,
-                values, Convert.ToHexStringLower(SHA256.HashData(values)), workItem.Job.SourceRevision));
+                values, chunk.ContentHash, Convert.ToHexStringLower(SHA256.HashData(values)),
+                workItem.Job.SourceRevision));
         }
 
         await transitions.TransitionAsync(new StageTransitionRequest(

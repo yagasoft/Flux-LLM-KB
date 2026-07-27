@@ -26,6 +26,8 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton(options);
         services.AddSingleton<SqlServerReadinessValidator>();
+        services.AddSingleton<ISqlServerReadinessValidator>(
+            provider => provider.GetRequiredService<SqlServerReadinessValidator>());
         void ConfigureDatabase(DbContextOptionsBuilder builder) =>
             builder.UseSqlServer(
                 options.ConnectionString,

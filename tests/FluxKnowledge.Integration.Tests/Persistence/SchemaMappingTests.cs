@@ -88,13 +88,40 @@ public sealed class SchemaMappingTests
         AssertProperty<string>(entityType, "ModelFingerprint");
         AssertProperty<int>(entityType, "Dimensions");
         AssertProperty<byte[]>(entityType, "Values");
-        AssertProperty<string>(entityType, "ContentHash");
+        AssertProperty<string>(entityType, "TextChunkContentHash");
+        AssertProperty<string>(entityType, "PayloadChecksum");
+        Assert.Null(entityType.FindProperty("ContentHash"));
         AssertProperty<long>(entityType, "SourceRevision");
         AssertProperty<bool>(entityType, "IsDeleted");
         AssertProperty<Guid>(entityType, "IndexGenerationId");
         var rowVersion = AssertProperty<byte[]>(entityType, "RowVersion");
         Assert.True(rowVersion.IsConcurrencyToken);
         Assert.Equal(ValueGenerated.OnAddOrUpdate, rowVersion.ValueGenerated);
+    }
+
+    [Fact]
+    public void Vector_hash_migration_preserves_payload_integrity_and_backfills_chunk_identity()
+    {
+        using var context = CreateContext();
+        var script = context.GetService<IMigrator>().GenerateScript(
+            "20260726235718_AddIndexGenerationMembership",
+            "20260727055755_DistinguishVectorIdentityAndPayloadChecksum");
+
+        Assert.Contains(
+            "EXEC sp_rename N'[Vectors].[ContentHash]', N'PayloadChecksum', 'COLUMN';",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "SET [TextChunkContentHash] = [chunk].[ContentHash]",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ALTER TABLE [Vectors] ALTER COLUMN [TextChunkContentHash] char(64) NOT NULL;",
+            script,
+            StringComparison.Ordinal);
+        Assert.Contains("THROW 51000", script, StringComparison.Ordinal);
+        Assert.Contains("CK_Vectors_PayloadChecksum", script, StringComparison.Ordinal);
+        Assert.Contains("CK_Vectors_TextChunkContentHash", script, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -309,7 +336,7 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
     }
 
     [NativeSqlServerFact]
-    public async Task Membership_migration_backfills_origins_and_blocks_snapshot_only_downgrade()
+    public async Task Membership_and_vector_hash_migrations_backfill_safely_and_block_snapshot_only_downgrade()
     {
         await using var database = await fixture.CreatePreviousMigrationDatabaseAsync();
         var now = DateTimeOffset.Parse("2026-07-27T12:00:00+00:00");
@@ -376,20 +403,19 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             context.TextChunks.Add(chunk);
             await context.SaveChangesAsync();
 
-            var vector = new VectorEntity
-            {
-                TextChunkId = chunk.Id,
-                SourceRevision = 1,
-                ModelFingerprint = "migration-test:1",
-                Dimensions = 1,
-                Values = [0, 0, 128, 63],
-                ContentHash = new string('d', 64),
-                IndexGenerationId = generationId,
-                CreatedAtUtc = now
-            };
-            context.Vectors.Add(vector);
-            await context.SaveChangesAsync();
-            vectorId = vector.VectorId;
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 INSERT INTO [Vectors]
+                     ([TextChunkId], [ModelFingerprint], [Dimensions], [Values],
+                      [ContentHash], [SourceRevision], [IsDeleted],
+                      [IndexGenerationId], [CreatedAtUtc])
+                 VALUES
+                     ({chunk.Id}, {"migration-test:1"}, {1}, {new byte[] { 0, 0, 128, 63 }},
+                      {new string('d', 64)}, {1L}, {false}, {generationId}, {now});
+                 """);
+            vectorId = await context.Vectors
+                .Select(candidate => candidate.VectorId)
+                .SingleAsync();
         }
 
         await using (var context = database.CreateContext())
@@ -430,5 +456,10 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
 
         await using var verification = database.CreateContext();
         Assert.Equal(2, await verification.IndexGenerationVectors.CountAsync());
+        await verification.GetService<IMigrator>().MigrateAsync();
+        var migratedVector = await verification.Vectors.SingleAsync(
+            candidate => candidate.VectorId == vectorId);
+        Assert.Equal(new string('c', 64), migratedVector.TextChunkContentHash);
+        Assert.Equal(new string('d', 64), migratedVector.PayloadChecksum);
     }
 }

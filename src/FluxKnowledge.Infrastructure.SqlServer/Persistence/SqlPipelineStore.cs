@@ -246,7 +246,8 @@ public sealed class SqlPipelineStore(
             where membership.GenerationId == indexGenerationId
             orderby vector.VectorId
             select new CanonicalVector(vector.VectorId, vector.TextChunkId,
-                vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,
+                vector.ModelFingerprint, vector.Dimensions, vector.Values,
+                vector.TextChunkContentHash, vector.PayloadChecksum,
                 vector.SourceRevision))
             .ToListAsync(cancellationToken);
     }
@@ -266,7 +267,8 @@ public sealed class SqlPipelineStore(
                       .Max(candidate => candidate.Revision)
             orderby vector.VectorId
             select new CanonicalVector(vector.VectorId, vector.TextChunkId,
-                vector.ModelFingerprint, vector.Dimensions, vector.Values, vector.ContentHash,
+                vector.ModelFingerprint, vector.Dimensions, vector.Values,
+                vector.TextChunkContentHash, vector.PayloadChecksum,
                 vector.SourceRevision))
             .ToListAsync(cancellationToken);
     }

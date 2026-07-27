@@ -30,7 +30,7 @@ public sealed class SqlFullTextSearch(IDbContextFactory<FluxKnowledgeDbContext> 
                    AND [artifact].[SourceRevision] = [record].[Revision]
                  WHERE [vector].[IsDeleted] = 0
                    AND [record].[IsDeleted] = 0
-                   AND [vector].[ContentHash] = [chunk].[ContentHash]
+                   AND [vector].[TextChunkContentHash] = [chunk].[ContentHash]
                    AND [record].[Revision] = (
                         SELECT MAX([current].[Revision])
                         FROM [PipelineRecords] AS [current]

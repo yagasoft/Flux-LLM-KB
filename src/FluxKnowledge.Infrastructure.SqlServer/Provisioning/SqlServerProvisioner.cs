@@ -26,15 +26,19 @@ public sealed class SqlServerProvisioner
         SqlServerProvisioningRequest request,
         CancellationToken cancellationToken = default)
     {
-        var failures = Validate(request);
-        if (failures.Count > 0)
+        var validation = ValidateAndCanonicalise(request);
+        if (validation.Failures.Count > 0)
         {
-            throw new InvalidOperationException(string.Join(Environment.NewLine, failures));
+            throw new InvalidOperationException(
+                string.Join(Environment.NewLine, validation.Failures));
         }
+        var backupTarget = validation.CanonicalBackupTarget
+            ?? throw new InvalidOperationException(
+                "The validated backup target has no canonical file-system path.");
 
         Directory.CreateDirectory(Path.GetDirectoryName(request.DataFilePath)!);
         Directory.CreateDirectory(Path.GetDirectoryName(request.LogFilePath)!);
-        Directory.CreateDirectory(request.BackupTarget);
+        Directory.CreateDirectory(backupTarget);
 
         await using var administratorConnection = new SqlConnection(request.AdministratorConnectionString);
         await administratorConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -63,15 +67,19 @@ public sealed class SqlServerProvisioner
             SqlServerOptions.CatalogName,
             request.DataFilePath,
             request.LogFilePath,
-            request.BackupTarget,
+            backupTarget,
             [
                 $"Grant the SQL Server service identity full control of {Path.GetDirectoryName(request.DataFilePath)}.",
                 $"Grant the SQL Server service identity full control of {Path.GetDirectoryName(request.LogFilePath)}.",
-                $"Grant the SQL Server service identity write access to {request.BackupTarget}."
+                $"Grant the SQL Server service identity write access to {backupTarget}."
             ]);
     }
 
-    public static IReadOnlyList<string> Validate(SqlServerProvisioningRequest request)
+    public static IReadOnlyList<string> Validate(SqlServerProvisioningRequest request) =>
+        ValidateAndCanonicalise(request).Failures;
+
+    private static ProvisioningValidation ValidateAndCanonicalise(
+        SqlServerProvisioningRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
         var failures = new List<string>();
@@ -94,8 +102,8 @@ public sealed class SqlServerProvisioner
         }
 
         ValidateAdministratorConnection(request.AdministratorConnectionString, failures);
-        ValidateBackupTarget(request.BackupTarget, failures);
-        return failures;
+        var canonicalBackupTarget = ValidateBackupTarget(request.BackupTarget, failures);
+        return new ProvisioningValidation(failures, canonicalBackupTarget);
     }
 
     private static void ValidateAdministratorConnection(string connectionString, List<string> failures)
@@ -126,19 +134,69 @@ public sealed class SqlServerProvisioner
         }
     }
 
-    private static void ValidateBackupTarget(string backupTarget, List<string> failures)
+    private static string? ValidateBackupTarget(
+        string backupTarget,
+        List<string> failures)
     {
-        if (string.IsNullOrWhiteSpace(backupTarget) || !Path.IsPathFullyQualified(backupTarget))
+        if (!TryCanonicaliseBackupTarget(backupTarget, out var canonicalTarget))
         {
             failures.Add("An absolute --backup-target outside I: is required.");
-            return;
+            return null;
         }
 
-        var root = Path.GetPathRoot(Path.GetFullPath(backupTarget));
-        if (string.Equals(root, "I:\\", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(root, "I:/", StringComparison.OrdinalIgnoreCase))
+        var root = Path.GetPathRoot(canonicalTarget);
+        if (string.Equals(root, "I:\\", StringComparison.OrdinalIgnoreCase))
         {
             failures.Add("The backup target must be outside I:.");
+            return null;
+        }
+
+        return canonicalTarget;
+    }
+
+    private static bool TryCanonicaliseBackupTarget(
+        string backupTarget,
+        out string canonicalTarget)
+    {
+        canonicalTarget = string.Empty;
+        if (string.IsNullOrWhiteSpace(backupTarget))
+        {
+            return false;
+        }
+
+        var normalised = backupTarget.Replace('/', '\\');
+        if (normalised.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase) ||
+            normalised.StartsWith(@"\\.\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            normalised = @"\\" + normalised[8..];
+        }
+        else if (normalised.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+                 normalised.StartsWith(@"\\.\", StringComparison.Ordinal))
+        {
+            normalised = normalised[4..];
+            if (normalised.Length < 3 ||
+                !char.IsAsciiLetter(normalised[0]) ||
+                normalised[1] != ':' ||
+                normalised[2] != '\\')
+            {
+                return false;
+            }
+        }
+
+        if (!Path.IsPathFullyQualified(normalised))
+        {
+            return false;
+        }
+
+        try
+        {
+            canonicalTarget = Path.GetFullPath(normalised).Replace('/', '\\');
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
         }
     }
 
@@ -168,6 +226,10 @@ public sealed class SqlServerProvisioner
                 "The FluxKnowledge database already exists; provisioning will not replace it.");
         }
     }
+
+    private sealed record ProvisioningValidation(
+        IReadOnlyList<string> Failures,
+        string? CanonicalBackupTarget);
 }
 
 public sealed record SqlServerProvisioningRequest(
