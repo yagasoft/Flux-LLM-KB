@@ -59,8 +59,7 @@ public static class ReciprocalRankFusion
 
     private static double Score(int? lexicalRank, int? semanticRank)
     {
-        var bestRank = Math.Min(lexicalRank ?? int.MaxValue, semanticRank ?? int.MaxValue);
-        var contributions = (lexicalRank is null ? 0 : 1) + (semanticRank is null ? 0 : 1);
-        return contributions / (RankConstant + bestRank);
+        return (lexicalRank is { } lexical ? 1D / (RankConstant + lexical) : 0D) +
+               (semanticRank is { } semantic ? 1D / (RankConstant + semantic) : 0D);
     }
 }

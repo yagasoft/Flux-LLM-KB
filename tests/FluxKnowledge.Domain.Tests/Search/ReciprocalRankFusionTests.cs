@@ -13,6 +13,6 @@ public sealed class ReciprocalRankFusionTests
             [new RankedCandidate(4, 1), new RankedCandidate(8, 2)]);
 
         Assert.Equal(new long[] { 4, 8 }, fused.Select(static item => item.VectorId));
-        Assert.Equal(2D / 61D, fused[0].Score, 10);
+        Assert.Equal(1D / 62D + 1D / 61D, fused[0].Score, 10);
     }
 }
