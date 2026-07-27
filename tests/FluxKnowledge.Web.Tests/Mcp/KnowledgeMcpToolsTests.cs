@@ -30,6 +30,21 @@ public sealed class KnowledgeMcpToolsTests
         Assert.Equal(503, payload.GetProperty("error").GetProperty("status_code").GetInt32());
     }
 
+    [Fact]
+    public async Task Search_returns_a_non_transient_tool_error_envelope_for_a_permanent_io_failure()
+    {
+        var tools = CreateToolsThatAlwaysThrow<FileNotFoundException>("index file is permanently missing");
+
+        var result = await tools.Search("restart", 5, null, null, "local_first", null, CancellationToken.None);
+        var payload = ParseFirstTextBlock(result);
+
+        Assert.False(result.IsError);
+        Assert.Equal("tool_error", payload.GetProperty("status").GetString());
+        Assert.Equal("mcp.tool_error", payload.GetProperty("error").GetProperty("code").GetString());
+        Assert.False(payload.GetProperty("error").GetProperty("retryable").GetBoolean());
+        Assert.Equal(500, payload.GetProperty("error").GetProperty("status_code").GetInt32());
+    }
+
     [Theory]
     [InlineData("Search", "query", "limit", "cwd", "root_name", "scope_mode", "filters")]
     [InlineData("Brief", "query", "token_budget", "cwd", "root_name", "scope_mode", "filters")]
