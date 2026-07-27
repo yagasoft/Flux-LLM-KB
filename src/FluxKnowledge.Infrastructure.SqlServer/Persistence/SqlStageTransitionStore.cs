@@ -43,7 +43,11 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             .CreateDbContextAsync(cancellationToken)
             .ConfigureAwait(false);
         await using var transaction = await context.Database
-            .BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken)
+            .BeginTransactionAsync(
+                request.IndexingOutput?.ActivateGeneration is null
+                    ? IsolationLevel.ReadCommitted
+                    : IsolationLevel.Serializable,
+                cancellationToken)
             .ConfigureAwait(false);
 
         var validated = await ValidateClaimAsync(context, request, cancellationToken)

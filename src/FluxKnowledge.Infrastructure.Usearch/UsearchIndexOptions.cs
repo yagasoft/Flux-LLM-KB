@@ -35,11 +35,19 @@ public sealed record UsearchIndexOptions(string RootPath)
     {
         var fullPath = Path.GetFullPath(path);
         var directory = new DirectoryInfo(fullPath);
-        if (!directory.Exists)
+        var suffix = new Stack<string>();
+        while (!directory.Exists && directory.Parent is not null)
         {
-            return Path.TrimEndingDirectorySeparator(fullPath);
+            suffix.Push(directory.Name);
+            directory = directory.Parent;
         }
         var resolved = directory.ResolveLinkTarget(returnFinalTarget: true);
-        return Path.TrimEndingDirectorySeparator((resolved ?? directory).FullName);
+        var physical = (resolved ?? directory).FullName;
+        while (suffix.Count > 0)
+        {
+            physical = Path.Combine(physical, suffix.Pop());
+        }
+
+        return Path.TrimEndingDirectorySeparator(physical);
     }
 }

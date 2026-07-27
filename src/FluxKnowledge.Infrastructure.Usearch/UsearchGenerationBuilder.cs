@@ -87,9 +87,18 @@ public sealed class UsearchGenerationBuilder(
         {
             SaveCandidate(staging, candidate, vectors);
             validator.Validate(staging, candidate, vectors);
-            var finalPath = AtomicGenerationPlacement.Place(options, candidateId, staging);
-            candidate = candidate with { IndexPath = finalPath };
-            return new IndexGenerationCandidateSnapshot(candidate, vectors);
+            try
+            {
+                var finalPath = AtomicGenerationPlacement.Place(options, candidateId, staging);
+                candidate = candidate with { IndexPath = finalPath };
+                return new IndexGenerationCandidateSnapshot(candidate, vectors);
+            }
+            catch (IOException) when (Directory.Exists(finalDirectory))
+            {
+                validator.Validate(finalDirectory, candidate, vectors);
+                if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+                return new IndexGenerationCandidateSnapshot(candidate, vectors);
+            }
         }
         catch
         {

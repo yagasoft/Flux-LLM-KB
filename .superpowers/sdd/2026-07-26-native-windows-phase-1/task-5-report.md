@@ -112,3 +112,13 @@ active pointer before removing referenced generation rows.
 Fresh local source evidence: Integration USearch/Indexing passed 2 with 3
 guarded native-SQL skips; Release build passed with zero warnings/errors. No
 SQL connection was opened.
+
+## Correction round 2 follow-up
+
+Activation transitions now use serialisable isolation. The active reader
+rechecks the SQL pointer after an out-of-lock native open and before query use,
+discarding a stale opened handle. Immutable placement handles a concurrent
+`Directory.Move` collision by validating/reusing the compatible winner and
+cleaning only its staging directory. Root resolution walks to the nearest
+existing ancestor and resolves its reparse target before reconstructing an
+absent configured leaf. A non-SQL concurrent-placement test passed (1/1).

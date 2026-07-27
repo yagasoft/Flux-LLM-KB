@@ -34,6 +34,20 @@ public sealed class UsearchGenerationTests : IDisposable
     }
 
     [Fact]
+    public async Task Concurrent_identical_candidates_reuse_the_immutable_placement_winner()
+    {
+        var store = new MemoryStore(Guid.NewGuid());
+        var builder = new UsearchGenerationBuilder(store, UsearchIndexOptions.FromConfiguredRoot(_root), new UsearchGenerationValidator());
+
+        var candidates = await Task.WhenAll(
+            builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None).AsTask(),
+            builder.BuildAndPlaceAsync(Guid.NewGuid(), CancellationToken.None).AsTask());
+
+        Assert.Equal(candidates[0].Generation.Id, candidates[1].Generation.Id);
+        Assert.True(File.Exists(Path.Combine(candidates[0].Generation.IndexPath, UsearchGenerationValidator.IndexFileName)));
+    }
+
+    [Fact]
     public async Task Active_reader_reuses_a_matching_generation_and_replaces_it_after_the_sql_pointer_changes()
     {
         var store = new CachingStore();

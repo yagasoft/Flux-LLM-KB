@@ -34,7 +34,14 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
                 return [];
             }
 
-            await EnsureOpenAsync(activeId.Value, store, cancellationToken);
+            if (!await EnsureOpenAsync(activeId.Value, store, cancellationToken))
+            {
+                continue;
+            }
+            if (await store.GetActiveGenerationIdAsync(cancellationToken) != activeId)
+            {
+                continue;
+            }
             _gate.EnterReadLock();
             try
             {
@@ -73,7 +80,7 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         }
     }
 
-    private async ValueTask EnsureOpenAsync(
+    private async ValueTask<bool> EnsureOpenAsync(
         Guid activeId,
         IIndexGenerationStore store,
         CancellationToken cancellationToken)
@@ -84,7 +91,7 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         {
             if (_generationId == activeId && _index is not null)
             {
-                return;
+                return true;
             }
         }
         finally
@@ -97,6 +104,11 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
         var vectors = await store.ReadVectorsAsync(activeId, cancellationToken);
         new UsearchGenerationValidator().Validate(generation.IndexPath, generation, vectors);
         var opened = new USearchIndex(Path.Combine(generation.IndexPath, UsearchGenerationValidator.IndexFileName), false);
+        if (await store.GetActiveGenerationIdAsync(cancellationToken) != activeId)
+        {
+            opened.Dispose();
+            return false;
+        }
         if (Volatile.Read(ref _disposed) != 0)
         {
             opened.Dispose();
@@ -113,12 +125,13 @@ public sealed class UsearchAnnIndex(IServiceScopeFactory scopeFactory) : IAnnInd
             if (_generationId == activeId && _index is not null)
             {
                 opened.Dispose();
-                return;
+                return true;
             }
 
                 _index?.Dispose();
                 _index = opened;
                 _generationId = activeId;
+                return true;
         }
         finally
         {
