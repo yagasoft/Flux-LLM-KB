@@ -95,6 +95,387 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     }
 
     [NativeSqlServerFact]
+    public async Task Valid_active_generation_with_a_recognised_unplaced_embed_draft_remains_healthy()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        var active = await environment.ActiveGenerationAsync();
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var draft = await context.IndexGenerations.AsNoTracking().SingleAsync(generation =>
+            generation.Id != active.Id && generation.IndexPath == string.Empty);
+        var activePath = active.IndexPath;
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        var recoveryStore = provider.GetRequiredService<IDerivedIndexRecoveryStore>();
+
+        await coordinator.RunOnceAsync(CancellationToken.None);
+
+        var snapshot = await recoveryStore.ReadActiveAsync(CancellationToken.None);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.DoesNotContain(string.Empty, snapshot.ReferencedIndexPaths);
+        Assert.Contains(draft.Id, snapshot.ReferencedGenerationIds);
+        Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        Assert.Equal(activePath, (await environment.Store.GetGenerationAsync(active.Id, CancellationToken.None))!.IndexPath);
+        Assert.Equal(string.Empty, (await context.IndexGenerations.SingleAsync(generation => generation.Id == draft.Id)).IndexPath);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Zero_vector_unplaced_embed_draft_with_valid_provenance_remains_healthy()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        await environment.AddAndPumpAsync(string.Empty);
+        var active = await environment.ActiveGenerationAsync();
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var draft = await context.IndexGenerations.AsNoTracking().SingleAsync(generation =>
+            generation.Id != active.Id && generation.IndexPath == string.Empty && generation.VectorCount == 0);
+        var vectorReferenceCount = await context.Vectors.CountAsync(vector => vector.IndexGenerationId == draft.Id);
+        var membershipCount = await context.IndexGenerationVectors.CountAsync(item => item.GenerationId == draft.Id);
+        var activePath = active.IndexPath;
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+        var recoveryStore = provider.GetRequiredService<IDerivedIndexRecoveryStore>();
+
+        await coordinator.RunOnceAsync(CancellationToken.None);
+
+        var snapshot = await recoveryStore.ReadActiveAsync(CancellationToken.None);
+        Assert.Equal(0, vectorReferenceCount);
+        Assert.Equal(0, membershipCount);
+        Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+        Assert.DoesNotContain(string.Empty, snapshot.ReferencedIndexPaths);
+        Assert.Contains(draft.Id, snapshot.ReferencedGenerationIds);
+        Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        Assert.Equal(activePath, (await environment.Store.GetGenerationAsync(active.Id, CancellationToken.None))!.IndexPath);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Zero_vector_unplaced_embed_draft_allows_each_publish_worker_state()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        await environment.AddAndPumpAsync(string.Empty);
+        var active = await environment.ActiveGenerationAsync();
+        await using var context = await environment.Factory.CreateDbContextAsync();
+        var draft = await context.IndexGenerations.SingleAsync(candidate =>
+            candidate.Id != active.Id && candidate.IndexPath == string.Empty && candidate.VectorCount == 0);
+        var artifact = await context.Artifacts.SingleAsync(candidate =>
+            candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draft.Id.ToString("D"));
+        var publishJob = await context.Jobs.SingleAsync(job =>
+            job.PipelineRecordId == artifact.PipelineRecordId &&
+            job.SourceRevision == artifact.SourceRevision &&
+            job.Stage == (int)PipelineStage.Publish);
+        var publishOutbox = await context.OutboxMessages.SingleAsync(message =>
+            message.PipelineRecordId == artifact.PipelineRecordId &&
+            message.SourceRevision == artifact.SourceRevision &&
+            message.Stage == (int)PipelineStage.Publish);
+
+        foreach (var state in new[]
+                 {
+                     PublicJobState.WorkerQueued,
+                     PublicJobState.WorkerProcessing,
+                     PublicJobState.Completed,
+                     PublicJobState.Failed
+                 })
+        {
+            publishJob.PublicState = (int)state;
+            publishOutbox.DispatchedAtUtc = state is PublicJobState.Completed or PublicJobState.Failed
+                ? DateTimeOffset.UtcNow
+                : null;
+            await context.SaveChangesAsync();
+            using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+            var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+
+            await coordinator.RunOnceAsync(CancellationToken.None);
+
+            Assert.Equal(DerivedIndexRecoveryState.Healthy, coordinator.Snapshot.State);
+            Assert.Equal(active.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Unrecognised_nonzero_embed_draft_variants_require_operator_action_without_mutation()
+    {
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var state = await context.IndexState.SingleAsync(candidate => candidate.Id == 1);
+            state.ActiveIndexGenerationId = draftId;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.IndexGenerations.SingleAsync(candidate => candidate.Id == draftId)).IndexPath = " ";
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.IndexGenerations.SingleAsync(candidate => candidate.Id == draftId)).ValidatedAtUtc = DateTimeOffset.UtcNow;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.IndexGenerations.SingleAsync(candidate => candidate.Id == draftId)).MetadataChecksum = new string('1', 64);
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var vectorId = await context.Vectors.Where(vector => vector.IndexGenerationId == draftId)
+                .Select(vector => vector.VectorId)
+                .SingleAsync();
+            context.IndexGenerationVectors.Add(new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.IndexGenerationVectorEntity
+            {
+                GenerationId = draftId,
+                VectorId = vectorId
+            });
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            artifact.SearchText = Guid.NewGuid().ToString("D");
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            artifact.ContentType = "application/vnd.fluxknowledge.not-an-embedding-set";
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            artifact.Stage = -1;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.PipelineRecords.SingleAsync(record => record.Id == artifact.PipelineRecordId)).CurrentStage =
+                (int)PipelineStage.Embed;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.Jobs.SingleAsync(job =>
+                    job.PipelineRecordId == artifact.PipelineRecordId &&
+                    job.SourceRevision == artifact.SourceRevision &&
+                    job.Stage == (int)PipelineStage.Embed)).PublicState = (int)PublicJobState.WorkerQueued;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.Jobs.SingleAsync(job =>
+                    job.PipelineRecordId == artifact.PipelineRecordId &&
+                    job.SourceRevision == artifact.SourceRevision &&
+                    job.Stage == (int)PipelineStage.Publish)).Operation = "not-a-publish-operation";
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.Jobs.SingleAsync(job =>
+                    job.PipelineRecordId == artifact.PipelineRecordId &&
+                    job.SourceRevision == artifact.SourceRevision &&
+                    job.Stage == (int)PipelineStage.Publish)).PublicState = (int)PublicJobState.GpuQueued;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.OutboxMessages.SingleAsync(message =>
+                    message.PipelineRecordId == artifact.PipelineRecordId &&
+                    message.SourceRevision == artifact.SourceRevision &&
+                    message.Stage == (int)PipelineStage.Embed)).DispatchedAtUtc = null;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.Jobs.SingleAsync(job =>
+                    job.PipelineRecordId == artifact.PipelineRecordId &&
+                    job.SourceRevision == artifact.SourceRevision &&
+                    job.Stage == (int)PipelineStage.Publish)).PublicState = (int)PublicJobState.Completed;
+            (await context.OutboxMessages.SingleAsync(message =>
+                    message.PipelineRecordId == artifact.PipelineRecordId &&
+                    message.SourceRevision == artifact.SourceRevision &&
+                    message.Stage == (int)PipelineStage.Publish)).DispatchedAtUtc = null;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.Jobs.SingleAsync(job =>
+                    job.PipelineRecordId == artifact.PipelineRecordId &&
+                    job.SourceRevision == artifact.SourceRevision &&
+                    job.Stage == (int)PipelineStage.Publish)).PublicState = (int)PublicJobState.WorkerProcessing;
+            (await context.OutboxMessages.SingleAsync(message =>
+                    message.PipelineRecordId == artifact.PipelineRecordId &&
+                    message.SourceRevision == artifact.SourceRevision &&
+                    message.Stage == (int)PipelineStage.Publish)).DispatchedAtUtc = DateTimeOffset.UtcNow;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            (await context.OutboxMessages.SingleAsync(message =>
+                    message.PipelineRecordId == artifact.PipelineRecordId &&
+                    message.SourceRevision == artifact.SourceRevision &&
+                    message.Stage == (int)PipelineStage.Publish)).DispatchGeneration++;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.IndexGenerations.SingleAsync(candidate => candidate.Id == draftId)).VectorCount++;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.Vectors.SingleAsync(vector => vector.IndexGenerationId == draftId)).ModelFingerprint =
+                "incompatible-draft-fingerprint";
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.Vectors.SingleAsync(vector => vector.IndexGenerationId == draftId)).Dimensions++;
+        });
+        await AssertUnrecognisedNonzeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.Vectors.SingleAsync(vector => vector.IndexGenerationId == draftId)).IsDeleted = true;
+        });
+    }
+
+    [NativeSqlServerFact]
+    public async Task Cross_record_vector_provenance_in_an_unplaced_draft_requires_operator_action_without_mutation()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        await environment.AddAndPumpAsync("second source");
+        Guid draftId;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var drafts = await context.IndexGenerations
+                .Where(candidate => candidate.IndexPath == string.Empty && candidate.VectorCount > 0)
+                .OrderBy(candidate => candidate.CreatedAtUtc)
+                .ToListAsync();
+            var target = drafts[0];
+            var source = drafts[1];
+            var sourceVector = await context.Vectors.SingleAsync(vector => vector.IndexGenerationId == source.Id);
+            context.Vectors.Add(new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.VectorEntity
+            {
+                TextChunkId = sourceVector.TextChunkId,
+                ModelFingerprint = sourceVector.ModelFingerprint,
+                Dimensions = sourceVector.Dimensions,
+                Values = sourceVector.Values.ToArray(),
+                TextChunkContentHash = sourceVector.TextChunkContentHash,
+                PayloadChecksum = sourceVector.PayloadChecksum,
+                SourceRevision = sourceVector.SourceRevision,
+                IsDeleted = false,
+                IndexGenerationId = target.Id,
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            });
+            target.VectorCount++;
+            draftId = target.Id;
+            await context.SaveChangesAsync();
+        }
+
+        await AssertUnrecognisedDraftDoesNotMutateAsync(environment, draftId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Source_revision_mismatch_in_an_unplaced_draft_requires_operator_action_without_mutation()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        await environment.AddAndPumpAtPathAsync("second source revision", "initial.txt");
+        Guid draftId;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var drafts = await context.IndexGenerations
+                .Where(candidate => candidate.IndexPath == string.Empty && candidate.VectorCount > 0)
+                .ToListAsync();
+            var draftArtifacts = await context.Artifacts
+                .Where(candidate => candidate.Stage == (int)PipelineStage.Embed)
+                .ToListAsync();
+            var ordered = drafts
+                .Select(draft => new
+                {
+                    Draft = draft,
+                    Artifact = draftArtifacts.Single(candidate =>
+                        candidate.SearchText == draft.Id.ToString("D"))
+                })
+                .OrderBy(candidate => candidate.Artifact.SourceRevision)
+                .ToArray();
+            Assert.Equal(2, ordered.Length);
+            Assert.Equal(1, ordered[0].Artifact.SourceRevision);
+            Assert.Equal(2, ordered[1].Artifact.SourceRevision);
+
+            var target = ordered[0];
+            var source = ordered[1];
+            var sourceVector = await context.Vectors.SingleAsync(vector => vector.IndexGenerationId == source.Draft.Id);
+            context.Vectors.Add(new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.VectorEntity
+            {
+                TextChunkId = sourceVector.TextChunkId,
+                ModelFingerprint = sourceVector.ModelFingerprint,
+                Dimensions = sourceVector.Dimensions,
+                Values = sourceVector.Values.ToArray(),
+                TextChunkContentHash = sourceVector.TextChunkContentHash,
+                PayloadChecksum = sourceVector.PayloadChecksum,
+                SourceRevision = sourceVector.SourceRevision,
+                IsDeleted = false,
+                IndexGenerationId = target.Draft.Id,
+                CreatedAtUtc = DateTimeOffset.UtcNow
+            });
+            target.Draft.VectorCount++;
+            draftId = target.Draft.Id;
+            await context.SaveChangesAsync();
+        }
+
+        await AssertUnrecognisedDraftDoesNotMutateAsync(environment, draftId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Missing_zero_vector_embed_evidence_requires_operator_action_without_mutation()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        await environment.AddAndPumpAsync(string.Empty);
+        Guid draftId;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var draft = await context.IndexGenerations.SingleAsync(candidate =>
+                candidate.IndexPath == string.Empty && candidate.VectorCount == 0);
+            var artifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draft.Id.ToString("D"));
+            artifact.ContentHash = Convert.ToHexStringLower(SHA256.HashData("not-empty"u8));
+            draftId = draft.Id;
+            await context.SaveChangesAsync();
+        }
+
+        await AssertUnrecognisedDraftDoesNotMutateAsync(environment, draftId);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Unrecognised_zero_vector_embed_draft_variants_require_operator_action_without_mutation()
+    {
+        await AssertUnrecognisedZeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.IndexGenerations.SingleAsync(candidate => candidate.Id == draftId)).ModelFingerprint =
+                "incompatible-zero-draft-fingerprint";
+        });
+        await AssertUnrecognisedZeroDraftAsync(async (context, draftId) =>
+        {
+            (await context.IndexGenerations.SingleAsync(candidate => candidate.Id == draftId)).Dimensions++;
+        });
+        await AssertUnrecognisedZeroDraftAsync(async (context, draftId) =>
+        {
+            var embedArtifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.Stage == (int)PipelineStage.Embed && candidate.SearchText == draftId.ToString("D"));
+            var canonicalArtifact = await context.Artifacts.SingleAsync(candidate =>
+                candidate.PipelineRecordId == embedArtifact.PipelineRecordId &&
+                candidate.SourceRevision == embedArtifact.SourceRevision &&
+                candidate.Stage == (int)PipelineStage.CanonicalIndex);
+            context.TextChunks.Add(new FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.TextChunkEntity
+            {
+                ArtifactId = canonicalArtifact.Id,
+                SourceRevision = embedArtifact.SourceRevision,
+                Ordinal = 0,
+                StartOffset = 0,
+                Length = 1,
+                Content = "x",
+                ContentHash = Convert.ToHexStringLower(SHA256.HashData("x"u8))
+            });
+        });
+    }
+
+    [NativeSqlServerFact]
     public async Task Worker_produced_vector_round_trips_through_hybrid_search_and_preserves_stale_chunk_protection()
     {
         const string sourceText = "restart the native worker safely";
@@ -365,6 +746,373 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
                 ActivateMembership: candidate.Vectors));
     }
 
+    private async Task AssertUnrecognisedNonzeroDraftAsync(
+        Func<FluxKnowledgeDbContext, Guid, Task> mutate)
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        Guid draftId;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var draft = await context.IndexGenerations.SingleAsync(candidate =>
+                candidate.IndexPath == string.Empty && candidate.VectorCount > 0);
+            draftId = draft.Id;
+            await mutate(context, draftId);
+            await context.SaveChangesAsync();
+        }
+
+        await AssertUnrecognisedDraftDoesNotMutateAsync(environment, draftId);
+    }
+
+    private async Task AssertUnrecognisedZeroDraftAsync(
+        Func<FluxKnowledgeDbContext, Guid, Task> mutate)
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "first source");
+        await environment.AddAndPumpAsync(string.Empty);
+        Guid draftId;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var draft = await context.IndexGenerations.SingleAsync(candidate =>
+                candidate.IndexPath == string.Empty && candidate.VectorCount == 0);
+            draftId = draft.Id;
+            await mutate(context, draftId);
+            await context.SaveChangesAsync();
+        }
+
+        await AssertUnrecognisedDraftDoesNotMutateAsync(environment, draftId);
+    }
+
+    private static async Task AssertUnrecognisedDraftDoesNotMutateAsync(
+        PipelineEnvironment environment,
+        Guid draftId)
+    {
+        var activeIdBefore = await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None);
+        Assert.NotNull(activeIdBefore);
+        var activeBefore = await environment.Store.GetGenerationAsync(activeIdBefore!.Value, CancellationToken.None);
+        Assert.NotNull(activeBefore);
+        DraftState draftBefore;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            draftBefore = await context.IndexGenerations.AsNoTracking()
+                .Where(candidate => candidate.Id == draftId)
+                .Select(candidate => new DraftState(
+                    candidate.ModelFingerprint,
+                    candidate.Dimensions,
+                    candidate.IndexPath,
+                    candidate.MetadataChecksum,
+                    candidate.VectorCount,
+                    candidate.ValidatedAtUtc))
+                .SingleAsync();
+        }
+        var evidenceBefore = await ReadRecoveryEvidenceSnapshotAsync(environment.Factory);
+
+        var staging = Path.Combine(environment.IndexRoot, "staging");
+        var quarantine = Path.Combine(environment.IndexRoot, "quarantine");
+        var stagingBefore = ReadDirectoryEntries(staging);
+        var quarantineBefore = ReadDirectoryEntries(quarantine);
+        using var provider = CreateRecoveryProvider(environment.Factory, environment.IndexRoot);
+        var coordinator = provider.GetRequiredService<DerivedIndexRecoveryCoordinator>();
+
+        await coordinator.RunOnceAsync(CancellationToken.None);
+
+        Assert.Equal(DerivedIndexRecoveryState.OperatorActionRequired, coordinator.Snapshot.State);
+        Assert.Equal(DerivedIndexRecoveryFailureCategory.ConfigurationInvalid, coordinator.Snapshot.FailureCategory);
+        Assert.Null(coordinator.Snapshot.NextRetryAtUtc);
+        Assert.Equal(activeIdBefore, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        Assert.Equal(activeBefore!.IndexPath,
+            (await environment.Store.GetGenerationAsync(activeIdBefore.Value, CancellationToken.None))!.IndexPath);
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var draftAfter = await context.IndexGenerations.AsNoTracking()
+                .Where(candidate => candidate.Id == draftId)
+                .Select(candidate => new DraftState(
+                    candidate.ModelFingerprint,
+                    candidate.Dimensions,
+                    candidate.IndexPath,
+                    candidate.MetadataChecksum,
+                    candidate.VectorCount,
+                    candidate.ValidatedAtUtc))
+                .SingleAsync();
+            Assert.Equal(draftBefore, draftAfter);
+        }
+        var evidenceAfter = await ReadRecoveryEvidenceSnapshotAsync(environment.Factory);
+        AssertRecoveryEvidenceUnchanged(evidenceBefore, evidenceAfter);
+
+        Assert.Equal(stagingBefore, ReadDirectoryEntries(staging));
+        Assert.Equal(quarantineBefore, ReadDirectoryEntries(quarantine));
+    }
+
+    private static string[] ReadDirectoryEntries(string path) =>
+        Directory.Exists(path)
+            ? Directory.EnumerateFileSystemEntries(path, "*", SearchOption.AllDirectories)
+                .Select(entry => Path.GetRelativePath(path, entry))
+                .Order(StringComparer.Ordinal)
+                .ToArray()
+            : [];
+
+    private static ServiceProvider CreateRecoveryProvider(
+        IDbContextFactory<FluxKnowledgeDbContext> factory,
+        string root)
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton(factory);
+        services.AddSingleton<IDerivedIndexRecoveryStore, SqlDerivedIndexRecoveryStore>();
+        services.AddScoped<SqlPipelineStore>();
+        services.AddScoped<IIndexGenerationStore>(provider => provider.GetRequiredService<SqlPipelineStore>());
+        services.AddSingleton(UsearchIndexOptions.FromConfiguredRoot(root));
+        services.AddSingleton<UsearchGenerationValidator>();
+        services.AddScoped<UsearchGenerationBuilder>();
+        services.AddSingleton<DerivedIndexFileSystem>();
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<DerivedIndexRecoveryCoordinator>();
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+    }
+
+    private sealed record DraftState(
+        string ModelFingerprint,
+        int Dimensions,
+        string IndexPath,
+        string MetadataChecksum,
+        long VectorCount,
+        DateTimeOffset? ValidatedAtUtc);
+
+    private static async Task<RecoveryEvidenceSnapshot> ReadRecoveryEvidenceSnapshotAsync(
+        IDbContextFactory<FluxKnowledgeDbContext> factory)
+    {
+        await using var context = await factory.CreateDbContextAsync();
+        var indexStates = await context.IndexState.AsNoTracking().OrderBy(candidate => candidate.Id).ToListAsync();
+        var generations = await context.IndexGenerations.AsNoTracking().OrderBy(candidate => candidate.Id).ToListAsync();
+        var records = await context.PipelineRecords.AsNoTracking().OrderBy(candidate => candidate.Id).ToListAsync();
+        var artifacts = await context.Artifacts.AsNoTracking().OrderBy(candidate => candidate.Id).ToListAsync();
+        var chunks = await context.TextChunks.AsNoTracking().OrderBy(candidate => candidate.Id).ToListAsync();
+        var vectors = await context.Vectors.AsNoTracking().OrderBy(candidate => candidate.VectorId).ToListAsync();
+        var memberships = await context.IndexGenerationVectors.AsNoTracking()
+            .OrderBy(candidate => candidate.GenerationId)
+            .ThenBy(candidate => candidate.VectorId)
+            .ToListAsync();
+        var jobs = await context.Jobs.AsNoTracking().OrderBy(candidate => candidate.Id).ToListAsync();
+        var outbox = await context.OutboxMessages.AsNoTracking().OrderBy(candidate => candidate.Id).ToListAsync();
+
+        return new RecoveryEvidenceSnapshot(
+            indexStates.Select(candidate => new IndexStateEvidence(
+                candidate.Id,
+                candidate.ActiveIndexGenerationId,
+                candidate.UpdatedAtUtc,
+                HashBytes(candidate.RowVersion))).ToArray(),
+            generations.Select(candidate => new GenerationEvidence(
+                candidate.Id,
+                candidate.ModelFingerprint,
+                candidate.Dimensions,
+                candidate.IndexPath,
+                candidate.MetadataChecksum,
+                candidate.VectorCount,
+                candidate.CreatedAtUtc,
+                candidate.ValidatedAtUtc,
+                HashBytes(candidate.RowVersion))).ToArray(),
+            records.Select(candidate => new PipelineRecordEvidence(
+                candidate.Id,
+                candidate.SourceIdentityId,
+                candidate.Revision,
+                candidate.ContentHash,
+                candidate.RootLineageRecordId,
+                candidate.ParentRevisionRecordId,
+                candidate.CurrentStage,
+                candidate.CompletionCriteriaMet,
+                candidate.IsDeleted,
+                candidate.RegisteredAtUtc,
+                HashBytes(candidate.RowVersion))).ToArray(),
+            artifacts.Select(candidate => new ArtifactEvidence(
+                candidate.Id,
+                candidate.PipelineRecordId,
+                candidate.SourceRevision,
+                candidate.Stage,
+                candidate.ContentHash,
+                candidate.ContentType,
+                candidate.SearchText,
+                candidate.CreatedAtUtc)).ToArray(),
+            chunks.Select(candidate => new ChunkEvidence(
+                candidate.Id,
+                candidate.ArtifactId,
+                candidate.SourceRevision,
+                candidate.Ordinal,
+                candidate.StartOffset,
+                candidate.Length,
+                HashText(candidate.Content),
+                candidate.ContentHash)).ToArray(),
+            vectors.Select(candidate => new VectorEvidence(
+                candidate.VectorId,
+                candidate.TextChunkId,
+                candidate.ModelFingerprint,
+                candidate.Dimensions,
+                HashBytes(candidate.Values),
+                candidate.TextChunkContentHash,
+                candidate.PayloadChecksum,
+                candidate.SourceRevision,
+                candidate.IsDeleted,
+                candidate.IndexGenerationId,
+                candidate.CreatedAtUtc,
+                HashBytes(candidate.RowVersion))).ToArray(),
+            memberships.Select(candidate => new MembershipEvidence(candidate.GenerationId, candidate.VectorId)).ToArray(),
+            jobs.Select(candidate => new JobEvidence(
+                candidate.Id,
+                candidate.PipelineRecordId,
+                candidate.SourceRevision,
+                candidate.Stage,
+                candidate.Operation,
+                candidate.PublicState,
+                candidate.DueAtUtc,
+                candidate.AttemptCount,
+                candidate.LeaseOwner,
+                candidate.LeaseExpiresAtUtc,
+                candidate.LeaseGeneration,
+                HashText(candidate.Reason),
+                HashText(candidate.ErrorDetails),
+                HashBytes(candidate.RowVersion))).ToArray(),
+            outbox.Select(candidate => new OutboxEvidence(
+                candidate.Id,
+                candidate.PipelineRecordId,
+                candidate.SourceRevision,
+                candidate.Stage,
+                candidate.Operation,
+                candidate.DispatchGeneration,
+                candidate.IdempotencyKey,
+                candidate.DueAtUtc,
+                candidate.CreatedAtUtc,
+                candidate.DispatchedAtUtc,
+                candidate.LeaseOwner,
+                candidate.LeaseExpiresAtUtc,
+                candidate.LeaseGeneration,
+                HashBytes(candidate.RowVersion))).ToArray());
+    }
+
+    private static void AssertRecoveryEvidenceUnchanged(
+        RecoveryEvidenceSnapshot before,
+        RecoveryEvidenceSnapshot after)
+    {
+        Assert.Equal(before.IndexStates, after.IndexStates);
+        Assert.Equal(before.Generations, after.Generations);
+        Assert.Equal(before.PipelineRecords, after.PipelineRecords);
+        Assert.Equal(before.Artifacts, after.Artifacts);
+        Assert.Equal(before.Chunks, after.Chunks);
+        Assert.Equal(before.Vectors, after.Vectors);
+        Assert.Equal(before.Memberships, after.Memberships);
+        Assert.Equal(before.Jobs, after.Jobs);
+        Assert.Equal(before.Outbox, after.Outbox);
+    }
+
+    private static string HashBytes(byte[] value) => Convert.ToHexStringLower(SHA256.HashData(value));
+
+    private static string? HashText(string? value) =>
+        value is null ? null : HashBytes(System.Text.Encoding.UTF8.GetBytes(value));
+
+    private sealed record RecoveryEvidenceSnapshot(
+        IReadOnlyList<IndexStateEvidence> IndexStates,
+        IReadOnlyList<GenerationEvidence> Generations,
+        IReadOnlyList<PipelineRecordEvidence> PipelineRecords,
+        IReadOnlyList<ArtifactEvidence> Artifacts,
+        IReadOnlyList<ChunkEvidence> Chunks,
+        IReadOnlyList<VectorEvidence> Vectors,
+        IReadOnlyList<MembershipEvidence> Memberships,
+        IReadOnlyList<JobEvidence> Jobs,
+        IReadOnlyList<OutboxEvidence> Outbox);
+
+    private sealed record IndexStateEvidence(
+        int Id,
+        Guid? ActiveGenerationId,
+        DateTimeOffset UpdatedAtUtc,
+        string RowVersion);
+
+    private sealed record GenerationEvidence(
+        Guid Id,
+        string ModelFingerprint,
+        int Dimensions,
+        string IndexPath,
+        string MetadataChecksum,
+        long VectorCount,
+        DateTimeOffset CreatedAtUtc,
+        DateTimeOffset? ValidatedAtUtc,
+        string RowVersion);
+
+    private sealed record PipelineRecordEvidence(
+        Guid Id,
+        Guid SourceIdentityId,
+        long Revision,
+        string ContentHash,
+        Guid RootLineageRecordId,
+        Guid? ParentRevisionRecordId,
+        int CurrentStage,
+        bool CompletionCriteriaMet,
+        bool IsDeleted,
+        DateTimeOffset RegisteredAtUtc,
+        string RowVersion);
+
+    private sealed record ArtifactEvidence(
+        Guid Id,
+        Guid PipelineRecordId,
+        long SourceRevision,
+        int Stage,
+        string ContentHash,
+        string ContentType,
+        string SearchText,
+        DateTimeOffset CreatedAtUtc);
+
+    private sealed record ChunkEvidence(
+        long Id,
+        Guid ArtifactId,
+        long SourceRevision,
+        int Ordinal,
+        int StartOffset,
+        int Length,
+        string? ContentHashEvidence,
+        string ContentHash);
+
+    private sealed record VectorEvidence(
+        long Id,
+        long TextChunkId,
+        string ModelFingerprint,
+        int Dimensions,
+        string ValuesHash,
+        string TextChunkContentHash,
+        string PayloadChecksum,
+        long SourceRevision,
+        bool IsDeleted,
+        Guid GenerationId,
+        DateTimeOffset CreatedAtUtc,
+        string RowVersion);
+
+    private sealed record MembershipEvidence(Guid GenerationId, long VectorId);
+
+    private sealed record JobEvidence(
+        Guid Id,
+        Guid PipelineRecordId,
+        long SourceRevision,
+        int Stage,
+        string Operation,
+        int PublicState,
+        DateTimeOffset DueAtUtc,
+        int AttemptCount,
+        string? LeaseOwner,
+        DateTimeOffset? LeaseExpiresAtUtc,
+        long LeaseGeneration,
+        string? ReasonHash,
+        string? ErrorDetailsHash,
+        string RowVersion);
+
+    private sealed record OutboxEvidence(
+        Guid Id,
+        Guid PipelineRecordId,
+        long SourceRevision,
+        int Stage,
+        string Operation,
+        long DispatchGeneration,
+        string IdempotencyKey,
+        DateTimeOffset DueAtUtc,
+        DateTimeOffset CreatedAtUtc,
+        DateTimeOffset? DispatchedAtUtc,
+        string? LeaseOwner,
+        DateTimeOffset? LeaseExpiresAtUtc,
+        long LeaseGeneration,
+        string RowVersion);
+
     private sealed class ThrowingValidator : UsearchGenerationValidator
     {
         public override void Validate(string directory, IndexGenerationDescriptor expected, IReadOnlyList<CanonicalVector> vectors) =>
@@ -421,13 +1169,24 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             services.AddScoped<IStageWorker, PublishStageWorker>();
             var provider = services.BuildServiceProvider();
             var environment = new PipelineEnvironment(provider, ingress, index, provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>());
-            await environment.AddAndPumpAsync(text);
+            await environment.AddAndPumpAtPathAsync(text, "initial.txt");
             return environment;
         }
 
         public async Task AddAndPumpAsync(string text)
         {
-            var path = Path.Combine(_ingressRoot, $"{Guid.NewGuid():N}.txt");
+            await AddAndPumpAtPathAsync(text, $"{Guid.NewGuid():N}.txt");
+        }
+
+        public async Task AddAndPumpAtPathAsync(string text, string fileName)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+            if (!string.Equals(fileName, Path.GetFileName(fileName), StringComparison.Ordinal))
+            {
+                throw new ArgumentException("The test ingress file name must not contain a directory.", nameof(fileName));
+            }
+
+            var path = Path.Combine(_ingressRoot, fileName);
             await File.WriteAllTextAsync(path, text);
             using var scope = _provider.CreateScope();
             LastReceipt = await scope.ServiceProvider.GetRequiredService<RegisterUtf8FileHandler>().HandleAsync(new(path, "native-sql-test", null), CancellationToken.None);

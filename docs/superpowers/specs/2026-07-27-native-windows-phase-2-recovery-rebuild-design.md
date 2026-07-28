@@ -1,6 +1,9 @@
 # Native Windows Phase 2 derived-index recovery design
 
-Status: approved; local implementation and verification complete on 2026-07-27.
+Status: approved design correction on 2026-07-28. The original local
+implementation and verification completed on 2026-07-27; the unplaced-draft
+correction is implemented and locally verified, with branch closeout and the
+separately authorised loopback IIS checkpoint still pending.
 
 ## Goal
 
@@ -21,6 +24,53 @@ are authoritative. A USearch directory, metadata file, staging directory and
 quarantine directory are derived state only. Recovery never creates a new SQL
 generation, changes `IndexState.ActiveIndexGenerationId`, or treats a directory
 as a source for rebuilding SQL state.
+
+### Generation record classification
+
+`IndexGenerations` contains both placed derived-index generations and normal
+pipeline provenance records that have not been placed. Recovery must classify
+every row in its serializable SQL snapshot before treating it as a filesystem
+reference:
+
+- A **placed generation** has a non-empty `IndexPath`. Its path is a filesystem
+  reference and must be a canonical, direct child of the configured app-owned
+  `generations` directory with no unsafe components.
+- A **recognised unplaced draft** has no derived filesystem path. It is excluded
+  from the path-reference set only when all of the following durable evidence
+  agrees:
+  - it is not the active generation; `IndexPath` is exactly the empty string;
+    `ValidatedAtUtc` is null; `MetadataChecksum` is exactly the 64-zero draft
+    sentinel; and it has no `IndexGenerationVectors` membership;
+  - `VectorCount` exactly equals its `Vectors.IndexGenerationId` reference
+    count, and every referenced vector has the draft's fingerprint, dimensions,
+    source revision and same-record canonical-chunk provenance;
+  - exactly one Embed artefact for the same record and revision has the Embed
+    stage, the embedding-set content type, and the draft ID in canonical GUID
+    form as its `SearchText`; the linked record is at Publish, the Embed job
+    completed and its own outbox has a durable `DispatchedAtUtc` completion;
+    its successor Publish job and outbox transition exist with the expected
+    dispatch generation; a queued or processing Publish job has an undispatched
+    outbox, while a completed or failed Publish job has a durably dispatched
+    outbox;
+  - for a zero-vector draft, there are no referenced vectors or canonical
+    chunks for that record and revision, the fingerprint and dimensions equal
+    the Embed empty-input defaults, and the Embed artefact hash is the SHA-256
+    hash of the empty byte sequence.
+
+  A queued, processing, failed, completed or superseded Publish job does not by
+  itself invalidate a recognised draft: it is pipeline provenance, not the
+  active derived index. The draft's generation ID and provenance remain in the
+  SQL reference snapshot; only its absent filesystem path is omitted.
+- Any row that is neither a placed generation nor a recognised unplaced draft
+  is an operator-actionable configuration fault. This includes an active or
+  whitespace path, a partially initialised blank row, a blank row with
+  membership, validation timestamp or non-sentinel checksum, and any missing
+  or contradictory lifecycle evidence. Recovery must fail closed without a
+  retry, SQL mutation or filesystem mutation.
+
+This is a recovery-projection correction, not a data repair or schema
+migration. It does not fabricate a path or membership for a draft, delete the
+draft, or change its vectors, artefacts, jobs, outbox records or active pointer.
 
 ## Continuous recovery contract
 
@@ -51,9 +101,11 @@ it records that outcome and returns to `Healthy` without rebuilding.
 
 1. Mark recovery as `Recovering`, publish a local status invalidation, and write
    a sanitised durable audit event.
-2. Read the active generation descriptor and immutable vector membership from
-   SQL. Verify dimensions, model fingerprint, vector count and membership
-   checksum before any filesystem mutation.
+2. Read the active generation descriptor, immutable vector membership and a
+   serializable generation-classification snapshot from SQL. Verify dimensions,
+   model fingerprint, vector count and membership checksum before any filesystem
+   mutation. A recognised unplaced draft retains its SQL provenance but adds no
+   filesystem path; an unrecognised row is terminal before any mutation.
 3. Classify the failure.
    - A missing directory, invalid derived metadata/index, transient file lock,
      or transient local I/O failure is recoverable.
@@ -68,24 +120,27 @@ it records that outcome and returns to `Healthy` without rebuilding.
    SQL metadata to that new derived path. `IndexState.ActiveIndexGenerationId`
    is not changed. If metadata update fails, the old SQL-referenced path remains
    untouched and the unreferenced replacement becomes a quarantine candidate.
-6. After the metadata update succeeds, take a fresh SQL path-reference snapshot
-   while still holding the recovery lock. Canonicalise every SQL
-   `IndexGenerations.IndexPath`; only when the previous invalid path is absent
-   from that snapshot may it be moved into the app-owned quarantine area. It is
-   not deleted as part of recovery. An invalid or out-of-root SQL path is an
-   operator-actionable configuration fault and receives no filesystem mutation.
-   A failed rebuild leaves the SQL active pointer unchanged.
+6. After the metadata update succeeds, take a fresh SQL placed-path reference
+   snapshot while still holding the recovery lock. Canonicalise every placed
+   `IndexGenerations.IndexPath`; a recognised unplaced draft remains protected
+   as SQL provenance but contributes no filesystem path. Only when the previous
+   invalid path is absent from that snapshot may it be moved into the app-owned
+   quarantine area. It is not deleted as part of recovery. An unsafe placed
+   path or unrecognised draft is an operator-actionable configuration fault and
+   receives no filesystem mutation. A failed rebuild leaves the SQL active
+   pointer unchanged.
 7. On success, write a sanitised audit outcome, set `Healthy`, and publish a
    status invalidation. Only then can readiness return 200.
 
-The current active or any SQL-referenced generation is never deleted. A SQL
-generation reference is a canonical path reference, not only a generation ID:
-the same generation ID can legitimately receive a new recovery path. Cleanup
-may delete only direct children of the canonical USearch `staging` or
-`quarantine` directories after both conditions hold: the candidate is older than
-its configured retention and a fresh, lock-held SQL path-reference snapshot does
-not contain it. Cleanup must not follow links outside the configured USearch
-root.
+The current active generation, every placed SQL-referenced generation and every
+recognised unplaced draft are never deleted. A placed SQL generation reference
+is a canonical path reference, not only a generation ID: the same generation ID
+can legitimately receive a new recovery path. Cleanup may delete only direct
+children of the canonical USearch `staging` or `quarantine` directories after
+both conditions hold: the candidate is older than its configured retention and
+a fresh, lock-held SQL path-reference snapshot does not contain it. Cleanup
+never scans or cleans `generations` and must not follow links outside the
+configured USearch root.
 
 ## Bounded retry policy
 
@@ -139,23 +194,37 @@ recovers; no IIS restart is required for a successful recovery.
    recovery. A successful recovery may update only the active generation's
    derived path after placement and validation; a failed recovery never changes
    the active pointer or its SQL-referenced path.
-4. A transient derived-index failure follows the exact bounded retry schedule
+4. A valid active generation remains `Healthy` and readiness returns 200 when a
+   recognised inactive unplaced draft coexists with it. This holds for both
+   non-zero and zero-vector drafts and for queued, processing, failed,
+   completed or superseded Publish states when the job/outbox dispatch pair is
+   durably consistent. It causes no rebuild, SQL update, path update,
+   quarantine action or cleanup.
+5. A one-condition-at-a-time near miss to the unplaced-draft contract, including
+   an active blank row, whitespace path, invalid checksum or timestamp,
+   membership, vector/provenance mismatch, contradictory Embed or Publish
+   job/outbox dispatch evidence, or unsafe non-empty path, becomes
+   `OperatorActionRequired` with `ConfigurationInvalid`. It receives no retry,
+   SQL mutation or filesystem mutation.
+6. A transient derived-index failure follows the exact bounded retry schedule
    and succeeds if a later attempt validates. Retry exhaustion ends in
    `OperatorActionRequired`, not an endless loop.
-5. Invalid SQL membership/checksum, schema/configuration failures and
+7. Invalid SQL membership/checksum, schema/configuration failures and
    permissions failures become `OperatorActionRequired` without automatic retry
    or unsafe filesystem mutation.
-6. Cleanup removes only aged, unreferenced staging or quarantine candidates;
-   active and SQL-referenced generations remain intact, including when old.
-7. Concurrent recovery service instances perform at most one rebuild under the
+8. Cleanup removes only aged, unreferenced staging or quarantine candidates;
+   active, placed SQL-referenced and recognised unplaced generations remain
+   intact, including when old. It never scans `generations`.
+9. Concurrent recovery service instances perform at most one rebuild under the
    SQL application lock and converge on the same validated active generation.
-8. Durable audit evidence and the read-only local status projection expose the
-   recovery lifecycle without paths, private content, credentials or raw
-   exception text.
-9. Focused domain, SQL integration, web projection and browser checks prove the
-   behaviours above. A later, separately approved loopback IIS checkpoint may
-   exercise controlled fault-and-recovery validation; this design authorises no
-   deployment action by itself.
+10. Durable audit evidence and the read-only local status projection expose the
+    recovery lifecycle without paths, private content, credentials or raw
+    exception text.
+11. Focused domain, SQL integration, web projection and browser checks prove the
+    behaviours above, including Embed-to-Publish provenance and the full
+    unplaced-draft negative matrix. A later, separately approved loopback IIS
+    checkpoint may exercise controlled fault-and-recovery validation; this
+    design authorises no deployment action by itself.
 
 ## Non-goals
 

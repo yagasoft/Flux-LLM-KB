@@ -35,7 +35,7 @@ public sealed class EmbedStageWorker(
             workItem.Job,
             new StageArtifact(Guid.NewGuid(), PipelineStage.Embed,
                 Convert.ToHexStringLower(SHA256.HashData(vectors.SelectMany(vector => vector.Values).ToArray())),
-                "application/vnd.fluxknowledge.embedding-set+binary", generationId.ToString("D"), timeProvider.GetUtcNow()),
+                EmbedDraftDefaults.ArtifactContentType, generationId.ToString("D"), timeProvider.GetUtcNow()),
             PipelineStage.Publish,
             PipelineOperations.Publish,
             nameof(EmbedStageWorker),
@@ -46,5 +46,5 @@ public sealed class EmbedStageWorker(
     }
 
     private static string DeterministicFingerprint(IReadOnlyList<CanonicalVector> vectors) =>
-        vectors.Count == 0 ? "deterministic-tokenhash-v1:256" : vectors[0].ModelFingerprint;
+        vectors.Count == 0 ? EmbedDraftDefaults.ModelFingerprint : vectors[0].ModelFingerprint;
 }

@@ -1,5 +1,6 @@
 using System.Data;
 using System.Text.Json;
+using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Common;
@@ -563,9 +564,9 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             {
                 Id = generationId,
                 ModelFingerprint = output.ModelFingerprint!,
-                Dimensions = output.Vectors?.FirstOrDefault()?.Dimensions ?? 256,
+                Dimensions = output.Vectors?.FirstOrDefault()?.Dimensions ?? EmbedDraftDefaults.Dimensions,
                 IndexPath = string.Empty,
-                MetadataChecksum = new string('0', 64),
+                MetadataChecksum = EmbedDraftDefaults.MetadataChecksum,
                 VectorCount = output.Vectors?.Count ?? 0,
                 CreatedAtUtc = _timeProvider.GetUtcNow()
             });
