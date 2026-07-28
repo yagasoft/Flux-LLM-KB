@@ -1,9 +1,9 @@
 # Native Windows Phase 2 derived-index recovery design
 
-Status: approved design correction on 2026-07-28. The original local
-implementation and verification completed on 2026-07-27; the unplaced-draft
-correction is implemented and locally verified, with branch closeout and the
-separately authorised loopback IIS checkpoint still pending.
+Status: approved design correction on 2026-07-28. The unplaced-draft correction
+is implemented, locally verified and live-validated on the authorised
+loopback-only IIS checkpoint. Branch closeout is the remaining administrative
+step; broader Phase 2 work remains out of scope.
 
 ## Goal
 
@@ -222,9 +222,24 @@ recovers; no IIS restart is required for a successful recovery.
     exception text.
 11. Focused domain, SQL integration, web projection and browser checks prove the
     behaviours above, including Embed-to-Publish provenance and the full
-    unplaced-draft negative matrix. A later, separately approved loopback IIS
-    checkpoint may exercise controlled fault-and-recovery validation; this
-    design authorises no deployment action by itself.
+    unplaced-draft negative matrix. The separately authorised loopback IIS
+    checkpoint has also completed a controlled missing-metadata recovery: it
+    preserved the SQL active pointer and generation count, safely replaced only
+    the derived path, restored readiness and ANN search without an IIS restart,
+    and recorded sanitised detection, rebuild, cleanup and healthy evidence.
+
+## Verification and loopback checkpoint
+
+The 2026-07-28 loopback-only checkpoint preserved the existing target-only
+production settings and `127.0.0.1` binding. The deployed service reached
+`Healthy` with readiness and the read-only index-status route returning 200.
+With only the active generation metadata temporarily withheld, recovery rebuilt
+from immutable SQL membership without an IIS restart. The active SQL pointer
+and generation count were unchanged; the replacement derived path validated,
+ANN search returned 200, and durable sanitised evidence recorded
+`recovery_detected`, `recovery_attempt`, `recovery_rebuild_succeeded`, cleanup
+and `recovery_healthy`. The rollback payload was retained. No external access,
+legacy action, model or GPU work occurred.
 
 ## Non-goals
 

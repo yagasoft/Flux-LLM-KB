@@ -241,18 +241,22 @@ drift.
   generated-output exclusion, and scope creep. Obtain the required pre-live
   independent gate before deployment.
 
-- [ ] **Step 3: Commit, merge and purge through the repository closeout script**
+- [x] **Step 3: Commit, merge and purge through the repository closeout script**
 
   Commit the approved specification and implementation on the native feature
   branch. Use `scripts/dev/complete-feature.ps1`; do not manually substitute
   its merge/purge sequence. Do not touch either protected legacy Python /
   RabbitMQ branch or worktree.
 
-- [ ] **Step 4: Deploy and validate the loopback IIS checkpoint**
+- [x] **Step 4: Deploy and validate the loopback IIS checkpoint**
 
   Preserve the exact target-only production settings bytes/hash, loopback
   binding, rollback payload and current SQL active pointer. Deploy only after
   the gate approves; verify `/`, `/health/live`, `/health/ready` and
   `/api/index-health`, plus read-only SQL and filesystem invariants proving the
-  recognised draft, active pointer and active path were not mutated. Roll back
-  before cleanup if any probe fails.
+  recognised draft remains healthy. Then perform the authorised controlled
+  missing-metadata recovery check without an IIS restart: the active pointer and
+  generation count must remain unchanged while only the derived path may be
+  safely replaced, readiness and ANN search must return 200, and sanitised audit
+  evidence must show detection, rebuild, cleanup and healthy completion. Roll
+  back before cleanup if any probe fails.
