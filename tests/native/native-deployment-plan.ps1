@@ -75,4 +75,9 @@ foreach ($endpoint in $requiredEndpoints) {
     }
 }
 
+$deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
+if ($deploymentScriptText -notmatch 'Invoke-WebRequest\s+-UseBasicParsing') {
+    throw "The native deployment probe is not compatible with Windows PowerShell's basic parsing mode."
+}
+
 Write-Output "Native deployment plan contract passed."

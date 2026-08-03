@@ -228,7 +228,7 @@ function Invoke-EndpointProbe {
     $lastFailure = $null
     do {
         try {
-            $response = Invoke-WebRequest -Uri $Uri -TimeoutSec 15
+            $response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -TimeoutSec 15
             if ($response.StatusCode -eq 200) {
                 return
             }
