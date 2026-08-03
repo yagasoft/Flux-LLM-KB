@@ -61,6 +61,12 @@ durable SQL state.
   sanitised aggregate scheduler state. They have no scheduler action route,
   never expose identifiers or runtime values, and return a bodyless 503 for
   expected projection/database failures while preserving request cancellation.
+- **Validated local deployment.** On 2026-08-03 this foundation was merged and
+  deployed only to the fixed loopback IIS site. The six scheduler migrations,
+  SQL readiness and read-only liveness, readiness, index-health, scheduler-status
+  and search probes passed; a checksum-verified local SQL backup and rollback
+  payload were retained. This is not real executor/GPU work, external access or
+  legacy cutover. See [the validation record](operations/native-windows-phase-2-scheduler-validation.md).
 
 Legacy architecture below remains a compatibility reference only. It is not the
 target architecture for this branch and must not be deleted until local
