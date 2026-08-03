@@ -1,7 +1,9 @@
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Integration.Tests.Support;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Web.Components.Status;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
@@ -32,7 +34,7 @@ public sealed class SqlProjectionReaderIntegrationTests(NativeSqlServerFixture f
             null,
             null,
             null,
-            0)));
+            0)), new SqlGpuSchedulerStore(factory));
         var projection = await reader.ReadPipelineRecordAsync(
             receipt.PipelineRecordId.Value,
             CancellationToken.None);
@@ -52,7 +54,7 @@ public sealed class SqlProjectionReaderIntegrationTests(NativeSqlServerFixture f
             DateTimeOffset.Parse("2026-07-27T08:00:00Z"),
             DateTimeOffset.Parse("2026-07-27T08:00:05Z"),
             DerivedIndexRecoveryFailureCategory.TransientIo,
-            4)));
+            4)), new SqlGpuSchedulerStore(factory));
 
         var overview = await reader.ReadOverviewAsync(CancellationToken.None);
 
@@ -61,6 +63,47 @@ public sealed class SqlProjectionReaderIntegrationTests(NativeSqlServerFixture f
         Assert.Equal(DateTimeOffset.Parse("2026-07-27T08:00:05Z"), overview.IndexRecovery.NextRetryAtUtc);
         Assert.Equal("TransientIo", overview.IndexRecovery.FailureCategory);
         Assert.Equal(4, overview.IndexRecovery.CleanedCandidateCount);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Overview_projection_reads_the_sanitised_GPU_scheduler_SQL_snapshot()
+    {
+        var now = DateTimeOffset.Parse("2026-07-30T12:00:00+00:00");
+        var nextDeferredAtUtc = now.AddMinutes(5);
+        var factory = new TestDbContextFactory(_fixture.ConnectionString);
+        await using (var arrange = factory.CreateDbContext())
+        {
+            arrange.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+            {
+                SlotKey = "projection-slot",
+                State = (int)GpuCapacitySlotState.Available,
+                UpdatedAtUtc = now
+            });
+            var scheduler = await arrange.GpuSchedulerStates.SingleAsync(state => state.Id == 1);
+            scheduler.NextDeferredAtUtc = nextDeferredAtUtc;
+            scheduler.UpdatedAtUtc = now;
+            await arrange.SaveChangesAsync();
+        }
+
+        var reader = new SqlProjectionReader(
+            factory,
+            new FixedRecoveryStatus(new DerivedIndexRecoverySnapshot(
+                DerivedIndexRecoveryState.Healthy,
+                null,
+                null,
+                null,
+                null,
+                0)),
+            new SqlGpuSchedulerStore(factory, timeProvider: new FixedTimeProvider(now)));
+
+        var overview = await reader.ReadOverviewAsync(CancellationToken.None);
+
+        Assert.Equal(1, overview.GpuSchedulerStatus.AvailableSlotCount);
+        Assert.False(overview.GpuSchedulerStatus.HasActiveBatch);
+        Assert.Null(overview.GpuSchedulerStatus.ActiveBatchLane);
+        Assert.Equal(nextDeferredAtUtc, overview.GpuSchedulerStatus.NextDeferredAtUtc);
+        Assert.Equal("None", overview.GpuSchedulerStatus.UncertainCapacity.State);
+        Assert.Null(overview.GpuSchedulerStatus.UncertainCapacity.AgeMinutes);
     }
 
     private sealed class FixedRecoveryStatus(DerivedIndexRecoverySnapshot snapshot)
@@ -78,5 +121,10 @@ public sealed class SqlProjectionReaderIntegrationTests(NativeSqlServerFixture f
                 .Options;
 
         public FluxKnowledgeDbContext CreateDbContext() => new(_options);
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 }

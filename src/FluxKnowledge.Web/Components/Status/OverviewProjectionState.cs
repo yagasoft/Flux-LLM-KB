@@ -13,7 +13,10 @@ public sealed class OverviewProjectionState(IProjectionReader reader)
         0,
         0,
         "none",
-        new IndexRecoverySummary("Starting", null, null, null, null, 0));
+        new IndexRecoverySummary("Starting", null, null, null, null, 0))
+    {
+        GpuSchedulerStatus = GpuSchedulerStatusProjection.Empty
+    };
 
     public async ValueTask ReloadAsync(CancellationToken cancellationToken) =>
         Current = await reader.ReadOverviewAsync(cancellationToken).ConfigureAwait(false);
@@ -42,6 +45,7 @@ public sealed class OverviewProjectionState(IProjectionReader reader)
         ArgumentNullException.ThrowIfNull(statusChanged);
         return string.Equals(statusChanged.Projection, "pipeline", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(statusChanged.Projection, "index-recovery", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(statusChanged.Projection, "gpu-scheduler", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(statusChanged.Projection, "reconnect", StringComparison.OrdinalIgnoreCase)
             ? ReloadAsync(cancellationToken)
             : ValueTask.CompletedTask;

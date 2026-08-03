@@ -1,8 +1,11 @@
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Indexing;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
+using GpuSchedulerStore = FluxKnowledge.Application.Gpu.IGpuSchedulerStore;
+using SchedulerStoreStatusSnapshot = FluxKnowledge.Application.Gpu.GpuSchedulerStatusSnapshot;
 
 namespace FluxKnowledge.Web.Components.Status;
 
@@ -19,13 +22,15 @@ public sealed record PipelineRecordProjection(
 public interface IProjectionReader
 {
     ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken);
+    ValueTask<GpuSchedulerStatusProjection> ReadGpuSchedulerStatusAsync(CancellationToken cancellationToken);
     ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(CancellationToken cancellationToken);
     ValueTask<PipelineRecordProjection?> ReadPipelineRecordAsync(Guid id, CancellationToken cancellationToken);
 }
 
 public sealed class SqlProjectionReader(
     IDbContextFactory<FluxKnowledgeDbContext> contextFactory,
-    IDerivedIndexRecoveryStatus recoveryStatus) : IProjectionReader
+    IDerivedIndexRecoveryStatus recoveryStatus,
+    GpuSchedulerStore schedulerStore) : IProjectionReader
 {
     public async ValueTask<OverviewProjection> ReadOverviewAsync(CancellationToken cancellationToken)
     {
@@ -49,6 +54,8 @@ public sealed class SqlProjectionReader(
             .ConfigureAwait(false) ?? "none";
 
         var recovery = recoveryStatus.Snapshot;
+        var gpuSchedulerStatus = await ReadGpuSchedulerStatusAsync(cancellationToken)
+            .ConfigureAwait(false);
         return new OverviewProjection(
             GetCount(PublicJobState.WorkerQueued),
             GetCount(PublicJobState.WorkerProcessing),
@@ -64,7 +71,10 @@ public sealed class SqlProjectionReader(
                 recovery.LastCompletedAtUtc,
                 recovery.NextRetryAtUtc,
                 recovery.FailureCategory?.ToString(),
-                recovery.CleanedCandidateCount));
+                recovery.CleanedCandidateCount))
+        {
+            GpuSchedulerStatus = gpuSchedulerStatus
+        };
 
         int GetCount(PublicJobState state) => jobCounts.GetValueOrDefault((int)state);
     }
@@ -87,6 +97,47 @@ public sealed class SqlProjectionReader(
             .ConfigureAwait(false);
         return row is null ? null : ToProjection(row);
     }
+
+    public async ValueTask<GpuSchedulerStatusProjection> ReadGpuSchedulerStatusAsync(
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await schedulerStore.ReadGpuSchedulerStatusAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return ToGpuSchedulerStatusProjection(snapshot);
+    }
+
+    private static GpuSchedulerStatusProjection ToGpuSchedulerStatusProjection(
+        SchedulerStoreStatusSnapshot snapshot) =>
+        new(
+            snapshot.ReadyCount,
+            snapshot.ActiveCount,
+            snapshot.DeferredCount,
+            snapshot.OutcomeUncertainCount,
+            new GpuSchedulerLaneCounts(
+                snapshot.LaneCounts.GetValueOrDefault(GpuPriorityLane.InteractiveRetrieval),
+                snapshot.LaneCounts.GetValueOrDefault(GpuPriorityLane.DocumentIndexing),
+                snapshot.LaneCounts.GetValueOrDefault(GpuPriorityLane.ImageOcr),
+                snapshot.LaneCounts.GetValueOrDefault(GpuPriorityLane.ImageEnrichment),
+                snapshot.LaneCounts.GetValueOrDefault(GpuPriorityLane.VideoOrUnknown)),
+            snapshot.HasActiveBatch,
+            snapshot.ActiveBatchLane?.ToString(),
+            snapshot.AvailableSlotCount,
+            snapshot.ReservedSlotCount,
+            snapshot.UncertainSlotCount,
+            snapshot.NextDeferredAtUtc,
+            new GpuCapacityUncertaintySummary(
+                snapshot.UncertainSlotCount == 0 ? "None" : "Uncertain",
+                ToBoundedAgeMinutes(snapshot.UncertainCapacityAge)));
+
+    private static int? ToBoundedAgeMinutes(TimeSpan? uncertainCapacityAge) =>
+        uncertainCapacityAge is not { } age
+            ? null
+            : Math.Clamp(
+                (int)Math.Ceiling(age.TotalMinutes),
+                0,
+                MaximumUncertainCapacityAgeMinutes);
+
+    private const int MaximumUncertainCapacityAgeMinutes = 24 * 60;
 
     private static IQueryable<PipelineRecordProjectionRow> BuildPipelineRecordQuery(
         FluxKnowledgeDbContext context,

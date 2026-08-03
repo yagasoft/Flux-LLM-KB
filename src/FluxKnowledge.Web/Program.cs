@@ -12,7 +12,6 @@ builder.Services.AddRazorComponents()
 builder.Services.AddSingleton<StatusEventFeed>();
 builder.Services.AddSingleton<FluxKnowledge.Application.Ports.IStatusEventPublisher>(
     provider => provider.GetRequiredService<StatusEventFeed>());
-builder.Services.AddScoped<IProjectionReader, SqlProjectionReader>();
 builder.Services.AddScoped<OverviewProjectionState>();
 builder.Services.AddScoped<CircuitHandler, StatusEventCircuitHandler>();
 builder.Services.AddFluxKnowledgeMcp();
@@ -28,6 +27,7 @@ app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 app.MapFluxKnowledgeHealth();
 app.MapFluxKnowledgeIndexHealth();
+app.MapFluxKnowledgeGpuStatus();
 app.MapFluxKnowledgeSearch();
 app.MapFluxKnowledgePipelineRecords();
 app.MapMcp("/mcp");

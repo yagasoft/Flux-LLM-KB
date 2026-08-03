@@ -21,6 +21,23 @@ internal static class SqlTestData
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
         await context.AuditEvents.ExecuteDeleteAsync();
+        await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
+        await context.GpuMiniTasks.ExecuteDeleteAsync();
+        await context.GpuCapacitySlots
+            .Where(slot => slot.ActiveBatchId != null)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(slot => slot.ActiveBatchId, (Guid?)null));
+        await context.GpuBatches.ExecuteDeleteAsync();
+        await context.GpuCapacitySlots.ExecuteDeleteAsync();
+        var scheduler = await context.GpuSchedulerStates.SingleAsync(candidate => candidate.Id == 1);
+        scheduler.WakeGeneration = 0;
+        scheduler.PendingWakeReasons = 0;
+        scheduler.NextDeferredAtUtc = null;
+        scheduler.InFlightWakeOperationId = null;
+        scheduler.InFlightWakeGeneration = null;
+        scheduler.InFlightWakeReasons = 0;
+        scheduler.InFlightNextDeferredAtUtc = null;
+        scheduler.InFlightEffectiveAdmissionReasons = null;
+        scheduler.UpdatedAtUtc = DateTimeOffset.UnixEpoch;
         var state = await context.IndexState.SingleAsync(candidate => candidate.Id == 1);
         state.ActiveIndexGenerationId = null;
         await context.SaveChangesAsync();

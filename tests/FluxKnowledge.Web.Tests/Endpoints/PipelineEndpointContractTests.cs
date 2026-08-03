@@ -114,6 +114,10 @@ public sealed class PipelineEndpointContractTests : IClassFixture<PipelineEndpoi
                 "none",
                 new IndexRecoverySummary("Starting", null, null, null, null, 0)));
 
+        public ValueTask<GpuSchedulerStatusProjection> ReadGpuSchedulerStatusAsync(
+            CancellationToken cancellationToken) =>
+            ValueTask.FromResult(GpuSchedulerStatusProjection.Empty);
+
         public ValueTask<IReadOnlyList<PipelineRecordProjection>> ReadPipelineRecordsAsync(
             CancellationToken cancellationToken) =>
             ValueTask.FromResult<IReadOnlyList<PipelineRecordProjection>>([Record]);

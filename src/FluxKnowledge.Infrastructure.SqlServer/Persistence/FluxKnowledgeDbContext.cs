@@ -19,10 +19,15 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<IndexStateEntity> IndexState => Set<IndexStateEntity>();
     public DbSet<AuditEventEntity> AuditEvents => Set<AuditEventEntity>();
     public DbSet<GpuMiniTaskEntity> GpuMiniTasks => Set<GpuMiniTaskEntity>();
+    public DbSet<GpuBatchEntity> GpuBatches => Set<GpuBatchEntity>();
+    public DbSet<GpuCapacitySlotEntity> GpuCapacitySlots => Set<GpuCapacitySlotEntity>();
+    public DbSet<GpuSchedulerStateEntity> GpuSchedulerStates => Set<GpuSchedulerStateEntity>();
+    public DbSet<GpuSchedulerOperationReceiptEntity> GpuSchedulerOperationReceipts => Set<GpuSchedulerOperationReceiptEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         ArgumentNullException.ThrowIfNull(modelBuilder);
+        modelBuilder.HasSequence<long>("GpuMiniTaskCreatedSequence");
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(FluxKnowledgeDbContext).Assembly);
     }
 }

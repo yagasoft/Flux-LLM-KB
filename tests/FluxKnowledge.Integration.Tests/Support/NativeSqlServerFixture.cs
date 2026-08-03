@@ -80,6 +80,21 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
     }
 
     internal async Task<PreviousMigrationDatabase> CreatePreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260726221653_EnforceCanonicalSqlSafety").ConfigureAwait(false);
+
+    internal async Task<PreviousMigrationDatabase> CreateSchedulerPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260727055755_DistinguishVectorIdentityAndPayloadChecksum").ConfigureAwait(false);
+
+    internal async Task<PreviousMigrationDatabase> CreateGpuSchedulerFencePreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260729120305_AddGpuSchedulerOperationReceiptRequestFingerprint").ConfigureAwait(false);
+
+    internal async Task<PreviousMigrationDatabase> CreateGpuSchedulerReceiptPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260729094809_AddGpuSchedulerOperationReceipts").ConfigureAwait(false);
+
+    internal async Task<PreviousMigrationDatabase> CreateGpuSchedulerOpaqueKeyPreviousMigrationDatabaseAsync()
+        => await CreateMigrationDatabaseAsync("20260802182703_AddGpuSchedulerBinaryFenceCollation").ConfigureAwait(false);
+
+    private async Task<PreviousMigrationDatabase> CreateMigrationDatabaseAsync(string targetMigration)
     {
         if (string.IsNullOrWhiteSpace(_serverConnectionString))
         {
@@ -90,7 +105,8 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
         ValidateServerConnectionString(_serverConnectionString);
         var database = new PreviousMigrationDatabase(
             _serverConnectionString,
-            $"{TestCatalogPrefix}{Guid.NewGuid():N}");
+            $"{TestCatalogPrefix}{Guid.NewGuid():N}",
+            targetMigration);
         await database.InitializeAsync().ConfigureAwait(false);
         return database;
     }
@@ -294,17 +310,21 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
 
     internal sealed class PreviousMigrationDatabase : IAsyncDisposable
     {
-        private const string PreviousMigration = "20260726221653_EnforceCanonicalSqlSafety";
         private readonly string _serverConnectionString;
         private readonly string _databaseName;
+        private readonly string _targetMigration;
         private bool _created;
 
-        internal PreviousMigrationDatabase(string serverConnectionString, string databaseName)
+        internal PreviousMigrationDatabase(
+            string serverConnectionString,
+            string databaseName,
+            string targetMigration)
         {
             ValidateServerConnectionString(serverConnectionString);
             ValidateGeneratedCatalog(databaseName);
             _serverConnectionString = serverConnectionString;
             _databaseName = databaseName;
+            _targetMigration = targetMigration;
         }
 
         internal string ConnectionString => new SqlConnectionStringBuilder(_serverConnectionString)
@@ -337,7 +357,7 @@ public sealed class NativeSqlServerFixture : IAsyncLifetime
                 await VerifyCreatedDatabaseFilesAsync(serverConnection).ConfigureAwait(false);
                 await using var context = CreateContext();
                 await context.GetService<IMigrator>()
-                    .MigrateAsync(PreviousMigration)
+                    .MigrateAsync(_targetMigration)
                     .ConfigureAwait(false);
             }
             catch

@@ -1,3 +1,5 @@
+using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Domain.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations;
@@ -173,6 +175,256 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Gpu_scheduler_durability_uses_restrictive_relationships_and_a_sequence_backed_ready_queue()
+    {
+        using var context = CreateContext();
+        var model = context.Model;
+        var miniTask = FindTable(model, "GpuMiniTasks");
+
+        var executionState = AssertProperty<int>(miniTask, "ExecutionState");
+        Assert.Equal("State", executionState.GetColumnName(StoreObjectIdentifier.Table("GpuMiniTasks", null)));
+        var createdSequence = AssertProperty<long>(miniTask, "CreatedSequence");
+        Assert.Equal(ValueGenerated.OnAdd, createdSequence.ValueGenerated);
+        Assert.Contains("GpuMiniTaskCreatedSequence", createdSequence.GetDefaultValueSql(), StringComparison.Ordinal);
+        AssertProperty<DateTimeOffset?>(miniTask, "DeferredUntilUtc");
+        AssertProperty<Guid?>(miniTask, "BatchId");
+        AssertProperty<int>(miniTask, "ReservationAttemptCount");
+        var handoffLeaseOwner = AssertProperty<string>(miniTask, "HandoffLeaseOwner");
+        Assert.Equal(256, handoffLeaseOwner.GetMaxLength());
+        AssertUniqueIndex(model, "GpuMiniTasks", "IdempotencyKey");
+        AssertRestrictiveForeignKey(model, "GpuMiniTasks", ["BatchId"], "GpuBatches", ["Id"]);
+
+        var batch = FindTable(model, "GpuBatches");
+        AssertProperty<string>(batch, "CapacitySlotKey");
+        AssertProperty<int>(batch, "PriorityLane");
+        AssertProperty<string>(batch, "ModelRuntimeKey");
+        AssertProperty<string>(batch, "SettingsFingerprint");
+        AssertProperty<int>(batch, "ItemCount");
+        AssertProperty<long>(batch, "EstimatedBytes");
+        AssertProperty<long>(batch, "AdmissionGeneration");
+        AssertProperty<string>(batch, "OwnerKey");
+        AssertProperty<int>(batch, "State");
+        AssertProperty<DateTimeOffset?>(batch, "LastHeartbeatAtUtc");
+        AssertRestrictiveForeignKey(model, "GpuBatches", ["CapacitySlotKey"], "GpuCapacitySlots", ["SlotKey"]);
+
+        var slot = FindTable(model, "GpuCapacitySlots");
+        AssertProperty<string>(slot, "SlotKey");
+        AssertProperty<int>(slot, "State");
+        AssertProperty<Guid?>(slot, "ActiveBatchId");
+        AssertProperty<string>(slot, "OwnerKey");
+        AssertProperty<DateTimeOffset?>(slot, "LastHeartbeatAtUtc");
+        AssertRestrictiveForeignKey(model, "GpuCapacitySlots", ["ActiveBatchId"], "GpuBatches", ["Id"]);
+
+        var scheduler = FindTable(context.GetService<IDesignTimeModel>().Model, "GpuSchedulerState");
+        AssertProperty<int>(scheduler, "Id");
+        AssertProperty<long>(scheduler, "WakeGeneration");
+        AssertProperty<int>(scheduler, "PendingWakeReasons");
+        AssertProperty<DateTimeOffset?>(scheduler, "NextDeferredAtUtc");
+        Assert.Contains(
+            scheduler.GetCheckConstraints(),
+            constraint =>
+                constraint.Name == "CK_GpuSchedulerState_Singleton" &&
+                constraint.Sql == "[Id] = 1");
+        AssertIndex(model, "GpuMiniTasks", "ExecutionState", "PriorityLane", "CreatedSequence", "Id");
+        AssertIndex(model, "GpuMiniTasks", "ExecutionState", "DeferredUntilUtc");
+    }
+
+    [Fact]
+    public void Scheduler_fence_and_compatibility_strings_use_binary_sql_collation()
+    {
+        using var context = CreateContext();
+        var model = context.GetService<IDesignTimeModel>().Model;
+
+        AssertBinaryCollation(model, "Jobs", "Operation", "LeaseOwner");
+        AssertBinaryCollation(
+            model,
+            "GpuMiniTasks",
+            "ModelRuntimeKey",
+            "SettingsFingerprint",
+            "IdempotencyKey",
+            "HandoffLeaseOwner");
+        AssertBinaryCollation(
+            model,
+            "GpuBatches",
+            "CapacitySlotKey",
+            "ModelRuntimeKey",
+            "SettingsFingerprint",
+            "OwnerKey");
+        AssertBinaryCollation(model, "GpuCapacitySlots", "SlotKey", "OwnerKey");
+        AssertBinaryCollation(
+            model,
+            "GpuSchedulerOperationReceipts",
+            "OperationKind",
+            "RequestFingerprint",
+            "CapacitySlotKey",
+            "OwnerKey");
+    }
+
+    [Fact]
+    public void Scheduler_fence_and_compatibility_strings_require_non_empty_canonical_keys_in_the_schema()
+    {
+        using var context = CreateContext();
+        var model = context.GetService<IDesignTimeModel>().Model;
+
+        AssertNoTrailingWhitespaceConstraint(model, "Jobs", "Operation");
+        AssertNoTrailingWhitespaceConstraint(model, "Jobs", "LeaseOwner");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuMiniTasks", "ModelRuntimeKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuMiniTasks", "SettingsFingerprint");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuMiniTasks", "IdempotencyKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuMiniTasks", "HandoffLeaseOwner");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuBatches", "CapacitySlotKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuBatches", "ModelRuntimeKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuBatches", "SettingsFingerprint");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuBatches", "OwnerKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuCapacitySlots", "SlotKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuCapacitySlots", "OwnerKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuSchedulerOperationReceipts", "OperationKind");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuSchedulerOperationReceipts", "RequestFingerprint");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuSchedulerOperationReceipts", "CapacitySlotKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuSchedulerOperationReceipts", "OwnerKey");
+    }
+
+    [Fact]
+    public void Opaque_key_canonicality_migration_target_and_current_snapshot_require_non_empty_keys()
+    {
+        using var currentContext = CreateContext();
+        var models = new (string Name, IModel Model)[]
+        {
+            (nameof(AddGpuSchedulerOpaqueKeyCanonicality), new InspectableAddGpuSchedulerOpaqueKeyCanonicalityMigration().BuildTargetModel()),
+            ("CurrentSnapshot", currentContext.GetService<IDesignTimeModel>().Model)
+        };
+
+        foreach (var (_, model) in models)
+        {
+            AssertNoTrailingWhitespaceConstraint(model, "GpuCapacitySlots", "SlotKey");
+            AssertNoTrailingWhitespaceConstraint(model, "GpuCapacitySlots", "OwnerKey");
+            AssertNoTrailingWhitespaceConstraint(model, "GpuMiniTasks", "IdempotencyKey");
+            AssertNoTrailingWhitespaceConstraint(model, "GpuSchedulerOperationReceipts", "OperationKind");
+        }
+    }
+
+    [Fact]
+    public void Gpu_scheduler_migration_is_additive_and_seeds_its_singleton_state()
+    {
+        var migration = new InspectableAddGpuSchedulerDurabilityMigration();
+        var operations = migration.BuildUpOperations();
+
+        Assert.Contains(
+            operations.OfType<CreateSequenceOperation>(),
+            operation => operation.Name == "GpuMiniTaskCreatedSequence");
+        var createdSequence = Assert.Single(
+            operations.OfType<AddColumnOperation>(),
+            operation => operation.Table == "GpuMiniTasks" && operation.Name == "CreatedSequence");
+        Assert.True(createdSequence.IsNullable);
+        Assert.Null(createdSequence.DefaultValueSql);
+        Assert.Contains(
+            operations.OfType<SqlOperation>(),
+            operation => operation.Sql.Contains("ROW_NUMBER() OVER (ORDER BY [CreatedAtUtc], [Id])", StringComparison.Ordinal) &&
+                         operation.Sql.Contains("ALTER SEQUENCE [GpuMiniTaskCreatedSequence] RESTART WITH", StringComparison.Ordinal));
+        Assert.Contains(
+            operations.OfType<AlterColumnOperation>(),
+            operation => operation.Table == "GpuMiniTasks" && operation.Name == "CreatedSequence" &&
+                         !operation.IsNullable &&
+                         operation.DefaultValueSql == "NEXT VALUE FOR [GpuMiniTaskCreatedSequence]");
+        var handoffLeaseOwner = Assert.Single(
+            operations.OfType<AddColumnOperation>(),
+            operation => operation.Table == "GpuMiniTasks" && operation.Name == "HandoffLeaseOwner");
+        Assert.True(handoffLeaseOwner.IsNullable);
+        Assert.Contains(
+            operations.OfType<InsertDataOperation>(),
+            operation => operation.Table == "GpuSchedulerState");
+        Assert.Contains(
+            operations.OfType<AddCheckConstraintOperation>(),
+            operation =>
+                operation.Table == "GpuSchedulerState" &&
+                operation.Name == "CK_GpuSchedulerState_Singleton" &&
+                operation.Sql == "[Id] = 1");
+        Assert.DoesNotContain(
+            operations.OfType<DropTableOperation>(),
+            operation => operation.Name is "GpuMiniTasks" or "Jobs" or "PipelineRecords");
+        Assert.DoesNotContain(
+            operations.OfType<RenameColumnOperation>(),
+            operation => operation.Table == "GpuMiniTasks" && operation.Name == "State");
+    }
+
+    [Fact]
+    public void Gpu_scheduler_durability_migration_target_model_contains_the_in_flight_wake_fence()
+    {
+        var model = new InspectableAddGpuSchedulerDurabilityMigration().BuildTargetModel();
+        var scheduler = FindTable(model, "GpuSchedulerState");
+
+        AssertProperty<Guid?>(scheduler, "InFlightWakeOperationId");
+        AssertProperty<long?>(scheduler, "InFlightWakeGeneration");
+        AssertProperty<int>(scheduler, "InFlightWakeReasons");
+        AssertProperty<DateTimeOffset?>(scheduler, "InFlightNextDeferredAtUtc");
+        Assert.Contains(
+            scheduler.GetCheckConstraints(),
+            constraint =>
+                constraint.Name == "CK_GpuSchedulerState_InFlightWake" &&
+                constraint.Sql!.Contains("[InFlightWakeOperationId] IS NULL", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Every_scheduler_migration_target_after_durability_retains_the_complete_in_flight_wake_fence()
+    {
+        using var currentContext = CreateContext();
+        var targets = new (string Name, IModel Model)[]
+        {
+            (nameof(AddGpuSchedulerDurability), new InspectableAddGpuSchedulerDurabilityMigration().BuildTargetModel()),
+            (nameof(AddGpuSchedulerOperationReceipts), new InspectableAddGpuSchedulerOperationReceiptsMigration().BuildTargetModel()),
+            (nameof(CompleteGpuSchedulerOperationReceipts), new InspectableCompleteGpuSchedulerOperationReceiptsMigration().BuildTargetModel()),
+            (nameof(AddGpuSchedulerOperationReceiptRequestFingerprint), new InspectableAddGpuSchedulerOperationReceiptRequestFingerprintMigration().BuildTargetModel()),
+            (nameof(AddGpuSchedulerBinaryFenceCollation), new InspectableAddGpuSchedulerBinaryFenceCollationMigration().BuildTargetModel()),
+            (nameof(AddGpuSchedulerOpaqueKeyCanonicality), new InspectableAddGpuSchedulerOpaqueKeyCanonicalityMigration().BuildTargetModel()),
+            ("CurrentSnapshot", currentContext.Model)
+        };
+
+        foreach (var (name, model) in targets)
+        {
+            var scheduler = FindTable(model, "GpuSchedulerState");
+            AssertProperty<Guid?>(scheduler, "InFlightWakeOperationId");
+            AssertProperty<long?>(scheduler, "InFlightWakeGeneration");
+            AssertProperty<int>(scheduler, "InFlightWakeReasons");
+            AssertProperty<DateTimeOffset?>(scheduler, "InFlightNextDeferredAtUtc");
+            AssertProperty<int?>(scheduler, "InFlightEffectiveAdmissionReasons");
+            if (name != "CurrentSnapshot")
+            {
+                Assert.Contains(
+                    scheduler.GetCheckConstraints(),
+                    constraint =>
+                        constraint.Name == "CK_GpuSchedulerState_InFlightWake" &&
+                        constraint.Sql!.Contains("[InFlightEffectiveAdmissionReasons] IS NULL", StringComparison.Ordinal));
+            }
+
+            if (name == nameof(AddGpuSchedulerDurability))
+            {
+                continue;
+            }
+
+            var receipts = FindTable(model, "GpuSchedulerOperationReceipts");
+            AssertProperty<int?>(receipts, "EffectiveAdmissionReasons");
+        }
+    }
+
+    [Fact]
+    public void Gpu_scheduler_opaque_key_migration_adds_only_canonicality_constraints()
+    {
+        var migration = new InspectableAddGpuSchedulerOpaqueKeyCanonicalityMigration();
+        var operations = migration.BuildUpOperations();
+        var constraints = operations.OfType<AddCheckConstraintOperation>().ToList();
+
+        Assert.Equal(16, constraints.Count);
+        Assert.Contains(
+            constraints,
+            constraint =>
+                constraint.Table == "GpuCapacitySlots" &&
+                constraint.Name == "CK_GpuCapacitySlots_SlotKey_NoTrailingWhitespace" &&
+                constraint.Sql.Contains("UNICODE(RIGHT", StringComparison.Ordinal));
+        Assert.DoesNotContain(operations, operation => operation is DropTableOperation or AlterColumnOperation);
+        Assert.DoesNotContain(operations, operation => operation is UpdateDataOperation or DeleteDataOperation);
+    }
+
+    [Fact]
     public void Mutable_job_attempts_use_rowversion_concurrency()
     {
         using var context = CreateContext();
@@ -220,6 +472,40 @@ public sealed class SchemaMappingTests
         Assert.True(index.IsUnique);
     }
 
+    private static void AssertIndex(IModel model, string table, params string[] propertyNames)
+    {
+        var entityType = FindTable(model, table);
+        Assert.Contains(
+            entityType.GetIndexes(),
+            candidate => candidate.Properties.Select(property => property.Name).SequenceEqual(propertyNames));
+    }
+
+    private static void AssertBinaryCollation(
+        IModel model,
+        string table,
+        params string[] propertyNames)
+    {
+        var entityType = FindTable(model, table);
+        foreach (var propertyName in propertyNames)
+        {
+            var property = AssertProperty<string>(entityType, propertyName);
+            Assert.Equal("Latin1_General_100_BIN2", property.GetCollation());
+        }
+    }
+
+    private static void AssertNoTrailingWhitespaceConstraint(
+        IModel model,
+        string table,
+        string propertyName)
+    {
+        var entityType = FindTable(model, table);
+        var constraint = Assert.Single(
+            entityType.GetCheckConstraints(),
+            candidate => candidate.Name == $"CK_{table}_{propertyName}_NoTrailingWhitespace");
+        Assert.Contains("UNICODE(RIGHT", constraint.Sql, StringComparison.Ordinal);
+        Assert.Contains($"DATALENGTH([{propertyName}]) > 0", constraint.Sql, StringComparison.Ordinal);
+    }
+
     private static void AssertForeignKey(
         IModel model,
         string dependentTable,
@@ -237,6 +523,23 @@ public sealed class SchemaMappingTests
         Assert.Equal(
             principalProperties,
             foreignKey.PrincipalKey.Properties.Select(property => property.Name));
+    }
+
+    private static void AssertRestrictiveForeignKey(
+        IModel model,
+        string dependentTable,
+        string[] dependentProperties,
+        string principalTable,
+        string[] principalProperties)
+    {
+        AssertForeignKey(model, dependentTable, dependentProperties, principalTable, principalProperties);
+        var entityType = FindTable(model, dependentTable);
+        var foreignKey = Assert.Single(
+            entityType.GetForeignKeys(),
+            candidate =>
+                candidate.Properties.Select(property => property.Name).SequenceEqual(dependentProperties) &&
+                candidate.PrincipalEntityType.GetTableName() == principalTable);
+        Assert.Equal(DeleteBehavior.Restrict, foreignKey.DeleteBehavior);
     }
 
     private static IEntityType FindTable(IModel model, string table) =>
@@ -266,6 +569,56 @@ public sealed class SchemaMappingTests
             return builder.Operations;
         }
     }
+
+    private sealed class InspectableAddGpuSchedulerDurabilityMigration : AddGpuSchedulerDurability
+    {
+        public IReadOnlyList<MigrationOperation> BuildUpOperations()
+        {
+            var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.SqlServer");
+            Up(builder);
+            return builder.Operations;
+        }
+
+        public IModel BuildTargetModel() => TargetModel;
+    }
+
+    private sealed class InspectableAddGpuSchedulerOpaqueKeyCanonicalityMigration
+        : AddGpuSchedulerOpaqueKeyCanonicality
+    {
+        public IReadOnlyList<MigrationOperation> BuildUpOperations()
+        {
+            var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.SqlServer");
+            Up(builder);
+            return builder.Operations;
+        }
+
+        public IModel BuildTargetModel() => TargetModel;
+    }
+
+    private sealed class InspectableAddGpuSchedulerOperationReceiptsMigration
+        : AddGpuSchedulerOperationReceipts
+    {
+        public IModel BuildTargetModel() => TargetModel;
+    }
+
+    private sealed class InspectableCompleteGpuSchedulerOperationReceiptsMigration
+        : CompleteGpuSchedulerOperationReceipts
+    {
+        public IModel BuildTargetModel() => TargetModel;
+    }
+
+    private sealed class InspectableAddGpuSchedulerOperationReceiptRequestFingerprintMigration
+        : AddGpuSchedulerOperationReceiptRequestFingerprint
+    {
+        public IModel BuildTargetModel() => TargetModel;
+    }
+
+    private sealed class InspectableAddGpuSchedulerBinaryFenceCollationMigration
+        : AddGpuSchedulerBinaryFenceCollation
+    {
+        public IModel BuildTargetModel() => TargetModel;
+    }
+
 }
 
 public sealed class NativeSqlServerFixtureValidationTests
@@ -342,7 +695,7 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
     : IClassFixture<NativeSqlServerFixture>
 {
     [NativeSqlServerFact]
-    public async Task Native_migration_creates_only_the_generated_phase_one_catalog()
+    public async Task Native_migration_creates_only_the_generated_scheduler_catalog()
     {
         Assert.StartsWith(
             "FluxKnowledge_Phase1Tests_",
@@ -360,14 +713,79 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             WHERE [name] IN (
                 N'SourceIdentities', N'PipelineRecords', N'Jobs', N'JobAttempts',
                 N'OutboxMessages', N'Artifacts', N'TextChunks', N'Vectors',
-                N'IndexGenerations', N'IndexGenerationVectors', N'IndexState', N'AuditEvents', N'GpuMiniTasks');
+                N'IndexGenerations', N'IndexGenerationVectors', N'IndexState', N'AuditEvents', N'GpuMiniTasks',
+                N'GpuBatches', N'GpuCapacitySlots', N'GpuSchedulerState');
             """;
         await using var command = new SqlCommand(sql, connection);
         var tableCount = Convert.ToInt32(
             await command.ExecuteScalarAsync(),
             System.Globalization.CultureInfo.InvariantCulture);
 
-        Assert.Equal(13, tableCount);
+        Assert.Equal(16, tableCount);
+
+        const string schedulerSql =
+            """
+            SELECT
+                (SELECT COUNT(*) FROM [GpuSchedulerState] WHERE [Id] = 1),
+                (SELECT COUNT(*) FROM sys.sequences WHERE [name] = N'GpuMiniTaskCreatedSequence');
+            """;
+        await using var schedulerCommand = new SqlCommand(schedulerSql, connection);
+        await using var reader = await schedulerCommand.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Native_scheduler_state_constraint_rejects_any_non_singleton_row()
+    {
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var constraintCommand = new SqlCommand(
+            """
+            SELECT COUNT(*)
+            FROM sys.check_constraints
+            WHERE [parent_object_id] = OBJECT_ID(N'[GpuSchedulerState]')
+              AND [name] = N'CK_GpuSchedulerState_Singleton'
+              AND [definition] = N'([Id]=(1))';
+            """,
+            connection);
+        Assert.Equal(1, Convert.ToInt32(await constraintCommand.ExecuteScalarAsync()));
+
+        await using var insert = new SqlCommand(
+            """
+            INSERT INTO [GpuSchedulerState]
+                ([Id], [WakeGeneration], [PendingWakeReasons], [NextDeferredAtUtc], [UpdatedAtUtc])
+            VALUES (2, 0, 0, NULL, SYSUTCDATETIME());
+            """,
+            connection);
+        var error = await Assert.ThrowsAsync<SqlException>(async () => await insert.ExecuteNonQueryAsync());
+        Assert.Equal(547, error.Number);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Native_scheduler_fence_constraints_reject_trailing_whitespace()
+    {
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var constraintCommand = new SqlCommand(
+            """
+            SELECT COUNT(*)
+            FROM sys.check_constraints
+            WHERE [name] LIKE N'CK_Gpu%_NoTrailingWhitespace'
+               OR [name] LIKE N'CK_Jobs_%_NoTrailingWhitespace';
+            """,
+            connection);
+        Assert.Equal(16, Convert.ToInt32(await constraintCommand.ExecuteScalarAsync()));
+
+        await using var insert = new SqlCommand(
+            """
+            INSERT INTO [GpuCapacitySlots] ([SlotKey], [State], [UpdatedAtUtc])
+            VALUES (N'slot-a ', 0, SYSDATETIMEOFFSET());
+            """,
+            connection);
+        var error = await Assert.ThrowsAsync<SqlException>(async () => await insert.ExecuteNonQueryAsync());
+        Assert.Equal(547, error.Number);
     }
 
     [NativeSqlServerFact]
@@ -496,5 +914,293 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             candidate => candidate.VectorId == vectorId);
         Assert.Equal(new string('c', 64), migratedVector.TextChunkContentHash);
         Assert.Equal(new string('d', 64), migratedVector.PayloadChecksum);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Scheduler_migration_backfills_existing_task_sequence_in_creation_order_and_new_selection_stays_fifo()
+    {
+        await using var database = await fixture.CreateSchedulerPreviousMigrationDatabaseAsync();
+        var now = DateTimeOffset.Parse("2026-07-29T09:00:00+00:00");
+        var sourceId = Guid.NewGuid();
+        var recordId = Guid.NewGuid();
+        var jobId = Guid.NewGuid();
+        var olderTaskId = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        var newerTaskId = Guid.Parse("00000000-0000-0000-0000-000000000000");
+        var olderCreatedAtUtc = now.AddMinutes(-1);
+
+        await using (var context = database.CreateContext())
+        {
+            context.SourceIdentities.Add(new SourceIdentityEntity
+            {
+                Id = sourceId,
+                SourceKind = "scheduler-migration",
+                StableKey = $"scheduler-migration:{sourceId:N}",
+                CreatedAtUtc = now
+            });
+            context.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = recordId,
+                SourceIdentityId = sourceId,
+                Revision = 1,
+                ContentHash = new string('a', 64),
+                RootLineageRecordId = recordId,
+                CurrentStage = 1,
+                RegisteredAtUtc = now
+            });
+            context.Jobs.Add(new JobEntity
+            {
+                Id = jobId,
+                PipelineRecordId = recordId,
+                SourceRevision = 1,
+                Stage = 1,
+                Operation = "scheduler-migration",
+                PublicState = 2,
+                DueAtUtc = now
+            });
+            await context.SaveChangesAsync();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 INSERT INTO [GpuMiniTasks]
+                     ([Id], [ParentJobId], [SourceRevision], [PriorityLane], [ModelRuntimeKey],
+                      [SettingsFingerprint], [EstimatedBytes], [AdmissionGeneration], [IdempotencyKey],
+                      [State], [CreatedAtUtc])
+                 VALUES
+                     ({newerTaskId}, {jobId}, {1L}, {0}, {"scheduler-runtime"},
+                      {"scheduler-settings"}, {1L}, {0L}, {"scheduler-migration-newer"},
+                      {0}, {now}),
+                     ({olderTaskId}, {jobId}, {1L}, {0}, {"scheduler-runtime"},
+                      {"scheduler-settings"}, {1L}, {0L}, {"scheduler-migration-older"},
+                      {0}, {olderCreatedAtUtc});
+                 """);
+
+            await context.GetService<IMigrator>().MigrateAsync();
+        }
+
+        await using var verification = database.CreateContext();
+        var migrated = await verification.GpuMiniTasks
+            .Where(candidate => candidate.Id == olderTaskId || candidate.Id == newerTaskId)
+            .OrderBy(candidate => candidate.CreatedSequence)
+            .ToListAsync();
+        Assert.Equal([olderTaskId, newerTaskId], migrated.Select(candidate => candidate.Id));
+        Assert.All(migrated, candidate => Assert.Equal(0, candidate.ExecutionState));
+        Assert.True(migrated[0].CreatedSequence > 0);
+        Assert.True(migrated[1].CreatedSequence > migrated[0].CreatedSequence);
+        verification.GpuMiniTasks.Add(new GpuMiniTaskEntity
+        {
+            Id = Guid.NewGuid(), ParentJobId = jobId, SourceRevision = 1, PriorityLane = 0,
+            ModelRuntimeKey = "scheduler-runtime", SettingsFingerprint = "scheduler-settings",
+            EstimatedBytes = 1, IdempotencyKey = "scheduler-migration-new-row", ExecutionState = 0,
+            CreatedAtUtc = now.AddMinutes(1)
+        });
+        verification.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+        {
+            SlotKey = "slot-a", State = 0, UpdatedAtUtc = now
+        });
+        await verification.SaveChangesAsync();
+        Assert.True(await verification.GpuMiniTasks
+            .Where(candidate => candidate.IdempotencyKey == "scheduler-migration-new-row")
+            .Select(candidate => candidate.CreatedSequence)
+            .SingleAsync() > migrated[1].CreatedSequence);
+        Assert.Equal(1, await verification.GpuSchedulerStates.CountAsync(state => state.Id == 1));
+
+        var store = new SqlGpuSchedulerStore(new DirectContextFactory(database.ConnectionString));
+        var admission = await store.RunAdmissionRoundAsync(
+            Guid.NewGuid(),
+            GpuSchedulerWakeReason.WorkReady,
+            new GpuSchedulerOptions(1, 1, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1)),
+            (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "slot-a", "test-owner", null)),
+            CancellationToken.None);
+        Assert.True(admission.Committed);
+        await using var selected = database.CreateContext();
+        Assert.Equal(olderTaskId, await selected.GpuMiniTasks
+            .Where(candidate => candidate.ExecutionState == (int)GpuMiniTaskExecutionState.Active)
+            .Select(candidate => candidate.Id)
+            .SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Gpu_scheduler_binary_fence_migration_upgrades_existing_slot_and_batch_constraints()
+    {
+        await using var database = await fixture.CreateGpuSchedulerFencePreviousMigrationDatabaseAsync();
+        var now = DateTimeOffset.Parse("2026-08-02T18:00:00+00:00");
+        var batchId = Guid.NewGuid();
+
+        await using (var context = database.CreateContext())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+            {
+                SlotKey = "slot-a",
+                State = 0,
+                UpdatedAtUtc = now
+            });
+            context.GpuBatches.Add(new GpuBatchEntity
+            {
+                Id = batchId,
+                CapacitySlotKey = "slot-a",
+                PriorityLane = 0,
+                ModelRuntimeKey = "runtime-a",
+                SettingsFingerprint = "settings-a",
+                ItemCount = 1,
+                EstimatedBytes = 1,
+                AdmissionGeneration = 1,
+                OwnerKey = "owner-a",
+                State = 0,
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            });
+            await context.SaveChangesAsync();
+
+            await context.GetService<IMigrator>().MigrateAsync();
+        }
+
+        await using var verification = database.CreateContext();
+        Assert.Equal(batchId, await verification.GpuBatches
+            .Where(candidate => candidate.CapacitySlotKey == "slot-a")
+            .Select(candidate => candidate.Id)
+            .SingleAsync());
+
+        await using var connection = new SqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var collationCommand = new SqlCommand(
+            """
+            SELECT [collation_name]
+            FROM sys.columns
+            WHERE [object_id] = OBJECT_ID(N'[GpuCapacitySlots]')
+              AND [name] = N'SlotKey';
+            """,
+            connection);
+        Assert.Equal(
+            "Latin1_General_100_BIN2",
+            Convert.ToString(await collationCommand.ExecuteScalarAsync(), System.Globalization.CultureInfo.InvariantCulture));
+
+        await using var foreignKeyCommand = new SqlCommand(
+            """
+            SELECT COUNT(*)
+            FROM sys.foreign_keys
+            WHERE [name] = N'FK_GpuBatches_GpuCapacitySlots_CapacitySlotKey';
+            """,
+            connection);
+        Assert.Equal(1, Convert.ToInt32(await foreignKeyCommand.ExecuteScalarAsync()));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Gpu_scheduler_receipt_upgrade_adds_the_durable_consumption_token_column()
+    {
+        await using var database = await fixture.CreateGpuSchedulerReceiptPreviousMigrationDatabaseAsync();
+        await using (var context = database.CreateContext())
+        {
+            await context.GetService<IMigrator>().MigrateAsync();
+        }
+
+        await using var connection = new SqlConnection(database.ConnectionString);
+        await connection.OpenAsync();
+        await using var columnCommand = new SqlCommand(
+            """
+            SELECT COUNT(*)
+            FROM sys.columns
+            WHERE [object_id] = OBJECT_ID(N'[GpuSchedulerOperationReceipts]')
+              AND [name] = N'WakeConsumptionOperationId'
+              AND [system_type_id] = TYPE_ID(N'uniqueidentifier');
+            """,
+            connection);
+
+        Assert.Equal(1, Convert.ToInt32(await columnCommand.ExecuteScalarAsync()));
+    }
+
+    [NativeSqlServerFact]
+    public async Task Gpu_scheduler_opaque_key_migration_fails_safely_on_existing_trailing_whitespace()
+    {
+        await using var database = await fixture.CreateGpuSchedulerOpaqueKeyPreviousMigrationDatabaseAsync();
+        var now = DateTimeOffset.Parse("2026-08-02T19:00:00+00:00");
+
+        await using (var context = database.CreateContext())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+            {
+                SlotKey = "slot-a ",
+                State = 0,
+                UpdatedAtUtc = now
+            });
+            await context.SaveChangesAsync();
+
+            var failure = await Assert.ThrowsAsync<SqlException>(
+                async () => await context.GetService<IMigrator>().MigrateAsync());
+            Assert.Equal(547, failure.Number);
+        }
+
+        await using var verification = database.CreateContext();
+        Assert.Equal(
+            "slot-a ",
+            await verification.GpuCapacitySlots
+                .Select(candidate => candidate.SlotKey)
+                .SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Gpu_scheduler_opaque_key_migration_fails_safely_on_existing_empty_required_key()
+    {
+        await using var database = await fixture.CreateGpuSchedulerOpaqueKeyPreviousMigrationDatabaseAsync();
+        var now = DateTimeOffset.Parse("2026-08-02T19:00:00+00:00");
+
+        await using (var context = database.CreateContext())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+            {
+                SlotKey = string.Empty,
+                State = 0,
+                UpdatedAtUtc = now
+            });
+            await context.SaveChangesAsync();
+
+            var failure = await Assert.ThrowsAsync<SqlException>(
+                async () => await context.GetService<IMigrator>().MigrateAsync());
+            Assert.Equal(547, failure.Number);
+        }
+
+        await using var verification = database.CreateContext();
+        Assert.Equal(
+            string.Empty,
+            await verification.GpuCapacitySlots
+                .Select(candidate => candidate.SlotKey)
+                .SingleAsync());
+    }
+
+    [NativeSqlServerFact]
+    public async Task Gpu_scheduler_opaque_key_migration_fails_safely_on_existing_empty_nullable_key()
+    {
+        await using var database = await fixture.CreateGpuSchedulerOpaqueKeyPreviousMigrationDatabaseAsync();
+        var now = DateTimeOffset.Parse("2026-08-02T19:00:00+00:00");
+
+        await using (var context = database.CreateContext())
+        {
+            context.GpuCapacitySlots.Add(new GpuCapacitySlotEntity
+            {
+                SlotKey = "slot-a",
+                OwnerKey = string.Empty,
+                State = 0,
+                UpdatedAtUtc = now
+            });
+            await context.SaveChangesAsync();
+
+            var failure = await Assert.ThrowsAsync<SqlException>(
+                async () => await context.GetService<IMigrator>().MigrateAsync());
+            Assert.Equal(547, failure.Number);
+        }
+
+        await using var verification = database.CreateContext();
+        Assert.Equal(
+            string.Empty,
+            await verification.GpuCapacitySlots
+                .Select(candidate => candidate.OwnerKey)
+                .SingleAsync());
+    }
+
+    private sealed class DirectContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
+    {
+        public FluxKnowledgeDbContext CreateDbContext() => new(
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>().UseSqlServer(connectionString).Options);
+
+        public Task<FluxKnowledgeDbContext> CreateDbContextAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(CreateDbContext());
     }
 }

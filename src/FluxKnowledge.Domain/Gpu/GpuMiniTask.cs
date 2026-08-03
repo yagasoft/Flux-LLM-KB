@@ -23,6 +23,12 @@ public sealed record GpuMiniTask
 
     public string IdempotencyKey { get; private init; }
 
+    public GpuMiniTaskExecutionState ExecutionState { get; private init; }
+
+    public DateTimeOffset? DeferredUntilUtc { get; private init; }
+
+    public Guid? BatchId { get; private init; }
+
     public PublicJobState InitialParentJobState => PublicJobState.GpuQueued;
 
     public static GpuMiniTask Create(
@@ -32,21 +38,38 @@ public sealed record GpuMiniTask
         string modelRuntimeKey,
         string settingsFingerprint,
         long estimatedBytes,
-        long admissionGeneration,
         string idempotencyKey)
     {
         ArgumentNullException.ThrowIfNull(parentJobId);
         ArgumentException.ThrowIfNullOrWhiteSpace(modelRuntimeKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(settingsFingerprint);
         ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
-        if (sourceRevision <= 0 || estimatedBytes < 0 || admissionGeneration < 0)
+        RequireCanonicalOpaqueKey(modelRuntimeKey, nameof(modelRuntimeKey));
+        RequireCanonicalOpaqueKey(settingsFingerprint, nameof(settingsFingerprint));
+        RequireCanonicalOpaqueKey(idempotencyKey, nameof(idempotencyKey));
+        if (!Enum.IsDefined(priorityLane))
+        {
+            throw new DomainInvariantException("GPU mini-task priority lane is invalid.");
+        }
+
+        if (sourceRevision <= 0 || estimatedBytes <= 0)
         {
             throw new DomainInvariantException("GPU mini-task numeric values are invalid.");
         }
 
         return new GpuMiniTask(
             Guid.NewGuid(), parentJobId, sourceRevision, priorityLane, modelRuntimeKey,
-            settingsFingerprint, estimatedBytes, admissionGeneration, idempotencyKey);
+            settingsFingerprint, estimatedBytes, idempotencyKey);
+    }
+
+    private static void RequireCanonicalOpaqueKey(string value, string parameterName)
+    {
+        if (char.IsWhiteSpace(value[^1]))
+        {
+            throw new ArgumentException(
+                "GPU mini-task opaque keys cannot end with whitespace.",
+                parameterName);
+        }
     }
 
     private GpuMiniTask(
@@ -57,7 +80,6 @@ public sealed record GpuMiniTask
         string modelRuntimeKey,
         string settingsFingerprint,
         long estimatedBytes,
-        long admissionGeneration,
         string idempotencyKey)
     {
         Id = id;
@@ -67,7 +89,10 @@ public sealed record GpuMiniTask
         ModelRuntimeKey = modelRuntimeKey;
         SettingsFingerprint = settingsFingerprint;
         EstimatedBytes = estimatedBytes;
-        AdmissionGeneration = admissionGeneration;
         IdempotencyKey = idempotencyKey;
+        ExecutionState = GpuMiniTaskExecutionState.Ready;
+        DeferredUntilUtc = null;
+        BatchId = null;
+        AdmissionGeneration = 0;
     }
 }

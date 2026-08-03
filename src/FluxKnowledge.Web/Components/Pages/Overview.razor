@@ -39,6 +39,31 @@
     </dl>
 </section>
 
+<section aria-labelledby="gpu-scheduler-heading">
+    <h2 id="gpu-scheduler-heading">Local GPU scheduler</h2>
+    <p>Read-only local scheduler summary.</p>
+    <dl class="status-grid">
+        <div><dt>Scheduler ready</dt><dd><StatusCount Value="ProjectionState.Current.GpuSchedulerStatus.ReadyCount" /></dd></div>
+        <div><dt>Scheduler active</dt><dd><StatusCount Value="ProjectionState.Current.GpuSchedulerStatus.ActiveCount" /></dd></div>
+        <div><dt>Scheduler deferred</dt><dd><StatusCount Value="ProjectionState.Current.GpuSchedulerStatus.DeferredCount" /></dd></div>
+        <div><dt>Scheduler outcome uncertain</dt><dd><StatusCount Value="ProjectionState.Current.GpuSchedulerStatus.OutcomeUncertainCount" /></dd></div>
+        <div><dt>Scheduler slots available</dt><dd><StatusCount Value="ProjectionState.Current.GpuSchedulerStatus.AvailableSlotCount" /></dd></div>
+        <div><dt>Scheduler slots reserved</dt><dd><StatusCount Value="ProjectionState.Current.GpuSchedulerStatus.ReservedSlotCount" /></dd></div>
+        <div><dt>Scheduler slots uncertain</dt><dd><StatusCount Value="ProjectionState.Current.GpuSchedulerStatus.UncertainSlotCount" /></dd></div>
+        <div><dt>Scheduler active batch</dt><dd>@(ProjectionState.Current.GpuSchedulerStatus.HasActiveBatch ? "Present" : "None")</dd></div>
+        @if (ProjectionState.Current.GpuSchedulerStatus.ActiveBatchLane is { } activeBatchLane)
+        {
+            <div><dt>Scheduler active batch lane</dt><dd>@activeBatchLane</dd></div>
+        }
+        <div><dt>Scheduler next retry</dt><dd>@(ProjectionState.Current.GpuSchedulerStatus.NextDeferredAtUtc?.ToString("O") ?? "None")</dd></div>
+        <div><dt>Scheduler uncertain capacity</dt><dd>@ProjectionState.Current.GpuSchedulerStatus.UncertainCapacity.State</dd></div>
+        @if (ProjectionState.Current.GpuSchedulerStatus.UncertainCapacity.AgeMinutes is { } ageMinutes)
+        {
+            <div><dt>Scheduler uncertain capacity age</dt><dd>@ageMinutes minute(s)</dd></div>
+        }
+    </dl>
+</section>
+
 @code {
     private readonly CancellationTokenSource _stopping = new();
     private StatusEventSubscription? _subscription;

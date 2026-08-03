@@ -3,6 +3,38 @@
 Flux-LLM-KB is local-first. Runtime data belongs in your local PostgreSQL
 database, not in this repository.
 
+## Active native Windows replacement
+
+The active replacement is the loopback-only IIS application named
+`FluxKnowledge`, backed by local SQL Server and an immutable USearch
+projection. Its release path is native .NET only: it does not start or test the
+preserved Python, Docker, RabbitMQ, Vespa, dashboard, model or GPU runtime.
+
+Before a real feature closeout, configure an explicitly disposable server-level
+SQL connection for the native integration suite. The closeout script refuses to
+continue without it. The normal local release command is:
+
+```powershell
+$env:FLUXKNOWLEDGE_TEST_SQL_CONNECTION = 'Server=localhost;Integrated Security=true;Encrypt=true;TrustServerCertificate=true'
+.\scripts\dev\complete-feature.ps1 -ApplyMigrations -ConfirmApplyMigrations
+```
+
+This validates the native solution, merges and purges only the completed
+`codex/*` worktree, then deploys only the `FluxKnowledge` IIS site at
+`http://127.0.0.1:5137`. It preserves target-only `appsettings*.json`, creates
+and verifies a local SQL backup before the confirmed migration, retains the old
+payload for rollback, and probes liveness, readiness, index health, scheduler
+status, search and SQL readiness. Inspect the target without changing it with:
+
+```powershell
+.\scripts\deploy\update-native-windows.ps1 -PreflightOnly -ApplyMigrations -ConfirmApplyMigrations
+```
+
+## Preserved legacy Docker reference
+
+The remaining Docker/Python guidance is retained solely for unmerged legacy
+work. It is not part of the active native test, closeout or deployment path.
+
 ## Prerequisites
 
 - Python 3.11+
@@ -124,29 +156,14 @@ stops instead of downloading a replacement. Prefetch missing Python wheels only
 as an explicit operator action, then rebuild `flux-llm-kb-wheelhouse:local`
 from the persistent host cache before building from the cache.
 
-Feature closeout through `scripts/dev/complete-feature.ps1` uses only local npm,
-pip, and Docker dependencies by default. It runs npm in offline mode and passes
-`-PipOffline:$true` into production deploy. A missing package or image stops
-the operation instead of silently downloading a replacement. Docker Compose
-starts and model-download runs use `--pull never`; the existing
-`flux-ollama:local` runtime is discovered and reused when the upstream Ollama
-base tag is not local, preserving its revision and runtime-fingerprint labels.
-
-```powershell
-npm --prefix dashboard ci --include=dev --cache "J:\FluxLLMKB\package-cache\npm" --offline
-```
-
-Network refreshes require explicit operator intent. Use `-AllowImagePull` only
-when an image must be downloaded, and use `-AllowPackageRefresh` before setting
-`-PipOffline:$false` or `-NpmOffline:$false` to permit a package refresh. The
-same flags are available on feature closeout; its normal path never enables
-either one.
+The old Compose closeout flags do not apply to
+`scripts/dev/complete-feature.ps1`. That script now owns only the native .NET,
+SQL Server and IIS route described above. Retained Compose commands must be run
+only from an explicitly authorised legacy branch.
 
 ```powershell
 .\scripts\deploy\update-flux.ps1 -AllowImagePull
 .\scripts\deploy\update-flux.ps1 -AllowPackageRefresh -PipOffline:$false -NpmOffline:$false
-.\scripts\dev\complete-feature.ps1 -AllowImagePull
-.\scripts\dev\complete-feature.ps1 -AllowPackageRefresh
 ```
 
 Use `-DockerBaseMode python` only when Docker Desktop reports a local build-base

@@ -1,4 +1,5 @@
 using System.Net;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
@@ -11,6 +12,7 @@ using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Web;
+using FluxKnowledge.Web.Components.Status;
 using FluxKnowledge.Web.Endpoints;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -82,6 +84,10 @@ public sealed class WebHostCompositionTests : IDisposable
         _ = scope.ServiceProvider.GetRequiredService<RegisterUtf8FileHandler>();
         _ = scope.ServiceProvider.GetRequiredService<
             IDbContextFactory<FluxKnowledgeDbContext>>();
+        Assert.IsType<SqlGpuSchedulerStore>(
+            scope.ServiceProvider.GetRequiredService<IGpuSchedulerStore>());
+        Assert.IsType<SqlProjectionReader>(
+            scope.ServiceProvider.GetRequiredService<IProjectionReader>());
     }
 
     [Fact]

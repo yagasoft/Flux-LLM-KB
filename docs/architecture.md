@@ -13,6 +13,55 @@ The complete durable pipeline, compatibility, integration, GPU, retrieval,
 installation and phased-delivery design is in
 [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md).
 
+## Phase 2 local scheduler foundation
+
+The implemented Phase 2 scheduler is a SQL Server-authoritative durable control
+plane, not a model, GPU or result executor. Mini-task hand-off, scheduler wake
+state, batch and capacity ownership, and lifecycle receipts are committed in
+SQL before local wake or presentation notifications. The status projection is
+an aggregate read from committed scheduler SQL tables, not a persisted status
+object. Notifications are hints only; scheduler and reconnect handling reread
+durable SQL state.
+
+- **Priority and batching.** Admission selects the first eligible lane in the
+  declared order: Interactive Retrieval, Document Indexing, Image OCR, Image
+  Enrichment, then Video or Unknown. Within a lane it uses `CreatedSequence`
+  and then the task identifier for FIFO tie-breaking. A batch is a contiguous,
+  compatible prefix with the same runtime and settings, bounded by configured
+  item and byte limits; it does not bypass an earlier incompatible task.
+- **Admission scope.** One admission round runs in a serializable SQL
+  transaction and holds the transaction-scoped
+  `FluxKnowledge.GpuScheduler.Admission` application lock. The lock fences
+  selection and admission against concurrent schedulers; it is not evidence of
+  physical capacity or executor ownership. A service pass normally acts on
+  durable wake evidence; when SQL has no pending wake, it deliberately executes
+  one `StartupRecovery` admission pass. It does not blindly start a next
+  individual task.
+- **No time-based release.** Elapsed lease, owner or heartbeat age never
+  requeues Active or OutcomeUncertain work and never makes a capacity slot
+  Available. Time can produce diagnostic evidence only.
+- **Explicit lifecycle fences.** A callback must match the batch, capacity slot,
+  owner and admission generation. A retained safe boundary keeps capacity
+  reserved. Capacity becomes Available only through a matching,
+  capacity-releasing boundary or trusted reconciliation; releasing boundaries
+  record every affected task as completed or outcome-uncertain before the
+  durable release.
+- **Uncertainty and reconciliation.** The hosted scheduler uses the configured
+  stale-reservation heartbeat age only as diagnostic evidence. On a deterministic
+  due schedule, it submits an explicit fenced uncertainty transition for a
+  matching `Reserved` slot; that moves the slot to `Uncertain` and batch to
+  `CapacityUncertain`, blocks admission, and leaves associated tasks and parent
+  jobs active. It does not make capacity available, requeue work, replace
+  results, or establish executor, process or driver absence. Trusted capacity
+  reconciliation still requires a trusted evidence-class assertion; trusted
+  task-outcome reconciliation can record unresolved outcomes without releasing
+  capacity. Real executor/process/driver evidence collection remains a future
+  executor/result-stage responsibility.
+- **Local status.** `GET /api/gpu-status` and the Overview expose only
+  sanitised aggregate scheduler state. They have no scheduler action route,
+  never expose identifiers or runtime values, and return a bodyless 503 for
+  expected projection/database failures while preserving request cancellation.
+
 Legacy architecture below remains a compatibility reference only. It is not the
 target architecture for this branch and must not be deleted until local
 replacement, SQL-to-USearch rebuild and explicit cutover approval exist.
