@@ -32,6 +32,8 @@ public sealed class OutboxWorkerRegistrationTests
 
         Assert.IsType<NoGpuAdmissionGate>(provider.GetRequiredService<IGpuAdmissionGate>());
         Assert.Contains(provider.GetServices<IHostedService>(), service => service is GpuSchedulerService);
+        Assert.Contains(provider.GetServices<IHostedService>(), service => service is GpuExecutorDispatchRecoveryService);
+        Assert.Empty(provider.GetServices<IGpuExecutorAdapter>());
     }
 
     [Fact]
@@ -44,5 +46,6 @@ public sealed class OutboxWorkerRegistrationTests
         using var provider = services.BuildServiceProvider();
 
         Assert.Single(provider.GetServices<IHostedService>().OfType<GpuSchedulerService>());
+        Assert.Single(provider.GetServices<IHostedService>().OfType<GpuExecutorDispatchRecoveryService>());
     }
 }

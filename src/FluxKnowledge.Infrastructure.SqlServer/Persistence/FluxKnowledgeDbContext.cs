@@ -23,6 +23,9 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<GpuCapacitySlotEntity> GpuCapacitySlots => Set<GpuCapacitySlotEntity>();
     public DbSet<GpuSchedulerStateEntity> GpuSchedulerStates => Set<GpuSchedulerStateEntity>();
     public DbSet<GpuSchedulerOperationReceiptEntity> GpuSchedulerOperationReceipts => Set<GpuSchedulerOperationReceiptEntity>();
+    public DbSet<GpuExecutorDispatchEntity> GpuExecutorDispatches => Set<GpuExecutorDispatchEntity>();
+    public DbSet<GpuExecutorResultReceiptEntity> GpuExecutorResultReceipts => Set<GpuExecutorResultReceiptEntity>();
+    public DbSet<GpuExecutorEvidenceEntity> GpuExecutorEvidence => Set<GpuExecutorEvidenceEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

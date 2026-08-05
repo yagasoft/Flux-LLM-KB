@@ -256,33 +256,44 @@ model keys, process evidence or mutation controls.
 | Public-surface safety | Status stays sanitised and read-only; no public mutation route exists. |
 | Deployment safety | Only disposable-SQL verification is in scope. IIS, deployment configuration and external exposure remain unchanged. |
 
-## Future verification sequence
+## Verified implementation evidence (2026-08-05)
 
-1. Add failing domain tests for handle validation, receipt idempotency and
-   capacity/result separation.
-2. Add the EF migration and SQL-store tests against generated disposable
-   catalogues, including injected transaction failures and parallel callbacks.
-3. Add the test-only fake executor and hosted restart/lost-notification tests.
-4. Add sanitised read-only projection tests with no mutation route.
-5. Run locked restore, a zero-warning Release build and the full native test
-   suite. Do not run process, model/GPU, external, legacy or deployment work.
-6. Seek separate approval before a real process manager, driver/runtime
-   reconciliation, model/GPU activation, deployment or production migration.
+The durable adapter/receipt boundary and deterministic test-only fake are
+implemented. Disposable native SQL tests cover atomic dispatch creation and
+rollback, opaque handle fencing, immutable receipt/evidence records, duplicate,
+late and mismatched lifecycle calls, recovery after a lost prompt or restart,
+unresponsive-adapter diagnostics, and elapsed-time non-release behaviour.
 
-## Roadmap wording updated on approval
+The public-surface proof seeds distinct private executor, dispatch, receipt,
+slot, batch, task, verifier and digest values in the real SQL projection fixture.
+`GET /api/gpu-status` excludes every seeded value, retains its exact sanitised
+aggregate DTO, returns `405` for mutation verbs and emits a bodyless expected
+failure `503`. Normal production composition resolves `NoGpuAdmissionGate`, one
+idempotently registered recovery hosted service and zero `IGpuExecutorAdapter`
+registrations; no deployed adapter or process exists.
 
-The following wording in docs/roadmap.md now records the approved design without
-claiming implementation progress:
+The closeout matrix passed locked restore, a zero-warning Release build, Domain
+188/188, disposable native SQL Integration 248/248 and native Web 49/49. One
+browser-only Web test was skipped outside this native-only matrix. The full
+matrix also exposed and corrected two stale test-maintenance cases from earlier
+approved work: the scheduler-fence expected constraint count is 25 after the
+nine executor-boundary constraints, and a migration FIFO test now supplies its
+required test executor key. No production validation was relaxed.
 
-- The P0 Pipeline durability, scheduler and rebuild invariants row should
-  distinguish this approved durable adapter/receipt design from its future
-  implementation slice, then separately approval-gated real process management,
-  termination evidence, runtime/driver reconciliation and model/GPU activation.
-- The Phase 2 scheduler foundation section should link this design and say that
-  the delivered scheduler still has no active executor; its remaining-work text
-  must retain separate external-access and legacy gates.
-- No roadmap progress percentage has increased. Progress changes only after
-  implementation and disposable-SQL acceptance evidence.
+## Further approval-gated work
+
+Seek separate approval before real process management, process-termination
+evidence, runtime/driver reconciliation, model/GPU activation, deployment or a
+production migration. External access and legacy work remain separate gates.
+
+## Roadmap wording after verified implementation
+
+`docs/roadmap.md` records the verified durable boundary and disposable-SQL
+evidence while retaining the P0 Pipeline durability, scheduler and rebuild
+invariants item at 80%. The implementation does not justify a broader progress
+increase because real process management and termination evidence,
+runtime/driver reconciliation, model/GPU activation, external access and legacy
+work remain approval-gated.
 
 ## Approval boundary
 

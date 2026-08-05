@@ -80,13 +80,14 @@ remote database dependency.
   only the backup path and migration identifiers.  It refuses a catalog that
   lacks the four known Phase 1 baseline migrations, so it cannot initialise an
   unknown database during release.
-- The six scheduler migrations are additive scheduler tables/columns/indexes,
-  plus binary-collation and canonical-key constraints.  Existing `Jobs` values
-  are validated by SQL during the collation/constraint step; failure stops the
-  deployment before payload placement.  The script never silently bypasses a
+- The seven scheduler migrations are additive scheduler tables/columns/indexes,
+  binary-collation and canonical-key constraints, and the executor-dispatch,
+  immutable-receipt and trusted-evidence tables. Existing `Jobs` values are
+  validated by SQL during the collation/constraint step; failure stops the
+  deployment before payload placement. The script never silently bypasses a
   failed migration.
 - The migration command is pinned to
-  `20260802191240_AddGpuSchedulerOpaqueKeyCanonicality`; a later unreviewed
+  `20260805112341_AddGpuExecutorDispatchAndReceipts`; a later unreviewed
   migration cannot enter this release through the same confirmation.
 - The staged payload replaces the deployment directory only after preflight
   and any authorised migration have succeeded.  The previous payload is kept
@@ -110,7 +111,7 @@ remote database dependency.
   before it stops the app pool or changes SQL.
 - A deployment preserves target-only configuration, creates and verifies a
   SQL backup before the approved migration, and leaves a rollback payload.
-- All six pending Phase 2 migrations appear in SQL migration history after the
+- All seven pending Phase 2 migrations appear in SQL migration history after the
   authorised update.
 - The loopback site returns 200 from every required liveness, readiness,
   index-health and scheduler-status endpoint, and native SQL validation

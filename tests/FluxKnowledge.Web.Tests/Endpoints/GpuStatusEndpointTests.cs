@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Gpu;
@@ -233,8 +234,20 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
         var nextDeferredAtUtc = now.AddMinutes(5);
         var factory = new TestDbContextFactory(_fixture.ConnectionString);
         var batchId = Guid.Parse("11111111-2222-3333-4444-555555555555");
+        var dispatchId = Guid.Parse("66666666-7777-8888-9999-aaaaaaaaaaaa");
+        var receiptOperationId = Guid.Parse("bbbbbbbb-cccc-dddd-eeee-ffffffffffff");
+        var evidenceOperationId = Guid.Parse("01234567-89ab-cdef-0123-456789abcdef");
+        var privateDigest = Encoding.UTF8.GetBytes("private-result-digest-marker-000");
         await ClearSchedulerStatusAsync(factory);
-        await SeedSchedulerStatusAsync(factory, now, nextDeferredAtUtc, batchId);
+        await SeedSchedulerStatusAsync(
+            factory,
+            now,
+            nextDeferredAtUtc,
+            batchId,
+            dispatchId,
+            receiptOperationId,
+            evidenceOperationId,
+            privateDigest);
         await using var application = await CreateApplicationAsync(factory, now);
 
         using var response = await application.GetTestClient().GetAsync("/api/gpu-status");
@@ -264,9 +277,17 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
 
         Assert.DoesNotContain("C:\\private\\input.txt", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("mini-task-id-0001", payload, StringComparison.Ordinal);
-        Assert.DoesNotContain(batchId.ToString("N"), payload, StringComparison.Ordinal);
-        Assert.DoesNotContain("slot/private", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-task-idempotency-key", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(batchId.ToString(), payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(dispatchId.ToString(), payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(receiptOperationId.ToString(), payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(evidenceOperationId.ToString(), payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-dispatch-slot-key", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("owner/private", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-executor-key", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-verifier-key", payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(Convert.ToBase64String(privateDigest), payload, StringComparison.Ordinal);
+        Assert.DoesNotContain(Convert.ToHexString(privateDigest), payload, StringComparison.Ordinal);
         Assert.DoesNotContain("runtime/private", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("settings/private", payload, StringComparison.Ordinal);
         Assert.DoesNotContain("2026-07-28T12:00:00+00:00", payload, StringComparison.Ordinal);
@@ -330,7 +351,11 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
         IDbContextFactory<FluxKnowledgeDbContext> factory,
         DateTimeOffset now,
         DateTimeOffset nextDeferredAtUtc,
-        Guid batchId)
+        Guid batchId,
+        Guid dispatchId,
+        Guid receiptOperationId,
+        Guid evidenceOperationId,
+        byte[] privateDigest)
     {
         await using var context = await factory.CreateDbContextAsync();
         context.GpuCapacitySlots.AddRange(
@@ -342,7 +367,7 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
             },
             new GpuCapacitySlotEntity
             {
-                SlotKey = "slot/private",
+                SlotKey = "private-dispatch-slot-key",
                 State = (int)GpuCapacitySlotState.Reserved,
                 OwnerKey = "owner/private",
                 LastHeartbeatAtUtc = now.AddMinutes(-2),
@@ -359,7 +384,7 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
         context.GpuBatches.Add(new GpuBatchEntity
         {
             Id = batchId,
-            CapacitySlotKey = "slot/private",
+            CapacitySlotKey = "private-dispatch-slot-key",
             PriorityLane = (int)GpuPriorityLane.DocumentIndexing,
             ModelRuntimeKey = "runtime/private",
             SettingsFingerprint = "settings/private",
@@ -374,8 +399,48 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
         });
         AddMiniTask(context, now, "mini-task-id-0001", GpuPriorityLane.InteractiveRetrieval, GpuMiniTaskExecutionState.Ready, null, null);
         AddMiniTask(context, now, "mini-task-id-0002", GpuPriorityLane.DocumentIndexing, GpuMiniTaskExecutionState.Ready, nextDeferredAtUtc, null);
-        AddMiniTask(context, now, "mini-task-id-0003", GpuPriorityLane.DocumentIndexing, GpuMiniTaskExecutionState.Active, null, batchId);
+        var activeMiniTaskId = AddMiniTask(context, now, "private-task-idempotency-key", GpuPriorityLane.DocumentIndexing, GpuMiniTaskExecutionState.Active, null, batchId);
         AddMiniTask(context, now, "mini-task-id-0004", GpuPriorityLane.ImageOcr, GpuMiniTaskExecutionState.OutcomeUncertain, null, null);
+        context.GpuExecutorDispatches.Add(new GpuExecutorDispatchEntity
+        {
+            DispatchId = dispatchId,
+            BatchId = batchId,
+            CapacitySlotKey = "private-dispatch-slot-key",
+            OwnerKey = "owner/private",
+            ExecutorKey = "private-executor-key",
+            AdmissionGeneration = 1,
+            State = (int)GpuExecutorDispatchState.ReceiptRecorded,
+            AcknowledgedAtUtc = now,
+            UpdatedAtUtc = now
+        });
+        context.GpuExecutorResultReceipts.Add(new GpuExecutorResultReceiptEntity
+        {
+            OperationId = receiptOperationId,
+            DispatchId = dispatchId,
+            BatchId = batchId,
+            MiniTaskId = activeMiniTaskId,
+            ExecutorKey = "private-executor-key",
+            AdmissionGeneration = 1,
+            Disposition = (int)GpuMiniTaskBoundaryDisposition.Completed,
+            EvidenceClass = (int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed,
+            OpaqueResultDigest = privateDigest,
+            RequestFingerprint = "private-receipt-fingerprint",
+            CreatedAtUtc = now
+        });
+        context.GpuExecutorEvidence.Add(new GpuExecutorEvidenceEntity
+        {
+            OperationId = evidenceOperationId,
+            DispatchId = dispatchId,
+            BatchId = batchId,
+            CapacitySlotKey = "private-dispatch-slot-key",
+            ExecutorKey = "private-executor-key",
+            AdmissionGeneration = 1,
+            EvidenceClass = (int)GpuExecutorEvidenceClass.TaskOutcomeConfirmed,
+            VerifierKey = "private-verifier-key",
+            ObservedAtUtc = now,
+            RequestFingerprint = "private-evidence-fingerprint",
+            CreatedAtUtc = now
+        });
         var scheduler = await context.GpuSchedulerStates.SingleAsync(state => state.Id == 1);
         scheduler.NextDeferredAtUtc = nextDeferredAtUtc;
         scheduler.UpdatedAtUtc = now;
@@ -386,6 +451,9 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
     {
         await using var context = await factory.CreateDbContextAsync();
         await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
+        await context.GpuExecutorEvidence.ExecuteDeleteAsync();
+        await context.GpuExecutorResultReceipts.ExecuteDeleteAsync();
+        await context.GpuExecutorDispatches.ExecuteDeleteAsync();
         await context.GpuMiniTasks.ExecuteDeleteAsync();
         await context.GpuCapacitySlots
             .Where(slot => slot.ActiveBatchId != null)
@@ -400,7 +468,7 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
         await context.SaveChangesAsync();
     }
 
-    private static void AddMiniTask(
+    private static Guid AddMiniTask(
         FluxKnowledgeDbContext context,
         DateTimeOffset now,
         string idempotencyKey,
@@ -442,9 +510,10 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
             DueAtUtc = now,
             ErrorDetails = "private exception text"
         });
+        var miniTaskId = Guid.NewGuid();
         context.GpuMiniTasks.Add(new GpuMiniTaskEntity
         {
-            Id = Guid.NewGuid(),
+            Id = miniTaskId,
             ParentJobId = jobId,
             SourceRevision = 1,
             PriorityLane = (int)lane,
@@ -458,6 +527,7 @@ public sealed class GpuStatusEndpointTestsSql(NativeSqlServerFixture fixture)
             BatchId = batchId,
             CreatedAtUtc = now
         });
+        return miniTaskId;
     }
 
     private sealed class FixedRecoveryStatus : IDerivedIndexRecoveryStatus

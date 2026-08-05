@@ -528,3 +528,101 @@ public sealed class GpuSchedulerOperationReceiptConfiguration : IEntityTypeConfi
         builder.HasIndex(entity => new { entity.OperationKind, entity.BatchId, entity.CapacitySlotKey, entity.AdmissionGeneration });
     }
 }
+
+public sealed class GpuExecutorDispatchConfiguration : IEntityTypeConfiguration<GpuExecutorDispatchEntity>
+{
+    public void Configure(EntityTypeBuilder<GpuExecutorDispatchEntity> builder)
+    {
+        builder.ToTable(
+            "GpuExecutorDispatches",
+            table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorDispatches_CapacitySlotKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("CapacitySlotKey", nullable: false));
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorDispatches_OwnerKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("OwnerKey", nullable: false));
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorDispatches_ExecutorKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("ExecutorKey", nullable: false));
+            });
+        builder.HasKey(entity => entity.DispatchId);
+        builder.Property(entity => entity.DispatchId).ValueGeneratedNever();
+        builder.Property(entity => entity.CapacitySlotKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.OwnerKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ExecutorKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.AcknowledgedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => entity.BatchId).IsUnique();
+        builder.HasIndex(entity => new { entity.State, entity.UpdatedAtUtc });
+        builder.HasOne(entity => entity.Batch).WithMany().HasForeignKey(entity => entity.BatchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.CapacitySlot).WithMany().HasForeignKey(entity => entity.CapacitySlotKey).HasPrincipalKey(entity => entity.SlotKey).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class GpuExecutorResultReceiptConfiguration : IEntityTypeConfiguration<GpuExecutorResultReceiptEntity>
+{
+    public void Configure(EntityTypeBuilder<GpuExecutorResultReceiptEntity> builder)
+    {
+        builder.ToTable(
+            "GpuExecutorResultReceipts",
+            table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorResultReceipts_ExecutorKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("ExecutorKey", nullable: false));
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorResultReceipts_RequestFingerprint_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("RequestFingerprint", nullable: false));
+            });
+        builder.HasKey(entity => entity.OperationId);
+        builder.Property(entity => entity.OperationId).ValueGeneratedNever();
+        builder.Property(entity => entity.ExecutorKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.OpaqueResultDigest).HasColumnType("varbinary(32)");
+        builder.Property(entity => entity.RequestFingerprint).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(entity => new { entity.DispatchId, entity.MiniTaskId }).IsUnique();
+        builder.HasIndex(entity => new { entity.BatchId, entity.MiniTaskId, entity.AdmissionGeneration });
+        builder.HasOne(entity => entity.Dispatch).WithMany().HasForeignKey(entity => entity.DispatchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.Batch).WithMany().HasForeignKey(entity => entity.BatchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.MiniTask).WithMany().HasForeignKey(entity => entity.MiniTaskId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class GpuExecutorEvidenceConfiguration : IEntityTypeConfiguration<GpuExecutorEvidenceEntity>
+{
+    public void Configure(EntityTypeBuilder<GpuExecutorEvidenceEntity> builder)
+    {
+        builder.ToTable(
+            "GpuExecutorEvidence",
+            table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorEvidence_CapacitySlotKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("CapacitySlotKey", nullable: false));
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorEvidence_ExecutorKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("ExecutorKey", nullable: false));
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorEvidence_VerifierKey_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("VerifierKey", nullable: false));
+                table.HasCheckConstraint(
+                    "CK_GpuExecutorEvidence_RequestFingerprint_NoTrailingWhitespace",
+                    SchemaConfiguration.NoTrailingWhitespaceCheckFor("RequestFingerprint", nullable: false));
+            });
+        builder.HasKey(entity => entity.OperationId);
+        builder.Property(entity => entity.OperationId).ValueGeneratedNever();
+        builder.Property(entity => entity.CapacitySlotKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ExecutorKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.VerifierKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.RequestFingerprint).HasMaxLength(64).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ObservedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(entity => new { entity.DispatchId, entity.EvidenceClass, entity.OperationId });
+        builder.HasOne(entity => entity.Dispatch).WithMany().HasForeignKey(entity => entity.DispatchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.Batch).WithMany().HasForeignKey(entity => entity.BatchId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.CapacitySlot).WithMany().HasForeignKey(entity => entity.CapacitySlotKey).HasPrincipalKey(entity => entity.SlotKey).OnDelete(DeleteBehavior.Restrict);
+    }
+}

@@ -31,9 +31,14 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         Assert.Equal((int)GpuMiniTaskExecutionState.Active, await read.GpuMiniTasks.Where(task => task.Id == lowerTaskId).Select(task => task.ExecutionState).SingleAsync());
         Assert.Equal((int)GpuMiniTaskExecutionState.Ready, await read.GpuMiniTasks.Where(task => task.Id == higherTaskId).Select(task => task.ExecutionState).SingleAsync());
 
-        var boundary = await new SqlGpuSchedulerStore(factory).ApplyBatchCallbackAsync(
+        var store = new SqlGpuSchedulerStore(factory);
+        Assert.True((await store.AcknowledgeAsync(
+            new GpuExecutorAcknowledgement(Guid.NewGuid(),
+                ExecutorHandle(lowerBatch.Id, "slot-a", lowerBatch.AdmissionGeneration)),
+            CancellationToken.None)).Accepted);
+        var boundary = await store.ApplyBatchCallbackAsync(
             new GpuBatchCallback(
-                lowerBatch.Id, "slot-a", "test-owner", lowerBatch.AdmissionGeneration,
+                ExecutorHandle(lowerBatch.Id, "slot-a", lowerBatch.AdmissionGeneration),
                 GpuBatchCallbackKind.SafeBoundary,
                 [new GpuMiniTaskBoundaryOutcome(lowerTaskId, GpuMiniTaskBoundaryDisposition.OutcomeUncertain)],
                 CapacityReleased: true),
@@ -84,7 +89,11 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
 
         Assert.True(result.Committed);
         Assert.Equal(GpuAdmissionDisposition.Busy, result.Disposition);
-        Assert.Equal(result, replay);
+        Assert.False(result.IsIdempotentReplay);
+        Assert.True(replay.Committed);
+        Assert.True(replay.IsIdempotentReplay);
+        Assert.Equal(result.Disposition, replay.Disposition);
+        Assert.Equal(result.DeferredUntilUtc, replay.DeferredUntilUtc);
         Assert.Equal(GpuPriorityLane.InteractiveRetrieval, releaseCandidateLane);
         Assert.Equal(1, busyDecisionCount);
         await using (var afterBusy = await factory.CreateDbContextAsync())
@@ -170,20 +179,22 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         var store = new SqlGpuSchedulerStore(factory);
         var wakeGeneration = await read.GpuSchedulerStates.Select(state => state.WakeGeneration).SingleAsync();
 
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
         var invalidCallbacks = new[]
         {
-            new GpuBatchCallback(Guid.NewGuid(), "slot-a", "test-owner", batch.AdmissionGeneration, GpuBatchCallbackKind.SafeBoundary, [], false),
-            new GpuBatchCallback(batch.Id, "wrong-slot", "test-owner", batch.AdmissionGeneration, GpuBatchCallbackKind.SafeBoundary, [], false),
-            new GpuBatchCallback(batch.Id, "slot-a", "wrong-owner", batch.AdmissionGeneration, GpuBatchCallbackKind.SafeBoundary, [], false),
-            new GpuBatchCallback(batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration + 1, GpuBatchCallbackKind.SafeBoundary, [], false)
+            new GpuBatchCallback(handle with { BatchId = Guid.NewGuid(), DispatchId = Guid.NewGuid() }, GpuBatchCallbackKind.SafeBoundary, [], false),
+            new GpuBatchCallback(handle with { CapacitySlotKey = "wrong-slot" }, GpuBatchCallbackKind.SafeBoundary, [], false),
+            new GpuBatchCallback(handle with { ExecutorKey = "wrong-executor" }, GpuBatchCallbackKind.SafeBoundary, [], false),
+            new GpuBatchCallback(handle with { AdmissionGeneration = batch.AdmissionGeneration + 1 }, GpuBatchCallbackKind.SafeBoundary, [], false)
         };
         foreach (var callback in invalidCallbacks)
         {
             Assert.False((await store.ApplyBatchCallbackAsync(callback, CancellationToken.None)).Accepted);
         }
 
-        var completed = new GpuBatchCallback(batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration,
+        var completed = new GpuBatchCallback(handle,
             GpuBatchCallbackKind.Completed, [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.Completed)], true);
+        await RecordCompletedReceiptsAsync(store, handle, taskId);
         Assert.True((await store.ApplyBatchCallbackAsync(completed, CancellationToken.None)).Accepted);
         await using var afterCompleted = await factory.CreateDbContextAsync();
         var completionWakeGeneration = await afterCompleted.GpuSchedulerStates.Select(state => state.WakeGeneration).SingleAsync();
@@ -197,6 +208,45 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
     }
 
     [NativeSqlServerFact]
+    public async Task Dispatch_state_callback_gate_rejects_pending_delivery_delivery_uncertain_and_terminal_callbacks_without_lifecycle_mutation()
+    {
+        var pending = await CreateAdmittedDispatchAsync();
+        await AssertCallbacksRejectedWithoutLifecycleMutationAsync(
+            pending.Factory,
+            pending.TaskId,
+            pending.Handle,
+            new SqlGpuSchedulerStore(pending.Factory));
+
+        var uncertain = await CreateAdmittedDispatchAsync();
+        var uncertainStore = new SqlGpuSchedulerStore(uncertain.Factory);
+        Assert.True((await uncertainStore.MarkDeliveryUncertainAsync(
+            new GpuExecutorDeliveryUncertainty(Guid.NewGuid(), uncertain.Handle),
+            CancellationToken.None)).Accepted);
+        await AssertCallbacksRejectedWithoutLifecycleMutationAsync(
+            uncertain.Factory,
+            uncertain.TaskId,
+            uncertain.Handle,
+            uncertainStore);
+
+        var terminal = await CreateAdmittedDispatchAsync();
+        var terminalStore = new SqlGpuSchedulerStore(terminal.Factory);
+        await RecordCompletedReceiptsAsync(terminalStore, terminal.Handle, terminal.TaskId);
+        Assert.True((await terminalStore.ApplyBatchCallbackAsync(
+            Guid.NewGuid(),
+            new GpuBatchCallback(
+                terminal.Handle,
+                GpuBatchCallbackKind.Completed,
+                [new GpuMiniTaskBoundaryOutcome(terminal.TaskId, GpuMiniTaskBoundaryDisposition.Completed)],
+                CapacityReleased: true),
+            CancellationToken.None)).Accepted);
+        await AssertCallbacksRejectedWithoutLifecycleMutationAsync(
+            terminal.Factory,
+            terminal.TaskId,
+            terminal.Handle,
+            terminalStore);
+    }
+
+    [NativeSqlServerFact]
     public async Task Completed_fenced_callback_completes_only_its_task_releases_slot_and_preserves_parent_gpu_processing()
     {
         var admission = new SqlGpuAdmissionTests(_fixture);
@@ -205,10 +255,13 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a"));
         await using var read = await factory.CreateDbContextAsync();
         var batch = await read.GpuBatches.SingleAsync();
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var store = new SqlGpuSchedulerStore(factory);
+        await RecordCompletedReceiptsAsync(store, handle, taskId);
 
-        var result = await new SqlGpuSchedulerStore(factory).ApplyBatchCallbackAsync(
+        var result = await store.ApplyBatchCallbackAsync(
             new GpuBatchCallback(
-                batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration,
+                handle,
                 GpuBatchCallbackKind.Completed,
                 [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.Completed)],
                 CapacityReleased: true),
@@ -235,9 +288,13 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         await using var read = await factory.CreateDbContextAsync();
         var batch = await read.GpuBatches.SingleAsync();
         var callback = new GpuBatchCallback(
-            batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration,
+            ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration),
             GpuBatchCallbackKind.SafeBoundary, [], CapacityReleased: false);
         var store = new SqlGpuSchedulerStore(factory);
+
+        Assert.True((await store.AcknowledgeAsync(
+            new GpuExecutorAcknowledgement(Guid.NewGuid(), callback.Handle),
+            CancellationToken.None)).Accepted);
 
         var first = await store.ApplyBatchCallbackAsync(callback, CancellationToken.None);
         var duplicate = await store.ApplyBatchCallbackAsync(callback, CancellationToken.None);
@@ -262,7 +319,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         var wakeGeneration = (await read.GpuSchedulerStates.SingleAsync()).WakeGeneration;
 
         var result = await new SqlGpuSchedulerStore(factory).ApplyBatchCallbackAsync(
-            new GpuBatchCallback(batch.Id, "slot-a", "wrong-owner", batch.AdmissionGeneration,
+            new GpuBatchCallback(ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration) with { ExecutorKey = "wrong-executor" },
                 GpuBatchCallbackKind.CapacityReleased,
                 [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.OutcomeUncertain)],
                 CapacityReleased: true),
@@ -295,10 +352,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
 
         var callback = await store.ApplyBatchCallbackAsync(
             new GpuBatchCallback(
-                batch.Id,
-                "slot-a",
-                "TEST-OWNER",
-                batch.AdmissionGeneration,
+                ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration) with { ExecutorKey = "TEST-EXECUTOR" },
                 GpuBatchCallbackKind.SafeBoundary,
                 [],
                 CapacityReleased: false),
@@ -331,11 +385,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         var capacity = await store.ReconcileCapacityAsync(
             Guid.NewGuid(),
             new GpuTrustedCapacityReconciliation(
-                batch.Id,
-                "slot-a",
-                "TEST-OWNER",
-                batch.AdmissionGeneration,
-                SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass),
+                ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration) with { ExecutorKey = "TEST-EXECUTOR" }, Guid.NewGuid()),
             CancellationToken.None);
 
         Assert.False(capacity.Committed);
@@ -344,12 +394,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         var outcome = await store.ReconcileTaskOutcomeAsync(
             Guid.NewGuid(),
             new GpuTaskOutcomeReconciliation(
-                batch.Id,
-                "slot-a",
-                "TEST-OWNER",
-                batch.AdmissionGeneration,
-                [taskId],
-                SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass),
+                ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration) with { ExecutorKey = "TEST-EXECUTOR" }, Guid.NewGuid(), taskId),
             CancellationToken.None);
 
         Assert.False(outcome.Committed);
@@ -377,10 +422,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await store.ApplyBatchCallbackAsync(
                 new GpuBatchCallback(
-                    batch.Id,
-                    "slot-a ",
-                    "test-owner",
-                    batch.AdmissionGeneration,
+                    ExecutorHandle(batch.Id, "slot-a ", batch.AdmissionGeneration),
                     GpuBatchCallbackKind.SafeBoundary,
                     [],
                     CapacityReleased: false),
@@ -390,10 +432,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         await Assert.ThrowsAsync<ArgumentException>(async () =>
             await store.ApplyBatchCallbackAsync(
                 new GpuBatchCallback(
-                    batch.Id,
-                    "slot-a",
-                    "test-owner ",
-                    batch.AdmissionGeneration,
+                    ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration) with { ExecutorKey = "test-executor " },
                     GpuBatchCallbackKind.SafeBoundary,
                     [],
                     CapacityReleased: false),
@@ -423,11 +462,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             await store.ReconcileCapacityAsync(
                 Guid.NewGuid(),
                 new GpuTrustedCapacityReconciliation(
-                    batch.Id,
-                    "slot-a",
-                    "test-owner ",
-                    batch.AdmissionGeneration,
-                    SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass),
+                    ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration) with { ExecutorKey = "test-executor " }, Guid.NewGuid()),
                 CancellationToken.None));
         await AssertUncertainReservationAsync(factory, batch.Id, taskId, initialWakeGeneration);
 
@@ -435,12 +470,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             await store.ReconcileTaskOutcomeAsync(
                 Guid.NewGuid(),
                 new GpuTaskOutcomeReconciliation(
-                    batch.Id,
-                    "slot-a",
-                    "test-owner ",
-                    batch.AdmissionGeneration,
-                    [taskId],
-                    SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass),
+                    ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration) with { ExecutorKey = "test-executor " }, Guid.NewGuid(), taskId),
                 CancellationToken.None));
         await AssertUncertainReservationAsync(factory, batch.Id, taskId, initialWakeGeneration);
     }
@@ -503,8 +533,14 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         var staleRequest = Assert.Single(await store.ReadStaleCapacityReservationsAsync(
             DateTimeOffset.Parse("2030-01-01T00:00:00+00:00"), CancellationToken.None));
 
+        Assert.True((await store.AcknowledgeAsync(
+            new GpuExecutorAcknowledgement(
+                Guid.NewGuid(),
+                ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration)),
+            CancellationToken.None)).Accepted);
+
         var boundary = await store.ApplyBatchCallbackAsync(Guid.NewGuid(), new GpuBatchCallback(
-            batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration,
+            ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration),
             GpuBatchCallbackKind.SafeBoundary, [], CapacityReleased: false), CancellationToken.None);
         var uncertainty = await store.MarkCapacityUncertainAsync(Guid.NewGuid(), staleRequest, CancellationToken.None);
 
@@ -538,13 +574,13 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         var outcomes = new SwappingReadOnlyList<GpuMiniTaskBoundaryOutcome>(
             [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.Completed)],
             [new GpuMiniTaskBoundaryOutcome(Guid.NewGuid(), GpuMiniTaskBoundaryDisposition.Completed)]);
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var store = new SqlGpuSchedulerStore(factory);
+        await RecordCompletedReceiptsAsync(store, handle, taskId);
 
-        var result = await new SqlGpuSchedulerStore(factory).ApplyBatchCallbackAsync(
+        var result = await store.ApplyBatchCallbackAsync(
             new GpuBatchCallback(
-                batch.Id,
-                "slot-a",
-                "test-owner",
-                batch.AdmissionGeneration,
+                handle,
                 GpuBatchCallbackKind.Completed,
                 outcomes,
                 CapacityReleased: true),
@@ -561,11 +597,17 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
     }
 
     [NativeSqlServerFact]
-    public async Task Outcome_reconciliation_snapshots_caller_owned_task_ids_before_validation()
+    public async Task Task_outcome_reconciliation_transitions_only_the_named_active_task_without_releasing_capacity_or_replacing_siblings()
     {
         var admission = new SqlGpuAdmissionTests(_fixture);
         var factory = await admission.CreateEnvironmentAsync();
-        var taskId = await admission.AddReadyAsync(
+        var namedTaskId = await admission.AddReadyAsync(
+            factory,
+            GpuPriorityLane.DocumentIndexing,
+            "runtime",
+            "settings",
+            10);
+        var siblingTaskId = await admission.AddReadyAsync(
             factory,
             GpuPriorityLane.DocumentIndexing,
             "runtime",
@@ -579,17 +621,14 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             Guid.NewGuid(),
             await ReadCapacityUncertaintyRequestAsync(factory, batch.Id),
             CancellationToken.None)).Committed);
-        var taskIds = new SwappingReadOnlyList<Guid>([taskId], [Guid.NewGuid()]);
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var evidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, handle, GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
 
         var result = await store.ReconcileTaskOutcomeAsync(
             Guid.NewGuid(),
             new GpuTaskOutcomeReconciliation(
-                batch.Id,
-                "slot-a",
-                "test-owner",
-                batch.AdmissionGeneration,
-                taskIds,
-                SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass),
+                handle, evidenceOperationId, namedTaskId),
             CancellationToken.None);
 
         Assert.True(result.Committed);
@@ -597,9 +636,28 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         Assert.Equal(
             (int)GpuMiniTaskExecutionState.OutcomeUncertain,
             await verification.GpuMiniTasks
-                .Where(task => task.Id == taskId)
+                .Where(task => task.Id == namedTaskId)
                 .Select(task => task.ExecutionState)
                 .SingleAsync());
+        Assert.Equal(
+            (int)GpuMiniTaskExecutionState.Active,
+            await verification.GpuMiniTasks
+                .Where(task => task.Id == siblingTaskId)
+                .Select(task => task.ExecutionState)
+                .SingleAsync());
+        Assert.Equal(
+            (int)GpuBatchState.CapacityUncertain,
+            await verification.GpuBatches
+                .Where(candidate => candidate.Id == batch.Id)
+                .Select(candidate => candidate.State)
+                .SingleAsync());
+        var slot = await verification.GpuCapacitySlots.SingleAsync(candidate => candidate.SlotKey == "slot-a");
+        Assert.Equal((int)GpuCapacitySlotState.Uncertain, slot.State);
+        Assert.Equal(batch.Id, slot.ActiveBatchId);
+        Assert.Equal(0, await verification.GpuExecutorResultReceipts.CountAsync());
+        Assert.Single(await verification.GpuExecutorEvidence.ToListAsync());
+        Assert.Equal(0, await verification.GpuMiniTasks.CountAsync(task =>
+            task.ExecutionState == (int)GpuMiniTaskExecutionState.Ready));
     }
 
     [NativeSqlServerFact]
@@ -617,10 +675,12 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             Guid.NewGuid(),
             await ReadCapacityUncertaintyRequestAsync(factory, batch.Id),
             CancellationToken.None)).Committed);
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var outcomeEvidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, handle, GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
         Assert.True((await store.ReconcileTaskOutcomeAsync(
             new GpuTaskOutcomeReconciliation(
-                batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration, [taskId],
-                SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass),
+                handle, outcomeEvidenceOperationId, taskId),
             CancellationToken.None)).Committed);
 
         await using (var uncertain = await factory.CreateDbContextAsync())
@@ -630,8 +690,10 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             Assert.Equal((int)PublicJobState.GpuProcessing, await uncertain.Jobs.Where(job => job.Id == uncertain.GpuMiniTasks.Where(task => task.Id == taskId).Select(task => task.ParentJobId).Single()).Select(job => job.PublicState).SingleAsync());
         }
 
+        var capacityEvidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, handle, GpuExecutorEvidenceClass.CapacityReleaseConfirmed);
         Assert.True((await store.ReconcileCapacityAsync(
-            new GpuTrustedCapacityReconciliation(batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration, SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass),
+            new GpuTrustedCapacityReconciliation(handle, capacityEvidenceOperationId),
             CancellationToken.None)).Committed);
 
         await using var released = await factory.CreateDbContextAsync();
@@ -669,13 +731,14 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             Guid.NewGuid(),
             await ReadCapacityUncertaintyRequestAsync(factory, oldBatch.Id),
             CancellationToken.None)).Committed);
+        var oldHandle = ExecutorHandle(oldBatch.Id, "slot-a", oldBatch.AdmissionGeneration);
+        var capacityEvidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, oldHandle, GpuExecutorEvidenceClass.CapacityReleaseConfirmed);
+        var outcomeEvidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, oldHandle, GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
         Assert.True((await store.ReconcileCapacityAsync(
             new GpuTrustedCapacityReconciliation(
-                oldBatch.Id,
-                "slot-a",
-                "test-owner",
-                oldBatch.AdmissionGeneration,
-                SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass),
+                oldHandle, capacityEvidenceOperationId),
             CancellationToken.None)).Committed);
 
         var laterTaskId = await admission.AddReadyAsync(
@@ -690,12 +753,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
 
         var outcome = await store.ReconcileTaskOutcomeAsync(
             new GpuTaskOutcomeReconciliation(
-                oldBatch.Id,
-                "slot-a",
-                "test-owner",
-                oldBatch.AdmissionGeneration,
-                [oldTaskId],
-                SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass),
+                oldHandle, outcomeEvidenceOperationId, oldTaskId),
             CancellationToken.None);
 
         Assert.True(outcome.Committed);
@@ -734,15 +792,20 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             Guid.NewGuid(),
             await ReadCapacityUncertaintyRequestAsync(factory, firstBatch.Id),
             CancellationToken.None)).Committed);
-        Assert.True((await store.ReconcileTaskOutcomeAsync(new GpuTaskOutcomeReconciliation(firstBatch.Id, "slot-a", "test-owner", firstBatch.AdmissionGeneration, [firstTaskId], SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass), CancellationToken.None)).Committed);
-        Assert.True((await store.ReconcileCapacityAsync(new GpuTrustedCapacityReconciliation(firstBatch.Id, "slot-a", "test-owner", firstBatch.AdmissionGeneration, SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass), CancellationToken.None)).Committed);
+        var firstHandle = ExecutorHandle(firstBatch.Id, "slot-a", firstBatch.AdmissionGeneration);
+        var outcomeEvidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, firstHandle, GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
+        var capacityEvidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, firstHandle, GpuExecutorEvidenceClass.CapacityReleaseConfirmed);
+        Assert.True((await store.ReconcileTaskOutcomeAsync(new GpuTaskOutcomeReconciliation(firstHandle, outcomeEvidenceOperationId, firstTaskId), CancellationToken.None)).Committed);
+        Assert.True((await store.ReconcileCapacityAsync(new GpuTrustedCapacityReconciliation(firstHandle, capacityEvidenceOperationId), CancellationToken.None)).Committed);
 
         var laterTaskId = await admission.AddReadyAsync(factory, GpuPriorityLane.InteractiveRetrieval, "runtime", "settings", 10);
         await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a"));
         await using var occupied = await factory.CreateDbContextAsync();
         var laterBatch = await occupied.GpuBatches.SingleAsync(batch => batch.Id != firstBatch.Id);
 
-        Assert.False((await store.ReconcileCapacityAsync(new GpuTrustedCapacityReconciliation(firstBatch.Id, "slot-a", "test-owner", firstBatch.AdmissionGeneration, SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass), CancellationToken.None)).Committed);
+        Assert.False((await store.ReconcileCapacityAsync(new GpuTrustedCapacityReconciliation(firstHandle, capacityEvidenceOperationId), CancellationToken.None)).Committed);
         await using var verify = await factory.CreateDbContextAsync();
         Assert.Equal((int)GpuCapacitySlotState.Reserved, await verify.GpuCapacitySlots.Where(slot => slot.SlotKey == "slot-a").Select(slot => slot.State).SingleAsync());
         Assert.Equal(laterBatch.Id, await verify.GpuCapacitySlots.Where(slot => slot.SlotKey == "slot-a").Select(slot => slot.ActiveBatchId).SingleAsync());
@@ -848,11 +911,14 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             Guid.NewGuid(),
             await ReadCapacityUncertaintyRequestAsync(setup, batch.Id),
             CancellationToken.None);
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var evidenceOperationId = await RecordTrustedEvidenceAsync(
+            new SqlGpuSchedulerStore(setup), handle, GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
         var retries = 0;
         var store = new SqlGpuSchedulerStore(new RetryFactory(_fixture.ConnectionString), afterLifecycleCommitted: _ =>
             Interlocked.Increment(ref retries) == 1 ? ValueTask.FromException(new PostCommitTransientException()) : ValueTask.CompletedTask);
 
-        var result = await store.ReconcileTaskOutcomeAsync(new GpuTaskOutcomeReconciliation(batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration, [taskId], SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass), CancellationToken.None);
+        var result = await store.ReconcileTaskOutcomeAsync(new GpuTaskOutcomeReconciliation(handle, evidenceOperationId, taskId), CancellationToken.None);
 
         Assert.True(result.Committed);
         Assert.Equal(1, retries);
@@ -874,11 +940,14 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             Guid.NewGuid(),
             await ReadCapacityUncertaintyRequestAsync(setup, batch.Id),
             CancellationToken.None);
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var evidenceOperationId = await RecordTrustedEvidenceAsync(
+            new SqlGpuSchedulerStore(setup), handle, GpuExecutorEvidenceClass.CapacityReleaseConfirmed);
         var retries = 0;
         var store = new SqlGpuSchedulerStore(new RetryFactory(_fixture.ConnectionString), afterLifecycleCommitted: _ =>
             Interlocked.Increment(ref retries) == 1 ? ValueTask.FromException(new PostCommitTransientException()) : ValueTask.CompletedTask);
 
-        var result = await store.ReconcileCapacityAsync(new GpuTrustedCapacityReconciliation(batch.Id, "slot-a", "test-owner", batch.AdmissionGeneration, SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass), CancellationToken.None);
+        var result = await store.ReconcileCapacityAsync(new GpuTrustedCapacityReconciliation(handle, evidenceOperationId), CancellationToken.None);
 
         Assert.True(result.Committed);
         Assert.Equal(1, retries);
@@ -1041,10 +1110,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         await using var read = await factory.CreateDbContextAsync();
         var batch = await read.GpuBatches.SingleAsync();
         var callback = new GpuBatchCallback(
-            batch.Id,
-            "slot-a",
-            "test-owner",
-            batch.AdmissionGeneration,
+            ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration),
             GpuBatchCallbackKind.Completed,
             [
                 new GpuMiniTaskBoundaryOutcome(firstTaskId, GpuMiniTaskBoundaryDisposition.Completed),
@@ -1053,6 +1119,7 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             CapacityReleased: true);
         var operationId = Guid.NewGuid();
         var store = new SqlGpuSchedulerStore(factory);
+        await RecordCompletedReceiptsAsync(store, callback.Handle, firstTaskId, secondTaskId);
 
         Assert.True((await store.ApplyBatchCallbackAsync(operationId, callback, CancellationToken.None)).Accepted);
         var replay = await store.ApplyBatchCallbackAsync(
@@ -1120,19 +1187,20 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         var store = new SqlGpuSchedulerStore(factory);
         var operationId = Guid.NewGuid();
         var callback = new GpuBatchCallback(
-            batch.Id,
-            "slot-a",
-            "test-owner",
-            batch.AdmissionGeneration,
+            ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration),
             GpuBatchCallbackKind.SafeBoundary,
             [],
             CapacityReleased: false);
+
+        Assert.True((await store.AcknowledgeAsync(
+            new GpuExecutorAcknowledgement(Guid.NewGuid(), callback.Handle),
+            CancellationToken.None)).Accepted);
 
         Assert.True((await store.ApplyBatchCallbackAsync(operationId, callback, CancellationToken.None)).Accepted);
         var mismatch = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await store.ApplyBatchCallbackAsync(
                 operationId,
-                callback with { OwnerKey = "different-owner" },
+                callback with { Handle = callback.Handle with { ExecutorKey = "different-executor" } },
                 CancellationToken.None));
 
         Assert.Contains("does not match", mismatch.Message, StringComparison.OrdinalIgnoreCase);
@@ -1162,18 +1230,17 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             await ReadCapacityUncertaintyRequestAsync(factory, batch.Id),
             CancellationToken.None)).Committed);
         var operationId = Guid.NewGuid();
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var evidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, handle, GpuExecutorEvidenceClass.CapacityReleaseConfirmed);
         var request = new GpuTrustedCapacityReconciliation(
-            batch.Id,
-            "slot-a",
-            "test-owner",
-            batch.AdmissionGeneration,
-            SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass);
+            handle, evidenceOperationId);
 
         Assert.True((await store.ReconcileCapacityAsync(operationId, request, CancellationToken.None)).Committed);
         var mismatch = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await store.ReconcileCapacityAsync(
                 operationId,
-                request with { OwnerKey = "different-owner" },
+                request with { Handle = request.Handle with { ExecutorKey = "different-executor" } },
                 CancellationToken.None));
 
         Assert.Contains("does not match", mismatch.Message, StringComparison.OrdinalIgnoreCase);
@@ -1200,19 +1267,17 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             await ReadCapacityUncertaintyRequestAsync(factory, batch.Id),
             CancellationToken.None)).Committed);
         var operationId = Guid.NewGuid();
+        var handle = ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration);
+        var evidenceOperationId = await RecordTrustedEvidenceAsync(
+            store, handle, GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed);
         var request = new GpuTaskOutcomeReconciliation(
-            batch.Id,
-            "slot-a",
-            "test-owner",
-            batch.AdmissionGeneration,
-            [taskId],
-            SqlGpuSchedulerStore.TrustedOutcomeUncertainEvidenceClass);
+            handle, evidenceOperationId, taskId);
 
         Assert.True((await store.ReconcileTaskOutcomeAsync(operationId, request, CancellationToken.None)).Committed);
         var mismatch = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             await store.ReconcileTaskOutcomeAsync(
                 operationId,
-                request with { OwnerKey = "different-owner" },
+                request with { Handle = request.Handle with { ExecutorKey = "different-executor" } },
                 CancellationToken.None));
 
         Assert.Contains("does not match", mismatch.Message, StringComparison.OrdinalIgnoreCase);
@@ -1307,14 +1372,12 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
         await using var read = await factory.CreateDbContextAsync();
         var batch = await read.GpuBatches.SingleAsync();
         var callback = new GpuBatchCallback(
-            batch.Id,
-            "slot-a",
-            "test-owner",
-            batch.AdmissionGeneration,
+            ExecutorHandle(batch.Id, "slot-a", batch.AdmissionGeneration),
             GpuBatchCallbackKind.Completed,
             [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.Completed)],
             CapacityReleased: true);
         var operationId = Guid.NewGuid();
+        await RecordCompletedReceiptsAsync(new SqlGpuSchedulerStore(factory), callback.Handle, taskId);
         var throwingCoordinator = CreateCoordinator(
             new SqlGpuSchedulerStore(factory),
             new ThrowingStatusPublisher(),
@@ -1347,6 +1410,102 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
             .ToListAsync());
         Assert.Equal(1, await verify.GpuSchedulerStates.Select(state => state.WakeGeneration).SingleAsync());
     }
+
+    private async Task<(IDbContextFactory<FluxKnowledgeDbContext> Factory, Guid TaskId, GpuExecutorBatchHandle Handle)> CreateAdmittedDispatchAsync()
+    {
+        var admission = new SqlGpuAdmissionTests(_fixture);
+        var factory = await admission.CreateEnvironmentAsync();
+        var taskId = await admission.AddReadyAsync(factory, GpuPriorityLane.DocumentIndexing, "runtime", "settings", 10);
+        await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a"));
+        await using var context = await factory.CreateDbContextAsync();
+        var dispatch = await context.GpuExecutorDispatches.SingleAsync();
+        return (factory, taskId, new GpuExecutorBatchHandle(
+            dispatch.BatchId,
+            dispatch.CapacitySlotKey,
+            dispatch.ExecutorKey,
+            dispatch.AdmissionGeneration,
+            dispatch.DispatchId));
+    }
+
+    private static async Task AssertCallbacksRejectedWithoutLifecycleMutationAsync(
+        IDbContextFactory<FluxKnowledgeDbContext> factory,
+        Guid taskId,
+        GpuExecutorBatchHandle handle,
+        SqlGpuSchedulerStore store)
+    {
+        var callbacks = new[]
+        {
+            new GpuBatchCallback(handle, GpuBatchCallbackKind.SafeBoundary, [], CapacityReleased: false),
+            new GpuBatchCallback(
+                handle,
+                GpuBatchCallbackKind.CapacityReleased,
+                [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.OutcomeUncertain)],
+                CapacityReleased: true),
+            new GpuBatchCallback(
+                handle,
+                GpuBatchCallbackKind.Completed,
+                [new GpuMiniTaskBoundaryOutcome(taskId, GpuMiniTaskBoundaryDisposition.Completed)],
+                CapacityReleased: true)
+        };
+
+        foreach (var callback in callbacks)
+        {
+            var operationId = Guid.NewGuid();
+            var before = await ReadCallbackLifecycleSnapshotAsync(factory, taskId);
+
+            var rejected = await store.ApplyBatchCallbackAsync(operationId, callback, CancellationToken.None);
+            Assert.False(rejected.Accepted);
+            Assert.False(rejected.Committed);
+            Assert.Equal(before, await ReadCallbackLifecycleSnapshotAsync(factory, taskId));
+
+            var replay = await store.ApplyBatchCallbackAsync(operationId, callback, CancellationToken.None);
+            Assert.False(replay.Accepted);
+            Assert.False(replay.Committed);
+            Assert.Equal(before, await ReadCallbackLifecycleSnapshotAsync(factory, taskId));
+
+            await using var verify = await factory.CreateDbContextAsync();
+            var rejectionReceipt = await verify.GpuSchedulerOperationReceipts
+                .SingleAsync(receipt => receipt.OperationId == operationId);
+            Assert.Equal("callback", rejectionReceipt.OperationKind);
+            Assert.False(rejectionReceipt.Accepted);
+            Assert.False(rejectionReceipt.Committed);
+        }
+    }
+
+    private static async Task<CallbackLifecycleSnapshot> ReadCallbackLifecycleSnapshotAsync(
+        IDbContextFactory<FluxKnowledgeDbContext> factory,
+        Guid taskId)
+    {
+        await using var context = await factory.CreateDbContextAsync();
+        var task = await context.GpuMiniTasks.SingleAsync(candidate => candidate.Id == taskId);
+        var slot = await context.GpuCapacitySlots.SingleAsync(candidate => candidate.SlotKey == "slot-a");
+        return new CallbackLifecycleSnapshot(
+            await context.GpuExecutorDispatches.Select(candidate => candidate.State).SingleAsync(),
+            await context.GpuBatches.Select(candidate => candidate.State).SingleAsync(),
+            task.ExecutionState,
+            await context.Jobs.Where(job => job.Id == task.ParentJobId).Select(job => job.PublicState).SingleAsync(),
+            slot.State,
+            slot.ActiveBatchId,
+            slot.OwnerKey,
+            await context.GpuExecutorResultReceipts.CountAsync(),
+            await context.GpuExecutorEvidence.CountAsync(),
+            await context.GpuSchedulerStates.Select(state => state.WakeGeneration).SingleAsync(),
+            await context.GpuMiniTasks.CountAsync(candidate =>
+                candidate.ExecutionState == (int)GpuMiniTaskExecutionState.Ready));
+    }
+
+    private sealed record CallbackLifecycleSnapshot(
+        int DispatchState,
+        int BatchState,
+        int TaskState,
+        int ParentState,
+        int SlotState,
+        Guid? SlotActiveBatchId,
+        string? SlotOwnerKey,
+        int ResultReceiptCount,
+        int EvidenceCount,
+        long WakeGeneration,
+        int ReadyTaskCount);
 
     private static async Task AssertActiveReservationAsync(
         IDbContextFactory<FluxKnowledgeDbContext> factory,
@@ -1509,6 +1668,53 @@ public sealed class SqlGpuBatchLifecycleTests(NativeSqlServerFixture fixture) : 
 
         public void Advance(TimeSpan elapsed) => _now = _now.Add(elapsed);
     }
+
+    private static async Task RecordCompletedReceiptsAsync(
+        SqlGpuSchedulerStore store,
+        GpuExecutorBatchHandle handle,
+        params Guid[] miniTaskIds)
+    {
+        Assert.True((await store.AcknowledgeAsync(
+            new GpuExecutorAcknowledgement(Guid.NewGuid(), handle),
+            CancellationToken.None)).Accepted);
+
+        foreach (var miniTaskId in miniTaskIds)
+        {
+            Assert.True((await store.RecordReceiptAsync(
+                new GpuExecutorResultReceipt(
+                    Guid.NewGuid(),
+                    handle,
+                    miniTaskId,
+                    GpuMiniTaskBoundaryDisposition.Completed,
+                    null,
+                    GpuExecutorEvidenceClass.TaskOutcomeConfirmed),
+                CancellationToken.None)).Accepted);
+        }
+    }
+
+    private static async Task<Guid> RecordTrustedEvidenceAsync(
+        SqlGpuSchedulerStore store,
+        GpuExecutorBatchHandle handle,
+        GpuExecutorEvidenceClass evidenceClass)
+    {
+        var operationId = Guid.NewGuid();
+        Assert.True((await store.RecordTrustedEvidenceAsync(
+            new GpuExecutorTrustedEvidence(
+                operationId,
+                handle,
+                "test-verifier",
+                DateTimeOffset.Parse("2026-08-05T08:00:00+00:00"),
+                evidenceClass),
+            CancellationToken.None)).Accepted);
+        return operationId;
+    }
+
+    private static GpuExecutorBatchHandle ExecutorHandle(
+        Guid batchId,
+        string capacitySlotKey,
+        long admissionGeneration,
+        string executorKey = "test-executor") =>
+        new(batchId, capacitySlotKey, executorKey, admissionGeneration, batchId);
 }
 
 internal static class SqlGpuBatchLifecycleTestStoreExtensions

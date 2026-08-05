@@ -650,7 +650,7 @@ public sealed class SqlGpuAdmissionTests(NativeSqlServerFixture fixture) : IClas
     }
 
     internal static Func<GpuBatchCandidate, CancellationToken, ValueTask<GpuAdmissionDecision>> Admit(string slotKey) =>
-        (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, slotKey, "test-owner", null));
+        (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, slotKey, "test-owner", null, "test-executor"));
 
     private static string CreateLegacyAdmissionFingerprint(GpuSchedulerWakeReason wakeReason)
     {

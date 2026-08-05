@@ -60,12 +60,14 @@ $expectedMigrations = @(
     "20260729103104_CompleteGpuSchedulerOperationReceipts",
     "20260729120305_AddGpuSchedulerOperationReceiptRequestFingerprint",
     "20260802182703_AddGpuSchedulerBinaryFenceCollation",
-    "20260802191240_AddGpuSchedulerOpaqueKeyCanonicality"
+    "20260802191240_AddGpuSchedulerOpaqueKeyCanonicality",
+    "20260805112341_AddGpuExecutorDispatchAndReceipts"
 )
-foreach ($migration in $expectedMigrations) {
-    if ($migration -notin @($plan.scheduler_migration_ids)) {
-        throw "The native deployment plan is missing scheduler migration $migration."
-    }
+if ((@($plan.scheduler_migration_ids) -join "|") -ne ($expectedMigrations -join "|")) {
+    throw "The native deployment plan does not expose exactly the approved scheduler migration sequence."
+}
+if ($plan.scheduler_migration_target -ne $expectedMigrations[-1]) {
+    throw "The native deployment plan does not pin the approved scheduler migration target."
 }
 
 $requiredEndpoints = @("/health/live", "/health/ready", "/api/index-health", "/api/gpu-status")

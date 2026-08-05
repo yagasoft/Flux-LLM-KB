@@ -19,14 +19,20 @@ public static class GpuSchedulerServiceCollectionExtensions
         services.TryAddSingleton(GpuSchedulerOptions.Default);
         services.TryAddSingleton<ChannelGpuSchedulerWakeSignal>();
         services.TryAddSingleton<IGpuSchedulerWakeSignal>(provider => provider.GetRequiredService<ChannelGpuSchedulerWakeSignal>());
+        services.TryAddSingleton<ChannelGpuExecutorDispatchSignal>();
+        services.TryAddSingleton<IGpuExecutorDispatchSignal>(provider => provider.GetRequiredService<ChannelGpuExecutorDispatchSignal>());
         services.TryAddSingleton<IGpuAdmissionGate, NoGpuAdmissionGate>();
         services.TryAddSingleton<IStatusEventPublisher, NullStatusEventPublisher>();
         services.TryAddScoped<SqlGpuSchedulerStore>(provider => new SqlGpuSchedulerStore(
             provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
             timeProvider: provider.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<IGpuSchedulerStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
+        services.TryAddScoped<IGpuExecutorDispatchStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
         services.TryAddScoped<GpuSchedulerCoordinator>();
+        services.TryAddScoped<GpuExecutorLifecycleCoordinator>();
+        services.TryAddScoped<IGpuExecutorLifecycleSink>(provider => provider.GetRequiredService<GpuExecutorLifecycleCoordinator>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, GpuSchedulerService>());
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, GpuExecutorDispatchRecoveryService>());
         return services;
     }
 

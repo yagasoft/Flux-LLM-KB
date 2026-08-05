@@ -13,7 +13,7 @@ using Microsoft.EntityFrameworkCore.Storage;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
 
-public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
+public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore, IGpuExecutorDispatchStore
 {
     private readonly IDbContextFactory<FluxKnowledgeDbContext> _contextFactory;
     private readonly Func<CancellationToken, ValueTask>? _afterMiniTaskPersisted;
@@ -103,12 +103,16 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         await using var executionContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         var strategy = executionContext.Database.CreateExecutionStrategy();
         var batchId = Guid.NewGuid();
+        // The execution strategy can replay after a committed transaction.  The
+        // dispatch identity therefore derives only from the durable admission
+        // operation, never from an adapter callback or retry attempt.
+        var dispatchId = batchId;
         return await strategy.ExecuteAsync(
                 async () =>
                 {
                     await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
                     return await RunAdmissionRoundWithinTransactionAsync(
-                            context, wakeReason, options, decideAdmission, operationId, batchId, cancellationToken)
+                            context, wakeReason, options, decideAdmission, operationId, batchId, dispatchId, cancellationToken)
                         .ConfigureAwait(false);
                 })
             .ConfigureAwait(false);
@@ -121,6 +125,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         Func<GpuBatchCandidate, CancellationToken, ValueTask<GpuAdmissionDecision>> decideAdmission,
         Guid operationId,
         Guid batchId,
+        Guid dispatchId,
         CancellationToken cancellationToken)
     {
         await using var transaction = await context.Database
@@ -192,10 +197,175 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
                     context, transaction, selected, now, decision.RetryAfter!.Value, wakeReason, options, operationId, batchId, cancellationToken)
                 .ConfigureAwait(false),
             GpuAdmissionDisposition.Admit => await CommitAdmissionAsync(
-                    context, transaction, selected, now, decision, wakeReason, options, operationId, batchId, cancellationToken)
+                    context, transaction, selected, now, decision, wakeReason, options, operationId, batchId, dispatchId, cancellationToken)
                 .ConfigureAwait(false),
             _ => throw new ArgumentOutOfRangeException(nameof(decision))
         };
+    }
+
+    public async ValueTask<IReadOnlyList<GpuExecutorBatchHandle>> ReadPendingDispatchesAsync(CancellationToken cancellationToken)
+    {
+        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        return await context.GpuExecutorDispatches.AsNoTracking()
+            .Where(dispatch => dispatch.State == (int)GpuExecutorDispatchState.PendingDelivery)
+            .OrderBy(dispatch => dispatch.UpdatedAtUtc)
+            .Select(dispatch => new GpuExecutorBatchHandle(
+                dispatch.BatchId, dispatch.CapacitySlotKey, dispatch.ExecutorKey,
+                dispatch.AdmissionGeneration, dispatch.DispatchId))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public ValueTask<GpuExecutorDispatchMutationResult> AcknowledgeAsync(
+        GpuExecutorAcknowledgement acknowledgement,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(acknowledgement);
+        acknowledgement.Validate();
+        return ApplyExecutorMutationAsync(
+            acknowledgement.OperationId,
+            acknowledgement.Handle,
+            "executor-acknowledgement",
+            CreateExecutorAcknowledgementFingerprint(acknowledgement),
+            (context, dispatch, now, token) =>
+            {
+                if (dispatch.State != (int)GpuExecutorDispatchState.PendingDelivery)
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                dispatch.State = (int)GpuExecutorDispatchState.Acknowledged;
+                dispatch.AcknowledgedAtUtc = now;
+                dispatch.UpdatedAtUtc = now;
+                return ValueTask.FromResult(true);
+            },
+            cancellationToken);
+    }
+
+    public ValueTask<GpuExecutorDispatchMutationResult> MarkDeliveryUncertainAsync(
+        GpuExecutorDeliveryUncertainty uncertainty,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(uncertainty);
+        uncertainty.Validate();
+        return ApplyExecutorMutationAsync(
+            uncertainty.OperationId,
+            uncertainty.Handle,
+            "executor-delivery-uncertain",
+            CreateExecutorDeliveryUncertainFingerprint(uncertainty),
+            (context, dispatch, now, token) =>
+            {
+                if (dispatch.State is (int)GpuExecutorDispatchState.Terminal or (int)GpuExecutorDispatchState.DeliveryUncertain)
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                dispatch.State = (int)GpuExecutorDispatchState.DeliveryUncertain;
+                dispatch.UpdatedAtUtc = now;
+                return ValueTask.FromResult(true);
+            },
+            cancellationToken);
+    }
+
+    public async ValueTask<GpuExecutorDispatchMutationResult> RecordReceiptAsync(
+        GpuExecutorResultReceipt receipt,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        receipt.Validate();
+        var fingerprint = CreateExecutorResultReceiptFingerprint(receipt);
+        await using var executionContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await AcquireLifecycleOperationFencesAsync(
+                context, transaction.GetDbTransaction(), receipt.OperationId, receipt.Handle.BatchId, cancellationToken)
+                .ConfigureAwait(false);
+            var operation = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(candidate => candidate.OperationId == receipt.OperationId, cancellationToken).ConfigureAwait(false);
+            if (operation is not null)
+            {
+                ValidateReceiptForRequest(operation, "executor-result-receipt", fingerprint);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new GpuExecutorDispatchMutationResult(operation.Accepted, operation.Committed);
+            }
+
+            var dispatch = await FindExactDispatchAsync(context, receipt.Handle, cancellationToken).ConfigureAwait(false);
+            var accepted = false;
+            if (dispatch is not null && dispatch.State is (int)GpuExecutorDispatchState.Acknowledged or (int)GpuExecutorDispatchState.ReceiptRecorded)
+            {
+                var task = await context.GpuMiniTasks.SingleOrDefaultAsync(candidate =>
+                    candidate.Id == receipt.MiniTaskId && candidate.BatchId == dispatch.BatchId &&
+                    candidate.AdmissionGeneration == dispatch.AdmissionGeneration &&
+                    candidate.ExecutionState == (int)GpuMiniTaskExecutionState.Active,
+                    cancellationToken).ConfigureAwait(false);
+                var existing = await context.GpuExecutorResultReceipts.SingleOrDefaultAsync(candidate =>
+                    candidate.DispatchId == receipt.Handle.DispatchId && candidate.MiniTaskId == receipt.MiniTaskId,
+                    cancellationToken).ConfigureAwait(false);
+                if (task is not null && existing is null)
+                {
+                    context.GpuExecutorResultReceipts.Add(new GpuExecutorResultReceiptEntity
+                    {
+                        OperationId = receipt.OperationId,
+                        DispatchId = dispatch.DispatchId,
+                        BatchId = dispatch.BatchId,
+                        MiniTaskId = receipt.MiniTaskId,
+                        ExecutorKey = dispatch.ExecutorKey,
+                        AdmissionGeneration = dispatch.AdmissionGeneration,
+                        Disposition = (int)receipt.Disposition,
+                        EvidenceClass = (int)receipt.EvidenceClass,
+                        OpaqueResultDigest = receipt.OpaqueResultDigest,
+                        RequestFingerprint = fingerprint,
+                        CreatedAtUtc = _timeProvider.GetUtcNow()
+                    });
+                    dispatch.State = (int)GpuExecutorDispatchState.ReceiptRecorded;
+                    dispatch.UpdatedAtUtc = _timeProvider.GetUtcNow();
+                    accepted = true;
+                }
+            }
+
+            RecordReceipt(context, receipt.OperationId, "executor-result-receipt", receipt.Handle.BatchId,
+                receipt.Handle.CapacitySlotKey, dispatch?.OwnerKey, receipt.Handle.AdmissionGeneration,
+                accepted, accepted, 0, fingerprint);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new GpuExecutorDispatchMutationResult(accepted, accepted);
+        }).ConfigureAwait(false);
+    }
+
+    public async ValueTask<GpuExecutorDispatchMutationResult> RecordTrustedEvidenceAsync(
+        GpuExecutorTrustedEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        evidence.Validate();
+        var fingerprint = CreateExecutorEvidenceFingerprint(evidence);
+        return await ApplyExecutorMutationAsync(
+            evidence.OperationId, evidence.Handle, "executor-trusted-evidence", fingerprint,
+            (context, dispatch, now, token) =>
+            {
+                if (dispatch.State == (int)GpuExecutorDispatchState.Terminal)
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                context.GpuExecutorEvidence.Add(new GpuExecutorEvidenceEntity
+                {
+                    OperationId = evidence.OperationId,
+                    DispatchId = dispatch.DispatchId,
+                    BatchId = dispatch.BatchId,
+                    CapacitySlotKey = dispatch.CapacitySlotKey,
+                    ExecutorKey = dispatch.ExecutorKey,
+                    AdmissionGeneration = dispatch.AdmissionGeneration,
+                    EvidenceClass = (int)evidence.EvidenceClass,
+                    VerifierKey = evidence.VerifierKey,
+                    ObservedAtUtc = evidence.ObservedAtUtc,
+                    RequestFingerprint = fingerprint,
+                    CreatedAtUtc = now
+                });
+                return ValueTask.FromResult(true);
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask<GpuBatchCallbackResult> ApplyBatchCallbackAsync(
@@ -223,6 +393,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireLifecycleOperationFencesAsync(
+            context, transaction.GetDbTransaction(), operationId, callback.BatchId, cancellationToken)
+            .ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken)
             .ConfigureAwait(false);
         if (receipt is not null)
@@ -231,21 +404,27 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuBatchCallbackResult(receipt.Accepted, receipt.Committed);
         }
+        var dispatch = await FindExactDispatchAsync(context, callback.Handle, cancellationToken).ConfigureAwait(false);
+        var ownerKey = dispatch?.OwnerKey;
         var batch = await context.GpuBatches.SingleOrDefaultAsync(candidate =>
                 candidate.Id == callback.BatchId &&
                 candidate.CapacitySlotKey == callback.CapacitySlotKey &&
-                candidate.OwnerKey == callback.OwnerKey &&
+                candidate.OwnerKey == ownerKey &&
                 candidate.AdmissionGeneration == callback.AdmissionGeneration,
             cancellationToken).ConfigureAwait(false);
         var slot = await context.GpuCapacitySlots.SingleOrDefaultAsync(candidate =>
                 candidate.SlotKey == callback.CapacitySlotKey &&
                 candidate.ActiveBatchId == callback.BatchId &&
-                candidate.OwnerKey == callback.OwnerKey &&
+                candidate.OwnerKey == ownerKey &&
                 candidate.State == (int)GpuCapacitySlotState.Reserved,
             cancellationToken).ConfigureAwait(false);
-        if (batch is null || slot is null || !IsCallbackStateEligible(batch, callback.Kind))
+        if (dispatch is null ||
+            batch is null ||
+            slot is null ||
+            !IsCallbackStateEligible(batch, callback.Kind) ||
+            !IsDispatchCallbackStateEligible((GpuExecutorDispatchState)dispatch.State, callback.Kind))
         {
-            RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, callback.OwnerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
+            RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, ownerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuBatchCallbackResult(Accepted: false, Committed: false);
@@ -258,7 +437,16 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         if (!CallbackOutcomesMatch(callback, activeTasks))
         {
-            RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, callback.OwnerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
+            RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, ownerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new GpuBatchCallbackResult(Accepted: false, Committed: false);
+        }
+
+        if (callback.Kind == GpuBatchCallbackKind.Completed &&
+            !await HasCompletedReceiptsForEveryActiveTaskAsync(context, dispatch, activeTasks, cancellationToken).ConfigureAwait(false))
+        {
+            RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, ownerKey, callback.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuBatchCallbackResult(Accepted: false, Committed: false);
@@ -301,6 +489,17 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
             slot.UpdatedAtUtc = now;
         }
 
+        if (callback.Kind == GpuBatchCallbackKind.Completed)
+        {
+            dispatch.State = (int)GpuExecutorDispatchState.Terminal;
+            dispatch.UpdatedAtUtc = now;
+        }
+        else if (releasesCapacity)
+        {
+            dispatch.State = (int)GpuExecutorDispatchState.DeliveryUncertain;
+            dispatch.UpdatedAtUtc = now;
+        }
+
         var reasons = callback.Kind == GpuBatchCallbackKind.SafeBoundary
             ? GpuSchedulerWakeReason.SafeBoundary
             : (GpuSchedulerWakeReason)0;
@@ -310,7 +509,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         }
 
         await RecordWakeAsync(context, reasons, now, cancellationToken).ConfigureAwait(false);
-        RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, callback.OwnerKey, callback.AdmissionGeneration, true, true, (int)reasons, requestFingerprint);
+        RecordReceipt(context, operationId, "callback", callback.BatchId, callback.CapacitySlotKey, ownerKey, callback.AdmissionGeneration, true, true, (int)reasons, requestFingerprint);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         if (_afterLifecycleCommitted is not null)
@@ -358,6 +557,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireLifecycleOperationFencesAsync(
+            context, transaction.GetDbTransaction(), operationId, request.BatchId, cancellationToken)
+            .ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken).ConfigureAwait(false);
         if (receipt is not null)
         {
@@ -405,6 +607,18 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
 
         batch.State = (int)GpuBatchState.CapacityUncertain;
         batch.UpdatedAtUtc = now;
+        var dispatch = await context.GpuExecutorDispatches.SingleOrDefaultAsync(candidate =>
+                candidate.BatchId == request.BatchId &&
+                candidate.CapacitySlotKey == request.CapacitySlotKey &&
+                candidate.OwnerKey == request.OwnerKey &&
+                candidate.AdmissionGeneration == request.AdmissionGeneration &&
+                candidate.State != (int)GpuExecutorDispatchState.Terminal,
+            cancellationToken).ConfigureAwait(false);
+        if (dispatch is not null)
+        {
+            dispatch.State = (int)GpuExecutorDispatchState.DeliveryUncertain;
+            dispatch.UpdatedAtUtc = now;
+        }
         RecordReceipt(context, operationId, "uncertain", request.BatchId, request.CapacitySlotKey, request.OwnerKey, request.AdmissionGeneration, true, true, 0, requestFingerprint);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
@@ -422,17 +636,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
     {
         RequireLifecycleOperationId(operationId);
         ArgumentNullException.ThrowIfNull(request);
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(request.CapacitySlotKey, nameof(request.CapacitySlotKey));
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(request.OwnerKey, nameof(request.OwnerKey));
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(request.EvidenceClass, nameof(request.EvidenceClass));
-        if (request.BatchId == Guid.Empty || request.AdmissionGeneration <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(request));
-        }
-        if (!string.Equals(request.EvidenceClass, TrustedCapacityReleaseEvidenceClass, StringComparison.Ordinal))
-        {
-            throw new ArgumentException("Capacity reconciliation requires verified termination and driver-absence evidence.", nameof(request));
-        }
+        request.Validate();
 
         var requestFingerprint = CreateCapacityReconciliationRequestFingerprint(request);
         await using var executionContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -448,6 +652,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireLifecycleOperationFencesAsync(
+            context, transaction.GetDbTransaction(), operationId, request.BatchId, cancellationToken)
+            .ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken).ConfigureAwait(false);
         if (receipt is not null)
         {
@@ -455,15 +662,21 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuTrustedReconciliationResult(receipt.Committed);
         }
+        var dispatch = await FindExactDispatchAsync(context, request.Handle, cancellationToken).ConfigureAwait(false);
         var slot = await context.GpuCapacitySlots.SingleOrDefaultAsync(candidate =>
                 candidate.SlotKey == request.CapacitySlotKey &&
                 candidate.State == (int)GpuCapacitySlotState.Uncertain &&
                 candidate.ActiveBatchId == request.BatchId &&
-                candidate.OwnerKey == request.OwnerKey,
+                candidate.OwnerKey == (dispatch == null ? null : dispatch.OwnerKey),
             cancellationToken).ConfigureAwait(false);
-        if (slot is null)
+        var trustedEvidence = dispatch is not null && await context.GpuExecutorEvidence.AnyAsync(evidence =>
+            evidence.OperationId == request.TrustedEvidenceOperationId &&
+            evidence.DispatchId == dispatch.DispatchId &&
+            evidence.EvidenceClass == (int)GpuExecutorEvidenceClass.CapacityReleaseConfirmed,
+            cancellationToken).ConfigureAwait(false);
+        if (dispatch is null || slot is null || !trustedEvidence)
         {
-            RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, request.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
+            RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch?.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuTrustedReconciliationResult(false);
@@ -472,13 +685,13 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         var batch = await context.GpuBatches.SingleOrDefaultAsync(candidate =>
                 candidate.Id == request.BatchId &&
                 candidate.CapacitySlotKey == request.CapacitySlotKey &&
-                candidate.OwnerKey == request.OwnerKey &&
+                candidate.OwnerKey == dispatch.OwnerKey &&
                 candidate.AdmissionGeneration == request.AdmissionGeneration &&
                 candidate.State == (int)GpuBatchState.CapacityUncertain,
             cancellationToken).ConfigureAwait(false);
         if (batch is null)
         {
-            RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, request.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
+            RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuTrustedReconciliationResult(false);
@@ -491,7 +704,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         slot.UpdatedAtUtc = now;
         var reasons = GpuSchedulerWakeReason.Reconciliation | GpuSchedulerWakeReason.CapacityReleased;
         await RecordWakeAsync(context, reasons, now, cancellationToken).ConfigureAwait(false);
-        RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, request.OwnerKey, request.AdmissionGeneration, true, true, (int)reasons, requestFingerprint);
+        RecordReceipt(context, operationId, "capacity-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch.OwnerKey, request.AdmissionGeneration, true, true, (int)reasons, requestFingerprint);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         if (_afterLifecycleCommitted is not null)
@@ -508,22 +721,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
     {
         RequireLifecycleOperationId(operationId);
         ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(request.MiniTaskIds);
-        request = request with { MiniTaskIds = request.MiniTaskIds.ToArray() };
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(request.CapacitySlotKey, nameof(request.CapacitySlotKey));
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(request.OwnerKey, nameof(request.OwnerKey));
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(request.EvidenceClass, nameof(request.EvidenceClass));
-        if (request.BatchId == Guid.Empty || request.AdmissionGeneration <= 0 ||
-            request.MiniTaskIds is null || request.MiniTaskIds.Count == 0 ||
-            request.MiniTaskIds.Any(id => id == Guid.Empty) || request.MiniTaskIds.Distinct().Count() != request.MiniTaskIds.Count)
-        {
-            throw new ArgumentException("Task-outcome reconciliation requires a complete, distinct fenced task set.", nameof(request));
-        }
-
-        if (!string.Equals(request.EvidenceClass, TrustedOutcomeUncertainEvidenceClass, StringComparison.Ordinal))
-        {
-            throw new ArgumentException("Task-outcome reconciliation requires verified unresolved-outcome evidence.", nameof(request));
-        }
+        request.Validate();
 
         var requestFingerprint = CreateTaskOutcomeReconciliationRequestFingerprint(request);
         await using var executionContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
@@ -539,6 +737,9 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
         await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+        await AcquireLifecycleOperationFencesAsync(
+            context, transaction.GetDbTransaction(), operationId, request.BatchId, cancellationToken)
+            .ConfigureAwait(false);
         var receipt = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken).ConfigureAwait(false);
         if (receipt is not null)
         {
@@ -546,43 +747,46 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuTrustedReconciliationResult(receipt.Committed);
         }
+        var dispatch = await FindExactDispatchAsync(context, request.Handle, cancellationToken).ConfigureAwait(false);
+        var trustedEvidence = dispatch is not null && await context.GpuExecutorEvidence.AnyAsync(evidence =>
+            evidence.OperationId == request.TrustedEvidenceOperationId &&
+            evidence.DispatchId == dispatch.DispatchId &&
+            evidence.EvidenceClass == (int)GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed,
+            cancellationToken).ConfigureAwait(false);
         var batch = await context.GpuBatches.SingleOrDefaultAsync(candidate =>
                 candidate.Id == request.BatchId &&
                 candidate.CapacitySlotKey == request.CapacitySlotKey &&
-                candidate.OwnerKey == request.OwnerKey &&
+                candidate.OwnerKey == (dispatch == null ? null : dispatch.OwnerKey) &&
                 candidate.AdmissionGeneration == request.AdmissionGeneration &&
                 candidate.State == (int)GpuBatchState.CapacityUncertain,
             cancellationToken).ConfigureAwait(false);
-        if (batch is null)
+        if (dispatch is null || batch is null || !trustedEvidence)
         {
-            RecordReceipt(context, operationId, "outcome-reconciliation", request.BatchId, request.CapacitySlotKey, request.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
+            RecordReceipt(context, operationId, "outcome-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch?.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuTrustedReconciliationResult(false);
         }
 
-        var activeTasks = await context.GpuMiniTasks.Where(task =>
-                task.BatchId == request.BatchId &&
-                task.AdmissionGeneration == request.AdmissionGeneration &&
-                task.ExecutionState == (int)GpuMiniTaskExecutionState.Active)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-        if (activeTasks.Count != request.MiniTaskIds.Count ||
-            !activeTasks.Select(task => task.Id).ToHashSet().SetEquals(request.MiniTaskIds))
+        var task = await context.GpuMiniTasks.SingleOrDefaultAsync(candidate =>
+                candidate.Id == request.MiniTaskId &&
+                candidate.BatchId == request.BatchId &&
+                candidate.AdmissionGeneration == request.AdmissionGeneration &&
+                candidate.ExecutionState == (int)GpuMiniTaskExecutionState.Active,
+            cancellationToken).ConfigureAwait(false);
+        if (task is null)
         {
-            RecordReceipt(context, operationId, "outcome-reconciliation", request.BatchId, request.CapacitySlotKey, request.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
+            RecordReceipt(context, operationId, "outcome-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch.OwnerKey, request.AdmissionGeneration, false, false, 0, requestFingerprint);
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new GpuTrustedReconciliationResult(false);
         }
 
-        foreach (var task in activeTasks)
-        {
-            task.ExecutionState = (int)GpuMiniTaskExecutionState.OutcomeUncertain;
-        }
+        task.ExecutionState = (int)GpuMiniTaskExecutionState.OutcomeUncertain;
 
         await RecordWakeAsync(context, GpuSchedulerWakeReason.Reconciliation, _timeProvider.GetUtcNow(), cancellationToken)
             .ConfigureAwait(false);
-        RecordReceipt(context, operationId, "outcome-reconciliation", request.BatchId, request.CapacitySlotKey, request.OwnerKey, request.AdmissionGeneration, true, true, (int)GpuSchedulerWakeReason.Reconciliation, requestFingerprint);
+        RecordReceipt(context, operationId, "outcome-reconciliation", request.BatchId, request.CapacitySlotKey, dispatch.OwnerKey, request.AdmissionGeneration, true, true, (int)GpuSchedulerWakeReason.Reconciliation, requestFingerprint);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         if (_afterLifecycleCommitted is not null)
@@ -1178,6 +1382,7 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         GpuSchedulerOptions options,
         Guid operationId,
         Guid batchId,
+        Guid dispatchId,
         CancellationToken cancellationToken)
     {
         var slot = await context.GpuCapacitySlots.SingleOrDefaultAsync(
@@ -1221,6 +1426,18 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         };
         context.GpuBatches.Add(batch);
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        context.GpuExecutorDispatches.Add(new GpuExecutorDispatchEntity
+        {
+            DispatchId = dispatchId,
+            BatchId = batch.Id,
+            CapacitySlotKey = batch.CapacitySlotKey,
+            OwnerKey = batch.OwnerKey,
+            ExecutorKey = decision.ExecutorKey!,
+            AdmissionGeneration = batch.AdmissionGeneration,
+            State = (int)GpuExecutorDispatchState.PendingDelivery,
+            UpdatedAtUtc = now
+        });
 
         var reserved = await context.Database.ExecuteSqlInterpolatedAsync(
                 $"""
@@ -1317,6 +1534,50 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         }
     }
 
+    private static async Task AcquireLifecycleOperationFencesAsync(
+        FluxKnowledgeDbContext context,
+        DbTransaction transaction,
+        Guid operationId,
+        Guid batchId,
+        CancellationToken cancellationToken)
+    {
+        await AcquireTransactionApplicationLockAsync(
+                context,
+                transaction,
+                $"FluxKnowledge.GpuScheduler.Operation:{operationId:N}",
+                cancellationToken)
+            .ConfigureAwait(false);
+        await AcquireTransactionApplicationLockAsync(
+                context,
+                transaction,
+                $"FluxKnowledge.GpuScheduler.BatchLifecycle:{batchId:N}",
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task AcquireTransactionApplicationLockAsync(
+        FluxKnowledgeDbContext context,
+        DbTransaction transaction,
+        string resource,
+        CancellationToken cancellationToken)
+    {
+        await context.Database.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = context.Database.GetDbConnection().CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "DECLARE @result int; EXEC @result = sp_getapplock @Resource = @resource, @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 10000; SELECT @result;";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "@resource";
+        parameter.DbType = DbType.String;
+        parameter.Value = resource;
+        command.Parameters.Add(parameter);
+        var result = Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+        if (result is not 0 and not 1)
+        {
+            throw new InvalidOperationException("Could not acquire the GPU scheduler lifecycle fence. Check SQL Server locking and permissions.");
+        }
+    }
+
     private const GpuSchedulerWakeReason KnownWakeReasons =
         GpuSchedulerWakeReason.WorkReady |
         GpuSchedulerWakeReason.SafeBoundary |
@@ -1361,14 +1622,55 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
             options.FallbackInterval.Ticks.ToString(CultureInfo.InvariantCulture),
             options.UnresponsiveDiagnosticAge.Ticks.ToString(CultureInfo.InvariantCulture));
 
+    private static string CreateExecutorAcknowledgementFingerprint(GpuExecutorAcknowledgement acknowledgement) =>
+        CreateExecutorHandleFingerprint("executor-acknowledgement", acknowledgement.Handle);
+
+    private static string CreateExecutorDeliveryUncertainFingerprint(GpuExecutorDeliveryUncertainty uncertainty) =>
+        CreateExecutorHandleFingerprint("executor-delivery-uncertain", uncertainty.Handle);
+
+    private static string CreateExecutorEvidenceFingerprint(GpuExecutorTrustedEvidence evidence) =>
+        CreateRequestFingerprint(
+            "executor-trusted-evidence",
+            evidence.Handle.DispatchId.ToString("N"),
+            evidence.Handle.BatchId.ToString("N"),
+            evidence.Handle.CapacitySlotKey,
+            evidence.Handle.ExecutorKey,
+            evidence.Handle.AdmissionGeneration.ToString(CultureInfo.InvariantCulture),
+            evidence.VerifierKey,
+            evidence.ObservedAtUtc.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture),
+            ((int)evidence.EvidenceClass).ToString(CultureInfo.InvariantCulture));
+
+    private static string CreateExecutorResultReceiptFingerprint(GpuExecutorResultReceipt receipt) =>
+        CreateRequestFingerprint(
+            "executor-result-receipt",
+            receipt.Handle.DispatchId.ToString("N"),
+            receipt.Handle.BatchId.ToString("N"),
+            receipt.Handle.CapacitySlotKey,
+            receipt.Handle.ExecutorKey,
+            receipt.Handle.AdmissionGeneration.ToString(CultureInfo.InvariantCulture),
+            receipt.MiniTaskId.ToString("N"),
+            ((int)receipt.Disposition).ToString(CultureInfo.InvariantCulture),
+            ((int)receipt.EvidenceClass).ToString(CultureInfo.InvariantCulture),
+            receipt.OpaqueResultDigest is null ? string.Empty : Convert.ToHexString(receipt.OpaqueResultDigest));
+
+    private static string CreateExecutorHandleFingerprint(string operationKind, GpuExecutorBatchHandle handle) =>
+        CreateRequestFingerprint(
+            operationKind,
+            handle.DispatchId.ToString("N"),
+            handle.BatchId.ToString("N"),
+            handle.CapacitySlotKey,
+            handle.ExecutorKey,
+            handle.AdmissionGeneration.ToString(CultureInfo.InvariantCulture));
+
     private static string CreateCallbackRequestFingerprint(GpuBatchCallback callback)
     {
         var fields = new List<string>
         {
             "callback",
+            callback.Handle.DispatchId.ToString("N"),
             callback.BatchId.ToString("N"),
             callback.CapacitySlotKey,
-            callback.OwnerKey,
+            callback.Handle.ExecutorKey,
             callback.AdmissionGeneration.ToString(CultureInfo.InvariantCulture),
             ((int)callback.Kind).ToString(CultureInfo.InvariantCulture),
             callback.CapacityReleased ? "1" : "0",
@@ -1397,27 +1699,25 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
     private static string CreateCapacityReconciliationRequestFingerprint(GpuTrustedCapacityReconciliation request) =>
         CreateRequestFingerprint(
             "capacity-reconciliation",
+            request.Handle.DispatchId.ToString("N"),
             request.BatchId.ToString("N"),
             request.CapacitySlotKey,
-            request.OwnerKey,
+            request.Handle.ExecutorKey,
             request.AdmissionGeneration.ToString(CultureInfo.InvariantCulture),
-            request.EvidenceClass);
+            request.TrustedEvidenceOperationId.ToString("N"));
 
     private static string CreateTaskOutcomeReconciliationRequestFingerprint(
         GpuTaskOutcomeReconciliation request)
     {
-        var fields = new List<string>
-        {
+        return CreateRequestFingerprint(
             "outcome-reconciliation",
+            request.Handle.DispatchId.ToString("N"),
             request.BatchId.ToString("N"),
             request.CapacitySlotKey,
-            request.OwnerKey,
+            request.Handle.ExecutorKey,
             request.AdmissionGeneration.ToString(CultureInfo.InvariantCulture),
-            request.EvidenceClass,
-            request.MiniTaskIds.Count.ToString(CultureInfo.InvariantCulture)
-        };
-        fields.AddRange(request.MiniTaskIds.OrderBy(id => id).Select(id => id.ToString("N")));
-        return CreateRequestFingerprint(fields);
+            request.TrustedEvidenceOperationId.ToString("N"),
+            request.MiniTaskId.ToString("N"));
     }
 
     private static string CreateWakeConsumptionRequestFingerprint(long expectedGeneration) =>
@@ -1469,6 +1769,17 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
             GpuBatchCallbackKind.SafeBoundary => batch.State == (int)GpuBatchState.Active,
             GpuBatchCallbackKind.Completed or GpuBatchCallbackKind.CapacityReleased =>
                 batch.State == (int)GpuBatchState.Active || batch.State == (int)GpuBatchState.AtSafeBoundary,
+            _ => false
+        };
+
+    private static bool IsDispatchCallbackStateEligible(
+        GpuExecutorDispatchState state,
+        GpuBatchCallbackKind kind) =>
+        kind switch
+        {
+            GpuBatchCallbackKind.SafeBoundary or GpuBatchCallbackKind.CapacityReleased =>
+                state is GpuExecutorDispatchState.Acknowledged or GpuExecutorDispatchState.ReceiptRecorded,
+            GpuBatchCallbackKind.Completed => state == GpuExecutorDispatchState.ReceiptRecorded,
             _ => false
         };
 
@@ -1586,7 +1897,8 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
         return new GpuSchedulerAdmissionRoundResult(
             receipt.Committed,
             (GpuAdmissionDisposition)receipt.AdmissionDisposition.Value,
-            receipt.DeferredUntilUtc);
+            receipt.DeferredUntilUtc,
+            IsIdempotentReplay: true);
     }
 
     private static GpuSchedulerWakeConsumption WakeConsumptionFromReceipt(
@@ -1654,6 +1966,76 @@ public sealed class SqlGpuSchedulerStore : IGpuSchedulerStore
 
         state.NextDeferredAtUtc = next;
         return true;
+    }
+
+    private async ValueTask<GpuExecutorDispatchMutationResult> ApplyExecutorMutationAsync(
+        Guid operationId,
+        GpuExecutorBatchHandle handle,
+        string operationKind,
+        string requestFingerprint,
+        Func<FluxKnowledgeDbContext, GpuExecutorDispatchEntity, DateTimeOffset, CancellationToken, ValueTask<bool>> mutate,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+        handle.Validate();
+        await using var executionContext = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        var strategy = executionContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+            await using var transaction = await context.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken).ConfigureAwait(false);
+            await AcquireLifecycleOperationFencesAsync(
+                context, transaction.GetDbTransaction(), operationId, handle.BatchId, cancellationToken)
+                .ConfigureAwait(false);
+            var operation = await context.GpuSchedulerOperationReceipts.SingleOrDefaultAsync(candidate => candidate.OperationId == operationId, cancellationToken).ConfigureAwait(false);
+            if (operation is not null)
+            {
+                ValidateReceiptForRequest(operation, operationKind, requestFingerprint);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+                return new GpuExecutorDispatchMutationResult(operation.Accepted, operation.Committed);
+            }
+
+            var dispatch = await FindExactDispatchAsync(context, handle, cancellationToken).ConfigureAwait(false);
+            var accepted = dispatch is not null && await mutate(context, dispatch, _timeProvider.GetUtcNow(), cancellationToken).ConfigureAwait(false);
+            RecordReceipt(context, operationId, operationKind, handle.BatchId, handle.CapacitySlotKey,
+                dispatch?.OwnerKey, handle.AdmissionGeneration, accepted, accepted, 0, requestFingerprint);
+            await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return new GpuExecutorDispatchMutationResult(accepted, accepted);
+        }).ConfigureAwait(false);
+    }
+
+    private static Task<GpuExecutorDispatchEntity?> FindExactDispatchAsync(
+        FluxKnowledgeDbContext context,
+        GpuExecutorBatchHandle handle,
+        CancellationToken cancellationToken) =>
+        context.GpuExecutorDispatches.SingleOrDefaultAsync(dispatch =>
+            dispatch.DispatchId == handle.DispatchId &&
+            dispatch.BatchId == handle.BatchId &&
+            dispatch.CapacitySlotKey == handle.CapacitySlotKey &&
+            dispatch.ExecutorKey == handle.ExecutorKey &&
+            dispatch.AdmissionGeneration == handle.AdmissionGeneration,
+            cancellationToken);
+
+    private static async Task<bool> HasCompletedReceiptsForEveryActiveTaskAsync(
+        FluxKnowledgeDbContext context,
+        GpuExecutorDispatchEntity dispatch,
+        IReadOnlyCollection<GpuMiniTaskEntity> activeTasks,
+        CancellationToken cancellationToken)
+    {
+        if (activeTasks.Count == 0)
+        {
+            return false;
+        }
+
+        var completed = await context.GpuExecutorResultReceipts
+            .Where(receipt => receipt.DispatchId == dispatch.DispatchId &&
+                              receipt.BatchId == dispatch.BatchId &&
+                              receipt.AdmissionGeneration == dispatch.AdmissionGeneration &&
+                              receipt.Disposition == (int)GpuMiniTaskBoundaryDisposition.Completed)
+            .Select(receipt => receipt.MiniTaskId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        return completed.ToHashSet().SetEquals(activeTasks.Select(task => task.Id));
     }
 
     private static async Task ValidateIdempotentReplayAsync(

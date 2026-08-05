@@ -10,7 +10,8 @@ public sealed class GpuSchedulerCoordinator(
     IStatusEventPublisher statusPublisher,
     IGpuSchedulerWakeSignal wakeSignal,
     TimeProvider timeProvider,
-    GpuSchedulerOptions options)
+    GpuSchedulerOptions options,
+    IGpuExecutorDispatchSignal? executorDispatchSignal = null)
 {
     public async ValueTask<GpuMiniTaskHandoffResult> HandoffAsync(
         GpuMiniTaskHandoffRequest request,
@@ -82,7 +83,17 @@ public sealed class GpuSchedulerCoordinator(
             }
             else
             {
-                await PublishStatusAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await PublishStatusAsync(cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    if (result.Disposition == GpuAdmissionDisposition.Admit && !result.IsIdempotentReplay)
+                    {
+                        NotifyExecutorDispatch();
+                    }
+                }
             }
         }
 
@@ -149,6 +160,7 @@ public sealed class GpuSchedulerCoordinator(
     {
         RequireLifecycleOperationId(operationId);
         ArgumentNullException.ThrowIfNull(request);
+        request.Validate();
         var result = await store.ReconcileCapacityAsync(operationId, request, cancellationToken).ConfigureAwait(false);
         if (result.Committed)
         {
@@ -174,8 +186,7 @@ public sealed class GpuSchedulerCoordinator(
     {
         RequireLifecycleOperationId(operationId);
         ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(request.MiniTaskIds);
-        request = request with { MiniTaskIds = request.MiniTaskIds.ToArray() };
+        request.Validate();
         var result = await store.ReconcileTaskOutcomeAsync(operationId, request, cancellationToken).ConfigureAwait(false);
         if (result.Committed)
         {
@@ -204,6 +215,18 @@ public sealed class GpuSchedulerCoordinator(
         statusPublisher.PublishAsync(
             new StatusChanged(null, "gpu-scheduler", timeProvider.GetUtcNow()),
             cancellationToken);
+
+    private void NotifyExecutorDispatch()
+    {
+        try
+        {
+            executorDispatchSignal?.Notify();
+        }
+        catch
+        {
+            // A local prompt is not scheduler state and cannot alter a committed admission.
+        }
+    }
 
     private static void RequireLifecycleOperationId(Guid operationId)
     {

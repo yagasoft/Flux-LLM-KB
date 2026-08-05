@@ -18,13 +18,15 @@ if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 }
 
+$SchedulerMigrationTargetId = "20260805112341_AddGpuExecutorDispatchAndReceipts"
 $SchedulerMigrationIds = @(
     "20260729080641_AddGpuSchedulerDurability",
     "20260729094809_AddGpuSchedulerOperationReceipts",
     "20260729103104_CompleteGpuSchedulerOperationReceipts",
     "20260729120305_AddGpuSchedulerOperationReceiptRequestFingerprint",
     "20260802182703_AddGpuSchedulerBinaryFenceCollation",
-    "20260802191240_AddGpuSchedulerOpaqueKeyCanonicality"
+    "20260802191240_AddGpuSchedulerOpaqueKeyCanonicality",
+    $SchedulerMigrationTargetId
 )
 $RequiredBaselineMigrationIds = @(
     "20260726215521_InitialPhase1",
@@ -48,6 +50,7 @@ if ($PlanOnly) {
         requires_explicit_migration_confirmation = $true
         required_baseline_migration_ids = $RequiredBaselineMigrationIds
         scheduler_migration_ids = $SchedulerMigrationIds
+        scheduler_migration_target = $SchedulerMigrationTargetId
         required_endpoints = @(
             "/health/live",
             "/health/ready",
@@ -369,7 +372,7 @@ try {
         $previousConnection = $env:ConnectionStrings__FluxKnowledge
         try {
             $env:ConnectionStrings__FluxKnowledge = $productionConnection.ConnectionString
-            & dotnet tool run dotnet-ef -- database update "20260802191240_AddGpuSchedulerOpaqueKeyCanonicality" --project "src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" --configuration Release --no-build --connection $productionConnection.ConnectionString
+            & dotnet tool run dotnet-ef -- database update $SchedulerMigrationTargetId --project "src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" --configuration Release --no-build --connection $productionConnection.ConnectionString
             if ($LASTEXITCODE -ne 0) {
                 throw "The explicitly confirmed native SQL migration update failed with exit code $LASTEXITCODE."
             }

@@ -348,6 +348,124 @@ public sealed class GpuSchedulerContractTests
     }
 
     [Fact]
+    public async Task Committed_admission_publishes_status_before_prompting_executor_dispatch()
+    {
+        var events = new List<string>();
+        var store = new RecordingStore
+        {
+            AdmissionResult = new GpuSchedulerAdmissionRoundResult(true, GpuAdmissionDisposition.Admit, null),
+            EventLog = events
+        };
+        var coordinator = CreateCoordinator(
+            store,
+            new RecordingPublisher(events),
+            new RecordingWakeSignal(events),
+            dispatchSignal: new RecordingExecutorDispatchSignal(events));
+
+        var result = await coordinator.AdmitAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, CancellationToken.None);
+
+        Assert.True(result.Committed);
+        Assert.Equal(["admission-store", "status", "executor-dispatch"], events);
+    }
+
+    [Fact]
+    public async Task Replayed_committed_admission_publishes_status_without_a_second_executor_dispatch_prompt()
+    {
+        var events = new List<string>();
+        var store = new RecordingStore
+        {
+            AdmissionResult = new GpuSchedulerAdmissionRoundResult(true, GpuAdmissionDisposition.Admit, null),
+            MarkRepeatedAdmissionAsReplay = true,
+            EventLog = events
+        };
+        var dispatchSignal = new RecordingExecutorDispatchSignal(events);
+        var coordinator = CreateCoordinator(
+            store,
+            new RecordingPublisher(events),
+            new RecordingWakeSignal(events),
+            dispatchSignal: dispatchSignal);
+        var operationId = Guid.NewGuid();
+
+        await coordinator.AdmitAsync(operationId, GpuSchedulerWakeReason.WorkReady, CancellationToken.None);
+        await coordinator.AdmitAsync(operationId, GpuSchedulerWakeReason.WorkReady, CancellationToken.None);
+
+        Assert.Equal(1, dispatchSignal.Count);
+        Assert.Equal(
+            ["admission-store", "status", "executor-dispatch", "admission-store", "status"],
+            events);
+    }
+
+    [Theory]
+    [InlineData(GpuAdmissionDisposition.Busy)]
+    [InlineData(GpuAdmissionDisposition.Defer)]
+    public async Task Non_admit_result_does_not_prompt_executor_dispatch(GpuAdmissionDisposition disposition)
+    {
+        var events = new List<string>();
+        var store = new RecordingStore
+        {
+            AdmissionResult = new GpuSchedulerAdmissionRoundResult(
+                true,
+                disposition,
+                disposition == GpuAdmissionDisposition.Defer
+                    ? DateTimeOffset.Parse("2026-07-29T12:03:00+00:00")
+                    : null),
+            EventLog = events
+        };
+        var dispatchSignal = new RecordingExecutorDispatchSignal(events);
+        var coordinator = CreateCoordinator(
+            store,
+            new RecordingPublisher(events),
+            new RecordingWakeSignal(events),
+            dispatchSignal: dispatchSignal);
+
+        await coordinator.AdmitAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, CancellationToken.None);
+
+        Assert.Equal(0, dispatchSignal.Count);
+    }
+
+    [Fact]
+    public async Task Dispatch_prompt_failure_does_not_alter_a_committed_admission_result()
+    {
+        var store = new RecordingStore
+        {
+            AdmissionResult = new GpuSchedulerAdmissionRoundResult(true, GpuAdmissionDisposition.Admit, null)
+        };
+        var coordinator = CreateCoordinator(
+            store,
+            dispatchSignal: new ThrowingExecutorDispatchSignal());
+
+        var result = await coordinator.AdmitAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, CancellationToken.None);
+
+        Assert.True(result.Committed);
+        Assert.Equal(GpuAdmissionDisposition.Admit, result.Disposition);
+    }
+
+    [Fact]
+    public async Task Invalid_admission_decision_does_not_prompt_executor_dispatch()
+    {
+        var events = new List<string>();
+        var store = new RecordingStore
+        {
+            Candidate = CreateCandidate(),
+            EventLog = events
+        };
+        var dispatchSignal = new RecordingExecutorDispatchSignal(events);
+        var coordinator = CreateCoordinator(
+            store,
+            new RecordingPublisher(events),
+            new RecordingWakeSignal(events),
+            admissionGate: new FixedAdmissionGate(
+                new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "slot-a", "owner-a", null)),
+            dispatchSignal: dispatchSignal);
+
+        await Assert.ThrowsAnyAsync<ArgumentException>(async () =>
+            await coordinator.AdmitAsync(Guid.NewGuid(), GpuSchedulerWakeReason.WorkReady, CancellationToken.None));
+
+        Assert.Equal(0, dispatchSignal.Count);
+        Assert.Equal(["admission-store"], events);
+    }
+
+    [Fact]
     public async Task Mutation_free_busy_does_not_publish_or_signal_the_observed_wake()
     {
         var events = new List<string>();
@@ -479,29 +597,23 @@ public sealed class GpuSchedulerContractTests
     }
 
     [Fact]
-    public async Task Outcome_reconciliation_snapshots_caller_owned_task_ids_before_the_store_boundary()
+    public async Task Outcome_reconciliation_preserves_the_named_task_evidence_before_the_store_boundary()
     {
-        var originalTaskId = Guid.NewGuid();
-        var mutatedTaskId = Guid.NewGuid();
-        var callerOwnedTaskIds = new List<Guid> { originalTaskId };
+        var taskId = Guid.NewGuid();
         var store = new RecordingStore
         {
-            BeforeOutcomeRequestInspection = () => callerOwnedTaskIds[0] = mutatedTaskId
         };
         var coordinator = CreateCoordinator(store);
 
         await coordinator.ReconcileTaskOutcomeAsync(
             Guid.NewGuid(),
             new GpuTaskOutcomeReconciliation(
+                CreateHandle(),
                 Guid.NewGuid(),
-                "slot-a",
-                "owner-a",
-                1,
-                callerOwnedTaskIds,
-                "verified-unresolved-task-outcome"),
+                taskId),
             CancellationToken.None);
 
-        Assert.Equal([originalTaskId], store.LastOutcomeReconciliation!.MiniTaskIds);
+        Assert.Equal(taskId, store.LastOutcomeReconciliation!.MiniTaskId);
     }
 
     [Fact]
@@ -546,7 +658,7 @@ public sealed class GpuSchedulerContractTests
     }
 
     [Fact]
-    public void Coordinator_has_only_scheduler_boundary_dependencies()
+    public void Coordinator_has_only_scheduler_and_executor_prompt_boundary_dependencies()
     {
         var dependencyTypes = typeof(GpuSchedulerCoordinator)
             .GetConstructors()
@@ -562,7 +674,8 @@ public sealed class GpuSchedulerContractTests
                 typeof(IStatusEventPublisher),
                 typeof(IGpuSchedulerWakeSignal),
                 typeof(TimeProvider),
-                typeof(GpuSchedulerOptions)
+                typeof(GpuSchedulerOptions),
+                typeof(IGpuExecutorDispatchSignal)
             ],
             dependencyTypes);
     }
@@ -572,7 +685,8 @@ public sealed class GpuSchedulerContractTests
         IStatusEventPublisher? publisher = null,
         IGpuSchedulerWakeSignal? wakeSignal = null,
         IGpuAdmissionGate? admissionGate = null,
-        GpuSchedulerOptions? options = null) =>
+        GpuSchedulerOptions? options = null,
+        IGpuExecutorDispatchSignal? dispatchSignal = null) =>
         new(
             store,
             admissionGate ?? new FixedAdmissionGate(
@@ -580,7 +694,8 @@ public sealed class GpuSchedulerContractTests
             publisher ?? new RecordingPublisher([]),
             wakeSignal ?? new RecordingWakeSignal([]),
             new FixedTimeProvider(),
-            options ?? GpuSchedulerOptions.Default);
+            options ?? GpuSchedulerOptions.Default,
+            dispatchSignal);
 
     private static GpuMiniTaskHandoffRequest CreateHandoffRequest() => new(
         new ClaimedJob(
@@ -606,11 +721,11 @@ public sealed class GpuSchedulerContractTests
         var validOutcome = new GpuMiniTaskBoundaryOutcome(
             Guid.NewGuid(),
             GpuMiniTaskBoundaryDisposition.Completed);
-        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { BatchId = Guid.Empty }];
-        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { CapacitySlotKey = "" }];
-        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { OwnerKey = " " }];
-        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { AdmissionGeneration = 0 }];
-        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { AdmissionGeneration = -1 }];
+        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { Handle = CreateHandle() with { BatchId = Guid.Empty } }];
+        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { Handle = CreateHandle() with { CapacitySlotKey = "" } }];
+        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { Handle = CreateHandle() with { ExecutorKey = " " } }];
+        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { Handle = CreateHandle() with { AdmissionGeneration = 0 } }];
+        yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { Handle = CreateHandle() with { AdmissionGeneration = -1 } }];
         yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { Kind = (GpuBatchCallbackKind)99 }];
         yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with { Outcomes = [] }];
         yield return [CreateCallback(GpuBatchCallbackKind.Completed, true) with
@@ -636,10 +751,7 @@ public sealed class GpuSchedulerContractTests
         GpuBatchCallbackKind kind,
         bool capacityReleased) =>
         new(
-            Guid.NewGuid(),
-            "slot-a",
-            "owner-a",
-            1,
+            CreateHandle(),
             kind,
             kind == GpuBatchCallbackKind.SafeBoundary && !capacityReleased
                 ? []
@@ -650,14 +762,14 @@ public sealed class GpuSchedulerContractTests
                         : GpuMiniTaskBoundaryDisposition.OutcomeUncertain)],
             capacityReleased);
 
+    private static GpuExecutorBatchHandle CreateHandle() =>
+        new(Guid.NewGuid(), "slot-a", "executor-a", 1, Guid.NewGuid());
+
     private static GpuTaskOutcomeReconciliation CreateTaskOutcomeReconciliation() =>
         new(
+            CreateHandle(),
             Guid.NewGuid(),
-            "slot-a",
-            "owner-a",
-            1,
-            [Guid.NewGuid()],
-            "verified-unresolved-task-outcome");
+            Guid.NewGuid());
 
     private sealed class RecordingStore : IGpuSchedulerStore
     {
@@ -665,15 +777,16 @@ public sealed class GpuSchedulerContractTests
         public Exception? HandoffException { get; init; }
         public Exception? AdmissionException { get; init; }
         public GpuSchedulerAdmissionRoundResult AdmissionResult { get; init; } = new(false, GpuAdmissionDisposition.Busy, null);
+        public bool MarkRepeatedAdmissionAsReplay { get; init; }
         public GpuBatchCandidate? Candidate { get; init; }
         public GpuBatchCallbackResult CallbackResult { get; init; } = new(false, false);
         public GpuTrustedReconciliationResult OutcomeReconciliationResult { get; init; } = new(false);
-        public Action? BeforeOutcomeRequestInspection { get; init; }
         public int CallbackCount { get; private set; }
         public int UncertaintyCount { get; private set; }
         public GpuSchedulerWakeReason? LastWakeReason { get; private set; }
         public GpuAdmissionDecision? LastAdmissionDecision { get; private set; }
         public GpuTaskOutcomeReconciliation? LastOutcomeReconciliation { get; private set; }
+        private readonly HashSet<Guid> _admissionOperationIds = [];
 
         public ValueTask<GpuMiniTaskHandoffResult> GpuTaskHandoffAsync(
             GpuMiniTaskHandoffRequest request,
@@ -707,7 +820,9 @@ public sealed class GpuSchedulerContractTests
                 LastAdmissionDecision = await decideAdmission(Candidate, cancellationToken);
             }
 
-            return AdmissionResult;
+            return MarkRepeatedAdmissionAsReplay && !_admissionOperationIds.Add(operationId)
+                ? AdmissionResult with { IsIdempotentReplay = true }
+                : AdmissionResult;
         }
 
         public ValueTask<GpuBatchCallbackResult> ApplyBatchCallbackAsync(
@@ -744,7 +859,6 @@ public sealed class GpuSchedulerContractTests
             CancellationToken cancellationToken)
         {
             EventLog?.Add("outcome-store");
-            BeforeOutcomeRequestInspection?.Invoke();
             LastOutcomeReconciliation = request;
             return ValueTask.FromResult(OutcomeReconciliationResult);
         }
@@ -807,6 +921,22 @@ public sealed class GpuSchedulerContractTests
 
         public ValueTask<GpuSchedulerWakeReason> WaitAsync(CancellationToken cancellationToken) =>
             ValueTask.FromResult((GpuSchedulerWakeReason)0);
+    }
+
+    private sealed class RecordingExecutorDispatchSignal(List<string> events) : IGpuExecutorDispatchSignal
+    {
+        public int Count { get; private set; }
+
+        public void Notify()
+        {
+            Count++;
+            events.Add("executor-dispatch");
+        }
+    }
+
+    private sealed class ThrowingExecutorDispatchSignal : IGpuExecutorDispatchSignal
+    {
+        public void Notify() => throw new InvalidOperationException("test dispatch signal failure");
     }
 
     private sealed class FixedTimeProvider : TimeProvider

@@ -21,13 +21,25 @@ public sealed record GpuMiniTaskHandoffResult(
 /// </summary>
 public static class GpuSchedulerOpaqueKeyValidator
 {
-    public static void RequireCanonical(string? value, string parameterName)
+    public const int MaximumExecutorFenceKeyLength = 256;
+
+    public static void RequireCanonical(
+        string? value,
+        string parameterName,
+        int? maximumLength = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
         if (char.IsWhiteSpace(value[^1]))
         {
             throw new ArgumentException(
                 "Scheduler opaque keys cannot end with whitespace.",
+                parameterName);
+        }
+
+        if (maximumLength is not null && value.Length > maximumLength.Value)
+        {
+            throw new ArgumentException(
+                $"Scheduler opaque keys cannot exceed {maximumLength.Value} characters.",
                 parameterName);
         }
     }
@@ -51,7 +63,8 @@ public sealed record GpuAdmissionDecision(
     GpuAdmissionDisposition Disposition,
     string? CapacitySlotKey,
     string? OwnerKey,
-    TimeSpan? RetryAfter)
+    TimeSpan? RetryAfter,
+    string? ExecutorKey = null)
 {
     public GpuAdmissionDecision Validate(GpuSchedulerOptions options)
     {
@@ -64,8 +77,9 @@ public sealed record GpuAdmissionDecision(
 
         if (Disposition == GpuAdmissionDisposition.Admit)
         {
-            GpuSchedulerOpaqueKeyValidator.RequireCanonical(CapacitySlotKey, nameof(CapacitySlotKey));
-            GpuSchedulerOpaqueKeyValidator.RequireCanonical(OwnerKey, nameof(OwnerKey));
+            GpuSchedulerOpaqueKeyValidator.RequireCanonical(CapacitySlotKey, nameof(CapacitySlotKey), GpuSchedulerOpaqueKeyValidator.MaximumExecutorFenceKeyLength);
+            GpuSchedulerOpaqueKeyValidator.RequireCanonical(OwnerKey, nameof(OwnerKey), GpuSchedulerOpaqueKeyValidator.MaximumExecutorFenceKeyLength);
+            GpuSchedulerOpaqueKeyValidator.RequireCanonical(ExecutorKey, nameof(ExecutorKey), GpuSchedulerOpaqueKeyValidator.MaximumExecutorFenceKeyLength);
             if (RetryAfter is not null)
             {
                 throw new ArgumentException("An admitted batch cannot have a retry delay.", nameof(RetryAfter));
@@ -76,7 +90,7 @@ public sealed record GpuAdmissionDecision(
 
         if (Disposition == GpuAdmissionDisposition.Busy)
         {
-            if (CapacitySlotKey is not null || OwnerKey is not null || RetryAfter is not null)
+            if (CapacitySlotKey is not null || OwnerKey is not null || ExecutorKey is not null || RetryAfter is not null)
             {
                 throw new ArgumentException("A busy admission decision has no capacity reservation or retry delay.");
             }
@@ -84,7 +98,7 @@ public sealed record GpuAdmissionDecision(
             return this;
         }
 
-        if (CapacitySlotKey is not null || OwnerKey is not null)
+        if (CapacitySlotKey is not null || OwnerKey is not null || ExecutorKey is not null)
         {
             throw new ArgumentException("A deferred admission decision cannot reserve capacity.");
         }
@@ -101,7 +115,8 @@ public sealed record GpuAdmissionDecision(
 public sealed record GpuSchedulerAdmissionRoundResult(
     bool Committed,
     GpuAdmissionDisposition Disposition,
-    DateTimeOffset? DeferredUntilUtc);
+    DateTimeOffset? DeferredUntilUtc,
+    bool IsIdempotentReplay = false);
 
 public enum GpuBatchCallbackKind
 {
@@ -111,27 +126,26 @@ public enum GpuBatchCallbackKind
 }
 
 public sealed record GpuBatchCallback(
-    Guid BatchId,
-    string CapacitySlotKey,
-    string OwnerKey,
-    long AdmissionGeneration,
+    GpuExecutorBatchHandle Handle,
     GpuBatchCallbackKind Kind,
     IReadOnlyList<GpuMiniTaskBoundaryOutcome> Outcomes,
     bool CapacityReleased)
 {
+    // Transitional projections keep the existing scheduler store compiling until the SQL
+    // dispatch implementation replaces its legacy owner-based lookup in the next slice.
+    // They never carry an owner key; SQL must resolve that private identity from DispatchId.
+    public Guid BatchId => Handle.BatchId;
+
+    public string CapacitySlotKey => Handle.CapacitySlotKey;
+
+    public string OwnerKey => string.Empty;
+
+    public long AdmissionGeneration => Handle.AdmissionGeneration;
+
     public void Validate()
     {
-        if (BatchId == Guid.Empty)
-        {
-            throw new ArgumentException("A callback requires a batch ID.", nameof(BatchId));
-        }
-
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(CapacitySlotKey, nameof(CapacitySlotKey));
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(OwnerKey, nameof(OwnerKey));
-        if (AdmissionGeneration <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(AdmissionGeneration));
-        }
+        ArgumentNullException.ThrowIfNull(Handle);
+        Handle.Validate();
 
         if (!Enum.IsDefined(Kind))
         {
@@ -190,11 +204,26 @@ public sealed record GpuCapacityUncertaintyRequest(
 public sealed record GpuDiagnosticTransitionResult(bool Committed);
 
 public sealed record GpuTrustedCapacityReconciliation(
-    Guid BatchId,
-    string CapacitySlotKey,
-    string OwnerKey,
-    long AdmissionGeneration,
-    string EvidenceClass);
+    GpuExecutorBatchHandle Handle,
+    Guid TrustedEvidenceOperationId)
+{
+    public Guid BatchId => Handle.BatchId;
+
+    public string CapacitySlotKey => Handle.CapacitySlotKey;
+
+    public string OwnerKey => string.Empty;
+
+    public long AdmissionGeneration => Handle.AdmissionGeneration;
+
+    public string EvidenceClass => GpuExecutorEvidenceClass.CapacityReleaseConfirmed.ToString();
+
+    public void Validate()
+    {
+        ArgumentNullException.ThrowIfNull(Handle);
+        Handle.Validate();
+        GpuExecutorAcknowledgement.RequireOperationId(TrustedEvidenceOperationId);
+    }
+}
 
 public sealed record GpuTrustedReconciliationResult(bool Committed);
 
@@ -203,12 +232,33 @@ public sealed record GpuTrustedReconciliationResult(bool Committed);
 /// distinct from capacity reconciliation and is not an executor, model, or Web contract.
 /// </summary>
 public sealed record GpuTaskOutcomeReconciliation(
-    Guid BatchId,
-    string CapacitySlotKey,
-    string OwnerKey,
-    long AdmissionGeneration,
-    IReadOnlyList<Guid> MiniTaskIds,
-    string EvidenceClass);
+    GpuExecutorBatchHandle Handle,
+    Guid TrustedEvidenceOperationId,
+    Guid MiniTaskId)
+{
+    public Guid BatchId => Handle.BatchId;
+
+    public string CapacitySlotKey => Handle.CapacitySlotKey;
+
+    public string OwnerKey => string.Empty;
+
+    public long AdmissionGeneration => Handle.AdmissionGeneration;
+
+    public IReadOnlyList<Guid> MiniTaskIds => [MiniTaskId];
+
+    public string EvidenceClass => GpuExecutorEvidenceClass.TaskOutcomeUncertainConfirmed.ToString();
+
+    public void Validate()
+    {
+        ArgumentNullException.ThrowIfNull(Handle);
+        Handle.Validate();
+        GpuExecutorAcknowledgement.RequireOperationId(TrustedEvidenceOperationId);
+        if (MiniTaskId == Guid.Empty)
+        {
+            throw new ArgumentException("A task reconciliation requires a mini-task ID.", nameof(MiniTaskId));
+        }
+    }
+}
 
 public sealed record GpuSchedulerWakeSnapshot(
     long Generation,

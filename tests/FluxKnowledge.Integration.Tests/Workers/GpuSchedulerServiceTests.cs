@@ -547,16 +547,22 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
             await Assert.ThrowsAsync<InvalidOperationException>(async () =>
                 await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a")));
 
-            var reconciliation = await new SqlGpuSchedulerStore(factory, timeProvider: clock)
-                .ReconcileCapacityAsync(
-                    Guid.NewGuid(),
-                    new GpuTrustedCapacityReconciliation(
-                        batch.Id,
-                        "slot-a",
-                        "test-owner",
-                        batch.AdmissionGeneration,
-                        SqlGpuSchedulerStore.TrustedCapacityReleaseEvidenceClass),
-                    CancellationToken.None);
+            var reconciliationStore = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+            var handle = new GpuExecutorBatchHandle(
+                batch.Id, "slot-a", "test-executor", batch.AdmissionGeneration, batch.Id);
+            var evidenceOperationId = Guid.NewGuid();
+            Assert.True((await reconciliationStore.RecordTrustedEvidenceAsync(
+                new GpuExecutorTrustedEvidence(
+                    evidenceOperationId,
+                    handle,
+                    "test-verifier",
+                    now,
+                    GpuExecutorEvidenceClass.CapacityReleaseConfirmed),
+                CancellationToken.None)).Accepted);
+            var reconciliation = await reconciliationStore.ReconcileCapacityAsync(
+                Guid.NewGuid(),
+                new GpuTrustedCapacityReconciliation(handle, evidenceOperationId),
+                CancellationToken.None);
             Assert.True(reconciliation.Committed);
 
             await using var released = await factory.CreateDbContextAsync();
@@ -566,6 +572,104 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
                     .Where(slot => slot.SlotKey == "slot-a")
                     .Select(slot => slot.State)
                     .SingleAsync());
+        }
+        finally
+        {
+            await service.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [NativeSqlServerFact]
+    public async Task Elapsed_fallback_diagnostic_and_heartbeat_thresholds_do_not_admit_release_requeue_or_replace_results()
+    {
+        var admission = new SqlGpuAdmissionTests(_fixture);
+        var factory = await admission.CreateEnvironmentAsync();
+        var activeTaskId = await admission.AddReadyAsync(
+            factory,
+            GpuPriorityLane.DocumentIndexing,
+            "runtime",
+            "settings",
+            10);
+        await SqlGpuAdmissionTests.AdmitAsync(factory, SqlGpuAdmissionTests.Admit("slot-a"));
+        var waitingTaskId = await admission.AddReadyAsync(
+            factory,
+            GpuPriorityLane.InteractiveRetrieval,
+            "runtime",
+            "settings",
+            10);
+        await using var read = await factory.CreateDbContextAsync();
+        var batch = await read.GpuBatches.SingleAsync();
+        var handle = new GpuExecutorBatchHandle(
+            batch.Id,
+            "slot-a",
+            "test-executor",
+            batch.AdmissionGeneration,
+            batch.Id);
+
+        var now = DateTimeOffset.Parse("2026-07-29T10:00:00+00:00");
+        var fallbackInterval = TimeSpan.FromMinutes(1);
+        var diagnosticAge = TimeSpan.FromMinutes(5);
+        var clock = new ManualTimeProvider(now, () => 0);
+        var setupStore = new SqlGpuSchedulerStore(factory, timeProvider: clock);
+        Assert.True((await setupStore.AcknowledgeAsync(
+            new GpuExecutorAcknowledgement(Guid.NewGuid(), handle),
+            CancellationToken.None)).Accepted);
+        Assert.True((await setupStore.RecordReceiptAsync(
+            new GpuExecutorResultReceipt(
+                Guid.NewGuid(),
+                handle,
+                activeTaskId,
+                GpuMiniTaskBoundaryDisposition.Completed,
+                new byte[32],
+                GpuExecutorEvidenceClass.TaskOutcomeConfirmed),
+            CancellationToken.None)).Accepted);
+
+        var signal = new ChannelGpuSchedulerWakeSignal();
+        var publisher = new RecordingStatusPublisher();
+        var services = new ServiceCollection();
+        services.AddSingleton(factory);
+        services.AddScoped<IGpuSchedulerStore>(_ => new SqlGpuSchedulerStore(factory, timeProvider: clock));
+        services.AddSingleton<IGpuAdmissionGate, NoGpuAdmissionGate>();
+        services.AddSingleton<IStatusEventPublisher>(publisher);
+        services.AddSingleton<IGpuSchedulerWakeSignal>(signal);
+        services.AddSingleton<TimeProvider>(clock);
+        services.AddSingleton(new GpuSchedulerOptions(
+            1,
+            100,
+            TimeSpan.FromMinutes(1),
+            fallbackInterval,
+            diagnosticAge));
+        services.AddScoped<GpuSchedulerCoordinator>();
+        services.AddSingleton<GpuSchedulerService>();
+        await using var provider = services.BuildServiceProvider();
+        var service = provider.GetRequiredService<GpuSchedulerService>();
+
+        await service.StartAsync(CancellationToken.None);
+        try
+        {
+            Assert.Equal(now.Add(fallbackInterval), await ReadScheduledDueAsync(clock));
+            var beforeElapsedTime = await ReadElapsedTimeSnapshotAsync(factory, activeTaskId, waitingTaskId);
+            Assert.Equal(1, beforeElapsedTime.BatchCount);
+            Assert.Equal(1, beforeElapsedTime.ResultReceiptCount);
+            Assert.NotNull(beforeElapsedTime.AcceptedReceipt);
+
+            clock.AdvanceTo(now.Add(fallbackInterval));
+            Assert.Equal(now.Add(fallbackInterval + fallbackInterval), await ReadScheduledDueAsync(clock));
+            Assert.Equal(beforeElapsedTime, await ReadElapsedTimeSnapshotAsync(factory, activeTaskId, waitingTaskId));
+
+            clock.AdvanceTo(now.AddMinutes(4));
+            Assert.Equal(now.Add(diagnosticAge), await ReadScheduledDueAsync(clock));
+            Assert.Equal(beforeElapsedTime, await ReadElapsedTimeSnapshotAsync(factory, activeTaskId, waitingTaskId));
+
+            clock.AdvanceTo(now.Add(diagnosticAge));
+            await publisher.Published.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(beforeElapsedTime with
+            {
+                DispatchState = (int)GpuExecutorDispatchState.DeliveryUncertain,
+                BatchState = (int)GpuBatchState.CapacityUncertain,
+                SlotState = (int)GpuCapacitySlotState.Uncertain
+            }, await ReadElapsedTimeSnapshotAsync(factory, activeTaskId, waitingTaskId));
         }
         finally
         {
@@ -1071,6 +1175,71 @@ public sealed class GpuSchedulerServiceTests(NativeSqlServerFixture fixture)
 
         return services.BuildServiceProvider();
     }
+
+    private static async Task<DateTimeOffset> ReadScheduledDueAsync(ManualTimeProvider clock) =>
+        (await clock.ScheduledTimers.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2))).DueAtUtc;
+
+    private static async Task<ElapsedTimeSnapshot> ReadElapsedTimeSnapshotAsync(
+        IDbContextFactory<FluxKnowledgeDbContext> factory,
+        Guid activeTaskId,
+        Guid waitingTaskId)
+    {
+        await using var context = await factory.CreateDbContextAsync();
+        var activeParentJobId = await context.GpuMiniTasks
+            .Where(task => task.Id == activeTaskId)
+            .Select(task => task.ParentJobId)
+            .SingleAsync();
+        var receipt = await context.GpuExecutorResultReceipts.SingleOrDefaultAsync();
+        return new ElapsedTimeSnapshot(
+            await context.GpuExecutorDispatches.Select(dispatch => dispatch.State).SingleAsync(),
+            await context.GpuBatches.Select(candidate => candidate.State).SingleAsync(),
+            await context.GpuCapacitySlots.Select(slot => slot.State).SingleAsync(),
+            await context.GpuMiniTasks.Where(task => task.Id == activeTaskId).Select(task => task.ExecutionState).SingleAsync(),
+            await context.GpuMiniTasks.Where(task => task.Id == waitingTaskId).Select(task => task.ExecutionState).SingleAsync(),
+            await context.Jobs.Where(job => job.Id == activeParentJobId).Select(job => job.PublicState).SingleAsync(),
+            await context.GpuExecutorResultReceipts.CountAsync(),
+            await context.GpuExecutorEvidence.CountAsync(),
+            await context.GpuBatches.CountAsync(),
+            receipt is null
+                ? null
+                : new AcceptedReceiptSnapshot(
+                    receipt.OperationId,
+                    receipt.DispatchId,
+                    receipt.BatchId,
+                    receipt.MiniTaskId,
+                    receipt.ExecutorKey,
+                    receipt.AdmissionGeneration,
+                    receipt.Disposition,
+                    receipt.EvidenceClass,
+                    receipt.OpaqueResultDigest is null ? null : Convert.ToHexString(receipt.OpaqueResultDigest),
+                    receipt.RequestFingerprint,
+                    receipt.CreatedAtUtc));
+    }
+
+    private sealed record ElapsedTimeSnapshot(
+        int DispatchState,
+        int BatchState,
+        int SlotState,
+        int ActiveTaskState,
+        int WaitingTaskState,
+        int ActiveParentJobState,
+        int ResultReceiptCount,
+        int EvidenceCount,
+        int BatchCount,
+        AcceptedReceiptSnapshot? AcceptedReceipt);
+
+    private sealed record AcceptedReceiptSnapshot(
+        Guid OperationId,
+        Guid DispatchId,
+        Guid BatchId,
+        Guid MiniTaskId,
+        string ExecutorKey,
+        long AdmissionGeneration,
+        int Disposition,
+        int EvidenceClass,
+        string? OpaqueResultDigest,
+        string RequestFingerprint,
+        DateTimeOffset CreatedAtUtc);
 
     private sealed class RestartAfterCommittedAdmissionStore(
         GpuSchedulerWakeSnapshot wake,

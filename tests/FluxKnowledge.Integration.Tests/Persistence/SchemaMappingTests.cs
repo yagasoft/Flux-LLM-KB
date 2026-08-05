@@ -285,6 +285,55 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Executor_dispatch_records_preserve_the_durable_handle_and_append_only_evidence_fences()
+    {
+        using var context = CreateContext();
+        var model = context.GetService<IDesignTimeModel>().Model;
+
+        var dispatch = FindTable(model, "GpuExecutorDispatches");
+        AssertProperty<Guid>(dispatch, "DispatchId");
+        AssertProperty<Guid>(dispatch, "BatchId");
+        AssertProperty<string>(dispatch, "CapacitySlotKey");
+        AssertProperty<string>(dispatch, "OwnerKey");
+        AssertProperty<string>(dispatch, "ExecutorKey");
+        AssertProperty<long>(dispatch, "AdmissionGeneration");
+        AssertProperty<int>(dispatch, "State");
+        AssertProperty<DateTimeOffset?>(dispatch, "AcknowledgedAtUtc");
+        AssertUniqueIndex(model, "GpuExecutorDispatches", "BatchId");
+        AssertRestrictiveForeignKey(model, "GpuExecutorDispatches", ["BatchId"], "GpuBatches", ["Id"]);
+        AssertRestrictiveForeignKey(model, "GpuExecutorDispatches", ["CapacitySlotKey"], "GpuCapacitySlots", ["SlotKey"]);
+
+        var receipt = FindTable(model, "GpuExecutorResultReceipts");
+        AssertProperty<Guid>(receipt, "OperationId");
+        AssertProperty<Guid>(receipt, "DispatchId");
+        AssertProperty<Guid>(receipt, "MiniTaskId");
+        var digest = AssertProperty<byte[]>(receipt, "OpaqueResultDigest");
+        Assert.Equal("varbinary(32)", digest.GetColumnType());
+        AssertUniqueIndex(model, "GpuExecutorResultReceipts", "DispatchId", "MiniTaskId");
+        AssertRestrictiveForeignKey(model, "GpuExecutorResultReceipts", ["DispatchId"], "GpuExecutorDispatches", ["DispatchId"]);
+        AssertRestrictiveForeignKey(model, "GpuExecutorResultReceipts", ["MiniTaskId"], "GpuMiniTasks", ["Id"]);
+
+        var evidence = FindTable(model, "GpuExecutorEvidence");
+        AssertProperty<Guid>(evidence, "OperationId");
+        AssertProperty<Guid>(evidence, "DispatchId");
+        AssertProperty<string>(evidence, "VerifierKey");
+        AssertRestrictiveForeignKey(model, "GpuExecutorEvidence", ["DispatchId"], "GpuExecutorDispatches", ["DispatchId"]);
+
+        AssertBinaryCollation(model, "GpuExecutorDispatches", "CapacitySlotKey", "OwnerKey", "ExecutorKey");
+        AssertBinaryCollation(model, "GpuExecutorResultReceipts", "ExecutorKey", "RequestFingerprint");
+        AssertBinaryCollation(model, "GpuExecutorEvidence", "CapacitySlotKey", "ExecutorKey", "VerifierKey", "RequestFingerprint");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorDispatches", "CapacitySlotKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorDispatches", "OwnerKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorDispatches", "ExecutorKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorResultReceipts", "ExecutorKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorResultReceipts", "RequestFingerprint");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorEvidence", "CapacitySlotKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorEvidence", "ExecutorKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorEvidence", "VerifierKey");
+        AssertNoTrailingWhitespaceConstraint(model, "GpuExecutorEvidence", "RequestFingerprint");
+    }
+
+    [Fact]
     public void Opaque_key_canonicality_migration_target_and_current_snapshot_require_non_empty_keys()
     {
         using var currentContext = CreateContext();
@@ -422,6 +471,23 @@ public sealed class SchemaMappingTests
                 constraint.Sql.Contains("UNICODE(RIGHT", StringComparison.Ordinal));
         Assert.DoesNotContain(operations, operation => operation is DropTableOperation or AlterColumnOperation);
         Assert.DoesNotContain(operations, operation => operation is UpdateDataOperation or DeleteDataOperation);
+    }
+
+    [Fact]
+    public void Executor_dispatch_migration_is_additive_and_creates_only_the_approved_private_tables()
+    {
+        var migration = new InspectableAddGpuExecutorDispatchAndReceiptsMigration();
+        var operations = migration.BuildUpOperations();
+        var tables = operations.OfType<CreateTableOperation>().Select(operation => operation.Name).ToHashSet();
+
+        Assert.Equal(
+            ["GpuExecutorDispatches", "GpuExecutorEvidence", "GpuExecutorResultReceipts"],
+            tables.OrderBy(name => name, StringComparer.Ordinal));
+        Assert.DoesNotContain(operations, operation => operation is AlterColumnOperation or DropTableOperation or DeleteDataOperation or UpdateDataOperation);
+        Assert.Contains(operations.OfType<CreateIndexOperation>(), operation =>
+            operation.Table == "GpuExecutorDispatches" && operation.Name == "IX_GpuExecutorDispatches_BatchId" && operation.IsUnique);
+        Assert.Contains(operations.OfType<CreateIndexOperation>(), operation =>
+            operation.Table == "GpuExecutorResultReceipts" && operation.Name == "IX_GpuExecutorResultReceipts_DispatchId_MiniTaskId" && operation.IsUnique);
     }
 
     [Fact]
@@ -619,6 +685,17 @@ public sealed class SchemaMappingTests
         public IModel BuildTargetModel() => TargetModel;
     }
 
+    private sealed class InspectableAddGpuExecutorDispatchAndReceiptsMigration
+        : AddGpuExecutorDispatchAndReceipts
+    {
+        public IReadOnlyList<MigrationOperation> BuildUpOperations()
+        {
+            var builder = new MigrationBuilder("Microsoft.EntityFrameworkCore.SqlServer");
+            Up(builder);
+            return builder.Operations;
+        }
+    }
+
 }
 
 public sealed class NativeSqlServerFixtureValidationTests
@@ -776,7 +853,8 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                OR [name] LIKE N'CK_Jobs_%_NoTrailingWhitespace';
             """,
             connection);
-        Assert.Equal(16, Convert.ToInt32(await constraintCommand.ExecuteScalarAsync()));
+        // The executor boundary adds three dispatch, two receipt and four evidence fences.
+        Assert.Equal(25, Convert.ToInt32(await constraintCommand.ExecuteScalarAsync()));
 
         await using var insert = new SqlCommand(
             """
@@ -1008,7 +1086,7 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
             Guid.NewGuid(),
             GpuSchedulerWakeReason.WorkReady,
             new GpuSchedulerOptions(1, 1, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1)),
-            (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "slot-a", "test-owner", null)),
+            (_, _) => ValueTask.FromResult(new GpuAdmissionDecision(GpuAdmissionDisposition.Admit, "slot-a", "test-owner", null, "test-executor")),
             CancellationToken.None);
         Assert.True(admission.Committed);
         await using var selected = database.CreateContext();

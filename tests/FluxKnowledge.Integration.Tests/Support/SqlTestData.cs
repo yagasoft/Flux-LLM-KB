@@ -22,6 +22,9 @@ internal static class SqlTestData
                 .Options);
         await context.AuditEvents.ExecuteDeleteAsync();
         await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
+        await context.GpuExecutorEvidence.ExecuteDeleteAsync();
+        await context.GpuExecutorResultReceipts.ExecuteDeleteAsync();
+        await context.GpuExecutorDispatches.ExecuteDeleteAsync();
         await context.GpuMiniTasks.ExecuteDeleteAsync();
         await context.GpuCapacitySlots
             .Where(slot => slot.ActiveBatchId != null)

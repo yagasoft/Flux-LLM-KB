@@ -75,6 +75,7 @@ native SQL Server catalogues.
 - Create: `src/FluxKnowledge.Application/Gpu/IGpuExecutorAdapter.cs`
 - Create: `src/FluxKnowledge.Application/Gpu/IGpuExecutorLifecycleSink.cs`
 - Create: `src/FluxKnowledge.Application/Gpu/GpuExecutorLifecycleCoordinator.cs`
+- Create: `src/FluxKnowledge.Application/Gpu/IGpuExecutorDispatchSignal.cs`
 - Modify: `src/FluxKnowledge.Application/Gpu/GpuSchedulerContracts.cs`
 - Modify: `src/FluxKnowledge.Application/Gpu/GpuSchedulerCoordinator.cs`
 - Modify: `tests/FluxKnowledge.Domain.Tests/Gpu/GpuSchedulerContractTests.cs`
@@ -129,6 +130,9 @@ native SQL Server catalogues.
   process, runtime, network, file or model member. A later approval-gated
   native-process implementation can satisfy this interface without changing the
   SQL fence.
+- `IGpuExecutorDispatchSignal` is a payload-free post-commit prompt abstraction.
+  The scheduler coordinator may invoke it only after committed admission status
+  publication; a signal failure is isolated from the durable admission result.
 
 - [ ] Write failing contract tests for every invalid handle, admission decision,
   receipt digest, operation ID and evidence request; prove validation occurs
@@ -276,7 +280,6 @@ native SQL Server catalogues.
 
 **Files:**
 
-- Create: `src/FluxKnowledge.Application/Gpu/IGpuExecutorDispatchSignal.cs`
 - Create: `src/FluxKnowledge.Infrastructure.SqlServer/Workers/ChannelGpuExecutorDispatchSignal.cs`
 - Create: `src/FluxKnowledge.Infrastructure.SqlServer/Workers/GpuExecutorDispatchRecoveryService.cs`
 - Modify: `src/FluxKnowledge.Infrastructure.SqlServer/Workers/GpuSchedulerServiceCollectionExtensions.cs`
@@ -288,7 +291,8 @@ native SQL Server catalogues.
 
 **Recovery behaviour:**
 
-- `ChannelGpuExecutorDispatchSignal` is a bounded coalescing prompt without
+- `ChannelGpuExecutorDispatchSignal` implements the Task 1
+  `IGpuExecutorDispatchSignal` abstraction as a bounded coalescing prompt without
   handles or payloads. It is not a queue. After an admission commit, the
   scheduler coordinator notifies it in a `finally` block after publishing the
   normal committed status notification, just as scheduler wakes are notified

@@ -57,13 +57,24 @@ durable SQL state.
   task-outcome reconciliation can record unresolved outcomes without releasing
   capacity. Real executor/process/driver evidence collection remains a future
   executor/result-stage responsibility.
-- **Approved executor boundary.** The approved
+- **Verified executor boundary.** The
   [executor/result boundary design](superpowers/specs/2026-08-03-phase-2-executor-result-boundary-design.md)
-  defines the next implementation unit: durable opaque executor handles,
-  dispatch and receipt evidence, plus a deterministic test-only fake executor.
-  It does not create, supervise or activate a process, runtime, model or GPU;
-  real process/driver evidence and model/GPU activation remain separately
-  approval-gated.
+  is implemented as durable opaque handles, dispatch/receipt/evidence fences,
+  bounded pending-delivery recovery and a deterministic integration-test-only
+  fake executor. Production composition retains `NoGpuAdmissionGate`, registers
+  one recovery hosted service and resolves zero `IGpuExecutorAdapter` instances.
+  On 2026-08-05, locked restore, a zero-warning Release build, Domain 188/188,
+  disposable native SQL Integration 252/252 and native Web 49/49 passed. The
+  native SQL recovery proof recreates the hosted service and scoped store over
+  the same durable catalogue: an unacknowledged pending handle redelivers, while
+  receipt-recorded and delivery-uncertain state remains unchanged and is not
+  redelivered. The
+  public-status test seeds private executor, dispatch, receipt, verifier and
+  digest values and proves the read-only aggregate response excludes them.
+  This boundary does not create, supervise, terminate or activate a process,
+  runtime, model or GPU. Real process management and termination evidence,
+  runtime/driver reconciliation, model/GPU activation, external access and
+  legacy work remain separately approval-gated.
 - **Local status.** `GET /api/gpu-status` and the Overview expose only
   sanitised aggregate scheduler state. They have no scheduler action route,
   never expose identifiers or runtime values, and return a bodyless 503 for

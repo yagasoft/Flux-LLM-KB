@@ -54,6 +54,7 @@ public sealed class WebHostCompositionTests : IDisposable
         services.AddLogging();
 
         WebHostComposition.AddFluxKnowledgeServices(services, configuration);
+        services.AddFluxKnowledgeGpuScheduler();
         using var provider = services.BuildServiceProvider(
             new ServiceProviderOptions
             {
@@ -86,6 +87,17 @@ public sealed class WebHostCompositionTests : IDisposable
             IDbContextFactory<FluxKnowledgeDbContext>>();
         Assert.IsType<SqlGpuSchedulerStore>(
             scope.ServiceProvider.GetRequiredService<IGpuSchedulerStore>());
+        Assert.IsType<SqlGpuSchedulerStore>(
+            scope.ServiceProvider.GetRequiredService<IGpuExecutorDispatchStore>());
+        Assert.IsType<NoGpuAdmissionGate>(
+            scope.ServiceProvider.GetRequiredService<IGpuAdmissionGate>());
+        Assert.IsType<GpuExecutorLifecycleCoordinator>(
+            scope.ServiceProvider.GetRequiredService<IGpuExecutorLifecycleSink>());
+        Assert.IsType<ChannelGpuExecutorDispatchSignal>(
+            provider.GetRequiredService<IGpuExecutorDispatchSignal>());
+        Assert.Empty(scope.ServiceProvider.GetServices<IGpuExecutorAdapter>());
+        Assert.Single(
+            provider.GetServices<IHostedService>().OfType<GpuExecutorDispatchRecoveryService>());
         Assert.IsType<SqlProjectionReader>(
             scope.ServiceProvider.GetRequiredService<IProjectionReader>());
     }
