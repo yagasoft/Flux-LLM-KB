@@ -77,9 +77,42 @@ foreach ($endpoint in $requiredEndpoints) {
     }
 }
 
+$hashHelper = Join-Path $SourceRoot "scripts\deploy\get-sha256.ps1"
+$hashProbePath = [System.IO.Path]::GetTempFileName()
+try {
+    [System.IO.File]::WriteAllBytes($hashProbePath, [System.Text.Encoding]::ASCII.GetBytes("abc"))
+    $escapedHashHelper = $hashHelper.Replace("'", "''")
+    $escapedHashProbePath = $hashProbePath.Replace("'", "''")
+    $hashProbeScript = @"
+`$ErrorActionPreference = "Stop"
+Import-Module Microsoft.PowerShell.Management -ErrorAction Stop
+Remove-Module Microsoft.PowerShell.Utility -ErrorAction SilentlyContinue
+`$PSModuleAutoloadingPreference = "None"
+if (Get-Command Get-FileHash -ErrorAction SilentlyContinue) {
+    throw "Get-FileHash remained available after module autoload was disabled."
+}
+& '$escapedHashHelper' -LiteralPath '$escapedHashProbePath'
+"@
+    $encodedHashProbeScript = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($hashProbeScript))
+    $hashOutput = & powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedHashProbeScript 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "The native deployment SHA-256 helper failed without Get-FileHash in a child Windows PowerShell host: $hashOutput"
+    }
+    if ($hashOutput.Trim() -ne "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD") {
+        throw "The native deployment SHA-256 helper produced an unexpected digest: $hashOutput"
+    }
+} finally {
+    if (Test-Path -LiteralPath $hashProbePath) {
+        Remove-Item -LiteralPath $hashProbePath -Force
+    }
+}
+
 $deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
 if ($deploymentScriptText -notmatch 'Invoke-WebRequest\s+-UseBasicParsing') {
     throw "The native deployment probe is not compatible with Windows PowerShell's basic parsing mode."
+}
+if ($deploymentScriptText -match '\bGet-FileHash\b' -or $deploymentScriptText -notmatch 'get-sha256\.ps1') {
+    throw "The native deployment executable is not wired to the compatible SHA-256 helper."
 }
 
 Write-Output "Native deployment plan contract passed."

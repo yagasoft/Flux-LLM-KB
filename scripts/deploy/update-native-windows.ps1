@@ -287,6 +287,10 @@ $cliProject = Join-Path $SourceRoot "src\FluxKnowledge.Cli\FluxKnowledge.Cli.csp
 if (-not (Test-Path -LiteralPath $webProject) -or -not (Test-Path -LiteralPath $cliProject)) {
     throw "The native web and CLI projects must exist under SourceRoot."
 }
+$sha256Helper = Join-Path $PSScriptRoot "get-sha256.ps1"
+if (-not (Test-Path -LiteralPath $sha256Helper -PathType Leaf)) {
+    throw "The native deployment SHA-256 helper is missing."
+}
 
 Assert-LoopbackIisTarget -Name $SiteName -ExpectedUrl $SiteUrl -ExpectedDeployRoot $DeployRoot
 $targetSettings = @(Get-ChildItem -LiteralPath $DeployRoot -File -Filter "appsettings*.json" -ErrorAction Stop)
@@ -347,7 +351,7 @@ try {
         Copy-Item -LiteralPath $settingsFile.FullName -Destination (Join-Path $stagingRoot $settingsFile.Name) -Force
     }
 
-    $stagedAssemblyHash = (Get-FileHash -LiteralPath $stagedAssembly -Algorithm SHA256).Hash
+    $stagedAssemblyHash = (& $sha256Helper -LiteralPath $stagedAssembly).Trim()
     $migrationIdsBefore = Get-AppliedMigrationIds -Server $productionConnection.Server -Database $productionConnection.Catalog
 
     if ($ApplyMigrations) {
@@ -406,7 +410,7 @@ try {
     Wait-ForAppPoolState -Name $SiteName -ExpectedState "Started"
     $poolStopped = $false
 
-    $deployedAssemblyHash = (Get-FileHash -LiteralPath (Join-Path $DeployRoot "FluxKnowledge.Web.dll") -Algorithm SHA256).Hash
+    $deployedAssemblyHash = (& $sha256Helper -LiteralPath (Join-Path $DeployRoot "FluxKnowledge.Web.dll")).Trim()
     if ($deployedAssemblyHash -ne $stagedAssemblyHash) {
         throw "The deployed application assembly does not match the verified staged payload."
     }
