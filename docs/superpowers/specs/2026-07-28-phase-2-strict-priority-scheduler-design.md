@@ -1,6 +1,8 @@
 # Phase 2 strict-priority scheduler design
 
-Status: approved design; implementation complete locally and verified, but unmerged and undeployed; authorised closeout/release action is pending.
+Status: scheduler foundation implemented, merged and validated on the fixed
+local loopback IIS site. The next executor/result boundary is a separate
+approved design: [Phase 2 executor/result boundary design](2026-08-03-phase-2-executor-result-boundary-design.md).
 
 ## Goal
 
@@ -46,7 +48,8 @@ does not enter this scheduler.
   chunking and ordinary code parsing never create a GPU mini-task.
 - A future GPU executor owns model output and final pipeline-stage completion;
   this scheduler checkpoint does not invent output or emulate an approved
-  model.
+  model. Its durable adapter and receipt boundary is defined separately in the
+  [Phase 2 executor/result boundary design](2026-08-03-phase-2-executor-result-boundary-design.md).
 
 ## Priority and batch rules
 

@@ -57,6 +57,13 @@ durable SQL state.
   task-outcome reconciliation can record unresolved outcomes without releasing
   capacity. Real executor/process/driver evidence collection remains a future
   executor/result-stage responsibility.
+- **Approved executor boundary.** The approved
+  [executor/result boundary design](superpowers/specs/2026-08-03-phase-2-executor-result-boundary-design.md)
+  defines the next implementation unit: durable opaque executor handles,
+  dispatch and receipt evidence, plus a deterministic test-only fake executor.
+  It does not create, supervise or activate a process, runtime, model or GPU;
+  real process/driver evidence and model/GPU activation remain separately
+  approval-gated.
 - **Local status.** `GET /api/gpu-status` and the Overview expose only
   sanitised aggregate scheduler state. They have no scheduler action route,
   never expose identifiers or runtime values, and return a bodyless 503 for
