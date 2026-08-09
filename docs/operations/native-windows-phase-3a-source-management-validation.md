@@ -8,6 +8,18 @@ This record covers the approved Phase 3A local-only source-management checkpoint
 and its authorised disposable loopback deployment. The detailed source-root
 corpus exercise remains separate from the deployment readiness check.
 
+## 2026-08-09 operator corpus completion
+
+The disposable Sources UI previewed a synthetic local root with one UTF-8 text
+file and one signature-classified PDF: one planned text item and one deferred
+item. Save-only created a held request; Save and scan released a request for a
+separate synthetic root. That root completed with one indexed and one deferred
+item. The local search API returned the text sentinel first with its retained
+source identity and exact snippet. A controlled IIS application-pool restart
+preserved the root's two revisions and two activities, and readiness returned
+200. The PDF remains explicitly deferred because no matching local capability
+is registered; no executor, GPU or external replay was activated.
+
 ## 2026-08-09 disposable deployment and live readiness
 
 The required closeout workflow completed successfully after Phase 3A repairs:
