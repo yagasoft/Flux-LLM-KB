@@ -81,7 +81,7 @@ if ($plan.deployment_migration_target -ne $expectedPhase3AMigrations[-1]) {
     throw "The native deployment plan does not pin the approved Phase 3A migration target."
 }
 if (-not $plan.source_artifact_store_requires_app_pool_modify_access) {
-    throw "The native deployment plan does not require writable retained source storage for the IIS application pool."
+    throw "The native deployment plan does not require writable and lease-safe retained source storage for the IIS application pool."
 }
 if (-not $plan.source_artifact_store_acl_rejects_protected_root_overlap) {
     throw "The native deployment plan does not fence retained-source storage permissions from protected roots."

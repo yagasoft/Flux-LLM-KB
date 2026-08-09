@@ -196,7 +196,7 @@ function Grant-ApplicationPoolModifyAccess {
 
     $identity = "IIS AppPool\$ApplicationPoolName"
     $icacls = (Get-Command icacls.exe -ErrorAction Stop).Source
-    & $icacls $item.FullName "/grant:r" "${identity}:(OI)(CI)M" | Out-Host
+    & $icacls $item.FullName "/grant:r" "${identity}:(OI)(CI)(M,DC)" | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to grant the IIS application pool Modify access to the source artifact store."
     }
