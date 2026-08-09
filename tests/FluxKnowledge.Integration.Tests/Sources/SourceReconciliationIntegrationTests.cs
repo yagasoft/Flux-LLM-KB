@@ -533,6 +533,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         var store = CreateStore(now);
         var blocked = await store.ConvergeBlockedRevisionAsync(root, file, "artifact-io-failed", CancellationToken.None);
         Assert.True(blocked.IsRetentionBlocked);
+        _ = await store.ConvergeBlockedRevisionAsync(root, file, "artifact-io-failed", CancellationToken.None);
         var retentionActivityId = Guid.NewGuid();
         var unrelatedActivityId = Guid.NewGuid();
         await using (var setup = CreateContext())
@@ -573,6 +574,7 @@ public sealed class SourceReconciliationIntegrationTests(NativeSqlServerFixture 
         Assert.Equal((int)SourceActivityState.DeferredPolicy, activities.Single(value => value.Id == unrelatedActivityId).State);
         _ = Assert.Single(activities, value => value.ActivityKind == (int)SourceActivityKind.TextExtraction);
         Assert.Equal(1, await verification.SourceArtifacts.CountAsync());
+        Assert.Single(await verification.AuditEvents.Where(value => value.SourceRevisionId == revisionId.Value && value.EventType == "source.retention_blocked").ToListAsync());
     }
 
     [NativeSqlServerFact]

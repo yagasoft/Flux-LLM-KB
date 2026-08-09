@@ -114,6 +114,11 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                     }),
                 OccurredAtUtc = _timeProvider.GetUtcNow()
             });
+        OperatorEventAppender.Add(context, new OperatorEventDraft(
+            "pipeline.stage_completed", "pipeline", "information", request.Actor, _timeProvider.GetUtcNow(),
+            PipelineRecordId: request.CurrentJob.PipelineRecordId.Value,
+            CorrelationId: $"pipeline:{request.CurrentJob.PipelineRecordId.Value:N}:{request.CurrentJob.SourceRevision}",
+            Details: new { stage = request.Artifact.Stage.ToString() }));
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         if (_failureInjector is not null)
         {
@@ -147,6 +152,13 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         if (request.Artifact.Stage == PipelineStage.Publish && request.NextStage is null)
         {
             var now = _timeProvider.GetUtcNow();
+            var completingActivities = await context.SourceActivities
+                .Include(value => value.SourceRevision)
+                .Where(value => value.ResultingPipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
+                    value.ResultingPipelineRecordRevision == request.CurrentJob.SourceRevision &&
+                    (value.State == (int)SourceActivityState.Pending || value.State == (int)SourceActivityState.Running ||
+                     value.State == (int)SourceActivityState.FailedRetryable || value.State == (int)SourceActivityState.DeferredUnsupported))
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
             await context.Database.ExecuteSqlInterpolatedAsync(
                 $"""
                  UPDATE [SourceActivities]
@@ -161,6 +173,14 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                        {(int)SourceActivityState.FailedRetryable},
                        {(int)SourceActivityState.DeferredUnsupported});
                  """, cancellationToken).ConfigureAwait(false);
+            foreach (var activity in completingActivities)
+            {
+                OperatorEventAppender.Add(context, new OperatorEventDraft(
+                    "activity.completed", "activity", "information", request.Actor, now,
+                    PipelineRecordId: request.CurrentJob.PipelineRecordId.Value, SourceRootId: activity.SourceRevision.SourceRootId,
+                    SourceRevisionId: activity.SourceRevisionId, SourceActivityId: activity.Id,
+                    CorrelationId: $"source:{activity.SourceRevisionId:N}", Details: new { stage = "Publish" }));
+            }
         }
 
         JobId? nextJobId = null;
@@ -350,6 +370,13 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         var terminalReason = SanitiseSourceActivityReason(request.Reason);
         var terminalAtUtc = _timeProvider.GetUtcNow();
         var terminalEvidence = JsonSerializer.Serialize(new { terminalStageFailure = terminalReason });
+        var failingActivities = await context.SourceActivities
+            .Include(value => value.SourceRevision)
+            .Where(value => value.ResultingPipelineRecordId == request.CurrentJob.PipelineRecordId.Value &&
+                value.ResultingPipelineRecordRevision == request.CurrentJob.SourceRevision &&
+                (value.State == (int)SourceActivityState.Pending || value.State == (int)SourceActivityState.Running ||
+                 value.State == (int)SourceActivityState.FailedRetryable || value.State == (int)SourceActivityState.DeferredUnsupported))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
         await context.Database.ExecuteSqlInterpolatedAsync(
             $"""
              UPDATE [SourceActivities]
@@ -365,6 +392,14 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                    {(int)SourceActivityState.FailedRetryable},
                    {(int)SourceActivityState.DeferredUnsupported});
              """, cancellationToken).ConfigureAwait(false);
+        foreach (var activity in failingActivities)
+        {
+            OperatorEventAppender.Add(context, new OperatorEventDraft(
+                "activity.failed", "activity", "error", request.Actor, terminalAtUtc,
+                PipelineRecordId: request.CurrentJob.PipelineRecordId.Value, SourceRootId: activity.SourceRevision.SourceRootId,
+                SourceRevisionId: activity.SourceRevisionId, SourceActivityId: activity.Id,
+                CorrelationId: $"source:{activity.SourceRevisionId:N}", Details: new { reasonCode = terminalReason }));
+        }
 
         context.AuditEvents.Add(
             new AuditEventEntity
@@ -381,6 +416,11 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                     }),
                 OccurredAtUtc = _timeProvider.GetUtcNow()
             });
+        OperatorEventAppender.Add(context, new OperatorEventDraft(
+            "pipeline.failed", "pipeline", "error", request.Actor, _timeProvider.GetUtcNow(),
+            PipelineRecordId: request.CurrentJob.PipelineRecordId.Value,
+            CorrelationId: $"pipeline:{request.CurrentJob.PipelineRecordId.Value:N}:{request.CurrentJob.SourceRevision}",
+            Details: new { stage = request.CurrentJob.Stage.ToString(), reason = terminalReason }));
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await MarkDispatchCompleteAsync(
                 context,

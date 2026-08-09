@@ -1,0 +1,27 @@
+@page "/events"
+@implements IAsyncDisposable
+@using FluxKnowledge.Web.Components.Events
+@using FluxKnowledge.Web.Components.Status
+@inject EventsPageState PageState
+@inject StatusEventFeed StatusEvents
+
+<PageTitle>Events | Flux Knowledge</PageTitle>
+<section aria-labelledby="events-heading">
+    <h1 id="events-heading">Events</h1>
+    <p role="status" aria-live="polite">@(PageState.Error ?? (PageState.LiveTailEnabled ? "Live tail is on; rows remain SQL-authoritative." : "Live tail is paused."))</p>
+    <div class="filter-controls"><label>Family <input @bind="_family" /></label><label>Severity <input @bind="_severity" /></label><label>Source root ID <input @bind="_rootId" /></label><label>Pipeline record ID <input @bind="_pipelineRecordId" /></label><label>Source revision ID <input @bind="_revisionId" /></label><label>Correlation ID <input @bind="_correlationId" /></label><label>From <input placeholder="ISO-8601 time" @bind="_occurredFrom" /></label><label>To <input placeholder="ISO-8601 time" @bind="_occurredTo" /></label><button type="button" @onclick="ApplyFiltersAsync">Apply filters</button><button type="button" @onclick="ToggleLiveTail">@(PageState.LiveTailEnabled ? "Pause live tail" : "Resume live tail")</button></div>
+    @if (PageState.Page.Items.Count == 0) { <p>No durable events match the current filters.</p> }
+    else { <div class="table-scroll"><table><caption class="visually-hidden">Durable operator events</caption><thead><tr><th>Time</th><th>Type</th><th>Severity</th><th>Message</th><th>Related entry</th><th>Correlation</th></tr></thead><tbody>@foreach (var entry in PageState.Page.Items) { <tr><td>@entry.OccurredAtUtc.LocalDateTime</td><td>@entry.EventType</td><td>@entry.Severity</td><td>@entry.Message</td><td>@if (entry.PipelineRecordId is { } recordId) { <a href="@($"/corpus/{recordId:D}")">Open entry</a> } else if (entry.SourceRootId is { } rootId) { <a href="@($"/sources/{rootId:D}")">Open source root</a> }</td><td>@entry.CorrelationId</td></tr> }</tbody></table></div> }
+    @if (PageState.Page.NextCursor is not null) { <p><button type="button" @onclick="NextAsync">Next page</button></p> }
+</section>
+@code {
+    private readonly CancellationTokenSource _stopping = new(); private StatusEventSubscription? _subscription; private string? _family; private string? _severity; private string? _rootId; private string? _pipelineRecordId; private string? _revisionId; private string? _correlationId; private string? _occurredFrom; private string? _occurredTo;
+    protected override async Task OnInitializedAsync() { _subscription = StatusEvents.Subscribe(); await PageState.LoadAsync(_stopping.Token); _ = ObserveAsync(_subscription, _stopping.Token); }
+    private async Task ApplyFiltersAsync() { await PageState.ChangeFiltersAsync(new(_family, _severity, ParseGuid(_rootId), ParseGuid(_pipelineRecordId), ParseGuid(_revisionId), _correlationId, ParseTime(_occurredFrom), ParseTime(_occurredTo)), _stopping.Token); await InvokeAsync(StateHasChanged); }
+    private Task ToggleLiveTail() { PageState.ToggleLiveTail(); return InvokeAsync(StateHasChanged); }
+    private async Task NextAsync() { await PageState.NextPageAsync(_stopping.Token); await InvokeAsync(StateHasChanged); }
+    private async Task ObserveAsync(StatusEventSubscription subscription, CancellationToken cancellationToken) { try { await foreach (var changed in subscription.Reader.ReadAllAsync(cancellationToken)) { await PageState.HandleStatusChangedAsync(changed, cancellationToken); await InvokeAsync(StateHasChanged); } } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { } }
+    public async ValueTask DisposeAsync() { await _stopping.CancelAsync(); if (_subscription is not null) await _subscription.DisposeAsync(); await PageState.DisposeAsync(); _stopping.Dispose(); }
+    private static Guid? ParseGuid(string? value) => Guid.TryParse(value, out var parsed) ? parsed : null;
+    private static DateTimeOffset? ParseTime(string? value) => DateTimeOffset.TryParse(value, out var parsed) ? parsed : null;
+}

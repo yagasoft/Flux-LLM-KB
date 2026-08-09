@@ -86,6 +86,24 @@ public sealed class SourceReconciliationServiceTests
         Assert.Equal(2, control.ClaimAttempts);
     }
 
+    [Fact]
+    public async Task Watch_pump_drains_due_watcher_batches_without_claiming_source_scans()
+    {
+        var control = new RecordingControlStore([_ => ValueTask.FromResult<ClaimedSourceScan?>(null)]);
+        var watchStore = new DueWatchStore();
+        var services = new ServiceCollection();
+        services.AddSingleton<ISourceScanControlStore>(control);
+        services.AddSingleton<ISourceScanner>(new UnusedScanner());
+        await using var provider = services.BuildServiceProvider();
+        var service = new SourceReconciliationService(provider.GetRequiredService<IServiceScopeFactory>(), new ChannelSourceScanWakeSignal(), TimeProvider.System, new SourceWatchCoordinator(watchStore));
+
+        var released = await service.PumpDueWatchBatchesAsync(CancellationToken.None);
+
+        Assert.Equal(1, watchStore.Released);
+        Assert.Equal(1, released);
+        Assert.Equal(0, control.ClaimAttempts);
+    }
+
     private static async Task RunAsync(RecordingControlStore control, ISourceScanner scanner)
     {
         var services = new ServiceCollection();
@@ -192,5 +210,20 @@ public sealed class SourceReconciliationServiceTests
             SourceScanRequest scanRequest,
             CancellationToken cancellationToken) =>
             ValueTask.FromException<SourceScanResult>(new InvalidOperationException("scanner should not run"));
+    }
+
+    private sealed class DueWatchStore : ISourceRootWatchStore
+    {
+        private bool _claimed;
+        public int Released { get; private set; }
+        public ValueTask<IReadOnlyList<SourceRootConfiguration>> ReadEnabledRootsAsync(CancellationToken cancellationToken) => ValueTask.FromResult<IReadOnlyList<SourceRootConfiguration>>([]);
+        public ValueTask RecordSignalAsync(SourceWatchSignal signal, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public ValueTask<ClaimedSourceWatchBatch?> ClaimDueBatchAsync(DateTimeOffset nowUtc, string leaseOwner, TimeSpan leaseDuration, CancellationToken cancellationToken)
+        {
+            if (_claimed) return ValueTask.FromResult<ClaimedSourceWatchBatch?>(null);
+            _claimed = true;
+            return ValueTask.FromResult<ClaimedSourceWatchBatch?>(new ClaimedSourceWatchBatch(SourceRootId.New(), DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch, 1, 1, leaseOwner, 1));
+        }
+        public ValueTask ReleaseScanAsync(ClaimedSourceWatchBatch batch, CancellationToken cancellationToken) { Released++; return ValueTask.CompletedTask; }
     }
 }

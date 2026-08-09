@@ -47,6 +47,16 @@ public sealed class SqlSourceActivityStore(
             CreatedAtUtc = now,
             UpdatedAtUtc = now
         });
+        var rootId = await context.SourceRevisions
+            .Where(value => value.Id == activity.SourceRevisionId.Value)
+            .Select(value => value.SourceRootId)
+            .SingleAsync(cancellationToken).ConfigureAwait(false);
+        OperatorEventAppender.Add(context, OperatorEventDraft.ActivityPlanned(
+            activity.Id.Value,
+            activity.SourceRevisionId.Value,
+            rootId,
+            new { kind = activity.Kind.ToString(), executionClass = activity.ExecutionClass.ToString() },
+            activity.State == SourceActivityState.DeferredUnsupported));
         try
         {
             await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

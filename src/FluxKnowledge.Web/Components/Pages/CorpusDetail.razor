@@ -1,0 +1,26 @@
+@page "/corpus/{PipelineRecordId:guid}"
+@using FluxKnowledge.Web.Components.Corpus
+@inject CorpusDetailPageState PageState
+
+<PageTitle>Corpus entry | Flux Knowledge</PageTitle>
+@if (PageState.Detail is null)
+{
+    <p role="status">@(PageState.Error ?? "Loading Corpus entry…")</p>
+}
+else
+{
+    <section aria-labelledby="corpus-entry-heading">
+        <h1 id="corpus-entry-heading">@PageState.Detail.Entry</h1>
+        <dl class="metadata"><dt>Source kind</dt><dd>@PageState.Detail.SourceKind</dd><dt>Source identity</dt><dd>@PageState.Detail.SourceIdentity</dd><dt>Pipeline</dt><dd>@PageState.Detail.PipelineStatus</dd><dt>Source activity</dt><dd>@PageState.Detail.SourceActivityState</dd><dt>Checksum</dt><dd>@PageState.Detail.Checksum</dd></dl>
+        @if (PageState.Detail.DeferredOrFailureReason is { } reason) { <p>@reason</p> }
+        @if (PageState.Detail.IndexedTextPreview is { } preview) { <h2>Indexed text preview</h2><pre class="indexed-preview">@preview</pre> }
+        <h2>Pipeline activity</h2>
+        <ul>@foreach (var job in PageState.Detail.PipelineActivity) { <li>@job</li> }</ul>
+        <h2>Source activity and events</h2>
+        <ul>@foreach (var activity in PageState.Detail.SourceActivities) { <li>@activity.State: @(activity.Reason ?? "No reason recorded")</li> }</ul>
+        <ul>@foreach (var auditEvent in PageState.Detail.RelatedEvents) { <li>@auditEvent.OccurredAtUtc.LocalDateTime — @auditEvent.EventType</li> }</ul>
+        <details class="diagnostic-details"><summary>Copyable diagnostics</summary><label>Pipeline record ID <input readonly class="diagnostic-value" value="@PipelineRecordId" /></label><label>Lineage root ID <input readonly class="diagnostic-value" value="@PageState.Detail.Lineage.RootPipelineRecordId" /></label>@if (PageState.Detail.SourceRevisionId is { } revisionId) { <label>Source revision ID <input readonly class="diagnostic-value" value="@revisionId" /></label> }</details>
+        <p><a href="/corpus">Back to Corpus</a></p>
+    </section>
+}
+@code { [Parameter] public Guid PipelineRecordId { get; set; } protected override async Task OnParametersSetAsync() => await PageState.LoadAsync(PipelineRecordId, CancellationToken.None); }

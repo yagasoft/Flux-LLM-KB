@@ -63,7 +63,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
                 overviewResponse.IsSuccessStatusCode,
                 $"Overview returned {(int)overviewResponse.StatusCode}: {overviewMarkup}");
             Assert.Contains("Pipeline overview", overviewMarkup, StringComparison.Ordinal);
-            Assert.Contains("Index recovery state", overviewMarkup, StringComparison.Ordinal);
+            Assert.Contains("Index status", overviewMarkup, StringComparison.Ordinal);
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions { Headless = true });
             var page = await browser.NewPageAsync();

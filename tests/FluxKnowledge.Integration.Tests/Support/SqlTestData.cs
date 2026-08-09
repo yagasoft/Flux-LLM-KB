@@ -20,8 +20,8 @@ internal static class SqlTestData
             new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
-        await context.SourceActivities.ExecuteDeleteAsync();
         await context.AuditEvents.ExecuteDeleteAsync();
+        await context.SourceActivities.ExecuteDeleteAsync();
         await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
         await context.GpuExecutorEvidence.ExecuteDeleteAsync();
         await context.GpuExecutorResultReceipts.ExecuteDeleteAsync();
@@ -64,6 +64,8 @@ internal static class SqlTestData
                              .UseSqlServer(fixture.ConnectionString)
                              .Options))
         {
+            await context.AuditEvents.ExecuteDeleteAsync();
+            await context.SourceRootWatchStates.ExecuteDeleteAsync();
             await context.SourceScanOutbox.ExecuteDeleteAsync();
             await context.SourceScanJobs.ExecuteDeleteAsync();
             await context.SourceScanRequests.ExecuteDeleteAsync();

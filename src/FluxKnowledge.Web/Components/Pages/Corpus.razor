@@ -1,0 +1,86 @@
+@page "/corpus"
+@implements IAsyncDisposable
+@using FluxKnowledge.Web.Components.Corpus
+@using FluxKnowledge.Web.Components.Status
+@inject CorpusPageState PageState
+@inject StatusEventFeed StatusEvents
+
+<PageTitle>Corpus | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="corpus-heading">
+    <h1 id="corpus-heading">Corpus</h1>
+    <p role="status" aria-live="polite">@StatusMessage</p>
+    <details class="filter-drawer">
+        <summary>Filters</summary>
+        <div class="filter-controls">
+            <label>Search indexed text or path <input @bind="_search" /></label>
+            <label>Source root <select @bind="_rootSelection" @bind:after="ApplyRootAsync"><option value="">All roots</option>@foreach (var root in PageState.Roots) { <option value="@root.Id">@root.DisplayName</option> }</select></label>
+            <label>Source kind <input @bind="_sourceKind" /></label><label>Folder <input @bind="_folder" /></label><label>Classification <input @bind="_classification" /></label><label>Pipeline status <input @bind="_pipelineStatus" /></label><label>Activity status <select @bind="_activityStatus"><option value="">Any</option><option>indexed</option><option>pending</option><option>deferred</option><option>blocked</option><option>failed</option></select></label><label>Updated from <input placeholder="ISO-8601 time" @bind="_updatedFrom" /></label><label>Updated to <input placeholder="ISO-8601 time" @bind="_updatedTo" /></label>
+            <label><input type="checkbox" @bind="_includeHistorical" /> Include historical, deleted and suppressed entries</label><button type="button" @onclick="ApplyFiltersAsync">Apply filters</button>
+        </div>
+    </details>
+    @if (PageState.Error is { } error)
+    {
+        <p role="alert">@error</p>
+    }
+    @if (PageState.Folders.Count > 0)
+    {
+        <aside aria-label="Corpus folders" class="folder-browser">
+            <h2>Folders</h2>
+            <ul>
+            @foreach (var folder in PageState.Folders)
+            {
+                <li><button type="button" @onclick="() => SelectFolderAsync(folder.RelativePath)">@folder.RelativePath</button> <span>@folder.CurrentCount current, @folder.DeferredCount deferred, @folder.BlockedCount blocked, @folder.FailedCount failed</span></li>
+            }
+            </ul>
+        </aside>
+    }
+    @if (PageState.Page.Items.Count == 0)
+    {
+        <p>No Corpus entries match the current SQL projection.</p>
+    }
+    else
+    {
+        <div class="table-scroll"><table>
+            <caption class="visually-hidden">SQL-authoritative Corpus entries</caption>
+            <thead><tr><th>Entry</th><th>Category</th><th>Location</th><th>Pipeline</th><th>Source activity</th><th>Updated</th></tr></thead>
+            <tbody>
+            @foreach (var entry in PageState.Page.Items)
+            {
+                <tr><td><a href="@($"/corpus/{entry.PipelineRecordId:D}")">@entry.Entry</a></td><td>@entry.SourceKind@(entry.SourceClassification is null ? "" : $" · {entry.SourceClassification}")</td><td>@entry.Location</td><td>@entry.PipelineStatus</td><td>@entry.SourceActivityState</td><td>@entry.LastActivityAtUtc.LocalDateTime</td></tr>
+            }
+            </tbody>
+        </table></div>
+    }
+    @if (PageState.Page.NextCursor is not null)
+    {
+        <p><button type="button" @onclick="NextAsync">Next page</button></p>
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _stopping = new();
+    private StatusEventSubscription? _subscription;
+    private string? _search;
+    private string? _sourceKind; private string? _folder; private string? _classification; private string? _pipelineStatus; private string? _activityStatus; private string? _updatedFrom; private string? _updatedTo;
+    private string _rootSelection = string.Empty;
+    private bool _includeHistorical;
+    private string StatusMessage => PageState.Error ?? "Corpus loaded from SQL.";
+    protected override async Task OnInitializedAsync()
+    {
+        _subscription = StatusEvents.Subscribe();
+        await PageState.LoadAsync(_stopping.Token);
+        _ = ObserveAsync(_subscription, _stopping.Token);
+    }
+    private async Task ApplyFiltersAsync() { await PageState.ChangeFiltersAsync(new(_search, _sourceKind, Guid.TryParse(_rootSelection, out var rootId) ? rootId : null, _folder, _classification, _pipelineStatus, _activityStatus, ParseTime(_updatedFrom), ParseTime(_updatedTo)), _includeHistorical, _stopping.Token); await InvokeAsync(StateHasChanged); }
+    private Task ApplyRootAsync() => ApplyFiltersAsync();
+    private async Task SelectFolderAsync(string path) { await PageState.ChangeFolderAsync(path, _stopping.Token); await InvokeAsync(StateHasChanged); }
+    private async Task NextAsync() { await PageState.NextPageAsync(_stopping.Token); await InvokeAsync(StateHasChanged); }
+    private async Task ObserveAsync(StatusEventSubscription subscription, CancellationToken cancellationToken)
+    {
+        try { await foreach (var changed in subscription.Reader.ReadAllAsync(cancellationToken)) { await PageState.HandleStatusChangedAsync(changed, cancellationToken); await InvokeAsync(StateHasChanged); } }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+    public async ValueTask DisposeAsync() { await _stopping.CancelAsync(); if (_subscription is not null) await _subscription.DisposeAsync(); await PageState.DisposeAsync(); _stopping.Dispose(); }
+    private static DateTimeOffset? ParseTime(string? value) => DateTimeOffset.TryParse(value, out var parsed) ? parsed : null;
+}

@@ -82,9 +82,18 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<string>("CorrelationId")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
                     b.Property<string>("DetailsJson")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("EventFamily")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
 
                     b.Property<string>("EventType")
                         .IsRequired()
@@ -97,9 +106,40 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.Property<Guid?>("PipelineRecordId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("Severity")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<Guid?>("SourceActivityId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceRevisionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceRootId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("SourceScanRequestId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.HasKey("Id");
 
+                    b.HasIndex("CorrelationId");
+
+                    b.HasIndex("SourceActivityId");
+
+                    b.HasIndex("SourceScanRequestId");
+
+                    b.HasIndex("OccurredAtUtc", "Id")
+                        .IsDescending();
+
                     b.HasIndex("PipelineRecordId", "OccurredAtUtc");
+
+                    b.HasIndex("SourceRevisionId", "OccurredAtUtc")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("SourceRootId", "OccurredAtUtc")
+                        .IsDescending(false, true);
 
                     b.ToTable("AuditEvents", (string)null);
                 });
@@ -1407,6 +1447,50 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                     b.ToTable("SourceRootConfigurations", (string)null);
                 });
 
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRootWatchStateEntity", b =>
+                {
+                    b.Property<Guid>("SourceRootId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("DebounceGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("DueAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset>("FirstSignalAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset>("LastSignalAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<DateTimeOffset?>("LeaseExpiresAtUtc")
+                        .HasColumnType("datetimeoffset(7)");
+
+                    b.Property<long>("LeaseGeneration")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<byte[]>("RowVersion")
+                        .IsConcurrencyToken()
+                        .IsRequired()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("rowversion");
+
+                    b.Property<int>("SignalCount")
+                        .HasColumnType("int");
+
+                    b.HasKey("SourceRootId");
+
+                    b.HasIndex("DueAtUtc", "LeaseExpiresAtUtc");
+
+                    b.ToTable("SourceRootWatchStates", (string)null);
+                });
+
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceScanJobEntity", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1727,7 +1811,35 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .HasForeignKey("PipelineRecordId")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceActivityEntity", "SourceActivity")
+                        .WithMany()
+                        .HasForeignKey("SourceActivityId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRevisionEntity", "SourceRevision")
+                        .WithMany()
+                        .HasForeignKey("SourceRevisionId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRootConfigurationEntity", "SourceRoot")
+                        .WithMany()
+                        .HasForeignKey("SourceRootId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceScanRequestEntity", "SourceScanRequest")
+                        .WithMany()
+                        .HasForeignKey("SourceScanRequestId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("PipelineRecord");
+
+                    b.Navigation("SourceActivity");
+
+                    b.Navigation("SourceRevision");
+
+                    b.Navigation("SourceRoot");
+
+                    b.Navigation("SourceScanRequest");
                 });
 
             modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.GpuBatchEntity", b =>
@@ -1982,6 +2094,17 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("ParentSourceRevision");
+
+                    b.Navigation("SourceRoot");
+                });
+
+            modelBuilder.Entity("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRootWatchStateEntity", b =>
+                {
+                    b.HasOne("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRootConfigurationEntity", "SourceRoot")
+                        .WithOne()
+                        .HasForeignKey("FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities.SourceRootWatchStateEntity", "SourceRootId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
 
                     b.Navigation("SourceRoot");
                 });

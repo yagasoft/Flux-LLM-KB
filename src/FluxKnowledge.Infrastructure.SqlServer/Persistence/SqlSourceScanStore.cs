@@ -94,6 +94,7 @@ public sealed class SqlSourceScanStore(
         var revision = revisions.FirstOrDefault(value =>
             string.Equals(value.ContentSha256, file.ContentSha256, StringComparison.Ordinal) &&
             string.Equals(value.CanonicalPath, file.CanonicalPath, StringComparison.Ordinal));
+        var eventType = "source.unchanged";
         if (revision is null)
         {
             var latest = revisions.FirstOrDefault();
@@ -107,11 +108,13 @@ public sealed class SqlSourceScanStore(
                 DiscoveryEvidenceJson = JsonSerializer.Serialize(new { relativePath = file.RelativePath, stableIdentity = file.StableSourceIdentity })
             };
             context.SourceRevisions.Add(revision);
+            eventType = revisions.Count == 0 ? "source.added" : "source.updated";
         }
         else if (revision.SuppressedAtUtc is not null)
         {
             revision.SuppressedAtUtc = null;
             revision.RetentionEvidenceJson = null;
+            eventType = "source.updated";
         }
 
         var artifacts = await context.SourceArtifacts
@@ -145,11 +148,21 @@ public sealed class SqlSourceScanStore(
             MarkRetentionRecovered(revision, timeProvider.GetUtcNow());
             await CancelSupersededArtifactRetentionActivitiesAsync(context, revision.Id, file.ContentSha256, cancellationToken).ConfigureAwait(false);
         }
-        else if (artifact is null)
+        else if (artifact is null && MarkRetentionBlocked(revision, blockedReason ?? "artifact-retention-failed"))
         {
-            MarkRetentionBlocked(revision, blockedReason ?? "artifact-retention-failed");
+            OperatorEventAppender.Add(context, new OperatorEventDraft(
+                "source.retention_blocked", "source", "warning", "source-reconciliation", timeProvider.GetUtcNow(),
+                SourceRootId: sourceRoot.Id.Value, SourceRevisionId: revision.Id, CorrelationId: $"source:{revision.Id:N}",
+                Details: new { reasonCode = "artifact-retention-failed" }));
         }
 
+        if (eventType != "source.unchanged")
+        {
+            var correlationId = $"source:{revision.Id:N}";
+            OperatorEventAppender.Add(context, eventType == "source.added"
+                ? OperatorEventDraft.SourceAdded(sourceRoot.Id.Value, null, revision.Id, correlationId, new { revision = revision.Revision, classification = revision.Classification })
+                : OperatorEventDraft.SourceUpdated(sourceRoot.Id.Value, null, revision.Id, correlationId, new { revision = revision.Revision, classification = revision.Classification }));
+        }
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return new SourceRetentionConvergence(new SourceRevisionId(revision.Id), receipt is null && artifact is null);
@@ -159,17 +172,18 @@ public sealed class SqlSourceScanStore(
         receipt.ByteLength == file.ByteLength &&
         string.Equals(receipt.ContentSha256, file.ContentSha256, StringComparison.Ordinal);
 
-    private static void MarkRetentionBlocked(SourceRevisionEntity revision, string reason)
+    private static bool MarkRetentionBlocked(SourceRevisionEntity revision, string reason)
     {
         var evidence = ParseRetentionEvidence(revision.RetentionEvidenceJson);
         if (string.Equals(evidence["artifactRetention"]?.GetValue<string>(), "failed", StringComparison.Ordinal))
         {
-            return;
+            return false;
         }
 
         evidence["artifactRetention"] = "failed";
         evidence["reasonCode"] = reason[..Math.Min(reason.Length, 128)];
         revision.RetentionEvidenceJson = evidence.ToJsonString();
+        return true;
     }
 
     private static void MarkRetentionRecovered(SourceRevisionEntity revision, DateTimeOffset recoveredAtUtc)
@@ -274,6 +288,11 @@ public sealed class SqlSourceScanStore(
             revision.SuppressedAtUtc = now;
             revision.RetainUntilUtc = now.AddDays(30);
             revision.RetentionEvidenceJson = "{\"reason\":\"unseen-during-authoritative-scan\"}";
+            OperatorEventAppender.Add(context, OperatorEventDraft.SourceRemoved(
+                sourceRootId.Value,
+                revision.Id,
+                $"source:{revision.Id:N}",
+                new { revision = revision.Revision, reason = "unseen-during-authoritative-scan" }));
         }
 
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

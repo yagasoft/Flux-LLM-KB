@@ -28,6 +28,17 @@ else
             <div><dt>Errors</dt><dd>@PageState.Detail.ErrorCount</dd></div>
         </dl>
     </section>
+    <section aria-labelledby="source-events-heading">
+        <h2 id="source-events-heading">Recent events</h2>
+        @if (PageState.RecentEvents.Count == 0)
+        {
+            <p>No durable events have been recorded for this source root.</p>
+        }
+        else
+        {
+            <ul>@foreach (var operatorEvent in PageState.RecentEvents) { <li>@operatorEvent.OccurredAtUtc.LocalDateTime — @operatorEvent.EventType</li> }</ul>
+        }
+    </section>
     <section aria-labelledby="source-reasons-heading">
         <h2 id="source-reasons-heading">Deferred and blocked reasons</h2>
         @if (PageState.Detail.DeferredOrBlockedReasons.Count == 0)

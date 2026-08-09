@@ -266,17 +266,15 @@ public sealed class SqlRetainedTextRegistrationStore(
         });
         context.AuditEvents.Add(new AuditEventEntity
         {
-            PipelineRecordId = recordId,
-            EventType = "retained source pipeline record registered",
-            Actor = "source-reconciliation",
-            DetailsJson = JsonSerializer.Serialize(new
-            {
-                SourceRevisionId = sourceRevision.Id,
-                sourceRevision.ContentSha256,
-                ActivityId = durableActivity.Id
-            }),
+            PipelineRecordId = recordId, EventType = "retained source pipeline record registered", Actor = "source-reconciliation",
+            DetailsJson = JsonSerializer.Serialize(new { SourceRevisionId = sourceRevision.Id, sourceRevision.ContentSha256, ActivityId = durableActivity.Id }),
             OccurredAtUtc = now
         });
+        OperatorEventAppender.Add(context, new OperatorEventDraft(
+            "pipeline.registered", "pipeline", "information", "source-reconciliation", now,
+            PipelineRecordId: recordId, SourceRootId: sourceRevision.SourceRootId, SourceRevisionId: sourceRevision.Id,
+            SourceActivityId: durableActivity.Id, CorrelationId: $"source:{sourceRevision.Id:N}",
+            Details: new { revision, sourceActivity = true }));
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return true;

@@ -164,22 +164,16 @@ public sealed class SqlPipelineStore(
                 DueAtUtc = now,
                 CreatedAtUtc = now
             });
-        context.AuditEvents.Add(
-            new AuditEventEntity
-            {
-                PipelineRecordId = recordId,
-                EventType = "pipeline record registered",
-                Actor = registration.RequestedBy,
-                DetailsJson = JsonSerializer.Serialize(
-                    new
-                    {
-                        registration.CanonicalPath,
-                        registration.SourceLabel,
-                        registration.ContentHash,
-                        Revision = revision
-                    }),
-                OccurredAtUtc = now
-            });
+        context.AuditEvents.Add(new AuditEventEntity
+        {
+            PipelineRecordId = recordId, EventType = "pipeline record registered", Actor = registration.RequestedBy,
+            DetailsJson = JsonSerializer.Serialize(new { registration.CanonicalPath, registration.SourceLabel, registration.ContentHash, Revision = revision }),
+            OccurredAtUtc = now
+        });
+        OperatorEventAppender.Add(context, new OperatorEventDraft(
+            "pipeline.registered", "pipeline", "information", registration.RequestedBy, now,
+            PipelineRecordId: recordId, CorrelationId: $"pipeline:{recordId:N}:{revision}",
+            Details: new { revision }));
         await context.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return CreateReceipt(record, jobId, dispatchId, existing: false);

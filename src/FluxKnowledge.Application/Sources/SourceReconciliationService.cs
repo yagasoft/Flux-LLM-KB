@@ -32,15 +32,19 @@ public sealed class ChannelSourceScanWakeSignal : ISourceScanWakeSignal
 public sealed class SourceReconciliationService(
     IServiceScopeFactory scopeFactory,
     ISourceScanWakeSignal wakeSignal,
-    TimeProvider timeProvider) : BackgroundService
+    TimeProvider timeProvider,
+    SourceWatchCoordinator? watchCoordinator = null) : BackgroundService
 {
     private static readonly TimeSpan DefaultCadence = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan WatchCadence = TimeSpan.FromSeconds(2);
     private readonly string _leaseOwner = $"source-reconciliation:{Guid.NewGuid():N}";
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await PumpDueWatchBatchesAsync(stoppingToken).ConfigureAwait(false);
         await RunAvailableAsync(stoppingToken).ConfigureAwait(false);
-        using var timer = new PeriodicTimer(DefaultCadence);
+        var nextReconciliationAtUtc = timeProvider.GetUtcNow().Add(DefaultCadence);
+        using var timer = new PeriodicTimer(WatchCadence);
         while (!stoppingToken.IsCancellationRequested)
         {
             using var waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
@@ -57,9 +61,19 @@ public sealed class SourceReconciliationService(
             {
                 // The unselected wait was deliberately cancelled before the next loop.
             }
-            await RunAvailableAsync(stoppingToken).ConfigureAwait(false);
+            var released = await PumpDueWatchBatchesAsync(stoppingToken).ConfigureAwait(false);
+            if (released > 0 || timeProvider.GetUtcNow() >= nextReconciliationAtUtc)
+            {
+                await RunAvailableAsync(stoppingToken).ConfigureAwait(false);
+                nextReconciliationAtUtc = timeProvider.GetUtcNow().Add(DefaultCadence);
+            }
         }
     }
+
+    public Task<int> PumpDueWatchBatchesAsync(CancellationToken cancellationToken) =>
+        watchCoordinator is null
+            ? Task.FromResult(0)
+            : watchCoordinator.ReleaseDueAsync(timeProvider.GetUtcNow(), DefaultCadence, cancellationToken).AsTask();
 
     public async Task RunAvailableAsync(CancellationToken cancellationToken)
     {

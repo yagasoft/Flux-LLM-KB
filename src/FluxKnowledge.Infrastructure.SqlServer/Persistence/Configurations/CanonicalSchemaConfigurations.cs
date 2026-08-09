@@ -318,10 +318,33 @@ public sealed class AuditEventConfiguration : IEntityTypeConfiguration<AuditEven
         builder.Property(entity => entity.Actor).HasMaxLength(256).IsRequired();
         builder.Property(entity => entity.DetailsJson).HasColumnType("nvarchar(max)").IsRequired();
         builder.Property(entity => entity.OccurredAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.CorrelationId).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.EventFamily).HasMaxLength(128);
+        builder.Property(entity => entity.Severity).HasMaxLength(64);
         builder.HasIndex(entity => new { entity.PipelineRecordId, entity.OccurredAtUtc });
+        builder.HasIndex(entity => new { entity.OccurredAtUtc, entity.Id }).IsDescending();
+        builder.HasIndex(entity => new { entity.SourceRootId, entity.OccurredAtUtc }).IsDescending(false, true);
+        builder.HasIndex(entity => new { entity.SourceRevisionId, entity.OccurredAtUtc }).IsDescending(false, true);
+        builder.HasIndex(entity => entity.CorrelationId);
         builder.HasOne(entity => entity.PipelineRecord)
             .WithMany()
             .HasForeignKey(entity => entity.PipelineRecordId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.SourceRoot)
+            .WithMany()
+            .HasForeignKey(entity => entity.SourceRootId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.SourceScanRequest)
+            .WithMany()
+            .HasForeignKey(entity => entity.SourceScanRequestId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.SourceRevision)
+            .WithMany()
+            .HasForeignKey(entity => entity.SourceRevisionId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.SourceActivity)
+            .WithMany()
+            .HasForeignKey(entity => entity.SourceActivityId)
             .OnDelete(DeleteBehavior.Restrict);
     }
 }
@@ -664,6 +687,26 @@ public sealed class SourceRootConfigurationConfiguration : IEntityTypeConfigurat
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => entity.CanonicalPathFingerprint).IsUnique();
+    }
+}
+
+public sealed class SourceRootWatchStateConfiguration : IEntityTypeConfiguration<SourceRootWatchStateEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceRootWatchStateEntity> builder)
+    {
+        builder.ToTable("SourceRootWatchStates");
+        builder.HasKey(entity => entity.SourceRootId);
+        builder.Property(entity => entity.FirstSignalAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.LastSignalAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.DueAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.LeaseOwner).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => new { entity.DueAtUtc, entity.LeaseExpiresAtUtc });
+        builder.HasOne(entity => entity.SourceRoot)
+            .WithOne()
+            .HasForeignKey<SourceRootWatchStateEntity>(entity => entity.SourceRootId)
+            .OnDelete(DeleteBehavior.Restrict);
     }
 }
 

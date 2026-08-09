@@ -95,17 +95,27 @@ public static class WebHostComposition
         services.AddScoped<ISourceScanner, SourceScanWorker>();
         services.AddSingleton<ChannelSourceScanWakeSignal>();
         services.AddSingleton<ISourceScanWakeSignal>(provider => provider.GetRequiredService<ChannelSourceScanWakeSignal>());
+        services.AddSingleton<SqlSourceRootWatchStore>();
+        services.AddSingleton<ISourceRootWatchStore>(provider => provider.GetRequiredService<SqlSourceRootWatchStore>());
+        services.AddSingleton<SourceWatchCoordinator>();
         services.AddSingleton<SourceReconciliationService>();
         services.AddSingleton<IHostedService>(provider => provider.GetRequiredService<SourceReconciliationService>());
+        services.AddSingleton<IHostedService, LocalSourceRootWatchHostedService>();
         services.AddScoped<SourceRootService>();
         services.AddScoped<SourceScanControlService>();
         services.AddScoped<ISourceRootProjectionReader, SourceRootProjectionReader>();
         services.AddScoped<SourceRootPageState>();
         services.AddScoped<SourceRootDetailPageState>(provider => new SourceRootDetailPageState(
             provider.GetRequiredService<ISourceRootProjectionReader>(),
-            provider.GetService<IDeferredContentReprocessor>()));
+            provider.GetService<IDeferredContentReprocessor>(),
+            provider.GetRequiredService<IOperatorEventProjectionReader>()));
         services.AddFluxKnowledgeGpuScheduler();
         services.AddScoped<IProjectionReader, SqlProjectionReader>();
+        services.AddScoped<ICorpusProjectionReader, SqlCorpusProjectionReader>();
+        services.AddScoped<IOperatorEventProjectionReader, SqlOperatorEventProjectionReader>();
+        services.AddScoped<Components.Corpus.CorpusPageState>();
+        services.AddScoped<Components.Corpus.CorpusDetailPageState>();
+        services.AddScoped<Components.Events.EventsPageState>();
         services.AddScoped<IStageWorker, CanonicalIndexStageWorker>();
         services.AddScoped<IStageWorker, EmbedStageWorker>();
         services.AddScoped<IStageWorker, PublishStageWorker>();

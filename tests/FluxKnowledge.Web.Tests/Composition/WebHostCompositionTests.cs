@@ -78,6 +78,9 @@ public sealed class WebHostCompositionTests : IDisposable
         Assert.Contains(
             provider.GetServices<IHostedService>(),
             service => service is OutboxPumpService);
+        Assert.Contains(
+            provider.GetServices<IHostedService>(),
+            service => service is LocalSourceRootWatchHostedService);
         using var scope = provider.CreateScope();
         var workers = scope.ServiceProvider.GetServices<IStageWorker>().ToArray();
         Assert.Collection(
@@ -112,6 +115,7 @@ public sealed class WebHostCompositionTests : IDisposable
             scope.ServiceProvider.GetRequiredService<ISourceRootStore>());
         _ = scope.ServiceProvider.GetRequiredService<SourceRootService>();
         _ = scope.ServiceProvider.GetRequiredService<SourceScanControlService>();
+        Assert.IsType<SqlSourceRootWatchStore>(scope.ServiceProvider.GetRequiredService<ISourceRootWatchStore>());
     }
 
     [Fact]

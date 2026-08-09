@@ -117,6 +117,7 @@ public sealed class SqlJobClaimStore(
                  [Stage] int, [Operation] nvarchar(128), [PublicState] int, [DueAtUtc] datetimeoffset(7),
                  [AttemptCount] int, [LeaseOwner] nvarchar(256), [LeaseExpiresAtUtc] datetimeoffset(7), [LeaseGeneration] bigint
              );
+             DECLARE @claimedActivities TABLE ([Id] uniqueidentifier, [SourceRevisionId] uniqueidentifier);
              ;WITH [candidate] AS
              (
                  SELECT TOP (1)
@@ -164,6 +165,7 @@ public sealed class SqlJobClaimStore(
                  [LastAttemptAtUtc] = @nowUtc,
                  [AttemptEvidenceJson] = CONCAT('{"claimLeaseGeneration":', CONVERT(nvarchar(32), [claimed].[LeaseGeneration]), '}'),
                  [UpdatedAtUtc] = @nowUtc
+             OUTPUT inserted.[Id], inserted.[SourceRevisionId] INTO @claimedActivities
              FROM [SourceActivities] AS [activity]
              INNER JOIN @claimed AS [claimed]
                  ON [activity].[ResultingPipelineRecordId] = [claimed].[PipelineRecordId]
@@ -180,6 +182,14 @@ public sealed class SqlJobClaimStore(
                     [activity].[ActivityKind] = @sourceTextExtraction AND
                     [activity].[State] IN (@sourceDeferredUnsupported, @sourceRunning, @sourceFailedRetryable))
                );
+
+             INSERT INTO [AuditEvents] ([PipelineRecordId], [SourceRootId], [SourceRevisionId], [SourceActivityId], [CorrelationId], [EventFamily], [Severity], [EventType], [Actor], [DetailsJson], [OccurredAtUtc])
+             SELECT [claimed].[PipelineRecordId], [revision].[SourceRootId], [activity].[SourceRevisionId], [activity].[Id],
+                 CONCAT(N'source:', CONVERT(nvarchar(36), [activity].[SourceRevisionId])), N'activity', N'information', N'activity.claimed', N'pipeline-worker', N'{}', @nowUtc
+             FROM [SourceActivities] [activity]
+             INNER JOIN @claimedActivities [claimedActivity] ON [claimedActivity].[Id] = [activity].[Id]
+             INNER JOIN [SourceRevisions] [revision] ON [revision].[Id] = [activity].[SourceRevisionId]
+             CROSS JOIN @claimed [claimed];
 
              SELECT [Id], [PipelineRecordId], [SourceRevision], [Stage], [Operation], [PublicState], [DueAtUtc],
                  [AttemptCount], [LeaseOwner], [LeaseExpiresAtUtc], [LeaseGeneration]

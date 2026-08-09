@@ -5,11 +5,14 @@ namespace FluxKnowledge.Web.Components.Sources;
 
 public sealed class SourceRootDetailPageState(
     ISourceRootProjectionReader reader,
-    IDeferredContentReprocessor? reprocessor)
+    IDeferredContentReprocessor? reprocessor,
+    IOperatorEventProjectionReader? eventReader = null)
 {
     public Guid RootId { get; private set; }
 
     public SourceRootDetailProjection? Detail { get; private set; }
+
+    public IReadOnlyList<OperatorEventEntry> RecentEvents { get; private set; } = [];
 
     public bool CanReprocessDeferredContent =>
         Detail?.CanReprocessDeferredContent == true && reprocessor is not null;
@@ -22,6 +25,26 @@ public sealed class SourceRootDetailPageState(
     {
         RootId = rootId;
         Detail = await reader.ReadRootAsync(rootId, cancellationToken).ConfigureAwait(false);
+        if (eventReader is null)
+        {
+            RecentEvents = [];
+            return;
+        }
+
+        try
+        {
+            RecentEvents = (await eventReader.ReadPageAsync(
+                new OperatorEventQuery(new OperatorEventFilters(SourceRootId: rootId), PageSize: 10), cancellationToken)
+                .ConfigureAwait(false)).Items;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            RecentEvents = [];
+        }
     }
 
     public ValueTask HandleStatusChangedAsync(StatusChanged statusChanged, CancellationToken cancellationToken)

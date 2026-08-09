@@ -75,6 +75,8 @@ public sealed class SourceActivityLifecycleIntegrationTests(NativeSqlServerFixtu
             Assert.Contains("claimLeaseGeneration", claimed.AttemptEvidenceJson, StringComparison.Ordinal);
             Assert.Equal((int)SourceActivityState.Pending, untouched.State);
             Assert.Equal(0, untouched.AttemptCount);
+            Assert.Single(await afterClaim.AuditEvents.Where(value => value.SourceActivityId == activityIds.Primary && value.EventType == "activity.claimed").ToListAsync());
+            Assert.Empty(await afterClaim.AuditEvents.Where(value => value.SourceActivityId == activityIds.Unrelated && value.EventType == "activity.claimed").ToListAsync());
         }
 
         var retryDispatch = await outboxStore.ClaimNextDueAsync(
@@ -117,6 +119,8 @@ public sealed class SourceActivityLifecycleIntegrationTests(NativeSqlServerFixtu
             Assert.Contains("terminalStageFailure", failed.AttemptEvidenceJson, StringComparison.Ordinal);
             Assert.Equal((int)SourceActivityState.Pending, untouched.State);
             Assert.Equal(0, untouched.AttemptCount);
+            Assert.Single(await afterFailure.AuditEvents.Where(value => value.SourceActivityId == activityIds.Primary && value.EventType == "activity.failed").ToListAsync());
+            Assert.Empty(await afterFailure.AuditEvents.Where(value => value.SourceActivityId == activityIds.Unrelated && value.EventType == "activity.failed").ToListAsync());
         }
 
         var publishDispatch = await outboxStore.ClaimNextDueAsync(
@@ -158,6 +162,7 @@ public sealed class SourceActivityLifecycleIntegrationTests(NativeSqlServerFixtu
         Assert.Null(completed.Reason);
         Assert.Equal((int)SourceActivityState.FailedTerminal, failedAgain.State);
         Assert.Equal((int)SourceActivityState.Pending, unrelatedAgain.State);
+        Assert.Single(await verification.AuditEvents.Where(value => value.SourceActivityId == activityIds.Published && value.EventType == "activity.completed").ToListAsync());
     }
 
     private async Task<(Guid Primary, Guid Unrelated, Guid Published)> SeedLinkedActivitiesAsync(

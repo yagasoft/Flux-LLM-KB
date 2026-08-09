@@ -90,20 +90,23 @@ durable SQL state.
 
 Phase 2 is complete as scoped: recovery, the SQL-authoritative scheduler and
 the executor/result boundary are implemented, verified and live-validated
-without a real executor process or model/GPU activation. Phase 3A now has an
-implemented, focused-test-evidenced local source-management code path; its
-generated SQL migrations are unapplied and its disposable SQL/IIS/local-root
-vertical-slice proof has not run. The usefulness-first ordering remains: an MCP
-or REST surface over an empty corpus is not useful, but full MCP/plugin/REST/CLI
-parity remains required after this corpus slice.
+without a real executor process or model/GPU activation. Phase 3A is complete:
+its migrations were applied to the disposable loopback site and the local-root
+slice proved held/released scans, retained UTF-8 indexing, deferred PDF evidence,
+search provenance and restart-stable source state. The next approved design is
+the [Phase 3B watcher, Corpus and Events slice](superpowers/specs/2026-08-09-phase-3b-watcher-corpus-events-design.md).
+The usefulness-first ordering remains: an MCP or REST surface over an empty
+corpus is not useful, but full MCP/plugin/REST/CLI parity remains required after
+these corpus slices.
 
 ### Status classes and execution-class seam
 
-- **Implemented now:** Phases 0–2 and the Phase 3A source-management code path:
+- **Implemented now:** Phases 0–2 and the completed Phase 3A source-management
+  slice:
   source roots and scan controls, retained source revisions/artifacts,
   in-process UTF-8 planning/indexing, deferred replay and Sources/Indexing
-  projections. The Phase 3A schema remains unapplied and the local SQL/IIS
-  vertical slice remains unvalidated. Production retains the no-admission gate
+  projections. Its schema and local SQL/IIS vertical slice were validated on the
+  disposable loopback deployment. The application retains the no-admission gate
   and resolves no executor adapter.
 - **Designed extension points:** Phase 3A source activities may carry only
   `InProcess`, `DeferredCapability` or `NativeExecutorLater`. Text extraction,
@@ -178,24 +181,24 @@ wrap or truncate safely without overflow and remain usable at narrow widths.
 All source mutations retain local-only, antiforgery, validation and audit
 requirements.
 
-### Phase 3A evidence boundary
+### Phase 3A evidence boundary and Phase 3B follow-up
 
-The focused code checkpoint covers the contract and projection layers; the
-separate local vertical-slice checkpoint must still prove a valid local root,
-safe path rejection, save-only and save-and-scan behaviour,
-recursive/include/exclude policy, preview counts, UTF-8 search, immutable source
-provenance, idempotent unchanged rescans, new revisions for changed files,
-unseen-file suppression, restart-safe reconciliation, SQL-to-USearch rebuild,
-deferred unsupported work and exact-once replay after capability registration.
-It must leave the active generation unchanged on partial failure and must not
-activate a model, GPU, process, external surface or legacy/RabbitMQ/Docker/Vespa
-component. See [the Phase 3A validation record](operations/native-windows-phase-3a-source-management-validation.md).
+The Phase 3A local vertical-slice checkpoint proved a valid local root, safe
+path rejection, held and released scan behaviour, recursive/include/exclude
+policy, preview counts, UTF-8 search, immutable source provenance, idempotent
+unchanged rescans, changed-file revisions, unseen-file suppression, restart-safe
+reconciliation, SQL-to-USearch rebuild, deferred unsupported work and exact-once
+replay after capability registration. It left the active generation safe on
+partial failure and did not activate a model, GPU, process, external surface or
+legacy/RabbitMQ/Docker/Vespa component. See [the Phase 3A validation
+record](operations/native-windows-phase-3a-source-management-validation.md).
 
-Phase 3B expands local processors and content branches; Phase 3C delivers the
-full 54-tool MCP/plugin/REST/CLI contract ledger against the now-useful corpus.
-Gmail/Outlook ingress, advanced media/document/code branches, approved native
-model adapters and final replacement/legacy retirement remain the separately
-gated later phases in the native replacement design.
+Phase 3B first delivers the approved watcher-driven PipelineRecord Corpus and
+durable Events dashboard, then separately expands local processors and content
+branches. Phase 3C delivers the full 54-tool MCP/plugin/REST/CLI contract ledger
+against the now-useful corpus. Gmail/Outlook ingress, advanced media/document/
+code branches, approved native model adapters and final replacement/legacy
+retirement remain separately gated later work.
 
 Legacy architecture below remains a compatibility reference only. It is not the
 target architecture for this branch and must not be deleted until local
