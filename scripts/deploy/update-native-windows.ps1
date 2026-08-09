@@ -195,26 +195,11 @@ function Grant-ApplicationPoolModifyAccess {
     }
 
     $identity = "IIS AppPool\$ApplicationPoolName"
-    $acl = Get-Acl -LiteralPath $item.FullName
-    $hasModifyAccess = @($acl.Access | Where-Object {
-        $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
-        $_.IdentityReference.Value -eq $identity -and
-        ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Modify) -eq [System.Security.AccessControl.FileSystemRights]::Modify -and
-        ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit) -eq [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -and
-        ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit) -eq [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
-    }).Count -gt 0
-    if ($hasModifyAccess) {
-        return
+    $icacls = (Get-Command icacls.exe -ErrorAction Stop).Source
+    & $icacls $item.FullName "/grant:r" "${identity}:(OI)(CI)M" | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to grant the IIS application pool Modify access to the source artifact store."
     }
-
-    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-        $identity,
-        [System.Security.AccessControl.FileSystemRights]::Modify,
-        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
-        [System.Security.AccessControl.PropagationFlags]::None,
-        [System.Security.AccessControl.AccessControlType]::Allow)
-    $acl.AddAccessRule($rule)
-    Set-Acl -LiteralPath $item.FullName -AclObject $acl
 }
 
 function Assert-LoopbackIisTarget {
