@@ -59,6 +59,8 @@ if ($PlanOnly) {
         scheduler_migration_target = $SchedulerMigrationTargetId
         phase3a_migration_ids = $Phase3AMigrationIds
         deployment_migration_target = $Phase3AMigrationTargetId
+        source_artifact_store_requires_app_pool_modify_access = $true
+        source_artifact_store_acl_rejects_protected_root_overlap = $true
         required_endpoints = @(
             "/health/live",
             "/health/ready",
@@ -115,6 +117,104 @@ function Get-LocalProductionConnection {
         Server = $server
         Catalog = $catalog
     }
+}
+
+function Get-SourceArtifactStoreRoot {
+    param([string]$ConfigurationPath)
+
+    $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw | ConvertFrom-Json
+    $configuredRoot = [string]$configuration.SourceArtifactStore.Root
+    if ([string]::IsNullOrWhiteSpace($configuredRoot)) {
+        $configuredRoot = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) "FluxKnowledge\source-artifacts"
+    }
+
+    return [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredRoot))
+}
+
+function Get-SourceArtifactStoreProtectedRoots {
+    param(
+        [string]$ConfigurationPath,
+        [string]$DeploymentRoot
+    )
+
+    $configuration = Get-Content -LiteralPath $ConfigurationPath -Raw | ConvertFrom-Json
+    $configuredRoots = @(
+        $configuration.SourceRootPolicy.ProtectedRoots,
+        $configuration.SourceRootPolicy.SecretRoots,
+        $configuration.SourceRootPolicy.CacheRoots,
+        $configuration.SourceArtifactStore.ProtectedRoots
+    ) | ForEach-Object { @($_) } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+
+    return @(
+        $DeploymentRoot,
+        "I:\FluxKnowledge\Sql\Data",
+        "I:\FluxKnowledge\Sql\Log",
+        [string]$configuration.Usearch.RootPath,
+        $configuredRoots
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        ForEach-Object { [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$_)).TrimEnd([char[]]@('\', '/')) }
+}
+
+function Test-PathOverlap {
+    param(
+        [string]$FirstPath,
+        [string]$SecondPath
+    )
+
+    $first = [System.IO.Path]::GetFullPath($FirstPath).TrimEnd([char[]]@('\', '/'))
+    $second = [System.IO.Path]::GetFullPath($SecondPath).TrimEnd([char[]]@('\', '/'))
+    return $first.Equals($second, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $first.StartsWith("$second$([System.IO.Path]::DirectorySeparatorChar)", [System.StringComparison]::OrdinalIgnoreCase) -or
+        $second.StartsWith("$first$([System.IO.Path]::DirectorySeparatorChar)", [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Grant-ApplicationPoolModifyAccess {
+    param(
+        [string]$Path,
+        [string]$ApplicationPoolName,
+        [string[]]$ProtectedRoots
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
+    if ([string]::IsNullOrWhiteSpace((Split-Path -Parent $fullPath))) {
+        throw "The source artifact store root must not be a filesystem root."
+    }
+    foreach ($protectedRoot in $ProtectedRoots) {
+        if (Test-PathOverlap -FirstPath $fullPath -SecondPath $protectedRoot) {
+            throw "The source artifact store root must not overlap a protected root."
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $fullPath)) {
+        New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
+    }
+
+    $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "The source artifact store root must not be a reparse point."
+    }
+
+    $identity = "IIS AppPool\$ApplicationPoolName"
+    $acl = Get-Acl -LiteralPath $item.FullName
+    $hasModifyAccess = @($acl.Access | Where-Object {
+        $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and
+        $_.IdentityReference.Value -eq $identity -and
+        ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::Modify) -eq [System.Security.AccessControl.FileSystemRights]::Modify -and
+        ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ContainerInherit) -eq [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -and
+        ($_.InheritanceFlags -band [System.Security.AccessControl.InheritanceFlags]::ObjectInherit) -eq [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    }).Count -gt 0
+    if ($hasModifyAccess) {
+        return
+    }
+
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity,
+        [System.Security.AccessControl.FileSystemRights]::Modify,
+        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+        [System.Security.AccessControl.PropagationFlags]::None,
+        [System.Security.AccessControl.AccessControlType]::Allow)
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $item.FullName -AclObject $acl
 }
 
 function Assert-LoopbackIisTarget {
@@ -307,6 +407,8 @@ if ($null -eq $productionSettings) {
     throw "The deployment directory has no target-only appsettings.Production.json file."
 }
 $productionConnection = Get-LocalProductionConnection -ConfigurationPath $productionSettings.FullName
+$sourceArtifactStoreRoot = Get-SourceArtifactStoreRoot -ConfigurationPath $productionSettings.FullName
+$sourceArtifactStoreProtectedRoots = Get-SourceArtifactStoreProtectedRoots -ConfigurationPath $productionSettings.FullName -DeploymentRoot $DeployRoot
 $preflightMigrationIds = @()
 if ($ApplyMigrations) {
     $preflightMigrationIds = Get-AppliedMigrationIds -Server $productionConnection.Server -Database $productionConnection.Catalog
@@ -381,6 +483,8 @@ try {
     Stop-WebAppPool -Name $SiteName -ErrorAction Stop
     $poolStopped = $true
     Wait-ForAppPoolState -Name $SiteName -ExpectedState "Stopped"
+
+    Grant-ApplicationPoolModifyAccess -Path $sourceArtifactStoreRoot -ApplicationPoolName $SiteName -ProtectedRoots $sourceArtifactStoreProtectedRoots
 
     if ($ApplyMigrations) {
         $previousConnection = $env:ConnectionStrings__FluxKnowledge
