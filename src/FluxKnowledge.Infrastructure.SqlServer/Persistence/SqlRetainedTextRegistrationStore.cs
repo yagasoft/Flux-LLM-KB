@@ -9,6 +9,7 @@ using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Pipeline;
 using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
 using FluxKnowledge.Integrations.Files;
 using Microsoft.EntityFrameworkCore;
 
@@ -66,7 +67,10 @@ public sealed class SqlRetainedTextRegistrationStore(
             where activity.State == (int)SourceActivityState.Pending &&
                 activity.ExecutionClass == (int)ExecutionClass.InProcess &&
                 activity.ResultingPipelineRecordId == null && revision.SuppressedAtUtc == null &&
-                artifact.ContentSha256 == revision.ContentSha256 && artifact.ContentSha256 == activity.InputFingerprint
+                EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                    EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                    EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation)
             orderby activity.SourceRevisionId, activity.ActivityKind, activity.ProcessorVersion, activity.InputFingerprint
             select activity).ToListAsync(cancellationToken).ConfigureAwait(false);
         var offered = 0;
@@ -321,8 +325,10 @@ public sealed class SqlRetainedTextRegistrationStore(
                 activity.ProcessorVersion == capability.ProcessorVersion &&
                 activity.ResultingPipelineRecordId == null &&
                 revision.SuppressedAtUtc == null &&
-                artifact.ContentSha256 == revision.ContentSha256 &&
-                artifact.ContentSha256 == activity.InputFingerprint
+                EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                    EF.Functions.Collate(revision.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) &&
+                EF.Functions.Collate(artifact.ContentSha256, SchemaConfiguration.SchedulerFenceCollation) ==
+                    EF.Functions.Collate(activity.InputFingerprint, SchemaConfiguration.SchedulerFenceCollation)
             select new { activity, revision.SourceRootId };
         if (rootId is not null)
         {
