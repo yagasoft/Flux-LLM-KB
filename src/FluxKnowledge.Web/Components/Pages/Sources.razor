@@ -1,0 +1,232 @@
+@page "/sources"
+@implements IAsyncDisposable
+@using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Application.Sources
+@using FluxKnowledge.Web.Components.Sources
+@using FluxKnowledge.Web.Components.Status
+@inject SourceRootPageState PageState
+@inject SourceRootService SourceRootService
+@inject StatusEventFeed StatusEvents
+
+<PageTitle>Sources and indexing | Flux Knowledge</PageTitle>
+
+<section aria-labelledby="sources-heading">
+    <h1 id="sources-heading">Sources and indexing</h1>
+    <p role="status" aria-live="polite">@_statusMessage</p>
+    @if (PageState.Roots.Count == 0 && !_showAddFolder)
+    {
+        <p>No local source folders have been saved.</p>
+        <button type="button" @onclick="ShowAddFolder">Add folder</button>
+    }
+    else
+    {
+        <p><button type="button" @onclick="ShowAddFolder">Add folder</button></p>
+        @if (PageState.Roots.Count > 0)
+        {
+            <div class="table-scroll">
+                <table>
+                    <caption class="visually-hidden">Configured local source roots</caption>
+                    <thead><tr><th>Name</th><th>Canonical path</th><th>State</th><th>Last scan</th><th>Indexed</th><th>Deferred</th><th>Blocked</th><th>Errors</th><th>Details</th></tr></thead>
+                    <tbody>
+                    @foreach (var root in PageState.Roots)
+                    {
+                        <tr>
+                            <td>@root.DisplayName</td><td class="diagnostic-value">@root.CanonicalPath</td><td>@root.State</td>
+                            <td>@(root.LastScanCompletedAtUtc?.LocalDateTime.ToString() ?? "Not scanned")</td>
+                            <td>@root.IndexedCount</td><td>@root.DeferredCount</td><td>@root.BlockedCount</td><td>@root.ErrorCount</td>
+                            <td><a href="@($"/sources/{root.Id}")">View</a></td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+
+    @if (_showAddFolder)
+    {
+        <section class="source-form" aria-labelledby="add-folder-heading">
+            <h2 id="add-folder-heading">Add folder</h2>
+            <p>Only local fixed-drive NTFS folders that pass the configured root policy can be saved.</p>
+            <label>Folder path <input @bind="_fullPath" @bind:after="InvalidatePreview" /></label>
+            <label>Display name <input @bind="_displayName" @bind:after="InvalidatePreview" /></label>
+            <label><input type="checkbox" @bind="_recursive" @bind:after="InvalidatePreview" /> Include subfolders</label>
+            <label>Include rules (one per line) <textarea @bind="_includeRules" @bind:after="InvalidatePreview"></textarea></label>
+            <label>Exclude rules (one per line) <textarea @bind="_excludeRules" @bind:after="InvalidatePreview"></textarea></label>
+            <p><button type="button" @onclick="PreviewAsync">Preview</button></p>
+            @if (_validationError is { } validationError)
+            {
+                <p role="alert">@validationError</p>
+            }
+            @if (PageState.Preview is { } preview)
+            {
+                <section aria-labelledby="source-preview-heading">
+                    <h3 id="source-preview-heading">Read-only preview</h3>
+                    <dl class="status-grid">
+                        <div><dt>Canonical path</dt><dd class="diagnostic-value">@preview.CanonicalPath</dd></div>
+                        <div><dt>Matched files</dt><dd>@preview.MatchedFileCount</dd></div>
+                        <div><dt>Planned text activities</dt><dd>@preview.PlannedInProcessCount</dd></div>
+                        <div><dt>Deferred</dt><dd>@preview.DeferredCount</dd></div>
+                        <div><dt>Blocked</dt><dd>@preview.BlockedCount</dd></div>
+                        <div><dt>Permission errors</dt><dd>@preview.PermissionErrorCount</dd></div>
+                    </dl>
+                    <p>Effective include rules: @(preview.EffectiveIncludePatterns.Count == 0 ? "All files" : string.Join(", ", preview.EffectiveIncludePatterns))</p>
+                    <p>Effective exclude rules: @(preview.EffectiveExcludePatterns.Count == 0 ? "None" : string.Join(", ", preview.EffectiveExcludePatterns))</p>
+                    @if (preview.Reasons.Count > 0)
+                    {
+                        <ul>
+                        @foreach (var reason in preview.Reasons)
+                        {
+                            <li>@reason</li>
+                        }
+                        </ul>
+                    }
+                </section>
+                <p>
+                    <button type="button" @onclick="() => SaveAsync(ScanStartIntent.SaveOnly)">Save</button>
+                    <button type="button" @onclick="() => SaveAsync(ScanStartIntent.SaveAndScan)">Save and scan</button>
+                </p>
+            }
+            @if (_receiptMessage is { } receiptMessage)
+            {
+                <p role="status">@receiptMessage</p>
+                @if (_savedRootId is { } savedRootId)
+                {
+                    <p><a href="@($"/sources/{savedRootId}")">View saved source root</a></p>
+                }
+            }
+        </section>
+    }
+</section>
+
+@code {
+    private readonly CancellationTokenSource _stopping = new();
+    private SourceRootDraft _draft = SourceRootDraft.Empty;
+    private string _fullPath = string.Empty;
+    private string _displayName = string.Empty;
+    private bool _recursive = true;
+    private string _includeRules = string.Empty;
+    private string _excludeRules = string.Empty;
+    private StatusEventSubscription? _subscription;
+    private bool _showAddFolder;
+    private string _statusMessage = "Loading local source roots…";
+    private string? _validationError;
+    private string? _receiptMessage;
+    private Guid? _savedRootId;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _subscription = StatusEvents.Subscribe();
+        await ReloadAsync();
+        _ = ObserveAsync(_subscription, _stopping.Token);
+    }
+
+    private void ShowAddFolder()
+    {
+        _showAddFolder = true;
+        _validationError = null;
+        _receiptMessage = null;
+        PageState.InvalidatePreview();
+    }
+
+    private async Task PreviewAsync()
+    {
+        _validationError = null;
+        _receiptMessage = null;
+        _draft = BuildDraft();
+        try
+        {
+            await PageState.LoadPreviewAsync(_draft, _stopping.Token);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or UnauthorizedAccessException or IOException)
+        {
+            _validationError = exception.Message;
+        }
+    }
+
+    private async Task SaveAsync(ScanStartIntent intent)
+    {
+        _validationError = null;
+        try
+        {
+            _draft = BuildDraft();
+            if (!PageState.IsPreviewCurrent(_draft))
+            {
+                _validationError = "Preview the current folder settings before saving.";
+                return;
+            }
+            var request = new SourceRootCreateRequest(
+                _draft.FullPath,
+                _draft.DisplayName,
+                _draft.Recursive,
+                _draft.IncludePatterns,
+                _draft.ExcludePatterns,
+                FollowLinks: false,
+                _draft.MaximumFileBytes,
+                ["text/plain"],
+                TimeSpan.FromMinutes(15),
+                _draft.RequestedBy);
+            var receipt = await SourceRootService.CreateAsync(request, intent, _stopping.Token);
+            _savedRootId = receipt.SourceRootId.Value;
+            _receiptMessage = receipt.IsHeld
+                ? "Saved. The durable scan request is held until it is explicitly released."
+                : "Saved and scan request released. Local reconciliation will pick it up.";
+            await ReloadAsync();
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or UnauthorizedAccessException or IOException)
+        {
+            _validationError = exception.Message;
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        await PageState.ReloadAsync(_stopping.Token);
+        _statusMessage = "Local source roots loaded from SQL.";
+    }
+
+    private async Task ObserveAsync(StatusEventSubscription subscription, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var statusChanged in subscription.Reader.ReadAllAsync(cancellationToken))
+            {
+                await PageState.HandleStatusChangedAsync(statusChanged, cancellationToken);
+                _statusMessage = "Local source root status refreshed from SQL.";
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stopping.CancelAsync();
+        if (_subscription is not null)
+        {
+            await _subscription.DisposeAsync();
+        }
+        _stopping.Dispose();
+    }
+
+    private static IReadOnlyList<string> ParseRules(string text) =>
+        text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    private void InvalidatePreview()
+    {
+        PageState.InvalidatePreview();
+        _validationError = null;
+        _receiptMessage = null;
+    }
+
+    private SourceRootDraft BuildDraft() => new(
+        _fullPath,
+        _displayName,
+        _recursive,
+        ParseRules(_includeRules),
+        ParseRules(_excludeRules),
+        SourceRootDraft.Empty.MaximumFileBytes,
+        SourceRootDraft.Empty.RequestedBy);
+}

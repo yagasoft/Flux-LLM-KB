@@ -28,13 +28,16 @@ public sealed class SqlFullTextSearch(IDbContextFactory<FluxKnowledgeDbContext> 
                  INNER JOIN [PipelineRecords] AS [record]
                     ON [artifact].[PipelineRecordId] = [record].[Id]
                    AND [artifact].[SourceRevision] = [record].[Revision]
+                 LEFT JOIN [SourceRevisions] AS [retained]
+                    ON [record].[SourceRevisionId] = [retained].[Id]
                  WHERE [vector].[IsDeleted] = 0
                    AND [record].[IsDeleted] = 0
+                   AND ([record].[SourceRevisionId] IS NULL OR [retained].[SuppressedAtUtc] IS NULL)
                    AND [vector].[TextChunkContentHash] = [chunk].[ContentHash]
-                   AND [record].[Revision] = (
+                   AND ([record].[SourceRevisionId] IS NOT NULL OR [record].[Revision] = (
                         SELECT MAX([current].[Revision])
                         FROM [PipelineRecords] AS [current]
-                        WHERE [current].[SourceIdentityId] = [record].[SourceIdentityId])
+                        WHERE [current].[SourceIdentityId] = [record].[SourceIdentityId]))
                  ORDER BY [fulltext].[RANK] DESC, [vector].[VectorId] ASC
                  """)
             .ToListAsync(cancellationToken)

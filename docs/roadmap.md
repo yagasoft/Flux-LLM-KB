@@ -1,6 +1,6 @@
 # Roadmap
 
-Last reviewed: 2026-08-05
+Last reviewed: 2026-08-09
 
 This file is the canonical public roadmap and implementation-status tracker for
 Flux-LLM-KB. It is intentionally separate from live runtime state. Do not add
@@ -18,10 +18,31 @@ estimates toward `shipped`; they are not live runtime health measurements.
 | Target architecture and requirements traceability | P0 | complete | 100% | The approved target, phase boundary and full traceability baseline are documented in [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md); the detailed Phase 1 plan and [validation record](operations/native-windows-phase-1-validation.md) now link implementation evidence to that intent. This completes the design/traceability piece only, not the replacement programme. |
 | Phase 1: disposable UTF-8 file vertical slice | P0 | complete | 100% | The verified local slice covers UTF-8 registration, SQL PipelineRecord/Job/outbox flow, deterministic embedding, immutable USearch generation, hydrated REST/search, live Blazor projections and Phase 1 kb.search/kb.brief hosting. The final checkpoint passed locked restore, a zero-warning Release build, 54 Domain tests, 60 Integration tests including the disposable SQL matrix, 24 non-browser Web tests and one guarded Kestrel/Chromium browser slice; generated test catalogues were cleaned up. A scoped localhost-only IIS deployment then completed a retained labelled record through Publish, returned ready/search success for ordinary multiword and punctuation input, passed native SQL validation and checksum-verified backup inspection. Corrections made Full-Text migration operations non-transactional, retry-enabled transaction paths safe, ordinary Full-Text input natural-language compatible, claim locking safe after pooled serializable work and under read-committed snapshot isolation, antiforgery active, and live pipeline projection translatable. This completes the defined disposable Phase 1 item and its isolated local IIS checkpoint only; external deployment and legacy cutover remain separate gates. See [the validation record](operations/native-windows-phase-1-validation.md). |
 | Pipeline durability, scheduler and rebuild invariants | P0 | in progress | 80% | Phase 1 includes six-state Job, provenance, atomic transition, claim/lease-generation, terminal Publish completion, distinct vector identity/integrity, immutable snapshot and SQL-to-USearch rebuild contracts, all exercised against generated disposable SQL catalogues. The approved [Phase 2 recovery design](superpowers/specs/2026-07-27-native-windows-phase-2-recovery-rebuild-design.md) is implemented and verified: missing or invalid active derived indexes recover from immutable SQL membership with bounded retry, safe cleanup of aged unreferenced staging or quarantine candidates, readiness gating and a sanitised local status projection, while preserving the active pointer. The serializable, fail-closed projection treats only exact, proven Embed-to-Publish drafts as pathless; completed Embed dispatches and the Publish job/outbox dispatch pair must be durably consistent, while every near miss remains terminal without retry or mutation. The real-SQL matrix covers valid non-zero and zero-vector drafts, all supported Publish states, lifecycle and provenance contradictions, immutable membership, vector count/fingerprint/dimensions/deletion and source-revision failures, plus no-mutation snapshots of every SQL relation read by the projection. At the Phase 2 recovery checkpoint, verification passed locked restore, a zero-warning Release `-warnaserror` build, Domain 64/64, Integration 109/109, Web 36/36, the guarded browser slice 1/1, and zero remaining disposable catalogues. The authorised loopback-only IIS checkpoint then preserved the target-only settings and binding, reached healthy readiness and index status, and completed a controlled missing-metadata recovery without an IIS restart: the SQL active pointer and generation count stayed unchanged, the derived path was safely replaced, ANN search returned 200, and sanitised durable evidence recorded detection, rebuild, cleanup and healthy completion. The rollback payload remains retained. The strict-priority scheduler foundation is implemented and verified against disposable native SQL: atomic hand-off, strict lane/FIFO compatible bounded batching, a transaction-scoped admission fence, durable wake and retry receipts, explicit fenced lifecycle boundaries, uncertainty with trusted reconciliation separation, and sanitised GET status. It is now merged and live-validated on the local loopback-only IIS checkpoint: the six scheduler migrations are applied, SQL readiness and all required read-only endpoints returned 200, and a newly created SQL backup passed checksum verification. The final native closeout passed locked restore, a zero-warning Release build, and Domain 129/129, Integration 209/209 and Web 50/50 tests; the deployed payload and a rollback payload are retained. See [the Phase 2 scheduler validation record](operations/native-windows-phase-2-scheduler-validation.md). The approved [executor/result boundary design](superpowers/specs/2026-08-03-phase-2-executor-result-boundary-design.md) is now implemented and verified against disposable native SQL: opaque dispatch/receipt/evidence fencing, atomic admission, recovery of the original pending handle only, deterministic test-only fake execution, a persisted SQL hosted-service restart proof, and a sanitised read-only status surface. The 2026-08-05 checkpoint passed locked restore, a zero-warning Release build, Domain 188/188, Integration 252/252 and native Web 49/49; one browser-only Web test remained skipped outside the native matrix. The approved loopback deployment gate now includes the additive `20260805112341_AddGpuExecutorDispatchAndReceipts` migration. Progress remains 80% because no real process management, process-termination evidence, runtime/driver reconciliation, model/GPU activation, external access or legacy work is included; each remains separately approval-gated. |
-| MCP, plugin, REST and CLI contract parity | P0 | in progress | 5% | Phase 1 hosts and tests only kb.search and kb.brief discovery, retry and error envelopes through the shared search use case. The other 52 current kb.* tools, plugin installation, hooks, readiness, full REST/CLI ledgers and executable compatibility fixtures remain Phase 3 work. |
-| Source, mail, extraction and code branches | P1 | planned | 0% | Add filesystem crawl/watch, Gmail, Outlook VSTO ingress, documents, archives, image/OCR/enrichment, video/audio, code understanding and provenance branches in dependency order. |
+| Phase 3A: local source management and searchable-content usefulness slice | P0 | in progress | 70% | The code checkpoint implements SQL-authoritative roots and scan controls, retained source revisions/artifacts, signature-first classification, in-process UTF-8 planning/indexing, deferred replay, Sources/Indexing and bounded Overview diagnostics. The corrected branch also fences source activity terminal transitions to linked pipeline receipts and corrects immutable rename provenance/current suppression plus `Recovering` diagnostics. Fresh evidence passed the zero-warning Release build, 100 focused Domain tests, 99 runnable Integration tests and 19 runnable Web tests. The conservative 70% weights the implemented/tested code path at 70%; the remaining 30% is the separately authorised disposable SQL/IIS/local-root vertical-slice proof, because 109 of 208 native SQL and 6 of 25 SQL/browser tests were environment-skipped. The additive migrations `20260806120000_AddPhase3ALocalSources` and `20260808191700_AddRetainedTextPipelineLink` were inspected but not applied. No deployment, IIS restart, model/GPU, process, external or legacy action occurred. See [the Phase 3A validation record](operations/native-windows-phase-3a-source-management-validation.md). |
+| Phase 3B: broader local content and capability expansion | P1 | planned | 0% | Extend the retained-source/activity contract to documents, archives, image/OCR, video/audio, code understanding and provenance branches as capabilities become available; unsupported work remains explicitly deferred. |
+| Phase 3C: MCP, plugin, REST and CLI contract parity | P0 | in progress | 5% | Full parity remains required, but follows a useful local corpus. Phase 1 hosts and tests cover kb.search and kb.brief discovery, retry and error envelopes; the other 52 current kb.* tools, plugin installation, hooks, readiness, full REST/CLI ledgers and executable compatibility fixtures remain Phase 3C work. |
+| Phases 4–5: external/source and advanced content branches | P1 | planned | 0% | Preserve the original Gmail, Outlook VSTO, document, archive, image/OCR, video/audio, code and provenance requirements in dependency order; no source or legacy requirement is removed by the Phase 3A resequencing. |
 | Authorised native inference adapters | P1 | blocked pending approval | 0% | No model is downloaded, converted, copied, activated or parity-tested until explicitly authorised. Use only an approved versioned app-owned cache and ONNX Runtime CUDA/DirectML where appropriate. |
 | Local replacement readiness and legacy retirement decision | P0 | planned | 0% | Requires SQL backup/restore, SQL-to-USearch rebuild, end-to-end integration and operator evidence, then a separate explicit cutover approval. Legacy data, code, Docker assets, model caches and private spools remain preserved until then. |
+
+### Status classes for the usefulness-first checkpoint
+
+- **Implemented now:** Phases 0–2 and the Phase 3A source-management code path,
+  including retained UTF-8 indexing, source reconciliation, deferred replay and
+  Sources/Indexing projections. Phase 3A migrations and the local SQL/IIS
+  vertical-slice checkpoint remain unapplied/not run; production still resolves
+  no executor adapter and performs no model/GPU work.
+- **Designed extension points:** Phase 3A source-root, retained-revision and
+  deferred-activity contracts may carry only an execution-class/capability
+  descriptor: `InProcess`, `DeferredCapability` or `NativeExecutorLater`.
+  Phase 3A runs text indexing in-process; OCR, media and GPU-dependent work
+  remains deferred. The existing opaque executor/result boundary is the future
+  seam, not an activation request.
+- **Future approval-gated implementation:** Native process start/stop,
+  supervision, PIDs, termination evidence, runtime/driver probes, GPU admission
+  changes, executor activation, model/cache activation, external access and
+  legacy work require separate written checkpoints. Process-management design
+  is intentionally a future checkpoint, not part of Phase 3A.
 
 ### Phase 2 scheduler foundation
 
@@ -35,14 +56,18 @@ a real GPU/runtime. See [the validation record](operations/native-windows-phase-
 
 The approved [executor/result boundary
 design](superpowers/specs/2026-08-03-phase-2-executor-result-boundary-design.md)
-defines the next implementation unit: durable adapter and receipt persistence
-plus a deterministic test-only fake executor. It does not create a real native
-process or perform model/GPU work.
+is implemented, verified and live-validated locally. It provides durable
+adapter/receipt/evidence fencing and a deterministic test-only fake executor;
+it does not create a real native process or perform model/GPU work.
 
-Remaining work is deliberately separate: implementation of that approved
-boundary; then separately approval-gated real process management, process
-termination evidence, runtime/driver reconciliation, model/GPU activation,
-external-access operations and legacy work. None is included in this checkpoint.
+The usefulness-first Phase 3A code checkpoint now provides durable local source
+roots, retained source revisions, explicit deferred activities, a searchable
+UTF-8 path and a dedicated Sources/Indexing operator UI. Its migrations have
+not been applied and its disposable SQL/IIS/local-root proof has not run. Full
+MCP/plugin/REST/CLI parity remains Phase 3C and is intentionally not deleted or
+downgraded; it follows a useful local corpus. Real process management,
+process-termination evidence, runtime/driver reconciliation, model/GPU
+activation, external access and legacy work remain separately approval-gated.
 
 The replacement work does not change historic legacy progress figures below.
 Phase 1's defined local disposable acceptance matrix is complete; target SQL

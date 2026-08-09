@@ -110,8 +110,13 @@ public sealed class SqlJobClaimStore(
                 AND [Operation] = @operation
               """;
         var sql =
-            $"""
-             SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+            $$"""
+             DECLARE @claimed TABLE
+             (
+                 [Id] uniqueidentifier, [PipelineRecordId] uniqueidentifier, [SourceRevision] bigint,
+                 [Stage] int, [Operation] nvarchar(128), [PublicState] int, [DueAtUtc] datetimeoffset(7),
+                 [AttemptCount] int, [LeaseOwner] nvarchar(256), [LeaseExpiresAtUtc] datetimeoffset(7), [LeaseGeneration] bigint
+             );
              ;WITH [candidate] AS
              (
                  SELECT TOP (1)
@@ -128,7 +133,7 @@ public sealed class SqlJobClaimStore(
                        OR
                        ([PublicState] = @processingState AND [LeaseExpiresAtUtc] <= @nowUtc)
                    )
-                   {dispatchPredicate}
+                    {{dispatchPredicate}}
                  ORDER BY [DueAtUtc], [Id]
              )
              UPDATE [candidate]
@@ -150,7 +155,35 @@ public sealed class SqlJobClaimStore(
                  inserted.[AttemptCount],
                  inserted.[LeaseOwner],
                  inserted.[LeaseExpiresAtUtc],
-                 inserted.[LeaseGeneration];
+                 inserted.[LeaseGeneration]
+             INTO @claimed;
+
+             UPDATE [activity]
+             SET [State] = @sourceRunning,
+                 [AttemptCount] = [activity].[AttemptCount] + 1,
+                 [LastAttemptAtUtc] = @nowUtc,
+                 [AttemptEvidenceJson] = CONCAT('{"claimLeaseGeneration":', CONVERT(nvarchar(32), [claimed].[LeaseGeneration]), '}'),
+                 [UpdatedAtUtc] = @nowUtc
+             FROM [SourceActivities] AS [activity]
+             INNER JOIN @claimed AS [claimed]
+                 ON [activity].[ResultingPipelineRecordId] = [claimed].[PipelineRecordId]
+                AND [activity].[ResultingPipelineRecordRevision] = [claimed].[SourceRevision]
+             WHERE [claimed].[Operation] = @extractOperation
+               AND [claimed].[Stage] = @extractStage
+               AND
+               (
+                   ([activity].[ExecutionClass] = @sourceInProcess AND
+                    [activity].[ActivityKind] IN (@sourceTextExtraction, @sourceMetadataExtraction) AND
+                    [activity].[State] IN (@sourcePending, @sourceRunning, @sourceFailedRetryable))
+                   OR
+                   ([activity].[ExecutionClass] = @sourceDeferredCapability AND
+                    [activity].[ActivityKind] = @sourceTextExtraction AND
+                    [activity].[State] IN (@sourceDeferredUnsupported, @sourceRunning, @sourceFailedRetryable))
+               );
+
+             SELECT [Id], [PipelineRecordId], [SourceRevision], [Stage], [Operation], [PublicState], [DueAtUtc],
+                 [AttemptCount], [LeaseOwner], [LeaseExpiresAtUtc], [LeaseGeneration]
+             FROM @claimed;
              """;
 
         await using var context = await contextFactory
@@ -164,6 +197,16 @@ public sealed class SqlJobClaimStore(
         AddParameter(command, "@leaseOwner", SqlDbType.NVarChar, leaseOwner, 256);
         AddParameter(command, "@queuedState", SqlDbType.Int, (int)queuedState);
         AddParameter(command, "@processingState", SqlDbType.Int, (int)processingState);
+        AddParameter(command, "@extractOperation", SqlDbType.NVarChar, PipelineOperations.ExtractUtf8, 128);
+        AddParameter(command, "@extractStage", SqlDbType.Int, (int)PipelineStage.Extract);
+        AddParameter(command, "@sourcePending", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.Pending);
+        AddParameter(command, "@sourceRunning", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.Running);
+        AddParameter(command, "@sourceFailedRetryable", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.FailedRetryable);
+        AddParameter(command, "@sourceDeferredUnsupported", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityState.DeferredUnsupported);
+        AddParameter(command, "@sourceInProcess", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.ExecutionClass.InProcess);
+        AddParameter(command, "@sourceDeferredCapability", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.ExecutionClass.DeferredCapability);
+        AddParameter(command, "@sourceTextExtraction", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.TextExtraction);
+        AddParameter(command, "@sourceMetadataExtraction", SqlDbType.Int, (int)FluxKnowledge.Domain.Sources.SourceActivityKind.MetadataExtraction);
         if (dispatchMessage is not null)
         {
             AddParameter(
@@ -180,14 +223,17 @@ public sealed class SqlJobClaimStore(
             AddParameter(command, "@operation", SqlDbType.NVarChar, dispatchMessage.Operation, 128);
         }
 
+        await using var transaction = (SqlTransaction)await connection.BeginTransactionAsync(IsolationLevel.ReadCommitted, cancellationToken).ConfigureAwait(false);
+        command.Transaction = transaction;
         await using var reader = await command.ExecuteReaderAsync(cancellationToken)
             .ConfigureAwait(false);
         if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
+            await reader.DisposeAsync().ConfigureAwait(false);
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return null;
         }
-
-        return new ClaimedJob(
+        var claimed = new ClaimedJob(
             new JobId(reader.GetGuid(0)),
             new PipelineRecordId(reader.GetGuid(1)),
             reader.GetInt64(2),
@@ -199,6 +245,9 @@ public sealed class SqlJobClaimStore(
             reader.GetString(8),
             reader.GetFieldValue<DateTimeOffset>(9),
             reader.GetInt64(10));
+        await reader.DisposeAsync().ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return claimed;
     }
 
     private static Job RestoreClaimedJob(ClaimedJob claim)

@@ -86,6 +86,117 @@ durable SQL state.
   payload were retained. This is not real executor/GPU work, external access or
   legacy cutover. See [the validation record](operations/native-windows-phase-2-scheduler-validation.md).
 
+## Phase 3A usefulness-first local source management
+
+Phase 2 is complete as scoped: recovery, the SQL-authoritative scheduler and
+the executor/result boundary are implemented, verified and live-validated
+without a real executor process or model/GPU activation. Phase 3A now has an
+implemented, focused-test-evidenced local source-management code path; its
+generated SQL migrations are unapplied and its disposable SQL/IIS/local-root
+vertical-slice proof has not run. The usefulness-first ordering remains: an MCP
+or REST surface over an empty corpus is not useful, but full MCP/plugin/REST/CLI
+parity remains required after this corpus slice.
+
+### Status classes and execution-class seam
+
+- **Implemented now:** Phases 0–2 and the Phase 3A source-management code path:
+  source roots and scan controls, retained source revisions/artifacts,
+  in-process UTF-8 planning/indexing, deferred replay and Sources/Indexing
+  projections. The Phase 3A schema remains unapplied and the local SQL/IIS
+  vertical slice remains unvalidated. Production retains the no-admission gate
+  and resolves no executor adapter.
+- **Designed extension points:** Phase 3A source activities may carry only
+  `InProcess`, `DeferredCapability` or `NativeExecutorLater`. Text extraction,
+  chunking, deterministic embedding and index publication are `InProcess`.
+  OCR/media/GPU-dependent work is `DeferredCapability`; `NativeExecutorLater`
+  is a non-runnable marker reserved for the existing opaque executor/result
+  seam.
+- **Future approval-gated implementation:** Process start/stop, supervision,
+  PIDs, termination evidence, runtime/driver probes, GPU admission changes and
+  executor activation are excluded. Their design remains a separate future
+  checkpoint and approval gate.
+
+### Durable source-root contract
+
+The native target uses SQL-authoritative source-root records rather than
+in-memory settings. A root records its display name, canonical local path,
+enabled/paused state, recursive scan policy, include/exclude patterns,
+follow-links policy, content-size and file-type policy, crawl/watch mode,
+reconciliation cadence, last-scan evidence, permission/health evidence,
+configuration revision and audit metadata. Paths are canonicalised and checked
+before persistence; link traversal is off by default and roots cannot point at
+the deployment, SQL, cache or secret stores.
+
+Adding a root is a local operator mutation. Its SQL transaction creates the
+durable scan request, initial Job and transactional outbox record together. A
+**Save** action leaves that initial request durably held for an explicit scan;
+**Save and scan** releases it as runnable in the same committed operation. A
+process restart therefore resumes from SQL rather than losing an in-memory
+setting or scan request. A periodic reconciliation pass is authoritative; a
+filesystem watcher, when enabled, only supplies a coalesced wake hint. The
+recommended default is periodic reconciliation every 15 minutes with manual
+scan available.
+
+### Source preservation and activity planning
+
+Each discovered source revision retains canonical path and root identity,
+revision identity, content hash, detected type/extension/classification,
+discovery metadata and immutable bytes in an app-owned, checksum-verified,
+content-addressed source store. The original path remains provenance and may be
+re-opened for reconciliation, but search and later processing do not depend on
+the path still being readable. If bytes cannot be retained or safely reopened,
+the revision is recorded as blocked and is not presented as searchable text.
+
+The revision receives a declarative activity plan using the existing durable
+Job/outbox model. Its idempotency key is
+`(source_revision_id, activity_kind, processor_version, input_fingerprint)`.
+Activities are independently visible as `Pending`, `Running`, `Completed`,
+`DeferredUnsupported`, `FailedRetryable`, `FailedTerminal` or
+`CancelledSuperseded`; these are activity states, not a replacement for the
+existing six public Job states. Unsupported capability is deferred, never
+silently completed as text and never retried forever. Registering an available
+processor or performing an explicit local operator replay reconciles matching
+deferred activities exactly once and adds a new projection without replacing a
+valid canonical projection.
+
+### Operator experience
+
+Sources/Indexing is a dedicated navigation area, separate from Overview and
+executor callback mutation routes. Its empty state offers **Add folder**. The
+root list shows name, path, state, last scan, indexed count, deferred count and
+errors. The Add folder form collects path, recursion, include/exclude rules and
+processing profile, validates the path and permissions before save, and offers
+**Save** and **Save and scan**. A preview reports matched files, unsupported
+types, permissions and planned activities. Root detail shows scan progress,
+queued/indexed/deferred/blocked counts and reasons, with a local **Reprocess
+deferred content** action when a capability is available.
+
+The existing Overview remains a summary surface. It must show friendly states
+such as Healthy, Recovering or Blocked instead of full opaque generation IDs;
+full identifiers belong in a detail or copyable diagnostic field. Cards must
+wrap or truncate safely without overflow and remain usable at narrow widths.
+All source mutations retain local-only, antiforgery, validation and audit
+requirements.
+
+### Phase 3A evidence boundary
+
+The focused code checkpoint covers the contract and projection layers; the
+separate local vertical-slice checkpoint must still prove a valid local root,
+safe path rejection, save-only and save-and-scan behaviour,
+recursive/include/exclude policy, preview counts, UTF-8 search, immutable source
+provenance, idempotent unchanged rescans, new revisions for changed files,
+unseen-file suppression, restart-safe reconciliation, SQL-to-USearch rebuild,
+deferred unsupported work and exact-once replay after capability registration.
+It must leave the active generation unchanged on partial failure and must not
+activate a model, GPU, process, external surface or legacy/RabbitMQ/Docker/Vespa
+component. See [the Phase 3A validation record](operations/native-windows-phase-3a-source-management-validation.md).
+
+Phase 3B expands local processors and content branches; Phase 3C delivers the
+full 54-tool MCP/plugin/REST/CLI contract ledger against the now-useful corpus.
+Gmail/Outlook ingress, advanced media/document/code branches, approved native
+model adapters and final replacement/legacy retirement remain the separately
+gated later phases in the native replacement design.
+
 Legacy architecture below remains a compatibility reference only. It is not the
 target architecture for this branch and must not be deleted until local
 replacement, SQL-to-USearch rebuild and explicit cutover approval exist.

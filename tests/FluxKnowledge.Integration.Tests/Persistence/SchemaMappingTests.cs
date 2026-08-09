@@ -885,16 +885,6 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                 StableKey = $"migration-test:{sourceId:N}",
                 CreatedAtUtc = now
             });
-            context.PipelineRecords.Add(new PipelineRecordEntity
-            {
-                Id = recordId,
-                SourceIdentityId = sourceId,
-                Revision = 1,
-                ContentHash = new string('a', 64),
-                RootLineageRecordId = recordId,
-                CurrentStage = 1,
-                RegisteredAtUtc = now
-            });
             context.IndexGenerations.Add(new IndexGenerationEntity
             {
                 Id = generationId,
@@ -906,6 +896,7 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                 CreatedAtUtc = now
             });
             await context.SaveChangesAsync();
+            await SeedHistoricalPipelineRecordAsync(context, recordId, sourceId, new string('a', 64), now);
 
             var artifact = new ArtifactEntity
             {
@@ -1015,16 +1006,8 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                 StableKey = $"scheduler-migration:{sourceId:N}",
                 CreatedAtUtc = now
             });
-            context.PipelineRecords.Add(new PipelineRecordEntity
-            {
-                Id = recordId,
-                SourceIdentityId = sourceId,
-                Revision = 1,
-                ContentHash = new string('a', 64),
-                RootLineageRecordId = recordId,
-                CurrentStage = 1,
-                RegisteredAtUtc = now
-            });
+            await context.SaveChangesAsync();
+            await SeedHistoricalPipelineRecordAsync(context, recordId, sourceId, new string('a', 64), now);
             context.Jobs.Add(new JobEntity
             {
                 Id = jobId,
@@ -1272,6 +1255,22 @@ public sealed class NativeSchemaMigrationTests(NativeSqlServerFixture fixture)
                 .Select(candidate => candidate.OwnerKey)
                 .SingleAsync());
     }
+
+    private static Task SeedHistoricalPipelineRecordAsync(
+        FluxKnowledgeDbContext context,
+        Guid recordId,
+        Guid sourceId,
+        string contentHash,
+        DateTimeOffset now) =>
+        context.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             INSERT INTO [PipelineRecords]
+                 ([Id], [SourceIdentityId], [Revision], [ContentHash], [RootLineageRecordId],
+                  [ParentRevisionRecordId], [CurrentStage], [CompletionCriteriaMet], [IsDeleted], [RegisteredAtUtc])
+             VALUES
+                 ({recordId}, {sourceId}, {1L}, {contentHash}, {recordId},
+                  NULL, {1}, {false}, {false}, {now});
+             """);
 
     private sealed class DirectContextFactory(string connectionString) : IDbContextFactory<FluxKnowledgeDbContext>
     {

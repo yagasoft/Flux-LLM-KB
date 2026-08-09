@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -46,6 +47,9 @@ public static class OutboxWorkerServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
         services.AddLogging();
         services.TryAddSingleton(TimeProvider.System);
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<ILocalSourceCapabilityHandler, RetainedUtf8TextLocalHandler>());
+        services.TryAddSingleton<ILocalSourceCapabilityHandlerRegistry>(provider => new LocalSourceCapabilityHandlerRegistry(
+            provider.GetServices<ILocalSourceCapabilityHandler>()));
         services.TryAddSingleton<ChannelOutboxWakeSignal>();
         services.TryAddSingleton<IOutboxWakeSignal>(
             provider => provider.GetRequiredService<ChannelOutboxWakeSignal>());
@@ -60,6 +64,18 @@ public static class OutboxWorkerServiceCollectionExtensions
             provider => provider.GetRequiredService<SqlPipelineStore>());
         services.TryAddScoped<IIndexGenerationStore>(
             provider => provider.GetRequiredService<SqlPipelineStore>());
+        services.TryAddScoped<SqlRetainedTextRegistrationStore>();
+        services.TryAddScoped<IRetainedTextRegistrationStore>(
+            provider => provider.GetRequiredService<SqlRetainedTextRegistrationStore>());
+        services.TryAddScoped<IDeferredActivityReplayStore>(
+            provider => provider.GetRequiredService<SqlRetainedTextRegistrationStore>());
+        services.TryAddScoped<ISourceActivityRestartStore>(
+            provider => provider.GetRequiredService<SqlRetainedTextRegistrationStore>());
+        services.TryAddScoped<RetainedTextActivityPlanner>();
+        services.TryAddScoped<SourceCapabilityService>();
+        services.TryAddScoped<DeferredActivityReplayService>();
+        services.TryAddScoped<IDeferredContentReprocessor>(
+            provider => provider.GetRequiredService<DeferredActivityReplayService>());
         services.TryAddScoped<SqlJobClaimStore>();
         services.TryAddScoped<IJobClaimStore>(
             provider => provider.GetRequiredService<SqlJobClaimStore>());

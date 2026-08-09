@@ -6,6 +6,7 @@ using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
 
@@ -141,6 +142,25 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         {
             throw new InvalidOperationException(
                 "The current Job lease was lost before the stage transition completed.");
+        }
+
+        if (request.Artifact.Stage == PipelineStage.Publish && request.NextStage is null)
+        {
+            var now = _timeProvider.GetUtcNow();
+            await context.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                 UPDATE [SourceActivities]
+                 SET [State] = {(int)SourceActivityState.Completed},
+                     [Reason] = NULL,
+                     [UpdatedAtUtc] = {now}
+                 WHERE [ResultingPipelineRecordId] = {request.CurrentJob.PipelineRecordId.Value}
+                   AND [ResultingPipelineRecordRevision] = {request.CurrentJob.SourceRevision}
+                   AND [State] IN (
+                       {(int)SourceActivityState.Pending},
+                       {(int)SourceActivityState.Running},
+                       {(int)SourceActivityState.FailedRetryable},
+                       {(int)SourceActivityState.DeferredUnsupported});
+                 """, cancellationToken).ConfigureAwait(false);
         }
 
         JobId? nextJobId = null;
@@ -327,6 +347,25 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
                 "The current Job lease was lost before failure could be persisted.");
         }
 
+        var terminalReason = SanitiseSourceActivityReason(request.Reason);
+        var terminalAtUtc = _timeProvider.GetUtcNow();
+        var terminalEvidence = JsonSerializer.Serialize(new { terminalStageFailure = terminalReason });
+        await context.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             UPDATE [SourceActivities]
+             SET [State] = {(int)SourceActivityState.FailedTerminal},
+                 [Reason] = {terminalReason},
+                 [AttemptEvidenceJson] = {terminalEvidence},
+                 [UpdatedAtUtc] = {terminalAtUtc}
+             WHERE [ResultingPipelineRecordId] = {request.CurrentJob.PipelineRecordId.Value}
+               AND [ResultingPipelineRecordRevision] = {request.CurrentJob.SourceRevision}
+               AND [State] IN (
+                   {(int)SourceActivityState.Pending},
+                   {(int)SourceActivityState.Running},
+                   {(int)SourceActivityState.FailedRetryable},
+                   {(int)SourceActivityState.DeferredUnsupported});
+             """, cancellationToken).ConfigureAwait(false);
+
         context.AuditEvents.Add(
             new AuditEventEntity
             {
@@ -411,6 +450,14 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
         }
 
         return new ValidatedClaim(record, dispatch);
+    }
+
+    private static string SanitiseSourceActivityReason(string reason)
+    {
+        var sanitised = string.Concat(reason.Where(character => !char.IsControl(character))).Trim();
+        return sanitised.Length == 0
+            ? "terminal-stage-failure"
+            : sanitised[..Math.Min(sanitised.Length, 128)];
     }
 
     private static void ValidateDispatchLease(
@@ -598,9 +645,12 @@ public sealed class SqlStageTransitionStore : IStageTransitionStore
             join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
             join record in context.PipelineRecords on artifact.PipelineRecordId equals record.Id
             where !vector.IsDeleted && !record.IsDeleted &&
-                  record.Revision == context.PipelineRecords
-                      .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
-                      .Max(candidate => candidate.Revision)
+                  (record.SourceRevisionId.HasValue
+                      ? context.SourceRevisions.Any(sourceRevision =>
+                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null)
+                      : record.Revision == context.PipelineRecords
+                          .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
+                          .Max(candidate => candidate.Revision))
             orderby vector.VectorId
             select new CanonicalVector(vector.VectorId, vector.TextChunkId,
                 vector.ModelFingerprint, vector.Dimensions, vector.Values,

@@ -1,6 +1,8 @@
 using System.Net;
 using FluxKnowledge.Application.Gpu;
+using FluxKnowledge.Application.Contracts;
 using FluxKnowledge.Application.Pipeline;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Workers;
@@ -13,6 +15,7 @@ using FluxKnowledge.Infrastructure.Usearch;
 using FluxKnowledge.Integrations.Files;
 using FluxKnowledge.Web;
 using FluxKnowledge.Web.Components.Status;
+using FluxKnowledge.Web.Components.Sources;
 using FluxKnowledge.Web.Endpoints;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -70,6 +73,8 @@ public sealed class WebHostCompositionTests : IDisposable
                 .Split(';')[0]);
         Assert.IsType<Utf8FileSourceReader>(
             provider.GetRequiredService<IUtf8FileSourceReader>());
+        Assert.IsType<SourceRootPathPolicy>(
+            provider.GetRequiredService<ISourceRootPathPolicy>());
         Assert.Contains(
             provider.GetServices<IHostedService>(),
             service => service is OutboxPumpService);
@@ -91,6 +96,9 @@ public sealed class WebHostCompositionTests : IDisposable
             scope.ServiceProvider.GetRequiredService<IGpuExecutorDispatchStore>());
         Assert.IsType<NoGpuAdmissionGate>(
             scope.ServiceProvider.GetRequiredService<IGpuAdmissionGate>());
+        var localHandlers = provider.GetRequiredService<ILocalSourceCapabilityHandlerRegistry>();
+        Assert.True(localHandlers.TryResolve(new Guid("9c56d5b2-c931-4c8b-ab66-fd0601e9c1df"), out var localHandler));
+        Assert.Equal("pipeline:extract-utf8", localHandler.OutputContract);
         Assert.IsType<GpuExecutorLifecycleCoordinator>(
             scope.ServiceProvider.GetRequiredService<IGpuExecutorLifecycleSink>());
         Assert.IsType<ChannelGpuExecutorDispatchSignal>(
@@ -100,6 +108,52 @@ public sealed class WebHostCompositionTests : IDisposable
             provider.GetServices<IHostedService>().OfType<GpuExecutorDispatchRecoveryService>());
         Assert.IsType<SqlProjectionReader>(
             scope.ServiceProvider.GetRequiredService<IProjectionReader>());
+        Assert.IsType<SqlSourceRootStore>(
+            scope.ServiceProvider.GetRequiredService<ISourceRootStore>());
+        _ = scope.ServiceProvider.GetRequiredService<SourceRootService>();
+        _ = scope.ServiceProvider.GetRequiredService<SourceScanControlService>();
+    }
+
+    [Fact]
+    public void Composition_rejects_an_artifact_root_configured_inside_a_protected_root()
+    {
+        var protectedRoot = Path.Combine(_ingressRoot, "protected");
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:FluxKnowledge"] = "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                ["LocalIngress:AllowedRoots:0"] = _ingressRoot,
+                ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}"),
+                ["SourceRootPolicy:ProtectedRoots:0"] = protectedRoot,
+                ["SourceArtifactStore:Root"] = Path.Combine(protectedRoot, "artifacts")
+            })
+            .Build();
+
+        Assert.Throws<ArgumentException>(() =>
+            WebHostComposition.AddFluxKnowledgeServices(new ServiceCollection(), configuration));
+    }
+
+    [Fact]
+    public async Task Composition_wires_the_local_reprocessor_without_connecting_to_SQL()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:FluxKnowledge"] = "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;Integrated Security=true;Encrypt=true;TrustServerCertificate=true",
+                ["LocalIngress:AllowedRoots:0"] = _ingressRoot,
+                ["Usearch:RootPath"] = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}")
+            })
+            .Build();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        WebHostComposition.AddFluxKnowledgeServices(services, configuration);
+        services.AddScoped<ISourceRootProjectionReader, ReplayAvailableProjectionReader>();
+        using var provider = services.BuildServiceProvider();
+        using var scope = provider.CreateScope();
+        var state = scope.ServiceProvider.GetRequiredService<SourceRootDetailPageState>();
+
+        await state.LoadAsync(Guid.Parse("33333333-3333-3333-3333-333333333333"), CancellationToken.None);
+        Assert.True(state.CanReprocessDeferredContent);
     }
 
     [Fact]
@@ -277,6 +331,39 @@ public sealed class WebHostCompositionTests : IDisposable
             DateTimeOffset dueAtUtc,
             CancellationToken cancellationToken) =>
             ValueTask.CompletedTask;
+    }
+
+    private sealed class ReplayAvailableProjectionReader : ISourceRootProjectionReader
+    {
+        private static readonly SourceRootDetailProjection Detail = new(
+            Guid.Parse("33333333-3333-3333-3333-333333333333"),
+            "Root",
+            "E:\\Corpus",
+            "Enabled",
+            "Completed",
+            null,
+            0,
+            0,
+            1,
+            0,
+            0,
+            [],
+            [new DeferredContentReplayRequest(
+                Guid.Parse("44444444-4444-4444-4444-444444444444"),
+                "44444444444444444444444444444444|2|11:phase-3a-v1|64:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "local-source-capability",
+                Guid.Parse("9c56d5b2-c931-4c8b-ab66-fd0601e9c1df"),
+                "phase-3a-v1",
+                "phase-3a-inprocess-text-metadata-v1")]);
+
+        public ValueTask<IReadOnlyList<SourceRootListProjection>> ReadRootsAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult<IReadOnlyList<SourceRootListProjection>>([]);
+
+        public ValueTask<SourceRootDetailProjection?> ReadRootAsync(Guid rootId, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<SourceRootDetailProjection?>(Detail);
+
+        public ValueTask<SourceRootPreview> PreviewAsync(SourceRootDraft draft, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class ReadyReadinessValidator : ISqlServerReadinessValidator

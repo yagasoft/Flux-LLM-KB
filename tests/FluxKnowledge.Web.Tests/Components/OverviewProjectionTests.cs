@@ -12,6 +12,44 @@ namespace FluxKnowledge.Web.Tests.Components;
 public sealed class OverviewProjectionTests
 {
     [Fact]
+    public void Overview_diagnostic_summary_keeps_opaque_generation_identifier_out_of_the_card_value()
+    {
+        var summary = OverviewDiagnosticSummary.From(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            new IndexRecoverySummary("RetryScheduled", "ffffffff-1111-2222-3333-444444444444", null, null, "TransientIo", 0));
+
+        Assert.Equal("Recovering", summary.State);
+        Assert.Equal("Retry scheduled after a transient I/O failure.", summary.Reason);
+        Assert.Equal("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", summary.ActiveGenerationDiagnostic);
+        Assert.Equal("ffffffff-1111-2222-3333-444444444444", summary.RecoveryGenerationDiagnostic);
+    }
+
+    [Fact]
+    public void Overview_diagnostic_summary_maps_actual_recovering_state_to_recovering()
+    {
+        var summary = OverviewDiagnosticSummary.From(
+            "generation-a",
+            new IndexRecoverySummary("Recovering", "generation-a", null, null, "TransientIo", 0));
+
+        Assert.Equal("Recovering", summary.State);
+        Assert.Equal("Retry scheduled after a transient I/O failure.", summary.Reason);
+    }
+
+    [Fact]
+    public async Task Overview_renders_opaque_generation_identifiers_only_inside_copyable_diagnostics()
+    {
+        using var factory = new OverviewApplicationFactory();
+        using var client = factory.CreateClient();
+
+        var markup = await client.GetStringAsync("/");
+
+        Assert.Contains("Index status</dt><dd>Healthy</dd>", markup, StringComparison.Ordinal);
+        Assert.Contains("Copyable index diagnostics", markup, StringComparison.Ordinal);
+        Assert.DoesNotContain("Active index generation</dt>", markup, StringComparison.Ordinal);
+        Assert.DoesNotContain("Recovery generation</dt>", markup, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Overview_initialization_buffers_an_index_recovery_event_published_during_the_first_projection_read()
     {
         var initialRecovery = new IndexRecoverySummary(

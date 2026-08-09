@@ -1,6 +1,7 @@
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Sources;
 
 namespace FluxKnowledge.Application.Workers;
 
@@ -22,7 +23,8 @@ public sealed record PipelineStageSource(
     long SourceRevision,
     string CanonicalPath,
     string RegisteredContentHash,
-    string? InputText);
+    string? InputText,
+    SourceRevisionId? RetainedSourceRevisionId = null);
 
 public interface IPipelineStageReader
 {

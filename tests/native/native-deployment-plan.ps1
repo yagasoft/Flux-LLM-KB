@@ -70,6 +70,17 @@ if ($plan.scheduler_migration_target -ne $expectedMigrations[-1]) {
     throw "The native deployment plan does not pin the approved scheduler migration target."
 }
 
+$expectedPhase3AMigrations = @(
+    "20260806120000_AddPhase3ALocalSources",
+    "20260808191700_AddRetainedTextPipelineLink"
+)
+if ((@($plan.phase3a_migration_ids) -join "|") -ne ($expectedPhase3AMigrations -join "|")) {
+    throw "The native deployment plan does not expose exactly the approved Phase 3A migration sequence."
+}
+if ($plan.deployment_migration_target -ne $expectedPhase3AMigrations[-1]) {
+    throw "The native deployment plan does not pin the approved Phase 3A migration target."
+}
+
 $requiredEndpoints = @("/health/live", "/health/ready", "/api/index-health", "/api/gpu-status")
 foreach ($endpoint in $requiredEndpoints) {
     if ($endpoint -notin @($plan.required_endpoints)) {

@@ -1,5 +1,6 @@
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence.Configurations;
@@ -28,6 +29,9 @@ internal static class SchemaConfiguration
 
     public static void ConfigureRowVersion(PropertyBuilder<byte[]> property) =>
         property.IsRowVersion().IsConcurrencyToken();
+
+    public static void ConfigureImmutableAfterInsert<TProperty>(PropertyBuilder<TProperty> property) =>
+        property.Metadata.SetAfterSaveBehavior(PropertySaveBehavior.Throw);
 }
 
 public sealed class SourceIdentityConfiguration : IEntityTypeConfiguration<SourceIdentityEntity>
@@ -58,9 +62,15 @@ public sealed class PipelineRecordConfiguration : IEntityTypeConfiguration<Pipel
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasAlternateKey(entity => new { entity.Id, entity.Revision });
         builder.HasIndex(entity => new { entity.SourceIdentityId, entity.Revision }).IsUnique();
+        builder.HasIndex(entity => entity.SourceRevisionId).IsUnique().HasFilter("[SourceRevisionId] IS NOT NULL");
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.SourceRevisionId));
         builder.HasOne(entity => entity.SourceIdentity)
             .WithMany()
             .HasForeignKey(entity => entity.SourceIdentityId)
+            .OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.SourceRevision)
+            .WithMany()
+            .HasForeignKey(entity => entity.SourceRevisionId)
             .OnDelete(DeleteBehavior.Restrict);
         builder.HasOne<PipelineRecordEntity>()
             .WithMany()
@@ -624,5 +634,227 @@ public sealed class GpuExecutorEvidenceConfiguration : IEntityTypeConfiguration<
         builder.HasOne(entity => entity.Dispatch).WithMany().HasForeignKey(entity => entity.DispatchId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.Batch).WithMany().HasForeignKey(entity => entity.BatchId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.CapacitySlot).WithMany().HasForeignKey(entity => entity.CapacitySlotKey).HasPrincipalKey(entity => entity.SlotKey).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceRootConfigurationConfiguration : IEntityTypeConfiguration<SourceRootConfigurationEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceRootConfigurationEntity> builder)
+    {
+        builder.ToTable("SourceRootConfigurations");
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.CanonicalPath).HasMaxLength(2048).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.CanonicalPathFingerprint)
+            .HasMaxLength(64)
+            .IsUnicode(false)
+            .IsFixedLength()
+            .HasComputedColumnSql("CONVERT(char(64), HASHBYTES('SHA2_256', [CanonicalPath]), 2)", stored: true)
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.DisplayName).HasMaxLength(256).IsRequired();
+        builder.Property(entity => entity.IncludePatternsJson).HasColumnType("nvarchar(max)").IsRequired();
+        builder.Property(entity => entity.ExcludePatternsJson).HasColumnType("nvarchar(max)").IsRequired();
+        builder.Property(entity => entity.AllowedClassificationsJson).HasColumnType("nvarchar(max)").IsRequired();
+        builder.Property(entity => entity.LastScanStartedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.LastScanCompletedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.LastScanEvidenceJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.PermissionEvidenceJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.HealthEvidenceJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => entity.CanonicalPathFingerprint).IsUnique();
+    }
+}
+
+public sealed class SourceScanRequestConfiguration : IEntityTypeConfiguration<SourceScanRequestEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceScanRequestEntity> builder)
+    {
+        builder.ToTable("SourceScanRequests");
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.RequestedBy).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.RequestedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.ReleasedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.AuditEvidenceJson).HasColumnType("nvarchar(max)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => new { entity.SourceRootId, entity.RequestedAtUtc });
+        builder.HasIndex(entity => new { entity.IsReleased, entity.State });
+        builder.HasOne(entity => entity.SourceRoot).WithMany().HasForeignKey(entity => entity.SourceRootId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceScanJobConfiguration : IEntityTypeConfiguration<SourceScanJobEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceScanJobEntity> builder)
+    {
+        builder.ToTable("SourceScanJobs");
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.DueAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.LeaseOwner).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.Reason).HasMaxLength(1024);
+        builder.Property(entity => entity.ErrorDetails).HasMaxLength(4000);
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => entity.SourceScanRequestId).IsUnique();
+        builder.HasIndex(entity => new { entity.State, entity.DueAtUtc });
+        builder.HasOne(entity => entity.SourceScanRequest).WithMany().HasForeignKey(entity => entity.SourceScanRequestId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceScanOutboxConfiguration : IEntityTypeConfiguration<SourceScanOutboxEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceScanOutboxEntity> builder)
+    {
+        builder.ToTable("SourceScanOutbox");
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.Operation).HasMaxLength(128).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.IdempotencyKey).HasMaxLength(512).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.DueAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.DispatchedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.LeaseOwner).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.LeaseExpiresAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => entity.SourceScanRequestId).IsUnique();
+        builder.HasIndex(entity => entity.IdempotencyKey).IsUnique();
+        builder.HasIndex(entity => new { entity.DispatchedAtUtc, entity.DueAtUtc });
+        builder.HasOne(entity => entity.SourceScanRequest).WithMany().HasForeignKey(entity => entity.SourceScanRequestId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceRevisionConfiguration : IEntityTypeConfiguration<SourceRevisionEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceRevisionEntity> builder)
+    {
+        builder.ToTable("SourceRevisions", table => table.HasCheckConstraint("CK_SourceRevisions_ContentSha256", SchemaConfiguration.Sha256CheckFor("ContentSha256")));
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.StableSourceIdentity).HasMaxLength(768).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentSha256));
+        builder.Property(entity => entity.CanonicalPath).HasMaxLength(2048).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.CanonicalPathFingerprint)
+            .HasMaxLength(64)
+            .IsUnicode(false)
+            .IsFixedLength()
+            .HasComputedColumnSql("CONVERT(char(64), HASHBYTES('SHA2_256', [CanonicalPath]), 2)", stored: true)
+            .UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.Classification).HasMaxLength(256).IsRequired();
+        builder.Property(entity => entity.Extension).HasMaxLength(32).IsRequired();
+        builder.Property(entity => entity.FileCreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.FileLastWriteAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.DiscoveredAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.DiscoveryEvidenceJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.SuppressedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RetainUntilUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RetentionEvidenceJson).HasColumnType("nvarchar(max)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.SourceRootId));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.StableSourceIdentity));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.Revision));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ContentSha256));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.CanonicalPath));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ParentSourceRevisionId));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.Classification));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.Extension));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ByteLength));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.FileCreatedAtUtc));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.FileLastWriteAtUtc));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.DiscoveredAtUtc));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.DiscoveryEvidenceJson));
+        builder.HasIndex(entity => new { entity.SourceRootId, entity.StableSourceIdentity, entity.Revision }).IsUnique();
+        builder.HasIndex(entity => new { entity.SourceRootId, entity.CanonicalPathFingerprint, entity.ContentSha256 }).IsUnique();
+        builder.HasOne(entity => entity.SourceRoot).WithMany().HasForeignKey(entity => entity.SourceRootId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.ParentSourceRevision).WithMany().HasForeignKey(entity => entity.ParentSourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceArtifactConfiguration : IEntityTypeConfiguration<SourceArtifactEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceArtifactEntity> builder)
+    {
+        builder.ToTable("SourceArtifacts", table => table.HasCheckConstraint("CK_SourceArtifacts_ContentSha256", SchemaConfiguration.Sha256CheckFor("ContentSha256")));
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ContentSha256));
+        builder.Property(entity => entity.StoreRelativePath).HasMaxLength(2048).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ChecksumVerifiedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RetainUntilUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RetentionEvidenceJson).HasColumnType("nvarchar(max)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.SourceRevisionId));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ContentSha256));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.StoreRelativePath));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ByteLength));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ChecksumVerifiedAtUtc));
+        builder.HasIndex(entity => entity.SourceRevisionId).IsUnique();
+        builder.HasIndex(entity => entity.ContentSha256);
+        builder.HasOne(entity => entity.SourceRevision).WithMany().HasForeignKey(entity => entity.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceActivityConfiguration : IEntityTypeConfiguration<SourceActivityEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceActivityEntity> builder)
+    {
+        builder.ToTable("SourceActivities");
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.ProcessorVersion).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.InputFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.RequiredCapability).HasMaxLength(256).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.Reason).HasMaxLength(1024);
+        builder.Property(entity => entity.LastAttemptAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.AttemptEvidenceJson).HasColumnType("nvarchar(max)");
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => new { entity.SourceRevisionId, entity.ActivityKind, entity.ProcessorVersion, entity.InputFingerprint }).IsUnique();
+        builder.HasIndex(entity => new { entity.State, entity.ExecutionClass });
+        builder.HasOne(entity => entity.SourceRevision).WithMany().HasForeignKey(entity => entity.SourceRevisionId).OnDelete(DeleteBehavior.Restrict);
+        builder.HasOne(entity => entity.ResultingPipelineRecord).WithMany()
+            .HasForeignKey(entity => new { entity.ResultingPipelineRecordId, entity.ResultingPipelineRecordRevision })
+            .HasPrincipalKey(entity => new { entity.Id, entity.Revision })
+            .OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class SourceCapabilityConfiguration : IEntityTypeConfiguration<SourceCapabilityEntity>
+{
+    public void Configure(EntityTypeBuilder<SourceCapabilityEntity> builder)
+    {
+        builder.ToTable(
+            "SourceCapabilities",
+            table => table.HasCheckConstraint("CK_SourceCapabilities_NativeExecutorLater_NotRunnable", "[ExecutionClass] <> 2 OR [IsRunnable] = CONVERT(bit, 0)"));
+        builder.HasKey(entity => entity.Id);
+        builder.Property(entity => entity.Id).ValueGeneratedNever();
+        builder.Property(entity => entity.ProcessorKind).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ProcessorVersion).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.AcceptedClassificationsJson).HasColumnType("nvarchar(max)").IsRequired();
+        builder.Property(entity => entity.OutputContract).HasMaxLength(512).IsRequired();
+        builder.Property(entity => entity.ProcessorFingerprint).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.RegisteredBy).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.RegisteredAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RegistrationEvidenceJson).HasColumnType("nvarchar(max)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        builder.HasIndex(entity => new { entity.ProcessorKind, entity.ProcessorVersion, entity.ProcessorFingerprint }).IsUnique();
+        builder.HasData(new SourceCapabilityEntity
+        {
+            Id = new Guid("9c56d5b2-c931-4c8b-ab66-fd0601e9c1df"),
+            ProcessorKind = "text-metadata",
+            ProcessorVersion = "phase-3a-v1",
+            ExecutionClass = 0,
+            AcceptedClassificationsJson = "[\"text/plain\"]",
+            OutputContract = "pipeline:extract-utf8",
+            ProcessorFingerprint = "phase-3a-inprocess-text-metadata-v1",
+            IsRunnable = true,
+            RegisteredBy = "system",
+            RegisteredAtUtc = DateTimeOffset.Parse("2026-08-06T12:00:00+00:00")
+        });
     }
 }

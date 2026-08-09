@@ -120,7 +120,7 @@ public sealed class PhaseOneVerticalSliceBrowserTests
         }
     }
 
-    private sealed class BrowserHost(WebApplication application, Uri baseAddress) : IAsyncDisposable
+    internal sealed class BrowserHost(WebApplication application, Uri baseAddress) : IAsyncDisposable
     {
         private const string ValidatedPlaceholderConnection =
             "Server=unreachable.invalid;Initial Catalog=FluxKnowledge;" +

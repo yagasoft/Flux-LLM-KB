@@ -4,11 +4,14 @@ using FluxKnowledge.Application.Indexing;
 using FluxKnowledge.Application.Pipeline;
 using FluxKnowledge.Application.Ports;
 using FluxKnowledge.Application.Search;
+using FluxKnowledge.Application.Sources;
 using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.Inference;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence;
+using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 using FluxKnowledge.Infrastructure.SqlServer.Search;
 using FluxKnowledge.Infrastructure.SqlServer.Workers;
 using FluxKnowledge.Infrastructure.Usearch;
@@ -25,6 +28,108 @@ namespace FluxKnowledge.Integration.Tests.Indexing;
 public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : IClassFixture<NativeSqlServerFixture>
 {
     private readonly NativeSqlServerFixture _fixture = fixture;
+
+    [NativeSqlServerFact]
+    public async Task Rebuild_from_sql_keeps_a_retained_source_pipeline_record_searchable()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "baseline source");
+        var retainedRecordId = await environment.AddRetainedAndPumpAsync("retained rebuild source");
+        var active = await environment.ActiveGenerationAsync();
+        Directory.Delete(environment.IndexRoot, recursive: true);
+
+        _ = await environment.Builder.RebuildFromSqlAsync(active.Id, CancellationToken.None);
+        var query = await environment.Embeddings.CreateEmbeddingAsync("retained rebuild", CancellationToken.None);
+        var matches = await environment.Reader.SearchAsync(query.Values, 10, CancellationToken.None);
+        await using var context = await environment.Factory.CreateDbContextAsync();
+
+        var retainedVectorId = await (
+                from vector in context.Vectors
+                join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
+                join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
+                where artifact.PipelineRecordId == retainedRecordId
+                select vector.VectorId)
+            .SingleAsync();
+        var rebuiltMembership = await context.IndexGenerationVectors
+            .Where(member => member.GenerationId == active.Id)
+            .Select(member => member.VectorId)
+            .ToListAsync();
+        var returnedVectorIds = matches.Select(match => match.VectorId).ToArray();
+        var returnedRecordByVectorId = await (
+                from vector in context.Vectors
+                join chunk in context.TextChunks on vector.TextChunkId equals chunk.Id
+                join artifact in context.Artifacts on chunk.ArtifactId equals artifact.Id
+                where returnedVectorIds.Contains(vector.VectorId)
+                select new { vector.VectorId, artifact.PipelineRecordId })
+            .ToDictionaryAsync(value => value.VectorId, value => value.PipelineRecordId);
+
+        Assert.Contains(retainedVectorId, rebuiltMembership);
+        Assert.Contains(matches, match => match.VectorId == retainedVectorId);
+        Assert.Equal(retainedRecordId, returnedRecordByVectorId[retainedVectorId]);
+    }
+
+    [NativeSqlServerFact]
+    public async Task Publish_snapshot_keeps_an_older_unsuppressed_retained_record_when_a_later_retained_revision_is_suppressed()
+    {
+        await using var environment = await PipelineEnvironment.CreateAsync(_fixture, "retained publish snapshot");
+        var now = DateTimeOffset.UtcNow;
+        var suppressedRevisionId = Guid.NewGuid();
+        var olderRecordId = await environment.AddRetainedAndPumpAsync("retained publish source");
+        IReadOnlyList<CanonicalVector> expectedMembership;
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var olderRecord = await context.PipelineRecords.SingleAsync(record => record.Id == olderRecordId);
+            Assert.NotNull(olderRecord.SourceRevisionId);
+        }
+        expectedMembership = await environment.Store.ReadEligibleVectorsAsync(CancellationToken.None);
+        Assert.NotEmpty(expectedMembership);
+
+        await using (var context = await environment.Factory.CreateDbContextAsync())
+        {
+            var olderRecord = await context.PipelineRecords.SingleAsync(record => record.Id == olderRecordId);
+            var olderRevision = await context.SourceRevisions.SingleAsync(revision => revision.Id == olderRecord.SourceRevisionId!.Value);
+            context.SourceRevisions.Add(new SourceRevisionEntity
+            {
+                Id = suppressedRevisionId, SourceRootId = olderRevision.SourceRootId,
+                StableSourceIdentity = olderRevision.StableSourceIdentity, Revision = olderRevision.Revision + 1,
+                ContentSha256 = olderRecord.ContentHash, CanonicalPath = "C:\\retained-publish\\two.txt",
+                Classification = "AcceptedUtf8Text", Extension = ".txt", ByteLength = 1, DiscoveredAtUtc = now,
+                SuppressedAtUtc = now, DiscoveryEvidenceJson = "{}"
+            });
+            context.PipelineRecords.Add(new PipelineRecordEntity
+            {
+                Id = Guid.NewGuid(), SourceIdentityId = olderRecord.SourceIdentityId, SourceRevisionId = suppressedRevisionId,
+                Revision = olderRecord.Revision + 1, ContentHash = olderRecord.ContentHash,
+                RootLineageRecordId = olderRecord.RootLineageRecordId, ParentRevisionRecordId = olderRecord.Id,
+                CurrentStage = (int)PipelineStage.Publish, RegisteredAtUtc = now
+            });
+            await context.SaveChangesAsync();
+        }
+
+        var candidate = new IndexGenerationCandidateSnapshot(
+            new IndexGenerationDescriptor(
+                Guid.NewGuid(),
+                expectedMembership[0].ModelFingerprint,
+                expectedMembership[0].Dimensions,
+                "retained-publish-snapshot",
+                UsearchGenerationValidator.ComputeChecksum(
+                    expectedMembership[0].ModelFingerprint,
+                    expectedMembership[0].Dimensions,
+                    expectedMembership),
+                expectedMembership.Count),
+            expectedMembership);
+        var request = await ClaimPublishAsync(environment, candidate);
+
+        _ = await new SqlStageTransitionStore(environment.Factory).TransitionAsync(request, CancellationToken.None);
+
+        Assert.Equal(candidate.Generation.Id, await environment.Store.GetActiveGenerationIdAsync(CancellationToken.None));
+        await using var verification = await environment.Factory.CreateDbContextAsync();
+        var members = await verification.IndexGenerationVectors
+            .Where(member => member.GenerationId == candidate.Generation.Id)
+            .Select(member => member.VectorId)
+            .OrderBy(id => id)
+            .ToListAsync();
+        Assert.Equal(expectedMembership.Select(vector => vector.VectorId).OrderBy(id => id), members);
+    }
 
     [NativeSqlServerFact]
     public async Task Rebuild_after_index_root_deletion_uses_sql_membership_and_keeps_the_active_generation_searchable()
@@ -1138,9 +1243,10 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
     {
         private readonly ServiceProvider _provider;
         private readonly string _ingressRoot;
-        private PipelineEnvironment(ServiceProvider provider, string ingressRoot, string indexRoot, IDbContextFactory<FluxKnowledgeDbContext> factory)
+        private readonly string _artifactRoot;
+        private PipelineEnvironment(ServiceProvider provider, string ingressRoot, string artifactRoot, string indexRoot, IDbContextFactory<FluxKnowledgeDbContext> factory)
         {
-            _provider = provider; _ingressRoot = ingressRoot; IndexRoot = indexRoot; Factory = factory;
+            _provider = provider; _ingressRoot = ingressRoot; _artifactRoot = artifactRoot; IndexRoot = indexRoot; Factory = factory;
             Store = new SqlPipelineStore(factory); Builder = _provider.GetRequiredService<UsearchGenerationBuilder>();
             Reader = _provider.GetRequiredService<UsearchAnnIndex>(); Embeddings = _provider.GetRequiredService<IEmbeddingProvider>();
         }
@@ -1156,11 +1262,15 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         {
             await SqlTestData.ClearPipelineAsync(fixture);
             var ingress = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIngress_{Guid.NewGuid():N}");
+            var artifact = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeRetained_{Guid.NewGuid():N}");
             var index = Path.Combine(Path.GetTempPath(), $"FluxKnowledgeIndexes_{Guid.NewGuid():N}");
             Directory.CreateDirectory(ingress);
+            Directory.CreateDirectory(artifact);
             var services = new ServiceCollection();
             services.AddSingleton(SqlTestData.CreateFactory(fixture));
             services.AddSingleton<IUtf8FileSourceReader>(new Utf8FileSourceReader(new LocalIngressOptions([ingress])));
+            services.AddScoped<IRetainedSourceReader>(provider => new SqlRetainedSourceReader(
+                provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(), artifact));
             services.AddFluxKnowledgeOutboxWorkers();
             services.AddSingleton<IEmbeddingProvider, DeterministicTokenHashEmbeddingProvider>();
             services.AddFluxKnowledgeUsearch(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Usearch:RootPath"] = index }).Build());
@@ -1168,7 +1278,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             services.AddScoped<IStageWorker, EmbedStageWorker>();
             services.AddScoped<IStageWorker, PublishStageWorker>();
             var provider = services.BuildServiceProvider();
-            var environment = new PipelineEnvironment(provider, ingress, index, provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>());
+            var environment = new PipelineEnvironment(provider, ingress, artifact, index, provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>());
             await environment.AddAndPumpAtPathAsync(text, "initial.txt");
             return environment;
         }
@@ -1193,6 +1303,56 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
             await _provider.GetRequiredService<OutboxPumpService>().PumpOnceAsync(CancellationToken.None);
         }
 
+        public async Task<Guid> AddRetainedAndPumpAsync(string text)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var rootId = Guid.NewGuid();
+            var revisionId = Guid.NewGuid();
+            var relative = Path.Combine("sha256", hash[..2], $"{hash}.bin");
+            Directory.CreateDirectory(Path.Combine(_artifactRoot, "sha256", hash[..2]));
+            await File.WriteAllBytesAsync(Path.Combine(_artifactRoot, relative), bytes);
+            var activity = SourceActivity.Create(new SourceRevisionId(revisionId), SourceActivityKind.TextExtraction,
+                ExecutionClass.InProcess, "phase-3a-v1", hash, null, null);
+            var now = DateTimeOffset.UtcNow;
+            await using (var context = await Factory.CreateDbContextAsync())
+            {
+                context.SourceRootConfigurations.Add(new SourceRootConfigurationEntity
+                {
+                    Id = rootId, CanonicalPath = $"C:\\retained-rebuild\\{rootId:N}", DisplayName = "Retained", State = 0,
+                    Recursive = true, IncludePatternsJson = "[]", ExcludePatternsJson = "[]", FollowLinks = false,
+                    MaximumFileBytes = 16 * 1024 * 1024, AllowedClassificationsJson = "[]", CrawlMode = 0,
+                    ReconciliationCadenceSeconds = 900, ConfigurationRevision = 1, CreatedAtUtc = now, UpdatedAtUtc = now
+                });
+                context.SourceRevisions.Add(new SourceRevisionEntity
+                {
+                    Id = revisionId, SourceRootId = rootId, StableSourceIdentity = $"retained:{revisionId:N}", Revision = 1,
+                    ContentSha256 = hash, CanonicalPath = $"C:\\retained-rebuild\\{revisionId:N}.txt", Classification = "AcceptedUtf8Text",
+                    Extension = ".txt", ByteLength = bytes.Length, DiscoveredAtUtc = now, DiscoveryEvidenceJson = "{}"
+                });
+                context.SourceArtifacts.Add(new SourceArtifactEntity
+                {
+                    Id = Guid.NewGuid(), SourceRevisionId = revisionId, ContentSha256 = hash, StoreRelativePath = relative,
+                    ByteLength = bytes.Length, ChecksumVerifiedAtUtc = now, ReferenceCount = 1
+                });
+                context.SourceActivities.Add(new SourceActivityEntity
+                {
+                    Id = activity.Id.Value, SourceRevisionId = revisionId, ActivityKind = (int)activity.Kind,
+                    ExecutionClass = (int)activity.ExecutionClass, ProcessorVersion = activity.ProcessorVersion,
+                    InputFingerprint = activity.InputFingerprint, State = (int)activity.State, CreatedAtUtc = now, UpdatedAtUtc = now
+                });
+                await context.SaveChangesAsync();
+            }
+            using (var scope = _provider.CreateScope())
+            {
+                Assert.True(await scope.ServiceProvider.GetRequiredService<RetainedTextActivityPlanner>()
+                    .PlanAsync(activity, CancellationToken.None));
+            }
+            await _provider.GetRequiredService<OutboxPumpService>().PumpOnceAsync(CancellationToken.None);
+            await using var verification = await Factory.CreateDbContextAsync();
+            return (await verification.PipelineRecords.SingleAsync(record => record.SourceRevisionId == revisionId)).Id;
+        }
+
         public async Task<IndexGenerationDescriptor> ActiveGenerationAsync()
         {
             var id = await Store.GetActiveGenerationIdAsync(CancellationToken.None);
@@ -1204,6 +1364,7 @@ public sealed class SqlToUsearchRebuildTests(NativeSqlServerFixture fixture) : I
         {
             _provider.Dispose();
             if (Directory.Exists(_ingressRoot)) Directory.Delete(_ingressRoot, true);
+            if (Directory.Exists(_artifactRoot)) Directory.Delete(_artifactRoot, true);
             if (Directory.Exists(IndexRoot)) Directory.Delete(IndexRoot, true);
             return ValueTask.CompletedTask;
         }

@@ -1,0 +1,109 @@
+@page "/sources/{RootId:guid}"
+@implements IAsyncDisposable
+@using FluxKnowledge.Application.Contracts
+@using FluxKnowledge.Web.Components.Sources
+@using FluxKnowledge.Web.Components.Status
+@inject SourceRootDetailPageState PageState
+@inject StatusEventFeed StatusEvents
+
+<PageTitle>Source root | Flux Knowledge</PageTitle>
+
+@if (PageState.Detail is null)
+{
+    <p role="status">Loading source root…</p>
+}
+else
+{
+    <section aria-labelledby="source-root-heading">
+        <h1 id="source-root-heading">@PageState.Detail.DisplayName</h1>
+        <p class="diagnostic-value">@PageState.Detail.CanonicalPath</p>
+        <dl class="status-grid">
+            <div><dt>Root state</dt><dd>@PageState.Detail.State</dd></div>
+            <div><dt>Scan progress</dt><dd>@PageState.Detail.ScanState</dd></div>
+            <div><dt>Last reconciliation</dt><dd>@(PageState.Detail.LastReconciledAtUtc?.LocalDateTime.ToString() ?? "Not yet completed")</dd></div>
+            <div><dt>Discovered</dt><dd>@PageState.Detail.DiscoveredCount</dd></div>
+            <div><dt>Indexed</dt><dd>@PageState.Detail.IndexedCount</dd></div>
+            <div><dt>Deferred</dt><dd>@PageState.Detail.DeferredCount</dd></div>
+            <div><dt>Blocked</dt><dd>@PageState.Detail.BlockedCount</dd></div>
+            <div><dt>Errors</dt><dd>@PageState.Detail.ErrorCount</dd></div>
+        </dl>
+    </section>
+    <section aria-labelledby="source-reasons-heading">
+        <h2 id="source-reasons-heading">Deferred and blocked reasons</h2>
+        @if (PageState.Detail.DeferredOrBlockedReasons.Count == 0)
+        {
+            <p>No deferred or blocked activity reasons have been recorded.</p>
+        }
+        else
+        {
+            <ul>
+            @foreach (var reason in PageState.Detail.DeferredOrBlockedReasons)
+            {
+                <li><strong>@reason.State</strong> (@reason.Count): @reason.Reason</li>
+            }
+            </ul>
+        }
+        @if (PageState.CanReprocessDeferredContent)
+        {
+            <p><button type="button" @onclick="ReprocessAsync">Reprocess deferred content</button></p>
+        }
+        else
+        {
+            <p>@PageState.ReprocessUnavailableMessage</p>
+        }
+        @if (_replayMessage is { } replayMessage)
+        {
+            <p role="status">@replayMessage</p>
+        }
+    </section>
+    <p><a href="/sources">Back to sources</a></p>
+}
+
+@code {
+    [Parameter] public Guid RootId { get; set; }
+
+    private readonly CancellationTokenSource _stopping = new();
+    private StatusEventSubscription? _subscription;
+    private string? _replayMessage;
+
+    protected override async Task OnParametersSetAsync() =>
+        await PageState.LoadAsync(RootId, _stopping.Token);
+
+    protected override Task OnInitializedAsync()
+    {
+        _subscription = StatusEvents.Subscribe();
+        _ = ObserveAsync(_subscription, _stopping.Token);
+        return Task.CompletedTask;
+    }
+
+    private async Task ReprocessAsync()
+    {
+        var result = await PageState.ReprocessDeferredContentAsync(_stopping.Token);
+        _replayMessage = result.Message;
+    }
+
+    private async Task ObserveAsync(StatusEventSubscription subscription, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var statusChanged in subscription.Reader.ReadAllAsync(cancellationToken))
+            {
+                await PageState.HandleStatusChangedAsync(statusChanged, cancellationToken);
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stopping.CancelAsync();
+        if (_subscription is not null)
+        {
+            await _subscription.DisposeAsync();
+        }
+        _stopping.Dispose();
+    }
+}

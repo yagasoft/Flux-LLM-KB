@@ -733,6 +733,7 @@
         "type": "Project",
         "dependencies": {
           "FluxKnowledge.Application": "[1.0.0, )",
+          "FluxKnowledge.Integrations": "[1.0.0, )",
           "Microsoft.EntityFrameworkCore.SqlServer": "[10.0.10, )"
         }
       },

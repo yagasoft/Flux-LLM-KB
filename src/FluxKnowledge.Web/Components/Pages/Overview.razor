@@ -1,5 +1,6 @@
 @page "/"
 @implements IAsyncDisposable
+@using FluxKnowledge.Application.Contracts
 @using FluxKnowledge.Web.Components.Status
 @inject OverviewProjectionState ProjectionState
 @inject StatusEventFeed StatusEvents
@@ -9,6 +10,7 @@
 <section aria-labelledby="overview-heading">
     <h1 id="overview-heading">Pipeline overview</h1>
     <p role="status" aria-live="polite">@_statusMessage</p>
+    @{ var diagnostics = OverviewDiagnosticSummary.From(ProjectionState.Current.ActiveIndexGeneration, ProjectionState.Current.IndexRecovery); }
     <dl class="status-grid">
         <div><dt>Worker queued</dt><dd><StatusCount Value="ProjectionState.Current.WorkerQueuedCount" /></dd></div>
         <div><dt>Worker processing</dt><dd><StatusCount Value="ProjectionState.Current.WorkerProcessingCount" /></dd></div>
@@ -17,26 +19,34 @@
         <div><dt>Completed</dt><dd><StatusCount Value="ProjectionState.Current.CompletedCount" /></dd></div>
         <div><dt>Failed</dt><dd><StatusCount Value="ProjectionState.Current.FailedCount" /></dd></div>
         <div><dt>Indexed records</dt><dd><StatusCount Value="ProjectionState.Current.IndexedRecordCount" /></dd></div>
-        <div><dt>Active index generation</dt><dd>@ProjectionState.Current.ActiveIndexGeneration</dd></div>
-        <div><dt>Index recovery state</dt><dd>@ProjectionState.Current.IndexRecovery.State</dd></div>
-        @if (ProjectionState.Current.IndexRecovery.ActiveGeneration is { } recoveryGeneration)
+        <div><dt>Local source roots</dt><dd><StatusCount Value="ProjectionState.Current.SourceIndexing.RootCount" /></dd></div>
+        <div><dt>Source deferred</dt><dd><StatusCount Value="ProjectionState.Current.SourceIndexing.DeferredCount" /></dd></div>
+        <div><dt>Source blocked</dt><dd><StatusCount Value="ProjectionState.Current.SourceIndexing.BlockedCount" /></dd></div>
+        <div><dt>Source errors</dt><dd><StatusCount Value="ProjectionState.Current.SourceIndexing.ErrorCount" /></dd></div>
+        <div><dt>Index status</dt><dd>@diagnostics.State</dd></div>
+        <div><dt>Index status reason</dt><dd>@diagnostics.Reason</dd></div>
+        <div><dt>Recovery cleaned candidates</dt><dd><StatusCount Value="ProjectionState.Current.IndexRecovery.CleanedCandidateCount" /></dd></div>
+    </dl>
+    <details class="diagnostic-details">
+        <summary>Copyable index diagnostics</summary>
+        <label>Active generation <input class="diagnostic-value" readonly value="@diagnostics.ActiveGenerationDiagnostic" /></label>
+        @if (diagnostics.RecoveryGenerationDiagnostic is { } recoveryGeneration)
         {
-            <div><dt>Recovery generation</dt><dd>@recoveryGeneration</dd></div>
+            <label>Recovery generation <input class="diagnostic-value" readonly value="@recoveryGeneration" /></label>
         }
         @if (ProjectionState.Current.IndexRecovery.LastCompletedAtUtc is { } lastCompletedAtUtc)
         {
-            <div><dt>Recovery last completed</dt><dd>@lastCompletedAtUtc.ToString("O")</dd></div>
+            <p>Recovery last completed: @lastCompletedAtUtc.ToString("O")</p>
         }
         @if (ProjectionState.Current.IndexRecovery.NextRetryAtUtc is { } nextRetryAtUtc)
         {
-            <div><dt>Recovery next retry</dt><dd>@nextRetryAtUtc.ToString("O")</dd></div>
+            <p>Recovery next retry: @nextRetryAtUtc.ToString("O")</p>
         }
         @if (ProjectionState.Current.IndexRecovery.FailureCategory is { } failureCategory)
         {
-            <div><dt>Recovery failure category</dt><dd>@failureCategory</dd></div>
+            <p>Recovery failure category: @failureCategory</p>
         }
-        <div><dt>Recovery cleaned candidates</dt><dd><StatusCount Value="ProjectionState.Current.IndexRecovery.CleanedCandidateCount" /></dd></div>
-    </dl>
+    </details>
 </section>
 
 <section aria-labelledby="gpu-scheduler-heading">

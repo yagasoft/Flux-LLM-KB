@@ -205,7 +205,8 @@ public sealed class SqlPipelineStore(
                 select new
                 {
                     identity.StableKey,
-                    record.ContentHash
+                    record.ContentHash,
+                    record.SourceRevisionId
                 })
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -235,7 +236,8 @@ public sealed class SqlPipelineStore(
             sourceRevision,
             source.StableKey,
             source.ContentHash,
-            inputText);
+            inputText,
+            source.SourceRevisionId is null ? null : new FluxKnowledge.Domain.Sources.SourceRevisionId(source.SourceRevisionId.Value));
     }
 
     public async ValueTask<IReadOnlyList<CanonicalTextChunk>> ReadChunksAsync(
@@ -283,9 +285,12 @@ public sealed class SqlPipelineStore(
             join artifact in context.Artifacts.AsNoTracking() on chunk.ArtifactId equals artifact.Id
             join record in context.PipelineRecords.AsNoTracking() on artifact.PipelineRecordId equals record.Id
             where !vector.IsDeleted && !record.IsDeleted &&
-                  record.Revision == context.PipelineRecords
-                      .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
-                      .Max(candidate => candidate.Revision)
+                  (record.SourceRevisionId.HasValue
+                      ? context.SourceRevisions.Any(sourceRevision =>
+                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null)
+                      : record.Revision == context.PipelineRecords
+                          .Where(candidate => candidate.SourceIdentityId == record.SourceIdentityId)
+                          .Max(candidate => candidate.Revision))
             orderby vector.VectorId
             select new CanonicalVector(vector.VectorId, vector.TextChunkId,
                 vector.ModelFingerprint, vector.Dimensions, vector.Values,

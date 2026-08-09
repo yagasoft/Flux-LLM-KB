@@ -26,6 +26,14 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<GpuExecutorDispatchEntity> GpuExecutorDispatches => Set<GpuExecutorDispatchEntity>();
     public DbSet<GpuExecutorResultReceiptEntity> GpuExecutorResultReceipts => Set<GpuExecutorResultReceiptEntity>();
     public DbSet<GpuExecutorEvidenceEntity> GpuExecutorEvidence => Set<GpuExecutorEvidenceEntity>();
+    public DbSet<SourceRootConfigurationEntity> SourceRootConfigurations => Set<SourceRootConfigurationEntity>();
+    public DbSet<SourceScanRequestEntity> SourceScanRequests => Set<SourceScanRequestEntity>();
+    public DbSet<SourceScanJobEntity> SourceScanJobs => Set<SourceScanJobEntity>();
+    public DbSet<SourceScanOutboxEntity> SourceScanOutbox => Set<SourceScanOutboxEntity>();
+    public DbSet<SourceRevisionEntity> SourceRevisions => Set<SourceRevisionEntity>();
+    public DbSet<SourceArtifactEntity> SourceArtifacts => Set<SourceArtifactEntity>();
+    public DbSet<SourceActivityEntity> SourceActivities => Set<SourceActivityEntity>();
+    public DbSet<SourceCapabilityEntity> SourceCapabilities => Set<SourceCapabilityEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

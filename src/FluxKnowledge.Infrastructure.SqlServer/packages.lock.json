@@ -369,6 +369,12 @@
       },
       "fluxknowledge.domain": {
         "type": "Project"
+      },
+      "fluxknowledge.integrations": {
+        "type": "Project",
+        "dependencies": {
+          "FluxKnowledge.Application": "[1.0.0, )"
+        }
       }
     }
   }

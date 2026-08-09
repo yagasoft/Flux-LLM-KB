@@ -39,11 +39,13 @@ public sealed class SqlSearchHydrator(IDbContextFactory<FluxKnowledgeDbContext> 
                 where vectorIds.Contains(vector.VectorId) &&
                       !vector.IsDeleted &&
                       !record.IsDeleted &&
+                      (!record.SourceRevisionId.HasValue || context.SourceRevisions.Any(sourceRevision =>
+                          sourceRevision.Id == record.SourceRevisionId.Value && sourceRevision.SuppressedAtUtc == null)) &&
                       vector.TextChunkContentHash == chunk.ContentHash &&
                       vector.SourceRevision == record.Revision &&
-                      record.Revision == context.PipelineRecords
+                      (record.SourceRevisionId.HasValue || record.Revision == context.PipelineRecords
                           .Where(current => current.SourceIdentityId == record.SourceIdentityId)
-                          .Max(current => current.Revision)
+                          .Max(current => current.Revision))
                 select new HydratedRow(
                     vector.VectorId,
                     record.Id,

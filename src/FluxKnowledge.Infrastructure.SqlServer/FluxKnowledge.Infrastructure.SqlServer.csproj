@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
+    <ProjectReference Include="../FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
   </ItemGroup>
 
   <ItemGroup>

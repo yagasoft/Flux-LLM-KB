@@ -8,6 +8,7 @@ using FluxKnowledge.Application.Workers;
 using FluxKnowledge.Domain.Common;
 using FluxKnowledge.Domain.Jobs;
 using FluxKnowledge.Domain.Pipeline;
+using FluxKnowledge.Domain.Sources;
 using FluxKnowledge.Infrastructure.Inference;
 using Xunit;
 
@@ -33,6 +34,44 @@ public sealed class StageWorkerTests
 
         var failure = Assert.Single(transitions.Failures);
         Assert.Equal(ExtractUtf8StageWorker.ChangedSourceReason, failure.Reason);
+        Assert.Empty(transitions.Transitions);
+    }
+
+    [Fact]
+    public async Task Extract_uses_retained_bytes_when_the_discovered_path_has_been_renamed()
+    {
+        var transitions = new RecordingTransitionStore();
+        var retainedRevisionId = SourceRevisionId.New();
+        var worker = new ExtractUtf8StageWorker(
+            new ThrowingSourceReader(),
+            new RetainedSourceReader(retainedRevisionId, new string('a', 64), "retained text"),
+            new StubPipelineReader(new string('a', 64), inputText: null, retainedRevisionId),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Extract, PipelineOperations.ExtractUtf8), CancellationToken.None);
+
+        var transition = Assert.Single(transitions.Transitions);
+        Assert.Equal("retained text", transition.Artifact.SearchText);
+        Assert.Empty(transitions.Failures);
+    }
+
+    [Fact]
+    public async Task Extract_fails_terminally_when_the_retained_artifact_checksum_is_invalid()
+    {
+        var transitions = new RecordingTransitionStore();
+        var retainedRevisionId = SourceRevisionId.New();
+        var worker = new ExtractUtf8StageWorker(
+            new ThrowingSourceReader(),
+            new ThrowingRetainedSourceReader(retainedRevisionId),
+            new StubPipelineReader(new string('a', 64), inputText: null, retainedRevisionId),
+            CreateTransitionService(transitions),
+            new FixedTimeProvider());
+
+        await worker.ExecuteAsync(CreateWork(PipelineStage.Extract, PipelineOperations.ExtractUtf8), CancellationToken.None);
+
+        var failure = Assert.Single(transitions.Failures);
+        Assert.Equal(ExtractUtf8StageWorker.InvalidRetainedSourceReason, failure.Reason);
         Assert.Empty(transitions.Transitions);
     }
 
@@ -164,7 +203,10 @@ public sealed class StageWorkerTests
                 new Utf8FileSource(suppliedPath, [], text, contentHash));
     }
 
-    private sealed class StubPipelineReader(string registeredHash, string? inputText)
+    private sealed class StubPipelineReader(
+        string registeredHash,
+        string? inputText,
+        SourceRevisionId? retainedSourceRevisionId = null)
         : IPipelineStageReader
     {
         public ValueTask<PipelineStageSource> ReadStageSourceAsync(
@@ -178,7 +220,33 @@ public sealed class StageWorkerTests
                     sourceRevision,
                     "C:\\ingress\\a.txt",
                     registeredHash,
-                    inputText));
+                    inputText,
+                    retainedSourceRevisionId));
+    }
+
+    private sealed class ThrowingSourceReader : IUtf8FileSourceReader
+    {
+        public ValueTask<Utf8FileSource> ReadAsync(string suppliedPath, CancellationToken cancellationToken) =>
+            ValueTask.FromException<Utf8FileSource>(new FileNotFoundException("The original source path was renamed."));
+    }
+
+    private sealed class RetainedSourceReader(SourceRevisionId revisionId, string contentHash, string text)
+        : IRetainedSourceReader
+    {
+        public ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+        {
+            Assert.Equal(revisionId, sourceRevisionId);
+            return ValueTask.FromResult(new Utf8FileSource("retained", [], text, contentHash));
+        }
+    }
+
+    private sealed class ThrowingRetainedSourceReader(SourceRevisionId revisionId) : IRetainedSourceReader
+    {
+        public ValueTask<Utf8FileSource> ReadUtf8Async(SourceRevisionId sourceRevisionId, CancellationToken cancellationToken)
+        {
+            Assert.Equal(revisionId, sourceRevisionId);
+            return ValueTask.FromException<Utf8FileSource>(new InvalidDataException("checksum mismatch"));
+        }
     }
 
     private sealed class StubIndexGenerationStore(

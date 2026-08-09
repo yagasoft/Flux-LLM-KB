@@ -4,6 +4,7 @@ public sealed class PipelineRecordEntity
 {
     public Guid Id { get; set; }
     public Guid SourceIdentityId { get; set; }
+    public Guid? SourceRevisionId { get; set; }
     public long Revision { get; set; }
     public string ContentHash { get; set; } = string.Empty;
     public Guid RootLineageRecordId { get; set; }
@@ -14,5 +15,6 @@ public sealed class PipelineRecordEntity
     public DateTimeOffset RegisteredAtUtc { get; set; }
     public byte[] RowVersion { get; set; } = [];
     public SourceIdentityEntity SourceIdentity { get; set; } = null!;
+    public SourceRevisionEntity? SourceRevision { get; set; }
     public PipelineRecordEntity? ParentRevisionRecord { get; set; }
 }

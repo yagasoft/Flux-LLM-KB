@@ -20,6 +20,7 @@ internal static class SqlTestData
             new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
                 .UseSqlServer(fixture.ConnectionString)
                 .Options);
+        await context.SourceActivities.ExecuteDeleteAsync();
         await context.AuditEvents.ExecuteDeleteAsync();
         await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
         await context.GpuExecutorEvidence.ExecuteDeleteAsync();
@@ -54,6 +55,35 @@ internal static class SqlTestData
         await context.PipelineRecords.ExecuteDeleteAsync();
         await context.SourceIdentities.ExecuteDeleteAsync();
         await context.SaveChangesAsync();
+    }
+
+    public static async Task ClearPhase3SourceDataAsync(NativeSqlServerFixture fixture)
+    {
+        await using (var context = new FluxKnowledgeDbContext(
+                         new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                             .UseSqlServer(fixture.ConnectionString)
+                             .Options))
+        {
+            await context.SourceScanOutbox.ExecuteDeleteAsync();
+            await context.SourceScanJobs.ExecuteDeleteAsync();
+            await context.SourceScanRequests.ExecuteDeleteAsync();
+        }
+
+        await ClearPipelineAsync(fixture);
+
+        await using var sourceContext = new FluxKnowledgeDbContext(
+            new DbContextOptionsBuilder<FluxKnowledgeDbContext>()
+                .UseSqlServer(fixture.ConnectionString)
+                .Options);
+        await sourceContext.SourceArtifacts.ExecuteDeleteAsync();
+        while (await sourceContext.SourceRevisions
+                   .Where(candidate => !sourceContext.SourceRevisions
+                       .Any(child => child.ParentSourceRevisionId == candidate.Id))
+                   .ExecuteDeleteAsync() > 0)
+        {
+        }
+
+        await sourceContext.SourceRootConfigurations.ExecuteDeleteAsync();
     }
 
     public static async Task<SeededWorkItem> SeedWorkItemAsync(
