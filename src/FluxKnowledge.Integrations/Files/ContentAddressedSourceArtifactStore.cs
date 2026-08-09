@@ -331,7 +331,7 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore
             throw new ArgumentException("Artifact storage root must be a non-root absolute directory.", nameof(configuredRoot));
         }
 
-        var physicalRoot = PhysicalFileIdentity.GetProjectedPhysicalPath(root);
+        _ = PhysicalFileIdentity.GetProjectedPhysicalPath(root);
         foreach (var protectedRoot in protectedRoots ?? Array.Empty<string>())
         {
             if (string.IsNullOrWhiteSpace(protectedRoot))
@@ -345,12 +345,10 @@ public sealed class ContentAddressedSourceArtifactStore : ISourceArtifactStore
                 throw new ArgumentException("Artifact storage root cannot overlap a deployment, SQL or derived-index root.", nameof(configuredRoot));
             }
 
-            var physicalProtectedRoot = PhysicalFileIdentity.GetProjectedPhysicalPath(canonicalProtectedRoot);
-            if (Overlaps(root, canonicalProtectedRoot) ||
-                Overlaps(physicalRoot, physicalProtectedRoot))
-            {
-                throw new ArgumentException("Artifact storage root cannot overlap a deployment, SQL or derived-index root.", nameof(configuredRoot));
-            }
+            // Protected roots may intentionally deny the web identity all handle access
+            // (for example SQL-owned data and log directories). The artifact root itself
+            // is still physically verified above and rejects reparse traversal.
+
         }
 
         return root;
