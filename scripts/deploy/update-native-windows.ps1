@@ -33,7 +33,9 @@ $Phase3AMigrationIds = @(
     "20260806120000_AddPhase3ALocalSources",
     $Phase3AMigrationTargetId
 )
-$RequiredDeploymentMigrationIds = @($SchedulerMigrationIds + $Phase3AMigrationIds)
+$Phase3BMigrationTargetId = "20260809110000_AddPhase3BWatcherCorpusEvents"
+$Phase3BMigrationIds = @($Phase3BMigrationTargetId)
+$RequiredDeploymentMigrationIds = @($SchedulerMigrationIds + $Phase3AMigrationIds + $Phase3BMigrationIds)
 $RequiredBaselineMigrationIds = @(
     "20260726215521_InitialPhase1",
     "20260726221653_EnforceCanonicalSqlSafety",
@@ -58,7 +60,8 @@ if ($PlanOnly) {
         scheduler_migration_ids = $SchedulerMigrationIds
         scheduler_migration_target = $SchedulerMigrationTargetId
         phase3a_migration_ids = $Phase3AMigrationIds
-        deployment_migration_target = $Phase3AMigrationTargetId
+        phase3b_migration_ids = $Phase3BMigrationIds
+        deployment_migration_target = $Phase3BMigrationTargetId
         source_artifact_store_requires_app_pool_modify_access = $true
         source_artifact_store_acl_rejects_protected_root_overlap = $true
         required_endpoints = @(
@@ -413,7 +416,8 @@ if ($PreflightOnly) {
         preserved_settings_file_count = $targetSettings.Count
         scheduler_migrations_expected = $SchedulerMigrationIds
         phase3a_migrations_expected = $Phase3AMigrationIds
-        deployment_migration_target = $Phase3AMigrationTargetId
+        phase3b_migrations_expected = $Phase3BMigrationIds
+        deployment_migration_target = $Phase3BMigrationTargetId
         migration_update_requested = [bool]$ApplyMigrations
         baseline_migrations_present = @($RequiredBaselineMigrationIds | Where-Object { $_ -in $preflightMigrationIds })
     } | ConvertTo-Json -Depth 5
@@ -475,7 +479,7 @@ try {
         $previousConnection = $env:ConnectionStrings__FluxKnowledge
         try {
             $env:ConnectionStrings__FluxKnowledge = $productionConnection.ConnectionString
-        & dotnet tool run dotnet-ef -- database update $Phase3AMigrationTargetId --project "src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" --configuration Release --no-build --connection $productionConnection.ConnectionString
+        & dotnet tool run dotnet-ef -- database update $Phase3BMigrationTargetId --project "src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" --configuration Release --no-build --connection $productionConnection.ConnectionString
             if ($LASTEXITCODE -ne 0) {
                 throw "The explicitly confirmed native SQL migration update failed with exit code $LASTEXITCODE."
             }
@@ -490,7 +494,7 @@ try {
         $migrationIdsAfter = Get-AppliedMigrationIds -Server $productionConnection.Server -Database $productionConnection.Catalog
         $missingMigrations = @($RequiredDeploymentMigrationIds | Where-Object { $_ -notin $migrationIdsAfter })
         if ($missingMigrations.Count -gt 0) {
-            throw "The migration update completed without all required scheduler migrations: $($missingMigrations -join ', ')."
+            throw "The migration update completed without all required deployment migrations: $($missingMigrations -join ', ')."
         }
     }
 
@@ -543,6 +547,7 @@ try {
         rollback_payload_path = $rollbackRoot
         scheduler_migrations_applied = @($SchedulerMigrationIds | Where-Object { $_ -in $migrationIdsAfter })
         phase3a_migrations_applied = @($Phase3AMigrationIds | Where-Object { $_ -in $migrationIdsAfter })
+        phase3b_migrations_applied = @($Phase3BMigrationIds | Where-Object { $_ -in $migrationIdsAfter })
         deployed_assembly_sha256 = $deployedAssemblyHash
         endpoint_status = "200"
     } | ConvertTo-Json -Depth 5

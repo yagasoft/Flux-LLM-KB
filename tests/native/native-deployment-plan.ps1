@@ -77,8 +77,12 @@ $expectedPhase3AMigrations = @(
 if ((@($plan.phase3a_migration_ids) -join "|") -ne ($expectedPhase3AMigrations -join "|")) {
     throw "The native deployment plan does not expose exactly the approved Phase 3A migration sequence."
 }
-if ($plan.deployment_migration_target -ne $expectedPhase3AMigrations[-1]) {
-    throw "The native deployment plan does not pin the approved Phase 3A migration target."
+$expectedPhase3BMigration = "20260809110000_AddPhase3BWatcherCorpusEvents"
+if ((@($plan.phase3b_migration_ids) -join "|") -ne $expectedPhase3BMigration) {
+    throw "The native deployment plan does not expose the approved Phase 3B migration."
+}
+if ($plan.deployment_migration_target -ne $expectedPhase3BMigration) {
+    throw "The native deployment plan does not pin the approved Phase 3B migration target."
 }
 if (-not $plan.source_artifact_store_requires_app_pool_modify_access) {
     throw "The native deployment plan does not require writable and lease-safe retained source storage for the IIS application pool."
