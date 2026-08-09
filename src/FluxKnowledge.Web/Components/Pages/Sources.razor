@@ -48,11 +48,11 @@
         <section class="source-form" aria-labelledby="add-folder-heading">
             <h2 id="add-folder-heading">Add folder</h2>
             <p>Only local fixed-drive NTFS folders that pass the configured root policy can be saved.</p>
-            <label>Folder path <input @bind="_fullPath" @bind:after="InvalidatePreview" /></label>
-            <label>Display name <input @bind="_displayName" @bind:after="InvalidatePreview" /></label>
+            <label>Folder path <input @bind-value="_fullPath" @bind-value:event="oninput" @bind-value:after="InvalidatePreview" /></label>
+            <label>Display name <input @bind-value="_displayName" @bind-value:event="oninput" @bind-value:after="InvalidatePreview" /></label>
             <label><input type="checkbox" @bind="_recursive" @bind:after="InvalidatePreview" /> Include subfolders</label>
-            <label>Include rules (one per line) <textarea @bind="_includeRules" @bind:after="InvalidatePreview"></textarea></label>
-            <label>Exclude rules (one per line) <textarea @bind="_excludeRules" @bind:after="InvalidatePreview"></textarea></label>
+            <label>Include rules (one per line) <textarea @bind-value="_includeRules" @bind-value:event="oninput" @bind-value:after="InvalidatePreview"></textarea></label>
+            <label>Exclude rules (one per line) <textarea @bind-value="_excludeRules" @bind-value:event="oninput" @bind-value:after="InvalidatePreview"></textarea></label>
             <p><button type="button" @onclick="PreviewAsync">Preview</button></p>
             @if (_validationError is { } validationError)
             {
