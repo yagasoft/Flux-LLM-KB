@@ -4,11 +4,21 @@ Reviewed: 2026-08-09
 
 ## Scope and result
 
-This record covers the approved Phase 3A local-only source-management code
-checkpoint. It records focused build and test evidence only. No migration was
-applied, IIS was not restarted, no deployment or live local-root validation was
-performed, and no existing local SQL database was used as a substitute for the
-required disposable database.
+This record covers the approved Phase 3A local-only source-management checkpoint
+and its authorised disposable loopback deployment. The detailed source-root
+corpus exercise remains separate from the deployment readiness check.
+
+## 2026-08-09 disposable deployment and live readiness
+
+The required closeout workflow completed successfully after Phase 3A repairs:
+the two additive migrations were applied to the local disposable catalogue,
+the IIS payload was deployed to the loopback-only site, SQL validation passed,
+and `/health/live`, `/health/ready`, `/api/index-health`, `/api/gpu-status`,
+`/api/search?query=native%20deployment` and `/sources` each returned HTTP 200.
+The live catalogue confirms both Phase 3A migration identifiers. No external,
+model, GPU, process-management or legacy action was performed. A real operator
+root Save/Save-and-scan/sentinel-search exercise remains the next Phase 3A
+acceptance slice.
 
 The implementation adds SQL-authoritative source-root and scan-control
 contracts, retained source revisions and checksum-verified artifacts, the
