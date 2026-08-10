@@ -345,16 +345,17 @@ vectors. Backup must be off I:.
 | 2 | Pipeline durability, continuous derived-index recovery, scheduler, rebuild, full job/read projections and the durable executor/result boundary | Atomic claim, duplicate, lease, runtime recovery, snapshot, rebuild, strict-priority and fenced adapter/receipt evidence |
 | 3A | Local source management and searchable-content usefulness slice: durable roots, retained source revisions, classification, declarative activities, UTF-8 search and Sources/Indexing UI | Safe root validation, transactional scan request/outbox, preview, indexed UTF-8 result, deferred unsupported activity, provenance, rescan/restart/rebuild and truthful UI evidence |
 | 3B | Broader local content and capability expansion | Processor capability registration, document/archive/image/OCR/video/audio/code activity evidence, parent/child provenance and exact-once deferred replay |
-| 3C | Full MCP/plugin, REST and CLI parity in bounded contract groups against a useful local corpus | 54-tool/route/command ledger, schemas, envelopes, errors, retries, hooks, readiness and executable compatibility fixtures |
 | 4 | Gmail, Outlook and other source ingress | Restart-safe ingress, receipts, spool, provenance and operator evidence |
 | 5 | Remaining document, archive, image, video/audio and code branches | Parent/child provenance and branch-completion evidence |
 | 6 | Explicitly authorised native model adapters/cache | Per-model approval, native-runtime and scheduler evidence |
+| 3C | Full MCP/plugin, REST and CLI parity in bounded contract groups against a useful local corpus; starts only after Phases 1–6 are complete | 54-tool/route/command ledger, schemas, envelopes, errors, retries, hooks, readiness and executable compatibility fixtures |
 | 7 | Local replacement readiness and legacy retirement decision | SQL rebuild, backup/restore, end-to-end surface evidence and explicit cutover approval |
 
-The order is deliberately usefulness-first: a searchable local corpus must exist
-before full MCP/plugin/REST/CLI parity is judged useful. It does not delete,
-downgrade or waive any original Phase 3–7 requirement. No legacy capability is
-removed until its replacement passes local verification.
+The order is deliberately usefulness-first: a searchable local corpus must
+exist before full MCP/plugin/REST/CLI parity is judged useful, and Phase 3C
+starts only after Phases 1–6 are complete. It does not delete, downgrade or
+waive any original Phase 3–7 requirement. No legacy capability is removed until
+its replacement passes local verification.
 
 ## Phase 3A usefulness-first local corpus design
 
@@ -612,8 +613,8 @@ The resequencing changes delivery order, not requirements:
 | Local filesystem crawling, monitoring, source identity and provenance | Phase 3A source-root, revision and activity contract |
 | Searchable local corpus and operator visibility | Phase 3A UTF-8 slice, Sources/Indexing UI and Overview correction |
 | Documents, archives, image/OCR, video/audio and code | Phase 3B activity/capability expansion and Phase 5 branch completion |
-| Full MCP and Codex plugin surface | Phase 3C 54-tool ledger, hosted MCP, hooks and readiness fixtures |
-| REST and CLI compatibility | Phase 3C shared use cases and route/command ledger |
+| Full MCP and Codex plugin surface | Phase 3C 54-tool ledger, hosted MCP, hooks and readiness fixtures, scheduled after Phase 6 |
+| REST and CLI compatibility | Phase 3C shared use cases and route/command ledger, scheduled after Phase 6 |
 | Gmail and Outlook VSTO ingress | Phase 4 receipts, spool, provenance and restart evidence |
 | Opaque executor/result boundary and execution class | Phase 2 boundary is implemented; Phase 3A writes descriptors only; a separate process-management checkpoint is required before any native adapter or admission change |
 | Native model/inference adapters and caches | Phase 6, still explicitly approval-gated |
