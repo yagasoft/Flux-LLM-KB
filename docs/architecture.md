@@ -193,12 +193,12 @@ partial failure and did not activate a model, GPU, process, external surface or
 legacy/RabbitMQ/Docker/Vespa component. See [the Phase 3A validation
 record](operations/native-windows-phase-3a-source-management-validation.md).
 
-Phase 3B first delivers the approved watcher-driven PipelineRecord Corpus and
-durable Events dashboard, then separately expands local processors and content
-branches. Phase 3C delivers the full 54-tool MCP/plugin/REST/CLI contract ledger
-against the now-useful corpus. Gmail/Outlook ingress, advanced media/document/
-code branches, approved native model adapters and final replacement/legacy
-retirement remain separately gated later work.
+Phase 3B delivers the approved watcher-driven PipelineRecord Corpus and durable
+Events dashboard. Local processors and content branches, Gmail/Outlook ingress,
+and approved native model adapters remain separately gated later work. The full
+54-tool MCP/plugin/REST/CLI contract ledger is Phase 3C, deliberately sequenced
+after Phases 1–6 complete and before the Phase 7 readiness gate. Final
+replacement and legacy retirement remain separately gated.
 
 Legacy architecture below remains a compatibility reference only. It is not the
 target architecture for this branch and must not be deleted until local
