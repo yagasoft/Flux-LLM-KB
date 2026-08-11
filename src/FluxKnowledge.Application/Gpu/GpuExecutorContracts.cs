@@ -2,37 +2,6 @@ using FluxKnowledge.Domain.Gpu;
 
 namespace FluxKnowledge.Application.Gpu;
 
-/// <summary>
-/// Opaque, immutable fence for one durably admitted executor dispatch.
-/// </summary>
-public sealed record GpuExecutorBatchHandle(
-    Guid BatchId,
-    string CapacitySlotKey,
-    string ExecutorKey,
-    long AdmissionGeneration,
-    Guid DispatchId)
-{
-    public void Validate()
-    {
-        if (BatchId == Guid.Empty)
-        {
-            throw new ArgumentException("An executor handle requires a batch ID.", nameof(BatchId));
-        }
-
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(CapacitySlotKey, nameof(CapacitySlotKey), GpuSchedulerOpaqueKeyValidator.MaximumExecutorFenceKeyLength);
-        GpuSchedulerOpaqueKeyValidator.RequireCanonical(ExecutorKey, nameof(ExecutorKey), GpuSchedulerOpaqueKeyValidator.MaximumExecutorFenceKeyLength);
-        if (AdmissionGeneration <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(AdmissionGeneration));
-        }
-
-        if (DispatchId == Guid.Empty)
-        {
-            throw new ArgumentException("An executor handle requires a dispatch ID.", nameof(DispatchId));
-        }
-    }
-}
-
 public enum GpuExecutorDispatchState
 {
     PendingDelivery,

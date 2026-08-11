@@ -586,10 +586,14 @@ public sealed class GpuExecutorDispatchConfiguration : IEntityTypeConfiguration<
         builder.Property(entity => entity.OwnerKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.ExecutorKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.AcknowledgedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.NativeWorkerBindRequestFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.NativeWorkerClearRequestFingerprint).HasColumnType("char(64)").IsUnicode(false).IsFixedLength().HasMaxLength(64).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
         builder.Property(entity => entity.UpdatedAtUtc).HasColumnType("datetimeoffset(7)");
         SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
         builder.HasIndex(entity => entity.BatchId).IsUnique();
         builder.HasIndex(entity => new { entity.State, entity.UpdatedAtUtc });
+        builder.HasIndex(entity => entity.NativeWorkerBindOperationId).IsUnique().HasFilter("[NativeWorkerBindOperationId] IS NOT NULL");
+        builder.HasIndex(entity => entity.NativeWorkerClearOperationId).IsUnique().HasFilter("[NativeWorkerClearOperationId] IS NOT NULL");
         builder.HasOne(entity => entity.Batch).WithMany().HasForeignKey(entity => entity.BatchId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.CapacitySlot).WithMany().HasForeignKey(entity => entity.CapacitySlotKey).HasPrincipalKey(entity => entity.SlotKey).OnDelete(DeleteBehavior.Restrict);
     }
@@ -657,6 +661,65 @@ public sealed class GpuExecutorEvidenceConfiguration : IEntityTypeConfiguration<
         builder.HasOne(entity => entity.Dispatch).WithMany().HasForeignKey(entity => entity.DispatchId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.Batch).WithMany().HasForeignKey(entity => entity.BatchId).OnDelete(DeleteBehavior.Restrict);
         builder.HasOne(entity => entity.CapacitySlot).WithMany().HasForeignKey(entity => entity.CapacitySlotKey).HasPrincipalKey(entity => entity.SlotKey).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class NativeWorkerInstanceConfiguration : IEntityTypeConfiguration<NativeWorkerInstanceEntity>
+{
+    public void Configure(EntityTypeBuilder<NativeWorkerInstanceEntity> builder)
+    {
+        builder.ToTable(
+            "NativeWorkerInstances",
+            table =>
+            {
+                table.HasCheckConstraint("CK_NativeWorkerInstances_ExecutableFingerprint_Sha256", SchemaConfiguration.Sha256CheckFor("ExecutableFingerprint"));
+                table.HasCheckConstraint("CK_NativeWorkerInstances_ExecutorKey_NoTrailingWhitespace", SchemaConfiguration.NoTrailingWhitespaceCheckFor("ExecutorKey", nullable: false));
+                table.HasCheckConstraint("CK_NativeWorkerInstances_ExecutableFingerprint_NoTrailingWhitespace", SchemaConfiguration.NoTrailingWhitespaceCheckFor("ExecutableFingerprint", nullable: false));
+                table.HasCheckConstraint("CK_NativeWorkerInstances_ProtocolVersion_NoTrailingWhitespace", SchemaConfiguration.NoTrailingWhitespaceCheckFor("ProtocolVersion", nullable: false));
+                table.HasCheckConstraint("CK_NativeWorkerInstances_ProcessId_Positive", "[ProcessId] IS NULL OR [ProcessId] > 0");
+                table.HasCheckConstraint("CK_NativeWorkerInstances_ProcessAttestation_Complete", "([ProcessId] IS NULL AND [ProcessStartedAtUtc] IS NULL) OR ([ProcessId] IS NOT NULL AND [ProcessStartedAtUtc] IS NOT NULL)");
+                table.HasCheckConstraint("CK_NativeWorkerInstances_State_Closed", "[State] >= 0 AND [State] <= 13");
+            });
+        builder.HasKey(entity => entity.InstanceId);
+        builder.Property(entity => entity.InstanceId).ValueGeneratedNever();
+        builder.Property(entity => entity.ExecutorKey).HasMaxLength(256).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ProcessStartedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureHash(builder.Property(entity => entity.ExecutableFingerprint));
+        builder.Property(entity => entity.ExecutableFingerprint).UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.ProtocolVersion).HasMaxLength(32).IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.LaunchedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.ConnectedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.LastHeartbeatAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.ExitedAtUtc).HasColumnType("datetimeoffset(7)");
+        SchemaConfiguration.ConfigureRowVersion(builder.Property(entity => entity.RowVersion));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ExecutorKey));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ExecutableFingerprint));
+        SchemaConfiguration.ConfigureImmutableAfterInsert(builder.Property(entity => entity.ProtocolVersion));
+        builder.HasIndex(entity => entity.ActiveDispatchId).IsUnique().HasFilter("[ActiveDispatchId] IS NOT NULL");
+        builder.HasOne(entity => entity.ActiveDispatch).WithMany().HasForeignKey(entity => entity.ActiveDispatchId).OnDelete(DeleteBehavior.Restrict);
+    }
+}
+
+public sealed class NativeWorkerLifecycleEvidenceConfiguration : IEntityTypeConfiguration<NativeWorkerLifecycleEvidenceEntity>
+{
+    public void Configure(EntityTypeBuilder<NativeWorkerLifecycleEvidenceEntity> builder)
+    {
+        builder.ToTable(
+            "NativeWorkerLifecycleEvidence",
+            table =>
+            {
+                table.HasCheckConstraint("CK_NativeWorkerLifecycleEvidence_RequestFingerprint_Sha256", SchemaConfiguration.Sha256CheckFor("RequestFingerprint"));
+                table.HasCheckConstraint("CK_NativeWorkerLifecycleEvidence_RequestFingerprint_NoTrailingWhitespace", SchemaConfiguration.NoTrailingWhitespaceCheckFor("RequestFingerprint", nullable: false));
+                table.HasCheckConstraint("CK_NativeWorkerLifecycleEvidence_LifecycleClass_Closed", "[LifecycleClass] >= 0 AND [LifecycleClass] <= 13");
+                table.HasCheckConstraint("CK_NativeWorkerLifecycleEvidence_OutcomeCode_Bounded", "[OutcomeCode] IS NULL OR ([OutcomeCode] >= -32768 AND [OutcomeCode] <= 65535)");
+            });
+        builder.HasKey(entity => entity.OperationId);
+        builder.Property(entity => entity.OperationId).ValueGeneratedNever();
+        builder.Property(entity => entity.ObservedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.Property(entity => entity.RequestFingerprint).HasMaxLength(64).IsUnicode(false).IsFixedLength().IsRequired().UseCollation(SchemaConfiguration.SchedulerFenceCollation);
+        builder.Property(entity => entity.CreatedAtUtc).HasColumnType("datetimeoffset(7)");
+        builder.HasIndex(entity => new { entity.InstanceId, entity.ObservedAtUtc, entity.OperationId });
+        builder.HasOne(entity => entity.Instance).WithMany().HasForeignKey(entity => entity.InstanceId).OnDelete(DeleteBehavior.Restrict);
     }
 }
 

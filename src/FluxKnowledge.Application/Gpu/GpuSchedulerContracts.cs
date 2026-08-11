@@ -16,35 +16,6 @@ public sealed record GpuMiniTaskHandoffResult(
     bool IsIdempotentReplay,
     bool Committed);
 
-/// <summary>
-/// Guards opaque scheduler keys whose exact SQL identity must not be altered by string padding.
-/// </summary>
-public static class GpuSchedulerOpaqueKeyValidator
-{
-    public const int MaximumExecutorFenceKeyLength = 256;
-
-    public static void RequireCanonical(
-        string? value,
-        string parameterName,
-        int? maximumLength = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(value, parameterName);
-        if (char.IsWhiteSpace(value[^1]))
-        {
-            throw new ArgumentException(
-                "Scheduler opaque keys cannot end with whitespace.",
-                parameterName);
-        }
-
-        if (maximumLength is not null && value.Length > maximumLength.Value)
-        {
-            throw new ArgumentException(
-                $"Scheduler opaque keys cannot exceed {maximumLength.Value} characters.",
-                parameterName);
-        }
-    }
-}
-
 public sealed record GpuBatchCandidate(
     GpuPriorityLane PriorityLane,
     string ModelRuntimeKey,

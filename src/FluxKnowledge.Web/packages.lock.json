@@ -227,7 +227,8 @@
       "fluxknowledge.application": {
         "type": "Project",
         "dependencies": {
-          "FluxKnowledge.Domain": "[1.0.0, )"
+          "FluxKnowledge.Domain": "[1.0.0, )",
+          "FluxKnowledge.NativeWorker.Protocol": "[1.0.0, )"
         }
       },
       "fluxknowledge.domain": {
@@ -258,6 +259,12 @@
         "type": "Project",
         "dependencies": {
           "FluxKnowledge.Application": "[1.0.0, )"
+        }
+      },
+      "fluxknowledge.nativeworker.protocol": {
+        "type": "Project",
+        "dependencies": {
+          "FluxKnowledge.Domain": "[1.0.0, )"
         }
       },
       "Cloud.Unum.USearch": {

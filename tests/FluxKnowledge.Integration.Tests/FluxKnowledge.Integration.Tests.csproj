@@ -4,7 +4,18 @@
     <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.Usearch/FluxKnowledge.Infrastructure.Usearch.csproj" />
     <ProjectReference Include="../../src/FluxKnowledge.Infrastructure.Inference/FluxKnowledge.Infrastructure.Inference.csproj" />
     <ProjectReference Include="../../src/FluxKnowledge.Integrations/FluxKnowledge.Integrations.csproj" />
+    <ProjectReference Include="../../src/FluxKnowledge.DeterministicWorker/FluxKnowledge.DeterministicWorker.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
+
+  <Target Name="CopyDeterministicWorkerOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <DeterministicWorkerOutputDirectory>$(ArtifactsPath)bin\FluxKnowledge.DeterministicWorker\$([System.String]::Copy('$(Configuration)').ToLowerInvariant())</DeterministicWorkerOutputDirectory>
+    </PropertyGroup>
+    <ItemGroup>
+      <_DeterministicWorkerOutput Include="$(DeterministicWorkerOutputDirectory)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DeterministicWorkerOutput)" DestinationFiles="@(_DeterministicWorkerOutput->'$(OutDir)deterministic-worker\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
 
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

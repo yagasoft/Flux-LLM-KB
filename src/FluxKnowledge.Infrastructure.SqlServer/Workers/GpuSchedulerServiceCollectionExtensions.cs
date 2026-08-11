@@ -11,7 +11,9 @@ namespace FluxKnowledge.Infrastructure.SqlServer.Workers;
 
 public static class GpuSchedulerServiceCollectionExtensions
 {
-    public static IServiceCollection AddFluxKnowledgeGpuScheduler(this IServiceCollection services)
+    public static IServiceCollection AddFluxKnowledgeGpuScheduler(
+        this IServiceCollection services,
+        NativeWorkerOptions? nativeWorkerOptions = null)
     {
         ArgumentNullException.ThrowIfNull(services);
         services.AddLogging();
@@ -28,11 +30,32 @@ public static class GpuSchedulerServiceCollectionExtensions
             timeProvider: provider.GetRequiredService<TimeProvider>()));
         services.TryAddScoped<IGpuSchedulerStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
         services.TryAddScoped<IGpuExecutorDispatchStore>(provider => provider.GetRequiredService<SqlGpuSchedulerStore>());
+        services.TryAddScoped<SqlNativeWorkerInstanceStore>(provider => new SqlNativeWorkerInstanceStore(
+            provider.GetRequiredService<IDbContextFactory<FluxKnowledgeDbContext>>(),
+            timeProvider: provider.GetRequiredService<TimeProvider>()));
+        services.TryAddScoped<INativeWorkerInstanceStore>(provider => provider.GetRequiredService<SqlNativeWorkerInstanceStore>());
         services.TryAddScoped<GpuSchedulerCoordinator>();
         services.TryAddScoped<GpuExecutorLifecycleCoordinator>();
         services.TryAddScoped<IGpuExecutorLifecycleSink>(provider => provider.GetRequiredService<GpuExecutorLifecycleCoordinator>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, GpuSchedulerService>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, GpuExecutorDispatchRecoveryService>());
+        var resolvedNativeWorkerOptions = nativeWorkerOptions ?? new NativeWorkerOptions();
+        resolvedNativeWorkerOptions.Validate();
+        services.TryAddSingleton(resolvedNativeWorkerOptions);
+        if (resolvedNativeWorkerOptions.Enabled)
+        {
+            services.TryAddSingleton<INativeWorkerProcessLauncher, NativeWorkerProcessLauncher>();
+            services.TryAddSingleton<NativeWorkerSupervisorService>(provider => new NativeWorkerSupervisorService(
+                provider.GetRequiredService<NativeWorkerOptions>(),
+                provider.GetRequiredService<IServiceScopeFactory>(),
+                provider.GetRequiredService<INativeWorkerProcessLauncher>(),
+                provider.GetRequiredService<TimeProvider>()));
+            services.TryAddSingleton<NativeWorkerExecutorAdapter>();
+            services.AddSingleton<IHostedService>(provider =>
+                provider.GetRequiredService<NativeWorkerSupervisorService>());
+            services.AddSingleton<IGpuExecutorAdapter>(provider =>
+                provider.GetRequiredService<NativeWorkerExecutorAdapter>());
+        }
         return services;
     }
 

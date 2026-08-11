@@ -13,14 +13,15 @@ The complete durable pipeline, compatibility, integration, GPU, retrieval,
 installation and phased-delivery design is in
 [the native Windows replacement design](superpowers/specs/2026-07-26-native-windows-replacement-design.md).
 
-## Phase 2 local scheduler foundation
+## Phase 2 local scheduler and native worker supervision
 
-The implemented Phase 2 scheduler is a SQL Server-authoritative durable control
-plane, not a model, GPU or result executor. Mini-task hand-off, scheduler wake
-state, batch and capacity ownership, and lifecycle receipts are committed in
-SQL before local wake or presentation notifications. The status projection is
-an aggregate read from committed scheduler SQL tables, not a persisted status
-object. Notifications are hints only; scheduler and reconnect handling reread
+The implemented Phase 2 scheduler and native-worker supervision remain a SQL
+Server-authoritative durable control plane. Mini-task hand-off, scheduler wake
+state, batch and capacity ownership, executor dispatch/receipt fences, and
+native-worker lifecycle evidence are committed in SQL before local wake or
+presentation notifications. The status projection is an aggregate read from
+committed scheduler SQL tables, not a persisted status object. Notifications
+are hints only; scheduler, worker recovery and reconnect handling reread
 durable SQL state.
 
 - **Priority and batching.** Admission selects the first eligible lane in the
@@ -71,10 +72,30 @@ durable SQL state.
   redelivered. The
   public-status test seeds private executor, dispatch, receipt, verifier and
   digest values and proves the read-only aggregate response excludes them.
-  This boundary does not create, supervise, terminate or activate a process,
-  runtime, model or GPU. Real process management and termination evidence,
-  runtime/driver reconciliation, model/GPU activation, external access and
-  legacy work remain separately approval-gated.
+  By itself, this boundary does not create, supervise, terminate or activate a
+  process, runtime, model or GPU. The separately implemented deterministic
+  supervisor is described below; real model/GPU activation, runtime/driver
+  reconciliation, external access and legacy work remain separately
+  approval-gated.
+- **Native worker supervision.** An explicitly enabled, deterministic local
+  worker can now be launched and supervised through a private named-pipe
+  protocol. Each instance has a durable, fenced lifecycle record and
+  executable fingerprint; attested connection, heartbeat, receipt and exit
+  observations are evidence only and cannot infer completion, capacity release,
+  retry, requeue or replacement. Reconnect and prior-instance recovery retain
+  uncertainty where ownership or outcome is not proven. Graceful stop is
+  bounded; forced termination is restricted to controlled tests. Production
+  composition remains inert unless the private configuration is explicitly
+  enabled, and this deterministic worker does not activate a model, GPU or
+  runtime/driver capability.
+- **Pre-deployment evidence.** The native-worker supervision implementation
+  passed locked restore, a Release `-warnaserror` build with zero warnings and
+  errors, Domain 294/294, disposable native-SQL Integration 374/374, and Web
+  76 passed with three existing browser-only skips. The native closeout dry-run
+  and deployment-plan contracts also passed; the SQL fixture created generated
+  disposable databases only. These are pre-deployment checks: the additive
+  migration has not been applied to a local deployment and no live validation
+  record exists yet.
 - **Local status.** `GET /api/gpu-status` and the Overview expose only
   sanitised aggregate scheduler state. They have no scheduler action route,
   never expose identifiers or runtime values, and return a bodyless 503 for
@@ -88,9 +109,11 @@ durable SQL state.
 
 ## Phase 3A usefulness-first local source management
 
-Phase 2 is complete as scoped: recovery, the SQL-authoritative scheduler and
-the executor/result boundary are implemented, verified and live-validated
-without a real executor process or model/GPU activation. Phase 3A is complete:
+Phase 2 includes recovery, the SQL-authoritative scheduler, executor/result
+boundary and deterministic native-worker supervision. The earlier scheduler
+and boundary checkpoints were live-validated without model/GPU activation; the
+native-worker supervision increment is implemented and pre-deployment verified
+but still awaits local deployment and live validation. Phase 3A is complete:
 its migrations were applied to the disposable loopback site and the local-root
 slice proved held/released scans, retained UTF-8 indexing, deferred PDF evidence,
 search provenance and restart-stable source state. The next approved design is
@@ -114,10 +137,10 @@ these corpus slices.
   OCR/media/GPU-dependent work is `DeferredCapability`; `NativeExecutorLater`
   is a non-runnable marker reserved for the existing opaque executor/result
   seam.
-- **Future approval-gated implementation:** Process start/stop, supervision,
-  PIDs, termination evidence, runtime/driver probes, GPU admission changes and
-  executor activation are excluded. Their design remains a separate future
-  checkpoint and approval gate.
+- **Future approval-gated implementation:** Real model/GPU activation,
+  runtime/driver probes, GPU-admission changes, external access and production
+  worker enablement remain excluded. Any local deployment and live validation
+  of the implemented deterministic supervisor is a separate operational gate.
 
 ### Durable source-root contract
 

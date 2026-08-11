@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="../FluxKnowledge.Domain/FluxKnowledge.Domain.csproj" />
+    <ProjectReference Include="../FluxKnowledge.NativeWorker.Protocol/FluxKnowledge.NativeWorker.Protocol.csproj" />
   </ItemGroup>
 
   <ItemGroup>

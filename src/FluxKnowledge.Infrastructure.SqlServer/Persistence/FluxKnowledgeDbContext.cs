@@ -26,6 +26,8 @@ public sealed class FluxKnowledgeDbContext(DbContextOptions<FluxKnowledgeDbConte
     public DbSet<GpuExecutorDispatchEntity> GpuExecutorDispatches => Set<GpuExecutorDispatchEntity>();
     public DbSet<GpuExecutorResultReceiptEntity> GpuExecutorResultReceipts => Set<GpuExecutorResultReceiptEntity>();
     public DbSet<GpuExecutorEvidenceEntity> GpuExecutorEvidence => Set<GpuExecutorEvidenceEntity>();
+    public DbSet<NativeWorkerInstanceEntity> NativeWorkerInstances => Set<NativeWorkerInstanceEntity>();
+    public DbSet<NativeWorkerLifecycleEvidenceEntity> NativeWorkerLifecycleEvidence => Set<NativeWorkerLifecycleEvidenceEntity>();
     public DbSet<SourceRootConfigurationEntity> SourceRootConfigurations => Set<SourceRootConfigurationEntity>();
     public DbSet<SourceRootWatchStateEntity> SourceRootWatchStates => Set<SourceRootWatchStateEntity>();
     public DbSet<SourceScanRequestEntity> SourceScanRequests => Set<SourceScanRequestEntity>();

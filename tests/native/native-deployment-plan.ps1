@@ -81,8 +81,21 @@ $expectedPhase3BMigration = "20260809110000_AddPhase3BWatcherCorpusEvents"
 if ((@($plan.phase3b_migration_ids) -join "|") -ne $expectedPhase3BMigration) {
     throw "The native deployment plan does not expose the approved Phase 3B migration."
 }
-if ($plan.deployment_migration_target -ne $expectedPhase3BMigration) {
-    throw "The native deployment plan does not pin the approved Phase 3B migration target."
+
+$nativeWorkerMigrationDirectory = Join-Path $SourceRoot "src\FluxKnowledge.Infrastructure.SqlServer\Persistence\Migrations"
+$nativeWorkerMigration = @(
+    Get-ChildItem -LiteralPath $nativeWorkerMigrationDirectory -File -Filter "*_AddNativeWorkerSupervision.cs" |
+        Where-Object { $_.BaseName -match '^\d{14}_AddNativeWorkerSupervision$' }
+)
+if ($nativeWorkerMigration.Count -ne 1) {
+    throw "The generated native-worker supervision migration could not be identified uniquely."
+}
+$nativeWorkerMigrationId = $nativeWorkerMigration[0].BaseName
+if ((@($plan.native_worker_supervision_migration_ids) -join "|") -ne $nativeWorkerMigrationId) {
+    throw "The native deployment plan does not require the generated native-worker supervision migration."
+}
+if ($plan.deployment_migration_target -ne $nativeWorkerMigrationId) {
+    throw "The native deployment plan does not target the generated native-worker supervision migration."
 }
 if (-not $plan.source_artifact_store_requires_app_pool_modify_access) {
     throw "The native deployment plan does not require writable and lease-safe retained source storage for the IIS application pool."

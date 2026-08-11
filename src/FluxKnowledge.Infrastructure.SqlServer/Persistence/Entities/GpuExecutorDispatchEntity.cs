@@ -14,6 +14,10 @@ public sealed class GpuExecutorDispatchEntity
     public long AdmissionGeneration { get; set; }
     public int State { get; set; }
     public DateTimeOffset? AcknowledgedAtUtc { get; set; }
+    public Guid? NativeWorkerBindOperationId { get; set; }
+    public string? NativeWorkerBindRequestFingerprint { get; set; }
+    public Guid? NativeWorkerClearOperationId { get; set; }
+    public string? NativeWorkerClearRequestFingerprint { get; set; }
     public DateTimeOffset UpdatedAtUtc { get; set; }
     public byte[] RowVersion { get; set; } = [];
     public GpuBatchEntity Batch { get; set; } = null!;

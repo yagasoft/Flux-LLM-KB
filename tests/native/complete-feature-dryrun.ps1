@@ -69,6 +69,9 @@ try {
         "push-main",
         "verify-origin-main",
         "deploy-native-windows",
+        "post-deploy-native-worker-supervision-validation",
+        "post-deploy-validation-record-commit",
+        "post-deploy-validation-record-push",
         "cleanup-worktree"
     )
     $actualSteps = @($summary.steps | ForEach-Object { $_.name })
@@ -91,6 +94,23 @@ try {
     $foundForbidden = @($forbiddenCommands | Where-Object { $commands -match [regex]::Escape($_) })
     if ($foundForbidden.Count -gt 0) {
         throw "The native closeout plan contains forbidden active commands: $($foundForbidden -join ', ')."
+    }
+
+    $deployIndex = [Array]::IndexOf($actualSteps, "deploy-native-windows")
+    $validationIndex = [Array]::IndexOf($actualSteps, "post-deploy-native-worker-supervision-validation")
+    $validationCommitIndex = [Array]::IndexOf($actualSteps, "post-deploy-validation-record-commit")
+    $validationPushIndex = [Array]::IndexOf($actualSteps, "post-deploy-validation-record-push")
+    $cleanupIndex = [Array]::IndexOf($actualSteps, "cleanup-worktree")
+    if ($deployIndex -lt 0 -or $validationIndex -le $deployIndex -or
+        $validationCommitIndex -le $validationIndex -or $validationPushIndex -le $validationCommitIndex -or
+        $cleanupIndex -le $validationPushIndex) {
+        throw "The native closeout plan must validate, commit and push fresh sanitised evidence only after deployment and before cleanup."
+    }
+    $validationCommand = [string]$summary.steps[$validationIndex].command
+    if ($validationCommand -notmatch 'validate-native-worker-supervision\.ps1' -or
+        $validationCommand -notmatch "-ExpectedMigrationId '20260810185641_AddNativeWorkerSupervision'" -or
+        $validationCommand -notmatch '-ValidationRecordPath') {
+        throw "The native closeout plan does not invoke the narrowly parameterised native-worker validation hook."
     }
 
     Write-Output "Native closeout dry-run contract passed."

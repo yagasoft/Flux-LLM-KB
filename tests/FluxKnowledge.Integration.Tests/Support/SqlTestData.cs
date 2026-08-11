@@ -23,6 +23,8 @@ internal static class SqlTestData
         await context.AuditEvents.ExecuteDeleteAsync();
         await context.SourceActivities.ExecuteDeleteAsync();
         await context.GpuSchedulerOperationReceipts.ExecuteDeleteAsync();
+        await context.NativeWorkerLifecycleEvidence.ExecuteDeleteAsync();
+        await context.NativeWorkerInstances.ExecuteDeleteAsync();
         await context.GpuExecutorEvidence.ExecuteDeleteAsync();
         await context.GpuExecutorResultReceipts.ExecuteDeleteAsync();
         await context.GpuExecutorDispatches.ExecuteDeleteAsync();

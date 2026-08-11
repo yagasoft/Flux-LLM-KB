@@ -334,6 +334,69 @@ public sealed class SchemaMappingTests
     }
 
     [Fact]
+    public void Native_worker_supervision_records_are_fenced_private_and_restrictively_bound()
+    {
+        using var context = CreateContext();
+        var model = context.GetService<IDesignTimeModel>().Model;
+
+        var instance = FindTable(model, "NativeWorkerInstances");
+        AssertProperty<Guid>(instance, "InstanceId");
+        AssertProperty<string>(instance, "ExecutorKey");
+        AssertProperty<int?>(instance, "ProcessId");
+        AssertProperty<DateTimeOffset?>(instance, "ProcessStartedAtUtc");
+        var executableFingerprint = AssertProperty<string>(instance, "ExecutableFingerprint");
+        Assert.Equal(64, executableFingerprint.GetMaxLength());
+        Assert.Equal("char(64)", executableFingerprint.GetColumnType());
+        AssertProperty<string>(instance, "ProtocolVersion");
+        AssertProperty<int>(instance, "State");
+        AssertProperty<DateTimeOffset>(instance, "LaunchedAtUtc");
+        AssertProperty<DateTimeOffset?>(instance, "ConnectedAtUtc");
+        AssertProperty<DateTimeOffset?>(instance, "LastHeartbeatAtUtc");
+        AssertProperty<DateTimeOffset?>(instance, "ExitedAtUtc");
+        AssertProperty<Guid?>(instance, "ActiveDispatchId");
+        var instanceRowVersion = AssertProperty<byte[]>(instance, "RowVersion");
+        Assert.True(instanceRowVersion.IsConcurrencyToken);
+        Assert.Equal(ValueGenerated.OnAddOrUpdate, instanceRowVersion.ValueGenerated);
+        AssertUniqueIndex(model, "NativeWorkerInstances", "ActiveDispatchId");
+        AssertRestrictiveForeignKey(model, "NativeWorkerInstances", ["ActiveDispatchId"], "GpuExecutorDispatches", ["DispatchId"]);
+        AssertBinaryCollation(model, "NativeWorkerInstances", "ExecutorKey", "ExecutableFingerprint", "ProtocolVersion");
+        AssertNoTrailingWhitespaceConstraint(model, "NativeWorkerInstances", "ExecutorKey");
+        AssertNoTrailingWhitespaceConstraint(model, "NativeWorkerInstances", "ExecutableFingerprint");
+        AssertNoTrailingWhitespaceConstraint(model, "NativeWorkerInstances", "ProtocolVersion");
+        Assert.Contains(instance.GetCheckConstraints(), constraint => constraint.Name == "CK_NativeWorkerInstances_ProcessAttestation_Complete");
+        Assert.DoesNotContain(instance.GetProperties(), property => property.Name is
+            "PipeName" or "SessionNonce" or "CommandLine" or "ExecutablePath" or
+            "RawDiagnostics" or "SourceContent" or "ModelIdentity" or "Settings" or
+            "EnvironmentVariables");
+
+        var dispatch = FindTable(model, "GpuExecutorDispatches");
+        AssertProperty<Guid?>(dispatch, "NativeWorkerBindOperationId");
+        AssertProperty<string>(dispatch, "NativeWorkerBindRequestFingerprint");
+        AssertProperty<Guid?>(dispatch, "NativeWorkerClearOperationId");
+        AssertProperty<string>(dispatch, "NativeWorkerClearRequestFingerprint");
+        AssertUniqueIndex(model, "GpuExecutorDispatches", "NativeWorkerBindOperationId");
+        AssertUniqueIndex(model, "GpuExecutorDispatches", "NativeWorkerClearOperationId");
+
+        var evidence = FindTable(model, "NativeWorkerLifecycleEvidence");
+        AssertProperty<Guid>(evidence, "OperationId");
+        AssertProperty<Guid>(evidence, "InstanceId");
+        AssertProperty<int>(evidence, "LifecycleClass");
+        AssertProperty<DateTimeOffset>(evidence, "ObservedAtUtc");
+        AssertProperty<int?>(evidence, "OutcomeCode");
+        var requestFingerprint = AssertProperty<string>(evidence, "RequestFingerprint");
+        Assert.Equal(64, requestFingerprint.GetMaxLength());
+        Assert.Equal("char(64)", requestFingerprint.GetColumnType());
+        AssertProperty<DateTimeOffset>(evidence, "CreatedAtUtc");
+        AssertRestrictiveForeignKey(model, "NativeWorkerLifecycleEvidence", ["InstanceId"], "NativeWorkerInstances", ["InstanceId"]);
+        AssertBinaryCollation(model, "NativeWorkerLifecycleEvidence", "RequestFingerprint");
+        AssertNoTrailingWhitespaceConstraint(model, "NativeWorkerLifecycleEvidence", "RequestFingerprint");
+        Assert.DoesNotContain(evidence.GetProperties(), property => property.Name is
+            "PipeName" or "SessionNonce" or "CommandLine" or "ExecutablePath" or
+            "RawDiagnostics" or "SourceContent" or "ModelIdentity" or "Settings" or
+            "EnvironmentVariables");
+    }
+
+    [Fact]
     public void Opaque_key_canonicality_migration_target_and_current_snapshot_require_non_empty_keys()
     {
         using var currentContext = CreateContext();

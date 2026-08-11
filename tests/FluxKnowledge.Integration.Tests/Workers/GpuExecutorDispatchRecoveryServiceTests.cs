@@ -269,36 +269,22 @@ public sealed class GpuExecutorDispatchRecoveryServiceTests
 
     private sealed class PendingDispatchStore(GpuExecutorBatchHandle handle) : IGpuExecutorDispatchStore
     {
-        private readonly List<TaskCompletionSource> _readTargets = [];
-        private int _reads;
+        private readonly TaskCompletionSource _firstRead = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public int MutationCount { get; private set; }
 
         public ValueTask<IReadOnlyList<GpuExecutorBatchHandle>> ReadPendingDispatchesAsync(CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var reads = Interlocked.Increment(ref _reads);
-            foreach (var target in _readTargets.Where((_, index) => index < reads))
-            {
-                target.TrySetResult();
-            }
+            _firstRead.TrySetResult();
 
             return ValueTask.FromResult<IReadOnlyList<GpuExecutorBatchHandle>>([handle]);
         }
 
         public Task ReadsReached(int target)
         {
-            if (Volatile.Read(ref _reads) >= target)
-            {
-                return Task.CompletedTask;
-            }
-
-            while (_readTargets.Count < target)
-            {
-                _readTargets.Add(new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
-            }
-
-            return _readTargets[target - 1].Task;
+            ArgumentOutOfRangeException.ThrowIfNotEqual(target, 1);
+            return _firstRead.Task;
         }
 
         public ValueTask<GpuExecutorDispatchMutationResult> AcknowledgeAsync(GpuExecutorAcknowledgement acknowledgement, CancellationToken cancellationToken) => Mutate();

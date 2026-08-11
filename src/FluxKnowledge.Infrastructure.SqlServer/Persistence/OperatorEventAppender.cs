@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using FluxKnowledge.Application.Gpu;
 using FluxKnowledge.Infrastructure.SqlServer.Persistence.Entities;
 
 namespace FluxKnowledge.Infrastructure.SqlServer.Persistence;
@@ -99,4 +100,45 @@ public sealed record OperatorEventDraft(
         new("pipeline.completed", "pipeline", "information", "pipeline-worker", DateTimeOffset.UtcNow, PipelineRecordId: recordId, CorrelationId: correlationId, Details: details);
     public static OperatorEventDraft ActivityPlanned(Guid activityId, Guid revisionId, Guid rootId, object? details, bool deferred = false) =>
         new(deferred ? "activity.deferred" : "activity.planned", "activity", "information", "source-reconciliation", DateTimeOffset.UtcNow, SourceRootId: rootId, SourceRevisionId: revisionId, SourceActivityId: activityId, CorrelationId: $"source:{revisionId:N}", Details: details);
+
+    /// <summary>
+    /// Creates the sole operator-audit shape for private native-worker lifecycle evidence.
+    /// Process attestation and protocol data remain in private SQL records.
+    /// </summary>
+    public static OperatorEventDraft NativeWorkerLifecycle(
+        NativeWorkerLifecycleClass lifecycleClass,
+        Guid instanceId,
+        int? reasonCode,
+        DateTimeOffset occurredAtUtc)
+    {
+        if (!Enum.IsDefined(lifecycleClass))
+        {
+            throw new ArgumentOutOfRangeException(nameof(lifecycleClass));
+        }
+
+        if (instanceId == Guid.Empty)
+        {
+            throw new ArgumentException("A native worker instance correlation is required.", nameof(instanceId));
+        }
+
+        NativeWorkerInstanceHandle.RequireUtcTimestamp(occurredAtUtc, nameof(occurredAtUtc));
+        if (reasonCode is < -32768 or > 65535)
+        {
+            throw new ArgumentOutOfRangeException(nameof(reasonCode));
+        }
+
+        var kind = ToNativeWorkerEventSuffix(lifecycleClass);
+        return new(
+            $"native_worker.{kind}",
+            "native_worker",
+            "information",
+            "native-worker-supervisor",
+            occurredAtUtc,
+            CorrelationId: $"native-worker:{instanceId:N}",
+            Details: new { kind, reasonCode = reasonCode?.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+    }
+
+    private static string ToNativeWorkerEventSuffix(NativeWorkerLifecycleClass lifecycleClass) =>
+        string.Concat(lifecycleClass.ToString().Select((character, index) =>
+            index > 0 && char.IsUpper(character) ? $"_{char.ToLowerInvariant(character)}" : char.ToLowerInvariant(character).ToString()));
 }

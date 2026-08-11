@@ -1,6 +1,8 @@
 <Solution>
   <Project Path="src/FluxKnowledge.Domain/FluxKnowledge.Domain.csproj" />
   <Project Path="src/FluxKnowledge.Application/FluxKnowledge.Application.csproj" />
+  <Project Path="src/FluxKnowledge.NativeWorker.Protocol/FluxKnowledge.NativeWorker.Protocol.csproj" />
+  <Project Path="src/FluxKnowledge.DeterministicWorker/FluxKnowledge.DeterministicWorker.csproj" />
   <Project Path="src/FluxKnowledge.Infrastructure.SqlServer/FluxKnowledge.Infrastructure.SqlServer.csproj" />
   <Project Path="src/FluxKnowledge.Infrastructure.Usearch/FluxKnowledge.Infrastructure.Usearch.csproj" />
   <Project Path="src/FluxKnowledge.Infrastructure.Inference/FluxKnowledge.Infrastructure.Inference.csproj" />

@@ -337,6 +337,8 @@ $script:FailedStep = $null
 $safeCommitMessage = $CommitMessage.Replace("'", "''")
 $safeBranch = $Branch.Replace("'", "''")
 $nativeDeployCommand = ".\scripts\deploy\update-native-windows.ps1 -SiteName '$SiteName' -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -BackupRoot '$BackupRoot'"
+$nativeWorkerValidationRecord = "docs\operations\native-windows-phase-2-native-worker-supervision-validation.md"
+$nativeWorkerValidationCommand = ".\scripts\deploy\validate-native-worker-supervision.ps1 -SiteUrl '$SiteUrl' -DeployRoot '$DeployRoot' -ExpectedMigrationId '20260810185641_AddNativeWorkerSupervision' -ValidationRecordPath '$nativeWorkerValidationRecord'"
 if ($ApplyMigrations) {
     $nativeDeployCommand += " -ApplyMigrations -ConfirmApplyMigrations"
 }
@@ -362,6 +364,9 @@ try {
 
     if (-not $SkipDeploy) {
         Invoke-FeatureStep -Name "deploy-native-windows" -Cwd $MainRoot -Command $nativeDeployCommand -TimeoutSeconds $DeployStepTimeoutSeconds
+        Invoke-FeatureStep -Name "post-deploy-native-worker-supervision-validation" -Cwd $MainRoot -Command $nativeWorkerValidationCommand -TimeoutSeconds $DeployStepTimeoutSeconds
+        Invoke-FeatureStep -Name "post-deploy-validation-record-commit" -Cwd $MainRoot -Command "git add -- '$nativeWorkerValidationRecord'; if ((git status --porcelain) -ne `$null) { git commit -m 'docs: record native worker supervision validation' }"
+        Invoke-FeatureStep -Name "post-deploy-validation-record-push" -Cwd $MainRoot -Command 'git push origin main'
     }
 
     if (-not $KeepWorktree) {
