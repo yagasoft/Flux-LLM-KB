@@ -161,6 +161,27 @@ function Get-SourceArtifactStoreRoot {
     return [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($configuredRoot))
 }
 
+function Enable-LocalOutlookOperatorAuthentication {
+    param([string]$ApplicationName)
+
+    $appCmd = Join-Path $env:windir "System32\inetsrv\appcmd.exe"
+    if (-not (Test-Path -LiteralPath $appCmd -PathType Leaf)) {
+        throw "IIS appcmd.exe is required to configure local Outlook operator authentication."
+    }
+
+    # Windows authentication lets the Negotiate handler defer to IIS for the
+    # local /outlook challenge. Anonymous access remains enabled so existing
+    # read-only REST, MCP and CLI-facing HTTP routes stay public.
+    & $appCmd set config $ApplicationName /section:windowsAuthentication /enabled:true /commit:apphost
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not enable IIS Windows authentication for the local Outlook operator route."
+    }
+    & $appCmd set config $ApplicationName /section:anonymousAuthentication /enabled:true /commit:apphost
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not preserve IIS anonymous access for public read-only routes."
+    }
+}
+
 function Get-SourceArtifactStoreProtectedRoots {
     param(
         [string]$ConfigurationPath,
@@ -538,6 +559,7 @@ try {
         throw
     }
 
+    Enable-LocalOutlookOperatorAuthentication -ApplicationName $SiteName
     Start-WebAppPool -Name $SiteName -ErrorAction Stop
     Wait-ForAppPoolState -Name $SiteName -ExpectedState "Started"
     $poolStopped = $false

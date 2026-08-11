@@ -197,6 +197,10 @@ $deploymentScriptText = Get-Content -LiteralPath $deploymentScript -Raw
 if ($deploymentScriptText -notmatch 'Invoke-WebRequest\s+-UseBasicParsing') {
     throw "The native deployment probe is not compatible with Windows PowerShell's basic parsing mode."
 }
+if ($deploymentScriptText -notmatch 'windowsAuthentication' -or
+    $deploymentScriptText -notmatch 'anonymousAuthentication') {
+    throw "The native deployment executable does not configure IIS authentication for the local Outlook operator route."
+}
 if ($deploymentScriptText -match '\bGet-FileHash\b' -or $deploymentScriptText -notmatch 'get-sha256\.ps1') {
     throw "The native deployment executable is not wired to the compatible SHA-256 helper."
 }
